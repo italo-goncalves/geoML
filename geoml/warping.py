@@ -175,16 +175,28 @@ class ZScore(_Warping):
 class Softplus(_Warping):
     """
     Transforms the data using the inverse of the softplus function. 
-    All the data must be positive.
+    All the data must be positive. Negative values will be replaced with
+    half of the smallest positive value.
     """
     def forward(self, x):
-        return _np.log(_np.expm1(x))
+        x = _np.maximum(x, 0.5 * _np.min(x[x > 0]))
+        x_warp = x
+        # computation only for x < 50.0 to avoid overflow
+        x_warp[x_warp < 50] = _np.log(_np.expm1(x_warp[x_warp < 50]))
+        return x_warp
     
     def backward(self, x):
-        return _np.log1p(_np.exp(x))
+        x_warp = x
+        # computation only for x < 50.0 to avoid overflow
+        x_warp[x_warp < 50] = _np.log1p(_np.exp(x_warp[x_warp < 50]))
+        return x_warp
     
     def derivative(self, x):
-        return 1/(-_np.expm1(-x))
+        x = _np.maximum(x, 0.5 * _np.min(x[x > 0]))
+        x_warp = _np.ones_like(x)
+        # computation only for x < 50.0 to avoid overflow
+        x_warp[x < 50] = 1/(-_np.expm1(-x[x < 50]))
+        return x_warp
 
 
 class Scaling(_Warping):

@@ -23,6 +23,7 @@ import geoml.parameter as _gpr
 import geoml.transform as _gt
 
 from geoml.tftools import pairwise_dist as _pairwise_dist
+from geoml.tftools import prod_n as _prod_n
 
 
 class _Kernel(object):
@@ -30,7 +31,7 @@ class _Kernel(object):
     def __init__(self, transform=_gt.Identity()):
         self.transform = transform
         
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         """Computes point-point covariance matrix between x and y tensors."""
         pass
     
@@ -60,13 +61,22 @@ class _Kernel(object):
 
 class GaussianKernel(_Kernel):
     """Gaussian kernel"""
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Gaussian_cov"):
-            x = self.transform.backward(x)
-            y = self.transform.backward(y)
-            d2 = _tf.pow(_pairwise_dist(x, y), 2)
-            k = _tf.Variable(_tf.exp(-3 * d2), dtype=_tf.float64,
-                             validate_shape=False)
+            if y is None:
+                x = self.transform.backward(x)
+                d2 = _tf.pow(_pairwise_dist(x, x), 2)
+                k = _tf.Variable(_tf.exp(-3 * d2), dtype=_tf.float64,
+                                 validate_shape=False)
+                # adding jitter to avoid Cholesky decomposition problems
+                sx = _tf.shape(x)
+                k = k + _tf.diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
+            else:
+                x = self.transform.backward(x)
+                y = self.transform.backward(y)
+                d2 = _tf.pow(_pairwise_dist(x, y), 2)
+                k = _tf.Variable(_tf.exp(-3 * d2), dtype=_tf.float64,
+                                 validate_shape=False)
         return k
     
     def covariance_matrix_d1(self, x, y, dir_y):
@@ -106,8 +116,10 @@ class GaussianKernel(_Kernel):
 
 class SphericalKernel(_Kernel):
     """Spherical kernel"""
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Spherical_cov"):
+            if y is None:
+                y = x
             x = self.transform.backward(x)
             y = self.transform.backward(y)
             d = _pairwise_dist(x, y)
@@ -121,8 +133,10 @@ class SphericalKernel(_Kernel):
 
 class ExponentialKernel(_Kernel):
     """Exponential kernel"""
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Exponential_cov"):
+            if y is None:
+                y = x
             x = self.transform.backward(x)
             y = self.transform.backward(y)
             d = _pairwise_dist(x, y)
@@ -133,8 +147,10 @@ class ExponentialKernel(_Kernel):
 
 class CubicKernel(_Kernel):
     """Cubic kernel"""
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Cubic_cov"):
+            if y is None:
+                y = x
             x = self.transform.backward(x)
             y = self.transform.backward(y)
             d = _pairwise_dist(x, y)
@@ -201,16 +217,21 @@ class CubicKernel(_Kernel):
 
 class ConstantKernel(_Kernel):
     """Constant kernel"""
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Constant_cov"):
-            k = _tf.ones([_tf.shape(x)[0], _tf.shape(y)[0]], dtype=_tf.float64)
+            if y is None:
+                y = x
+            k = _tf.ones([_tf.shape(x)[0], _tf.shape(y)[0]],
+                         dtype=_tf.float64)
         return k
 
 
 class LinearKernel(_Kernel):
     """Linear kernel"""       
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Linear_cov"):
+            if y is None:
+                y = x
             x = self.transform.backward(x)
             y = self.transform.backward(y)
             k = _tf.matmul(x, y, False, True)
@@ -225,8 +246,10 @@ class LinearKernel(_Kernel):
 
 class CosineKernel(_Kernel):
     """Cosine kernel"""
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Cosine_cov"):
+            if y is None:
+                y = x
             x = self.transform.backward(x)
             y = self.transform.backward(y)
             d = _pairwise_dist(x, y)
@@ -299,7 +322,7 @@ class CovarianceModelRegression(_CovarianceModel):
     Attributes
     ----------
     kernels :  list
-        A list containing the desired kernels.
+        A list of lists containing the desired kernels.
     warping : list
         A list containing the Warpings for the dependent variable.
     nugget : Nugget
@@ -317,18 +340,35 @@ class CovarianceModelRegression(_CovarianceModel):
         Parameters
         ----------
         kernels :  list
-            A list containing the desired kernels.
+            A list of lists containing the desired kernels.
         warping : list
             A list containing the Warpings for the dependent variable.
+
+        The kernels must be contained in a nested list with two levels.
+        When building the covariance matrices, the kernels in the inner
+        level are multiplied, and the results are added.
         """
-        is_kernel = [isinstance(k, _Kernel) for k in kernels]
-        if not all(is_kernel):
-            raise Exception("kernels must be a list of Kernel objects")
-        self.kernels = kernels  
+        # kernels parsing
+        kernels_internal = []
+        for k in kernels:
+            if isinstance(k, _Kernel):
+                kernels_internal.append([k])
+            else:
+                is_kernel = [isinstance(kk, _Kernel) for kk in k]
+                if not all(is_kernel):
+                    raise Exception("kernels must be a nested list of "
+                                    "Kernel objects")
+                kernels_internal.append(k)
+        self.kernels = kernels_internal
+
+        # warping
         self.warping = warping
+
+        # nugget and variance
         self.nugget = Nugget()
         # initializing with 10% nugget
-        v = _np.concatenate([_np.repeat(0.9 / len(kernels), len(kernels)),
+        v = _np.concatenate([_np.repeat(0.9 / len(self.kernels),
+                                        len(self.kernels)),
                              _np.array([0.1])])
         self.variance = _gpr.CompositionalParameter(v)
         
@@ -346,24 +386,29 @@ class CovarianceModelRegression(_CovarianceModel):
         
         # kernels
         for i in range(len(self.kernels)):
+            # outer index
             s += "\nPosition " + str(i) + ": " \
-                 + self.kernels[i].__class__.__name__ + "\n"
+                    "variance = " + str(self.variance.value[i]) + "\n"
             
             # variance
-            s += "\tVariance: " + str(self.variance.value[i]) + "\n"
-            
-            # parameters
-            params = self.kernels[i].transform.params
-            if len(params) > 0:
-                s += "\tParameters:\n"
-                par_names = [x for x in params.keys()]
-                for name in par_names:
-                    par = params[name]
-                    s += "\t\t" + name + ": " + str(par.value)
-                    if par.fixed:
-                        s += " (fixed)\n"
-                    else:
-                        s += " (free)\n"
+            # s += "\tVariance: " + str(self.variance.value[i]) + "\n"
+
+            # inner index
+            for j in range(len(self.kernels[i])):
+                s += "\n\tPosition [" + str(i) + "][" + str(j) + "]: " \
+                     + self.kernels[i][j].__class__.__name__ + "\n"
+
+                # parameters
+                params = self.kernels[i][j].transform.params
+                if len(params) > 0:
+                    par_names = [x for x in params.keys()]
+                    for name in par_names:
+                        par = params[name]
+                        s += "\t\t" + name + ": " + str(par.value)
+                        if par.fixed:
+                            s += " (fixed)\n"
+                        else:
+                            s += " (free)\n"
             
         # warping
         s += "\nWarping:\n"
@@ -374,11 +419,10 @@ class CovarianceModelRegression(_CovarianceModel):
             # parameters
             params = self.warping[i].params
             if len(params) > 0:
-                s += "\tParameters:\n"
                 par_names = [x for x in params.keys()]
                 for name in par_names:
                     par = params[name]
-                    s += "\t\t" + str(name) + ": " 
+                    s += "\t" + str(name) + ": "
                     s += _np.array_str(par.value,
                                        max_line_width=200,
                                        precision=4)
@@ -395,16 +439,17 @@ class CovarianceModelRegression(_CovarianceModel):
 
         Parameters
         ----------
-        position : int
-            Position in the list of warping objects.
+        position : list or tuple of ints
+            Positions of outer and inner levels in the list of kernel objects.
         parameter : str
             The parameter's name.
 
         The positions and names can be seen by printing the model object.
         """
-        if parameter not in self.kernels[position].transform.params.keys():
+        i, j = position
+        if parameter not in self.kernels[i][j].transform.params.keys():
             raise Exception("kernel does not have parameter " + parameter)
-        self.kernels[position].transform.params[parameter].fix()
+        self.kernels[i][j].transform.params[parameter].fix()
         
     def unfix_kernel_parameter(self, position, parameter):
         """
@@ -413,16 +458,17 @@ class CovarianceModelRegression(_CovarianceModel):
 
         Parameters
         ----------
-        position : int
-            Position in the list of warping objects.
+        position : list or tuple of ints
+            Positions of outer and inner levels in the list of kernel objects.
         parameter : str
             The parameter's name.
 
         The positions and names can be seen by printing the model object.
         """
-        if parameter not in self.kernels[position].transform.params.keys():
+        i, j = position
+        if parameter not in self.kernels[i][j].transform.params.keys():
             raise Exception("kernel does not have parameter " + parameter)
-        self.kernels[position].transform.params[parameter].unfix()
+        self.kernels[i][j].transform.params[parameter].unfix()
         
     def set_kernel_parameter(self, position, parameter, value, transf=False):
         """
@@ -430,8 +476,8 @@ class CovarianceModelRegression(_CovarianceModel):
 
         Parameters
         ----------
-        position : int
-            Position in the list of warping objects.
+        position : list or tuple of ints
+            Positions of outer and inner levels in the list of kernel objects.
         parameter : str
             The parameter's name.
         value :
@@ -442,9 +488,10 @@ class CovarianceModelRegression(_CovarianceModel):
 
         The positions and names can be seen by printing the model object.
         """
-        if parameter not in self.kernels[position].transform.params.keys():
+        i, j = position
+        if parameter not in self.kernels[i][j].transform.params.keys():
             raise Exception("kernel does not have parameter " + parameter)
-        self.kernels[position].transform.params[parameter].set_value(
+        self.kernels[i][j].transform.params[parameter].set_value(
             value, transf)
         
     def set_kernel_parameter_limits(self, position, parameter,
@@ -454,8 +501,8 @@ class CovarianceModelRegression(_CovarianceModel):
 
         Parameters
         ----------
-        position : int
-            Position in the list of kernel objects.
+        position : list or tuple of ints
+            Positions of outer and inner levels in the list of kernel objects.
         parameter : str
             The parameter's name.
         min_val, max_val :
@@ -463,9 +510,10 @@ class CovarianceModelRegression(_CovarianceModel):
 
         The positions and names can be seen by printing the model object.
         """
-        if parameter not in self.kernels[position].transform.params.keys():
+        i, j = position
+        if parameter not in self.kernels[i][j].transform.params.keys():
             raise Exception("kernel does not have parameter " + parameter)
-        self.kernels[position].transform.params[parameter].set_limits(
+        self.kernels[i][j].transform.params[parameter].set_limits(
             min_val, max_val)
         
     def fix_warping_parameter(self, position, parameter):
@@ -552,17 +600,19 @@ class CovarianceModelRegression(_CovarianceModel):
         bounding box and such.
         """
         for k in self.kernels:
-            k.transform.set_limits(data)
+            for kk in k:
+                kk.transform.set_limits(data)
         
     def init_tf_placeholder(self):
         """To be called within the context of a TensorFlow graph."""
         self.variance.init_tf_placeholder()
         for k in self.kernels:
-            params = k.transform.params
-            if len(params) > 0:
-                par_names = [x for x in params.keys()]
-                for name in par_names:
-                    params[name].init_tf_placeholder()
+            for kk in k:
+                params = kk.transform.params
+                if len(params) > 0:
+                    par_names = [x for x in params.keys()]
+                    for name in par_names:
+                        params[name].init_tf_placeholder()
                     
     def feed_dict(self):
         """Gathers all parameters to feed a TensorFlow graph."""
@@ -570,11 +620,12 @@ class CovarianceModelRegression(_CovarianceModel):
         feed.update(self.variance.tf_feed_entry)
         
         for k in self.kernels:
-            params = k.transform.params
-            if len(params) > 0:
-                par_names = [x for x in params.keys()]
-                for name in par_names:
-                    feed.update(params[name].tf_feed_entry)
+            for kk in k:
+                params = kk.transform.params
+                if len(params) > 0:
+                    par_names = [x for x in params.keys()]
+                    for name in par_names:
+                        feed.update(params[name].tf_feed_entry)
 
         return feed
         
@@ -582,42 +633,70 @@ class CovarianceModelRegression(_CovarianceModel):
         """Adds all point-point covariance matrices."""
         with _tf.name_scope("Cov_model_mat"):
             v = self.variance.tf_val
-            cov_mat = [k.covariance_matrix(x, y) for k in self.kernels]
-            for i in range(len(cov_mat)):
-                cov_mat[i] = cov_mat[i] * v[i]
-            cov_mat = _tf.add_n(cov_mat)
+            cov_mat_outer = []
+            # start from inner index - kernel products
+            for k in self.kernels:
+                cov_mat_inner = [kk.covariance_matrix(x, y) for kk in k]
+                if len(cov_mat_inner) > 1:
+                    cov_mat_inner = [_prod_n(cov_mat_inner)]
+                cov_mat_outer.extend(cov_mat_inner)
+            # weighting and adding up
+            for i in range(len(cov_mat_outer)):
+                cov_mat_outer[i] = cov_mat_outer[i] * v[i]
+            cov_mat = _tf.add_n(cov_mat_outer)
         return cov_mat
     
     def covariance_matrix_d1(self, x, y, dir_y):
         """Adds all point-direction covariance matrices."""
         with _tf.name_scope("Cov_model_d1_mat"):
             v = self.variance.tf_val
-            cov_mat = [k.covariance_matrix_d1(x, y, dir_y)
-                       for k in self.kernels]
-            for i in range(len(cov_mat)):
-                cov_mat[i] = cov_mat[i] * v[i]
-            cov_mat = _tf.add_n(cov_mat)
+            cov_mat_outer = []
+            # start from inner index - kernel products
+            for k in self.kernels:
+                cov_mat_inner = [kk.covariance_matrix_d1(x, y, dir_y)
+                                 for kk in k]
+                if len(cov_mat_inner) > 1:
+                    cov_mat_inner = [_prod_n(cov_mat_inner)]
+                cov_mat_outer.extend(cov_mat_inner)
+            # weighting and adding up
+            for i in range(len(cov_mat_outer)):
+                cov_mat_outer[i] = cov_mat_outer[i] * v[i]
+            cov_mat = _tf.add_n(cov_mat_outer)
         return cov_mat
     
     def covariance_matrix_d2(self, x, y, dir_x, dir_y):
         """Adds all direction-direction covariance matrices."""
         with _tf.name_scope("Cov_model_d2_mat"):
             v = self.variance.tf_val
-            cov_mat = [k.covariance_matrix_d2(x, y, dir_x, dir_y)
-                       for k in self.kernels]
-            for i in range(len(cov_mat)):
-                cov_mat[i] = cov_mat[i] * v[i]
-            cov_mat = _tf.add_n(cov_mat)
+            cov_mat_outer = []
+            # start from inner index - kernel products
+            for k in self.kernels:
+                cov_mat_inner = [kk.covariance_matrix_d2(x, y, dir_x, dir_y)
+                                 for kk in k]
+                if len(cov_mat_inner) > 1:
+                    cov_mat_inner = [_prod_n(cov_mat_inner)]
+                cov_mat_outer.extend(cov_mat_inner)
+            # weighting and adding up
+            for i in range(len(cov_mat_outer)):
+                cov_mat_outer[i] = cov_mat_outer[i] * v[i]
+            cov_mat = _tf.add_n(cov_mat_outer)
         return cov_mat
     
     def point_variance(self, x):
         """Adds all point variances."""
         with _tf.name_scope("Point_var_all"):
             v = self.variance.tf_val
-            cov_mat = [k.point_variance(x) for k in self.kernels]
-            for i in range(len(cov_mat)):
-                cov_mat[i] = cov_mat[i] * v[i]
-            cov_mat = _tf.add_n(cov_mat)
+            cov_mat_outer = []
+            # start from inner index - kernel products
+            for k in self.kernels:
+                cov_mat_inner = [kk.point_variance(x) for kk in k]
+                if len(cov_mat_inner) > 1:
+                    cov_mat_inner = [_prod_n(cov_mat_inner)]
+                cov_mat_outer.extend(cov_mat_inner)
+            # weighting and adding up
+            for i in range(len(cov_mat_outer)):
+                cov_mat_outer[i] = cov_mat_outer[i] * v[i]
+            cov_mat = _tf.add_n(cov_mat_outer)
         return cov_mat
     
     def warp_backward(self, y):
@@ -659,7 +738,8 @@ class CovarianceModelRegression(_CovarianceModel):
         Writes all the model parameters in a dictionary, for easy reading later.
         """
         pd = {"param_type": [],
-              "param_pos": [],
+              "param_pos_outer": [],
+              "param_pos_inner": [],
               "param_id": [],
               "param_val": [],
               "param_min": [],
@@ -672,7 +752,8 @@ class CovarianceModelRegression(_CovarianceModel):
             count += 1
             val_length = len(self.variance.value_transf)
             pd["param_type"].extend(_np.repeat("variance", val_length).tolist())
-            pd["param_pos"].extend(_np.repeat(0, val_length).tolist())
+            pd["param_pos_outer"].extend(_np.repeat(0, val_length).tolist())
+            pd["param_pos_inner"].extend(_np.repeat(0, val_length).tolist())
             pd["param_id"].extend(_np.repeat(count, val_length).tolist())
             pd["param_val"].extend(self.variance.value_transf)
             pd["param_min"].extend(self.variance.min_transf)
@@ -681,24 +762,29 @@ class CovarianceModelRegression(_CovarianceModel):
         
         # kernels
         for i in range(len(self.kernels)):
-            params = self.kernels[i].transform.params
-            if len(params) > 0:
-                par_names = [x for x in params.keys()]
-                for j in range(len(params)):
-                    if not params[par_names[j]].fixed:
-                        count += 1
-                        val_length = len(params[par_names[j]].value)
-                        pd["param_type"].extend(_np.repeat(
-                            "kernel_param", val_length).tolist())
-                        pd["param_pos"].extend(_np.repeat(
-                            i, val_length).tolist())
-                        pd["param_id"].extend(_np.repeat(
-                            count, val_length).tolist())
-                        pd["param_val"].extend(
-                            params[par_names[j]].value_transf)
-                        pd["param_min"].extend(params[par_names[j]].min_transf)
-                        pd["param_max"].extend(params[par_names[j]].max_transf)
-                        pd["param_name"].extend([par_names[j]])
+            for ii in range(len(self.kernels[i])):
+                params = self.kernels[i][ii].transform.params
+                if len(params) > 0:
+                    par_names = [x for x in params.keys()]
+                    for j in range(len(params)):
+                        if not params[par_names[j]].fixed:
+                            count += 1
+                            val_length = len(params[par_names[j]].value)
+                            pd["param_type"].extend(_np.repeat(
+                                "kernel_param", val_length).tolist())
+                            pd["param_pos_outer"].extend(_np.repeat(
+                                i, val_length).tolist())
+                            pd["param_pos_inner"].extend(_np.repeat(
+                                ii, val_length).tolist())
+                            pd["param_id"].extend(_np.repeat(
+                                count, val_length).tolist())
+                            pd["param_val"].extend(
+                                params[par_names[j]].value_transf)
+                            pd["param_min"].extend(
+                                params[par_names[j]].min_transf)
+                            pd["param_max"].extend(
+                                params[par_names[j]].max_transf)
+                            pd["param_name"].extend([par_names[j]])
         
         # warping
         for i in range(len(self.warping)):
@@ -711,8 +797,10 @@ class CovarianceModelRegression(_CovarianceModel):
                         val_length = len(params[par_names[j]].value)
                         pd["param_type"].extend(_np.repeat(
                             "warping_param", val_length).tolist())
-                        pd["param_pos"].extend(_np.repeat(
+                        pd["param_pos_outer"].extend(_np.repeat(
                             i, val_length).tolist())
+                        pd["param_pos_inner"].extend(_np.repeat(
+                            i, val_length).tolist())  # not used
                         pd["param_id"].extend(_np.repeat(
                             count, val_length).tolist())
                         pd["param_val"].extend(
@@ -737,12 +825,15 @@ class CovarianceModelRegression(_CovarianceModel):
                 v = _np.array(params_dict["param_val"][pos2])
                 self.variance.set_value(v, transf=True)
             elif params_dict["param_type"][pos[0]] == "kernel_param":
-                self.set_kernel_parameter(params_dict["param_pos"][pos[0]],
+                kernel_pos = [params_dict["param_pos_outer"][pos[0]],
+                              params_dict["param_pos_inner"][pos[0]]]
+                self.set_kernel_parameter(kernel_pos,
                                           params_dict["param_name"][pos[0]],
                                           params_dict["param_val"][pos2], 
                                           transf=True)
             elif params_dict["param_type"][pos[0]] == "warping_param":
-                self.set_warping_parameter(params_dict["param_pos"][pos[0]],
+                warp_pos = params_dict["param_pos_outer"][pos[0]]
+                self.set_warping_parameter(warp_pos,
                                            params_dict["param_name"][pos[0]],
                                            params_dict["param_val"][pos2], 
                                            transf=True)

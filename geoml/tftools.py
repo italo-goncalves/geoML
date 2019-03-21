@@ -96,7 +96,7 @@ def prod_n(inputs, name=None):
         name = "prod_n"
     with _tf.name_scope(name):
         s = _tf.shape(inputs[0])
-        out = _tf.ones_like(s, dtype=inputs[0].dtype)
+        out = _tf.ones(s, dtype=inputs[0].dtype)
         for tensor in inputs:
             out = out * tensor
         return out

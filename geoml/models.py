@@ -171,7 +171,7 @@ class GP(_Model):
             if y is None:
                 nugget = self.cov_model.variance.tf_val[-1]
                 k = _tf.add(
-                    self.cov_model.covariance_matrix(x, x),
+                    self.cov_model.covariance_matrix(x, y),
                     self.cov_model.nugget.nugget_matrix(x, interp) * nugget)
             else:
                 k = self.cov_model.covariance_matrix(x, y)
@@ -206,7 +206,7 @@ class GP(_Model):
                 pred_var = _tf.multiply(k_new, pred_var)
                 pred_var = point_var - _tf.reduce_sum(pred_var, axis=0)
                 # adding nugget
-                pred_var = pred_var + self.cov_model.variance.value[-1]
+                pred_var = pred_var + self.cov_model.variance.tf_val[-1]
         return pred_mu, pred_var
 
     def log_lik(self, session=None):
@@ -491,7 +491,7 @@ class GPGrad(GP):
         with _tf.name_scope("covariance_matrix"):
             if y is None:
                 nugget = self.cov_model.variance.tf_val[-1]
-                k_x = _tf.add(self.cov_model.covariance_matrix(x, x),
+                k_x = _tf.add(self.cov_model.covariance_matrix(x, y),
                               self.cov_model.nugget.nugget_matrix(x, interp)
                               * nugget)
                 k_x_dir = self.cov_model.covariance_matrix_d1(x, x_dir,
@@ -521,7 +521,7 @@ class GPGrad(GP):
                 pred_var = _tf.multiply(k_new, pred_var)
                 pred_var = point_var - _tf.reduce_sum(pred_var, axis=0)
                 # adding nugget
-                pred_var = pred_var + self.cov_model.variance.value[-1]
+                pred_var = pred_var + self.cov_model.variance.tf_val[-1]
         return pred_mu, pred_var
 
     def log_lik(self, session=None):

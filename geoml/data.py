@@ -183,7 +183,7 @@ class Points1D(_PointData):
             coords_label = "X"
 
         self._ndim = 1
-        self.coords = _np.array(coords, ndmin=2)
+        self.coords = _np.array(coords, ndmin=2).transpose()
         self.bounding_box = _np.array([[coords.min()], [coords.max()]])
         self.diagonal = coords.max() - coords.min()
         self.coords_label = coords_label
@@ -1342,3 +1342,47 @@ class Examples(object):
         dirs = Directions2D.from_azimuth(ex_dir[["X", "Y"]], ex_dir["strike"])
 
         return point, dirs
+
+    @staticmethod
+    def sunspot_number():
+        """
+        Sunspot number data.
+
+        This data is downloaded from the Royal Observatory of Belgium
+        SILSO website (http://sidc.be/silso/home), and is distributed under
+        the CC BY-NC4.0 license (https://goo.gl/PXrLYd).
+
+        Returns
+        -------
+        yearly - Point1D
+            Yearly averages since 1700.
+        monthly - Point1D
+            Monthly averages since 1700.
+        daily - Point1D
+            Daily total sunspot number since 1818.
+        """
+        yearly_df = _pd.read_table(
+            "http://sidc.be/silso/INFO/snytotcsv.php",
+            sep=";", header=None)
+        yearly_df.set_axis(["year", "sn", "sn_std",
+                             "n_obs", "definitive"],
+                            axis="columns", inplace=True)
+        yearly = Points1D(_np.arange(1700, yearly_df.shape[0] + 1700),
+                          yearly_df)
+
+        monthly_df = _pd.read_table(
+            "http://sidc.oma.be/silso/INFO/snmtotcsv.php",
+            sep=";", header=None)
+        monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
+                             "n_obs", "definitive"],
+                            axis="columns", inplace=True)
+        monthly = Points1D(_np.arange(1, monthly_df.shape[0] + 1), monthly_df)
+
+        daily_df = _pd.read_table("http://sidc.oma.be/silso/INFO/sndtotcsv.php",
+                                  sep=";", header=None)
+        daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
+                           "n_obs", "definitive"],
+                          axis="columns", inplace=True)
+        daily = Points1D(_np.arange(1, daily_df.shape[0] + 1), daily_df)
+
+        return yearly, monthly, daily

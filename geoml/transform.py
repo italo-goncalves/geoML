@@ -241,7 +241,7 @@ class Projection2DTo1D(_Transform):
             Range to scale the data after projection. Must be positive.
         """
         super().__init__()
-        self.params = {"azimuth": _gpr.Parameter(azimuth, 0, 180),
+        self.params = {"azimuth": _gpr.Parameter(azimuth, 0, 180, fixed=True),
                        "range": _gpr.PositiveParameter(rng, 0.1, 10000)}
         self.vector = None
 
