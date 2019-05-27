@@ -11,6 +11,8 @@ would not extend the limits.
 * Implemented the neural network transform.
 * Now multiple transforms can be chained and/or shared between multiple
 kernels.
+* The classification algorithms now output an uncertainty metric, weighting
+the entropy and predictive variance.
 
 ## version 0.1.1
 * Added support for products of kernels.
