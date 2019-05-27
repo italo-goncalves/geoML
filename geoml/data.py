@@ -25,6 +25,7 @@ import numpy as _np
 # import plotly.graph_objs as go
 import collections as _collections
 import os as _os
+import copy as _copy
 
 from skimage import measure as _measure
 
@@ -136,6 +137,156 @@ class _PointData(_SpatialData):
         df = _pd.concat([df, self.data], axis=1)
         return df
 
+    def aggregate_categorical(self, column, grid):
+        """
+        Aggregation of categorical data in a regular grid.
+
+        Parameters
+        ----------
+        column : str
+            The name of the column with the data to work on.
+        grid :
+            A Grid*D object.
+
+        Returns
+        -------
+        out :
+            A point object with the aggregated data.
+
+        This method is used to downsample large point clouds. Given a grid
+        with regularly spaced coordinates, the label assigned to each
+        grid coordinate is the dominant label among all the data points in
+        its vicinity, considering that each coordinate is the center of a
+        rectangular cell. Cells without any data are dropped.
+        """
+        if self.ndim != grid.ndim:
+            raise ValueError("grid dimension different from object's")
+
+        # writing grid id
+        if grid.ndim == 1:
+            grid_id = _np.array(range(int(grid.grid_size[0])))
+            cols = ["xid"]
+        if grid.ndim == 2:
+            grid_id = _np.array(
+                [(x, y) for y in range(int(grid.grid_size[1]))
+                        for x in range(int(grid.grid_size[0]))])
+            cols = ["xid", "yid"]
+        if grid.ndim == 3:
+            grid_id = _np.array([(x, y, z)
+                                for z in range(int(grid.grid_size[2]))
+                                for y in range(int(grid.grid_size[1]))
+                                for x in range(int(grid.grid_size[0]))])
+            cols = ["xid", "yid", "zid"]
+        grid_id = _pd.DataFrame(grid_id, columns=cols)
+
+        # resetting grid
+        grid = _copy.deepcopy(grid)
+        grid.data = grid_id
+
+        # identifying cell id
+        # raw_data = self.as_data_frame()
+        raw_data = _pd.DataFrame(self.data)
+        raw_data["xid"] = _np.round(
+            (self.coords[:, 0] - grid.grid[0][0]
+             - grid.step_size[0] / 2) / grid.step_size[0])
+        if self.ndim >= 2:
+            raw_data["yid"] = _np.round(
+                (self.coords[:, 1] - grid.grid[1][0]
+                 - grid.step_size[1] / 2) / grid.step_size[1])
+        if self.ndim == 3:
+            raw_data["zid"] = _np.round(
+                (self.coords[:, 2] - grid.grid[2][0]
+                 - grid.step_size[2] / 2) / grid.step_size[2])
+
+        # counting values inside cells
+        grid_full = grid.as_data_frame()
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + [column]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = data_3.set_index(cols) \
+            .join(grid_full.set_index(cols)) \
+            .reset_index(drop=True)
+        out = self.__class__(data_4.loc[:, self.coords_label],
+                             data_4[column])
+        return out
+
+    def aggregate_numeric(self, column, grid):
+        """
+        Aggregation of numeric data in a regular grid.
+
+        Parameters
+        ----------
+        column : str
+            The name of the column with the data to work on.
+        grid :
+            A Grid*D object.
+
+        Returns
+        -------
+        out :
+            A point object with the aggregated data.
+
+        This method is used to downsample large point clouds. Aggregation is
+        done by taking the mean of the data values in each grid cell.
+        """
+        if self.ndim != grid.ndim:
+            raise ValueError("grid dimension different from object's")
+
+        # writing grid id
+        if grid.ndim == 1:
+            grid_id = _np.array(range(int(grid.grid_size[0])))
+            cols = ["xid"]
+        if grid.ndim == 2:
+            grid_id = _np.array(
+                [(x, y) for y in range(int(grid.grid_size[1]))
+                        for x in range(int(grid.grid_size[0]))])
+            cols = ["xid", "yid"]
+        if grid.ndim == 3:
+            grid_id = _np.array([(x, y, z)
+                                for z in range(int(grid.grid_size[2]))
+                                for y in range(int(grid.grid_size[1]))
+                                for x in range(int(grid.grid_size[0]))])
+            cols = ["xid", "yid", "zid"]
+        grid_id = _pd.DataFrame(grid_id, columns=cols)
+
+        # resetting grid
+        grid = _copy.deepcopy(grid)
+        grid.data = grid_id
+
+        # identifying cell id
+        # raw_data = self.as_data_frame()
+        raw_data = _pd.DataFrame(self.data.loc[:, column])
+        raw_data["xid"] = _np.round(
+            (self.coords[:, 0] - grid.grid[0][0]
+             - grid.step_size[0] / 2) / grid.step_size[0])
+        if self.ndim >= 2:
+            raw_data["yid"] = _np.round(
+                (self.coords[:, 1] - grid.grid[1][0]
+                 - grid.step_size[1] / 2) / grid.step_size[1])
+        if self.ndim == 3:
+            raw_data["zid"] = _np.round(
+                (self.coords[:, 2] - grid.grid[2][0]
+                 - grid.step_size[2] / 2) / grid.step_size[2])
+
+        # mean of values inside cells
+        grid_full = grid.as_data_frame()
+        # raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols).mean()
+        # data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # output
+        data_3 = data_2.join(grid_full.set_index(cols)) \
+                       .reset_index(drop=True)
+        out = self.__class__(data_3.loc[:, self.coords_label],
+                             data_3[column])
+        return out
+
 
 class Points1D(_PointData):
     """
@@ -180,7 +331,7 @@ class Points1D(_PointData):
                 coords_label = coords.name
             coords = coords.values
         if coords_label is None:
-            coords_label = "X"
+            coords_label = ["X"]
 
         self._ndim = 1
         self.coords = _np.array(coords, ndmin=2).transpose()
@@ -322,7 +473,51 @@ class Points3D(_PointData):
         raise NotImplementedError()
 
     def draw_categorical(self, column, colors, **kwargs):
-        raise NotImplementedError()
+        """
+        Visualization of categorical data.
+
+        Parameters
+        ----------
+        column : str
+            Name of the categorical variable to plot.
+        colors : dict
+            Dictionary mapping the data labels to plotly color
+            specifications.
+        kwargs
+            Additional arguments passed on to plotly's scatted3d
+            function.
+
+        Returns
+        -------
+        out : list
+            A singleton list containing the data to plot in plotly's format.
+        """
+        # x, y, z, and colors as lists
+        color_val = _np.arange(len(colors))
+        colors_dict = dict(zip(colors.keys(), color_val))
+        colors2 = self.data[column].map(colors_dict).tolist()
+        colors3 = [colors.get(item) for item in colors]
+        cmax = len(color_val) - 1
+
+        text = self.data[column].tolist()
+        x = self.coords[:, 0].tolist()
+        y = self.coords[:, 1].tolist()
+        z = self.coords[:, 2].tolist()
+
+        obj = {"mode": "markers",
+               "name": column,
+               "text": text,
+               "marker": {"color": colors2,
+                          "colorscale": [[i / cmax, colors3[i]]
+                                         for i in color_val]}}
+
+        obj.update({"type": "scatter3d",
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "hoverinfo": "x+y+z+text"})
+        obj = _update(obj, kwargs)
+        return [obj]
 
 
 class Grid1D(Points1D):
@@ -360,12 +555,14 @@ class Grid1D(Points1D):
             raise ValueError("one of step or end must be given")
         if step is not None:
             end = start + (n - 1) * step
+        else:
+            step = (end - start) / (n - 1)
         grid = _np.linspace(start, end, n)
 
         super().__init__(grid)
         self.step_size = [step]
         self.grid = [grid]
-        self.grid_size = [n]
+        self.grid_size = [int(n)]
 
 
 class Grid2D(Points2D):
@@ -409,6 +606,8 @@ class Grid2D(Points2D):
             end = start + (n - 1) * step
         else:
             end = _np.array(end)
+            step = _np.array([(end[0]-start[0])/(n[0]-1),
+                              (end[1]-start[1])/(n[1]-1)])
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
         coords = _np.array([(x, y) for y in grid_y for x in grid_x])
@@ -417,6 +616,7 @@ class Grid2D(Points2D):
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y]
         self.grid_size = n.tolist()
+        self.grid_size = [int(num) for num in self.grid_size]
 
     def as_image(self, column):
         """
@@ -485,6 +685,9 @@ class Grid3D(Points3D):
             end = start + (n - 1) * step
         else:
             end = _np.array(end)
+            step = _np.array([(end[0] - start[0]) / (n[0] - 1),
+                              (end[1] - start[1]) / (n[1] - 1),
+                              (end[2] - start[2]) / (n[2] - 1)])
 
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
@@ -496,6 +699,7 @@ class Grid3D(Points3D):
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = n.tolist()
+        self.grid_size = [int(num) for num in self.grid_size]
 
     def get_contour(self, column, value):
         """
@@ -546,6 +750,18 @@ class Grid3D(Points3D):
                     "k": faces[:, 2]})
         obj = _update(obj, kwargs)
         return [obj]
+
+    def export_contour(self, column, value, filename):
+        verts, faces, normals, values = self.get_contour(column, value)
+        for i in range(3):
+            verts[:, i] += self.grid[i][0]
+        with open(filename, 'w') as out_file:
+            out_file.write(
+                str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
+            for line in verts:
+                out_file.write(" ".join(str(elem) for elem in line) + "\n")
+            for line in faces:
+                out_file.write(" ".join(str(elem) for elem in line) + "\n")
 
     def draw_section_numeric(self, column, axis=0, **kwargs):
         """

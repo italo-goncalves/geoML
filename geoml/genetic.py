@@ -109,7 +109,13 @@ def _share_fitness(popmatrix, fitvec):
     Returns a vector with positive values representing relative probability
     for selection.
     """
-    d = _distance_matrix(popmatrix, popmatrix)
+    # d = _distance_matrix(popmatrix, popmatrix)
+
+    # cosine distance
+    n_var = popmatrix.shape[1]
+    popmatrix = popmatrix*2 - 1
+    d = 1 - _np.matmul(popmatrix, _np.transpose(popmatrix)) / n_var
+
     dmin = _find_min_count(d) + 1e-6
     
     # sh contains the distances above the threshold
@@ -148,8 +154,8 @@ def training_real(fitness, minval, maxval, popsize=50,
     Parameters
     ----------
     fitness : function
-        A function that takes an array vector as the only parameter and returns a scalar. The function to be
-        maximized.
+        A function that takes an array vector as the only parameter and returns
+        a scalar. The function to be maximized.
     minval : array
         The lower limits for the chromosomes.
     maxval : array
@@ -165,14 +171,17 @@ def training_real(fitness, minval, maxval, popsize=50,
     max_iter : int
         The maximum number of iterations.
     tol : double
-        Minimum expected improvement of the fitness function. An improvement less than tol does not count as
-        an improvement for the algorithm's counter.
+        Minimum expected improvement of the fitness function. An improvement
+        less than tol does not count as an improvement for the algorithm's
+        counter.
     stopping : int
-        Maximum number of iterations without improvement. The algorithm will stop if this value is reached.
+        Maximum number of iterations without improvement. The algorithm will
+        stop if this value is reached.
     seed : int
         Optional seed number.
     start : array
-        Optional starting point for the algorithm. Will be included in the initial population.
+        Optional starting point for the algorithm. Will be included in the
+        initial population.
     verbose : bool
         Whether to print information on console.
 
@@ -230,7 +239,10 @@ def training_real(fitness, minval, maxval, popsize=50,
         print("Iteration 0 | Best fitness = " + str(best_fitness), end="")
     for i in range(max_iter):
         # selection
-        p = _share_fitness(popmatrix, fitvec)
+        # p = _share_fitness(popmatrix, fitvec)
+        p = fitvec - fitvec.min()
+        p = p + 0.1*p.max() + 1e-6
+        p = p/p.sum()
         sel = _np.random.choice(popsize, 2, replace=False, p=p)
         
         # crossover/mutation
@@ -244,37 +256,41 @@ def training_real(fitness, minval, maxval, popsize=50,
             child2 = mutfun(child2, temperature)
         
         # update population
-        # replace smallest fitness
-        tmp_fitness = fitness(child1*(maxval - minval) + minval)
-        pos = _np.where(fitvec == fitvec.min())[0][0]
-        if tmp_fitness > fitvec[pos]:
-            fitvec[pos] = tmp_fitness
-            popmatrix[pos, :] = child1
-        tmp_fitness = fitness(child2*(maxval - minval) + minval)
-        pos = _np.where(fitvec == fitvec.min())[0][0]
-        if tmp_fitness > fitvec[pos]:
-            fitvec[pos] = tmp_fitness
-            popmatrix[pos, :] = child2
-            
-        # inverse fitness sharing for replacing
-#        p = share_fitness(popmatrix, -fitvec)
-#        p[np.where(fitvec == fitvec.max())[0]] = 0
-#        p = p/p.sum()
-#        sel = np.random.choice(popsize, 2, replace = False, p = p)
-#        fitvec[sel[0]] = fitness(child1*(maxval - minval) + minval)
-#        popmatrix[sel[0], :] = child1
-#        fitvec[sel[1]] = fitness(child2*(maxval - minval) + minval)
-#        popmatrix[sel[1], :] = child2
-        
-        # log
-        fitmatrix[:, i + 1] = fitvec
-        if verbose:
-            print("\rIteration: " + str(i + 1) + " | Best fitness: " + 
-                  str(fitvec.max()) + " | No improvement for " + 
-                  str(stagnation) + "/" + str(stopping) + 
-                  " iterations        ", sep="", end="")
-        
+        if i/max_iter > 0.7:
+            # replace smallest fitness - more aggressive
+            tmp_fitness = fitness(child1*(maxval - minval) + minval)
+            pos = _np.where(fitvec == fitvec.min())[0][0]
+            if tmp_fitness > fitvec[pos]:
+                fitvec[pos] = tmp_fitness
+                popmatrix[pos, :] = child1
+            tmp_fitness = fitness(child2*(maxval - minval) + minval)
+            pos = _np.where(fitvec == fitvec.min())[0][0]
+            if tmp_fitness > fitvec[pos]:
+                fitvec[pos] = tmp_fitness
+                popmatrix[pos, :] = child2
+        else:
+            # replacing parents if better - preserves diversity
+            tmp_fitness = fitness(child1 * (maxval - minval) + minval)
+            if (fitvec[sel[0]] < fitvec[sel[1]]) & \
+                    (fitvec[sel[0]] < tmp_fitness):
+                fitvec[sel[0]] = tmp_fitness
+                popmatrix[sel[0], :] = child1
+            elif (fitvec[sel[1]] < fitvec[sel[0]]) & \
+                    (fitvec[sel[1]] < tmp_fitness):
+                fitvec[sel[1]] = tmp_fitness
+                popmatrix[sel[1], :] = child1
+            tmp_fitness = fitness(child2 * (maxval - minval) + minval)
+            if (fitvec[sel[0]] < fitvec[sel[1]]) & \
+                    (fitvec[sel[0]] < tmp_fitness):
+                fitvec[sel[0]] = tmp_fitness
+                popmatrix[sel[0], :] = child2
+            elif (fitvec[sel[1]] < fitvec[sel[0]]) & \
+                    (fitvec[sel[1]] < tmp_fitness):
+                fitvec[sel[1]] = tmp_fitness
+                popmatrix[sel[1], :] = child2
+
         # stopping criterion
+        fitmatrix[:, i + 1] = fitvec
         ev = fitvec.max() - best_fitness
         best_fitness = fitvec.max()
         best_sol = popmatrix[_np.where(fitvec == best_fitness)[0], :]
@@ -289,6 +305,11 @@ def training_real(fitness, minval, maxval, popsize=50,
             if verbose:
                 print("\nTerminating training at iteration " + str(i+1))
             break
+        elif verbose:
+            print("\rIteration: " + str(i + 1) + " | Best fitness: " +
+                  str(fitvec.max()) + " | Improvement <" + str(tol) + " for " +
+                  str(stagnation) + "/" + str(stopping) +
+                  " iterations        ", sep="", end="")
     fitmatrix = fitmatrix[:, slice(i)]
     
     # output

@@ -14,19 +14,22 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["GP", "GPGrad", "GPClassif"]
+__all__ = ["GP", "GPGrad", "GPClassif", "SMEXGP"]
 
 import numpy as _np
 import tensorflow as _tf
 import scipy.stats as _st
 import pandas as _pd
 import copy as _copy
+import pickle as _pickle
 
 import geoml.genetic as _gen
 import geoml.kernels as _ker
 import geoml.warping as _warp
-# import geoml.tftools as tftools
+import geoml.tftools as _tftools
 import geoml.data as _data
+import geoml.transform as _transf
+import geoml.interpolation as _int
 
 
 class _Model:
@@ -52,6 +55,12 @@ class _Model:
             Arguments passed on to geoml.genetic.training_real() function.
 
         """
+        pass
+
+    def save_state(self, file):
+        pass
+
+    def load_state(self, file):
         pass
 
 
@@ -80,7 +89,9 @@ class GP(_Model):
     graph :
         A TensorFlow graph.
     """
-    def __init__(self, sp_data, variable, kernels, warping=(), interpolate=None):
+
+    def __init__(self, sp_data, variable, kernels, warping=(),
+                 interpolate=None):
         """
         Initializer for GP.
 
@@ -102,13 +113,13 @@ class GP(_Model):
         self.y = sp_data.data[variable].values
         self.y_name = variable
         self._ndim = sp_data.ndim
-        self.cov_model = _ker.CovarianceModelRegression(kernels, warping)
+        self.cov_model = _ker.CovarianceModelRegression(
+            kernels, warping)
         if interpolate is None:
             self.interpolate = _np.repeat(False, len(self.y))
         else:
             self.interpolate = sp_data.data[interpolate].values
         self.training_log = None
-        self.graph = _tf.Graph()
 
         # tidying up
         self.cov_model.auto_set_kernel_parameter_limits(sp_data)
@@ -132,60 +143,70 @@ class GP(_Model):
                 with _tf.name_scope("init_placeholders"):
                     self.cov_model.init_tf_placeholder()
 
-                # pre-computations
+                # placeholders
                 y_tf = _tf.placeholder(_tf.float64, shape=(len(y), 1),
                                        name="y_tf")
                 yd_tf = _tf.placeholder(_tf.float64, shape=(len(y), 1),
                                         name="yd_tf")
-                x_new_tf = _tf.placeholder_with_default(
+                jitter_tf = _tf.placeholder(_tf.float64, shape=[],
+                                            name="jitter")
+                x_new = _tf.placeholder_with_default(
                     _tf.zeros([1, self.x.shape[1]], dtype=_tf.float64),
                     shape=[None, self.x.shape[1]],
-                    name="x_new_tf")
+                    name="x_new")
 
                 # covariance matrix
-                mat_k = self._covariance_matrix(x, interp)
+                mat_k = self._covariance_matrix(x, interp,
+                                                jitter=jitter_tf)
 
                 # alpha
                 mat_chol, alpha = self._alpha(mat_k, y_tf)
+                mat_chol = _tf.Variable(mat_chol, validate_shape=False)
+                alpha = _tf.Variable(alpha, validate_shape=False)
 
                 # log-likelihood
                 log_lik = self._log_lik(mat_chol, alpha, y_tf, yd_tf)
 
                 # prediction
-                pred_mu, pred_var = self._predict(mat_chol, alpha, x, x_new_tf,
+                pred_mu, pred_var = self._predict(mat_chol, alpha, x, x_new,
                                                   interp)
 
-                self.tf_handles = {"L": mat_chol,
-                                   "alpha": alpha,
-                                   "y_tf": y_tf,
-                                   "yd_tf": yd_tf,
-                                   "K": mat_k,
-                                   "log_lik": log_lik,
-                                   "x_new_tf": x_new_tf,
-                                   "pred_mu": pred_mu,
-                                   "pred_var": pred_var,
-                                   "init": _tf.global_variables_initializer()}
+                self.tf_handles = {
+                    "L": mat_chol,
+                    "alpha": alpha,
+                    "y_tf": y_tf,
+                    "yd_tf": yd_tf,
+                    "K": mat_k,
+                    "log_lik": log_lik,
+                    "x_new": x_new,
+                    "pred_mu": pred_mu,
+                    "pred_var": pred_var,
+                    "jitter": jitter_tf,
+                    "init": _tf.global_variables_initializer()}
 
-    def _covariance_matrix(self, x, interp, y=None):
+        self.graph.finalize()
+
+    def _covariance_matrix(self, x, interp, y=None, jitter=1e-9):
         with _tf.name_scope("covariance_matrix"):
             if y is None:
                 nugget = self.cov_model.variance.tf_val[-1]
                 k = _tf.add(
                     self.cov_model.covariance_matrix(x, y),
                     self.cov_model.nugget.nugget_matrix(x, interp) * nugget)
+                # adding jitter to avoid Cholesky decomposition problems
+                sk = _tf.shape(k)
+                k = k + _tf.diag(_tf.ones(sk[0], dtype=_tf.float64) * jitter)
             else:
                 k = self.cov_model.covariance_matrix(x, y)
         return k
 
-    @staticmethod
-    def _alpha(k, y):
+    def _alpha(self, k, y):
         with _tf.name_scope("alpha"):
             chol = _tf.linalg.cholesky(k)
             alpha = _tf.linalg.cholesky_solve(chol, y)
         return chol, alpha
 
-    @staticmethod
-    def _log_lik(chol, alpha, y, yd):
+    def _log_lik(self, chol, alpha, y, yd):
         with _tf.name_scope("log_lik"):
             n_data = y.shape[0].value
             log_lik = - 0.5 * _tf.reduce_sum(alpha * y, name="fit") \
@@ -236,9 +257,14 @@ class GP(_Model):
         # session
         feed = self.cov_model.feed_dict()
         feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
-                     self.tf_handles["yd_tf"]: _np.resize(yd, (len(y), 1))})
+                     self.tf_handles["yd_tf"]: _np.resize(yd, (len(y), 1)),
+                     self.tf_handles["jitter"]: self.cov_model.jitter})
+        run_opts = _tf.RunOptions(report_tensor_allocations_upon_oom=True)
         session.run(self.tf_handles["init"], feed_dict=feed)
-        log_lik = session.run(self.tf_handles["log_lik"], feed_dict=feed)
+        log_lik = session.run(
+            self.tf_handles["log_lik"],
+            feed_dict=feed,
+            options=run_opts)
         return log_lik
 
     def train(self, **kwargs):
@@ -297,6 +323,15 @@ class GP(_Model):
         self.cov_model.warp_refresh(self.y)
         y = self.cov_model.warp_forward(self.y)
 
+        # session and placeholders
+        session = _tf.Session(graph=self.graph)
+        feed = self.cov_model.feed_dict()
+        feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
+                     self.tf_handles["jitter"]: self.cov_model.jitter})
+        session.run(self.tf_handles["init"], feed_dict=feed)
+        handles = [self.tf_handles["pred_mu"],
+                   self.tf_handles["pred_var"]]
+
         # prediction in batches
         n_data = x_new.shape[0]
         n_batches = int(_np.ceil(n_data / batch_size))
@@ -311,21 +346,15 @@ class GP(_Model):
                 print("\rProcessing batch " + str(i + 1) + " of "
                       + str(n_batches) + "       ", sep="", end="")
 
-            # placeholders
-            feed = self.cov_model.feed_dict()
-            feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
-                         self.tf_handles["x_new_tf"]: x_new[batch_id[i], :]})
+            feed.update({self.tf_handles["x_new"]: x_new[batch_id[i], :]})
 
             # TensorFlow
-            with _tf.Session(graph=self.graph) as session:
-                session.run(self.tf_handles["init"], feed_dict=feed)
-                handles = [self.tf_handles["pred_mu"],
-                           self.tf_handles["pred_var"]]
-                mu_i, var_i = session.run(handles, feed_dict=feed)
+            mu_i, var_i = session.run(handles, feed_dict=feed)
 
             # update
             mu = _np.concatenate([mu, mu_i])
             var = _np.concatenate([var, var_i])
+        session.close()
         if verbose:
             print("\n")
 
@@ -340,6 +369,12 @@ class GP(_Model):
         s = "A " + self.__class__.__name__ + " object\n\n"
         s += "Covariance model: " + self.cov_model.__str__()
         return s
+
+    def save_state(self, file):
+        self.cov_model.save_state(file)
+
+    def load_state(self, file):
+        self.cov_model.load_state(file)
 
 
 class GPGrad(GP):
@@ -370,6 +405,7 @@ class GPGrad(GP):
     graph :
         A TensorFlow graph.
     """
+
     def __init__(self, point_data, variable, dir_data,
                  kernels, dir_variable=None, interpolate=None):
         """
@@ -396,7 +432,8 @@ class GPGrad(GP):
         self.y = point_data.data[variable].values
         self.y_name = variable
         self._ndim = point_data.ndim
-        self.cov_model = _ker.CovarianceModelRegression(kernels, warping=[])
+        self.cov_model = _ker.CovarianceModelRegression(
+            kernels, warping=[])
         self.x_dir = dir_data.coords
         self.directions = dir_data.directions
         if dir_variable is None:
@@ -445,7 +482,7 @@ class GPGrad(GP):
                 with _tf.name_scope("init_placeholders"):
                     self.cov_model.init_tf_placeholder()
 
-                # pre-computations
+                # placeholders
                 y_tf = _tf.placeholder(_tf.float64, shape=(len(self.y), 1),
                                        name="y_tf")
                 y_dir = _tf.placeholder(_tf.float64,
@@ -455,10 +492,13 @@ class GPGrad(GP):
                     _tf.zeros([1, self.x.shape[1]], dtype=_tf.float64),
                     shape=[None, self.x.shape[1]],
                     name="x_new_tf")
+                jitter_tf = _tf.placeholder(_tf.float64, shape=[],
+                                            name="jitter")
 
                 # covariance matrix
                 mat_k = self._covariance_matrix(x, interp, x_dir=x_dir,
-                                                directions=directions)
+                                                directions=directions,
+                                                jitter=jitter_tf)
 
                 # alpha
                 y_join = _tf.concat([y_tf, y_dir], axis=0)
@@ -482,18 +522,24 @@ class GPGrad(GP):
                                    "x_new_tf": x_new_tf,
                                    "pred_mu": pred_mu,
                                    "pred_var": pred_var,
+                                   "jitter": jitter_tf,
                                    "init": _tf.global_variables_initializer()}
 
-    #        with tf.Session(graph = self.graph) as session:
-    #            self._refresh(session)
+        self.graph.finalize()
 
-    def _covariance_matrix(self, x, interp, x_dir, directions, y=None):
+    def _covariance_matrix(self, x, interp, x_dir, directions, y=None,
+                           jitter=1e-9):
         with _tf.name_scope("covariance_matrix"):
             if y is None:
                 nugget = self.cov_model.variance.tf_val[-1]
                 k_x = _tf.add(self.cov_model.covariance_matrix(x, y),
                               self.cov_model.nugget.nugget_matrix(x, interp)
                               * nugget)
+                # adding jitter to avoid Cholesky decomposition problems
+                sk = _tf.shape(k_x)
+                k_x = k_x + _tf.diag(_tf.ones(
+                    sk[0], dtype=_tf.float64) * jitter)
+
                 k_x_dir = self.cov_model.covariance_matrix_d1(x, x_dir,
                                                               directions)
                 k_dir = self.cov_model.covariance_matrix_d2(x_dir, x_dir,
@@ -536,7 +582,8 @@ class GPGrad(GP):
         feed = self.cov_model.feed_dict()
         feed.update({
             self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
-            self.tf_handles["y_dir"]: _np.resize(y_dir, (len(y_dir), 1))})
+            self.tf_handles["y_dir"]: _np.resize(y_dir, (len(y_dir), 1)),
+            self.tf_handles["jitter"]: self.cov_model.jitter})
         session.run(self.tf_handles["init"], feed_dict=feed)
         log_lik = session.run(self.tf_handles["log_lik"], feed_dict=feed)
         return log_lik
@@ -573,6 +620,7 @@ class GPGrad(GP):
             feed.update({
                 self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
                 self.tf_handles["y_dir"]: _np.resize(y_dir, (len(y_dir), 1)),
+                self.tf_handles["jitter"]: self.cov_model.jitter,
                 self.tf_handles["x_new_tf"]: x_new[batch_id[i], :]})
 
             # TensorFlow
@@ -594,6 +642,7 @@ class GPGrad(GP):
         for p in perc:
             newdata.data[name + "_p" + str(p)] = self.cov_model.warp_backward(
                 _st.norm.ppf(p, loc=mu, scale=_np.sqrt(var)))
+
 
 #    def _get_cov_mat(self):
 #        with tf.Session(graph = self.graph) as session:
@@ -623,6 +672,7 @@ class GPClassif(_Model):
     GPs : list
         The individual models that interpolate each latent variable.
     """
+
     def __init__(self, sp_data, var_1, var_2, kernels, dir_data=None):
         """
         Initializer for GPClassif.
@@ -665,14 +715,15 @@ class GPClassif(_Model):
 
         # latent variable models
         self.GPs = []
-        n_dim = self.x.shape[1]
-        if n_dim == 1:
+        n_latent = len(labels)
+        temp_data = None
+        if self.ndim == 1:
             temp_data = _data.Points1D(self.x, _pd.DataFrame(
                 self.latent.values, columns=labels))
-        elif n_dim == 2:
+        elif self.ndim == 2:
             temp_data = _data.Points2D(self.x, _pd.DataFrame(
                 self.latent.values, columns=labels))
-        elif n_dim == 3:
+        elif self.ndim == 3:
             temp_data = _data.Points3D(self.x, _pd.DataFrame(
                 self.latent.values, columns=labels))
         for i in range(n_latent):
@@ -738,6 +789,7 @@ class GPClassif(_Model):
         if self.ndim != newdata.ndim:
             raise ValueError("dimension of newdata is incompatible with model")
 
+        temp_data = None
         if isinstance(newdata, _data.Points1D):
             temp_data = _data.Points1D(newdata.coords)
         elif isinstance(newdata, _data.Points2D):
@@ -764,7 +816,7 @@ class GPClassif(_Model):
         # probabilities, indicators, and entropy
         if verbose:
             print("Calculating probabilities:")
-        prob, ind, entropy = self._calc_prob(mu, std, n_samples)
+        prob, ind, entropy, uncertainty = self._calc_prob(mu, std, n_samples)
 
         # output
         idx = self.latent.columns
@@ -774,6 +826,7 @@ class GPClassif(_Model):
         for i in range(n_classes):
             newdata.data[name + "_" + idx[i] + "_ind"] = ind[:, i]
         newdata.data[name + "_entropy"] = entropy
+        newdata.data[name + "_uncertainty"] = uncertainty
 
     def __str__(self):
         s = ""
@@ -789,7 +842,6 @@ class GPClassif(_Model):
             std = _tf.constant(std, dtype=_tf.float64)
             self_lat = _tf.constant(self.latent.values, dtype=_tf.float64)
             s = _tf.shape(self_lat)  # n_data, n_lat
-            max_entropy = _tf.log(_tf.cast(s[1], _tf.float64))
 
             # same random numbers across test points for smooth plotting
             rnd = _tf.random.normal(shape=[n_samples, s[1]], dtype=_tf.float64)
@@ -810,21 +862,44 @@ class GPClassif(_Model):
                               parallel_iterations=1000)
 
             # indicators
-            def loop_ind(x):
-                x = _tf.log(x)
-                x_sort = _tf.contrib.framework.sort(x, direction="DESCENDING")
-                x = x - _tf.reduce_mean(x_sort[0:2])
-                return x
-
-            ind = _tf.map_fn(loop_ind, prob, dtype=_tf.float64,
-                             parallel_iterations=1000)
+            # def loop_ind(x):
+            #     x = _tf.log(x)
+            #     x_sort = _tf.contrib.framework.sort(x, direction="DESCENDING")
+            #     x = x - _tf.reduce_mean(x_sort[0:2])
+            #     return x
+            #
+            # ind = _tf.map_fn(loop_ind, _tf.log(prob), dtype=_tf.float64,
+            #                  parallel_iterations=1000)
+            ind = _tf.log(prob)
+            values, _ = _tf.math.top_k(ind, 2, sorted=False)
+            mean_top_2 = _tf.tile(
+                _tf.reduce_mean(values, axis=1, keepdims=True),
+                multiples=[1, s[1]])
+            ind = ind - mean_top_2
 
             # entropy
             entropy = - _tf.reduce_sum(prob * _tf.log(prob), axis=1)
+            max_entropy = _tf.log(_tf.cast(s[1], _tf.float64))
             entropy = entropy / max_entropy
+
+            # relative uncertainty
+            mean_var = _tf.reduce_mean(std*std, axis=1)
+            uncertainty = _tf.sqrt(mean_var * entropy)
 
         with _tf.Session(graph=g) as session:
             session.run(_tf.global_variables_initializer())
-            prob, ind, entropy = session.run([prob, ind, entropy])
+            prob, ind, entropy, uncertainty = \
+                session.run([prob, ind, entropy, uncertainty])
 
-        return prob, ind, entropy
+        return prob, ind, entropy, uncertainty
+
+    def save_state(self, file):
+        d = [gp.cov_model.params_dict(complete=True) for gp in self.GPs]
+        with open(file, 'wb') as f:
+            _pickle.dump(d, f)
+
+    def load_state(self, file):
+        with open(file, 'rb') as f:
+            d = _pickle.load(f)
+        for i in range(len(self.GPs)):
+            self.GPs[i].cov_model.update_params(d[i])

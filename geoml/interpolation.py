@@ -21,7 +21,7 @@ import tensorflow as _tf
 import scipy.interpolate as _interp
 
 
-def cubic_conv_1d(x, xnew, output="numpy"):
+def cubic_conv_1d(x, xnew):
     """
     Generates a sparse matrix for interpolating from a regular grid to
     a new set of positions in one dimension.
@@ -33,13 +33,11 @@ def cubic_conv_1d(x, xnew, output="numpy"):
     xnew : array
         Positions to receive the interpolated values. Its limits must be
         confined within the limits of x.
-    output : str
-        The output format. Either 'numpy' or 'tensorflow'.
     
     Returns
     -------
-    w : a sparse matrix
-        A standard numpy matrix or a SparseTensor, if output == 'tensorflow'.
+    w : array
+        The weights matrix.
     """
     if _np.std(_np.diff(x)) > 1e-9:
         raise Exception("array x not equally spaced")
@@ -53,58 +51,89 @@ def cubic_conv_1d(x, xnew, output="numpy"):
     base_pos = _np.linspace(-1, x_len, x_len + 2)
     
     # weight matrix
-    if output == "numpy":
-        # vectorized version
-        w = _np.abs(_np.resize(s, [x_len + 2, _np.size(s)]).transpose()
-                    - _np.resize(base_pos, [_np.size(s), x_len + 2]))
-        pos = w <= 1
-        w[pos] = 1.5 * _np.power(w[pos], 3) - 2.5 * _np.power(w[pos], 2) + 1
-        pos = (w > 1) & (w <= 2)
-        w[pos] = - 0.5 * _np.power(w[pos], 3) + 2.5 * _np.power(w[pos], 2) - 4 * w[pos] + 2
-        w[w > 2] = 0
-        # borders
-        w[:, 1] = w[:, 1] + 3*w[:, 0]
-        w[:, 2] = w[:, 2] - 3*w[:, 0]
-        w[:, 3] = w[:, 3] + 1*w[:, 0]
-        w[:, x_len] = w[:, x_len] + 3 * w[:, x_len + 1]
-        w[:, x_len - 1] = w[:, x_len - 1] - 3 * w[:, x_len + 1]
-        w[:, x_len - 2] = w[:, x_len - 2] + 1 * w[:, x_len + 1]
-        w = w[:, range(1, x_len + 1)]
-    elif output == "tensorflow":
-        ix = _np.empty(0, dtype=_np.int64)
-        iy = _np.empty(0, dtype=_np.int64)
-        values = _np.empty(0)
-        # looping through s to save memory
-        for i in range(_np.size(s)):
-            si = _np.abs(s[i] - base_pos)
-            pos = si <= 1
-            si[pos] = 1.5 * _np.power(si[pos], 3) - 2.5 * _np.power(si[pos], 2) + 1
-            pos = (si > 1) & (si <= 2)
-            si[pos] = - 0.5 * _np.power(si[pos], 3) + 2.5 * _np.power(si[pos], 2) - 4 * si[pos] + 2
-            si[si > 2] = 0
-            # borders
-            si[1] = si[1] + 3*si[0]
-            si[2] = si[2] - 3*si[0]
-            si[3] = si[3] + 1*si[0]
-            si[x_len] = si[x_len] + 3 * si[x_len + 1]
-            si[x_len - 1] = si[x_len - 1] - 3 * si[x_len + 1]
-            si[x_len - 2] = si[x_len - 2] + 1 * si[x_len + 1]
-            si = si[range(1, x_len + 1)]
-            # indices
-            pos = si.nonzero()[0]
-            iy = _np.append(iy, pos)
-            ix = _np.append(ix, _np.repeat(i, _np.size(pos)))
-            values = _np.append(values, si[pos])
-        # tensorflow object
-        indices = _np.append(_np.matrix(ix), _np.matrix(iy), 0).transpose()
-        with _tf.name_scope("cubic_conv_1D"):
-            w = _tf.SparseTensor(indices=indices, values=values,
-                                 dense_shape=[_np.size(s), x_len])
-            w = _tf.sparse.reorder(w)
-    else:
-        raise Exception("invalid output type")
-        
+    w = _np.abs(_np.resize(s, [x_len + 2, _np.size(s)]).transpose()
+                - _np.resize(base_pos, [_np.size(s), x_len + 2]))
+    pos = w <= 1
+    w[pos] = 1.5 * _np.power(w[pos], 3) - 2.5 * _np.power(w[pos], 2) + 1
+    pos = (w > 1) & (w <= 2)
+    w[pos] = - 0.5 * _np.power(w[pos], 3) \
+             + 2.5 * _np.power(w[pos], 2) \
+             - 4 * w[pos] + 2
+    w[w > 2] = 0
+    # borders
+    w[:, 1] = w[:, 1] + 3*w[:, 0]
+    w[:, 2] = w[:, 2] - 3*w[:, 0]
+    w[:, 3] = w[:, 3] + 1*w[:, 0]
+    w[:, x_len] = w[:, x_len] + 3 * w[:, x_len + 1]
+    w[:, x_len - 1] = w[:, x_len - 1] - 3 * w[:, x_len + 1]
+    w[:, x_len - 2] = w[:, x_len - 2] + 1 * w[:, x_len + 1]
+    w = w[:, range(1, x_len + 1)]
+
     return w
+
+
+def cubic_conv_1d_tf(x, xnew):
+    """
+    Generates a sparse matrix for interpolating from a regular grid to
+    a new set of positions in one dimension.
+
+    Parameters
+    ----------
+    x : Tensor
+        Array of regularly spaced values.
+    xnew : Tensor
+        Positions to receive the interpolated values. Its limits must be
+        confined within the limits of x.
+
+    Returns
+    -------
+    w : Tensor
+        The interpolation matrix.
+
+    All parameters and output are Tensors. It is assumed that x is regularly
+    spaced and xnew is within the limits of x.
+    """
+    with _tf.name_scope("cubic_conv_1D"):
+        # interval and data position
+        h = x[1] - x[0]
+        x_len = _tf.shape(x)[0]
+        x_new_len = _tf.shape(xnew)[0]
+        s = (xnew - _tf.reduce_min(x)) / h
+        base_pos = _tf.linspace(_tf.constant(-1.0, dtype=_tf.float64),
+                                _tf.cast(x_len, _tf.float64),
+                                x_len + 2)
+
+        # initializing weight matrix
+        s = _tf.expand_dims(s, axis=1)  # column vector
+        base_pos = _tf.expand_dims(base_pos, axis=0)  # row vector
+        w = _tf.abs(_tf.tile(s, [1, x_len + 2])
+                    - _tf.tile(base_pos, [x_new_len, 1]))
+
+        # interpolation weights
+        # si = _tf.abs(s[i_] - base_pos)
+        replace = 1.5 * _tf.pow(w, 3.0) - 2.5 * _tf.pow(w, 2.0) \
+            + _tf.constant(1.0, dtype=_tf.float64)
+        w_new = _tf.where(_tf.less_equal(w, 1.0), replace, w)
+
+        replace = - 0.5 * _tf.pow(w, 3.0) + 2.5 * _tf.pow(w, 2.0) \
+                  - 4.0 * w + _tf.constant(2.0, dtype=_tf.float64)
+        w_new = _tf.where(_tf.greater(w, 1.0) & _tf.less_equal(w, 2.0),
+                          replace, w_new)
+
+        w_new = _tf.where(_tf.greater(w, 2.0), _tf.zeros_like(w), w_new)
+
+        # borders
+        w_new = _tf.concat([
+            _tf.stack([w_new[:, 1] + 3.0 * w_new[:, 0],
+                       w_new[:, 2] - 3.0 * w_new[:, 0],
+                       w_new[:, 3] + 1.0 * w_new[:, 0]], axis=1),
+            w_new[:, 4:(x_len-2)],
+            _tf.stack([w_new[:, x_len - 2] + 1.0 * w_new[:, x_len + 1],
+                       w_new[:, x_len - 1] - 3.0 * w_new[:, x_len + 1],
+                       w_new[:, x_len] + 3.0 * w_new[:, x_len + 1]], axis=1)
+        ], axis=1)
+
+    return w_new
 
 
 class Spline(object):
@@ -183,14 +212,16 @@ class Spline(object):
 
 class MonotonicSpline(Spline):
     """
-    Implementation of the monotonic spline algorithm by Fritsch and Carlson (1980).
+    Implementation of the monotonic spline algorithm by Fritsch and Carlson
+    (1980).
 
     Attributes
     ----------
     x, y : array
         The knots that define the spline.
     d : array
-        The derivative of y at the points x, found internally to preserve monotonicity.
+        The derivative of y at the points x, found internally to preserve
+        monotonicity.
     region : int
         May affect the spline's shape. Refer to the original paper for details.
     """

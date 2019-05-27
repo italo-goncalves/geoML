@@ -19,11 +19,13 @@ __all__ = ["GaussianKernel", "SphericalKernel", "ExponentialKernel",
 
 import tensorflow as _tf
 import numpy as _np
+import pickle as _pickle
 import geoml.parameter as _gpr
 import geoml.transform as _gt
 
 from geoml.tftools import pairwise_dist as _pairwise_dist
 from geoml.tftools import prod_n as _prod_n
+from geoml.tftools import extract_features as _extract_features
 
 
 class _Kernel(object):
@@ -58,6 +60,28 @@ class _Kernel(object):
             v = _tf.ones([_tf.shape(x)[0]], dtype=_tf.float64)
         return v
 
+    def feature_matrix(self, x, min_var=0.999):
+        """
+        Factorizes the covariance matrix in a compressed form.
+
+        Parameters
+        ----------
+        x : Tensor
+            The coordinates.
+        min_var : double
+            The minimum amount of variance to retain.
+
+        Returns
+        -------
+        features : Tensor
+            A feature matrix F, such that F^T*F approximates the original
+            covariance matrix.
+        """
+        with _tf.name_scope("Feature_matrix"):
+            k = self.covariance_matrix(x)
+            features = _extract_features(k, min_var)
+        return features
+
 
 class GaussianKernel(_Kernel):
     """Gaussian kernel"""
@@ -66,8 +90,7 @@ class GaussianKernel(_Kernel):
             if y is None:
                 x = self.transform.backward(x)
                 d2 = _tf.pow(_pairwise_dist(x, x), 2)
-                k = _tf.Variable(_tf.exp(-3 * d2), dtype=_tf.float64,
-                                 validate_shape=False)
+                k = _tf.exp(-3 * d2)
                 # adding jitter to avoid Cholesky decomposition problems
                 sx = _tf.shape(x)
                 k = k + _tf.diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
@@ -75,8 +98,7 @@ class GaussianKernel(_Kernel):
                 x = self.transform.backward(x)
                 y = self.transform.backward(y)
                 d2 = _tf.pow(_pairwise_dist(x, y), 2)
-                k = _tf.Variable(_tf.exp(-3 * d2), dtype=_tf.float64,
-                                 validate_shape=False)
+                k = _tf.exp(-3 * d2)
         return k
     
     def covariance_matrix_d1(self, x, y, dir_y):
@@ -124,10 +146,7 @@ class SphericalKernel(_Kernel):
             y = self.transform.backward(y)
             d = _pairwise_dist(x, y)
             k = 1 - 1.5 * d + 0.5 * _tf.pow(d, 3)
-            k = _tf.Variable(k, dtype=_tf.float64, validate_shape=False)
-            indices = _tf.where(_tf.greater(d, 1))
-            updates = _tf.zeros(_tf.shape(indices)[0], dtype=k.dtype)
-            k = _tf.scatter_nd_update(k, indices, updates)
+            k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
         return k
 
 
@@ -140,8 +159,7 @@ class ExponentialKernel(_Kernel):
             x = self.transform.backward(x)
             y = self.transform.backward(y)
             d = _pairwise_dist(x, y)
-            k = _tf.Variable(_tf.exp(-3 * d), dtype=_tf.float64,
-                             validate_shape=False)
+            k = _tf.exp(-3 * d)
         return k
 
 
@@ -150,16 +168,22 @@ class CubicKernel(_Kernel):
     def covariance_matrix(self, x, y=None):
         with _tf.name_scope("Cubic_cov"):
             if y is None:
-                y = x
-            x = self.transform.backward(x)
-            y = self.transform.backward(y)
-            d = _pairwise_dist(x, y)
-            k = 1 - 7 * _tf.pow(d, 2) + 35 / 4 * _tf.pow(d, 3) \
-                - 7 / 2 * _tf.pow(d, 5) + 3 / 4 * _tf.pow(d, 7)
-            k = _tf.Variable(k, dtype=_tf.float64, validate_shape=False)
-            indices = _tf.where(_tf.greater(d, 1))
-            updates = _tf.zeros(_tf.shape(indices)[0], dtype=k.dtype)
-            k = _tf.scatter_nd_update(k, indices, updates)
+                x = self.transform.backward(x)
+                d = _pairwise_dist(x, x)
+                k = 1 - 7 * _tf.pow(d, 2) + 35 / 4 * _tf.pow(d, 3) \
+                    - 7 / 2 * _tf.pow(d, 5) + 3 / 4 * _tf.pow(d, 7)
+                k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
+
+                # adding jitter to avoid Cholesky decomposition problems
+                sx = _tf.shape(x)
+                k = k + _tf.diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
+            else:
+                x = self.transform.backward(x)
+                y = self.transform.backward(y)
+                d = _pairwise_dist(x, y)
+                k = 1 - 7 * _tf.pow(d, 2) + 35 / 4 * _tf.pow(d, 3) \
+                    - 7 / 2 * _tf.pow(d, 5) + 3 / 4 * _tf.pow(d, 7)
+                k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
         return k
     
     def covariance_matrix_d1(self, x, y, dir_y):
@@ -178,10 +202,7 @@ class CubicKernel(_Kernel):
                 - 105 / 4 * d \
                 + 35 / 2 * _tf.pow(d, 3) \
                 - 21 / 4 * _tf.pow(d, 5)
-            k = _tf.Variable(k, dtype=_tf.float64, validate_shape=False)
-            indices = _tf.where(_tf.greater(d, 1))
-            updates = _tf.zeros(_tf.shape(indices)[0], dtype=k.dtype)
-            k = _tf.scatter_nd_update(k, indices, updates)
+            k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
             k = k*dif
         return k
     
@@ -205,12 +226,14 @@ class CubicKernel(_Kernel):
             k1 = 14 - 105 / 4 * d + 35 / 2 * _tf.pow(d, 3) \
                  - 21 / 4 * _tf.pow(d, 5)
             k2 = -105 / 4 / (d+1e-9) + 105 / 2 * d - 105 / 4 * _tf.pow(d, 3)
-            k1 = _tf.Variable(k1, dtype=_tf.float64, validate_shape=False)
-            k2 = _tf.Variable(k2, dtype=_tf.float64, validate_shape=False)
-            indices = _tf.where(_tf.greater(d, 1))
-            updates = _tf.zeros(_tf.shape(indices)[0], dtype=k1.dtype)
-            k1 = _tf.scatter_nd_update(k1, indices, updates)
-            k2 = _tf.scatter_nd_update(k2, indices, updates)
+            # k1 = _tf.Variable(k1, dtype=_tf.float64, validate_shape=False)
+            # k2 = _tf.Variable(k2, dtype=_tf.float64, validate_shape=False)
+            # indices = _tf.where(_tf.greater(d, 1))
+            # updates = _tf.zeros(_tf.shape(indices)[0], dtype=k1.dtype)
+            # k1 = _tf.scatter_nd_update(k1, indices, updates)
+            # k2 = _tf.scatter_nd_update(k2, indices, updates)
+            k1 = _tf.where(_tf.less(d, 1.0), k1, _tf.zeros_like(k1))
+            k2 = _tf.where(_tf.less(d, 1.0), k2, _tf.zeros_like(k2))
             k = k1*dir_prod + k2*prod
         return k
 
@@ -242,6 +265,11 @@ class LinearKernel(_Kernel):
             x = self.transform.backward(x)
             v = _tf.reduce_sum(_tf.pow(x, 2), 1)
         return v
+
+    def feature_matrix(self, x, min_var=0.999):
+        with _tf.name_scope("Feature_matrix"):
+            x = self.transform.backward(x)
+        return x
 
 
 class CosineKernel(_Kernel):
@@ -329,11 +357,13 @@ class CovarianceModelRegression(_CovarianceModel):
         A nugget object.
     variance :
         A parameter object with the relative variance of each object.
+    jitter : double
+        A small number to increase numerical stability during training.
 
     In this covariance model, it is assumed that all variances add to 1.
     The warping objects are used to scale and transform the data accordingly.
     """
-    def __init__(self, kernels, warping):
+    def __init__(self, kernels, warping, jitter=1e-9):
         """
         Initializer for CovarianceModelRegression object.
 
@@ -343,6 +373,8 @@ class CovarianceModelRegression(_CovarianceModel):
             A list of lists containing the desired kernels.
         warping : list
             A list containing the Warpings for the dependent variable.
+        jitter : double
+            A small number to increase numerical stability during training.
 
         The kernels must be contained in a nested list with two levels.
         When building the covariance matrices, the kernels in the inner
@@ -371,10 +403,13 @@ class CovarianceModelRegression(_CovarianceModel):
                                         len(self.kernels)),
                              _np.array([0.1])])
         self.variance = _gpr.CompositionalParameter(v)
+        self.jitter = jitter
         
     def __str__(self):
-        s = "A " + self.__class__.__name__ + " object\n\n"
-        s += "Variance is"
+        s = "A " + self.__class__.__name__ + " object\n"
+
+        # variance
+        s += "\nVariance is"
         if self.variance.fixed:
             s += " fixed\n"
         else:
@@ -389,14 +424,12 @@ class CovarianceModelRegression(_CovarianceModel):
             # outer index
             s += "\nPosition " + str(i) + ": " \
                     "variance = " + str(self.variance.value[i]) + "\n"
-            
-            # variance
-            # s += "\tVariance: " + str(self.variance.value[i]) + "\n"
 
             # inner index
             for j in range(len(self.kernels[i])):
                 s += "\n\tPosition [" + str(i) + "][" + str(j) + "]: " \
-                     + self.kernels[i][j].__class__.__name__ + "\n"
+                     + self.kernels[i][j].__class__.__name__ + " - " \
+                     + self.kernels[i][j].transform.__class__.__name__ + "\n"
 
                 # parameters
                 params = self.kernels[i][j].transform.params
@@ -733,9 +766,11 @@ class CovarianceModelRegression(_CovarianceModel):
             W.refresh(y)
             y = W.forward(y)
             
-    def params_dict(self):
+    def params_dict(self, complete=False):
         """
         Writes all the model parameters in a dictionary, for easy reading later.
+
+        The complete option is used to save the parameters to disk.
         """
         pd = {"param_type": [],
               "param_pos_outer": [],
@@ -747,8 +782,8 @@ class CovarianceModelRegression(_CovarianceModel):
               "param_name": []}
         count = -1
         
-        # nugget
-        if not self.variance.fixed:
+        # variance and nugget
+        if (not self.variance.fixed) | complete:
             count += 1
             val_length = len(self.variance.value_transf)
             pd["param_type"].extend(_np.repeat("variance", val_length).tolist())
@@ -761,30 +796,37 @@ class CovarianceModelRegression(_CovarianceModel):
             pd["param_name"].extend(_np.repeat("variance", val_length).tolist())
         
         # kernels
+        # the same transform can appear at multiple kernels, so we keep
+        # track of their hashes in order not to duplicate their parameters
+        hashes = []
         for i in range(len(self.kernels)):
             for ii in range(len(self.kernels[i])):
                 params = self.kernels[i][ii].transform.params
                 if len(params) > 0:
                     par_names = [x for x in params.keys()]
                     for j in range(len(params)):
-                        if not params[par_names[j]].fixed:
-                            count += 1
-                            val_length = len(params[par_names[j]].value)
-                            pd["param_type"].extend(_np.repeat(
-                                "kernel_param", val_length).tolist())
-                            pd["param_pos_outer"].extend(_np.repeat(
-                                i, val_length).tolist())
-                            pd["param_pos_inner"].extend(_np.repeat(
-                                ii, val_length).tolist())
-                            pd["param_id"].extend(_np.repeat(
-                                count, val_length).tolist())
-                            pd["param_val"].extend(
-                                params[par_names[j]].value_transf)
-                            pd["param_min"].extend(
-                                params[par_names[j]].min_transf)
-                            pd["param_max"].extend(
-                                params[par_names[j]].max_transf)
-                            pd["param_name"].extend([par_names[j]])
+                        if hash(params[par_names[j]]) not in hashes:
+                            hashes.append(hash(params[par_names[j]]))
+                            if (not params[par_names[j]].fixed) | complete:
+                                count += 1
+                                val_length = len(params[par_names[j]]
+                                                 .value_transf)
+                                pd["param_type"].extend(_np.repeat(
+                                    "kernel_param", val_length).tolist())
+                                pd["param_pos_outer"].extend(_np.repeat(
+                                    i, val_length).tolist())
+                                pd["param_pos_inner"].extend(_np.repeat(
+                                    ii, val_length).tolist())
+                                pd["param_id"].extend(_np.repeat(
+                                    count, val_length).tolist())
+                                pd["param_val"].extend(
+                                    params[par_names[j]].value_transf)
+                                pd["param_min"].extend(
+                                    params[par_names[j]].min_transf)
+                                pd["param_max"].extend(
+                                    params[par_names[j]].max_transf)
+                                pd["param_name"].extend(_np.repeat(
+                                    par_names[j], val_length).tolist())
         
         # warping
         for i in range(len(self.warping)):
@@ -792,9 +834,9 @@ class CovarianceModelRegression(_CovarianceModel):
             if len(params) > 0:
                 par_names = [x for x in params.keys()]
                 for j in range(len(params)):
-                    if not params[par_names[j]].fixed:
+                    if (not params[par_names[j]].fixed) | complete:
                         count += 1
-                        val_length = len(params[par_names[j]].value)
+                        val_length = len(params[par_names[j]].value_transf)
                         pd["param_type"].extend(_np.repeat(
                             "warping_param", val_length).tolist())
                         pd["param_pos_outer"].extend(_np.repeat(
@@ -839,3 +881,79 @@ class CovarianceModelRegression(_CovarianceModel):
                                            transf=True)
             else:
                 raise ValueError("invalid param_id")
+
+    def save_state(self, file):
+        """
+        Saves a model's current parameters to disk.
+
+        Parameters
+        ----------
+        file : str
+            The file name.
+        """
+        d = self.params_dict(complete=True)
+        with open(file, 'wb') as f:
+            _pickle.dump(d, f)
+
+    def load_state(self, file):
+        """
+        Restores a model's parameters from disk.
+
+        Parameters
+        ----------
+        file : str
+            The file name.
+
+        The object that calls this method must have the same structure
+        (kernels, warping, etc.) as the one that created the saved file,
+        otherwise the system is likely to throw an error.
+        """
+        with open(file, 'rb') as f:
+            d = _pickle.load(f)
+        self.update_params(d)
+
+
+# class DeepKernelModel(CovarianceModelRegression):
+#     def __init__(self, n_dim, n_layers, layer_size,
+#                  periodic_layer_size, warping, jitter=1e-9):
+#         self.kernels = []
+#
+#         # warping
+#         self.warping = warping
+#
+#         # nugget and variance
+#         self.nugget = Nugget()
+#         # initializing with 10% nugget
+#         self.variance = _gpr.CompositionalParameter(_np.array([0.9, 0.1]))
+#         self.jitter = jitter
+#
+#         # neural network
+#         n_weights = n_dim * layer_size + (n_layers - 1) * layer_size ** 2
+#         n_bias = n_layers * layer_size
+#         n_periods = layer_size * periodic_layer_size
+#         self.weights = _gpr.Parameter(
+#                 _np.ones(n_weights),
+#                 _np.ones(n_weights) * (-5),
+#                 _np.ones(n_weights) * 5)
+#         self.bias = _gpr.Parameter(
+#                 _np.zeros(n_bias),
+#                 _np.ones(n_bias) * (-5),
+#                 _np.ones(n_bias) * 5)
+#         self.periods = _gpr.PositiveParameter(
+#                 _np.ones(n_periods),
+#                 _np.ones(n_periods) * 2,
+#                 _np.ones(n_periods) * 10000)
+#
+#     def params_dict(self, complete=False):
+#         pd = super().params_dict(complete)
+#         count = _np.max(_np.array(pd["param_id"]))
+#
+#         pd = {"param_type": [],
+#               "param_pos_outer": [],
+#               "param_pos_inner": [],
+#               "param_id": [],
+#               "param_val": [],
+#               "param_min": [],
+#               "param_max": [],
+#               "param_name": []}
+#         count = -1

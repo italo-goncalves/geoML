@@ -15,12 +15,12 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 __all__ = ["Identity", "Isotropic", "Anisotropy2D", "Anisotropy3D",
-           "Projection2DTo1D"]
+           "ProjectionTo1D"]
 
 import numpy as _np
 import tensorflow as _tf
 import geoml.parameter as _gpr
-
+import geoml.tftools as _tftools
 
 class _Transform(object):
     """An abstract class for variable transformations"""
@@ -47,11 +47,11 @@ class Identity(_Transform):
         
     def forward(self, x):
         with _tf.name_scope("Identity_forward"):
-            return _tf.constant(x, dtype=_tf.float64)
+            return x
     
     def backward(self, x):
         with _tf.name_scope("Identity_backward"):
-            return _tf.constant(x, dtype=_tf.float64)
+            return x
 
 
 class Isotropic(_Transform):
@@ -225,51 +225,184 @@ class Anisotropy3D(_Transform):
                 min_val=data.diagonal / 100, max_val=data.diagonal * 10)
 
 
-class Projection2DTo1D(_Transform):
+class ProjectionTo1D(_Transform):
     """
-    Projection of 2D data to a line.
+    Projection of high-dimensional data to a line.
     """
-    def __init__(self, azimuth, rng):
+    def __init__(self, n_dim):
         """
-        Initializer for Projection2DTo1D.
+        Initializer for ProjectionTo1D.
 
         Parameters
         ----------
-        azimuth : double
-            Azimuth of the line to project on, between 0 and 180 degrees.
-        rng : double
-            Range to scale the data after projection. Must be positive.
+        n_dim : int
+            The number of dimensions. May be greater than 3 when used in
+            conjunction with a space-expanding transform.
         """
         super().__init__()
-        self.params = {"azimuth": _gpr.Parameter(azimuth, 0, 180, fixed=True),
-                       "range": _gpr.PositiveParameter(rng, 0.1, 10000)}
-        self.vector = None
-
-    def refresh(self):
-        with _tf.name_scope("Projection2DTo1D_refresh"):
-            az = self.params["azimuth"].tf_val
-            az = az * (_np.pi / 180)
-            self.vector = _tf.concat([_tf.sin(az), _tf.cos(az)], axis=0)
-            self.vector = _tf.reshape(self.vector, [2, 1])
+        self.params = {"ranges": _gpr.PositiveParameter(
+            _np.ones(n_dim), _np.ones(n_dim) * 0.001, _np.ones(n_dim) * 10000)}
 
     def backward(self, x):
-        with _tf.name_scope("Projection2DTo1D_backward"):
-            self.refresh()
-            r = self.params["range"].tf_val
-            x = _tf.matmul(x, self.vector)
-            x = x / r
+        with _tf.name_scope("ProjectionTo1D_backward"):
+            vector = _tf.expand_dims(1 / self.params["ranges"].tf_val, axis=1)
+            x = _tf.matmul(x, vector)
         return x
 
     def forward(self, x):
-        with _tf.name_scope("Projection2DTo1D_forward"):
+        with _tf.name_scope("ProjectionTo1D_forward"):
+            vector = self.params["ranges"].tf_val
+            x = x * vector
+        return x
+
+    # def set_limits(self, data):
+    #     self.params["range"].set_limits(
+    #             min_val=data.diagonal / 100, max_val=data.diagonal * 10)
+
+
+class NeuralNetwork(_Transform):
+    """A neural network transform."""
+
+    def __init__(self, n_dim, layers=[10]):
+        """
+        Initializer for NeuralNetwork.
+
+        Parameters
+        ----------
+        n_dim : int
+            Dimensionality of the input.
+        layers : List[int]
+            The hidden layers in the network. A list of ints whose size
+            determines the number of layers and each value corresponds to
+            the layer size.
+        """
+        super().__init__()
+        self.n_dim = n_dim
+        self.layers = layers
+        self.center = _np.zeros([n_dim])
+        self.scale = 1.0
+
+        n_weights = 0
+        n_bias = 0
+        tmp = [n_dim] + layers
+        for i in range(len(layers)):
+            n_weights += tmp[i] * tmp[i + 1]
+            n_bias += tmp[i + 1]
+        self.params = {
+            "weights": _gpr.Parameter(
+                _np.random.normal(size=n_weights, scale=0.1),
+                _np.ones(n_weights) * (-10),
+                _np.ones(n_weights) * 10),
+            "bias": _gpr.Parameter(
+                _np.zeros(n_bias),
+                _np.ones(n_bias) * (-10),
+                _np.ones(n_bias) * 10)
+        }
+        self.bias = None
+        self.weights = None
+
+    def refresh(self):
+        with _tf.name_scope("NeuralNetwork_refresh"):
+            # weights
+            weights_array = self.params["weights"].tf_val
+            self.weights = []
+            pos_1 = 0
+            pos_2 = self.n_dim * self.layers[0]
+            self.weights.append(_tf.reshape(
+                weights_array[pos_1:pos_2],
+                shape=[self.n_dim, self.layers[0]]))
+            if len(self.layers) > 1:
+                for i in range(1, len(self.layers)):
+                    pos_1 = pos_2
+                    pos_2 += self.layers[i] * self.layers[i - 1]
+                    self.weights.append(_tf.reshape(
+                        weights_array[pos_1:pos_2],
+                        shape=[self.layers[i - 1], self.layers[i]]))
+
+            # bias
+            bias_array = self.params["bias"].tf_val
+            self.bias = []
+            pos_1 = 0
+            pos_2 = self.layers[0]
+            self.bias.append(bias_array[pos_1:pos_2])
+            if len(self.layers) > 1:
+                for i in range(1, len(self.layers)):
+                    pos_1 = pos_2
+                    pos_2 += self.layers[i]
+                    self.bias.append(bias_array[pos_1:pos_2])
+
+    def forward(self, x):
+        raise Exception("forward transform not available for this class")
+
+    def backward(self, x):
+        with _tf.name_scope("NeuralNetwork_backward"):
             self.refresh()
-            r = self.params["range"].tf_val
-            x = x * r
-            az = self.params["azimuth"].tf_val
-            az = az * (_np.pi / 180)
-            coords = _tf.concat([x * _tf.sin(az), x * _tf.cos(az)], axis=1)
-        return coords
+            # scaling
+            with _tf.name_scope("scaling"):
+                center = _tf.expand_dims(_tf.constant(self.center, _tf.float64),
+                                         axis=0)
+                scale = _tf.constant(self.scale, _tf.float64)
+                s = _tf.shape(x)
+                center = _tf.tile(center, [s[0], 1])
+                x_tr = (x - center) / scale
+            # ReLU layers
+            for i in range(len(self.weights)):
+                with _tf.name_scope("dense_layer_" + str(i)):
+                    x_tr = _tf.nn.xw_plus_b(x_tr, self.weights[i], self.bias[i])
+                    x_tr = x_tr * _tf.nn.sigmoid(x_tr)  # swish activation
+            return x_tr
 
     def set_limits(self, data):
-        self.params["range"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 10)
+        self.center = (data.bounding_box[1, :] + data.bounding_box[0, :]) / 2.0
+        self.scale = data.diagonal
+
+
+class AnisotropyARD(_Transform):
+    """Automatic Relevance Detection"""
+
+    def __init__(self, n_dim):
+        """
+        Initializer for Isotropic.
+
+        Parameters
+        ----------
+        n_dim : int
+            The number of dimensions. May be greater than 3 when used in
+            conjunction with a space-expanding transform.
+        """
+        super().__init__()
+        self.params = {"ranges": _gpr.PositiveParameter(
+            _np.ones(n_dim), _np.ones(n_dim)*0.001, _np.ones(n_dim)*10000)}
+
+    def forward(self, x):
+        with _tf.name_scope("Isotropic_forward"):
+            ranges = self.params["ranges"].tf_val
+            x_tr = _tf.matmul(x, _tf.diag(ranges))
+        return x_tr
+
+    def backward(self, x):
+        with _tf.name_scope("Isotropic_backward"):
+            ranges = self.params["ranges"].tf_val
+            x_tr = _tf.matmul(x, _tf.diag(1 / ranges))
+        return x_tr
+
+
+class ChainedTransform(_Transform):
+    def __init__(self, *transforms):
+        super().__init__()
+        count = -1
+        for tr in transforms:
+            count += 1
+            names = list(tr.params.keys())
+            names = [s + "_" + str(count) for s in names]
+            self.params.update(zip(names, tr.params.values()))
+        self.transforms = transforms
+
+    def backward(self, x):
+        for tr in self.transforms:
+            x = tr.backward(x)
+        return x
+
+    def set_limits(self, data):
+        for tr in self.transforms:
+            tr.set_limits(data)

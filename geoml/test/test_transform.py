@@ -11,7 +11,7 @@ coords = np.append(np.cos(angle), np.sin(angle), axis=1)
 tr_identity = geoml.transform.Identity()
 tr_isotropic = geoml.transform.Isotropic(5)
 tr_anis_2D = geoml.transform.Anisotropy2D(3, 1 / 3, 60)
-tr_proj = geoml.transform.Projection2DTo1D(30, 1)
+tr_proj = geoml.transform.ProjectionTo1D(30, 1)
 
 g = tf.Graph()
 with g.as_default():

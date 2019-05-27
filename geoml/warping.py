@@ -72,7 +72,7 @@ class Spline(_Warping):
     reverse_spline :
         A spline object to convert from the warped to original space.
     """
-    def __init__(self, n_knots):
+    def __init__(self, n_knots=5):
         """
         Initializer for Spline.
 
@@ -99,7 +99,8 @@ class Spline(_Warping):
     def refresh(self, y):
         """Rebuilds the spline using the given data's range."""
         y_seq = _np.linspace(_np.min(y), _np.max(y), self.n_knots)
-        self.params["original"].set_value(y_seq)
+        orig = _np.concatenate([[y_seq[0]], _np.diff(y_seq)])
+        self.params["original"].set_value(orig)
         warp = self.params["warp"].value.cumsum()
         orig = y_seq
         self.base_spline = _gint.MonotonicSpline(orig, warp)
@@ -144,7 +145,8 @@ class ZScore(_Warping):
         std : double
             The desired standard deviation of the data.
 
-        The mean and standard deviation can be computed from the data (if omitted) or specified.
+        The mean and standard deviation can be computed from the data
+        (if omitted) or specified.
         """
         super().__init__()
         self.def_mean = mean
@@ -212,7 +214,8 @@ class Scaling(_Warping):
         Parameters
         ----------
         positive : bool
-            Whether to enforce positivity in the data. The <=0 values will be replaced with half of the smallest
+            Whether to enforce positivity in the data. The <=0 values will
+            be replaced with half of the smallest
             positive value.
         """
         super().__init__()

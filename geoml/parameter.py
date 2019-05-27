@@ -49,22 +49,34 @@ class Parameter(object):
         if max_val is not None:
             self.max = _np.array(max_val, ndmin=1)
             self.max_transf = _np.array(max_val, ndmin=1)
+
+        # updating value
+        if (self.value > self.max).any():
+            self.value = self.max
+        if (self.value_transf > self.max_transf).any():
+            self.value_transf = self.max_transf
+        if (self.value < self.min).any():
+            self.value = self.min
+        if (self.value_transf < self.min_transf).any():
+            self.value_transf = self.min_transf
         self.refresh()
             
     def set_value(self, value, transf=False):
         self.value = _np.array(value, ndmin=1)
         self.value_transf = _np.array(value, ndmin=1)
+
+        # updating limits
+        if (self.value > self.max).any():
+            self.max = self.value
+        if (self.value_transf > self.max_transf).any():
+            self.max_transf = self.value_transf
+        if (self.value < self.min).any():
+            self.min = self.value
+        if (self.value_transf < self.min_transf).any():
+            self.min_transf = self.value_transf
         self.refresh()
         
     def refresh(self):
-        if (self.value > self.max).any():
-            self.value = self.max
-        if (self.value_transf > self.max_transf).any(): 
-            self.value_transf = self.max_transf
-        if (self.value < self.min).any():
-            self.value = self.min
-        if (self.value_transf < self.min_transf).any(): 
-            self.value_transf = self.min_transf
         if self.tf_val is not None:
             self.tf_feed_entry = {self.tf_val: self.value}
             
@@ -123,7 +135,9 @@ class CompositionalParameter(Parameter):
     
     def set_value(self, value, transf=False):
         if transf:
+            value = _np.array(value)
             v = _np.concatenate([value, [-value.sum()]])
+            v = v - v.max()  # to avoid overflow
             self.value = _np.exp(v) / sum(_np.exp(v))
             self.value_transf = value
         else:
