@@ -330,7 +330,7 @@ class Nugget(object):
                 ones = _tf.where(interpolate,
                                  _tf.ones_like(ones) * 1e-9,
                                  _tf.ones_like(ones))
-            mat = _tf.diag(ones)
+            mat = _tf.linalg.tensor_diag(ones)
         return mat
 
 
@@ -913,47 +913,79 @@ class CovarianceModelRegression(_CovarianceModel):
         self.update_params(d)
 
 
-# class DeepKernelModel(CovarianceModelRegression):
-#     def __init__(self, n_dim, n_layers, layer_size,
-#                  periodic_layer_size, warping, jitter=1e-9):
-#         self.kernels = []
-#
-#         # warping
-#         self.warping = warping
-#
-#         # nugget and variance
-#         self.nugget = Nugget()
-#         # initializing with 10% nugget
-#         self.variance = _gpr.CompositionalParameter(_np.array([0.9, 0.1]))
-#         self.jitter = jitter
-#
-#         # neural network
-#         n_weights = n_dim * layer_size + (n_layers - 1) * layer_size ** 2
-#         n_bias = n_layers * layer_size
-#         n_periods = layer_size * periodic_layer_size
-#         self.weights = _gpr.Parameter(
-#                 _np.ones(n_weights),
-#                 _np.ones(n_weights) * (-5),
-#                 _np.ones(n_weights) * 5)
-#         self.bias = _gpr.Parameter(
-#                 _np.zeros(n_bias),
-#                 _np.ones(n_bias) * (-5),
-#                 _np.ones(n_bias) * 5)
-#         self.periods = _gpr.PositiveParameter(
-#                 _np.ones(n_periods),
-#                 _np.ones(n_periods) * 2,
-#                 _np.ones(n_periods) * 10000)
-#
-#     def params_dict(self, complete=False):
-#         pd = super().params_dict(complete)
-#         count = _np.max(_np.array(pd["param_id"]))
-#
-#         pd = {"param_type": [],
-#               "param_pos_outer": [],
-#               "param_pos_inner": [],
-#               "param_id": [],
-#               "param_val": [],
-#               "param_min": [],
-#               "param_max": [],
-#               "param_name": []}
-#         count = -1
+class CovarianceModelSparse(CovarianceModelRegression):
+    def __init__(self, kernels, warping, pseudo_inputs, jitter=1e-9):
+        super().__init__(kernels, warping, jitter)
+
+        coords = pseudo_inputs.coords.flatten(order="C")
+        min_val = pseudo_inputs.coords.min(axis=0)
+        min_val = _np.repeat(min_val, pseudo_inputs.coords.shape[0])
+        max_val = pseudo_inputs.coords.max(axis=0)
+        max_val = _np.repeat(max_val, pseudo_inputs.coords.shape[0])
+        self.ps_coords = _gpr.Parameter(coords, min_val, max_val, fixed=True)
+
+    def fix_pseudo_inputs(self):
+        self.ps_coords.fix()
+
+    def unfix_pseudo_inputs(self):
+        self.ps_coords.unfix()
+
+    def init_tf_placeholder(self):
+        super().init_tf_placeholder()
+        self.ps_coords.init_tf_placeholder()
+
+    def feed_dict(self):
+        feed = super().feed_dict()
+        feed.update(self.ps_coords.tf_feed_entry)
+        return feed
+
+    def params_dict(self, complete=False):
+        pd = super().params_dict()
+        count = max(pd["param_id"])
+
+        if (not self.ps_coords.fixed) | complete:
+            count += 1
+            val_length = len(self.ps_coords.value_transf)
+            pd["param_type"].extend(_np.repeat("pseudo_inputs", val_length)
+                                    .tolist())
+            pd["param_pos_outer"].extend(_np.repeat(0, val_length).tolist())
+            pd["param_pos_inner"].extend(_np.repeat(0, val_length).tolist())
+            pd["param_id"].extend(_np.repeat(count, val_length).tolist())
+            pd["param_val"].extend(self.ps_coords.value_transf)
+            pd["param_min"].extend(self.ps_coords.min_transf)
+            pd["param_max"].extend(self.ps_coords.max_transf)
+            pd["param_name"].extend(_np.repeat("pseudo_inputs", val_length)
+                                    .tolist())
+        return pd
+
+    def update_params(self, params_dict):
+        """
+        Updates the model parameters, which will be fed to a TensorFlow graph
+        later.
+        """
+        n_updates = _np.max(params_dict["param_id"])
+        for i in range(n_updates + 1):
+            pos = _np.where(_np.array(params_dict["param_id"]) == i)[0]
+            pos2 = slice(pos[0], pos[-1] + 1)
+            if params_dict["param_type"][pos[0]] == "variance":
+                v = _np.array(params_dict["param_val"][pos2])
+                self.variance.set_value(v, transf=True)
+            elif params_dict["param_type"][pos[0]] == "kernel_param":
+                kernel_pos = [params_dict["param_pos_outer"][pos[0]],
+                              params_dict["param_pos_inner"][pos[0]]]
+                self.set_kernel_parameter(kernel_pos,
+                                          params_dict["param_name"][pos[0]],
+                                          params_dict["param_val"][pos2],
+                                          transf=True)
+            elif params_dict["param_type"][pos[0]] == "warping_param":
+                warp_pos = params_dict["param_pos_outer"][pos[0]]
+                self.set_warping_parameter(warp_pos,
+                                           params_dict["param_name"][pos[0]],
+                                           params_dict["param_val"][pos2],
+                                           transf=True)
+            elif params_dict["param_type"][pos[0]] == "pseudo_inputs":
+                ps = _np.array(params_dict["param_val"][pos2])
+                self.ps_coords.set_value(ps, transf=True)
+            else:
+                raise ValueError("invalid param_id")
+

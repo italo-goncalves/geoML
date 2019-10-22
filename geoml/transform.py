@@ -80,7 +80,7 @@ class Isotropic(_Transform):
     
     def set_limits(self, data):
         self.params["range"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 10)
+                min_val=data.diagonal / 100, max_val=data.diagonal * 2)
 
 
 class Anisotropy2D(_Transform):
@@ -122,8 +122,10 @@ class Anisotropy2D(_Transform):
             rot = _tf.reshape(rot, [2, 2])
             # scaling matrix
             sc = _tf.linalg.diag(_tf.concat([maxrange, minrange], -1))
+            # sc = _tf.linalg.diag(_tf.concat([minrange, maxrange], -1))
             # anisotropy matrix
             self._anis = _tf.transpose(_tf.matmul(rot, sc))
+            # self._anis = _tf.matmul(rot, sc)
             self._anis_inv = _tf.linalg.inv(self._anis)
     
     def forward(self, x):
@@ -138,7 +140,7 @@ class Anisotropy2D(_Transform):
     
     def set_limits(self, data):
         self.params["maxrange"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 10)
+                min_val=data.diagonal / 100, max_val=data.diagonal * 2)
 
 
 class Anisotropy3D(_Transform):
@@ -190,6 +192,7 @@ class Anisotropy3D(_Transform):
             rake = rake * (_np.pi / 180)
             # conversion to mathematical coordinates
             dip = - dip
+            azimuth = _np.pi / 2 - azimuth
             rng = _tf.linalg.diag(_tf.concat(
                 [midrange, maxrange, minrange], -1))
             # rotation matrix
@@ -222,7 +225,7 @@ class Anisotropy3D(_Transform):
     
     def set_limits(self, data):
         self.params["maxrange"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 10)
+                min_val=data.diagonal / 100, max_val=data.diagonal * 2)
 
 
 class ProjectionTo1D(_Transform):
@@ -375,13 +378,13 @@ class AnisotropyARD(_Transform):
             _np.ones(n_dim), _np.ones(n_dim)*0.001, _np.ones(n_dim)*10000)}
 
     def forward(self, x):
-        with _tf.name_scope("Isotropic_forward"):
+        with _tf.name_scope("ARD_forward"):
             ranges = self.params["ranges"].tf_val
             x_tr = _tf.matmul(x, _tf.diag(ranges))
         return x_tr
 
     def backward(self, x):
-        with _tf.name_scope("Isotropic_backward"):
+        with _tf.name_scope("ARD_backward"):
             ranges = self.params["ranges"].tf_val
             x_tr = _tf.matmul(x, _tf.diag(1 / ranges))
         return x_tr
@@ -406,3 +409,33 @@ class ChainedTransform(_Transform):
     def set_limits(self, data):
         for tr in self.transforms:
             tr.set_limits(data)
+
+
+class SelectVariables(_Transform):
+    def __init__(self, index):
+        super().__init__()
+        self.index = index
+
+    def backward(self, x):
+        x = _tf.gather(x, self.index, axis=1)
+        r = _tf.rank(x)
+        x = _tf.cond(_tf.equal(r, 1),
+                     lambda: _tf.expand_dims(x, 1),
+                     lambda: x)
+        return x
+
+
+class Periodic(_Transform):
+    def __init__(self, period):
+        super().__init__()
+        self.params = {"period": _gpr.PositiveParameter(period, 0.01, 10000)}
+
+    def backward(self, x):
+        with _tf.name_scope("Trigonometric_backward"):
+            p = self.params["period"].tf_val
+            return _tf.concat([_tf.sin(2.0 * _np.pi * x / p),
+                               _tf.cos(2.0 * _np.pi * x / p)], axis=1)
+
+    def set_limits(self, data):
+        self.params["period"].set_limits(
+                min_val=data.diagonal / 100, max_val=data.diagonal * 10)

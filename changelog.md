@@ -1,3 +1,11 @@
+## version 0.1.3
+* Introduced parallel sparse cubic convolution interpolation.
+* Introduced the sparse GP model.
+* Introduced the SPICE model for scalability.
+* New auxiliary functions in `tftools` module, such as 
+conjugate gradient solver and Lanczos decomposition.
+* Limited support for modeling non-spatial data.
+
 ## version 0.1.2
 * Introduced the `jitter` parameter in the models, for improved 
 numerical stability.

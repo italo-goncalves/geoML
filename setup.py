@@ -7,7 +7,7 @@ from setuptools import setup
 
 
 setup(name='geoml',
-      version='0.1',
+      version='0.1.3',
       description='Machine learning for spatial data',
       #      long_description=readme(),
       keywords=['machine learning', 'spatial data', 'gaussian process'],

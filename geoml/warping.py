@@ -237,3 +237,31 @@ class Scaling(_Warping):
     
     def derivative(self, x):
         return _np.repeat(1 / (self.y_max - self.y_min), len(x))
+
+
+class Log(_Warping):
+    """
+    Log-scale warping.
+    """
+
+    def __init__(self, shift=0.0):
+        """
+        Initializer for Log.
+
+        Parameters
+        ----------
+        shift : float
+            A positive value to add to the data. Use it if you have zeros.
+            Default is half the smallest positive value.
+        """
+        super().__init__()
+        self.shift = shift
+
+    def forward(self, x):
+        return _np.log(x + self.shift)
+
+    def backward(self, x):
+        return _np.exp(x)
+
+    def derivative(self, x):
+        return 1 / (x + self.shift)

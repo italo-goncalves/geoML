@@ -14,11 +14,28 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ['cubic_conv_1d', 'MonotonicSpline']
+__all__ = ['cubic_conv_1d',
+           'cubic_conv_1d_sparse',
+           'cubic_conv_2d_sparse',
+           'cubic_conv_3d_sparse',
+           'cubic_conv_1d_parallel',
+           'cubic_conv_2d_parallel',
+           'cubic_conv_3d_parallel',
+           'MonotonicSpline']
 
 import numpy as _np
-import tensorflow as _tf
+# import tensorflow as _tf
 import scipy.interpolate as _interp
+import scipy.sparse as _sp
+import pathos.multiprocessing as _mult
+
+
+def _batch_id(n_data, batch_size):
+    n_batches = int(_np.ceil(n_data / batch_size))
+    batch_id = [_np.arange(i * batch_size,
+                           _np.minimum((i + 1) * batch_size, n_data))
+                for i in range(n_batches)]
+    return batch_id
 
 
 def cubic_conv_1d(x, xnew):
@@ -72,67 +89,202 @@ def cubic_conv_1d(x, xnew):
     return w
 
 
-def cubic_conv_1d_tf(x, xnew):
+def cubic_conv_1d_sparse(x, xnew):
     """
     Generates a sparse matrix for interpolating from a regular grid to
     a new set of positions in one dimension.
 
     Parameters
     ----------
-    x : Tensor
+    x : array
         Array of regularly spaced values.
-    xnew : Tensor
+    xnew : array
         Positions to receive the interpolated values. Its limits must be
         confined within the limits of x.
 
     Returns
     -------
-    w : Tensor
-        The interpolation matrix.
-
-    All parameters and output are Tensors. It is assumed that x is regularly
-    spaced and xnew is within the limits of x.
+    w : csc_matrix
+        The weights matrix.
     """
-    with _tf.name_scope("cubic_conv_1D"):
-        # interval and data position
-        h = x[1] - x[0]
-        x_len = _tf.shape(x)[0]
-        x_new_len = _tf.shape(xnew)[0]
-        s = (xnew - _tf.reduce_min(x)) / h
-        base_pos = _tf.linspace(_tf.constant(-1.0, dtype=_tf.float64),
-                                _tf.cast(x_len, _tf.float64),
-                                x_len + 2)
+    if _np.std(_np.diff(x)) > 1e-9:
+        raise Exception("array x not equally spaced")
+    if (_np.min(xnew) < _np.min(x)) | (_np.max(xnew) > _np.max(x)):
+        raise Exception("xnew out of bounds")
 
-        # initializing weight matrix
-        s = _tf.expand_dims(s, axis=1)  # column vector
-        base_pos = _tf.expand_dims(base_pos, axis=0)  # row vector
-        w = _tf.abs(_tf.tile(s, [1, x_len + 2])
-                    - _tf.tile(base_pos, [x_new_len, 1]))
+    # interval and data position
+    h = x[1] - x[0]
+    x_len = x.shape[0]
+    x_new_len = xnew.shape[0]
+    dense_shape = [x_new_len, x_len]
 
-        # interpolation weights
-        # si = _tf.abs(s[i_] - base_pos)
-        replace = 1.5 * _tf.pow(w, 3.0) - 2.5 * _tf.pow(w, 2.0) \
-            + _tf.constant(1.0, dtype=_tf.float64)
-        w_new = _tf.where(_tf.less_equal(w, 1.0), replace, w)
+    s = (xnew - _np.min(x)) / h
+    base_cols = _np.array([-1, 0, 1, 2])
 
-        replace = - 0.5 * _tf.pow(w, 3.0) + 2.5 * _tf.pow(w, 2.0) \
-                  - 4.0 * w + _tf.constant(2.0, dtype=_tf.float64)
-        w_new = _tf.where(_tf.greater(w, 1.0) & _tf.less_equal(w, 2.0),
-                          replace, w_new)
+    rows = []
+    cols = []
+    vals = []
+    for i in range(x_new_len):
+        # position
+        si = s[i] + base_cols
+        cols_i = _np.floor(si).tolist()
+        si = _np.abs(s[i] - _np.floor(si))
 
-        w_new = _tf.where(_tf.greater(w, 2.0), _tf.zeros_like(w), w_new)
+        # weights
+        wi = [- 0.5 * si[0]**3 + 2.5 * si[0]**2 - 4.0 * si[0] + 2.0,
+              1.5 * si[1]**3 - 2.5 * si[1]**2 + 1.0,
+              1.5 * si[2]**3 - 2.5 * si[2]**2 + 1.0,
+              - 0.5 * si[3]**3 + 2.5 * si[3]**2 - 4.0 * si[3] + 2.0]
 
         # borders
-        w_new = _tf.concat([
-            _tf.stack([w_new[:, 1] + 3.0 * w_new[:, 0],
-                       w_new[:, 2] - 3.0 * w_new[:, 0],
-                       w_new[:, 3] + 1.0 * w_new[:, 0]], axis=1),
-            w_new[:, 4:(x_len-2)],
-            _tf.stack([w_new[:, x_len - 2] + 1.0 * w_new[:, x_len + 1],
-                       w_new[:, x_len - 1] - 3.0 * w_new[:, x_len + 1],
-                       w_new[:, x_len] + 3.0 * w_new[:, x_len + 1]], axis=1)
-        ], axis=1)
+        if cols_i[0] == -1:
+            wi = [wi[1] + 3.0 * wi[0],
+                  wi[2] - 3.0 * wi[0],
+                  wi[3] + 1.0 * wi[0]]
+            cols_i = cols_i[1:4]
+        elif cols_i[-1] == x_len:
+            wi = [wi[0] + 1.0 * wi[3],
+                  wi[1] - 3.0 * wi[3],
+                  wi[2] + 3.0 * wi[3]]
+            cols_i = cols_i[0:3]
+        elif cols_i[-1] == x_len + 1:
+            wi = [1]
+            cols_i = [x_len - 1]
 
+        # output
+        rows.extend([i] * len(cols_i))
+        cols.extend(cols_i)
+        vals.extend(wi)
+
+    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=dense_shape)
+    return w_new
+
+
+def cubic_conv_2d_sparse(grid_x, grid_y, coords):
+    int_x = cubic_conv_1d_sparse(grid_x, coords[:, 0])
+    int_y = cubic_conv_1d_sparse(grid_y, coords[:, 1])
+
+    n_data = coords.shape[0]
+    nx = grid_x.shape[0]
+    ny = grid_y.shape[0]
+
+    rows = []
+    cols = []
+    vals = []
+    for i in range(n_data):
+        cols_x = int_x.col[int_x.row == i]
+        data_x = int_x.data[int_x.row == i]
+
+        cols_y = int_y.col[int_y.row == i]
+        data_y = int_y.data[int_y.row == i]
+
+        data_xy = _np.kron(data_y, data_x)
+        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
+
+        rows.extend([i] * len(cols_x) * len(cols_y))
+        cols.extend(cols_xy.tolist())
+        vals.extend(data_xy.tolist())
+
+    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny])
+    return w_new
+
+
+def cubic_conv_3d_sparse(grid_x, grid_y, grid_z, coords):
+    int_x = cubic_conv_1d_sparse(grid_x, coords[:, 0])
+    int_y = cubic_conv_1d_sparse(grid_y, coords[:, 1])
+    int_z = cubic_conv_1d_sparse(grid_z, coords[:, 2])
+
+    n_data = coords.shape[0]
+    nx = grid_x.shape[0]
+    ny = grid_y.shape[0]
+    nz = grid_z.shape[0]
+
+    rows = []
+    cols = []
+    vals = []
+    for i in range(n_data):
+        cols_x = int_x.col[int_x.row == i]
+        data_x = int_x.data[int_x.row == i]
+
+        cols_y = int_y.col[int_y.row == i]
+        data_y = int_y.data[int_y.row == i]
+
+        data_xy = _np.kron(data_y, data_x)
+        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
+
+        cols_z = int_z.col[int_z.row == i]
+        data_z = int_z.data[int_z.row == i]
+
+        data_xyz = _np.kron(data_z, data_xy)
+        cols_xyz = _np.concatenate([nx * ny * j + cols_xy for j in cols_z],
+                                   axis=0)
+
+        rows.extend([i] * len(cols_x) * len(cols_y) * len(cols_z))
+        cols.extend(cols_xyz.tolist())
+        vals.extend(data_xyz.tolist())
+
+    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny * nz])
+    return w_new
+
+
+def cubic_conv_1d_parallel(x, xnew, batch_size=1000):
+    """
+    Generates a sparse matrix for interpolating from a regular grid to
+    a new set of positions in one dimension.
+
+    Parameters
+    ----------
+    x : array
+        Array of regularly spaced values.
+    xnew : array
+        Positions to receive the interpolated values. Its limits must be
+        confined within the limits of x.
+    batch_size : int
+        Number of points per batch.
+
+    Returns
+    -------
+    w : csc_matrix
+        The weights matrix.
+    """
+    n_data = len(xnew)
+    batch_id = _batch_id(n_data, batch_size)
+
+    def loop_fn(bid):
+        return cubic_conv_1d_sparse(x, xnew[bid])
+
+    pool = _mult.ProcessingPool()
+    out = pool.map(loop_fn, batch_id)
+
+    w_new = _sp.vstack(out)
+    return w_new
+
+
+def cubic_conv_2d_parallel(grid_x, grid_y, coords, batch_size=1000):
+    n_data = coords.shape[0]
+    batch_id = _batch_id(n_data, batch_size)
+
+    def loop_fn(bid):
+        return cubic_conv_2d_sparse(grid_x, grid_y, coords[bid])
+
+    pool = _mult.ProcessingPool()
+    out = pool.map(loop_fn, batch_id)
+
+    w_new = _sp.vstack(out)
+    return w_new
+
+
+def cubic_conv_3d_parallel(grid_x, grid_y, grid_z, coords, batch_size=1000):
+    n_data = coords.shape[0]
+    batch_id = _batch_id(n_data, batch_size)
+
+    def loop_fn(bid):
+        return cubic_conv_3d_sparse(grid_x, grid_y, grid_z, coords[bid])
+
+    pool = _mult.ProcessingPool()
+    out = pool.map(loop_fn, batch_id)
+
+    w_new = _sp.vstack(out)
     return w_new
 
 
@@ -208,6 +360,36 @@ class Spline(object):
                + f2*Spline._h2(x, x1, x2, n_deriv) \
                + d1*Spline._h3(x, x1, x2, n_deriv) \
                + d2*Spline._h4(x, x1, x2, n_deriv)
+
+    def __call__(self, x2, n_deriv=0):
+        """
+        Interpolation at new positions. Extrapolation is done linearly.
+        """
+        yout = _np.repeat(0.0, x2.size)
+        x = self.x
+        y = self.y
+        d = self.d
+
+        # values outside limits
+        if n_deriv == 0:
+            yout[x2 < x[0]] = y[0] + d[0] * (x2[x2 < x[0]] - x[0])
+            yout[x2 >= x[-1]] = y[-1] + d[-1] * (x2[x2 >= x[-1]] - x[-1])
+        elif n_deriv == 1:
+            yout[x2 < x[0]] = d[0]
+            yout[x2 >= x[-1]] = d[-1]
+        else:
+            raise ValueError("n_deriv must be 0 or 1")
+
+        # values inside limits
+        for i in range(d.size - 1):
+            pos = ((x2 >= x[i]) & (x2 < x[i + 1]))
+            yout[pos] = Spline._poly(x2[pos],
+                                     x[i], x[i + 1],
+                                     y[i], y[i + 1],
+                                     d[i], d[i + 1],
+                                     n_deriv)
+
+        return yout
 
 
 class MonotonicSpline(Spline):
@@ -301,36 +483,6 @@ class MonotonicSpline(Spline):
         self.d = _np.append(d1, d2[-1])
         self._alpha = alpha
         self._beta = beta
-        
-    def __call__(self, x2, n_deriv=0):
-        """
-        Interpolation at new positions. Extrapolation is done linearly.
-        """
-        yout = _np.repeat(0.0, x2.size)
-        x = self.x
-        y = self.y
-        d = self.d
-        
-        # values outside limits
-        if n_deriv == 0:
-            yout[x2 < x[0]] = y[0] + d[0] * (x2[x2 < x[0]] - x[0])
-            yout[x2 >= x[-1]] = y[-1] + d[-1] * (x2[x2 >= x[-1]] - x[-1])
-        elif n_deriv == 1:
-            yout[x2 < x[0]] = d[0]
-            yout[x2 >= x[-1]] = d[-1]
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
-            
-        # values inside limits
-        for i in range(d.size - 1):
-            pos = ((x2 >= x[i]) & (x2 < x[i + 1]))
-            yout[pos] = Spline._poly(x2[pos],
-                                     x[i], x[i+1],
-                                     y[i], y[i+1],
-                                     d[i], d[i+1],
-                                     n_deriv)
-                      
-        return yout
     
     def __init__(self, x, y, region=1):
         self.x = x

@@ -29,6 +29,8 @@ import copy as _copy
 
 from skimage import measure as _measure
 
+import geoml.interpolation as _int
+
 
 def _update(d, u):
     """
@@ -298,7 +300,7 @@ class Points1D(_PointData):
         A matrix with the spatial coordinates.
     data : data frame
         The coordinates' attributes.
-    coords_label : str
+    coords_label : list
         Label for spatial coordinates.
     bounding_box : array
         Object's spatial limits.
@@ -320,6 +322,8 @@ class Points1D(_PointData):
             Extracted from coords object if available.
         """
         super().__init__(coords, data)
+        if isinstance(coords_label, str):
+            coords_label = [coords_label]
         if isinstance(coords, _pd.core.frame.DataFrame):
             if coords_label is None:
                 coords_label = coords.columns
@@ -335,8 +339,12 @@ class Points1D(_PointData):
 
         self._ndim = 1
         self.coords = _np.array(coords, ndmin=2).transpose()
-        self.bounding_box = _np.array([[coords.min()], [coords.max()]])
-        self.diagonal = coords.max() - coords.min()
+        if coords.shape[0] > 0:
+            self.bounding_box = _np.array([[coords.min()], [coords.max()]])
+            self.diagonal = coords.max() - coords.min()
+        else:
+            self.bounding_box = _np.zeros([2, 1])
+            self.diagonal = 0
         self.coords_label = coords_label
 
     def __str__(self):
@@ -354,6 +362,46 @@ class Points1D(_PointData):
     def draw_categorical(self, column, colors, **kwargs):
         raise NotImplementedError()
 
+    def subset_region(self, xmin, xmax, include_min=True, include_max=False):
+        df = self.as_data_frame()
+        keep = (df[self.coords_label[0]] >= xmin) \
+               & (df[self.coords_label[0]] <= xmax)
+        if not include_min:
+            keep = keep & (df[self.coords_label[0]] > xmin)
+        if not include_max:
+            keep = keep & (df[self.coords_label[0]] < xmax)
+        coords = df.loc[keep, self.coords_label]
+        data = df.drop(self.coords_label, axis=1).loc[keep, :]
+        return Points1D(coords, data)
+
+    def divide_by_region(self, n=1):
+        break_points = _np.linspace(self.bounding_box[0],
+                                    self.bounding_box[1],
+                                    n + 1)
+        divided = [self.subset_region(break_points[i], break_points[i+1],
+                                      include_max=(i == n-1))
+                   for i in range(n)]
+        return divided
+
+    def assign_region(self, n=1, prefix="region"):
+        break_points = _np.linspace(self.bounding_box[0],
+                                    self.bounding_box[1],
+                                    n + 1)
+        region = _np.zeros(self.coords.shape[0], dtype=_np.int32)
+
+        for i in range(n):
+            keep = (self.coords[:, 0] >= break_points[i]) \
+                   & (self.coords[:, 0] <= break_points[i+1])
+            if i < n-1:
+                keep = keep & (self.coords[:, 0] < break_points[i+1])
+            region[keep] = i
+
+        if self.data is None:
+            self.data = _pd.DataFrame(
+                region, columns=[prefix + "_" + self.coords_label[0]])
+        else:
+            self.data[prefix + "_" + self.coords_label[0]] = region
+
 
 class Points2D(_PointData):
     """
@@ -365,7 +413,7 @@ class Points2D(_PointData):
         A matrix with the spatial coordinates.
     data : data frame
         The coordinates' attributes.
-    coords_label : str
+    coords_label : list
         Label for spatial coordinates.
     bounding_box : array
         Object's spatial limits.
@@ -382,7 +430,7 @@ class Points2D(_PointData):
             The spatial coordinates. Must contain two columns.
         data : data frame
             The coordinates' attributes (optional)
-        coords_label : str
+        coords_label : list
             Optional string to label the coordinates.
             Extracted from coords object if available.
         """
@@ -395,7 +443,11 @@ class Points2D(_PointData):
             coords_label = ["X", "Y"]
 
         self.coords = coords
-        self.bounding_box, self.diagonal = _bounding_box(coords)
+        if coords.shape[0] > 0:
+            self.bounding_box, self.diagonal = _bounding_box(coords)
+        else:
+            self.bounding_box = _np.zeros([2, 2])
+            self.diagonal = 0
         self.coords_label = coords_label
         self._ndim = 2
 
@@ -413,6 +465,76 @@ class Points2D(_PointData):
 
     def draw_categorical(self, column, colors, **kwargs):
         raise NotImplementedError()
+
+    def subset_region(self, xmin, xmax, ymin, ymax,
+                      include_min_x=True, include_max_x=False,
+                      include_min_y=True, include_max_y=False):
+        df = self.as_data_frame()
+        keep = (df[self.coords_label[0]] >= xmin) \
+               & (df[self.coords_label[0]] <= xmax) \
+               & (df[self.coords_label[1]] >= ymin) \
+               & (df[self.coords_label[1]] <= ymax)
+        if not include_min_x:
+            keep = keep & (df[self.coords_label[0]] > xmin)
+        if not include_min_y:
+            keep = keep & (df[self.coords_label[1]] > ymin)
+        if not include_max_x:
+            keep = keep & (df[self.coords_label[0]] < xmax)
+        if not include_max_y:
+            keep = keep & (df[self.coords_label[1]] < ymax)
+        coords = df.loc[keep, self.coords_label]
+        data = df.drop(self.coords_label, axis=1).loc[keep, :]
+        return Points2D(coords, data)
+
+    def divide_by_region(self, nx=1, ny=1):
+        break_points_x = _np.linspace(self.bounding_box[0, 0],
+                                      self.bounding_box[1, 0],
+                                      nx + 1)
+        break_points_y = _np.linspace(self.bounding_box[0, 1],
+                                      self.bounding_box[1, 1],
+                                      ny + 1)
+
+        divided = [[
+            self.subset_region(
+                break_points_x[i], break_points_x[i + 1],
+                break_points_y[j], break_points_y[j + 1],
+                include_max_x=(i == nx - 1),
+                include_max_y=(j == ny - 1)
+            )
+            for j in range(ny)]
+            for i in range(nx)]
+        return divided
+
+    def assign_region(self, nx=1, ny=1, prefix="region"):
+        break_points_x = _np.linspace(self.bounding_box[0, 0],
+                                      self.bounding_box[1, 0],
+                                      nx + 1)
+        break_points_y = _np.linspace(self.bounding_box[0, 1],
+                                      self.bounding_box[1, 1],
+                                      ny + 1)
+
+        region = _np.zeros([self.coords.shape[0], 2], dtype=_np.int32)
+
+        for i in range(nx):
+            keep = (self.coords[:, 0] >= break_points_x[i]) \
+                   & (self.coords[:, 0] <= break_points_x[i + 1])
+            if i < nx - 1:
+                keep = keep & (self.coords[:, 0] < break_points_x[i + 1])
+            region[keep, 0] = i
+        for j in range(ny):
+            keep = (self.coords[:, 1] >= break_points_y[j]) \
+                   & (self.coords[:, 1] <= break_points_y[j + 1])
+            if j < ny - 1:
+                keep = keep & (self.coords[:, 1] < break_points_y[j + 1])
+            region[keep, 1] = j
+
+        if self.data is None:
+            self.data = _pd.DataFrame(
+                region,
+                columns=[prefix + "_" + lab for lab in self.coords_label])
+        else:
+            for d in range(self.ndim):
+                self.data[prefix + "_" + self.coords_label[d]] = region[:, d]
 
 
 class Points3D(_PointData):
@@ -456,7 +578,11 @@ class Points3D(_PointData):
             coords_label = ["X", "Y", "Z"]
 
         self.coords = coords
-        self.bounding_box, self.diagonal = _bounding_box(coords)
+        if coords.shape[0] > 0:
+            self.bounding_box, self.diagonal = _bounding_box(coords)
+        else:
+            self.bounding_box = _np.zeros([2, 3])
+            self.diagonal = 0
         self.coords_label = coords_label
         self._ndim = 3
 
@@ -470,7 +596,25 @@ class Points3D(_PointData):
         return s
 
     def draw_numeric(self, column, **kwargs):
-        raise NotImplementedError()
+        # x, y, z, and text as lists
+        values = self.data[column].tolist()
+        text = [str(num) for num in values]
+        x = self.coords[:, 0].tolist()
+        y = self.coords[:, 1].tolist()
+        z = self.coords[:, 2].tolist()
+
+        obj = {"mode": "markers",
+               "name": column,
+               "text": text,
+               "marker": {"color": values}}
+
+        obj.update({"type": "scatter3d",
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "hoverinfo": "x+y+z+text"})
+        obj = _update(obj, kwargs)
+        return [obj]
 
     def draw_categorical(self, column, colors, **kwargs):
         """
@@ -484,7 +628,7 @@ class Points3D(_PointData):
             Dictionary mapping the data labels to plotly color
             specifications.
         kwargs
-            Additional arguments passed on to plotly's scatted3d
+            Additional arguments passed on to plotly's scatter3d
             function.
 
         Returns
@@ -518,6 +662,99 @@ class Points3D(_PointData):
                     "hoverinfo": "x+y+z+text"})
         obj = _update(obj, kwargs)
         return [obj]
+
+    def subset_region(self, xmin, xmax, ymin, ymax, zmin, zmax,
+                      include_min_x=True, include_max_x=False,
+                      include_min_y=True, include_max_y=False,
+                      include_min_z=True, include_max_z=False
+                      ):
+        df = self.as_data_frame()
+        keep = (df[self.coords_label[0]] >= xmin) \
+               & (df[self.coords_label[0]] <= xmax) \
+               & (df[self.coords_label[1]] >= ymin) \
+               & (df[self.coords_label[1]] <= ymax) \
+               & (df[self.coords_label[2]] >= zmin) \
+               & (df[self.coords_label[2]] <= zmax)
+        if not include_min_x:
+            keep = keep & (df[self.coords_label[0]] > xmin)
+        if not include_min_y:
+            keep = keep & (df[self.coords_label[1]] > ymin)
+        if not include_min_z:
+            keep = keep & (df[self.coords_label[2]] > zmin)
+        if not include_max_x:
+            keep = keep & (df[self.coords_label[0]] < xmax)
+        if not include_max_y:
+            keep = keep & (df[self.coords_label[1]] < ymax)
+        if not include_max_z:
+            keep = keep & (df[self.coords_label[2]] < zmax)
+        coords = df.loc[keep, self.coords_label]
+        data = df.drop(self.coords_label, axis=1).loc[keep, :]
+        return Points3D(coords, data)
+
+    def divide_by_region(self, nx=1, ny=1, nz=1):
+        break_points_x = _np.linspace(self.bounding_box[0, 0],
+                                      self.bounding_box[1, 0],
+                                      nx + 1)
+        break_points_y = _np.linspace(self.bounding_box[0, 1],
+                                      self.bounding_box[1, 1],
+                                      ny + 1)
+        break_points_z = _np.linspace(self.bounding_box[0, 2],
+                                      self.bounding_box[1, 2],
+                                      nz + 1)
+
+        divided = [[[
+            self.subset_region(
+                break_points_x[i], break_points_x[i + 1],
+                break_points_y[j], break_points_y[j + 1],
+                break_points_z[k], break_points_z[k + 1],
+                include_max_x=(i == nx - 1),
+                include_max_y=(j == ny - 1),
+                include_max_z=(k == nz - 1)
+            )
+            for k in range(nz)]
+            for j in range(ny)]
+            for i in range(nx)]
+        return divided
+
+    def assign_region(self, nx=1, ny=1, nz=1, prefix="region"):
+        break_points_x = _np.linspace(self.bounding_box[0, 0],
+                                      self.bounding_box[1, 0],
+                                      nx + 1)
+        break_points_y = _np.linspace(self.bounding_box[0, 1],
+                                      self.bounding_box[1, 1],
+                                      ny + 1)
+        break_points_z = _np.linspace(self.bounding_box[0, 2],
+                                      self.bounding_box[1, 2],
+                                      nz + 1)
+
+        region = _np.zeros([self.coords.shape[0], 3], dtype=_np.int32)
+
+        for i in range(nx):
+            keep = (self.coords[:, 0] >= break_points_x[i]) \
+                   & (self.coords[:, 0] <= break_points_x[i + 1])
+            if i < nx - 1:
+                keep = keep & (self.coords[:, 0] < break_points_x[i + 1])
+            region[keep, 0] = i
+        for j in range(ny):
+            keep = (self.coords[:, 1] >= break_points_y[j]) \
+                   & (self.coords[:, 1] <= break_points_y[j + 1])
+            if j < ny - 1:
+                keep = keep & (self.coords[:, 1] < break_points_y[j + 1])
+            region[keep, 1] = j
+        for k in range(nz):
+            keep = (self.coords[:, 2] >= break_points_z[k]) \
+                   & (self.coords[:, 2] <= break_points_z[k + 1])
+            if k < nz - 1:
+                keep = keep & (self.coords[:, 2] < break_points_z[k + 1])
+            region[keep, 2] = k
+
+        if self.data is None:
+            self.data = _pd.DataFrame(
+                region,
+                columns=[prefix + "_" + lab for lab in self.coords_label])
+        else:
+            for d in range(self.ndim):
+                self.data[prefix + "_" + self.coords_label[d]] = region[:, d]
 
 
 class Grid1D(Points1D):
@@ -563,6 +800,17 @@ class Grid1D(Points1D):
         self.step_size = [step]
         self.grid = [grid]
         self.grid_size = [int(n)]
+
+    def interpolation_weights(self, data, parallel=True, batch_size=1000):
+        if self.ndim != data.ndim:
+            raise ValueError("Dimension of self and data do not match")
+        if parallel:
+            return _int.cubic_conv_1d_parallel(self.grid[0],
+                                               data.coords[:, 0],
+                                               batch_size)
+        else:
+            return _int.cubic_conv_1d_sparse(self.grid[0], data.coords[:, 0])
+
 
 
 class Grid2D(Points2D):
@@ -643,6 +891,16 @@ class Grid2D(Points2D):
         #image = _np.flip(image, 0)
         return image
 
+    def interpolation_weights(self, data, parallel=True, batch_size=1000):
+        if self.ndim != data.ndim:
+            raise ValueError("Dimension of self and data do not match")
+        if parallel:
+            return _int.cubic_conv_2d_parallel(self.grid[0], self.grid[1],
+                                               data.coords, batch_size)
+        else:
+            return _int.cubic_conv_2d_sparse(self.grid[0], self.grid[1],
+                                             data.coords)
+
 
 class Grid3D(Points3D):
     """
@@ -701,6 +959,24 @@ class Grid3D(Points3D):
         self.grid_size = n.tolist()
         self.grid_size = [int(num) for num in self.grid_size]
 
+    def as_cube(self, column):
+        """
+        Returns a rank-3 array filled with the specified variable.
+
+        Parameters
+        ----------
+        column : str
+            The column with the variable to use.
+
+        Returns
+        -------
+        cube : array
+            A cubic array.
+        """
+        cube = _np.reshape(self.data[column].values,
+                           self.grid_size, order="F")
+        return cube
+
     def get_contour(self, column, value):
         """
         Calls the marching cubes algorithm to extract a isosurface.
@@ -724,11 +1000,10 @@ class Grid3D(Points3D):
             Value that can be used for color coding.
 
 
-        This method calls the skimage.measure.marching_cubes_lewiner().
+        This method calls skimage.measure.marching_cubes_lewiner().
         See the original documentation for details.
         """
-        cube = _np.reshape(self.data[column].values,
-                           self.grid_size, order="F")
+        cube = self.as_cube(column)
         verts, faces, normals, values = _measure.marching_cubes_lewiner(
             cube, value, gradient_direction="ascent",
             allow_degenerate=False, spacing=self.step_size)
@@ -747,7 +1022,8 @@ class Grid3D(Points3D):
                     "z": verts[:, 2],
                     "i": faces[:, 0],
                     "j": faces[:, 1],
-                    "k": faces[:, 2]})
+                    "k": faces[:, 2],
+                    "text": column})
         obj = _update(obj, kwargs)
         return [obj]
 
@@ -925,6 +1201,17 @@ class Grid3D(Points3D):
                 sections[i] = _update(sections[i], kwargs)
 
         return sections
+
+    def interpolation_weights(self, data, parallel=True, batch_size=1000):
+        if self.ndim != data.ndim:
+            raise ValueError("Dimension of self and data do not match")
+        if parallel:
+            return _int.cubic_conv_3d_parallel(self.grid[0], self.grid[1],
+                                               self.grid[2], data.coords,
+                                               batch_size)
+        else:
+            return _int.cubic_conv_3d_sparse(self.grid[0], self.grid[1],
+                                             self.grid[2], data.coords)
 
 
 class _DirectionalData(_PointData):
@@ -1306,8 +1593,12 @@ class DrillholeData(_SpatialData):
         val_from = self.data.loc[0:(self.coords_from.shape[0] - 1), by].values
         val_to = self.data.loc[1:self.coords_from.shape[0], by].values
         same_value = [val_from[i] == val_to[i] for i in range(len(val_to))]
+        # condition 4 - same hole
+        hole_from = self.data.loc[0:(self.coords_from.shape[0] - 1), "HOLEID"].values
+        hole_to = self.data.loc[1:self.coords_from.shape[0], "HOLEID"].values
+        same_hole = [hole_from[i] == hole_to[i] for i in range(len(hole_to))]
         # final vector
-        mergeable = start_end & parallel & same_value
+        mergeable = start_end & parallel & same_value & same_hole
 
         # merged object
         # find contiguous mergeable segments
@@ -1448,17 +1739,29 @@ def merge(x, y):
         new_coords = _np.concatenate([x.coords, y.coords], axis=0)
 
         # data
-        all_cols = _pd.unique(x.data.columns.values.tolist() +
-                              y.data.columns.values.tolist())
+        all_cols = []
+        if x.data is not None:
+            all_cols += x.data.columns.values.tolist()
+        if y.data is not None:
+            all_cols += y.data.columns.values.tolist()
+        all_cols = _pd.unique(all_cols)
+
         df_x = _pd.DataFrame(columns=all_cols)
         df_y = _pd.DataFrame(columns=all_cols)
-        for col in x.data.columns:
-            df_x[col] = x.data[col]
-        for col in y.data.columns:
-            df_y[col] = y.data[col]
+        if x.data is not None:
+            for col in x.data.columns:
+                df_x[col] = x.data[col]
+        if y.data is not None:
+            for col in y.data.columns:
+                df_y[col] = y.data[col]
         new_data = _pd.concat([df_x, df_y]).reset_index(drop=True)
 
-        return x.__class__(new_coords, new_data)
+        if x.ndim == 1:
+            return Points1D(new_coords, new_data)
+        if x.ndim == 2:
+            return Points2D(new_coords, new_data)
+        if x.ndim == 3:
+            return Points3D(new_coords, new_data)
     else:
         raise ValueError("x and y are not compatible for merging")
 
@@ -1581,9 +1884,10 @@ class Examples(object):
             "http://sidc.be/silso/INFO/snytotcsv.php",
             sep=";", header=None)
         yearly_df.set_axis(["year", "sn", "sn_std",
-                             "n_obs", "definitive"],
-                            axis="columns", inplace=True)
-        yearly = Points1D(_np.arange(1700, yearly_df.shape[0] + 1700),
+                            "n_obs", "definitive"],
+                           axis="columns", inplace=True)
+        yearly = Points1D(_np.arange(1700, yearly_df.shape[0] + 1700,
+                                     dtype=_np.float),
                           yearly_df)
 
         monthly_df = _pd.read_table(
@@ -1592,13 +1896,111 @@ class Examples(object):
         monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
                              "n_obs", "definitive"],
                             axis="columns", inplace=True)
-        monthly = Points1D(_np.arange(1, monthly_df.shape[0] + 1), monthly_df)
+        monthly = Points1D(_np.arange(1, monthly_df.shape[0] + 1,
+                                      dtype=_np.float), monthly_df)
 
         daily_df = _pd.read_table("http://sidc.oma.be/silso/INFO/sndtotcsv.php",
                                   sep=";", header=None)
         daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
                            "n_obs", "definitive"],
                           axis="columns", inplace=True)
-        daily = Points1D(_np.arange(1, daily_df.shape[0] + 1), daily_df)
+        daily = Points1D(_np.arange(1, daily_df.shape[0] + 1,
+                                    dtype=_np.float), daily_df)
 
         return yearly, monthly, daily
+
+
+class PointsND(object):
+    """General, high-dimensional data"""
+
+    def __init__(self, data, columns_x, columns_y=None):
+        self._ndim = len(columns_x)
+        self.coords_label = columns_x
+        self.coords = data.loc[:, columns_x].values
+        self.bounding_box, self.diagonal = _bounding_box(self.coords)
+        if columns_y is not None:
+            self.data = _pd.DataFrame(data.loc[:, columns_y])
+        else:
+            self.data = _pd.DataFrame()
+
+    def __repr__(self):
+        return self.__str__()
+
+    @property
+    def ndim(self):
+        return self._ndim
+
+    def as_data_frame(self):
+        """
+        Conversion to a data frame.
+        """
+        df = _pd.DataFrame(self.coords,
+                           columns=self.coords_label)
+        df = _pd.concat([df, self.data], axis=1)
+        return df
+
+    def __str__(self):
+        s = "Object of class " + self.__class__.__name__ + " with " \
+            + str(len(self.coords)) + " data points\n\n"
+
+        if self.data is not None:
+            s += "Data preview:\n\n"
+            s += str(self.data.head())
+        return s
+
+
+class CirculantGrid1D(Grid1D):
+    """
+    Grid with circulant structure.
+    """
+    def __init__(self, grid, expand=0.2):
+        n_points = float(grid.grid_size[0]) * (1 + expand)
+        n_points = int(_np.ceil(n_points))
+        if n_points % 2 == 0:
+            n_points += 1
+        start = grid.grid[0][0]
+        step = grid.step_size[0]
+        super().__init__(start, n_points, step)
+        self.point_zero = _np.array([[self.grid[0][n_points // 2]]])
+
+
+class CirculantGrid2D(Grid2D):
+    """
+    Grid with circulant structure.
+    """
+    def __init__(self, grid, expand=0.2):
+        n = []
+        for el in grid.grid_size:
+            el = float(el) * (1 + expand)
+            el = int(_np.ceil(el))
+            if el % 2 == 0:
+                el += 1
+            n.append(el)
+
+        start = [grid.grid[i][0] for i in [0, 1]]
+        step = grid.step_size
+        super().__init__(start, n, step)
+
+        self.point_zero = _np.array(
+            [[self.grid[i][n[i] // 2] for i in [0, 1]]])
+
+
+class CirculantGrid3D(Grid3D):
+    """
+    Grid with circulant structure.
+    """
+    def __init__(self, grid, expand=0.2):
+        n = []
+        for el in grid.grid_size:
+            el = float(el) * (1 + expand)
+            el = int(_np.ceil(el))
+            if el % 2 == 0:
+                el += 1
+            n.append(el)
+
+        start = [grid.grid[i][0] for i in [0, 1, 2]]
+        step = grid.step_size
+        super().__init__(start, n, step)
+
+        self.point_zero = _np.array(
+            [[self.grid[i][n[i] // 2] for i in [0, 1, 2]]])

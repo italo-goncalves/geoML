@@ -1,29 +1,48 @@
 import numpy as np
-import tensorflow as tf
+# import tensorflow as tf
 
 import geoml
+import timeit
 
 # cubic_conv_1D
 x = np.linspace(0, 10, 11)
 np.random.seed(1234)
 xnew = np.random.uniform(0, 10, 100)
 
-W = geoml.interpolation.cubic_conv_1d(x, xnew)
+w_np = geoml.interpolation.cubic_conv_1d(x, xnew)
+w_sp = geoml.interpolation.cubic_conv_1d_sparse(x, xnew)
+w_sp = w_sp.todense()
+w_par = geoml.interpolation.cubic_conv_1d_parallel(x, xnew)
+w_par = w_par.todense()
 
-g = tf.Graph()
-with g.as_default():
-    W_tf = geoml.interpolation.cubic_conv_1d_tf(x, xnew)
-    # W_tf = tf.sparse.to_dense(W_tf)
-    init = tf.global_variables_initializer()
-with tf.Session(graph=g) as sess:
-    sess.run(init)
-    W2 = W_tf.eval(session=sess)
+assert (np.abs(w_np - w_sp) < 1e-9).all()
+assert (np.abs(w_np - w_par) < 1e-9).all()
 
-assert (np.abs(W - W2) < 1e-9).all()
+# speed
+setup = """
+import numpy as np
+import geoml
 
-# MonotonicSpline
-x = np.array([0, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15])
-y = np.array([10, 10, 10, 10, 10, 10, 10.5, 15, 50, 60, 85])
-x2 = np.linspace(-2, 17, 1000)
-sp = geoml.interpolation.MonotonicSpline(x, y)
-y2 = sp(x2)
+x = np.linspace(0, 10, 1001)
+np.random.seed(1234)
+xnew = np.random.uniform(0, 10, 10000)
+"""
+timeit.timeit("geoml.interpolation.cubic_conv_1d(x, xnew)", 
+              setup=setup, number=10)
+timeit.timeit("geoml.interpolation.cubic_conv_1d_sparse(x, xnew)", 
+              setup=setup, number=10)
+timeit.timeit("geoml.interpolation.cubic_conv_1d_parallel(x, xnew)", 
+              setup=setup, number=10)
+
+setup = """
+import numpy as np
+import geoml
+
+x = np.linspace(0, 10, 1001)
+np.random.seed(1234)
+xnew = np.random.uniform(0, 1, [10000, 2])
+"""
+timeit.timeit("geoml.interpolation.cubic_conv_2d_sparse(x, x, xnew)", 
+              setup=setup, number=10)
+timeit.timeit("geoml.interpolation.cubic_conv_2d_parallel(x, x, xnew)", 
+              setup=setup, number=10)
