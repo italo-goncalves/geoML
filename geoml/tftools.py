@@ -33,7 +33,7 @@ def pairwise_dist(A, B):
     code from
     https://gist.github.com/mbsariyildiz/34cdc26afb630e8cae079048eef91865
     """
-    with _tf.variable_scope('pairwise_dist'):
+    with _tf.compat.v1.variable_scope('pairwise_dist'):
         # squared norms of each row in A and B
         na = _tf.reduce_sum(_tf.square(A), 1)
         nb = _tf.reduce_sum(_tf.square(B), 1)
@@ -52,7 +52,7 @@ def safe_chol(A):
     """
     Conditioning of a matrix for Cholesky decomposition
     """
-    with _tf.variable_scope("safe_chol"):
+    with _tf.compat.v1.variable_scope("safe_chol"):
         A = 0.5 * (A + _tf.transpose(A))
         e, v = _tf.self_adjoint_eig(A)
 #        e = tf.where(e > 1e-14, e, 1e-14*tf.ones_like(e))
@@ -68,7 +68,7 @@ def softmax(A):
     """
     Softmax by rows of a matrix.
     """
-    with _tf.variable_scope("softmax"):
+    with _tf.compat.v1.variable_scope("softmax"):
         s = _tf.shape(A)
         E = _tf.exp(A - _tf.reduce_max(A))
         E_total = _tf.reduce_sum(E, axis=1, keepdims=True)
@@ -81,7 +81,7 @@ def composition_close(A):
     """
     Divides each row of a matrix by its sum.
     """
-    with _tf.variable_scope("composition_close"):
+    with _tf.name_scope("composition_close"):
         s = _tf.shape(A)
         total = _tf.reduce_sum(A, axis=1, keepdims=True)
         total = _tf.tile(total, [1, s[1]]) + _np.exp(-10.0)

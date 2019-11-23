@@ -93,7 +93,7 @@ class GaussianKernel(_Kernel):
                 k = _tf.exp(-3 * d2)
                 # adding jitter to avoid Cholesky decomposition problems
                 sx = _tf.shape(x)
-                k = k + _tf.diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
+                k = k + _tf.linalg.tensor_diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
             else:
                 x = self.transform.backward(x)
                 y = self.transform.backward(y)
@@ -176,7 +176,7 @@ class CubicKernel(_Kernel):
 
                 # adding jitter to avoid Cholesky decomposition problems
                 sx = _tf.shape(x)
-                k = k + _tf.diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
+                k = k + _tf.linalg.tensor_diag(_tf.ones(sx[0], dtype=_tf.float64) * 1e-9)
             else:
                 x = self.transform.backward(x)
                 y = self.transform.backward(y)

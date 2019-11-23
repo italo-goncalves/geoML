@@ -148,27 +148,27 @@ class GP(_Model):
                     self.cov_model.init_tf_placeholder()
 
                 # placeholders
-                y_tf = _tf.placeholder(_tf.float64, shape=(len(y), 1),
+                y_tf = _tf.compat.v1.placeholder(_tf.float64, shape=(len(y), 1),
                                        name="y_tf")
-                yd_tf = _tf.placeholder(_tf.float64, shape=(len(y), 1),
+                yd_tf = _tf.compat.v1.placeholder(_tf.float64, shape=(len(y), 1),
                                         name="yd_tf")
-                jitter_tf = _tf.placeholder(_tf.float64, shape=[],
+                jitter_tf = _tf.compat.v1.placeholder(_tf.float64, shape=[],
                                             name="jitter")
-                x = _tf.placeholder_with_default(
+                x = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(sp_data.coords, dtype=_tf.float64),
                     shape=[None, self.ndim],
                     name="x"
                 )
-                x_new = _tf.placeholder_with_default(
+                x_new = _tf.compat.v1.placeholder_with_default(
                     _tf.zeros([1, self.ndim], dtype=_tf.float64),
                     shape=[None, self.ndim],
                     name="x_new")
-                n_sim = _tf.placeholder_with_default(
+                n_sim = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(0, _tf.int32), shape=[], name="n_sim"
                 )
-                sim_with_noise = _tf.placeholder_with_default(
+                sim_with_noise = _tf.compat.v1.placeholder_with_default(
                     False, shape=[], name="sim_with_noise")
-                seed = _tf.placeholder_with_default(
+                seed = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(1234, _tf.int32), shape=[],
                     name="seed"
                 )
@@ -182,7 +182,7 @@ class GP(_Model):
                         self.cov_model.nugget.nugget_matrix(x, interp) * nugget)
                     # adding jitter to avoid Cholesky decomposition problems
                     sk = _tf.shape(k_train)
-                    k_train = k_train + _tf.diag(
+                    k_train = k_train + _tf.linalg.tensor_diag(
                         _tf.ones(sk[0], dtype=_tf.float64) * jitter_tf)
 
                     k_train_test = self.cov_model.covariance_matrix(x, x_new)
@@ -198,7 +198,7 @@ class GP(_Model):
                 with _tf.name_scope("log_lik"):
                     log_lik = \
                         - 0.5 * _tf.reduce_sum(alpha * y_tf, name="fit") \
-                        - _tf.reduce_sum(_tf.math.log(_tf.diag_part(
+                        - _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(
                             chol_train)), name="det") \
                         - 0.5 * _tf.constant(n_data * _np.log(2 * _np.pi)) \
                         + _tf.reduce_sum(_tf.math.log(yd_tf),
@@ -269,7 +269,7 @@ class GP(_Model):
                     "n_sim": n_sim,
                     "sim_with_noise": sim_with_noise,
                     "seed": seed,
-                    "init": _tf.global_variables_initializer()}
+                    "init": _tf.compat.v1.global_variables_initializer()}
 
         self.graph.finalize()
 
@@ -282,7 +282,7 @@ class GP(_Model):
                     self.cov_model.nugget.nugget_matrix(x, interp) * nugget)
                 # adding jitter to avoid Cholesky decomposition problems
                 sk = _tf.shape(k)
-                k = k + _tf.diag(_tf.ones(sk[0], dtype=_tf.float64) * jitter)
+                k = k + _tf.linalg.tensor_diag(_tf.ones(sk[0], dtype=_tf.float64) * jitter)
             else:
                 k = self.cov_model.covariance_matrix(x, y)
         return k
@@ -297,10 +297,10 @@ class GP(_Model):
         with _tf.name_scope("log_lik"):
             n_data = y.shape[0].value
             log_lik = - 0.5 * _tf.reduce_sum(alpha * y, name="fit") \
-                      - _tf.reduce_sum(_tf.math.log(_tf.diag_part(chol)),
+                      - _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(chol)),
                                        name="det") \
                       - 0.5 * _tf.constant(n_data * _np.log(2 * _np.pi)) \
-                      + _tf.reduce_sum(_tf.log(yd), name="warping_derivative")
+                      + _tf.reduce_sum(_tf.math.log(yd), name="warping_derivative")
         return log_lik
 
     def _predict(self, chol, alpha, x, x_new, interp):
@@ -332,7 +332,7 @@ class GP(_Model):
             The model's log-likelihood.
         """
         if session is None:
-            with _tf.Session(graph=self.graph) as session:
+            with _tf.compat.v1.Session(graph=self.graph) as session:
                 log_lik = self.log_lik(session)
             return log_lik
 
@@ -346,7 +346,7 @@ class GP(_Model):
         feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
                      self.tf_handles["yd_tf"]: _np.resize(yd, (len(y), 1)),
                      self.tf_handles["jitter"]: self.cov_model.jitter})
-        run_opts = _tf.RunOptions(report_tensor_allocations_upon_oom=True)
+        run_opts = _tf.compat.v1.RunOptions(report_tensor_allocations_upon_oom=True)
         session.run(self.tf_handles["init"], feed_dict=feed)
         log_lik = session.run(
             self.tf_handles["log_lik"],
@@ -368,7 +368,7 @@ class GP(_Model):
             self.cov_model.update_params(pd2)
             return self.log_lik(sess)
 
-        with _tf.Session(graph=self.graph) as session:
+        with _tf.compat.v1.Session(graph=self.graph) as session:
             opt = _gen.training_real(fitness=lambda z: fitness(z, session),
                                      minval=_np.array(pd["param_min"]),
                                      maxval=_np.array(pd["param_max"]),
@@ -420,7 +420,7 @@ class GP(_Model):
         y = self.cov_model.warp_forward(self.y)
 
         # session and placeholders
-        session = _tf.Session(graph=self.graph)
+        session = _tf.compat.v1.Session(graph=self.graph)
         feed = self.cov_model.feed_dict()
         feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
                      self.tf_handles["jitter"]: self.cov_model.jitter,
@@ -516,7 +516,7 @@ class GP(_Model):
                              "with model")
 
         # session and placeholders
-        session = _tf.Session(graph=self.graph)
+        session = _tf.compat.v1.Session(graph=self.graph)
         feed = self.cov_model.feed_dict()
         feed.update({self.tf_handles["jitter"]: self.cov_model.jitter,
                      self.tf_handles["x"]: x,
@@ -634,16 +634,16 @@ class GPGrad(GP):
                     self.cov_model.init_tf_placeholder()
 
                 # placeholders
-                y_tf = _tf.placeholder(_tf.float64, shape=(len(self.y), 1),
+                y_tf = _tf.compat.v1.placeholder(_tf.float64, shape=(len(self.y), 1),
                                        name="y_tf")
-                y_dir = _tf.placeholder(_tf.float64,
+                y_dir = _tf.compat.v1.placeholder(_tf.float64,
                                         shape=(len(self.y_dir), 1),
                                         name="y_dir")
-                x_new_tf = _tf.placeholder_with_default(
+                x_new_tf = _tf.compat.v1.placeholder_with_default(
                     _tf.zeros([1, self.x.shape[1]], dtype=_tf.float64),
                     shape=[None, self.x.shape[1]],
                     name="x_new_tf")
-                jitter_tf = _tf.placeholder(_tf.float64, shape=[],
+                jitter_tf = _tf.compat.v1.placeholder(_tf.float64, shape=[],
                                             name="jitter")
 
                 # covariance matrix
@@ -674,7 +674,7 @@ class GPGrad(GP):
                                    "pred_mu": pred_mu,
                                    "pred_var": pred_var,
                                    "jitter": jitter_tf,
-                                   "init": _tf.global_variables_initializer()}
+                                   "init": _tf.compat.v1.global_variables_initializer()}
 
         self.graph.finalize()
 
@@ -688,7 +688,7 @@ class GPGrad(GP):
                               * nugget)
                 # adding jitter to avoid Cholesky decomposition problems
                 sk = _tf.shape(k_x)
-                k_x = k_x + _tf.diag(_tf.ones(
+                k_x = k_x + _tf.linalg.tensor_diag(_tf.ones(
                     sk[0], dtype=_tf.float64) * jitter)
 
                 k_x_dir = self.cov_model.covariance_matrix_d1(x, x_dir,
@@ -726,7 +726,7 @@ class GPGrad(GP):
 
     def log_lik(self, session=None):
         if session is None:
-            with _tf.Session(graph=self.graph) as session:
+            with _tf.compat.v1.Session(graph=self.graph) as session:
                 log_lik = self.log_lik(session)
             return log_lik
 
@@ -778,7 +778,7 @@ class GPGrad(GP):
                 self.tf_handles["x_new_tf"]: x_new[batch_id[i], :]})
 
             # TensorFlow
-            with _tf.Session(graph=self.graph) as session:
+            with _tf.compat.v1.Session(graph=self.graph) as session:
                 session.run(self.tf_handles["init"], feed_dict=feed)
                 handles = [self.tf_handles["pred_mu"],
                            self.tf_handles["pred_var"]]
@@ -815,7 +815,7 @@ class GPClassif(_Model):
     """
 
     def __init__(self, sp_data, var_1, var_2, kernels, dir_data=None,
-                 sparse=False, ensemble=False, **kwargs):
+                 sparse=False, circulant=False, **kwargs):
         """
         Initializer for GPClassif.
 
@@ -832,7 +832,7 @@ class GPClassif(_Model):
             It is assumed that these are directions with zero variation.
         sparse : bool
             Whether to use a sparse model.
-        ensemble : bool
+        circulant : bool
             If sparse=True, whether to use an ensemble model.
         kwargs :
             Passed on to the appropriate model.
@@ -895,7 +895,7 @@ class GPClassif(_Model):
                                 dir_data=dir_data)
             else:
                 # sparse GP
-                if not ensemble:
+                if not circulant:
                     if dir_data is None:
                         gp = SparseGP(sp_data=temp_data,
                                       variable=temp_data.data.columns[i],
@@ -905,10 +905,10 @@ class GPClassif(_Model):
                                       **kwargs)
                     else:
                         raise NotImplementedError()
-                # sparse GP ensemble
+                # sparse GP circulant
                 else:
                     if dir_data is None:
-                        gp = SparseGPEnsemble(
+                        gp = SPICE(
                             sp_data=temp_data,
                             variable=temp_data.data.columns[i],
                             kernels=_copy.deepcopy(kernels),
@@ -1096,22 +1096,22 @@ class SparseGP(GP):
                     self.cov_model.init_tf_placeholder()
 
                 # placeholders
-                y_tf = _tf.placeholder(_tf.float64, shape=(len(y), 1),
+                y_tf = _tf.compat.v1.placeholder(_tf.float64, shape=(len(y), 1),
                                        name="y_tf")
-                yd_tf = _tf.placeholder(_tf.float64, shape=(len(y), 1),
+                yd_tf = _tf.compat.v1.placeholder(_tf.float64, shape=(len(y), 1),
                                         name="yd_tf")
-                jitter_tf = _tf.placeholder(_tf.float64, shape=[],
+                jitter_tf = _tf.compat.v1.placeholder(_tf.float64, shape=[],
                                             name="jitter")
-                x_new = _tf.placeholder_with_default(
+                x_new = _tf.compat.v1.placeholder_with_default(
                     _tf.zeros([1, self.x.shape[1]], dtype=_tf.float64),
                     shape=[None, self.x.shape[1]],
                     name="x_new")
-                n_sim = _tf.placeholder_with_default(
+                n_sim = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(0, _tf.int32), shape=[], name="n_sim"
                 )
-                sim_with_noise = _tf.placeholder_with_default(
+                sim_with_noise = _tf.compat.v1.placeholder_with_default(
                     False, shape=[], name="sim_with_noise")
-                seed = _tf.placeholder_with_default(
+                seed = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(1234, _tf.int32), shape=[],
                     name="seed"
                 )
@@ -1226,14 +1226,14 @@ class SparseGP(GP):
                         - _tf.reduce_sum(k_uf_y_nug * alpha)
                     )
                     det = -0.5 * (
-                        2 * _tf.reduce_sum(_tf.log(_tf.diag_part(sigma_chol)))
-                        - 2 * _tf.reduce_sum(_tf.log(_tf.diag_part(chol_uu)))
-                        + _tf.reduce_sum(_tf.log(nugget))
+                        2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(sigma_chol)))
+                        - 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(chol_uu)))
+                        + _tf.reduce_sum(_tf.math.log(nugget))
                     )
                     const = -0.5 * _tf.constant(
                         y.shape[0] * _np.log(2 * _np.pi), _tf.float64)
                     # trace = -0.5 * _tf.reduce_sum(var_dif / nugget)
-                    warp = _tf.reduce_sum(_tf.log(yd_tf))
+                    warp = _tf.reduce_sum(_tf.math.log(yd_tf))
                     log_lik = fit + det + const + warp  # + trace
                     # if include_trace_penalty:
                     #     log_lik = log_lik + trace
@@ -1300,7 +1300,7 @@ class SparseGP(GP):
                     "sim_with_noise": sim_with_noise,
                     "y_sim": y_sim,
                     "seed": seed,
-                    "init": _tf.global_variables_initializer()}
+                    "init": _tf.compat.v1.global_variables_initializer()}
 
         self.graph.finalize()
 
@@ -1346,7 +1346,7 @@ class SparseGP(GP):
         y = self.cov_model.warp_forward(self.y)
 
         # session and placeholders
-        session = _tf.Session(graph=self.graph)
+        session = _tf.compat.v1.Session(graph=self.graph)
         feed = self.cov_model.feed_dict()
         feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
                      self.tf_handles["jitter"]: self.cov_model.jitter,
@@ -1589,7 +1589,7 @@ class SPICE(GP):
     """
 
     def __init__(self, sp_data, variable, kernels, circulant_grid, warping=(),
-                 interpolate=None):
+                 interpolate=None, interpolation_method="cubic"):
         """
         Initializer for SPICE.
 
@@ -1624,6 +1624,7 @@ class SPICE(GP):
         else:
             self.interpolate = sp_data.data[interpolate].values
         self.training_log = None
+        # self.interpolation_method = interpolation_method
 
         if sp_data.ndim != circulant_grid.ndim:
             raise ValueError("Data and circulant grid must have matching "
@@ -1640,7 +1641,10 @@ class SPICE(GP):
         yd = self.cov_model.warp_derivative(self.y)
 
         # interpolation weights
-        w_mat = circulant_grid.interpolation_weights(sp_data)
+        # if interpolation_method == "cubic":
+        w_mat = circulant_grid.interpolation_weights_cubic(sp_data)
+        # elif interpolation_method == "gaussian":
+        #     w_mat = circulant_grid.interpolation_weights_inverse_distance(sp_data)
 
         # TensorFlow
         self.graph = _tf.Graph()
@@ -1665,40 +1669,40 @@ class SPICE(GP):
                                         name="yd_tf")
                 jitter_tf = _tf.compat.v1.placeholder(_tf.float64, shape=[],
                                             name="jitter")
-                x = _tf.placeholder_with_default(
+                x = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(sp_data.coords, dtype=_tf.float64),
                     shape=[None, self.ndim],
                     name="x"
                 )
-                x_new = _tf.placeholder_with_default(
+                x_new = _tf.compat.v1.placeholder_with_default(
                     point_zero,
                     shape=[None, self.ndim],
                     name="x_new")
-                n_sim = _tf.placeholder_with_default(
+                n_sim = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(50, _tf.int32), shape=[], name="n_sim"
                 )
-                sim_with_noise = _tf.placeholder_with_default(
+                sim_with_noise = _tf.compat.v1.placeholder_with_default(
                     False, shape=[], name="sim_with_noise")
-                seed = _tf.placeholder_with_default(
+                seed = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(1234, _tf.int32), shape=[],
                     name="seed"
                 )
-                w_row = _tf.placeholder_with_default(
+                w_row = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(w_mat.row, _tf.int64), shape=[None],
                     name="w_row")
-                w_col = _tf.placeholder_with_default(
+                w_col = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(w_mat.col, _tf.int64), shape=[None],
                     name="w_col")
-                w_data = _tf.placeholder_with_default(
+                w_data = _tf.compat.v1.placeholder_with_default(
                     _tf.constant(w_mat.data, _tf.float64), shape=[None],
                     name="w_data")
-                w_row_new = _tf.placeholder_with_default(
+                w_row_new = _tf.compat.v1.placeholder_with_default(
                     _tf.constant([0], _tf.int64), shape=[None],
                     name="w_row_new")
-                w_col_new = _tf.placeholder_with_default(
+                w_col_new = _tf.compat.v1.placeholder_with_default(
                     _tf.constant([0], _tf.int64), shape=[None],
                     name="w_col_new")
-                w_data_new = _tf.placeholder_with_default(
+                w_data_new = _tf.compat.v1.placeholder_with_default(
                     _tf.constant([1], _tf.float64), shape=[None],
                     name="w_data_new")
 
@@ -1759,56 +1763,119 @@ class SPICE(GP):
                     )
 
                 # unconditional simulation
-                with _tf.name_scope("unconditional_simulation"):
-                    sim_shape = [n_circ, n_sim]
+                # with _tf.name_scope("unconditional_simulation"):
+                #     sim_shape = [n_circ, n_sim]
+                #
+                #     # iid simulation
+                #     sim_real = _tf.random.stateless_normal(
+                #         sim_shape, [seed, 0]
+                #     )
+                #     sim_imag = _tf.random.stateless_normal(
+                #         sim_shape, [seed, 1]
+                #     )
+                #     sim_comp = _tf.cast(sim_real, _tf.complex128) \
+                #                + _tf.cast(sim_imag, _tf.complex128) * 1.0j
+                #
+                #     sim_unc = SPICE.circular_sqrt(eigvals_comp, sim_comp,
+                #                                   circulant_grid.grid_size)
+                #     sim_unc = _tf.concat([
+                #         _tf.math.real(sim_unc),
+                #         _tf.math.imag(sim_unc)
+                #     ], axis=1)
 
-                    # iid simulation
-                    sim_real = _tf.random.stateless_normal(
-                        sim_shape, [seed, 0]
-                    )
-                    sim_imag = _tf.random.stateless_normal(
-                        sim_shape, [seed, 1]
-                    )
-                    sim_comp = _tf.cast(sim_real, _tf.complex128) \
-                               + _tf.cast(sim_imag, _tf.complex128) * 1.0j
+                # Lanczos
+                with _tf.name_scope("Lanczos"):
+                    n_lanczos = 100
 
-                    sim_unc = SPICE.circular_sqrt(eigvals_comp, sim_comp,
-                                                  circulant_grid.grid_size)
-                    sim_unc = _tf.concat([
-                        _tf.math.real(sim_unc),
-                        _tf.math.imag(sim_unc)
-                    ], axis=1)
+                    def matmul_1(b):
+                        out_1 = _tf.sparse.sparse_dense_matmul(w_train, b,
+                                                               True, False)
+                        out_1 = self.circular_matmul(eigvals_comp, out_1,
+                                                     circulant_grid.grid_size)
+                        out_1 = _tf.sparse.sparse_dense_matmul(w_train, out_1)
+                        out_2 = nugget * b
+                        return out_1 + out_2
+
+                    mat_t_1, mat_q_1 = _tftools.lanczos(matmul_1, y_tf,
+                                                        n_lanczos)
+                    vals_1, vecs_1 = _tf.linalg.eigh(mat_t_1)
+
+                    eig_min = _tf.reduce_min(vals_1)
+                    vals_1 = _tf.cond(_tf.greater(eig_min, 0.0),
+                                      lambda: vals_1,
+                                      lambda: vals_1 - 1.01 * eig_min)
+
+                    partial_1 = _tf.matmul(vecs_1,
+                                        _tf.linalg.diag(_tf.sqrt(1/vals_1)))
+                    partial_1 = _tf.matmul(mat_q_1, partial_1)
+                    prod_1 = _tf.sparse.sparse_dense_matmul(w_train, partial_1,
+                                                            True, False)
+                    prod_1 = SPICE.circular_matmul(eigvals_comp, prod_1,
+                                                   circulant_grid.grid_size)
+
+                    probe_2 = SPICE.circular_matmul(
+                        eigvals_comp,
+                        _tf.ones([n_circ, 1], _tf.float64),
+                        circulant_grid.grid_size)
+
+                    def matmul_2(b):
+                        out_1 = _tf.matmul(prod_1, b, True, False)
+                        out_1 = _tf.matmul(prod_1, out_1)
+                        out_2 = SPICE.circular_matmul(eigvals_comp, b,
+                                                      circulant_grid.grid_size)
+                        return out_2 - out_1
+
+                    mat_t_2, mat_q_2 = _tftools.lanczos(matmul_2, probe_2,
+                                                        n_lanczos)
+                    vals_2, vecs_2 = _tf.linalg.eigh(mat_t_2)
+
+                    eig_min = _tf.reduce_min(vals_2)
+                    vals_2 = _tf.cond(_tf.greater(eig_min, 0.0),
+                                      lambda: vals_2,
+                                      lambda: vals_2 - 1.01 * eig_min)
+
+                    prod_2 = _tf.matmul(vecs_2,
+                                        _tf.linalg.diag(_tf.sqrt(vals_2)))
+                    prod_2 = _tf.matmul(mat_q_2, prod_2)
+                    prod_2 = _tf.Variable(lambda: prod_2, validate_shape=False)
+
 
                 # alpha
                 with _tf.name_scope("alpha"):
-                    def matmul_fn(w1, w2, nug, b):
-                        out_1 = _tf.sparse.sparse_dense_matmul(w2, b, True, False)
-                        out_1 = self.circular_matmul(eigvals_comp, out_1,
-                                                     circulant_grid.grid_size)
-                        out_1 = _tf.sparse.sparse_dense_matmul(w1, out_1)
-                        out_2 = nug * b
-                        return out_1 + out_2
-
-                    alpha = _tftools.conjugate_gradient(
-                        lambda b: matmul_fn(w_train, w_train, nugget, b),
-                        y_tf, max_iter=100
-                    )
-                    alpha_pred = _tf.sparse.sparse_dense_matmul(w_train, alpha,
-                                                     True, False)
-                    alpha_pred = SPICE.circular_matmul(eigvals_comp, alpha_pred,
-                                                        circulant_grid.grid_size)
+                    alpha_partial = _tf.matmul(partial_1, y_tf, True, False)
+                    alpha = _tf.matmul(partial_1, alpha_partial)
+                    alpha_pred = _tf.matmul(prod_1, alpha_partial)
                     alpha_pred = _tf.Variable(lambda: alpha_pred,
                                               validate_shape=False)
 
-                    alpha_sim = _tftools.conjugate_gradient_block(
-                        lambda b: matmul_fn(w_train, w_train, nugget, b),
-                        _tf.sparse.sparse_dense_matmul(w_train, sim_unc),
-                        jitter=jitter_tf
-                    )
-                    alpha_sim = _tf.sparse.sparse_dense_matmul(w_train, alpha_sim,
-                                                     True, False)
-                    alpha_sim = SPICE.circular_matmul(eigvals_comp, alpha_sim,
-                                                        circulant_grid.grid_size)
+                    # def matmul_fn(w1, w2, nug, b):
+                    #     out_1 = _tf.sparse.sparse_dense_matmul(w2, b, True, False)
+                    #     out_1 = self.circular_matmul(eigvals_comp, out_1,
+                    #                                  circulant_grid.grid_size)
+                    #     out_1 = _tf.sparse.sparse_dense_matmul(w1, out_1)
+                    #     out_2 = nug * b
+                    #     return out_1 + out_2
+                    #
+                    # alpha = _tftools.conjugate_gradient(
+                    #     lambda b: matmul_fn(w_train, w_train, nugget, b),
+                    #     y_tf, max_iter=100
+                    # )
+                    # alpha_pred = _tf.sparse.sparse_dense_matmul(w_train, alpha,
+                    #                                             True, False)
+                    # alpha_pred = SPICE.circular_matmul(eigvals_comp, alpha_pred,
+                    #                                    circulant_grid.grid_size)
+                    # alpha_pred = _tf.Variable(lambda: alpha_pred,
+                    #                           validate_shape=False)
+                    #
+                    # alpha_sim = _tftools.conjugate_gradient_block(
+                    #     lambda b: matmul_fn(w_train, w_train, nugget, b),
+                    #     _tf.sparse.sparse_dense_matmul(w_train, sim_unc),
+                    #     jitter=jitter_tf
+                    # )
+                    # alpha_sim = _tf.sparse.sparse_dense_matmul(
+                    #     w_train, alpha_sim, True, False)
+                    # alpha_sim = SPICE.circular_matmul(
+                    #     eigvals_comp, alpha_sim, circulant_grid.grid_size)
 
                 # log-likelihood
                 with _tf.name_scope("log_lik"):
@@ -1816,21 +1883,42 @@ class SPICE(GP):
 
                     # Lanczos
                     # with _tf.device('/CPU:0'):
-                    #     det = -0.5 * _tftools.determinant_lanczos(
-                    #         lambda b: matmul_fn(w_train, w_train, nugget, b),
-                    #         n_data, m=100, seed=seed, n=5
-                    #     )
+                    # det = -0.5 * _tftools.determinant_lanczos(
+                    #     lambda b: matmul_fn(w_train, w_train, nugget, b),
+                    #     n_data, m=100, seed=seed, n=1
+                    # )
+
+                    # tau = vecs_1[0, :]
+                    # det = _tf.reduce_sum(tau**2 * _tf.math.log(vals_1))
+                    # det = - 0.5 * det * n_data
+                    det = -0.5 * _tftools.determinant_lanczos(
+                        matmul_1, n_data, m=100, seed=seed, n=1
+                    )
 
                     # samples
-                    det1 = _tf.math.log(nugget) * n_data
-
-                    prod = _tf.sparse.sparse_dense_matmul(w_train, sim_unc)
-                    prod = _tf.matmul(prod, prod, True, False)
-                    chol = _tf.linalg.cholesky(
-                        prod + _tf.eye(2*n_sim, dtype=_tf.float64))
-                    det2 = 2 * _tf.reduce_sum(
-                        _tf.math.log(_tf.diag_part(chol)))
-                    det = -0.5 * (det1 + det2)
+                    # sims = _tf.sparse.sparse_dense_matmul(w_train, sim_unc)
+                    # sims_var = _tf.reduce_mean(sims ** 2, axis=1, keepdims=True)
+                    # diag_correction = _tf.maximum(
+                    # _tf.constant(0.0, _tf.float64), total_var - sims_var)
+                    #
+                    # diag_correction = _tf.random.stateless_normal(
+                    #     shape=[n_data, 2*n_sim], seed=[seed, 0],
+                    #     stddev=_tf.tile(_tf.sqrt(diag_correction), [1, 2*n_sim]),
+                    #     dtype=_tf.float64
+                    # )
+                    # sims = sims + diag_correction
+                    #
+                    # # with _tf.control_dependencies([_tf.print(diag_correction)]):
+                    # # det1 = _tf.reduce_sum(
+                    # #     _tf.math.log(nugget + diag_correction))
+                    # det1 = _tf.math.log(nugget) * n_data
+                    #
+                    # prod = _tf.matmul(sims, sims, True, False)
+                    # chol = _tf.linalg.cholesky(
+                    #     prod + _tf.eye(2*n_sim, dtype=_tf.float64))
+                    # det2 = 2 * _tf.reduce_sum(
+                    #     _tf.math.log(_tf.linalg.tensor_diag_part(chol)))
+                    # det = -0.5 * (det1 + det2)
 
                     const = - 0.5 * _tf.constant(n_data * _np.log(2 * _np.pi),
                                                  dtype=_tf.float64)
@@ -1844,16 +1932,29 @@ class SPICE(GP):
                     pred_mu = _tf.sparse.sparse_dense_matmul(w_test, alpha_pred,
                                                 name="pred_mean")
 
+                    pred_var = _tf.reduce_sum(
+                        _tf.sparse.sparse_dense_matmul(w_test, prod_2) ** 2,
+                        axis=1
+                    )
+                    pred_var = pred_var + nugget
+
                 # conditional simulation
                 with _tf.name_scope("conditional_simulation"):
 
+                    sim_normal = _tf.random.stateless_normal(
+                        [n_lanczos, n_sim], [seed, 0], dtype=_tf.float64
+                    )
+                    sim_normal = _tf.matmul(prod_2, sim_normal)
                     y_sim = pred_mu + _tf.sparse.sparse_dense_matmul(
-                        w_test, sim_unc - alpha_sim)
+                        w_test, sim_normal)
 
-                    with _tf.name_scope("approximate_variance"):
-                        sample_var = _tf.reduce_mean((y_sim - pred_mu)**2,
-                                                     axis=1)
-                        pred_var = sample_var + nugget
+                    # y_sim = pred_mu + _tf.sparse.sparse_dense_matmul(
+                    #     w_test, sim_unc - alpha_sim)
+                    #
+                    # with _tf.name_scope("approximate_variance"):
+                    #     sample_var = _tf.reduce_mean((y_sim - pred_mu)**2,
+                    #                                  axis=1)
+                    #     pred_var = sample_var + nugget
 
                     with _tf.name_scope("noise"):
                         def noise(mat):
@@ -1995,11 +2096,14 @@ class SPICE(GP):
         y = self.cov_model.warp_forward(self.y)
 
         # interpolation matrix
-        w_mat = self.circulant_grid.interpolation_weights(newdata)
+        # if self.interpolation_method == "cubic":
+        w_mat = self.circulant_grid.interpolation_weights_cubic(newdata)
+        # elif self.interpolation_method == "gaussian":
+        #     w_mat = self.circulant_grid.interpolation_weights_inverse_distance(newdata)
         w_mat = _sp.csr_matrix(w_mat)
 
         # session and placeholders
-        session = _tf.Session(graph=self.graph)
+        session = _tf.compat.v1.Session(graph=self.graph)
         feed = self.cov_model.feed_dict()
         feed.update({self.tf_handles["y_tf"]: _np.resize(y, (len(y), 1)),
                      self.tf_handles["jitter"]: self.cov_model.jitter,
@@ -2021,7 +2125,7 @@ class SPICE(GP):
 
         mu = _np.array([])
         var = _np.array([])
-        y_sim = _np.empty([0, n_sim*2])
+        y_sim = _np.empty([0, n_sim])
         for i in range(n_batches):
             if verbose:
                 print("\rProcessing batch " + str(i + 1) + " of "
@@ -2053,10 +2157,10 @@ class SPICE(GP):
                 _st.norm.ppf(p, loc=mu, scale=_np.sqrt(var)))
 
         # simulations
-        n_digits = str(len(str(n_sim*2 - 1)))
+        n_digits = str(len(str(n_sim - 1)))
         cols = [name + "_sim_" + ("{:0>" + n_digits + "d}").format(i)
-                for i in range(n_sim*2)]
-        for i in range(n_sim*2):
+                for i in range(n_sim)]
+        for i in range(n_sim):
             newdata.data[cols[i]] = self.cov_model.warp_backward(
                 y_sim[:, i])
 
@@ -2087,7 +2191,7 @@ class SPICE(GP):
             The model's predictions.
         """
         if session is None:
-            with _tf.Session(graph=self.graph) as session:
+            with _tf.compat.v1.Session(graph=self.graph) as session:
                 y_pred = self.cross_validation(partition, n_sim, seed,
                                                add_noise, session)
             return y_pred
@@ -2103,7 +2207,7 @@ class SPICE(GP):
         y_pred = _np.zeros([x.shape[0], n_sim*2])
 
         # interpolation matrix
-        w_mat = self.circulant_grid.interpolation_weights(self.data)
+        w_mat = self.circulant_grid.interpolation_weights_cubic(self.data)
         w_mat = _sp.csr_matrix(w_mat)
 
         # partition
@@ -2117,7 +2221,7 @@ class SPICE(GP):
                      self.tf_handles["sim_with_noise"]: add_noise,
                      self.tf_handles["seed"]: seed
                      })
-        run_opts = _tf.RunOptions(report_tensor_allocations_upon_oom=True)
+        run_opts = _tf.compat.v1.RunOptions(report_tensor_allocations_upon_oom=True)
 
         for idx in _np.unique(partition):
             keep = partition == idx

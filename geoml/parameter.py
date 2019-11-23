@@ -81,7 +81,8 @@ class Parameter(object):
             self.tf_feed_entry = {self.tf_val: self.value}
             
     def init_tf_placeholder(self):
-        self.tf_val = _tf.placeholder(_tf.float64, shape=self.value.shape)
+        self.tf_val = _tf.compat.v1.placeholder(
+            _tf.float64, shape=self.value.shape)
         self.tf_feed_entry = {self.tf_val: self.value}
 
 

@@ -288,6 +288,205 @@ def cubic_conv_3d_parallel(grid_x, grid_y, grid_z, coords, batch_size=1000):
     return w_new
 
 
+def inverse_distance_1d_sparse(x, xnew, radius, power=2, epsilon=1):
+    """
+    Generates a sparse matrix for interpolating from a regular grid to
+    a new set of positions in one dimension.
+
+    Parameters
+    ----------
+    x : array
+        Array of regularly spaced values.
+    xnew : array
+        Positions to receive the interpolated values. Its limits must be
+        confined within the limits of x.
+    radius : float
+        The neighborhood search radius, which will correspond to four
+        standard deviations.
+
+    Returns
+    -------
+    w : array
+        The weights matrix.
+    """
+    if _np.std(_np.diff(x)) > 1e-9:
+        raise Exception("array x not equally spaced")
+    if (_np.min(xnew) < _np.min(x)) | (_np.max(xnew) > _np.max(x)):
+        raise Exception("xnew out of bounds")
+
+    # interval and data position
+    h = _np.diff(x)[0]
+    x_len = x.size
+    x_new_len = xnew.size
+    dense_shape = [x_new_len, x_len]
+
+    if radius < h:
+        raise ValueError("radius must be higher than the data spacing."
+                         "Expected at least " + str(h) + "and found"
+                         + str(radius))
+
+    s = (xnew - _np.min(x)) / h
+    # base_cols = _np.array([-3, -2, -1, 0, 1, 2, 3])
+    n_neighbors = _np.floor(radius / h)
+    base_cols = _np.arange(-n_neighbors, n_neighbors + 1)
+
+    rows = []
+    cols = []
+    vals = []
+    for i in range(x_new_len):
+        # position
+        si = s[i] + base_cols
+        si = si[(si >= 0) & (si < x_len)]
+
+        cols_i = _np.floor(si).tolist()
+        si = _np.abs(s[i] - _np.floor(si))
+
+        # weights
+        si = si*h/radius
+        si[si > 1] = 1
+        wi = (epsilon * (1 - si) / (si + epsilon))**power
+        wi = wi / wi.sum()
+        wi = wi.tolist()
+
+        # output
+        rows.extend([i] * len(cols_i))
+        cols.extend(cols_i)
+        vals.extend(wi)
+
+    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=dense_shape)
+    return w_new
+
+
+def inverse_distance_2d_sparse(grid_x, grid_y, coords, radius):
+    int_x = inverse_distance_1d_sparse(grid_x, coords[:, 0], radius)
+    int_y = inverse_distance_1d_sparse(grid_y, coords[:, 1], radius)
+
+    n_data = coords.shape[0]
+    nx = grid_x.shape[0]
+    ny = grid_y.shape[0]
+
+    rows = []
+    cols = []
+    vals = []
+    for i in range(n_data):
+        cols_x = int_x.col[int_x.row == i]
+        data_x = int_x.data[int_x.row == i]
+
+        cols_y = int_y.col[int_y.row == i]
+        data_y = int_y.data[int_y.row == i]
+
+        data_xy = _np.kron(data_y, data_x)
+        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
+
+        rows.extend([i] * len(cols_x) * len(cols_y))
+        cols.extend(cols_xy.tolist())
+        vals.extend(data_xy.tolist())
+
+    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny])
+    return w_new
+
+
+def inverse_distance_3d_sparse(grid_x, grid_y, grid_z, coords, radius):
+    int_x = cubic_conv_1d_sparse(grid_x, coords[:, 0], radius)
+    int_y = cubic_conv_1d_sparse(grid_y, coords[:, 1], radius)
+    int_z = cubic_conv_1d_sparse(grid_z, coords[:, 2], radius)
+
+    n_data = coords.shape[0]
+    nx = grid_x.shape[0]
+    ny = grid_y.shape[0]
+    nz = grid_z.shape[0]
+
+    rows = []
+    cols = []
+    vals = []
+    for i in range(n_data):
+        cols_x = int_x.col[int_x.row == i]
+        data_x = int_x.data[int_x.row == i]
+
+        cols_y = int_y.col[int_y.row == i]
+        data_y = int_y.data[int_y.row == i]
+
+        data_xy = _np.kron(data_y, data_x)
+        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
+
+        cols_z = int_z.col[int_z.row == i]
+        data_z = int_z.data[int_z.row == i]
+
+        data_xyz = _np.kron(data_z, data_xy)
+        cols_xyz = _np.concatenate([nx * ny * j + cols_xy for j in cols_z],
+                                   axis=0)
+
+        rows.extend([i] * len(cols_x) * len(cols_y) * len(cols_z))
+        cols.extend(cols_xyz.tolist())
+        vals.extend(data_xyz.tolist())
+
+    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny * nz])
+    return w_new
+
+
+def inverse_distance_1d_parallel(x, xnew, radius, power=2, epsilon=1,
+                                 batch_size=1000):
+    """
+    Generates a sparse matrix for interpolating from a regular grid to
+    a new set of positions in one dimension.
+
+    Parameters
+    ----------
+    x : array
+        Array of regularly spaced values.
+    xnew : array
+        Positions to receive the interpolated values. Its limits must be
+        confined within the limits of x.
+    batch_size : int
+        Number of points per batch.
+
+    Returns
+    -------
+    w : csc_matrix
+        The weights matrix.
+    """
+    n_data = len(xnew)
+    batch_id = _batch_id(n_data, batch_size)
+
+    def loop_fn(bid):
+        return inverse_distance_1d_sparse(x, xnew[bid], radius, power, epsilon)
+
+    pool = _mult.ProcessingPool()
+    out = pool.map(loop_fn, batch_id)
+
+    w_new = _sp.vstack(out)
+    return w_new
+
+
+def inverse_distance_2d_parallel(grid_x, grid_y, coords, radius, batch_size=1000):
+    n_data = coords.shape[0]
+    batch_id = _batch_id(n_data, batch_size)
+
+    def loop_fn(bid):
+        return inverse_distance_2d_sparse(grid_x, grid_y, coords[bid], radius)
+
+    pool = _mult.ProcessingPool()
+    out = pool.map(loop_fn, batch_id)
+
+    w_new = _sp.vstack(out)
+    return w_new
+
+
+def inverse_distance_3d_parallel(grid_x, grid_y, grid_z, coords, radius,
+                                 batch_size=1000):
+    n_data = coords.shape[0]
+    batch_id = _batch_id(n_data, batch_size)
+
+    def loop_fn(bid):
+        return inverse_distance_3d_sparse(grid_x, grid_y, grid_z, coords[bid], radius)
+
+    pool = _mult.ProcessingPool()
+    out = pool.map(loop_fn, batch_id)
+
+    w_new = _sp.vstack(out)
+    return w_new
+
+
 class Spline(object):
     """
     Abstract spline class

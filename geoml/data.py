@@ -370,8 +370,10 @@ class Points1D(_PointData):
             keep = keep & (df[self.coords_label[0]] > xmin)
         if not include_max:
             keep = keep & (df[self.coords_label[0]] < xmax)
-        coords = df.loc[keep, self.coords_label]
-        data = df.drop(self.coords_label, axis=1).loc[keep, :]
+        df = df.loc[keep, :]
+        df.reset_index(drop=True, inplace=True)
+        coords = df[self.coords_label]
+        data = df.drop(self.coords_label, axis=1)
         return Points1D(coords, data)
 
     def divide_by_region(self, n=1):
@@ -482,8 +484,10 @@ class Points2D(_PointData):
             keep = keep & (df[self.coords_label[0]] < xmax)
         if not include_max_y:
             keep = keep & (df[self.coords_label[1]] < ymax)
-        coords = df.loc[keep, self.coords_label]
-        data = df.drop(self.coords_label, axis=1).loc[keep, :]
+        df = df.loc[keep, :]
+        df.reset_index(drop=True, inplace=True)
+        coords = df[self.coords_label]
+        data = df.drop(self.coords_label, axis=1)
         return Points2D(coords, data)
 
     def divide_by_region(self, nx=1, ny=1):
@@ -687,8 +691,10 @@ class Points3D(_PointData):
             keep = keep & (df[self.coords_label[1]] < ymax)
         if not include_max_z:
             keep = keep & (df[self.coords_label[2]] < zmax)
-        coords = df.loc[keep, self.coords_label]
-        data = df.drop(self.coords_label, axis=1).loc[keep, :]
+        df = df.loc[keep, :]
+        df.reset_index(drop=True, inplace=True)
+        coords = df[self.coords_label]
+        data = df.drop(self.coords_label, axis=1)
         return Points3D(coords, data)
 
     def divide_by_region(self, nx=1, ny=1, nz=1):
@@ -801,7 +807,7 @@ class Grid1D(Points1D):
         self.grid = [grid]
         self.grid_size = [int(n)]
 
-    def interpolation_weights(self, data, parallel=True, batch_size=1000):
+    def interpolation_weights_cubic(self, data, parallel=True, batch_size=1000):
         if self.ndim != data.ndim:
             raise ValueError("Dimension of self and data do not match")
         if parallel:
@@ -811,6 +817,22 @@ class Grid1D(Points1D):
         else:
             return _int.cubic_conv_1d_sparse(self.grid[0], data.coords[:, 0])
 
+    def interpolation_weights_inverse_distance(self, data, parallel=True,
+                                               batch_size=1000):
+        if self.ndim != data.ndim:
+            raise ValueError("Dimension of self and data do not match")
+
+        radius = _np.max(self.step_size) * 2
+
+        if parallel:
+            return _int.inverse_distance_1d_parallel(self.grid[0],
+                                                     data.coords[:, 0],
+                                                     radius,
+                                                     batch_size=batch_size)
+        else:
+            return _int.inverse_distance_1d_sparse(self.grid[0],
+                                                   data.coords[:, 0],
+                                                   radius)
 
 
 class Grid2D(Points2D):
@@ -891,7 +913,7 @@ class Grid2D(Points2D):
         #image = _np.flip(image, 0)
         return image
 
-    def interpolation_weights(self, data, parallel=True, batch_size=1000):
+    def interpolation_weights_cubic(self, data, parallel=True, batch_size=1000):
         if self.ndim != data.ndim:
             raise ValueError("Dimension of self and data do not match")
         if parallel:
@@ -900,6 +922,22 @@ class Grid2D(Points2D):
         else:
             return _int.cubic_conv_2d_sparse(self.grid[0], self.grid[1],
                                              data.coords)
+
+    def interpolation_weights_gaussian(self, data, parallel=True,
+                                       batch_size=1000):
+        if self.ndim != data.ndim:
+            raise ValueError("Dimension of self and data do not match")
+
+        radius = _np.max(self.step_size)
+
+        if parallel:
+            return _int.inverse_distance_2d_parallel(self.grid[0], self.grid[1],
+                                                     data.coords,
+                                                     radius,
+                                                     batch_size)
+        else:
+            return _int.inverse_distance_2d_sparse(self.grid[0], self.grid[1],
+                                                   data.coords, radius)
 
 
 class Grid3D(Points3D):
@@ -1202,7 +1240,7 @@ class Grid3D(Points3D):
 
         return sections
 
-    def interpolation_weights(self, data, parallel=True, batch_size=1000):
+    def interpolation_weights_cubic(self, data, parallel=True, batch_size=1000):
         if self.ndim != data.ndim:
             raise ValueError("Dimension of self and data do not match")
         if parallel:
@@ -1212,6 +1250,24 @@ class Grid3D(Points3D):
         else:
             return _int.cubic_conv_3d_sparse(self.grid[0], self.grid[1],
                                              self.grid[2], data.coords)
+
+    def interpolation_weights_gaussian(self, data, parallel=True,
+                                       batch_size=1000):
+        if self.ndim != data.ndim:
+            raise ValueError("Dimension of self and data do not match")
+
+        radius = _np.max(self.step_size)
+
+        if parallel:
+            return _int.inverse_distance_3d_parallel(self.grid[0], self.grid[1],
+                                                     self.grid[2],
+                                                     data.coords,
+                                                     radius,
+                                                     batch_size)
+        else:
+            return _int.inverse_distance_3d_sparse(self.grid[0], self.grid[1],
+                                                   self.grid[2],
+                                                   data.coords, radius)
 
 
 class _DirectionalData(_PointData):
@@ -1333,8 +1389,28 @@ class Directions3D(_DirectionalData, Points3D):
         self.directions = directions
         self.directions_label = directions_label
 
-    def draw_arrows(self, size=1):
-        raise NotImplementedError()
+    def draw_arrows(self, size=1, **kwargs):
+        head = self.coords + size / 2 * self.directions
+        tail = self.coords - size / 2 * self.directions
+
+        x = []
+        y = []
+        z = []
+        for i in range(head.shape[0]):
+            x.extend([tail[i, 0], head[i, 0], None])
+            y.extend([tail[i, 1], head[i, 1], None])
+            z.extend([tail[i, 2], head[i, 2], None])
+
+        obj = {"type": "scatter3d",
+               "mode": "lines",
+               "x": x,
+               "y": y,
+               "z": z,
+               "hoverinfo": "none"}
+
+        obj = _update(obj, kwargs)
+        return [obj]
+
 
     @classmethod
     def from_planes(cls, coords, azimuth, dip, data=None):

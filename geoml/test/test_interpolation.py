@@ -46,3 +46,18 @@ timeit.timeit("geoml.interpolation.cubic_conv_2d_sparse(x, x, xnew)",
               setup=setup, number=10)
 timeit.timeit("geoml.interpolation.cubic_conv_2d_parallel(x, x, xnew)", 
               setup=setup, number=10)
+
+
+# gaussian
+#x = np.linspace(0, 10, 11)
+#np.random.seed(1234)
+#xnew = np.random.uniform(0, 10, 100)
+#xnew = np.linspace(0, 10, 1001)
+#
+#w_inv = geoml.interpolation.inverse_distance_1d_sparse(
+#        x, xnew, radius=5, power=2, epsilon=0.01)
+#w_inv = w_inv.todense()
+#
+#y = np.sin(x) + 2*np.cos(x+1) + 2
+#ynew = np.matmul(w_inv, np.expand_dims(y, 1))
+#plt.plot(x, y, "ok", xnew, ynew, "-r")
