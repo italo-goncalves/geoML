@@ -982,14 +982,14 @@ form longer segments.</p>
 <div class="section" id="module-geoml.genetic">
 <span id="geoml-genetic-module"></span><h2>geoml.genetic module<a class="headerlink" href="#module-geoml.genetic" title="Permalink to this headline">¶</a></h2>
 <dl class="function">
-<dt id="geoml.genetic.real_crossover_1p">
-<code class="descclassname">geoml.genetic.</code><code class="descname">real_crossover_1p</code><span class="sig-paren">(</span><em>parent1</em>, <em>parent2</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/genetic.html#real_crossover_1p"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.genetic.real_crossover_1p" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.genetic.crossover_1p">
+<code class="descclassname">geoml.genetic.</code><code class="descname">crossover_1p</code><span class="sig-paren">(</span><em>parent1</em>, <em>parent2</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/genetic.html#crossover_1p"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.genetic.crossover_1p" title="Permalink to this definition">¶</a></dt>
 <dd><p>One-point crossover</p>
 </dd></dl>
 
 <dl class="function">
-<dt id="geoml.genetic.real_crossover_2p">
-<code class="descclassname">geoml.genetic.</code><code class="descname">real_crossover_2p</code><span class="sig-paren">(</span><em>parent1</em>, <em>parent2</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/genetic.html#real_crossover_2p"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.genetic.real_crossover_2p" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.genetic.crossover_2p">
+<code class="descclassname">geoml.genetic.</code><code class="descname">crossover_2p</code><span class="sig-paren">(</span><em>parent1</em>, <em>parent2</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/genetic.html#crossover_2p"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.genetic.crossover_2p" title="Permalink to this definition">¶</a></dt>
 <dd><p>Two-point crossover</p>
 </dd></dl>
 
@@ -1016,7 +1016,7 @@ a small distance in a random direction.</p>
 
 <dl class="function">
 <dt id="geoml.genetic.training_real">
-<code class="descclassname">geoml.genetic.</code><code class="descname">training_real</code><span class="sig-paren">(</span><em>fitness</em>, <em>minval</em>, <em>maxval</em>, <em>popsize=50</em>, <em>mutation=(&lt;function real_mutation_parallel&gt;</em>, <em>&lt;function real_mutation_radial&gt;)</em>, <em>crossover=(&lt;function real_crossover_1p&gt;</em>, <em>&lt;function real_crossover_2p&gt;</em>, <em>&lt;function real_crossover_average&gt;)</em>, <em>mut_prob=0.35</em>, <em>max_iter=1000</em>, <em>tol=0.1</em>, <em>stopping=None</em>, <em>seed=None</em>, <em>start=None</em>, <em>verbose=True</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/genetic.html#training_real"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.genetic.training_real" title="Permalink to this definition">¶</a></dt>
+<code class="descclassname">geoml.genetic.</code><code class="descname">training_real</code><span class="sig-paren">(</span><em>fitness</em>, <em>minval</em>, <em>maxval</em>, <em>popsize=50</em>, <em>mutation=(&lt;function real_mutation_parallel&gt;</em>, <em>&lt;function real_mutation_radial&gt;)</em>, <em>crossover=(&lt;function crossover_1p&gt;</em>, <em>&lt;function crossover_2p&gt;</em>, <em>&lt;function real_crossover_average&gt;)</em>, <em>mut_prob=0.35</em>, <em>max_iter=1000</em>, <em>tol=0.1</em>, <em>stopping=None</em>, <em>seed=None</em>, <em>start=None</em>, <em>verbose=True</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/genetic.html#training_real"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.genetic.training_real" title="Permalink to this definition">¶</a></dt>
 <dd><p>Genetic optimizer for real-valued chromosomes.</p>
 <p>This genetic algorithm works by selecting two individuals from the
 population, performing crossover and mutation. The new individuals replace
@@ -1105,9 +1105,9 @@ confined within the limits of x.</li>
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.interpolation.MonotonicSpline">
-<em class="property">class </em><code class="descclassname">geoml.interpolation.</code><code class="descname">MonotonicSpline</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>region=1</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/interpolation.html#MonotonicSpline"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.interpolation.MonotonicSpline" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.interpolation.Spline</span></code></p>
+<dt id="geoml.interpolation.MonotonicCubicSpline">
+<em class="property">class </em><code class="descclassname">geoml.interpolation.</code><code class="descname">MonotonicCubicSpline</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>region=1</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/interpolation.html#MonotonicCubicSpline"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.interpolation.MonotonicCubicSpline" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.interpolation.CubicSpline</span></code></p>
 <p>Implementation of the monotonic spline algorithm by Fritsch and Carlson (1980).</p>
 <dl class="attribute">
 <dt>
@@ -1124,8 +1124,8 @@ confined within the limits of x.</li>
 </dd></dl>
 
 <dl class="attribute">
-<dt id="geoml.interpolation.MonotonicSpline.d">
-<code class="descname">d</code><a class="headerlink" href="#geoml.interpolation.MonotonicSpline.d" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.interpolation.MonotonicCubicSpline.d">
+<code class="descname">d</code><a class="headerlink" href="#geoml.interpolation.MonotonicCubicSpline.d" title="Permalink to this definition">¶</a></dt>
 <dd><p>The derivative of y at the points x, found internally to preserve monotonicity.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1138,8 +1138,8 @@ confined within the limits of x.</li>
 </dd></dl>
 
 <dl class="attribute">
-<dt id="geoml.interpolation.MonotonicSpline.region">
-<code class="descname">region</code><a class="headerlink" href="#geoml.interpolation.MonotonicSpline.region" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.interpolation.MonotonicCubicSpline.region">
+<code class="descname">region</code><a class="headerlink" href="#geoml.interpolation.MonotonicCubicSpline.region" title="Permalink to this definition">¶</a></dt>
 <dd><p>May affect the spline’s shape. Refer to the original paper for details.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1152,8 +1152,8 @@ confined within the limits of x.</li>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.interpolation.MonotonicSpline.__init__">
-<code class="descname">__init__</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>region=1</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/interpolation.html#MonotonicSpline.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.interpolation.MonotonicSpline.__init__" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.interpolation.MonotonicCubicSpline.__init__">
+<code class="descname">__init__</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>region=1</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/interpolation.html#MonotonicCubicSpline.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.interpolation.MonotonicCubicSpline.__init__" title="Permalink to this definition">¶</a></dt>
 <dd><p>Initialize self.  See help(type(self)) for accurate signature.</p>
 </dd></dl>
 
@@ -1163,108 +1163,108 @@ confined within the limits of x.</li>
 <div class="section" id="module-geoml.kernels">
 <span id="geoml-kernels-module"></span><h2>geoml.kernels module<a class="headerlink" href="#module-geoml.kernels" title="Permalink to this headline">¶</a></h2>
 <dl class="class">
-<dt id="geoml.kernels.GaussianKernel">
-<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">GaussianKernel</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#GaussianKernel"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.GaussianKernel" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._Kernel</span></code></p>
+<dt id="geoml.kernels.Gaussian">
+<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">Gaussian</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Gaussian"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Gaussian" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._LeafKernel</span></code></p>
 <p>Gaussian kernel</p>
 <dl class="method">
-<dt id="geoml.kernels.GaussianKernel.covariance_matrix">
-<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#GaussianKernel.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.GaussianKernel.covariance_matrix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Gaussian.covariance_matrix">
+<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Gaussian.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Gaussian.covariance_matrix" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes point-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.kernels.GaussianKernel.covariance_matrix_d1">
-<code class="descname">covariance_matrix_d1</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#GaussianKernel.covariance_matrix_d1"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.GaussianKernel.covariance_matrix_d1" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Gaussian.covariance_matrix_d1">
+<code class="descname">covariance_matrix_d1</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Gaussian.covariance_matrix_d1"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Gaussian.covariance_matrix_d1" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes direction-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.kernels.GaussianKernel.covariance_matrix_d2">
-<code class="descname">covariance_matrix_d2</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_x</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#GaussianKernel.covariance_matrix_d2"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.GaussianKernel.covariance_matrix_d2" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Gaussian.covariance_matrix_d2">
+<code class="descname">covariance_matrix_d2</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_x</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Gaussian.covariance_matrix_d2"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Gaussian.covariance_matrix_d2" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes direction-direction covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.kernels.SphericalKernel">
-<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">SphericalKernel</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#SphericalKernel"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.SphericalKernel" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._Kernel</span></code></p>
+<dt id="geoml.kernels.Spherical">
+<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">Spherical</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Spherical"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Spherical" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._LeafKernel</span></code></p>
 <p>Spherical kernel</p>
 <dl class="method">
-<dt id="geoml.kernels.SphericalKernel.covariance_matrix">
-<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#SphericalKernel.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.SphericalKernel.covariance_matrix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Spherical.covariance_matrix">
+<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Spherical.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Spherical.covariance_matrix" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes point-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.kernels.ExponentialKernel">
-<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">ExponentialKernel</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#ExponentialKernel"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.ExponentialKernel" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._Kernel</span></code></p>
+<dt id="geoml.kernels.Exponential">
+<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">Exponential</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Exponential"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Exponential" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._LeafKernel</span></code></p>
 <p>Exponential kernel</p>
 <dl class="method">
-<dt id="geoml.kernels.ExponentialKernel.covariance_matrix">
-<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#ExponentialKernel.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.ExponentialKernel.covariance_matrix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Exponential.covariance_matrix">
+<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Exponential.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Exponential.covariance_matrix" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes point-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.kernels.CubicKernel">
-<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">CubicKernel</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#CubicKernel"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.CubicKernel" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._Kernel</span></code></p>
+<dt id="geoml.kernels.Cubic">
+<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">Cubic</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Cubic"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Cubic" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._LeafKernel</span></code></p>
 <p>Cubic kernel</p>
 <dl class="method">
-<dt id="geoml.kernels.CubicKernel.covariance_matrix">
-<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#CubicKernel.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.CubicKernel.covariance_matrix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Cubic.covariance_matrix">
+<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Cubic.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Cubic.covariance_matrix" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes point-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.kernels.CubicKernel.covariance_matrix_d1">
-<code class="descname">covariance_matrix_d1</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#CubicKernel.covariance_matrix_d1"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.CubicKernel.covariance_matrix_d1" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Cubic.covariance_matrix_d1">
+<code class="descname">covariance_matrix_d1</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Cubic.covariance_matrix_d1"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Cubic.covariance_matrix_d1" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes direction-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.kernels.CubicKernel.covariance_matrix_d2">
-<code class="descname">covariance_matrix_d2</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_x</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#CubicKernel.covariance_matrix_d2"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.CubicKernel.covariance_matrix_d2" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Cubic.covariance_matrix_d2">
+<code class="descname">covariance_matrix_d2</code><span class="sig-paren">(</span><em>x</em>, <em>y</em>, <em>dir_x</em>, <em>dir_y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Cubic.covariance_matrix_d2"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Cubic.covariance_matrix_d2" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes direction-direction covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.kernels.ConstantKernel">
-<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">ConstantKernel</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#ConstantKernel"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.ConstantKernel" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._Kernel</span></code></p>
+<dt id="geoml.kernels.Constant">
+<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">Constant</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Constant"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Constant" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._LeafKernel</span></code></p>
 <p>Constant kernel</p>
 <dl class="method">
-<dt id="geoml.kernels.ConstantKernel.covariance_matrix">
-<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#ConstantKernel.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.ConstantKernel.covariance_matrix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Constant.covariance_matrix">
+<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Constant.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Constant.covariance_matrix" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes point-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.kernels.LinearKernel">
-<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">LinearKernel</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#LinearKernel"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.LinearKernel" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._Kernel</span></code></p>
+<dt id="geoml.kernels.Linear">
+<em class="property">class </em><code class="descclassname">geoml.kernels.</code><code class="descname">Linear</code><span class="sig-paren">(</span><em>transform=&lt;geoml.transform.Identity object&gt;</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Linear"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Linear" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.kernels._LeafKernel</span></code></p>
 <p>Linear kernel</p>
 <dl class="method">
-<dt id="geoml.kernels.LinearKernel.covariance_matrix">
-<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#LinearKernel.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.LinearKernel.covariance_matrix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Linear.covariance_matrix">
+<code class="descname">covariance_matrix</code><span class="sig-paren">(</span><em>x</em>, <em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Linear.covariance_matrix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Linear.covariance_matrix" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes point-point covariance matrix between x and y tensors.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.kernels.LinearKernel.point_variance">
-<code class="descname">point_variance</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#LinearKernel.point_variance"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.LinearKernel.point_variance" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.kernels.Linear.point_variance">
+<code class="descname">point_variance</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/kernels.html#Linear.point_variance"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.kernels.Linear.point_variance" title="Permalink to this definition">¶</a></dt>
 <dd><p>Computes the data points’ self variance (covariance between the point and itself).</p>
 </dd></dl>
 
@@ -1672,15 +1672,15 @@ TensorFlow error, try decreasing this value.</li>
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.models.GPClassif">
-<em class="property">class </em><code class="descclassname">geoml.models.</code><code class="descname">GPClassif</code><span class="sig-paren">(</span><em>sp_data</em>, <em>var_1</em>, <em>var_2</em>, <em>kernels</em>, <em>dir_data=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPClassif"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPClassif" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier">
+<em class="property">class </em><code class="descclassname">geoml.models.</code><code class="descname">GPMultiClassifier</code><span class="sig-paren">(</span><em>sp_data</em>, <em>var_1</em>, <em>var_2</em>, <em>kernels</em>, <em>dir_data=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier" title="Permalink to this definition">¶</a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.models._Model</span></code></p>
 <p>GP for classification. This model uses topological relations between the
 class labels to find a low-dimensional representation of the data. A
 separate GP model is trained on each latent variable.</p>
 <dl class="attribute">
-<dt id="geoml.models.GPClassif.x">
-<code class="descname">x</code><a class="headerlink" href="#geoml.models.GPClassif.x" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.x">
+<code class="descname">x</code><a class="headerlink" href="#geoml.models.GPMultiClassifier.x" title="Permalink to this definition">¶</a></dt>
 <dd><p>The independent variables.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1693,8 +1693,8 @@ separate GP model is trained on each latent variable.</p>
 </dd></dl>
 
 <dl class="attribute">
-<dt id="geoml.models.GPClassif.latent">
-<code class="descname">latent</code><a class="headerlink" href="#geoml.models.GPClassif.latent" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.latent">
+<code class="descname">latent</code><a class="headerlink" href="#geoml.models.GPMultiClassifier.latent" title="Permalink to this definition">¶</a></dt>
 <dd><p>The values of the latent variables used in the model.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1707,8 +1707,8 @@ separate GP model is trained on each latent variable.</p>
 </dd></dl>
 
 <dl class="attribute">
-<dt id="geoml.models.GPClassif.GPs">
-<code class="descname">GPs</code><a class="headerlink" href="#geoml.models.GPClassif.GPs" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.GPs">
+<code class="descname">GPs</code><a class="headerlink" href="#geoml.models.GPMultiClassifier.GPs" title="Permalink to this definition">¶</a></dt>
 <dd><p>The individual models that interpolate each latent variable.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1721,9 +1721,9 @@ separate GP model is trained on each latent variable.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GPClassif.__init__">
-<code class="descname">__init__</code><span class="sig-paren">(</span><em>sp_data</em>, <em>var_1</em>, <em>var_2</em>, <em>kernels</em>, <em>dir_data=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPClassif.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPClassif.__init__" title="Permalink to this definition">¶</a></dt>
-<dd><p>Initializer for GPClassif.</p>
+<dt id="geoml.models.GPMultiClassifier.__init__">
+<code class="descname">__init__</code><span class="sig-paren">(</span><em>sp_data</em>, <em>var_1</em>, <em>var_2</em>, <em>kernels</em>, <em>dir_data=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier.__init__" title="Permalink to this definition">¶</a></dt>
+<dd><p>Initializer for GPMultiClassifier.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
 <col class="field-body" />
@@ -1742,8 +1742,8 @@ It is assumed that these are directions with zero variation.</li>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GPClassif.log_lik">
-<code class="descname">log_lik</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPClassif.log_lik"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPClassif.log_lik" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.log_lik">
+<code class="descname">log_lik</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier.log_lik"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier.log_lik" title="Permalink to this definition">¶</a></dt>
 <dd><p>Outputs the model’s log-likelihood, given the current parameters.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1758,8 +1758,8 @@ It is assumed that these are directions with zero variation.</li>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GPClassif.predict">
-<code class="descname">predict</code><span class="sig-paren">(</span><em>newdata</em>, <em>name</em>, <em>verbose=True</em>, <em>batch_size=20000</em>, <em>n_samples=1000</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPClassif.predict"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPClassif.predict" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.predict">
+<code class="descname">predict</code><span class="sig-paren">(</span><em>newdata</em>, <em>name</em>, <em>verbose=True</em>, <em>batch_size=20000</em>, <em>n_samples=1000</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier.predict"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier.predict" title="Permalink to this definition">¶</a></dt>
 <dd><p>Makes a prediction on the specified coordinates.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1782,8 +1782,8 @@ TensorFlow error, try decreasing this value.</li>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GPClassif.train">
-<code class="descname">train</code><span class="sig-paren">(</span><em>**kwargs</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPClassif.train"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPClassif.train" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.train">
+<code class="descname">train</code><span class="sig-paren">(</span><em>**kwargs</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier.train"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier.train" title="Permalink to this definition">¶</a></dt>
 <dd><p>Calls the genetic algorithm to train the model.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1934,8 +1934,8 @@ D,    [m,n] matrix of pairwise distances</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.transform.Identity.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Identity.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Identity.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.transform.Identity.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Identity.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Identity.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -1965,8 +1965,8 @@ D,    [m,n] matrix of pairwise distances</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.transform.Isotropic.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Isotropic.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Isotropic.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.transform.Isotropic.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Isotropic.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Isotropic.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -2007,8 +2007,8 @@ from the right.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.transform.Anisotropy2D.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Anisotropy2D.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Anisotropy2D.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.transform.Anisotropy2D.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Anisotropy2D.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Anisotropy2D.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -2057,8 +2057,8 @@ from the right.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.transform.Anisotropy3D.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Anisotropy3D.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Anisotropy3D.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.transform.Anisotropy3D.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/transform.html#Anisotropy3D.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.transform.Anisotropy3D.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -2087,8 +2087,8 @@ from the right.</p>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.warping._Warping</span></code></p>
 <p>Identity warping</p>
 <dl class="method">
-<dt id="geoml.warping.Identity.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Identity.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Identity.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.Identity.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Identity.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Identity.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -2104,14 +2104,14 @@ from the right.</p>
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.warping.Spline">
-<em class="property">class </em><code class="descclassname">geoml.warping.</code><code class="descname">Spline</code><span class="sig-paren">(</span><em>n_knots</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Spline"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Spline" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline">
+<em class="property">class </em><code class="descclassname">geoml.warping.</code><code class="descname">CubicSpline</code><span class="sig-paren">(</span><em>n_knots</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#CubicSpline"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.CubicSpline" title="Permalink to this definition">¶</a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.warping._Warping</span></code></p>
 <p>Uses a monotonic spline to convert from original to warped space and
 back.</p>
 <dl class="attribute">
-<dt id="geoml.warping.Spline.n_knots">
-<code class="descname">n_knots</code><a class="headerlink" href="#geoml.warping.Spline.n_knots" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.n_knots">
+<code class="descname">n_knots</code><a class="headerlink" href="#geoml.warping.CubicSpline.n_knots" title="Permalink to this definition">¶</a></dt>
 <dd><p>The number of knots to build the spline.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -2124,21 +2124,21 @@ back.</p>
 </dd></dl>
 
 <dl class="attribute">
-<dt id="geoml.warping.Spline.base_spline">
-<code class="descname">base_spline</code><a class="headerlink" href="#geoml.warping.Spline.base_spline" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.base_spline">
+<code class="descname">base_spline</code><a class="headerlink" href="#geoml.warping.CubicSpline.base_spline" title="Permalink to this definition">¶</a></dt>
 <dd><p>A spline object to convert from the original to warped space.</p>
 </dd></dl>
 
 <dl class="attribute">
-<dt id="geoml.warping.Spline.reverse_spline">
-<code class="descname">reverse_spline</code><a class="headerlink" href="#geoml.warping.Spline.reverse_spline" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.reverse_spline">
+<code class="descname">reverse_spline</code><a class="headerlink" href="#geoml.warping.CubicSpline.reverse_spline" title="Permalink to this definition">¶</a></dt>
 <dd><p>A spline object to convert from the warped to original space.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.Spline.__init__">
-<code class="descname">__init__</code><span class="sig-paren">(</span><em>n_knots</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Spline.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Spline.__init__" title="Permalink to this definition">¶</a></dt>
-<dd><p>Initializer for Spline.</p>
+<dt id="geoml.warping.CubicSpline.__init__">
+<code class="descname">__init__</code><span class="sig-paren">(</span><em>n_knots</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#CubicSpline.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.CubicSpline.__init__" title="Permalink to this definition">¶</a></dt>
+<dd><p>Initializer for CubicSpline.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
 <col class="field-body" />
@@ -2150,23 +2150,23 @@ back.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.Spline.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Spline.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Spline.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#CubicSpline.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.CubicSpline.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.Spline.derivative">
-<code class="descname">derivative</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Spline.derivative"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Spline.derivative" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.derivative">
+<code class="descname">derivative</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#CubicSpline.derivative"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.CubicSpline.derivative" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.Spline.forward">
-<code class="descname">forward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Spline.forward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Spline.forward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.forward">
+<code class="descname">forward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#CubicSpline.forward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.CubicSpline.forward" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.Spline.refresh">
-<code class="descname">refresh</code><span class="sig-paren">(</span><em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Spline.refresh"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Spline.refresh" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.CubicSpline.refresh">
+<code class="descname">refresh</code><span class="sig-paren">(</span><em>y</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#CubicSpline.refresh"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.CubicSpline.refresh" title="Permalink to this definition">¶</a></dt>
 <dd><p>Rebuilds the spline using the given data’s range.</p>
 </dd></dl>
 
@@ -2197,8 +2197,8 @@ back.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.ZScore.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#ZScore.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.ZScore.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.ZScore.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#ZScore.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.ZScore.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -2241,8 +2241,8 @@ positive value.</td>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.warping.Scaling.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Scaling.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Scaling.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.Scaling.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Scaling.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Scaling.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -2269,8 +2269,8 @@ positive value.</td>
 <p>Transforms the data using the inverse of the softplus function.
 All the data must be positive.</p>
 <dl class="method">
-<dt id="geoml.warping.Softplus.backward">
-<code class="descname">backward</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Softplus.backward"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Softplus.backward" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.warping.Softplus.__call__">
+<code class="descname">__call__</code><span class="sig-paren">(</span><em>x</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/warping.html#Softplus.__call__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.warping.Softplus.__call__" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">

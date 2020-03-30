@@ -141,7 +141,7 @@
            <div itemprop="articleBody">
             
   <h1>Source code for geoml.interpolation</h1><div class="highlight"><pre>
-<span></span><span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;cubic_conv_1d&#39;</span><span class="p">,</span> <span class="s1">&#39;MonotonicSpline&#39;</span><span class="p">]</span>
+<span></span><span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;cubic_conv_1d&#39;</span><span class="p">,</span> <span class="s1">&#39;MonotonicCubicSpline&#39;</span><span class="p">]</span>
 
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">_np</span>
 <span class="kn">import</span> <span class="nn">tensorflow</span> <span class="k">as</span> <span class="nn">_tf</span>
@@ -234,7 +234,7 @@
     <span class="k">return</span> <span class="n">w</span></div>
 
 
-<span class="k">class</span> <span class="nc">Spline</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+<span class="k">class</span> <span class="nc">CubicSpline</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
     <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Abstract spline class</span>
 <span class="sd">    </span>
@@ -264,9 +264,9 @@
     <span class="k">def</span> <span class="nf">_h1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
         <span class="n">h</span> <span class="o">=</span> <span class="n">x2</span> <span class="o">-</span> <span class="n">x1</span>
         <span class="k">if</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
         <span class="k">elif</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span><span class="o">*</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span><span class="o">*</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;n_deriv must be 0 or 1&quot;</span><span class="p">)</span>
 
@@ -274,9 +274,9 @@
     <span class="k">def</span> <span class="nf">_h2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
         <span class="n">h</span> <span class="o">=</span> <span class="n">x2</span> <span class="o">-</span> <span class="n">x1</span>
         <span class="k">if</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
         <span class="k">elif</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span>
+            <span class="k">return</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_phi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;n_deriv must be 0 or 1&quot;</span><span class="p">)</span>
         
@@ -284,9 +284,9 @@
     <span class="k">def</span> <span class="nf">_h3</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
         <span class="n">h</span> <span class="o">=</span> <span class="n">x2</span> <span class="o">-</span> <span class="n">x1</span>
         <span class="k">if</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-            <span class="k">return</span> <span class="o">-</span> <span class="n">h</span> <span class="o">*</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
+            <span class="k">return</span> <span class="o">-</span> <span class="n">h</span> <span class="o">*</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
         <span class="k">elif</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x2</span> <span class="o">-</span> <span class="n">x</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;n_deriv must be 0 or 1&quot;</span><span class="p">)</span>
             
@@ -294,21 +294,21 @@
     <span class="k">def</span> <span class="nf">_h4</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
         <span class="n">h</span> <span class="o">=</span> <span class="n">x2</span> <span class="o">-</span> <span class="n">x1</span>
         <span class="k">if</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-            <span class="k">return</span> <span class="o">+</span> <span class="n">h</span> <span class="o">*</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
+            <span class="k">return</span> <span class="o">+</span> <span class="n">h</span> <span class="o">*</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">)</span>
         <span class="k">elif</span> <span class="n">n_deriv</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_psi</span><span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">x1</span><span class="p">)</span><span class="o">/</span><span class="n">h</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;n_deriv must be 0 or 1&quot;</span><span class="p">)</span>
 
     <span class="nd">@staticmethod</span>
     <span class="k">def</span> <span class="nf">_poly</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">f1</span><span class="p">,</span> <span class="n">f2</span><span class="p">,</span> <span class="n">d1</span><span class="p">,</span> <span class="n">d2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
-        <span class="k">return</span> <span class="n">f1</span><span class="o">*</span><span class="n">Spline</span><span class="o">.</span><span class="n">_h1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span> \
-               <span class="o">+</span> <span class="n">f2</span><span class="o">*</span><span class="n">Spline</span><span class="o">.</span><span class="n">_h2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span> \
-               <span class="o">+</span> <span class="n">d1</span><span class="o">*</span><span class="n">Spline</span><span class="o">.</span><span class="n">_h3</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span> \
-               <span class="o">+</span> <span class="n">d2</span><span class="o">*</span><span class="n">Spline</span><span class="o">.</span><span class="n">_h4</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">f1</span><span class="o">*</span><span class="n">CubicSpline</span><span class="o">.</span><span class="n">_h1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span> \
+               <span class="o">+</span> <span class="n">f2</span><span class="o">*</span><span class="n">CubicSpline</span><span class="o">.</span><span class="n">_h2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span> \
+               <span class="o">+</span> <span class="n">d1</span><span class="o">*</span><span class="n">CubicSpline</span><span class="o">.</span><span class="n">_h3</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span> \
+               <span class="o">+</span> <span class="n">d2</span><span class="o">*</span><span class="n">CubicSpline</span><span class="o">.</span><span class="n">_h4</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">,</span> <span class="n">n_deriv</span><span class="p">)</span>
 
 
-<div class="viewcode-block" id="MonotonicSpline"><a class="viewcode-back" href="../../geoml.html#geoml.interpolation.MonotonicSpline">[docs]</a><span class="k">class</span> <span class="nc">MonotonicSpline</span><span class="p">(</span><span class="n">Spline</span><span class="p">):</span>
+<div class="viewcode-block" id="MonotonicCubicSpline"><a class="viewcode-back" href="../../geoml.html#geoml.interpolation.MonotonicCubicSpline">[docs]</a><span class="k">class</span> <span class="nc">MonotonicCubicSpline</span><span class="p">(</span><span class="n">CubicSpline</span><span class="p">):</span>
     <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Implementation of the monotonic spline algorithm by Fritsch and Carlson (1980).</span>
 
@@ -322,7 +322,7 @@
 <span class="sd">        May affect the spline&#39;s shape. Refer to the original paper for details.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     
-    <span class="k">def</span> <span class="nf">__find_d</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">region</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">_adjust_d</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">region</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
         <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Starting from a standard cubic spline, adjusts the derivatives</span>
 <span class="sd">        at the data points to ensure monotonicity. </span>
@@ -420,7 +420,7 @@
         <span class="c1"># values inside limits</span>
         <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">d</span><span class="o">.</span><span class="n">size</span> <span class="o">-</span> <span class="mi">1</span><span class="p">):</span>
             <span class="n">pos</span> <span class="o">=</span> <span class="p">((</span><span class="n">x2</span> <span class="o">&gt;=</span> <span class="n">x</span><span class="p">[</span><span class="n">i</span><span class="p">])</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">x2</span> <span class="o">&lt;</span> <span class="n">x</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]))</span>
-            <span class="n">yout</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">=</span> <span class="n">Spline</span><span class="o">.</span><span class="n">_poly</span><span class="p">(</span><span class="n">x2</span><span class="p">[</span><span class="n">pos</span><span class="p">],</span>
+            <span class="n">yout</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">=</span> <span class="n">CubicSpline</span><span class="o">.</span><span class="n">_poly</span><span class="p">(</span><span class="n">x2</span><span class="p">[</span><span class="n">pos</span><span class="p">],</span>
                                      <span class="n">x</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">x</span><span class="p">[</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">],</span>
                                      <span class="n">y</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">y</span><span class="p">[</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">],</span>
                                      <span class="n">d</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">d</span><span class="p">[</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">],</span>
@@ -428,11 +428,11 @@
                       
         <span class="k">return</span> <span class="n">yout</span>
     
-<div class="viewcode-block" id="MonotonicSpline.__init__"><a class="viewcode-back" href="../../geoml.html#geoml.interpolation.MonotonicSpline.__init__">[docs]</a>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">region</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+<div class="viewcode-block" id="MonotonicCubicSpline.__init__"><a class="viewcode-back" href="../../geoml.html#geoml.interpolation.MonotonicCubicSpline.__init__">[docs]</a>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">region</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">x</span> <span class="o">=</span> <span class="n">x</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">y</span> <span class="o">=</span> <span class="n">y</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">region</span> <span class="o">=</span> <span class="n">region</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">__find_d</span><span class="p">(</span><span class="n">region</span><span class="p">)</span></div></div>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_adjust_d</span><span class="p">(</span><span class="n">region</span><span class="p">)</span></div></div>
 </pre></div>
 
            </div>

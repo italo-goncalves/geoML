@@ -1,3 +1,15 @@
+## version 0.2.0
+* Code updated to TensorFlow 2.0.
+* Cubic convolution implemented in TensorFlow.
+* Simplified kernel API.
+* New auxiliary functions in `tftools` module.
+* Cubic splines implemented in TensorFlow.
+* Added Cerro do Andrade dataset.
+* Notebooks moved to Google Colaboratory.
+* Training is now based on Particle Swarm Optimization.
+* Included a `GPOptions` class to control verbosity, batch size and
+other model options.
+
 ## version 0.1.3
 * Introduced parallel sparse cubic convolution interpolation.
 * Introduced the sparse GP model.
@@ -25,7 +37,7 @@ the entropy and predictive variance.
 ## version 0.1.1
 * Added support for products of kernels.
 * Fixed bug in `geoml.tftools.prod_n()` function.
-* `geoml.kernels.GaussianKernel.covariance_matrix(x, y)` now
+* `geoml.kernels.Gaussian.covariance_matrix(x, y)` now
 adds some jitter to the covariance matrix when x == y, to
 avoid Cholesky decomposition problems.
 * `geoml.warping.Softplus` now corrects non-positive values
@@ -34,4 +46,4 @@ in its input.
 while making a prediction.
 * Added sunspot number data and example notebook.
 * Implemented cubic convolution fully in TensorFlow.
-* Set the default `n_knots=5` in `geoml.warping.Spline.__init__()`.
+* Set the default `n_knots=5` in `geoml.warping.CubicSpline.__init__()`.

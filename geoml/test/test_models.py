@@ -12,8 +12,8 @@ import geoml
 
 walker, walker_ex = geoml.data.Examples.walker()
 
-kernels=[geoml.kernels.SphericalKernel(geoml.transform.Identity()),
-         geoml.kernels.SphericalKernel(geoml.transform.Isotropic(50))]
+kernels=[geoml.kernels.Spherical(geoml.transform.Identity()),
+         geoml.kernels.Spherical(geoml.transform.Isotropic(50))]
 warping=[geoml.warping.Softplus(), geoml.warping.Spline(5)]
 gp = geoml.models.InterpolatingBands(
     walker, "V", walker_ex,

@@ -8,24 +8,36 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["Identity", "Isotropic", "Anisotropy2D", "Anisotropy3D",
-           "ProjectionTo1D"]
+__all__ = ["Identity",
+           "Isotropic",
+           "Anisotropy2D",
+           "Anisotropy3D",
+           "ProjectionTo1D",
+           "AnisotropyARD",
+           "ChainedTransform",
+           "SelectVariables"]
+
+import geoml.parameter as _gpr
 
 import numpy as _np
 import tensorflow as _tf
-import geoml.parameter as _gpr
-import geoml.tftools as _tftools
+
 
 class _Transform(object):
     """An abstract class for variable transformations"""
     def __init__(self):
-        self.params = {}
+        self.parameters = {}
+        self._all_parameters = [pr for pr in self.parameters.values()]
+
+    @property
+    def all_parameters(self):
+        return self._all_parameters
         
     def refresh(self):
         pass
@@ -33,24 +45,66 @@ class _Transform(object):
     def set_limits(self, data):
         pass
     
-    def forward(self, x):
+    def __call__(self, x):
         pass
-    
-    def backward(self, x):
-        pass
+
+    def pretty_print(self, depth=0):
+        s = "  " * depth + self.__class__.__name__ + "\n"
+        depth += 1
+        for name, parameter in self.parameters.items():
+            s += "  " * depth + name + ": " + str(parameter.value.numpy())
+            if parameter.fixed:
+                s += " (fixed)"
+            s += "\n"
+        return s
+
+    def __repr__(self):
+        return self.pretty_print()
+
+    def get_parameter_values(self, complete=False):
+        value = []
+        shape = []
+        position = []
+        min_val = []
+        max_val = []
+
+        for index, parameter in enumerate(self._all_parameters):
+            if (not parameter.fixed) | complete:
+                value.append(_tf.reshape(parameter.value_transformed, [-1]).
+                                 numpy())
+                shape.append(_tf.shape(parameter.value_transformed).numpy())
+                position.append(index)
+                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
+                               numpy())
+                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
+                               numpy())
+
+        min_val = _np.concatenate(min_val, axis=0)
+        max_val = _np.concatenate(max_val, axis=0)
+        value = _np.concatenate(value, axis=0)
+
+        return value, shape, position, min_val, max_val
+
+    def update_parameters(self, value, shape, position):
+        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
+        value = _np.split(value, _np.cumsum(sizes))[:-1]
+        value = [_np.squeeze(val) if len(sh) == 0 else val
+                    for val, sh in zip(value, shape)]
+
+        for val, sh, pos in zip(value, shape, position):
+            self._all_parameters[pos].set_value(
+                _np.reshape(val, sh) if len(sh) > 0 else val,
+                transformed=True
+            )
 
 
 class Identity(_Transform):
     """The identity transformation"""
     def __init__(self):
         super().__init__()
-        
-    def forward(self, x):
-        with _tf.name_scope("Identity_forward"):
-            return x
     
-    def backward(self, x):
-        with _tf.name_scope("Identity_backward"):
+    def __call__(self, x):
+        with _tf.name_scope("Identity_transform"):
             return x
 
 
@@ -66,21 +120,18 @@ class Isotropic(_Transform):
             The range. Must be positive.
         """
         super().__init__()
-        self.params = {"range": _gpr.PositiveParameter(r, 0.1, 10000)}
-        
-    def forward(self, x):
-        with _tf.name_scope("Isotropic_forward"):
-            r = self.params["range"].tf_val
-            return x * r
+        self.parameters = {"range": _gpr.PositiveParameter(r, 0.1, 10000)}
+        self._all_parameters = [pr for pr in self.parameters.values()]
     
-    def backward(self, x):
-        with _tf.name_scope("Isotropic_backward"):
-            r = self.params["range"].tf_val
+    def __call__(self, x):
+        with _tf.name_scope("Isotropic_transform"):
+            r = self.parameters["range"].value
             return x / r
     
     def set_limits(self, data):
-        self.params["range"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 2)
+        self.parameters["range"].set_limits(
+            min_val=data.diagonal / 100,
+            max_val=data.diagonal * 2)
 
 
 class Anisotropy2D(_Transform):
@@ -97,50 +148,50 @@ class Anisotropy2D(_Transform):
         maxrange : double
             The maximum range. Must be positive.
         minrange_fct : double
-            A multiple of maxrange, contained in the [0,1) interval.
+            matrix multiple of maxrange, contained in the [0,1) interval.
         """
         super().__init__()
-        self.params = {"maxrange": _gpr.PositiveParameter(maxrange, 0.1, 10000),
-                       "minrange_fct": _gpr.Parameter(minrange_fct, 0.05, 1),
-                       "azimuth": _gpr.Parameter(azimuth, 0, 180)}
+        self.parameters = {
+            "maxrange": _gpr.PositiveParameter(maxrange, 0.1, 10000),
+            "minrange_fct": _gpr.RealParameter(minrange_fct, 0.05, 1),
+            "azimuth": _gpr.RealParameter(azimuth, 0, 180)}
+        self._all_parameters = [pr for pr in self.parameters.values()]
         self._anis = None
         self._anis_inv = None
 
     def refresh(self):
         with _tf.name_scope("Anisotropy2D_refresh"):
-            azimuth = self.params["azimuth"].tf_val
-            maxrange = self.params["maxrange"].tf_val
-            minrange = _tf.multiply(
-                self.params["minrange_fct"].tf_val, maxrange)
+            azimuth = self.parameters["azimuth"].value
+            maxrange = self.parameters["maxrange"].value
+            minrange = self.parameters["minrange_fct"].value * maxrange
+
             # conversion to radians
             azimuth = azimuth * (_np.pi / 180)
+
             # conversion to mathematical coordinates
             azimuth = _np.pi / 2 - azimuth
+
             # rotation matrix
-            rot = _tf.concat([_tf.cos(azimuth), -_tf.sin(azimuth),
-                              _tf.sin(azimuth), _tf.cos(azimuth)], -1)
+            rot = _tf.stack([_tf.cos(azimuth), -_tf.sin(azimuth),
+                             _tf.sin(azimuth), _tf.cos(azimuth)], axis=0)
             rot = _tf.reshape(rot, [2, 2])
+
             # scaling matrix
-            sc = _tf.linalg.diag(_tf.concat([maxrange, minrange], -1))
-            # sc = _tf.linalg.diag(_tf.concat([minrange, maxrange], -1))
+            sc = _tf.linalg.diag(_tf.stack([maxrange, minrange], axis=0))
+
             # anisotropy matrix
             self._anis = _tf.transpose(_tf.matmul(rot, sc))
-            # self._anis = _tf.matmul(rot, sc)
             self._anis_inv = _tf.linalg.inv(self._anis)
     
-    def forward(self, x):
-        with _tf.name_scope("Anisotropy2D_forward"):
-            self.refresh()
-            return _tf.matmul(x, self._anis)
-    
-    def backward(self, x):
-        with _tf.name_scope("Anisotropy2D_backward"):
+    def __call__(self, x):
+        with _tf.name_scope("Anisotropy2D_transform"):
             self.refresh()
             return _tf.matmul(x, self._anis_inv)
     
     def set_limits(self, data):
-        self.params["maxrange"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 2)
+        self.parameters["maxrange"].set_limits(
+            min_val=data.diagonal / 100,
+            max_val=data.diagonal * 2)
 
 
 class Anisotropy3D(_Transform):
@@ -156,9 +207,9 @@ class Anisotropy3D(_Transform):
         maxrange : double
             The maximum range. Must be positive.
         midrange_fct : double
-            A multiple of maxrange, contained in the [0,1) interval.
+            matrix multiple of maxrange, contained in the [0,1) interval.
         minrange_fct : double
-            A multiple of midrange, contained in the [0,1) interval.
+            matrix multiple of midrange, contained in the [0,1) interval.
         azimuth : double
             Defined clockwise from north, and is aligned with maxrange.
         dip : double
@@ -167,65 +218,67 @@ class Anisotropy3D(_Transform):
             Rake angle, from -90 to 90 degrees.
         """
         super().__init__()
-        self.params = {"maxrange": _gpr.PositiveParameter(maxrange, 0.1, 10000),
-                       "midrange_fct": _gpr.Parameter(midrange_fct, 0.05, 1),
-                       "minrange_fct": _gpr.Parameter(minrange_fct, 0.05, 1),
-                       "azimuth": _gpr.Parameter(azimuth, 0, 180),
-                       "dip": _gpr.Parameter(dip, 0, 90),
-                       "rake": _gpr.Parameter(rake, -90, 90)}
+        self.parameters = {
+            "maxrange": _gpr.PositiveParameter(maxrange, 0.1, 10000),
+            "midrange_fct": _gpr.RealParameter(midrange_fct, 0.05, 1),
+            "minrange_fct": _gpr.RealParameter(minrange_fct, 0.05, 1),
+            "azimuth": _gpr.RealParameter(azimuth, 0, 180),
+            "dip": _gpr.RealParameter(dip, 0, 90),
+            "rake": _gpr.RealParameter(rake, -90, 90)}
+        self._all_parameters = [pr for pr in self.parameters.values()]
         self._anis = None
         self._anis_inv = None
 
     def refresh(self):
         with _tf.name_scope("Anisotropy3D_refresh"):
-            azimuth = self.params["azimuth"].tf_val
-            dip = self.params["dip"].tf_val
-            rake = self.params["rake"].tf_val
-            maxrange = self.params["maxrange"].tf_val
+            azimuth = self.parameters["azimuth"].value
+            dip = self.parameters["dip"].value
+            rake = self.parameters["rake"].value
+            maxrange = self.parameters["maxrange"].value
             midrange = _tf.multiply(
-                self.params["midrange_fct"].tf_val, maxrange)
+                self.parameters["midrange_fct"].value, maxrange)
             minrange = _tf.multiply(
-                self.params["minrange_fct"].tf_val, midrange)
+                self.parameters["minrange_fct"].value, midrange)
+
             # conversion to radians
             azimuth = azimuth * (_np.pi / 180)
             dip = dip * (_np.pi / 180)
             rake = rake * (_np.pi / 180)
+
             # conversion to mathematical coordinates
             dip = - dip
             azimuth = _np.pi / 2 - azimuth
-            rng = _tf.linalg.diag(_tf.concat(
+            rng = _tf.linalg.diag(_tf.stack(
                 [midrange, maxrange, minrange], -1))
+
             # rotation matrix
-            rx = _tf.concat([_tf.cos(rake), [0], _tf.sin(rake),
-                             [0], [1], [0],
-                             -_tf.sin(rake), [0], _tf.cos(rake)], -1)
+            rx = _tf.stack([_tf.cos(rake), 0, _tf.sin(rake),
+                             0, 1, 0,
+                             -_tf.sin(rake), 0, _tf.cos(rake)], -1)
             rx = _tf.reshape(rx, [3, 3])
-            ry = _tf.concat([[1], [0], [0],
-                             [0], _tf.cos(dip), -_tf.sin(dip),
-                             [0], _tf.sin(dip), _tf.cos(dip)], -1)
+            ry = _tf.stack([1, 0, 0,
+                             0, _tf.cos(dip), -_tf.sin(dip),
+                             0, _tf.sin(dip), _tf.cos(dip)], -1)
             ry = _tf.reshape(ry, [3, 3])
-            rz = _tf.concat([_tf.cos(azimuth), _tf.sin(azimuth), [0],
-                             -_tf.sin(azimuth), _tf.cos(azimuth), [0],
-                             [0], [0], [1]], -1)
+            rz = _tf.stack([_tf.cos(azimuth), _tf.sin(azimuth), 0,
+                             -_tf.sin(azimuth), _tf.cos(azimuth), 0,
+                             0, 0, 1], -1)
             rz = _tf.reshape(rz, [3, 3])
+
             # anisotropy matrix
             anis = _tf.matmul(_tf.matmul(_tf.matmul(rz, ry), rx), rng)
             self._anis = _tf.transpose(anis)
             self._anis_inv = _tf.linalg.inv(self._anis)
     
-    def forward(self, x):
-        with _tf.name_scope("Anisotropy3D_forward"):
-            self.refresh()
-            return _tf.matmul(x, self._anis)
-    
-    def backward(self, x):
-        with _tf.name_scope("Anisotropy3D_backward"):
+    def __call__(self, x):
+        with _tf.name_scope("Anisotropy3D_transform"):
             self.refresh()
             return _tf.matmul(x, self._anis_inv)
     
     def set_limits(self, data):
-        self.params["maxrange"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 2)
+        self.parameters["maxrange"].set_limits(
+            min_val=data.diagonal / 100,
+            max_val=data.diagonal * 2)
 
 
 class ProjectionTo1D(_Transform):
@@ -243,121 +296,17 @@ class ProjectionTo1D(_Transform):
             conjunction with a space-expanding transform.
         """
         super().__init__()
-        self.params = {"ranges": _gpr.PositiveParameter(
-            _np.ones(n_dim), _np.ones(n_dim) * 0.001, _np.ones(n_dim) * 10000)}
+        self.parameters = {"directions": _gpr.PositiveParameter(
+            _np.ones(n_dim), _np.ones(n_dim) * 0.001, _np.ones(n_dim))}
+        self._all_parameters = [pr for pr in self.parameters.values()]
 
-    def backward(self, x):
-        with _tf.name_scope("ProjectionTo1D_backward"):
-            vector = _tf.expand_dims(1 / self.params["ranges"].tf_val, axis=1)
+    def __call__(self, x):
+        with _tf.name_scope("ProjectionTo1D_transform"):
+            vector = _tf.expand_dims(self.parameters["directions"].value,
+                                     axis=1)
+            vector = vector / _tf.math.reduce_euclidean_norm(vector)
             x = _tf.matmul(x, vector)
         return x
-
-    def forward(self, x):
-        with _tf.name_scope("ProjectionTo1D_forward"):
-            vector = self.params["ranges"].tf_val
-            x = x * vector
-        return x
-
-    # def set_limits(self, data):
-    #     self.params["range"].set_limits(
-    #             min_val=data.diagonal / 100, max_val=data.diagonal * 10)
-
-
-class NeuralNetwork(_Transform):
-    """A neural network transform."""
-
-    def __init__(self, n_dim, layers=[10]):
-        """
-        Initializer for NeuralNetwork.
-
-        Parameters
-        ----------
-        n_dim : int
-            Dimensionality of the input.
-        layers : List[int]
-            The hidden layers in the network. A list of ints whose size
-            determines the number of layers and each value corresponds to
-            the layer size.
-        """
-        super().__init__()
-        self.n_dim = n_dim
-        self.layers = layers
-        self.center = _np.zeros([n_dim])
-        self.scale = 1.0
-
-        n_weights = 0
-        n_bias = 0
-        tmp = [n_dim] + layers
-        for i in range(len(layers)):
-            n_weights += tmp[i] * tmp[i + 1]
-            n_bias += tmp[i + 1]
-        self.params = {
-            "weights": _gpr.Parameter(
-                _np.random.normal(size=n_weights, scale=0.1),
-                _np.ones(n_weights) * (-10),
-                _np.ones(n_weights) * 10),
-            "bias": _gpr.Parameter(
-                _np.zeros(n_bias),
-                _np.ones(n_bias) * (-10),
-                _np.ones(n_bias) * 10)
-        }
-        self.bias = None
-        self.weights = None
-
-    def refresh(self):
-        with _tf.name_scope("NeuralNetwork_refresh"):
-            # weights
-            weights_array = self.params["weights"].tf_val
-            self.weights = []
-            pos_1 = 0
-            pos_2 = self.n_dim * self.layers[0]
-            self.weights.append(_tf.reshape(
-                weights_array[pos_1:pos_2],
-                shape=[self.n_dim, self.layers[0]]))
-            if len(self.layers) > 1:
-                for i in range(1, len(self.layers)):
-                    pos_1 = pos_2
-                    pos_2 += self.layers[i] * self.layers[i - 1]
-                    self.weights.append(_tf.reshape(
-                        weights_array[pos_1:pos_2],
-                        shape=[self.layers[i - 1], self.layers[i]]))
-
-            # bias
-            bias_array = self.params["bias"].tf_val
-            self.bias = []
-            pos_1 = 0
-            pos_2 = self.layers[0]
-            self.bias.append(bias_array[pos_1:pos_2])
-            if len(self.layers) > 1:
-                for i in range(1, len(self.layers)):
-                    pos_1 = pos_2
-                    pos_2 += self.layers[i]
-                    self.bias.append(bias_array[pos_1:pos_2])
-
-    def forward(self, x):
-        raise Exception("forward transform not available for this class")
-
-    def backward(self, x):
-        with _tf.name_scope("NeuralNetwork_backward"):
-            self.refresh()
-            # scaling
-            with _tf.name_scope("scaling"):
-                center = _tf.expand_dims(_tf.constant(self.center, _tf.float64),
-                                         axis=0)
-                scale = _tf.constant(self.scale, _tf.float64)
-                s = _tf.shape(x)
-                center = _tf.tile(center, [s[0], 1])
-                x_tr = (x - center) / scale
-            # ReLU layers
-            for i in range(len(self.weights)):
-                with _tf.name_scope("dense_layer_" + str(i)):
-                    x_tr = _tf.nn.xw_plus_b(x_tr, self.weights[i], self.bias[i])
-                    x_tr = x_tr * _tf.nn.sigmoid(x_tr)  # swish activation
-            return x_tr
-
-    def set_limits(self, data):
-        self.center = (data.bounding_box[1, :] + data.bounding_box[0, :]) / 2.0
-        self.scale = data.diagonal
 
 
 class AnisotropyARD(_Transform):
@@ -374,19 +323,14 @@ class AnisotropyARD(_Transform):
             conjunction with a space-expanding transform.
         """
         super().__init__()
-        self.params = {"ranges": _gpr.PositiveParameter(
+        self.parameters = {"ranges": _gpr.PositiveParameter(
             _np.ones(n_dim), _np.ones(n_dim)*0.001, _np.ones(n_dim)*10000)}
+        self._all_parameters = [pr for pr in self.parameters.values()]
 
-    def forward(self, x):
-        with _tf.name_scope("ARD_forward"):
-            ranges = self.params["ranges"].tf_val
-            x_tr = _tf.matmul(x, _tf.diag(ranges))
-        return x_tr
-
-    def backward(self, x):
-        with _tf.name_scope("ARD_backward"):
-            ranges = self.params["ranges"].tf_val
-            x_tr = _tf.matmul(x, _tf.diag(1 / ranges))
+    def __call__(self, x):
+        with _tf.name_scope("ARD_transform"):
+            ranges = _tf.expand_dims(self.parameters["ranges"].value, axis=0)
+            x_tr = x / ranges
         return x_tr
 
 
@@ -396,19 +340,21 @@ class ChainedTransform(_Transform):
         count = -1
         for tr in transforms:
             count += 1
-            names = list(tr.params.keys())
+            names = list(tr.parameters.keys())
             names = [s + "_" + str(count) for s in names]
-            self.params.update(zip(names, tr.params.values()))
+            self.parameters.update(zip(names, tr.parameters.values()))
         self.transforms = transforms
+        self._all_parameters = [tr.all_parameters for tr in transforms]
+        self._all_parameters = [item for sublist in self._all_parameters
+                                for item in sublist]
 
-    def backward(self, x):
+    def __call__(self, x):
         for tr in self.transforms:
-            x = tr.backward(x)
+            x = tr.__call__(x)
         return x
 
     def set_limits(self, data):
-        for tr in self.transforms:
-            tr.set_limits(data)
+        self.transforms[0].set_limits(data)
 
 
 class SelectVariables(_Transform):
@@ -416,26 +362,10 @@ class SelectVariables(_Transform):
         super().__init__()
         self.index = index
 
-    def backward(self, x):
+    def __call__(self, x):
         x = _tf.gather(x, self.index, axis=1)
         r = _tf.rank(x)
         x = _tf.cond(_tf.equal(r, 1),
                      lambda: _tf.expand_dims(x, 1),
                      lambda: x)
         return x
-
-
-class Periodic(_Transform):
-    def __init__(self, period):
-        super().__init__()
-        self.params = {"period": _gpr.PositiveParameter(period, 0.01, 10000)}
-
-    def backward(self, x):
-        with _tf.name_scope("Trigonometric_backward"):
-            p = self.params["period"].tf_val
-            return _tf.concat([_tf.sin(2.0 * _np.pi * x / p),
-                               _tf.cos(2.0 * _np.pi * x / p)], axis=1)
-
-    def set_limits(self, data):
-        self.params["period"].set_limits(
-                min_val=data.diagonal / 100, max_val=data.diagonal * 10)

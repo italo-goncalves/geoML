@@ -8,683 +8,337 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 __all__ = ['cubic_conv_1d',
-           'cubic_conv_1d_sparse',
-           'cubic_conv_2d_sparse',
-           'cubic_conv_3d_sparse',
-           'cubic_conv_1d_parallel',
-           'cubic_conv_2d_parallel',
-           'cubic_conv_3d_parallel',
-           'MonotonicSpline']
-
-import numpy as _np
-# import tensorflow as _tf
-import scipy.interpolate as _interp
-import scipy.sparse as _sp
-import pathos.multiprocessing as _mult
+           'cubic_conv_2d',
+           'cubic_conv_3d',
+           'CubicSpline',
+           'MonotonicCubicSpline']
 
 
-def _batch_id(n_data, batch_size):
-    n_batches = int(_np.ceil(n_data / batch_size))
-    batch_id = [_np.arange(i * batch_size,
-                           _np.minimum((i + 1) * batch_size, n_data))
-                for i in range(n_batches)]
-    return batch_id
+import geoml.tftools as _tftools
+
+import tensorflow as _tf
 
 
 def cubic_conv_1d(x, xnew):
     """
     Generates a sparse matrix for interpolating from a regular grid to
     a new set of positions in one dimension.
-    
-    Parameters
-    ----------
-    x : array
-        Array of regularly spaced values.
-    xnew : array
-        Positions to receive the interpolated values. Its limits must be
-        confined within the limits of x.
-    
-    Returns
-    -------
-    w : array
-        The weights matrix.
-    """
-    if _np.std(_np.diff(x)) > 1e-9:
-        raise Exception("array x not equally spaced")
-    if (_np.min(xnew) < _np.min(x)) | (_np.max(xnew) > _np.max(x)):
-        raise Exception("xnew out of bounds")
-        
-    # interval and data position
-    h = _np.diff(x)[0]
-    x_len = x.size
-    s = (xnew - _np.min(x)) / h
-    base_pos = _np.linspace(-1, x_len, x_len + 2)
-    
-    # weight matrix
-    w = _np.abs(_np.resize(s, [x_len + 2, _np.size(s)]).transpose()
-                - _np.resize(base_pos, [_np.size(s), x_len + 2]))
-    pos = w <= 1
-    w[pos] = 1.5 * _np.power(w[pos], 3) - 2.5 * _np.power(w[pos], 2) + 1
-    pos = (w > 1) & (w <= 2)
-    w[pos] = - 0.5 * _np.power(w[pos], 3) \
-             + 2.5 * _np.power(w[pos], 2) \
-             - 4 * w[pos] + 2
-    w[w > 2] = 0
-    # borders
-    w[:, 1] = w[:, 1] + 3*w[:, 0]
-    w[:, 2] = w[:, 2] - 3*w[:, 0]
-    w[:, 3] = w[:, 3] + 1*w[:, 0]
-    w[:, x_len] = w[:, x_len] + 3 * w[:, x_len + 1]
-    w[:, x_len - 1] = w[:, x_len - 1] - 3 * w[:, x_len + 1]
-    w[:, x_len - 2] = w[:, x_len - 2] + 1 * w[:, x_len + 1]
-    w = w[:, range(1, x_len + 1)]
-
-    return w
-
-
-def cubic_conv_1d_sparse(x, xnew):
-    """
-    Generates a sparse matrix for interpolating from a regular grid to
-    a new set of positions in one dimension.
 
     Parameters
     ----------
-    x : array
+    x : Tensor
         Array of regularly spaced values.
-    xnew : array
+    xnew : Tensor
         Positions to receive the interpolated values. Its limits must be
         confined within the limits of x.
 
     Returns
     -------
-    w : csc_matrix
+    w : SparseTensor
         The weights matrix.
     """
-    if _np.std(_np.diff(x)) > 1e-9:
-        raise Exception("array x not equally spaced")
-    if (_np.min(xnew) < _np.min(x)) | (_np.max(xnew) > _np.max(x)):
-        raise Exception("xnew out of bounds")
+    # TODO: throw exceptions in TensorFlow
+    # if _tf.math.reduce_std(x[1:]-x[:-1]) > 1e-9:
+    #     raise Exception("array x not equally spaced")
+    # if (_tf.reduce_min(xnew) < _tf.reduce_min(x)) \
+    #         | (_tf.reduce_max(xnew) > _tf.reduce_max(x)):
+    #     raise Exception("xnew out of bounds")
 
     # interval and data position
     h = x[1] - x[0]
-    x_len = x.shape[0]
-    x_new_len = xnew.shape[0]
+    x_len = _tf.shape(x, out_type=_tf.int64)[0]
+    x_new_len = _tf.shape(xnew, out_type=_tf.int64)[0]
     dense_shape = [x_new_len, x_len]
 
-    s = (xnew - _np.min(x)) / h
-    base_cols = _np.array([-1, 0, 1, 2])
+    s = _tf.expand_dims((xnew - _tf.reduce_min(x)) / h, axis=1)
+    base_cols = _tf.constant([[-1, 0, 1, 2]], dtype=_tf.float64)
 
-    rows = []
-    cols = []
-    vals = []
-    for i in range(x_new_len):
-        # position
-        si = s[i] + base_cols
-        cols_i = _np.floor(si).tolist()
-        si = _np.abs(s[i] - _np.floor(si))
+    # distance and positions
+    s_relative = s + base_cols
+    cols = _tf.math.floor(s_relative)
+    s_relative = _tf.math.abs(s - cols)
+    cols = _tf.cast(cols, _tf.int64)
 
-        # weights
-        wi = [- 0.5 * si[0]**3 + 2.5 * si[0]**2 - 4.0 * si[0] + 2.0,
-              1.5 * si[1]**3 - 2.5 * si[1]**2 + 1.0,
-              1.5 * si[2]**3 - 2.5 * si[2]**2 + 1.0,
-              - 0.5 * si[3]**3 + 2.5 * si[3]**2 - 4.0 * si[3] + 2.0]
+    # weights
+    s_0 = s_relative[:, 0]
+    s_1 = s_relative[:, 1]
+    s_2 = s_relative[:, 2]
+    s_3 = s_relative[:, 3]
+    w = _tf.stack(
+        [- 0.5*s_0**3 + 2.5*s_0**2 - 4.0*s_0 + 2.0,
+         1.5*s_1**3 - 2.5*s_1**2 + 1.0,
+         1.5*s_2**3 - 2.5*s_2**2 + 1.0,
+         - 0.5*s_3**3 + 2.5*s_3**2 - 4.0*s_3 + 2.0],
+        axis=1
+    )
 
-        # borders
-        if cols_i[0] == -1:
-            wi = [wi[1] + 3.0 * wi[0],
-                  wi[2] - 3.0 * wi[0],
-                  wi[3] + 1.0 * wi[0]]
-            cols_i = cols_i[1:4]
-        elif cols_i[-1] == x_len:
-            wi = [wi[0] + 1.0 * wi[3],
-                  wi[1] - 3.0 * wi[3],
-                  wi[2] + 3.0 * wi[3]]
-            cols_i = cols_i[0:3]
-        elif cols_i[-1] == x_len + 1:
-            wi = [1]
-            cols_i = [x_len - 1]
+    # borders
+    left_border = _tf.stack(
+        [w[:, 1] + 3.0*w[:, 0],
+         w[:, 2] - 3.0*w[:, 0],
+         w[:, 3] + 1.0*w[:, 0],
+         0*w[:, 0]],
+        axis=1
+    )
+    right_border = _tf.stack(
+        [0 * w[:, 0],
+         w[:, 0] + 1.0*w[:, 3],
+         w[:, 1] - 3.0*w[:, 3],
+         w[:, 2] + 3.0*w[:, 3]],
+        axis=1
+    )
+    last_point = _tf.concat([_tf.zeros([x_new_len, 3], _tf.float64),
+                             _tf.ones([x_new_len, 1], _tf.float64)], axis=1)
 
-        # output
-        rows.extend([i] * len(cols_i))
-        cols.extend(cols_i)
-        vals.extend(wi)
+    w_final = _tf.where(
+        _tf.tile(_tf.expand_dims(_tf.equal(cols[:, 0], -1), 1), [1, 4]),
+        left_border, w
+    )
+    w_final = _tf.where(
+        _tf.tile(_tf.expand_dims(_tf.equal(cols[:, 3], x_len), 1), [1, 4]),
+        right_border, w_final
+    )
+    w_final = _tf.where(
+        _tf.tile(_tf.expand_dims(_tf.equal(cols[:, 3], x_len + 1), 1), [1, 4]),
+        last_point, w_final
+    )
 
-    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=dense_shape)
+    cols_final = _tf.where(
+        _tf.tile(_tf.expand_dims(_tf.equal(cols[:, 0], -1), 1), [1, 4]),
+        cols + 1, cols
+    )
+    cols_final = _tf.where(
+        _tf.tile(_tf.expand_dims(_tf.equal(cols[:, 3], x_len), 1), [1, 4]),
+        cols - 1, cols_final
+    )
+    cols_final = _tf.where(
+        _tf.tile(_tf.expand_dims(_tf.equal(cols[:, 3], x_len + 1), 1), [1, 4]),
+        cols - 2, cols_final
+    )
+
+    # sparse indices
+    rows = _tf.tile(_tf.expand_dims(_tf.range(x_new_len, dtype=_tf.int64), 1),
+                    [1, 4])
+    rows = _tf.reshape(rows, [-1])
+    # cols = _tf.maximum(cols, 0)
+    # cols = _tf.minimum(cols, x_len - 1)
+    cols = _tf.reshape(cols_final, [-1])
+    vals = _tf.reshape(w_final, [-1])
+
+    keep = _tf.squeeze(_tf.where(_tf.not_equal(vals, 0.0)))
+    rows = _tf.gather(rows, keep)
+    cols = _tf.gather(cols, keep)
+    vals = _tf.gather(vals, keep)
+
+    # output
+    indices = _tf.stack([rows, cols], axis=1)
+    w_new = _tf.sparse.SparseTensor(indices, vals, dense_shape)
     return w_new
 
 
-def cubic_conv_2d_sparse(grid_x, grid_y, coords):
-    int_x = cubic_conv_1d_sparse(grid_x, coords[:, 0])
-    int_y = cubic_conv_1d_sparse(grid_y, coords[:, 1])
+def cubic_conv_2d(grid_x, grid_y, coords):
+    int_x = cubic_conv_1d(grid_x, coords[:, 0])
+    int_y = cubic_conv_1d(grid_y, coords[:, 1])
 
-    n_data = coords.shape[0]
-    nx = grid_x.shape[0]
-    ny = grid_y.shape[0]
-
-    rows = []
-    cols = []
-    vals = []
-    for i in range(n_data):
-        cols_x = int_x.col[int_x.row == i]
-        data_x = int_x.data[int_x.row == i]
-
-        cols_y = int_y.col[int_y.row == i]
-        data_y = int_y.data[int_y.row == i]
-
-        data_xy = _np.kron(data_y, data_x)
-        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
-
-        rows.extend([i] * len(cols_x) * len(cols_y))
-        cols.extend(cols_xy.tolist())
-        vals.extend(data_xy.tolist())
-
-    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny])
+    w_new = _tftools.sparse_kronecker_by_rows(int_x, int_y)
     return w_new
 
 
-def cubic_conv_3d_sparse(grid_x, grid_y, grid_z, coords):
-    int_x = cubic_conv_1d_sparse(grid_x, coords[:, 0])
-    int_y = cubic_conv_1d_sparse(grid_y, coords[:, 1])
-    int_z = cubic_conv_1d_sparse(grid_z, coords[:, 2])
+def cubic_conv_3d(grid_x, grid_y, grid_z, coords):
+    int_x = cubic_conv_1d(grid_x, coords[:, 0])
+    int_y = cubic_conv_1d(grid_y, coords[:, 1])
+    int_z = cubic_conv_1d(grid_z, coords[:, 2])
 
-    n_data = coords.shape[0]
-    nx = grid_x.shape[0]
-    ny = grid_y.shape[0]
-    nz = grid_z.shape[0]
-
-    rows = []
-    cols = []
-    vals = []
-    for i in range(n_data):
-        cols_x = int_x.col[int_x.row == i]
-        data_x = int_x.data[int_x.row == i]
-
-        cols_y = int_y.col[int_y.row == i]
-        data_y = int_y.data[int_y.row == i]
-
-        data_xy = _np.kron(data_y, data_x)
-        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
-
-        cols_z = int_z.col[int_z.row == i]
-        data_z = int_z.data[int_z.row == i]
-
-        data_xyz = _np.kron(data_z, data_xy)
-        cols_xyz = _np.concatenate([nx * ny * j + cols_xy for j in cols_z],
-                                   axis=0)
-
-        rows.extend([i] * len(cols_x) * len(cols_y) * len(cols_z))
-        cols.extend(cols_xyz.tolist())
-        vals.extend(data_xyz.tolist())
-
-    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny * nz])
+    w_xy = _tftools.sparse_kronecker_by_rows(int_x, int_y)
+    w_new = _tftools.sparse_kronecker_by_rows(w_xy, int_z)
     return w_new
 
 
-def cubic_conv_1d_parallel(x, xnew, batch_size=1000):
+class CubicSpline(object):
     """
-    Generates a sparse matrix for interpolating from a regular grid to
-    a new set of positions in one dimension.
-
-    Parameters
-    ----------
-    x : array
-        Array of regularly spaced values.
-    xnew : array
-        Positions to receive the interpolated values. Its limits must be
-        confined within the limits of x.
-    batch_size : int
-        Number of points per batch.
-
-    Returns
-    -------
-    w : csc_matrix
-        The weights matrix.
+    Cubic splines.
     """
-    n_data = len(xnew)
-    batch_id = _batch_id(n_data, batch_size)
 
-    def loop_fn(bid):
-        return cubic_conv_1d_sparse(x, xnew[bid])
-
-    pool = _mult.ProcessingPool()
-    out = pool.map(loop_fn, batch_id)
-
-    w_new = _sp.vstack(out)
-    return w_new
-
-
-def cubic_conv_2d_parallel(grid_x, grid_y, coords, batch_size=1000):
-    n_data = coords.shape[0]
-    batch_id = _batch_id(n_data, batch_size)
-
-    def loop_fn(bid):
-        return cubic_conv_2d_sparse(grid_x, grid_y, coords[bid])
-
-    pool = _mult.ProcessingPool()
-    out = pool.map(loop_fn, batch_id)
-
-    w_new = _sp.vstack(out)
-    return w_new
-
-
-def cubic_conv_3d_parallel(grid_x, grid_y, grid_z, coords, batch_size=1000):
-    n_data = coords.shape[0]
-    batch_id = _batch_id(n_data, batch_size)
-
-    def loop_fn(bid):
-        return cubic_conv_3d_sparse(grid_x, grid_y, grid_z, coords[bid])
-
-    pool = _mult.ProcessingPool()
-    out = pool.map(loop_fn, batch_id)
-
-    w_new = _sp.vstack(out)
-    return w_new
-
-
-def inverse_distance_1d_sparse(x, xnew, radius, power=2, epsilon=1):
-    """
-    Generates a sparse matrix for interpolating from a regular grid to
-    a new set of positions in one dimension.
-
-    Parameters
-    ----------
-    x : array
-        Array of regularly spaced values.
-    xnew : array
-        Positions to receive the interpolated values. Its limits must be
-        confined within the limits of x.
-    radius : float
-        The neighborhood search radius, which will correspond to four
-        standard deviations.
-
-    Returns
-    -------
-    w : array
-        The weights matrix.
-    """
-    if _np.std(_np.diff(x)) > 1e-9:
-        raise Exception("array x not equally spaced")
-    if (_np.min(xnew) < _np.min(x)) | (_np.max(xnew) > _np.max(x)):
-        raise Exception("xnew out of bounds")
-
-    # interval and data position
-    h = _np.diff(x)[0]
-    x_len = x.size
-    x_new_len = xnew.size
-    dense_shape = [x_new_len, x_len]
-
-    if radius < h:
-        raise ValueError("radius must be higher than the data spacing."
-                         "Expected at least " + str(h) + "and found"
-                         + str(radius))
-
-    s = (xnew - _np.min(x)) / h
-    # base_cols = _np.array([-3, -2, -1, 0, 1, 2, 3])
-    n_neighbors = _np.floor(radius / h)
-    base_cols = _np.arange(-n_neighbors, n_neighbors + 1)
-
-    rows = []
-    cols = []
-    vals = []
-    for i in range(x_new_len):
-        # position
-        si = s[i] + base_cols
-        si = si[(si >= 0) & (si < x_len)]
-
-        cols_i = _np.floor(si).tolist()
-        si = _np.abs(s[i] - _np.floor(si))
-
-        # weights
-        si = si*h/radius
-        si[si > 1] = 1
-        wi = (epsilon * (1 - si) / (si + epsilon))**power
-        wi = wi / wi.sum()
-        wi = wi.tolist()
-
-        # output
-        rows.extend([i] * len(cols_i))
-        cols.extend(cols_i)
-        vals.extend(wi)
-
-    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=dense_shape)
-    return w_new
-
-
-def inverse_distance_2d_sparse(grid_x, grid_y, coords, radius):
-    int_x = inverse_distance_1d_sparse(grid_x, coords[:, 0], radius)
-    int_y = inverse_distance_1d_sparse(grid_y, coords[:, 1], radius)
-
-    n_data = coords.shape[0]
-    nx = grid_x.shape[0]
-    ny = grid_y.shape[0]
-
-    rows = []
-    cols = []
-    vals = []
-    for i in range(n_data):
-        cols_x = int_x.col[int_x.row == i]
-        data_x = int_x.data[int_x.row == i]
-
-        cols_y = int_y.col[int_y.row == i]
-        data_y = int_y.data[int_y.row == i]
-
-        data_xy = _np.kron(data_y, data_x)
-        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
-
-        rows.extend([i] * len(cols_x) * len(cols_y))
-        cols.extend(cols_xy.tolist())
-        vals.extend(data_xy.tolist())
-
-    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny])
-    return w_new
-
-
-def inverse_distance_3d_sparse(grid_x, grid_y, grid_z, coords, radius):
-    int_x = cubic_conv_1d_sparse(grid_x, coords[:, 0], radius)
-    int_y = cubic_conv_1d_sparse(grid_y, coords[:, 1], radius)
-    int_z = cubic_conv_1d_sparse(grid_z, coords[:, 2], radius)
-
-    n_data = coords.shape[0]
-    nx = grid_x.shape[0]
-    ny = grid_y.shape[0]
-    nz = grid_z.shape[0]
-
-    rows = []
-    cols = []
-    vals = []
-    for i in range(n_data):
-        cols_x = int_x.col[int_x.row == i]
-        data_x = int_x.data[int_x.row == i]
-
-        cols_y = int_y.col[int_y.row == i]
-        data_y = int_y.data[int_y.row == i]
-
-        data_xy = _np.kron(data_y, data_x)
-        cols_xy = _np.concatenate([nx * j + cols_x for j in cols_y], axis=0)
-
-        cols_z = int_z.col[int_z.row == i]
-        data_z = int_z.data[int_z.row == i]
-
-        data_xyz = _np.kron(data_z, data_xy)
-        cols_xyz = _np.concatenate([nx * ny * j + cols_xy for j in cols_z],
-                                   axis=0)
-
-        rows.extend([i] * len(cols_x) * len(cols_y) * len(cols_z))
-        cols.extend(cols_xyz.tolist())
-        vals.extend(data_xyz.tolist())
-
-    w_new = _sp.coo_matrix((vals, (rows, cols)), shape=[n_data, nx * ny * nz])
-    return w_new
-
-
-def inverse_distance_1d_parallel(x, xnew, radius, power=2, epsilon=1,
-                                 batch_size=1000):
-    """
-    Generates a sparse matrix for interpolating from a regular grid to
-    a new set of positions in one dimension.
-
-    Parameters
-    ----------
-    x : array
-        Array of regularly spaced values.
-    xnew : array
-        Positions to receive the interpolated values. Its limits must be
-        confined within the limits of x.
-    batch_size : int
-        Number of points per batch.
-
-    Returns
-    -------
-    w : csc_matrix
-        The weights matrix.
-    """
-    n_data = len(xnew)
-    batch_id = _batch_id(n_data, batch_size)
-
-    def loop_fn(bid):
-        return inverse_distance_1d_sparse(x, xnew[bid], radius, power, epsilon)
-
-    pool = _mult.ProcessingPool()
-    out = pool.map(loop_fn, batch_id)
-
-    w_new = _sp.vstack(out)
-    return w_new
-
-
-def inverse_distance_2d_parallel(grid_x, grid_y, coords, radius, batch_size=1000):
-    n_data = coords.shape[0]
-    batch_id = _batch_id(n_data, batch_size)
-
-    def loop_fn(bid):
-        return inverse_distance_2d_sparse(grid_x, grid_y, coords[bid], radius)
-
-    pool = _mult.ProcessingPool()
-    out = pool.map(loop_fn, batch_id)
-
-    w_new = _sp.vstack(out)
-    return w_new
-
-
-def inverse_distance_3d_parallel(grid_x, grid_y, grid_z, coords, radius,
-                                 batch_size=1000):
-    n_data = coords.shape[0]
-    batch_id = _batch_id(n_data, batch_size)
-
-    def loop_fn(bid):
-        return inverse_distance_3d_sparse(grid_x, grid_y, grid_z, coords[bid], radius)
-
-    pool = _mult.ProcessingPool()
-    out = pool.map(loop_fn, batch_id)
-
-    w_new = _sp.vstack(out)
-    return w_new
-
-
-class Spline(object):
-    """
-    Abstract spline class
-    
-    Objects can be called like a function to interpolate at new positions.
-    """
-    
-    # basic interpolation methods
+    # Hermite spline functions
     @staticmethod
-    def _phi(t, n_deriv=0):
-        if n_deriv == 0:
-            return 3*t**2 - 2*t**3
-        elif n_deriv == 1:
-            return 6*t - 6*t**2
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
+    def _phi(t):
+        return 3 * t ** 2 - 2 * t ** 3
 
     @staticmethod
-    def _psi(t, n_deriv=0):
-        if n_deriv == 0:
-            return t**3 - t**2
-        elif n_deriv == 1:
-            return 3*t**2 - 2*t
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
+    def _phi_d1(t):
+        return 6 * t - 6 * t ** 2
 
     @staticmethod
-    def _h1(x, x1, x2, n_deriv=0):
+    def _psi(t):
+        return t ** 3 - t ** 2
+
+    @staticmethod
+    def _psi_d1(t):
+        return 3 * t ** 2 - 2 * t
+
+    @staticmethod
+    def _h1(x, x1, x2):
         h = x2 - x1
-        if n_deriv == 0:
-            return Spline._phi((x2 - x)/h)
-        elif n_deriv == 1:
-            return Spline._phi((x2 - x)/h, 1)*(-1/h)
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
+        return CubicSpline._phi((x2 - x) / h)
 
     @staticmethod
-    def _h2(x, x1, x2, n_deriv=0):
+    def _h1_d1(x, x1, x2):
         h = x2 - x1
-        if n_deriv == 0:
-            return Spline._phi((x - x1)/h)
-        elif n_deriv == 1:
-            return Spline._phi((x - x1)/h, 1)/h
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
-        
+        return CubicSpline._phi_d1((x2 - x) / h) * (-1 / h)
+
     @staticmethod
-    def _h3(x, x1, x2, n_deriv=0):
+    def _h2(x, x1, x2):
         h = x2 - x1
-        if n_deriv == 0:
-            return - h * Spline._psi((x2 - x)/h)
-        elif n_deriv == 1:
-            return Spline._psi((x2 - x)/h, 1)
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
-            
+        return CubicSpline._phi((x - x1) / h)
+
     @staticmethod
-    def _h4(x, x1, x2, n_deriv=0):
+    def _h2_d1(x, x1, x2):
         h = x2 - x1
-        if n_deriv == 0:
-            return + h * Spline._psi((x - x1)/h)
-        elif n_deriv == 1:
-            return Spline._psi((x - x1)/h, 1)
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
+        return CubicSpline._phi_d1((x - x1) / h) / h
 
     @staticmethod
-    def _poly(x, x1, x2, f1, f2, d1, d2, n_deriv=0):
-        return f1*Spline._h1(x, x1, x2, n_deriv) \
-               + f2*Spline._h2(x, x1, x2, n_deriv) \
-               + d1*Spline._h3(x, x1, x2, n_deriv) \
-               + d2*Spline._h4(x, x1, x2, n_deriv)
+    def _h3(x, x1, x2):
+        h = x2 - x1
+        return - h * CubicSpline._psi((x2 - x) / h)
 
-    def __call__(self, x2, n_deriv=0):
-        """
-        Interpolation at new positions. Extrapolation is done linearly.
-        """
-        yout = _np.repeat(0.0, x2.size)
-        x = self.x
-        y = self.y
-        d = self.d
+    @staticmethod
+    def _h3_d1(x, x1, x2):
+        h = x2 - x1
+        return CubicSpline._psi_d1((x2 - x) / h)
 
-        # values outside limits
-        if n_deriv == 0:
-            yout[x2 < x[0]] = y[0] + d[0] * (x2[x2 < x[0]] - x[0])
-            yout[x2 >= x[-1]] = y[-1] + d[-1] * (x2[x2 >= x[-1]] - x[-1])
-        elif n_deriv == 1:
-            yout[x2 < x[0]] = d[0]
-            yout[x2 >= x[-1]] = d[-1]
-        else:
-            raise ValueError("n_deriv must be 0 or 1")
+    @staticmethod
+    def _h4(x, x1, x2):
+        h = x2 - x1
+        return h * CubicSpline._psi((x - x1) / h)
 
-        # values inside limits
-        for i in range(d.size - 1):
-            pos = ((x2 >= x[i]) & (x2 < x[i + 1]))
-            yout[pos] = Spline._poly(x2[pos],
-                                     x[i], x[i + 1],
-                                     y[i], y[i + 1],
-                                     d[i], d[i + 1],
-                                     n_deriv)
+    @staticmethod
+    def _h4_d1(x, x1, x2):
+        h = x2 - x1
+        return CubicSpline._psi_d1((x - x1) / h)
 
-        return yout
+    @staticmethod
+    def _poly(x, x1, x2, f1, f2, d1, d2):
+        return f1 * CubicSpline._h1(x, x1, x2) \
+               + f2 * CubicSpline._h2(x, x1, x2) \
+               + d1 * CubicSpline._h3(x, x1, x2) \
+               + d2 * CubicSpline._h4(x, x1, x2)
+
+    @staticmethod
+    def _poly_d1(x, x1, x2, f1, f2, d1, d2):
+        return f1 * CubicSpline._h1_d1(x, x1, x2) \
+               + f2 * CubicSpline._h2_d1(x, x1, x2) \
+               + d1 * CubicSpline._h3_d1(x, x1, x2) \
+               + d2 * CubicSpline._h4_d1(x, x1, x2)
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.d = _tf.ones_like(x)
+        self.refresh(x, y)
+
+    def refresh(self, x, y):
+        self.x = x
+        self.y = y
+
+        w = x[1:] - x[:-1]
+        s = (y[1:] - y[:-1]) / w
+        self.d = _tf.concat([
+            _tf.expand_dims(s[0], axis=0),
+            (s[:-1] * w[1:] + s[1:] * w[:-1]) / (w[1:] + w[:-1]),
+            _tf.expand_dims(s[-1], axis=0),
+        ], axis=0)
+
+    def interpolate(self, xnew):
+        with _tf.name_scope("cubic_interpolation"):
+            x = self.x
+            y = self.y
+            d = self.d
+
+            n_knots = _tf.shape(x)[0]
+
+            x = _tf.expand_dims(x, 1)
+            xnew = _tf.expand_dims(xnew, 0)
+            le = _tf.less_equal(x, xnew)
+            pos = _tf.reduce_sum(_tf.cast(le, _tf.int32), axis=0)
+            x = _tf.squeeze(x)
+            xnew = _tf.squeeze(xnew)
+
+            ynew = _tf.where(_tf.equal(pos, 0),
+                             y[0] + d[0] * (xnew - x[0]),
+                             _tf.where(_tf.equal(pos, n_knots),
+                                       y[-1] + d[-1] * (xnew - x[-1]),
+                                       CubicSpline._poly(xnew,
+                                                         _tf.gather(x, pos-1),
+                                                         _tf.gather(x, pos),
+                                                         _tf.gather(y, pos-1),
+                                                         _tf.gather(y, pos),
+                                                         _tf.gather(d, pos-1),
+                                                         _tf.gather(d, pos))))
+        return ynew
+
+    def interpolate_d1(self, xnew):
+        with _tf.name_scope("cubic_interpolation_d1"):
+            x = self.x
+            y = self.y
+            d = self.d
+
+            n_knots = _tf.shape(x)[0]
+
+            x = _tf.expand_dims(x, 1)
+            xnew = _tf.expand_dims(xnew, 0)
+            le = _tf.less_equal(x, xnew)
+            pos = _tf.reduce_sum(_tf.cast(le, _tf.int32), axis=0)
+            x = _tf.squeeze(x)
+            xnew = _tf.squeeze(xnew)
+
+            ynew = _tf.where(_tf.equal(pos, 0),
+                             d[0],
+                             _tf.where(_tf.equal(pos, n_knots),
+                                       d[-1],
+                                       CubicSpline._poly_d1(
+                                           xnew,
+                                           _tf.gather(x, pos - 1),
+                                           _tf.gather(x, pos),
+                                           _tf.gather(y, pos - 1),
+                                           _tf.gather(y, pos),
+                                           _tf.gather(d, pos - 1),
+                                           _tf.gather(d, pos))))
+        return ynew
 
 
-class MonotonicSpline(Spline):
+class MonotonicCubicSpline(CubicSpline):
     """
-    Implementation of the monotonic spline algorithm by Fritsch and Carlson
-    (1980).
+    Implementation of the monotonic spline algorithm by Steffen (1990).
 
     Attributes
     ----------
-    x, y : array
+    x, y : Tensor
         The knots that define the spline.
-    d : array
-        The derivative of y at the points x, found internally to preserve
+    d : Tensor
+        The derivative of y at the points x, adjusted to preserve
         monotonicity.
-    region : int
-        May affect the spline's shape. Refer to the original paper for details.
     """
-    
-    def __find_d(self, region=1):
-        """
-        Starting from a standard cubic spline, adjusts the derivatives
-        at the data points to ensure monotonicity. 
-        
-        The region argument takes values from 1 to 4, each one increasing 
-        the constraints in the possible values for the derivatives. Details
-        can be found in the original paper, but the default will be
-        sufficient for most applications.
-        """
-        x = self.x
-        y = self.y
-        if not (region in [1, 2, 3, 4]):
-            raise Exception("region must be either 1, 2, 3, or 4")
-        if not ((_np.diff(x) >= 0).all()):
-            raise Exception("x is not monotonic")
-        if not ((_np.diff(y) >= 0).all() | (_np.diff(y) <= 0).all()):
-            raise Exception("y is not monotonic")
-        
-        delta = _np.diff(y) / _np.diff(x)
-        sp = _interp.CubicSpline(x, y)
-        d = sp(x, 1)
-        d[d < 0] = 0
-        if d[0] == 0:
-            d[0] = delta[0]
-        if d[-1] == 0:
-            d[-1] = delta[-1]
-        d1 = d[range(0, d.size - 1)]
-        d2 = d[range(1, d.size)]
-        alpha = d1 / (delta + 1e-6)
-        beta = d2 / (delta + 1e-6)
-        
-        for i in range(d1.size):
-            # region 1
-            if (alpha[i] > beta[i]) & (alpha[i] > 3):
-                k = alpha[i] / (beta[i] + 1e-6)
-                alpha[i] = 3
-                beta[i] = 3 / k
-            elif beta[i] > 3:
-                k = beta[i] / (alpha[i] + 1e-6)
-                beta[i] = 3
-                alpha[i] = 3 / k
-            # region 2
-            if region >= 2:
-                r = _np.sqrt(alpha[i] ** 2 + beta[i] ** 2) + 1e-6
-                if r > 3:
-                    alpha[i] = alpha[i] * 3 / r
-                    beta[i] = beta[i] * 3 / r
-            # region 3
-            if region >= 3:
-                s = alpha[i] + beta[i]
-                if s > 3:
-                    alpha[i], beta[i] = 3*alpha[i]/s, 3*beta[i]/s
-            # region 4
-            if region == 4:
-                if alpha[i] > beta[i]:
-                    if alpha[i] > (3-beta[i])/2:
-                        k = alpha[i] / (beta[i] + 1e-6)
-                        beta[i] = 3 / (2*k + 1)
-                        alpha[i] = (3-beta[i])/2
-                else:
-                    if beta[i] > (3-alpha[i])/2:
-                        k = beta[i] / (alpha[i] + 1e-6)
-                        alpha[i] = 3 / (2*k + 1)
-                        beta[i] = (3-alpha[i])/2        
-            # updating derivatives
-            d1[i] = alpha[i] * delta[i]
-            d2[i] = beta[i] * delta[i]
-            if i < alpha.size - 1:
-                d1[i+1] = d2[i]
-                alpha[i+1] = d1[i+1] / (delta[i+1] + 1e-6)
-        
-        self.d = _np.append(d1, d2[-1])
-        self._alpha = alpha
-        self._beta = beta
-    
-    def __init__(self, x, y, region=1):
+    def refresh(self, x, y):
         self.x = x
         self.y = y
-        self.region = region
-        self.__find_d(region)
+
+        w = x[1:] - x[:-1]
+        s = (y[1:] - y[:-1]) / w
+
+        p = (s[:-1] * w[1:] + s[1:] * w[:-1]) / (w[1:] + w[:-1])
+        s_max = 2 * _tf.reduce_min(_tf.stack([s[:-1], s[1:]], axis=0), axis=0)
+
+        d = _tf.where(_tf.greater(p, s_max), s_max, p)
+
+        self.d = _tf.concat([
+            _tf.expand_dims(s[0], axis=0),
+            d,
+            _tf.expand_dims(s[-1], axis=0),
+        ], axis=0)

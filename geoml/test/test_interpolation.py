@@ -1,63 +1,150 @@
 import numpy as np
-# import tensorflow as tf
+import tensorflow as tf
+import matplotlib.pyplot as plt
 
 import geoml
 import timeit
 
-# cubic_conv_1D
+# cubic_conv_1d
 x = np.linspace(0, 10, 11)
 np.random.seed(1234)
 xnew = np.random.uniform(0, 10, 100)
 
-w_np = geoml.interpolation.cubic_conv_1d(x, xnew)
-w_sp = geoml.interpolation.cubic_conv_1d_sparse(x, xnew)
-w_sp = w_sp.todense()
-w_par = geoml.interpolation.cubic_conv_1d_parallel(x, xnew)
-w_par = w_par.todense()
+x = tf.constant(x)
+xnew = tf.constant(xnew)
+w = geoml.interpolation.cubic_conv_1d(x, xnew)
+w2 = tf.sparse.to_dense(w)
 
-assert (np.abs(w_np - w_sp) < 1e-9).all()
-assert (np.abs(w_np - w_par) < 1e-9).all()
 
 # speed
 setup = """
+import tensorflow as tf
 import numpy as np
 import geoml
 
 x = np.linspace(0, 10, 1001)
 np.random.seed(1234)
 xnew = np.random.uniform(0, 10, 10000)
+
+x = tf.constant(x)
+xnew = tf.constant(xnew)
+# warming up
+geoml.interpolation.cubic_conv_1d(x, xnew)
 """
 timeit.timeit("geoml.interpolation.cubic_conv_1d(x, xnew)", 
-              setup=setup, number=10)
-timeit.timeit("geoml.interpolation.cubic_conv_1d_sparse(x, xnew)", 
-              setup=setup, number=10)
-timeit.timeit("geoml.interpolation.cubic_conv_1d_parallel(x, xnew)", 
-              setup=setup, number=10)
+              setup=setup, number=100) # ~1.6s
+
+
+# cubic_conv_2d
+x = np.linspace(0, 10, 11)
+np.random.seed(1234)
+xnew = np.random.uniform(0, 10, [100, 2])
+
+x = tf.constant(x)
+xnew = tf.constant(xnew)
+w = geoml.interpolation.cubic_conv_2d(x, x, xnew)
+w2 = tf.sparse.to_dense(w)
 
 setup = """
 import numpy as np
+import tensorflow as tf
 import geoml
 
 x = np.linspace(0, 10, 1001)
 np.random.seed(1234)
-xnew = np.random.uniform(0, 1, [10000, 2])
+xnew = np.random.uniform(0, 10, [10000, 2])
+
+x = tf.constant(x)
+xnew = tf.constant(xnew)
+geoml.interpolation.cubic_conv_2d(x, x, xnew)
 """
-timeit.timeit("geoml.interpolation.cubic_conv_2d_sparse(x, x, xnew)", 
-              setup=setup, number=10)
-timeit.timeit("geoml.interpolation.cubic_conv_2d_parallel(x, x, xnew)", 
-              setup=setup, number=10)
+timeit.timeit("geoml.interpolation.cubic_conv_2d(x, x, xnew)", 
+              setup=setup, number=10) # ~125s
 
 
-# gaussian
-#x = np.linspace(0, 10, 11)
-#np.random.seed(1234)
-#xnew = np.random.uniform(0, 10, 100)
-#xnew = np.linspace(0, 10, 1001)
-#
-#w_inv = geoml.interpolation.inverse_distance_1d_sparse(
-#        x, xnew, radius=5, power=2, epsilon=0.01)
-#w_inv = w_inv.todense()
-#
-#y = np.sin(x) + 2*np.cos(x+1) + 2
-#ynew = np.matmul(w_inv, np.expand_dims(y, 1))
-#plt.plot(x, y, "ok", xnew, ynew, "-r")
+
+# cubic_conv_3d
+x = np.linspace(0, 10, 11)
+np.random.seed(1234)
+xnew = np.random.uniform(0, 10, [100, 3])
+
+x = tf.constant(x)
+xnew = tf.constant(xnew)
+w = geoml.interpolation.cubic_conv_3d(x, x, x, xnew)
+w2 = tf.sparse.to_dense(w)
+
+setup = """
+import numpy as np
+import tensorflow as tf
+import geoml
+
+x = np.linspace(0, 10, 1001)
+np.random.seed(1234)
+xnew = np.random.uniform(0, 10, [10000, 3])
+
+x = tf.constant(x)
+xnew = tf.constant(xnew)
+geoml.interpolation.cubic_conv_3d(x, x, x, xnew)
+"""
+timeit.timeit("geoml.interpolation.cubic_conv_3d(x, x, x, xnew)", 
+              setup=setup, number=10) # ??s
+
+
+# interpolating spline
+x = tf.sort(tf.random.stateless_uniform([10], maxval=10, dtype=tf.float64, 
+                                        seed=[4321, 0]))
+y = tf.math.sin(x*3)
+xnew = tf.cast(tf.linspace(-1.0, 11.0, 1001), tf.float64)
+
+spline = geoml.interpolation.CubicSpline(x, y)
+ynew = spline.interpolate(xnew)
+ynew_d1 = spline.interpolate_d1(xnew)
+
+plt.plot(xnew.numpy(), ynew.numpy(), "-r")
+plt.plot(x.numpy(), y.numpy(), "ok")
+plt.plot(xnew.numpy(), ynew_d1.numpy(), "-g")
+plt.plot(x.numpy(), spline.d.numpy(), "og")
+
+y_mono = tf.cumsum(tf.math.abs(y))
+spline_mono = geoml.interpolation.MonotonicCubicSpline(x, y_mono)
+
+ynew_mono = spline_mono.interpolate(xnew)
+ynew_mono_d1 = spline_mono.interpolate_d1(xnew)
+
+plt.plot(xnew.numpy(), ynew_mono.numpy(), "-r")
+plt.plot(x.numpy(), y_mono.numpy(), "ok")
+plt.plot(xnew.numpy(), ynew_mono_d1.numpy(), "-g")
+plt.plot(x.numpy(), spline_mono.d.numpy(), "og")
+plt.hlines(0, -1, 11, linestyles="dashed")
+
+
+setup = """
+import numpy as np
+import tensorflow as tf
+import geoml
+
+x = tf.sort(tf.random.stateless_uniform([10], maxval=10, dtype=tf.float64, 
+                                        seed=[4321, 0]))
+y = tf.math.sin(x*3)
+y_mono = tf.cumsum(tf.math.abs(y))
+spline_mono = geoml.interpolation.MonotonicCubicSpline(x, y_mono)
+
+xnew = tf.cast(tf.linspace(-1.0, 11.0, 10001), tf.float64)
+ynew_mono = spline_mono.interpolate(xnew)
+"""
+timeit.timeit("ynew_mono = spline_mono.interpolate(xnew)", 
+              setup=setup, number=10) # 0.013s
+
+setup = """
+import numpy as np
+import tensorflow as tf
+import geoml
+
+x = tf.sort(tf.random.stateless_uniform([10000], maxval=10, dtype=tf.float64, 
+                                        seed=[4321, 0]))
+y = tf.math.sin(x*3)
+y_mono = tf.cumsum(tf.math.abs(y))
+spline_mono = geoml.interpolation.MonotonicCubicSpline(x, y_mono)
+"""
+timeit.timeit("spline_mono = geoml.interpolation.MonotonicCubicSpline(x, y_mono)", 
+              setup=setup, number=10) # 0.034s

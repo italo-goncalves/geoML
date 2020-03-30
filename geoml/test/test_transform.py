@@ -27,7 +27,7 @@ with g.as_default():
     test_identity = tr_identity.forward(coords)
     test_isotropic = tr_isotropic.forward(coords)
     test_anis_2D = tr_anis_2D.forward(coords)
-    test_proj = tr_proj.backward(coords)
+    test_proj = tr_proj.__call__(coords)
     
     init = tf.global_variables_initializer()
 

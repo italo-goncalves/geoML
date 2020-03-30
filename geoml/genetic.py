@@ -8,21 +8,19 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as _np
-from scipy.spatial import distance_matrix as _distance_matrix
-
-# All real chromosomes are normalized to lie in the [0,1] interval
+# from scipy.spatial import distance_matrix as _distance_matrix
 
 
 def real_mutation_radial(parent, temperature):
     """
-    Treats the chromossome as coordinate in Euclidean space, shifting it
+    Treats the chromossome as coordinates in Euclidean space, shifting it
     a small distance in a random direction.
     """
     min_val = parent - temperature
@@ -49,7 +47,27 @@ def real_mutation_parallel(parent, temperature):
     return parent*(1-change) + child*change
 
 
-def real_crossover_1p(parent1, parent2):
+def real_mutation_step(parent, temperature):
+    """
+    Treats the chromossome as coordinates in Euclidean space, shifting it
+    0.1% in a random direction.
+    """
+    min_val = parent - 0.001
+    max_val = parent + 0.001
+
+    child = parent + _np.random.uniform(min_val, max_val, len(parent))
+    child[child < 0] = 0
+    child[child > 0] = 0
+    return child
+
+
+MUTATIONS_REAL = (real_mutation_radial,
+                  real_mutation_parallel,
+                  real_mutation_step,
+                  )
+
+
+def crossover_1p(parent1, parent2):
     """One-point crossover"""
     xp = _np.random.choice(len(parent1) - 1, 1)
     child1 = parent1.copy()
@@ -59,10 +77,10 @@ def real_crossover_1p(parent1, parent2):
     return child1, child2
 
 
-def real_crossover_2p(parent1, parent2):
+def crossover_2p(parent1, parent2):
     """Two-point crossover"""
     if len(parent1) < 3:
-        return real_crossover_1p(parent1, parent2)
+        return crossover_1p(parent1, parent2)
     
     xp1 = _np.random.choice(len(parent1) - 2, 1)
     xp2 = _np.random.choice(_np.arange(xp1 + 1, len(parent1) - 1), 1)
@@ -81,243 +99,239 @@ def real_crossover_average(parent1, parent2):
     child2 = frac[1]*parent1 + (1-frac[1])*parent2
     return child1, child2
 
-    
-def _find_min_count(d):
+
+CROSSOVERS_REAL = (crossover_1p,
+                   crossover_2p,
+                   real_crossover_average)
+
+
+def integer_mutation_parallel(parent, temperature, n_vals):
     """
-    For a given distance matrix, finds the minimum distance that gives at
-    least a count of 1 neighbor for all points.
+    Treats the chromosome as individual values. The temperature parameter
+    controls the probability of change for each value. If a value is changed,
+    it can take any value in its range.
     """
-    if d.sum() == 0:
-        return 0
-    
-    d2 = _np.tril(d, -1)
-    d2 = d2[d2 > 0]
-    
-    for i in range(1000):
-        x = (d2.max() - d2.min())*i/1000 + d2.min()
-        count = (d <= x).sum(0) - 1  # discounting the diagonal
-        if count.min() == 1:
-            break
-    return x
+
+    # controls which values will be changed
+    change = _np.random.choice([0, 1], size=len(parent), replace=True,
+                               p=(1 - temperature, temperature))
+    change = _np.where(change == 1)[0]
+
+    if change.shape[0] == 0:
+        return parent
+
+    vals = _np.arange(n_vals)
+    for pos in change:
+        parent[pos] = _np.random.choice(vals, size=1)[0]
+    return parent
 
 
-def _share_fitness(popmatrix, fitvec):
-    """
-    Shares fitness based on the number of neighbors within the radius
-    that gives at least 1 neighbor for each individual.
-  
-    Returns a vector with positive values representing relative probability
-    for selection.
-    """
-    # d = _distance_matrix(popmatrix, popmatrix)
+INTEGER_MUTATIONS = (integer_mutation_parallel)
 
-    # cosine distance
-    n_var = popmatrix.shape[1]
-    popmatrix = popmatrix*2 - 1
-    d = 1 - _np.matmul(popmatrix, _np.transpose(popmatrix)) / n_var
 
-    dmin = _find_min_count(d) + 1e-6
-    
-    # sh contains the distances above the threshold
-    sh = _np.ones_like(d)
-    sh = sh - d/dmin
-    sh[sh < 0] = 0
-    
-    # weights
-    w = sh.sum(0)
-    
-    amp = fitvec.max() - fitvec.min()
-    if amp == 0:
-        amp = 10
-    fitvec = fitvec - fitvec.min() + 0.1*amp
-    p = fitvec / w + 1e-6
-    p = p / _np.sum(p)
-    return p
+# def _find_min_count(d):
+#     """
+#     For a given distance matrix, finds the minimum distance that gives at
+#     least a count of 1 neighbor for all points.
+#     """
+#     if d.sum() == 0:
+#         return 0
+#
+#     d2 = _np.tril(d, -1)
+#     d2 = d2[d2 > 0]
+#
+#     for i in range(1000):
+#         x = (d2.max() - d2.min())*i/1000 + d2.min()
+#         count = (d <= x).sum(0) - 1  # discounting the diagonal
+#         if count.min() == 1:
+#             break
+#     return x
+#
+#
+# def _share_fitness(popmatrix, fitvec):
+#     """
+#     Shares fitness based on the number of neighbors within the radius
+#     that gives at least 1 neighbor for each individual.
+#
+#     Returns a vector with positive values representing relative probability
+#     for selection.
+#     """
+#     # d = _distance_matrix(popmatrix, popmatrix)
+#
+#     # cosine distance
+#     n_var = popmatrix.shape[1]
+#     popmatrix = popmatrix*2 - 1
+#     d = 1 - _np.matmul(popmatrix, _np.transpose(popmatrix)) / n_var
+#
+#     dmin = _find_min_count(d) + 1e-6
+#
+#     # sh contains the distances above the threshold
+#     sh = _np.ones_like(d)
+#     sh = sh - d/dmin
+#     sh[sh < 0] = 0
+#
+#     # weights
+#     w = sh.sum(0)
+#
+#     amp = fitvec.max() - fitvec.min()
+#     if amp == 0:
+#         amp = 10
+#     fitvec = fitvec - fitvec.min() + 0.1*amp
+#     p = fitvec / w + 1e-6
+#     p = p / _np.sum(p)
+#     return p
 
-    
-def training_real(fitness, minval, maxval, popsize=50,
-                  mutation=(real_mutation_parallel, real_mutation_radial),
-                  crossover=(real_crossover_1p, real_crossover_2p, real_crossover_average),
-                  mut_prob=0.35, max_iter=1000,
-                  tol=0.1, stopping=None,
-                  seed=None,
-                  start=None, verbose=True):
-    """
-    Genetic optimizer for real-valued chromosomes.
 
-    This genetic algorithm works by selecting two individuals from the
-    population, performing crossover and mutation. The new individuals replace
-    the ones with the smallest fitness.
-    
-    Individuals are selected using fitness sharing to preserve diversity.
+class GeneticOptimizer:
+    def __init__(self, generator, fitness, mutations, crossovers):
+        self.generator = generator
+        self.fitness = fitness
+        self.popsize = 50
+        self.mutations = mutations
+        self.crossovers = crossovers
+        self.mut_prob = 0.35
+        self.seed = None
+        self.population = []
+        self.best_solution = None
+        self.best_fitness = None
+        self.evolution_log = []
+        self.verbose = True
+        self.temperature = 0.5
 
-    Parameters
-    ----------
-    fitness : function
-        A function that takes an array vector as the only parameter and returns
-        a scalar. The function to be maximized.
-    minval : array
-        The lower limits for the chromosomes.
-    maxval : array
-        The upper limits for the chromosomes.
-    popsize : int
-        Number of individuals in the population.
-    mutation : tuple or list
-        The allowed mutation functions.
-    crossover : tuple or list
-        The allowed crossover functions.
-    mut_prob : double
-        The probability for mutation.
-    max_iter : int
-        The maximum number of iterations.
-    tol : double
-        Minimum expected improvement of the fitness function. An improvement
-        less than tol does not count as an improvement for the algorithm's
-        counter.
-    stopping : int
-        Maximum number of iterations without improvement. The algorithm will
-        stop if this value is reached.
-    seed : int
-        Optional seed number.
-    start : array
-        Optional starting point for the algorithm. Will be included in the
-        initial population.
-    verbose : bool
-        Whether to print information on console.
+    def populate(self, start=None):
+        """Resets population"""
+        if self.seed is not None:
+            _np.random.seed(self.seed)
 
-    Returns
-    -------
-    out : dict
-        A dictionary with the following items:
-            best_sol : array
-                The best solution found by the algorithm.
-            best_fitness : double
-                The optimized fitness value.
-            last_pop : array
-                The state of the population when the algorithm stops.
-            evolution : array
-                The fitness values for the whole population for each iteration.
+        self.population = start if start is not None else []
+        while len(self.population) < self.popsize:
+            self.population.append(self.generator())
 
-    """
-    # checking
-    if len(minval) != len(maxval):
-        raise ValueError("maxval and minval have different lengths")
-    if start is not None:
-        if len(start) != len(maxval):
-            raise ValueError("wrong length for starting point")
-    if stopping is None:
-        stopping = _np.ceil(max_iter / 5)
-    if seed is not None:
-        _np.random.seed(seed)
-        
-    # initialization
-    val_length = len(maxval)
-    popmatrix = _np.random.uniform(0, 1, (popsize, val_length))
-    if start is not None:
-        start = (start - minval)/(maxval - minval + 1e-9)
-        popmatrix[0, :] = start
-    
-    fitvec = _np.zeros(popsize)
-    if verbose:
-        print("Initializing population", end="")
-    for i in range(popsize):
-        if verbose:
-            print(".", end="")
-        fitvec[i] = fitness(popmatrix[i, :]*(maxval - minval) + minval)
-    if verbose:
-        print("\n")
-    fitmatrix = _np.zeros((popsize, max_iter + 1))
-    fitmatrix[:, 0] = fitvec
- 
-    best_fitness = fitvec.max()
-    best_sol = popmatrix[_np.where(fitvec == best_fitness)[0], :]
-    
-    # main loop
-    stagnation = 0
-    temperature = 1
-    if verbose: 
-        print("Iteration 0 | Best fitness = " + str(best_fitness), end="")
-    for i in range(max_iter):
+        fit_list = []
+        for i, elem in enumerate(self.population):
+            if self.verbose:
+                print("\rInitializing population: " + str(i) + "       ",
+                      end="")
+            fit_list.append(self.fitness(elem))
+        if self.verbose:
+            print("\n")
+
+        fitvec = _np.array(fit_list)
+        self.evolution_log = [fitvec]
+        self.best_fitness = _np.max(fitvec)
+        self.best_solution = self.population[int(_np.argmax(fitvec))]
+
+    def iterate(self, replace_worst=False):
+        """One iteration of training"""
         # selection
+        fitvec = self.evolution_log[-1].copy()
         # p = _share_fitness(popmatrix, fitvec)
         p = fitvec - fitvec.min()
-        p = p + 0.1*p.max() + 1e-6
-        p = p/p.sum()
-        sel = _np.random.choice(popsize, 2, replace=False, p=p)
-        
+        p = p + 0.1 * p.max() + 1e-6
+        p = p / p.sum()
+        sel = _np.random.choice(self.popsize, 2, replace=False, p=p)
+
         # crossover/mutation
-        crossfun = _np.random.choice(crossover)
-        child1, child2 = crossfun(popmatrix[sel[0], :], popmatrix[sel[1], :])
-        
-        mutfun = _np.random.choice(mutation)
-        if _np.random.uniform() < mut_prob:
-            child1 = mutfun(child1, temperature)
-        if _np.random.uniform() < mut_prob:
-            child2 = mutfun(child2, temperature)
-        
-        # update population
-        if i/max_iter > 0.7:
+        crossfun = _np.random.choice(self.crossovers)
+        child1, child2 = crossfun(self.population[sel[0]],
+                                  self.population[sel[1]])
+
+        mutfun = _np.random.choice(self.mutations)
+        if _np.random.uniform() < self.mut_prob:
+            child1 = mutfun(child1, self.temperature)
+        if _np.random.uniform() < self.mut_prob:
+            child2 = mutfun(child2, self.temperature)
+
+        # updating population
+        if replace_worst:
             # replace smallest fitness - more aggressive
-            tmp_fitness = fitness(child1*(maxval - minval) + minval)
+            tmp_fitness = self.fitness(child1)
             pos = _np.where(fitvec == fitvec.min())[0][0]
             if tmp_fitness > fitvec[pos]:
                 fitvec[pos] = tmp_fitness
-                popmatrix[pos, :] = child1
-            tmp_fitness = fitness(child2*(maxval - minval) + minval)
+                self.population[pos] = child1
+            tmp_fitness = self.fitness(child2)
             pos = _np.where(fitvec == fitvec.min())[0][0]
             if tmp_fitness > fitvec[pos]:
                 fitvec[pos] = tmp_fitness
-                popmatrix[pos, :] = child2
+                self.population[pos] = child2
         else:
             # replacing parents if better - preserves diversity
-            tmp_fitness = fitness(child1 * (maxval - minval) + minval)
+            tmp_fitness = self.fitness(child1)
             if (fitvec[sel[0]] < fitvec[sel[1]]) & \
                     (fitvec[sel[0]] < tmp_fitness):
                 fitvec[sel[0]] = tmp_fitness
-                popmatrix[sel[0], :] = child1
+                self.population[sel[0]] = child1
             elif (fitvec[sel[1]] < fitvec[sel[0]]) & \
                     (fitvec[sel[1]] < tmp_fitness):
                 fitvec[sel[1]] = tmp_fitness
-                popmatrix[sel[1], :] = child1
-            tmp_fitness = fitness(child2 * (maxval - minval) + minval)
+                self.population[sel[1]] = child1
+            tmp_fitness = self.fitness(child2)
             if (fitvec[sel[0]] < fitvec[sel[1]]) & \
                     (fitvec[sel[0]] < tmp_fitness):
                 fitvec[sel[0]] = tmp_fitness
-                popmatrix[sel[0], :] = child2
+                self.population[sel[0]] = child2
             elif (fitvec[sel[1]] < fitvec[sel[0]]) & \
                     (fitvec[sel[1]] < tmp_fitness):
                 fitvec[sel[1]] = tmp_fitness
-                popmatrix[sel[1], :] = child2
+                self.population[sel[1]] = child2
 
-        # stopping criterion
-        fitmatrix[:, i + 1] = fitvec
-        ev = fitvec.max() - best_fitness
-        best_fitness = fitvec.max()
-        best_sol = popmatrix[_np.where(fitvec == best_fitness)[0], :]
-        if ev < tol:
-            stagnation += 1
-            temperature = _np.maximum(0.05, _np.minimum(temperature + 0.001,
-                                                        (1 - i / max_iter) ** 2))
-        else:
-            stagnation = 0
-            temperature = 0.05
-        if stagnation >= stopping:
-            if verbose:
-                print("\nTerminating training at iteration " + str(i+1))
-            break
-        elif verbose:
-            print("\rIteration: " + str(i + 1) + " | Best fitness: " +
-                  str(fitvec.max()) + " | Improvement <" + str(tol) + " for " +
-                  str(stagnation) + "/" + str(stopping) +
-                  " iterations        ", sep="", end="")
-    fitmatrix = fitmatrix[:, slice(i)]
-    
-    # output
-    for i in range(popsize):
-        popmatrix[i, :] = popmatrix[i, :]*(maxval - minval) + minval
-    best_sol = best_sol*(maxval - minval) + minval
-    out = {"best_sol": best_sol[0],
-           "best_fitness": best_fitness,
-           "last_pop": popmatrix,
-           "evolution": fitmatrix}
-    return out
+        # updating log
+        self.evolution_log.append(fitvec)
+        self.best_fitness = _np.max(fitvec)
+        self.best_solution = self.population[int(_np.argmax(fitvec))]
+
+    def optimize(self, max_iter=1000, popsize=50, mut_prob=0.35, tol=0.1,
+                 patience=None, seed=None, start=None):
+        self.popsize = popsize
+        self.mut_prob = mut_prob
+        self.seed = seed
+
+        if patience is None:
+            patience = _np.ceil(max_iter / 5)
+
+        self.populate(start)
+
+        stagnation = 0
+        self.temperature = 1
+        best_fitness = self.best_fitness
+        if self.verbose:
+            print("Iteration 0 | Best fitness = " + str(self.best_fitness),
+                  end="")
+        for i in range(max_iter):
+            self.iterate(replace_worst=i / max_iter > 0.7)
+
+            ev = self.best_fitness - best_fitness
+            if ev < tol:
+                stagnation += 1
+                self.temperature = _np.maximum(0.05, _np.minimum(
+                    self.temperature + 0.001, (1 - i / max_iter) ** 2))
+            else:
+                stagnation = 0
+                self.temperature = 0.05
+            if stagnation >= patience:
+                if self.verbose:
+                    print("\nTerminating training at iteration " + str(i + 1))
+                break
+            else:
+                best_fitness = self.best_fitness
+                if self.verbose:
+                    print("\rIteration: " + str(i + 1) + " | Best fitness: "
+                          + str(self.best_fitness) + " | Improvement <"
+                          + str(tol) + " for " + str(stagnation) + "/"
+                          + str(patience) + " iterations        ",
+                          sep="", end="")
+
+
+class GeneticOptimizerReal(GeneticOptimizer):
+    def __init__(self, fitness, length, mutations=None, crossovers=None):
+        def generator():
+            # All real chromosomes are normalized to lie in the [0,1] interval
+            return _np.random.uniform(size=[length])
+
+        if mutations is None:
+            mutations = MUTATIONS_REAL
+        if crossovers is None:
+            crossovers = CROSSOVERS_REAL
+        super().__init__(generator, fitness,
+                         mutations, crossovers)

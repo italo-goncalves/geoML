@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -22,14 +22,10 @@ __all__ = ["Points1D", "Points2D", "Points3D",
 
 import pandas as _pd
 import numpy as _np
-# import plotly.graph_objs as go
 import collections as _collections
-import os as _os
 import copy as _copy
 
 from skimage import measure as _measure
-
-import geoml.interpolation as _int
 
 
 def _update(d, u):
@@ -52,6 +48,7 @@ def _bounding_box(coords):
     bbox = _np.array([[_np.min(coords[:, i]) for i in range(coords.shape[1])],
                       [_np.max(coords[:, i]) for i in range(coords.shape[1])]])
     d = _np.sqrt(sum([_np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
+    d = _np.squeeze(d)
     return bbox, d
 
 
@@ -113,6 +110,20 @@ class _SpatialData(object):
                                         "exponentformat": "none",
                                         "range": bbox[:, 2]}}}
 
+    def draw_bounding_box(self, **kwargs):
+        idx = _np.array([0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1])
+        idy = _np.array([0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1])
+        idz = _np.array([0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1])
+        obj = {"type": "scatter3d",
+               "mode": "lines",
+               "x": self.bounding_box[idx, 0],
+               "y": self.bounding_box[idy, 1],
+               "z": self.bounding_box[idz, 2],
+               "hoverinfo": "x+y+z",
+               "name": "bounding box"}
+        obj = _update(obj, kwargs)
+        return [obj]
+
 
 class _PointData(_SpatialData):
     """
@@ -148,12 +159,12 @@ class _PointData(_SpatialData):
         column : str
             The name of the column with the data to work on.
         grid :
-            A Grid*D object.
+            matrix Grid*D object.
 
         Returns
         -------
         out :
-            A point object with the aggregated data.
+            matrix point object with the aggregated data.
 
         This method is used to downsample large point clouds. Given a grid
         with regularly spaced coordinates, the label assigned to each
@@ -227,12 +238,12 @@ class _PointData(_SpatialData):
         column : str
             The name of the column with the data to work on.
         grid :
-            A Grid*D object.
+            matrix Grid*D object.
 
         Returns
         -------
         out :
-            A point object with the aggregated data.
+            matrix point object with the aggregated data.
 
         This method is used to downsample large point clouds. Aggregation is
         done by taking the mean of the data values in each grid cell.
@@ -297,7 +308,7 @@ class Points1D(_PointData):
     Attributes
     ----------
     coords : array
-        A matrix with the spatial coordinates.
+        matrix matrix with the spatial coordinates.
     data : data frame
         The coordinates' attributes.
     coords_label : list
@@ -314,7 +325,7 @@ class Points1D(_PointData):
         Parameters
         ----------
         coords : array, pandas series or data frame containing one column
-            A vector with the spatial coordinates.
+            matrix vector with the spatial coordinates.
         data : data frame
             The coordinates' attributes (optional).
         coords_label : str
@@ -338,10 +349,11 @@ class Points1D(_PointData):
             coords_label = ["X"]
 
         self._ndim = 1
-        self.coords = _np.array(coords, ndmin=2).transpose()
+        self.coords = _np.array(coords, ndmin=2, dtype=_np.float).transpose()
         if coords.shape[0] > 0:
-            self.bounding_box = _np.array([[coords.min()], [coords.max()]])
-            self.diagonal = coords.max() - coords.min()
+            self.bounding_box = _np.array([[_np.min(coords)],
+                                           [_np.max(coords)]])
+            self.diagonal = _np.max(coords) - _np.min(coords)
         else:
             self.bounding_box = _np.zeros([2, 1])
             self.diagonal = 0
@@ -412,7 +424,7 @@ class Points2D(_PointData):
     Attributes
     ----------
     coords : array
-        A matrix with the spatial coordinates.
+        matrix matrix with the spatial coordinates.
     data : data frame
         The coordinates' attributes.
     coords_label : list
@@ -444,7 +456,7 @@ class Points2D(_PointData):
         if coords_label is None:
             coords_label = ["X", "Y"]
 
-        self.coords = coords
+        self.coords = _np.array(coords, dtype=_np.float)
         if coords.shape[0] > 0:
             self.bounding_box, self.diagonal = _bounding_box(coords)
         else:
@@ -548,7 +560,7 @@ class Points3D(_PointData):
     Attributes
     ----------
     coords : array
-        A matrix with the spatial coordinates.
+        matrix matrix with the spatial coordinates.
     data : data frame
         The coordinates' attributes.
     coords_label : str
@@ -581,7 +593,7 @@ class Points3D(_PointData):
         if coords_label is None:
             coords_label = ["X", "Y", "Z"]
 
-        self.coords = coords
+        self.coords = _np.array(coords, dtype=_np.float)
         if coords.shape[0] > 0:
             self.bounding_box, self.diagonal = _bounding_box(coords)
         else:
@@ -762,6 +774,42 @@ class Points3D(_PointData):
             for d in range(self.ndim):
                 self.data[prefix + "_" + self.coords_label[d]] = region[:, d]
 
+    def draw_planes(self, dip, azimuth, size=1, **kwargs):
+        dip = self.data[dip]
+        azimuth = self.data[azimuth]
+
+        # conversions
+        dip = -dip * _np.pi / 180
+        azimuth = (90 - azimuth) * _np.pi / 180
+        strike = azimuth - _np.pi / 2
+
+        # dip and strike vectors
+        dipvec = _np.concatenate([
+            _np.array(_np.cos(dip) * _np.cos(azimuth), ndmin=2).transpose(),
+            _np.array(_np.cos(dip) * _np.sin(azimuth), ndmin=2).transpose(),
+            _np.array(_np.sin(dip), ndmin=2).transpose()], axis=1)*size
+        strvec = _np.concatenate([
+            _np.array(_np.cos(strike), ndmin=2).transpose(),
+            _np.array(_np.sin(strike), ndmin=2).transpose(),
+            _np.zeros([dipvec.shape[0], 1])], axis=1)*size
+
+        # surfaces
+        surf = []
+        for i, point in enumerate(self.coords):
+            surf_points = _np.stack([
+                point + dipvec[i],
+                point - 0.5*strvec[i] - 0.5*dipvec[i],
+                point + 0.5*strvec[i] - 0.5*dipvec[i]
+            ], axis=0)
+            obj = {"type": "mesh3d",
+                   "x": surf_points[:, 0],
+                   "y": surf_points[:, 1],
+                   "z": surf_points[:, 2],
+                   "hoverinfo": "x+y+z+text"}
+            obj = _update(obj, kwargs)
+            surf.append(obj)
+        return surf
+
 
 class Grid1D(Points1D):
     """
@@ -800,39 +848,12 @@ class Grid1D(Points1D):
             end = start + (n - 1) * step
         else:
             step = (end - start) / (n - 1)
-        grid = _np.linspace(start, end, n)
+        grid = _np.linspace(start, end, n, dtype=_np.float)
 
         super().__init__(grid)
         self.step_size = [step]
         self.grid = [grid]
         self.grid_size = [int(n)]
-
-    def interpolation_weights_cubic(self, data, parallel=True, batch_size=1000):
-        if self.ndim != data.ndim:
-            raise ValueError("Dimension of self and data do not match")
-        if parallel:
-            return _int.cubic_conv_1d_parallel(self.grid[0],
-                                               data.coords[:, 0],
-                                               batch_size)
-        else:
-            return _int.cubic_conv_1d_sparse(self.grid[0], data.coords[:, 0])
-
-    def interpolation_weights_inverse_distance(self, data, parallel=True,
-                                               batch_size=1000):
-        if self.ndim != data.ndim:
-            raise ValueError("Dimension of self and data do not match")
-
-        radius = _np.max(self.step_size) * 2
-
-        if parallel:
-            return _int.inverse_distance_1d_parallel(self.grid[0],
-                                                     data.coords[:, 0],
-                                                     radius,
-                                                     batch_size=batch_size)
-        else:
-            return _int.inverse_distance_1d_sparse(self.grid[0],
-                                                   data.coords[:, 0],
-                                                   radius)
 
 
 class Grid2D(Points2D):
@@ -880,13 +901,14 @@ class Grid2D(Points2D):
                               (end[1]-start[1])/(n[1]-1)])
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
-        coords = _np.array([(x, y) for y in grid_y for x in grid_x])
+        coords = _np.array([(x, y) for y in grid_y for x in grid_x],
+                           dtype=_np.float)
 
         super().__init__(coords)
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y]
-        self.grid_size = n.tolist()
-        self.grid_size = [int(num) for num in self.grid_size]
+        # self.grid_size = n.tolist()
+        self.grid_size = [int(num) for num in n]
 
     def as_image(self, column):
         """
@@ -904,40 +926,13 @@ class Grid2D(Points2D):
         Returns
         -------
         image : array
-            A 2-dimensional array.
+            matrix 2-dimensional array.
         """
         image = _np.reshape(self.data[column].values,
                             newshape=self.grid_size,
                             order="F")
         image = image.transpose()
-        #image = _np.flip(image, 0)
         return image
-
-    def interpolation_weights_cubic(self, data, parallel=True, batch_size=1000):
-        if self.ndim != data.ndim:
-            raise ValueError("Dimension of self and data do not match")
-        if parallel:
-            return _int.cubic_conv_2d_parallel(self.grid[0], self.grid[1],
-                                               data.coords, batch_size)
-        else:
-            return _int.cubic_conv_2d_sparse(self.grid[0], self.grid[1],
-                                             data.coords)
-
-    def interpolation_weights_gaussian(self, data, parallel=True,
-                                       batch_size=1000):
-        if self.ndim != data.ndim:
-            raise ValueError("Dimension of self and data do not match")
-
-        radius = _np.max(self.step_size)
-
-        if parallel:
-            return _int.inverse_distance_2d_parallel(self.grid[0], self.grid[1],
-                                                     data.coords,
-                                                     radius,
-                                                     batch_size)
-        else:
-            return _int.inverse_distance_2d_sparse(self.grid[0], self.grid[1],
-                                                   data.coords, radius)
 
 
 class Grid3D(Points3D):
@@ -989,13 +984,13 @@ class Grid3D(Points3D):
         grid_y = _np.linspace(start[1], end[1], n[1])
         grid_z = _np.linspace(start[2], end[2], n[2])
         coords = _np.array([(x, y, z) for z in grid_z for y in grid_y
-                            for x in grid_x])
+                            for x in grid_x], dtype=_np.float)
 
         super().__init__(coords)
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y, grid_z]
-        self.grid_size = n.tolist()
-        self.grid_size = [int(num) for num in self.grid_size]
+        # self.grid_size = n.tolist()
+        self.grid_size = [int(num) for num in n]
 
     def as_cube(self, column):
         """
@@ -1009,7 +1004,7 @@ class Grid3D(Points3D):
         Returns
         -------
         cube : array
-            A cubic array.
+            matrix cubic array.
         """
         cube = _np.reshape(self.data[column].values,
                            self.grid_size, order="F")
@@ -1065,17 +1060,19 @@ class Grid3D(Points3D):
         obj = _update(obj, kwargs)
         return [obj]
 
-    def export_contour(self, column, value, filename):
+    def export_contour(self, column, value, filename, triangles=True):
         verts, faces, normals, values = self.get_contour(column, value)
         for i in range(3):
             verts[:, i] += self.grid[i][0]
         with open(filename, 'w') as out_file:
-            out_file.write(
-                str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
+            if triangles:
+                out_file.write(
+                    str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
             for line in verts:
                 out_file.write(" ".join(str(elem) for elem in line) + "\n")
-            for line in faces:
-                out_file.write(" ".join(str(elem) for elem in line) + "\n")
+            if triangles:
+                for line in faces:
+                    out_file.write(" ".join(str(elem) for elem in line) + "\n")
 
     def draw_section_numeric(self, column, axis=0, **kwargs):
         """
@@ -1240,54 +1237,8 @@ class Grid3D(Points3D):
 
         return sections
 
-    def interpolation_weights_cubic(self, data, parallel=True, batch_size=1000):
-        if self.ndim != data.ndim:
-            raise ValueError("Dimension of self and data do not match")
-        if parallel:
-            return _int.cubic_conv_3d_parallel(self.grid[0], self.grid[1],
-                                               self.grid[2], data.coords,
-                                               batch_size)
-        else:
-            return _int.cubic_conv_3d_sparse(self.grid[0], self.grid[1],
-                                             self.grid[2], data.coords)
 
-    def interpolation_weights_gaussian(self, data, parallel=True,
-                                       batch_size=1000):
-        if self.ndim != data.ndim:
-            raise ValueError("Dimension of self and data do not match")
-
-        radius = _np.max(self.step_size)
-
-        if parallel:
-            return _int.inverse_distance_3d_parallel(self.grid[0], self.grid[1],
-                                                     self.grid[2],
-                                                     data.coords,
-                                                     radius,
-                                                     batch_size)
-        else:
-            return _int.inverse_distance_3d_sparse(self.grid[0], self.grid[1],
-                                                   self.grid[2],
-                                                   data.coords, radius)
-
-
-class _DirectionalData(_PointData):
-    """
-    Abstract class for directional data
-    """
-
-    def as_data_frame(self):
-        """
-        Conversion of a spatial object to a data frame.
-        """
-        df_coords = _pd.DataFrame(self.coords,
-                                  columns=self.coords_label)
-        df_directions = _pd.DataFrame(self.directions,
-                                      columns=self.directions_label)
-        df = _pd.concat([df_coords, df_directions, self.data], axis=1)
-        return df
-
-
-class Directions2D(_DirectionalData, Points2D):
+class Directions2D(Points2D):
     """
     Spatial directions in 2D.
     """
@@ -1304,7 +1255,7 @@ class Directions2D(_DirectionalData, Points2D):
         directions : a 2-dimensional array or data frame
             It is expected that the rows have unit norm.
         data : pandas DataFrame (optional)
-            A data frame with additional attributes.
+            matrix data frame with additional attributes.
         coords_label : str
             Optional string to label the coordinates.
             Extracted from coords object if available.
@@ -1341,7 +1292,7 @@ class Directions2D(_DirectionalData, Points2D):
 
         Returns
         -------
-        A Directions2D object.
+        matrix Directions2D object.
         """
         directions = _pd.DataFrame({"dX": _np.sin(azimuth / 180 * _np.pi),
                                     "dY": _np.cos(azimuth / 180 * _np.pi)})
@@ -1350,8 +1301,43 @@ class Directions2D(_DirectionalData, Points2D):
     def draw_arrows(self, size=1):
         raise NotImplementedError()
 
+    def subset_region(self, xmin, xmax, ymin, ymax,
+                      include_min_x=True, include_max_x=False,
+                      include_min_y=True, include_max_y=False):
+        df = self.as_data_frame()
+        keep = (df[self.coords_label[0]] >= xmin) \
+               & (df[self.coords_label[0]] <= xmax) \
+               & (df[self.coords_label[1]] >= ymin) \
+               & (df[self.coords_label[1]] <= ymax)
+        if not include_min_x:
+            keep = keep & (df[self.coords_label[0]] > xmin)
+        if not include_min_y:
+            keep = keep & (df[self.coords_label[1]] > ymin)
+        if not include_max_x:
+            keep = keep & (df[self.coords_label[0]] < xmax)
+        if not include_max_y:
+            keep = keep & (df[self.coords_label[1]] < ymax)
+        df = df.loc[keep, :]
+        df.reset_index(drop=True, inplace=True)
+        coords = df[self.coords_label]
+        directions = df[self.directions_label]
+        data = df.drop(list(self.coords_label) + list(self.directions_label),
+                       axis=1)
+        return Directions2D(coords, directions, data)
 
-class Directions3D(_DirectionalData, Points3D):
+    def as_data_frame(self):
+        """
+        Conversion of a spatial object to a data frame.
+        """
+        df_coords = _pd.DataFrame(self.coords,
+                                  columns=self.coords_label)
+        df_directions = _pd.DataFrame(self.directions,
+                                      columns=self.directions_label)
+        df = _pd.concat([df_coords, df_directions, self.data], axis=1)
+        return df
+
+
+class Directions3D(Points3D):
     """
     Spatial directions in 3D.
     """
@@ -1368,7 +1354,7 @@ class Directions3D(_DirectionalData, Points3D):
         directions : a 2-dimensional array or data frame
             It is expected that the rows have unit norm.
         data : pandas DataFrame (optional)
-            A data frame with additional attributes.
+            matrix data frame with additional attributes.
         coords_label : str
             Optional string to label the coordinates.
             Extracted from coords object if available.
@@ -1411,7 +1397,6 @@ class Directions3D(_DirectionalData, Points3D):
         obj = _update(obj, kwargs)
         return [obj]
 
-
     @classmethod
     def from_planes(cls, coords, azimuth, dip, data=None):
         """
@@ -1427,11 +1412,11 @@ class Directions3D(_DirectionalData, Points3D):
         dip : array
             Dip, between 0 and 90 degrees.
         data : pandas DataFrame
-            A data frame with additional data.
+            matrix data frame with additional data.
         
         Returns
         -------
-        A Directions3D object.
+        matrix Directions3D object.
         """
         # conversions
         dip = -dip * _np.pi / 180
@@ -1471,11 +1456,11 @@ class Directions3D(_DirectionalData, Points3D):
         dip : array
             Dip, between 0 and 90 degrees.
         data : data frame
-            A data frame with additional data.
+            matrix data frame with additional data.
         
         Returns
         -------
-        A Directions3D object.
+        matrix Directions3D object.
         """
         # conversions
         dip = -dip * _np.pi / 180
@@ -1507,11 +1492,11 @@ class Directions3D(_DirectionalData, Points3D):
         dip : array
             Dip, between 0 and 90 degrees.
         data : data frame
-            A data frame with additional data.
+            matrix data frame with additional data.
         
         Returns
         -------
-        A Directions3D object.
+        matrix Directions3D object.
         """
         n_data = coords.shape[0]
         plane_dirs = cls.from_planes(coords, azimuth, dip)
@@ -1521,11 +1506,54 @@ class Directions3D(_DirectionalData, Points3D):
         normalvec = vec1[:, [1, 2, 0]] * vec2[:, [2, 0, 1]] \
                     - vec1[:, [2, 0, 1]] * vec2[:, [1, 2, 0]]
         normalvec = _np.apply_along_axis(lambda x: x/_np.sqrt(_np.sum(x ** 2)),
-                                         axis=0,
+                                         axis=1,
                                          arr=normalvec)
 
         # result
         return cls(coords, normalvec, data)
+
+    def subset_region(self, xmin, xmax, ymin, ymax, zmin, zmax,
+                      include_min_x=True, include_max_x=False,
+                      include_min_y=True, include_max_y=False,
+                      include_min_z=True, include_max_z=False
+                      ):
+        df = self.as_data_frame()
+        keep = (df[self.coords_label[0]] >= xmin) \
+               & (df[self.coords_label[0]] <= xmax) \
+               & (df[self.coords_label[1]] >= ymin) \
+               & (df[self.coords_label[1]] <= ymax) \
+               & (df[self.coords_label[2]] >= zmin) \
+               & (df[self.coords_label[2]] <= zmax)
+        if not include_min_x:
+            keep = keep & (df[self.coords_label[0]] > xmin)
+        if not include_min_y:
+            keep = keep & (df[self.coords_label[1]] > ymin)
+        if not include_min_z:
+            keep = keep & (df[self.coords_label[2]] > zmin)
+        if not include_max_x:
+            keep = keep & (df[self.coords_label[0]] < xmax)
+        if not include_max_y:
+            keep = keep & (df[self.coords_label[1]] < ymax)
+        if not include_max_z:
+            keep = keep & (df[self.coords_label[2]] < zmax)
+        df = df.loc[keep, :]
+        df.reset_index(drop=True, inplace=True)
+        coords = df[self.coords_label]
+        directions = df[self.directions_label]
+        data = df.drop(list(self.coords_label) + list(self.directions_label),
+                       axis=1)
+        return Directions3D(coords, directions, data)
+
+    def as_data_frame(self):
+        """
+        Conversion of a spatial object to a data frame.
+        """
+        df_coords = _pd.DataFrame(self.coords,
+                                  columns=self.coords_label)
+        df_directions = _pd.DataFrame(self.directions,
+                                      columns=self.directions_label)
+        df = _pd.concat([df_coords, df_directions, self.data], axis=1)
+        return df
 
 
 class DrillholeData(_SpatialData):
@@ -1542,9 +1570,8 @@ class DrillholeData(_SpatialData):
         The length of each segment
     """
 
-    def __init__(self, collar=None, assay=None, survey=None,
-                 holeid="HOLEID", x="X", y="Y", z="Z", fr="FROM", to="TO",
-                 **kwargs):
+    def __init__(self, collar=None, assay=None, survey=None, holeid="HOLEID",
+                 x="X", y="Y", z="Z", fr="FROM", to="TO", **kwargs):
         """
         Initializer for DrillholeData.
 
@@ -1566,7 +1593,7 @@ class DrillholeData(_SpatialData):
 
         The column HOLEID in the output is reserved.
         """
-
+        super().__init__()
         if "coords_from" in kwargs:
             # internal instantiation
             self.coords_from = kwargs["coords_from"]
@@ -1628,7 +1655,7 @@ class DrillholeData(_SpatialData):
     def as_points(self, locations=_np.array([0.05, 0.5, 0.95])):
         if locations.__class__ is not _np.ndarray:
             locations = _np.array(locations)
-        if (locations.min() < 0) | (locations.max() > 1):
+        if (_np.min(locations) < 0) | (_np.max(locations) > 1):
             raise ValueError("locations must contain values between " +
                              "0 and 1, inclusive")
 
@@ -1658,7 +1685,7 @@ class DrillholeData(_SpatialData):
         start_end = _np.apply_along_axis(
             lambda x: all(x < 1e-6), axis=1,
             arr=self.coords_to[0:(self.coords_to.shape[0] - 1), :]
-                - self.coords_from[1:self.coords_from.shape[0], :])
+            - self.coords_from[1:self.coords_from.shape[0], :])
         # condition 2 - parallelism
         dir_from = directions[0:(directions.shape[0] - 1), :]
         dir_to = directions[1:directions.shape[0], :]
@@ -1670,7 +1697,8 @@ class DrillholeData(_SpatialData):
         val_to = self.data.loc[1:self.coords_from.shape[0], by].values
         same_value = [val_from[i] == val_to[i] for i in range(len(val_to))]
         # condition 4 - same hole
-        hole_from = self.data.loc[0:(self.coords_from.shape[0] - 1), "HOLEID"].values
+        hole_from = self.data.loc[0:(self.coords_from.shape[0] - 1), "HOLEID"]\
+                        .values
         hole_to = self.data.loc[1:self.coords_from.shape[0], "HOLEID"].values
         same_hole = [hole_from[i] == hole_to[i] for i in range(len(hole_to))]
         # final vector
@@ -1842,150 +1870,6 @@ def merge(x, y):
         raise ValueError("x and y are not compatible for merging")
 
 
-class Examples(object):
-    """Example data."""
-    def __new__(cls, *args, **kwargs):
-        return None
-
-    @staticmethod
-    def walker():
-        """
-        Walker lake dataset.
-
-        Returns
-        -------
-        walker_point : geoml.data.Points2D
-            Dataset with 470 samples.
-        walker_grid : geoml.data.Grid2D
-            Full data.
-        """
-        path = _os.path.dirname(__file__)
-        path_walker = _os.path.join(path, "sample_data\\walker.dat")
-        path_walker_ex = _os.path.join(path, "sample_data\\walker_ex.dat")
-
-        walker = _pd.read_table(path_walker)
-        walker_ex = _pd.read_table(path_walker_ex, sep=",")
-
-        walker_point = Points2D(walker[["X", "Y"]],
-                                walker.drop(["X", "Y"], axis=1))
-        walker_grid = Grid2D(start=[1, 1], n=[260, 300], step=[1, 1])
-        walker_grid.data = walker_ex.drop(["X", "Y"], axis=1)
-
-        return walker_point, walker_grid
-
-    @staticmethod
-    def ararangua():
-        """
-        Drillhole data from Araranguá town, Brazil.
-
-        Returns
-        -------
-        ara_dh : geoml.data.DrillholeData
-            A dataset with 13 drillholes.
-        """
-        path = _os.path.dirname(__file__)
-        file = _os.path.join(path, "sample_data\\Araranguá.xlsx")
-
-        ara_lito = _pd.read_excel(file, sheet_name="Lito")
-        ara_collar = _pd.read_excel(file, sheet_name="Collar")
-
-        ara_dh = DrillholeData(ara_collar,
-                               ara_lito,
-                               holeid="Hole ID",
-                               fr="From",
-                               to="To")
-        return ara_dh
-
-    @staticmethod
-    def example_fold():
-        """
-        Example directional data.
-
-        Returns
-        -------
-        point : geoml.data.Points2D
-            Some coordinates with two rock labels.
-        dirs : geoml.data.Directions2D
-            Structural measurements representing a fold.
-        """
-        ex_point = _pd.DataFrame(
-            {"X": _np.array([25, 40, 60, 85,
-                             5, 10, 45, 50, 55, 75, 90,
-                             15, 20, 30, 50, 65, 75, 90, 25, 50, 65, 75]),
-             "Y": _np.array([25, 60, 50, 15,
-                             50, 80, 10, 30, 10, 75, 90,
-                             15, 35, 65, 85, 65, 50, 20, 10, 50, 20, 10]),
-             "rock": _np.concatenate([_np.repeat("rock_a", 4),
-                                      _np.repeat("rock_b", 7),
-                                      _np.repeat("boundary", 11)])})
-        ex_point["label_1"] = _pd.Categorical(_np.concatenate(
-            [_np.repeat("rock_a", 4),
-             _np.repeat("rock_b", 7),
-             _np.repeat("rock_a", 11)]))
-        ex_point["label_2"] = _pd.Categorical(_np.concatenate(
-            [_np.repeat("rock_a", 4),
-             _np.repeat("rock_b", 7),
-             _np.repeat("rock_b", 11)]))
-
-        ex_dir = _pd.DataFrame(
-            {"X": _np.array([40, 50, 70, 90, 30, 20, 10]),
-             "Y": _np.array([40, 85, 70, 30, 50, 60, 10]),
-             "strike": _np.array([30, 90, 325, 325, 30, 30, 30])})
-
-        point = Points2D(ex_point[["X", "Y"]],
-                         ex_point.drop(["X", "Y"], axis=1))
-        dirs = Directions2D.from_azimuth(ex_dir[["X", "Y"]], ex_dir["strike"])
-
-        return point, dirs
-
-    @staticmethod
-    def sunspot_number():
-        """
-        Sunspot number data.
-
-        This data is downloaded from the Royal Observatory of Belgium
-        SILSO website (http://sidc.be/silso/home), and is distributed under
-        the CC BY-NC4.0 license (https://goo.gl/PXrLYd).
-
-        Returns
-        -------
-        yearly - Point1D
-            Yearly averages since 1700.
-        monthly - Point1D
-            Monthly averages since 1700.
-        daily - Point1D
-            Daily total sunspot number since 1818.
-        """
-        yearly_df = _pd.read_table(
-            "http://sidc.be/silso/INFO/snytotcsv.php",
-            sep=";", header=None)
-        yearly_df.set_axis(["year", "sn", "sn_std",
-                            "n_obs", "definitive"],
-                           axis="columns", inplace=True)
-        yearly = Points1D(_np.arange(1700, yearly_df.shape[0] + 1700,
-                                     dtype=_np.float),
-                          yearly_df)
-
-        monthly_df = _pd.read_table(
-            "http://sidc.oma.be/silso/INFO/snmtotcsv.php",
-            sep=";", header=None)
-        monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
-                             "n_obs", "definitive"],
-                            axis="columns", inplace=True)
-        monthly = Points1D(_np.arange(1, monthly_df.shape[0] + 1,
-                                      dtype=_np.float), monthly_df)
-
-        daily_df = _pd.read_table("http://sidc.oma.be/silso/INFO/sndtotcsv.php",
-                                  sep=";", header=None)
-        daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
-                           "n_obs", "definitive"],
-                          axis="columns", inplace=True)
-        daily = Points1D(_np.arange(1, daily_df.shape[0] + 1,
-                                    dtype=_np.float), daily_df)
-
-        return yearly, monthly, daily
-
-
 class PointsND(object):
     """General, high-dimensional data"""
 
@@ -2038,45 +1922,3 @@ class CirculantGrid1D(Grid1D):
         step = grid.step_size[0]
         super().__init__(start, n_points, step)
         self.point_zero = _np.array([[self.grid[0][n_points // 2]]])
-
-
-class CirculantGrid2D(Grid2D):
-    """
-    Grid with circulant structure.
-    """
-    def __init__(self, grid, expand=0.2):
-        n = []
-        for el in grid.grid_size:
-            el = float(el) * (1 + expand)
-            el = int(_np.ceil(el))
-            if el % 2 == 0:
-                el += 1
-            n.append(el)
-
-        start = [grid.grid[i][0] for i in [0, 1]]
-        step = grid.step_size
-        super().__init__(start, n, step)
-
-        self.point_zero = _np.array(
-            [[self.grid[i][n[i] // 2] for i in [0, 1]]])
-
-
-class CirculantGrid3D(Grid3D):
-    """
-    Grid with circulant structure.
-    """
-    def __init__(self, grid, expand=0.2):
-        n = []
-        for el in grid.grid_size:
-            el = float(el) * (1 + expand)
-            el = int(_np.ceil(el))
-            if el % 2 == 0:
-                el += 1
-            n.append(el)
-
-        start = [grid.grid[i][0] for i in [0, 1, 2]]
-        step = grid.step_size
-        super().__init__(start, n, step)
-
-        self.point_zero = _np.array(
-            [[self.grid[i][n[i] // 2] for i in [0, 1, 2]]])

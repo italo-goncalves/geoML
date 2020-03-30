@@ -141,7 +141,7 @@
            <div itemprop="articleBody">
             
   <h1>Source code for geoml.warping</h1><div class="highlight"><pre>
-<span></span><span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Identity&quot;</span><span class="p">,</span> <span class="s2">&quot;Spline&quot;</span><span class="p">,</span> <span class="s2">&quot;ZScore&quot;</span><span class="p">,</span> <span class="s2">&quot;Scaling&quot;</span><span class="p">,</span> <span class="s2">&quot;Softplus&quot;</span><span class="p">]</span>
+<span></span><span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Identity&quot;</span><span class="p">,</span> <span class="s2">&quot;CubicSpline&quot;</span><span class="p">,</span> <span class="s2">&quot;ZScore&quot;</span><span class="p">,</span> <span class="s2">&quot;Scaling&quot;</span><span class="p">,</span> <span class="s2">&quot;Softplus&quot;</span><span class="p">]</span>
 
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">_np</span>
 <span class="kn">import</span> <span class="nn">geoml.interpolation</span> <span class="k">as</span> <span class="nn">_gint</span>
@@ -163,7 +163,7 @@
     <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">pass</span>
     
-    <span class="k">def</span> <span class="nf">backward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">pass</span>
     
     <span class="k">def</span> <span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
@@ -178,14 +178,14 @@
 <div class="viewcode-block" id="Identity.forward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Identity.forward">[docs]</a>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">x</span></div>
     
-<div class="viewcode-block" id="Identity.backward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Identity.backward">[docs]</a>    <span class="k">def</span> <span class="nf">backward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="Identity.__call__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Identity.__call__">[docs]</a>    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">x</span></div>
     
 <div class="viewcode-block" id="Identity.derivative"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Identity.derivative">[docs]</a>    <span class="k">def</span> <span class="nf">derivative</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">x</span><span class="p">))</span></div></div>
 
 
-<div class="viewcode-block" id="Spline"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Spline">[docs]</a><span class="k">class</span> <span class="nc">Spline</span><span class="p">(</span><span class="n">_Warping</span><span class="p">):</span>
+<div class="viewcode-block" id="CubicSpline"><a class="viewcode-back" href="../../geoml.html#geoml.warping.CubicSpline">[docs]</a><span class="k">class</span> <span class="nc">CubicSpline</span><span class="p">(</span><span class="n">_Warping</span><span class="p">):</span>
     <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Uses a monotonic spline to convert from original to warped space and</span>
 <span class="sd">    back.</span>
@@ -199,9 +199,9 @@
 <span class="sd">    reverse_spline :</span>
 <span class="sd">        A spline object to convert from the warped to original space.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
-<div class="viewcode-block" id="Spline.__init__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Spline.__init__">[docs]</a>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_knots</span><span class="p">):</span>
+<div class="viewcode-block" id="CubicSpline.__init__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.CubicSpline.__init__">[docs]</a>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_knots</span><span class="p">):</span>
         <span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Initializer for Spline.</span>
+<span class="sd">        Initializer for CubicSpline.</span>
 
 <span class="sd">        Parameters</span>
 <span class="sd">        ----------</span>
@@ -223,13 +223,13 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">base_spline</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">reverse_spline</span> <span class="o">=</span> <span class="kc">None</span></div>
         
-<div class="viewcode-block" id="Spline.refresh"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Spline.refresh">[docs]</a>    <span class="k">def</span> <span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+<div class="viewcode-block" id="CubicSpline.refresh"><a class="viewcode-back" href="../../geoml.html#geoml.warping.CubicSpline.refresh">[docs]</a>    <span class="k">def</span> <span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
         <span class="sd">&quot;&quot;&quot;Rebuilds the spline using the given data&#39;s range.&quot;&quot;&quot;</span>
         <span class="n">y_seq</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">min</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_knots</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="p">[</span><span class="s2">&quot;original&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">y_seq</span><span class="p">)</span>
         <span class="n">warp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">params</span><span class="p">[</span><span class="s2">&quot;warp&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">value</span><span class="o">.</span><span class="n">cumsum</span><span class="p">()</span>
         <span class="n">orig</span> <span class="o">=</span> <span class="n">y_seq</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">base_spline</span> <span class="o">=</span> <span class="n">_gint</span><span class="o">.</span><span class="n">MonotonicSpline</span><span class="p">(</span><span class="n">orig</span><span class="p">,</span> <span class="n">warp</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">base_spline</span> <span class="o">=</span> <span class="n">_gint</span><span class="o">.</span><span class="n">MonotonicCubicSpline</span><span class="p">(</span><span class="n">orig</span><span class="p">,</span> <span class="n">warp</span><span class="p">)</span>
         <span class="c1"># modeling in the opposite direction with more points</span>
         <span class="c1"># to preserve the base curve&#39;s shape</span>
         <span class="n">orig_swap</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span>
@@ -237,16 +237,16 @@
                 <span class="n">orig</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.1</span><span class="o">*</span><span class="p">(</span><span class="n">orig</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">orig</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span>
                 <span class="mi">10</span> <span class="o">*</span> <span class="n">orig</span><span class="o">.</span><span class="n">size</span><span class="p">)</span>
         <span class="n">warp_swap</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_spline</span><span class="p">(</span><span class="n">orig_swap</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">reverse_spline</span> <span class="o">=</span> <span class="n">_gint</span><span class="o">.</span><span class="n">MonotonicSpline</span><span class="p">(</span><span class="n">warp_swap</span><span class="p">,</span> <span class="n">orig_swap</span><span class="p">)</span></div>
-<span class="c1">#        self.reverse_spline = gint.MonotonicSpline(warp, orig)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">reverse_spline</span> <span class="o">=</span> <span class="n">_gint</span><span class="o">.</span><span class="n">MonotonicCubicSpline</span><span class="p">(</span><span class="n">warp_swap</span><span class="p">,</span> <span class="n">orig_swap</span><span class="p">)</span></div>
+<span class="c1">#        self.reverse_spline = gint.MonotonicCubicSpline(warp, orig)</span>
     
-<div class="viewcode-block" id="Spline.forward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Spline.forward">[docs]</a>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="CubicSpline.forward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.CubicSpline.forward">[docs]</a>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_spline</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></div>
     
-<div class="viewcode-block" id="Spline.backward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Spline.backward">[docs]</a>    <span class="k">def</span> <span class="nf">backward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="CubicSpline.__call__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.CubicSpline.__call__">[docs]</a>    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">reverse_spline</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></div>
     
-<div class="viewcode-block" id="Spline.derivative"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Spline.derivative">[docs]</a>    <span class="k">def</span> <span class="nf">derivative</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="CubicSpline.derivative"><a class="viewcode-back" href="../../geoml.html#geoml.warping.CubicSpline.derivative">[docs]</a>    <span class="k">def</span> <span class="nf">derivative</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_spline</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_deriv</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div></div>
     
 <span class="c1">#    def set_limits(self, data):</span>
@@ -292,7 +292,7 @@
 <div class="viewcode-block" id="ZScore.forward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.ZScore.forward">[docs]</a>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_mean</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_std</span></div>
     
-<div class="viewcode-block" id="ZScore.backward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.ZScore.backward">[docs]</a>    <span class="k">def</span> <span class="nf">backward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="ZScore.__call__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.ZScore.__call__">[docs]</a>    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">x</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_std</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_mean</span></div>
     
 <div class="viewcode-block" id="ZScore.derivative"><a class="viewcode-back" href="../../geoml.html#geoml.warping.ZScore.derivative">[docs]</a>    <span class="k">def</span> <span class="nf">derivative</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
@@ -307,7 +307,7 @@
 <div class="viewcode-block" id="Softplus.forward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Softplus.forward">[docs]</a>    <span class="k">def</span> <span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">_np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">expm1</span><span class="p">(</span><span class="n">x</span><span class="p">))</span></div>
     
-<div class="viewcode-block" id="Softplus.backward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Softplus.backward">[docs]</a>    <span class="k">def</span> <span class="nf">backward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="Softplus.__call__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Softplus.__call__">[docs]</a>    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">_np</span><span class="o">.</span><span class="n">log1p</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">x</span><span class="p">))</span></div>
     
 <div class="viewcode-block" id="Softplus.derivative"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Softplus.derivative">[docs]</a>    <span class="k">def</span> <span class="nf">derivative</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
@@ -344,7 +344,7 @@
             <span class="n">x</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">min</span><span class="p">(</span><span class="n">x</span><span class="p">[</span><span class="n">x</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">]))</span>
         <span class="k">return</span> <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_min</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">y_max</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_min</span><span class="p">)</span></div>
     
-<div class="viewcode-block" id="Scaling.backward"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Scaling.backward">[docs]</a>    <span class="k">def</span> <span class="nf">backward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<div class="viewcode-block" id="Scaling.__call__"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Scaling.__call__">[docs]</a>    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">x</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">y_max</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_min</span><span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_min</span></div>
     
 <div class="viewcode-block" id="Scaling.derivative"><a class="viewcode-back" href="../../geoml.html#geoml.warping.Scaling.derivative">[docs]</a>    <span class="k">def</span> <span class="nf">derivative</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>

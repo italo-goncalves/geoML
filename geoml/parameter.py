@@ -8,142 +8,152 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import numpy as _np
+__all__ = ["RealParameter",
+           "PositiveParameter",
+           "CompositionalParameter"]
+
 import tensorflow as _tf
 
 
 class Parameter(object):
     """
-    Trainable model parameter. Can be a vector or scalar.
-    
-    The fixed property applies to the array as a whole.
+    Trainable model parameter. Can be a vector, matrix, or scalar.
+
+    The `fixed` property applies to the array as a whole.
     """
     def __init__(self, value, min_val, max_val, fixed=False):
-        self.value = _np.array(value, ndmin=1)
+        self.value = _tf.Variable(value, dtype=_tf.float64)
         self.fixed = fixed
-        self.max = _np.array(max_val, ndmin=1)
-        self.min = _np.array(min_val, ndmin=1)
-        self.value_transf = _np.array(value, ndmin=1)
-        self.max_transf = _np.array(max_val, ndmin=1)
-        self.min_transf = _np.array(min_val, ndmin=1)
-        self.tf_val = None
-        self.tf_feed_entry = None
+
+        self.max = _tf.constant(max_val, dtype=_tf.float64)
+        self.min = _tf.constant(min_val, dtype=_tf.float64)
+
+        if not self.max.shape == self.value.shape:
+            raise ValueError(
+                "Shape of max_val do not match shape of value: expected %s "
+                "and found %s" % (str(self.value.shape), str(self.max.shape)))
+
+        if not self.min.shape == self.value.shape:
+            raise ValueError(
+                "Shape of min_val do not match shape of value: expected %s "
+                "and found %s" % (str(self.value.shape), str(self.min.shape)))
+
+        self.value_transformed = _tf.Variable(value, dtype=_tf.float64)
+        self.max_transformed = _tf.constant(max_val, dtype=_tf.float64)
+        self.min_transformed = _tf.constant(min_val, dtype=_tf.float64)
         self.refresh()
-        
+
     def fix(self):
         self.fixed = True
-    
+
     def unfix(self):
         self.fixed = False
-        
+
     def set_limits(self, min_val=None, max_val=None):
         if min_val is not None:
-            self.min = _np.array(min_val, ndmin=1)
-            self.min_transf = _np.array(min_val, ndmin=1)
+            min_val = _tf.constant(min_val, dtype=_tf.float64)
+            if not min_val.shape == self.value.shape:
+                raise ValueError(
+                    "Shape of min_val do not match shape of value: expected %s "
+                    "and found %s" % (
+                        str(self.value.shape), str(min_val.shape)))
+
+            self.min = min_val
+            self.min_transformed = _tf.constant(min_val, dtype=_tf.float64)
+
         if max_val is not None:
-            self.max = _np.array(max_val, ndmin=1)
-            self.max_transf = _np.array(max_val, ndmin=1)
+            max_val = _tf.constant(max_val, dtype=_tf.float64)
+            if not max_val.shape == self.value.shape:
+                raise ValueError(
+                    "Shape of max_val do not match shape of value: expected %s "
+                    "and found %s" % (
+                        str(self.value.shape), str(max_val.shape)))
 
-        # updating value
-        if (self.value > self.max).any():
-            self.value = self.max
-        if (self.value_transf > self.max_transf).any():
-            self.value_transf = self.max_transf
-        if (self.value < self.min).any():
-            self.value = self.min
-        if (self.value_transf < self.min_transf).any():
-            self.value_transf = self.min_transf
-        self.refresh()
-            
-    def set_value(self, value, transf=False):
-        self.value = _np.array(value, ndmin=1)
-        self.value_transf = _np.array(value, ndmin=1)
+            self.max = max_val
+            self.max_transformed = _tf.constant(max_val, dtype=_tf.float64)
 
-        # updating limits
-        if (self.value > self.max).any():
-            self.max = self.value
-        if (self.value_transf > self.max_transf).any():
-            self.max_transf = self.value_transf
-        if (self.value < self.min).any():
-            self.min = self.value
-        if (self.value_transf < self.min_transf).any():
-            self.min_transf = self.value_transf
         self.refresh()
-        
+
+    def set_value(self, value, transformed=False):
+        self.value.assign(value)
+        self.refresh()
+
     def refresh(self):
-        if self.tf_val is not None:
-            self.tf_feed_entry = {self.tf_val: self.value}
-            
-    def init_tf_placeholder(self):
-        self.tf_val = _tf.compat.v1.placeholder(
-            _tf.float64, shape=self.value.shape)
-        self.tf_feed_entry = {self.tf_val: self.value}
+        pass
+
+
+class RealParameter(Parameter):
+    """
+    Trainable model parameter. Can be a vector, matrix, or scalar.
+    
+    The `fixed` property applies to the array as a whole.
+    """
+    def refresh(self):
+        self.value.assign(_tf.minimum(self.value, self.max))
+        self.value.assign(_tf.maximum(self.value, self.min))
+
+        self.value_transformed.assign(self.value.value())
+        self.value_transformed.assign(
+            _tf.minimum(self.value_transformed, self.max_transformed))
+        self.value_transformed.assign(
+            _tf.maximum(self.value_transformed, self.min_transformed))
 
 
 class PositiveParameter(Parameter):
     """Parameter in log scale"""
-    def __init__(self, value, min_val, max_val, fixed=False):
-        super().__init__(value, min_val, max_val, fixed)
-        self.value_transf = _np.array(_np.log(value), ndmin=1)
-        self.max_transf = _np.array(_np.log(max_val), ndmin=1)
-        self.min_transf = _np.array(_np.log(min_val), ndmin=1)
-        self.refresh()
-        
-    def set_limits(self, min_val=None, max_val=None):
-        if min_val is not None:
-            self.min = _np.array(min_val, ndmin=1)
-            self.min_transf = _np.array(_np.log(min_val), ndmin=1)
-        if max_val is not None:
-            self.max = _np.array(max_val, ndmin=1)
-            self.max_transf = _np.array(_np.log(max_val), ndmin=1)
-        self.refresh()
-            
-    def set_value(self, value, transf=False):
-        if transf:
-            self.value_transf = _np.array(value, ndmin=1)
-            self.value = _np.array(_np.exp(value), ndmin=1)
+
+    def set_value(self, value, transformed=False):
+        if transformed:
+            self.value_transformed.assign(value)
+            self.value.assign(_tf.math.exp(value))
         else:
-            self.value = _np.array(value, ndmin=1)
-            self.value_transf = _np.array(_np.log(value), ndmin=1)
+            self.value.assign(value)
         self.refresh()
+
+    def refresh(self):
+        self.value.assign(_tf.minimum(self.value, self.max))
+        self.value.assign(_tf.maximum(self.value, self.min))
+
+        self.value_transformed.assign(_tf.math.log(self.value))
+        self.max_transformed = _tf.math.log(self.max)
+        self.min_transformed = _tf.math.log(self.min)
 
 
 class CompositionalParameter(Parameter):
     """
-    A vector parameter in clr coordinates
+    matrix vector parameter in logit coordinates
     """
     def __init__(self, value, fixed=False):
-        s = value.size
-        self.value = value
-        self.fixed = fixed
-        self.max = _np.repeat(1, s)
-        self.min = _np.repeat(0, s)
-        self.value_transf = _np.log(value) - _np.log(value).mean()
-        self.value_transf = self.value_transf[0:(s-1)]
-        self.max_transf = _np.repeat(5, s - 1)
-        self.min_transf = _np.repeat(-5, s - 1)
-        self.tf_val = None
-        self.tf_feed_entry = None
+        value = _tf.constant(value, dtype=_tf.float64)
+        min_val = _tf.zeros_like(value)
+        max_val = _tf.ones_like(value)
+        super().__init__(value, min_val, max_val, fixed)
+        self.min_transformed = _tf.ones_like(value) * -10
+        self.max_transformed = _tf.ones_like(value) * 10
         
     def set_limits(self, min_val=None, max_val=None):
         pass
     
-    def set_value(self, value, transf=False):
-        if transf:
-            value = _np.array(value)
-            v = _np.concatenate([value, [-value.sum()]])
-            v = v - v.max()  # to avoid overflow
-            self.value = _np.exp(v) / sum(_np.exp(v))
-            self.value_transf = value
+    def set_value(self, value, transformed=False):
+        if transformed:
+            self.value_transformed.assign(value)
+
+            value = value - _tf.reduce_max(value)  # to avoid overflow
+            value = _tf.math.exp(value)
+            value = value / _tf.reduce_sum(value)
+            self.value.assign(value)
         else:
-            s = value.size
-            self.value = value
-            self.value_transf = _np.log(value) - _np.log(value).mean()
-            self.value_transf = self.value_transf[0:(s-1)]
+            self.value.assign(value)
         self.refresh()
+
+    def refresh(self):
+        self.value.assign(self.value / _tf.reduce_sum(self.value))
+
+        logit = _tf.math.log(self.value)
+        self.value_transformed.assign(logit - _tf.reduce_mean(logit))

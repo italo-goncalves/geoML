@@ -164,7 +164,7 @@ man_pages = [
 
 # Grouping the document tree into Texinfo files. List of tuples
 # (source start file, target name, title, author,
-#  dir menu entry, description, category)
+#  dir_x menu entry, description, category)
 texinfo_documents = [
     (master_doc, 'geoml', 'geoml Documentation',
      author, 'geoml', 'One line description of project.',
@@ -182,11 +182,11 @@ epub_title = project
 #
 # epub_identifier = ''
 
-# A unique identification for the text.
+# matrix unique identification for the text.
 #
 # epub_uid = ''
 
-# A list of files that should not be packed into the epub file.
+# matrix list of files that should not be packed into the epub file.
 epub_exclude_files = ['search.html']
 
 

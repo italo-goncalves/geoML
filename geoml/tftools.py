@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -18,74 +18,49 @@ import tensorflow as _tf
 import numpy as _np
 
 
-def pairwise_dist(A, B):
+@_tf.function(
+    input_signature=[_tf.TensorSpec(shape=[None, None], dtype=_tf.float64),
+                     _tf.TensorSpec(shape=[None, None], dtype=_tf.float64)])
+def pairwise_dist(mat_a, mat_b):
     """
-    Computes pairwise distances between each elements of A and
-    each elements of B.
+    Computes pairwise distances between each elements of matrix and
+    each elements of mat_b.
 
     Args:
-    A,    [m,d] matrix
-    B,    [n,d] matrix
+    mat_a,    [m,d] matrix
+    mat_b,    [n,d] matrix
 
     Returns:
-    D,    [m,n] matrix of pairwise distances
+    dist,    [m,n] matrix of pairwise distances
 
     code from
     https://gist.github.com/mbsariyildiz/34cdc26afb630e8cae079048eef91865
     """
-    with _tf.compat.v1.variable_scope('pairwise_dist'):
-        # squared norms of each row in A and B
-        na = _tf.reduce_sum(_tf.square(A), 1)
-        nb = _tf.reduce_sum(_tf.square(B), 1)
+    with _tf.name_scope('pairwise_dist'):
+        # squared norms of each row in matrix and mat_b
+        na = _tf.reduce_sum(_tf.square(mat_a), 1)
+        nb = _tf.reduce_sum(_tf.square(mat_b), 1)
 
         # na as a row and nb as a column vectors
         na = _tf.reshape(na, [-1, 1])
         nb = _tf.reshape(nb, [1, -1])
 
         # return pairwise euclidean difference matrix
-        D = na - 2 * _tf.matmul(A, B, False, True) + nb
-        D = _tf.sqrt(_tf.maximum(D, 0.0))
-    return D
+        dist = na - 2 * _tf.matmul(mat_a, mat_b, False, True) + nb
+        dist = _tf.sqrt(_tf.maximum(dist, 0.0))
+    return dist
 
 
-def safe_chol(A):
-    """
-    Conditioning of a matrix for Cholesky decomposition
-    """
-    with _tf.compat.v1.variable_scope("safe_chol"):
-        A = 0.5 * (A + _tf.transpose(A))
-        e, v = _tf.self_adjoint_eig(A)
-#        e = tf.where(e > 1e-14, e, 1e-14*tf.ones_like(e))
-#        A = tf.matmul(tf.matmul(v,tf.matrix_diag(e),transpose_a=True),v)
-        jitter = _tf.where(e > 1e-6, _tf.zeros_like(e),
-                           1e-6 * _tf.ones_like(e))
-        A = A + _tf.matrix_diag(jitter)
-        L = _tf.linalg.cholesky(A)
-    return L
-
-
-def softmax(A):
-    """
-    Softmax by rows of a matrix.
-    """
-    with _tf.compat.v1.variable_scope("softmax"):
-        s = _tf.shape(A)
-        E = _tf.exp(A - _tf.reduce_max(A))
-        E_total = _tf.reduce_sum(E, axis=1, keepdims=True)
-        E_total = _tf.tile(E_total, [1, s[1]]) + _np.exp(-10.0)
-        out = E / E_total
-    return out
-
-
-def composition_close(A):
+@_tf.function
+def composition_close(matrix):
     """
     Divides each row of a matrix by its sum.
     """
     with _tf.name_scope("composition_close"):
-        s = _tf.shape(A)
-        total = _tf.reduce_sum(A, axis=1, keepdims=True)
+        s = _tf.shape(matrix)
+        total = _tf.reduce_sum(matrix, axis=1, keepdims=True)
         total = _tf.tile(total, [1, s[1]]) + _np.exp(-10.0)
-        out = A / total
+        out = matrix / total
     return out
 
 
@@ -96,13 +71,13 @@ def prod_n(inputs, name=None):
     Parameters
     ----------
     inputs : list
-        A list of Tensor objects, all with the same shape and type.
+        matrix list of Tensor objects, all with the same shape and type.
     name : str
-        A name for the operation (optional).
+        matrix name for the _operation (optional).
 
     Returns
     -------
-    A Tensor of same shape and type as the elements of inputs.
+    matrix Tensor of same shape and type as the elements of inputs.
     """
     if name is None:
         name = "prod_n"
@@ -110,53 +85,6 @@ def prod_n(inputs, name=None):
         out = _tf.stack(inputs, axis=0)
         out = _tf.reduce_prod(out, axis=0)
         return out
-
-
-def safe_logdet(mat):
-    with _tf.name_scope("safe_det"):
-        eig = _tf.linalg.eigvalsh(mat)
-        min_eig = _tf.exp(_tf.constant(-10.0, dtype=_tf.float64))
-        out = _tf.where(eig > min_eig,
-                        eig,
-                        _tf.ones_like(eig) * min_eig)
-        out = _tf.reduce_sum(_tf.log(out))
-        return out
-
-
-def efficient_matrix_product(mat, nugget, b):
-    """
-    Computes efficient matrix products using the compressed feature
-    matrix structure.
-
-    Parameters
-    ----------
-    mat : Tensor
-        A matrix.
-    nugget : Tensor
-        A vector, the diagonal of a nugget matrix.
-    b : Tensor
-        A generic matrix with matching shape.
-
-    Returns
-    -------
-    out : Tensor
-        The computed matrix product.
-
-    This method computes tf.matmul(tf.matmul(mat, mat, False, True)
-    + tf.diag(nugget), b) in an efficient manner, especially if mat has more
-    rows than columns.
-    """
-    with _tf.name_scope("efficient_matrix_product"):
-        # Efficient multiplication of nugget and b
-        sb = _tf.shape(b)
-        nug = _tf.reshape(nugget, [sb[0], 1])
-        nug = _tf.tile(nug, [1, sb[1]])
-        out_0 = nug * b
-
-        # matrix multiplication
-        out_1 = _tf.matmul(mat, b, True, False)
-        out_1 = _tf.matmul(mat, out_1)
-    return out_0 + out_1
 
 
 def conjugate_gradient(matmul_fun, b, x_0=None, tol=1e-3, jitter=1e-9,
@@ -167,22 +95,22 @@ def conjugate_gradient(matmul_fun, b, x_0=None, tol=1e-3, jitter=1e-9,
     Parameters
     ----------
     matmul_fun : function
-        Function to compute A times b. Must accept and return a single Tensor
+        Function to compute matrix times b. Must accept and return a single Tensor
         with the same shape as b.
     b : Tensor
-        A vector with matching shape.
+        matrix vector with matching shape.
     x_0 : Tensor
         An initial guess at the solution. Defaults to zero.
     tol : double
         The tolerance for ending the loop. It is tested against the
         Frobenius norm of the residual matrix.
     jitter : double
-        A small number to improve numerical stability.
+        matrix small number to improve numerical stability.
 
     Returns
     -------
     x : Tensor
-        The solution of the system Ax=b, where A is implicitly provided in
+        The solution of the system Ax=b, where matrix is implicitly provided in
         matmul_fun.
     """
     with _tf.name_scope("conjugate_gradient"):
@@ -224,72 +152,6 @@ def conjugate_gradient(matmul_fun, b, x_0=None, tol=1e-3, jitter=1e-9,
     return out[3]
 
 
-# def conjugate_gradient_pre_cond(matmul_fun, pre_comp_matmul_fun,
-#                                 b, x_0=None, tol=1e-3, jitter=1e-9):
-#     """
-#     Conjugate gradient solver with preconditioning.
-#
-#     Parameters
-#     ----------
-#     matmul_fun : function
-#         Function to compute A times b. Must accept and return a single Tensor
-#         with the same shape as b.
-#     pre_comp_matmul_fun : function
-#         Function to compute the product of the preconditioning matrix with a
-#         vector.
-#     b : Tensor
-#         A vector with matching shape.
-#     x_0 : Tensor
-#         An initial guess at the solution. Defaults to zero.
-#     tol : double
-#         The tolerance for ending the loop. It is tested against the
-#         Frobenius norm of the residual matrix.
-#     jitter : double
-#         A small number to improve numerical stability.
-#
-#     Returns
-#     -------
-#     x : Tensor
-#         The solution of the system Ax=b, where A is implicitly provided in
-#         matmul_fun.
-#     """
-#     with _tf.name_scope("conjugate_gradient"):
-#         # initialization
-#         if x_0 is None:
-#             x_0 = _tf.zeros_like(b)
-#         r = matmul_fun(x_0) - b
-#         p = -r
-#         x = x_0
-#         z = pre_comp_matmul_fun(r)
-#         rtr = _tf.reduce_sum(z * r)
-#         i = _tf.constant(0)
-#         tol = _tf.constant(tol, b.dtype)
-#         sx = _tf.shape(x)
-#
-#         # TensorFlow loop
-#         def cond(i_, r_, p_, x_, rtr_):
-#
-#             cond_0 = _tf.less(i_, sx[0])
-#
-#             val = _tf.sqrt(_tf.reduce_mean(r_ * r_))
-#             cond_1 = _tf.greater(val, tol)
-#
-#             return _tf.reduce_all(_tf.stack([cond_0, cond_1]))
-#
-#         def body(i_, r_, p_, x_, rtr_):
-#             ap = matmul_fun(p_)
-#             alpha = rtr_ / (_tf.reduce_sum(p_ * ap) + jitter)
-#             x_ = x_ + alpha * p_
-#             r_ = r_ + alpha * ap
-#             z_ = pre_comp_matmul_fun(r_)
-#             rtr_new = _tf.reduce_sum(z_ * r_)
-#             p_ = -z_ + p_ * rtr_new / (rtr_ + jitter)
-#             return i_ + 1, r_, p_, x_, rtr_new
-#
-#         out = _tf.while_loop(cond, body, (i, r, p, x, rtr))
-#     return out[3]
-
-
 def conjugate_gradient_block(matmul_fun, b, tol=1e-3, jitter=1e-9,
                              x_0=None, max_iter=100):
     """
@@ -299,20 +161,20 @@ def conjugate_gradient_block(matmul_fun, b, tol=1e-3, jitter=1e-9,
     Parameters
     ----------
     matmul_fun : function
-        Function to compute A times b. Must accept and return a single Tensor
+        Function to compute matrix times b. Must accept and return a single Tensor
         with the same shape as b.
     b : Tensor
-        A generic matrix with matching shape.
+        matrix generic matrix with matching shape.
     tol : double
         The tolerance for ending the loop. It is tested against the
         Frobenius norm of the residual matrix.
     jitter : double
-        A small number to improve numerical stability.
+        matrix small number to improve numerical stability.
 
     Returns
     -------
     x : Tensor
-        The solution of the system Ax=b, where A is implicitly provided in
+        The solution of the system Ax=b, where matrix is implicitly provided in
         matmul_fun.
     """
     with _tf.name_scope("conjugate_gradient_block"):
@@ -388,59 +250,6 @@ def conjugate_gradient_block(matmul_fun, b, tol=1e-3, jitter=1e-9,
     return out[3]
 
 
-def extract_features(mat, min_var, pseudo_inverse=False):
-    with _tf.name_scope("extract_features"):
-        # eigen decomposition
-        # values, vectors = _tf.self_adjoint_eig(mat)
-        # values = _tf.reverse(values, axis=[0])
-        # vectors = _tf.reverse(vectors, axis=[1])
-        values, _, vectors = _tf.linalg.svd(mat)
-
-        # number of principal components needed to reach min_var
-        total_var = _tf.cumsum(values**2)
-        keep = _tf.where(_tf.greater(
-            total_var, min_var * _tf.reduce_sum(values**2)))[0] + 1
-        keep = _tf.squeeze(keep)
-
-        # compressed matrix
-        # delta = _tf.sqrt(values[0:keep])
-        delta = values[0:keep]
-        if pseudo_inverse:
-            delta = 1.0 / delta
-        q = _tf.matmul(vectors[:, 0:keep], _tf.diag(delta))
-    return q
-
-
-def determinant_taylor(matmul_fn, size, n=10, m=30, seed=1234):
-    with _tf.name_scope("determinant_approximation"):
-        size_fl = _tf.cast(size, _tf.float64)
-
-        def det_matmul(rhs):
-            return rhs - matmul_fn(rhs) / size_fl
-
-        rnd = _tf.random.stateless_uniform([size, n], [seed, 0],
-                                           dtype=_tf.float64,
-                                           minval=0, maxval=1)
-        rnd = _tf.round(rnd) * 2 - 1
-        mod = _tf.math.reduce_euclidean_norm(rnd, axis=0, keepdims=True)
-        rnd = rnd / mod
-        mod = _tf.squeeze(mod)
-
-        trace = []
-        prod = rnd
-        for i in range(m):
-            prod = det_matmul(prod)
-            tr = _tf.reduce_mean(
-                _tf.reduce_sum(rnd * prod, axis=0) * mod)
-            trace.append(tr / (i + 1))
-        trace = _tf.stack(trace) * size
-
-        # with _tf.control_dependencies([_tf.print(trace)]):
-
-        logdet = - _tf.reduce_sum(trace)
-    return logdet + size_fl * _tf.math.log(size_fl)
-
-
 def lanczos(matmul_fn, q_0, m=30):
     with _tf.name_scope("lanczos"):
         q_0 = q_0 / _tf.math.reduce_euclidean_norm(q_0)
@@ -451,14 +260,14 @@ def lanczos(matmul_fn, q_0, m=30):
 
         alpha = _tf.expand_dims(alpha, axis=0)
         beta = _tf.expand_dims(beta, axis=0)
-        q_mat = q_0
+        mat_q = q_0
         i = _tf.constant(1)
 
-        def loop_fn(i_, q_mat_, beta_, r_, alpha_):
-            v = _tf.expand_dims(q_mat_[:, - 1], axis=1)
-            q_i = r_ / beta_[- 1]
-            q_mat_ = _tf.concat([q_mat_, q_i], axis=1)
-            beta_i = beta[-1]
+        def loop_fn(i_, mat_q_, beta_, r_, alpha_):
+            v = _tf.expand_dims(mat_q_[:, - 1], axis=1)
+            beta_i = beta_[-1]
+            q_i = r_ / beta_i
+            mat_q_ = _tf.concat([mat_q_, q_i], axis=1)
             r_ = matmul_fn(q_i) - beta_i * v
             alpha_i = _tf.reduce_sum(q_i * r_)
             alpha_i = _tf.expand_dims(alpha_i, axis=0)
@@ -466,22 +275,21 @@ def lanczos(matmul_fn, q_0, m=30):
             r_ = r_ - alpha_i * q_i
 
             # reorthogonalization
-            r_ = r_ - _tf.matmul(q_mat_, _tf.matmul(q_mat_, r_, True, False))
-            r_ = r_ - _tf.matmul(q_mat_, _tf.matmul(q_mat_, r_, True, False))
-            r_ = r_ - _tf.matmul(q_mat_, _tf.matmul(q_mat_, r_, True, False))
+            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
+            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
+            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
 
             beta_i = _tf.math.reduce_euclidean_norm(r_)
             beta_i = _tf.expand_dims(beta_i, axis=0)
             beta_ = _tf.concat([beta_, beta_i], axis=0)
-            return i_ + 1, q_mat_, beta_, r_, alpha_
+            return i_ + 1, mat_q_, beta_, r_, alpha_
 
-        def cond_fn(i_, q_mat_, beta_, r_, alpha_):
+        def cond_fn(i_, mat_q_, beta_, r_, alpha_):
             cond_0 = _tf.less(i_, m)
-            # cond_1 = _tf.greater(beta_[-2], 0.0)
             return _tf.reduce_all(_tf.stack([cond_0]))
 
-        i, q_mat, beta, r, alpha = _tf.while_loop(
-            cond_fn, loop_fn, (i, q_mat, beta, r, alpha),
+        i, mat_q, beta, r, alpha = _tf.while_loop(
+            cond_fn, loop_fn, (i, mat_q, beta, r, alpha),
             shape_invariants=(_tf.TensorShape([]),
                               _tf.TensorShape([None, None]),
                               _tf.TensorShape([None]),
@@ -500,7 +308,7 @@ def lanczos(matmul_fn, q_0, m=30):
                         lambda: _tf.expand_dims(beta, axis=0))
         pos = _tf.shape(beta)[0]
         alpha = alpha[0:pos]
-        q_mat = q_mat[:, 0:pos]
+        mat_q = mat_q[:, 0:pos]
 
         alpha_min = _tf.reduce_min(alpha)
         alpha = _tf.cond(_tf.greater(alpha_min, 0.0),
@@ -512,7 +320,7 @@ def lanczos(matmul_fn, q_0, m=30):
             _tf.concat([beta[0:(pos-1)], [0.0]], axis=0))
         mat_t = alpha + _tf.roll(beta, 1, axis=1) + _tf.roll(beta, 1, axis=0)
 
-    return mat_t, q_mat
+    return mat_t, mat_q
 
 
 def determinant_lanczos(matmul_fn, size, n=10, m=100, seed=1234):
@@ -546,3 +354,290 @@ def determinant_lanczos(matmul_fn, size, n=10, m=100, seed=1234):
                          parallel_iterations=1)
         logdet = size / n * _tf.reduce_sum(det)
     return logdet
+
+
+def repeat_vector(vec, n, repeat_each=_tf.constant(True)):
+    with _tf.name_scope("repeat_vector"):
+        vec = _tf.expand_dims(vec, axis=-1)
+        vec = _tf.tile(vec, [1, n])
+        vec = _tf.cond(repeat_each,
+                       lambda: _tf.reshape(vec, [-1]),
+                       lambda: _tf.reshape(_tf.transpose(vec), [-1]))
+    return vec
+
+
+@_tf.function
+def sparse_kronecker_by_rows(mat_x, mat_y):
+    with _tf.name_scope("sparse_kronecker_by_rows"):
+        sh = _tf.cast(_tf.shape(mat_x), _tf.int64)
+        n_rows = sh[0]
+        nx = sh[1]
+        ny = _tf.cast(_tf.shape(mat_y)[1], _tf.int64)
+
+        # pre-allocation
+        rows = _tf.ones([0], _tf.int64)
+        cols = _tf.ones([0], _tf.int64)
+        vals = _tf.zeros([0], _tf.float64)
+        i = _tf.constant(0, _tf.int64)
+
+        def loop_fn(i_, rows_, cols_, vals_):
+            slice_x = _tf.sparse.slice(mat_x, [i_, 0], [1, nx])
+            slice_y = _tf.sparse.slice(mat_y, [i_, 0], [1, ny])
+
+            nvals_x = _tf.shape(slice_x.values)[0]
+            nvals_y = _tf.shape(slice_y.values)[0]
+
+            vals_x = repeat_vector(slice_x.values, nvals_y,
+                                   repeat_each=_tf.constant(False))
+            vals_y = repeat_vector(slice_y.values, nvals_x)
+            vals_xy = vals_x * vals_y
+
+            cols_x = repeat_vector(slice_x.indices[:, 1], nvals_y,
+                                   repeat_each=_tf.constant(False))
+            cols_y = repeat_vector(slice_y.indices[:, 1], nvals_x)
+            cols_xy = cols_x + cols_y*nx
+
+            rows_xy = _tf.ones_like(cols_xy) * i_
+
+            # update
+            rows_ = _tf.concat([rows_, rows_xy], axis=0)
+            cols_ = _tf.concat([cols_, cols_xy], axis=0)
+            vals_ = _tf.concat([vals_, vals_xy], axis=0)
+
+            return i_ + 1, rows_, cols_, vals_
+
+        def cond_fn(i_, rows_, cols_, vals_):
+            return _tf.less(i_, n_rows)
+
+        i, rows, cols, vals = _tf.while_loop(
+            cond_fn, loop_fn, loop_vars=[i, rows, cols, vals],
+            parallel_iterations=100,
+            shape_invariants=[_tf.TensorShape([]), _tf.TensorShape([None]),
+                              _tf.TensorShape([None]), _tf.TensorShape([None])]
+        )
+
+        # output
+        indices = _tf.stack([rows, cols], axis=1)
+        mat_new = _tf.sparse.SparseTensor(indices, vals,
+                                          dense_shape=[n_rows, nx*ny])
+    return mat_new
+
+
+# def lanczos_conjgate_gradient(matmul_fn, size, n=100, m=100,
+#                               seed=1234, tol=1e-6):
+#     """Matrix determinant based on conjugate gradients.
+#
+#     Based on Gardner et al. (2018)
+#     """
+#     with _tf.name_scope("lanczos_conjgate_gradient"):
+#
+#         # Rademacher random vectors
+#         rnd = _tf.random.stateless_uniform([size, n], [seed, 0],
+#                                            dtype=_tf.float64,
+#                                            minval=0, maxval=1)
+#         rnd = _tf.round(rnd) * 2 - 1
+#         rnd = rnd / _tf.math.reduce_euclidean_norm(rnd, axis=0, keepdims=True)
+#
+#         # initialization
+#         mat_u = _tf.zeros_like(rnd)
+#         mat_r = matmul_fn(mat_u) - rnd
+#         mat_z = mat_r
+#         mat_d = mat_z
+#
+#         alpha = _tf.zeros([0, n], _tf.float64)
+#         beta = _tf.zeros([0, n], _tf.float64)
+#         i = _tf.constant(0)
+#
+#         # conjugate gradient
+#         def loop_fn(i_, alpha_, beta_, u_, r_, z_, d_):
+#             mat_v = matmul_fn(d_)
+#             alpha_i = _tf.reduce_sum(r_ * z_, axis=0, keepdims=True) \
+#                 / _tf.reduce_sum(d_ * mat_v, axis=0, keepdims=True)
+#             u_ = u_ + alpha_i * d_
+#             r_ = r_ - alpha_i * mat_v
+#
+#             z_new = r_
+#             beta_i = _tf.reduce_sum(z_new**2, axis=0, keepdims=True) \
+#                 / _tf.reduce_sum(z_**2, axis=0, keepdims=True)
+#             d_ = z_new - beta_i * d_
+#
+#             alpha_ = _tf.concat([alpha_, alpha_i], axis=0)
+#             beta_ = _tf.concat([beta_, beta_i], axis=0)
+#
+#             return i_ + 1, alpha_, beta_, u_, r_, z_, d_
+#
+#         def cond_fn(i_, alpha_, beta_, u_, r_, z_, d_):
+#             cond_0 = _tf.less(i_, m)
+#             # cond_1 = _tf.less(_tf.sqrt(_tf.reduce_mean(r_*r_)),
+#             #                   _tf.constant(tol, _tf.float64))
+#             return _tf.reduce_all(_tf.stack([cond_0]))
+#
+#         i, alpha, beta, mat_u, mat_r, mat_z, mat_d = _tf.while_loop(
+#             cond_fn, loop_fn,
+#             (i, alpha, beta, mat_u, mat_r, mat_z, mat_d),
+#             shape_invariants=(_tf.TensorShape([]),
+#                               _tf.TensorShape([None, n]),
+#                               _tf.TensorShape([None, n]),
+#                               _tf.TensorShape([size, n]),
+#                               _tf.TensorShape([size, n]),
+#                               _tf.TensorShape([size, n]),
+#                               _tf.TensorShape([size, n])),
+#             swap_memory=False,
+#             parallel_iterations=1)
+#
+#         # fixing numerical issues
+#         alpha_min = _tf.reduce_min(alpha, axis=0, keepdims=True)
+#         alpha = _tf.where(_tf.greater(alpha, 0.0),
+#                           alpha,
+#                           alpha - 1.01 * alpha_min)
+#
+#         # lanczos and determinant
+#         final_m = _tf.shape(alpha)[0]
+#         idx = _tf.range(final_m)
+#
+#         lanczos_beta = _tf.sqrt(beta) / alpha
+#         lanczos_beta = _tf.gather(lanczos_beta, _tf.expand_dims(idx, axis=1))
+#
+#         beta_alpha = beta / alpha
+#         beta_alpha = _tf.roll(beta_alpha, shift=1, axis=0)
+#         beta_alpha = _tf.tensor_scatter_nd_update(
+#             beta_alpha, [[0]], _tf.zeros([1, n], _tf.float64))
+#         lanczos_alpha = 1/alpha + beta_alpha
+#
+#         lanczos_alpha = _tf.transpose(lanczos_alpha)
+#         lanczos_beta = _tf.transpose(_tf.squeeze(lanczos_beta, axis=1))
+#         batch_t = _tf.zeros([n, final_m, final_m], _tf.float64)
+#         batch_t = _tf.linalg.set_diag(batch_t, lanczos_alpha) \
+#                   + _tf.roll(_tf.linalg.set_diag(batch_t, lanczos_beta), 1, 2) \
+#                   + _tf.roll(_tf.linalg.set_diag(batch_t, lanczos_beta), 1, 1)
+#
+#         eigvals, eigvecs = _tf.linalg.eigh(batch_t)
+#         eigvals = _tf.maximum(eigvals, 1e-9)
+#         first_row = eigvecs[:, 0, :]
+#
+#         logdet = _tf.cast(size, _tf.float64) * _tf.reduce_mean(
+#             _tf.reduce_sum(first_row**2 * _tf.math.log(eigvals), axis=1)
+#         )
+#
+#     return logdet
+
+
+def lanczos_gp_solve(matmul_fn, y, n=20, m=30, seed=1234):
+    """Lanczos decomposition and determinant estimation"""
+    with _tf.name_scope("lanczos_gp_solve"):
+        n_data = _tf.shape(y)[0]
+
+        # Rademacher random vectors
+        rnd = _tf.random.stateless_uniform([n_data, n], [seed, 0],
+                                           dtype=_tf.float64,
+                                           minval=0, maxval=1)
+        rnd = _tf.round(rnd) * 2 - 1
+        rnd = rnd / _tf.math.reduce_euclidean_norm(rnd, axis=0, keepdims=True)
+
+        # initialization
+        q_0 = _tf.concat([y, rnd], axis=1)
+        q_0 = q_0 / _tf.math.reduce_euclidean_norm(q_0, axis=0, keepdims=True)
+        r = matmul_fn(q_0)
+        alpha = _tf.reduce_sum(r * q_0, axis=0, keepdims=True)  # [it, n+1]
+        r = r - alpha * q_0  # [n_data, n+1]
+        beta = _tf.math.reduce_euclidean_norm(r, axis=0, keepdims=True)
+
+        mat_q = _tf.expand_dims(q_0, axis=0)  # [it, n_data, n+1]
+        i = _tf.constant(1)
+
+        # batch lanczos
+        def loop_fn(i_, mat_q_, beta_, r_, alpha_):
+            v = mat_q_[-1, :, :]  # [n_data, n+1]
+            beta_i = _tf.expand_dims(beta_[-1, :], axis=0)  # [1, n+1]
+            q_i = r_ / beta_i
+            mat_q_ = _tf.concat([mat_q_, _tf.expand_dims(q_i, 0)], axis=0)
+            r_ = matmul_fn(q_i) - beta_i * v
+            alpha_i = _tf.reduce_sum(q_i * r_, axis=0, keepdims=True)
+            alpha_ = _tf.concat([alpha_, alpha_i], axis=0)
+            r_ = r_ - alpha_i * q_i
+
+            # reorthogonalization
+            mat_q_ = _tf.transpose(mat_q_, perm=[2, 1, 0])  # [n+1, n_data, it]
+            r_ = _tf.expand_dims(_tf.transpose(r_), axis=2)  # [n+1, n_data, 1]
+            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
+            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
+            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
+            r_ = _tf.transpose(_tf.squeeze(r_, axis=2))
+            mat_q_ = _tf.transpose(mat_q_, perm=[2, 1, 0])
+
+            beta_i = _tf.math.reduce_euclidean_norm(r_, axis=0, keepdims=True)
+            beta_ = _tf.concat([beta_, beta_i], axis=0)
+            return i_ + 1, mat_q_, beta_, r_, alpha_
+
+        def cond_fn(i_, mat_q_, beta_, r_, alpha_):
+            return _tf.less(i_, m)
+
+        i, mat_q, beta, r, alpha = _tf.while_loop(
+            cond_fn, loop_fn, (i, mat_q, beta, r, alpha),
+            shape_invariants=(_tf.TensorShape([]),
+                              _tf.TensorShape([None, None, None]),
+                              _tf.TensorShape([None, None]),
+                              _tf.TensorShape([None, None]),
+                              _tf.TensorShape([None, None])),
+            swap_memory=False,
+            parallel_iterations=1)
+
+        # post-processing
+        alpha_min = _tf.reduce_min(alpha)
+        alpha = _tf.where(_tf.greater(alpha, 0.0),
+                          alpha,
+                          alpha - 1.01 * alpha_min)
+        beta = _tf.where(_tf.greater(beta, 1e-12),
+                         beta,
+                         _tf.ones_like(beta)*1e-12)
+        beta = beta[0:(m-1), :]
+        beta = _tf.concat([beta, _tf.zeros([1, n+1], _tf.float64)], axis=0)
+
+        # determinant
+        batch_t = _tf.zeros([n+1, m, m], _tf.float64)
+        batch_t = _tf.linalg.set_diag(batch_t, _tf.transpose(alpha)) \
+                  + _tf.roll(_tf.linalg.set_diag(batch_t, _tf.transpose(beta)),
+                                                 1, 2) \
+                  + _tf.roll(_tf.linalg.set_diag(batch_t, _tf.transpose(beta)),
+                                                 1, 1)
+
+        eigvals, eigvecs = _tf.linalg.eigh(batch_t)
+        eigvals = _tf.maximum(eigvals, 1e-9)
+        first_row = eigvecs[1::, 0, :]
+
+        logdet = _tf.cast(n_data, _tf.float64) * _tf.reduce_mean(
+            _tf.reduce_sum(first_row ** 2 * _tf.math.log(eigvals[1::, :]), axis=1)
+        )
+
+        # decomposition for solving the system
+        eigvals_system = _tf.maximum(eigvals[0, :], 1e-9)
+        phi = _tf.linalg.diag(_tf.sqrt(1 / eigvals_system))
+        phi = _tf.matmul(eigvecs[0, :, :], phi)
+        phi = _tf.matmul(mat_q[:, :, 0], phi, True, False)
+
+        solved = _tf.matmul(phi, y, True, False)
+        solved = _tf.matmul(phi, solved)
+
+    return phi, solved, logdet
+
+
+@_tf.function
+def highest_value_probability(mu, var, seed, n_samples=10000):
+    sh = _tf.shape(mu)
+    n_data, n_values = sh[0], sh[1]
+
+    rnd = _tf.random.stateless_normal([1, n_values, n_samples - n_values],
+                                      seed=[seed, 0], dtype=_tf.float32)
+    samples = _tf.expand_dims(_tf.sqrt(var), 2)*rnd + _tf.expand_dims(mu, 2)
+    max_ind = _tf.math.argmax(samples, axis=1)
+
+    def count_fn(i):
+        which = _tf.cast(_tf.equal(max_ind, i), _tf.float32)
+        return _tf.reduce_sum(which, axis=1) + 1.0
+
+    counts = _tf.map_fn(count_fn, _tf.range(n_values, dtype=_tf.int64),
+                        dtype=_tf.float32)
+    counts = _tf.transpose(counts)
+
+    prob = counts/_tf.reduce_sum(counts, axis=1, keepdims=True)
+    return prob
