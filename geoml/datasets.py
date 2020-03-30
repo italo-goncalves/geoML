@@ -33,8 +33,8 @@ def walker():
         Full data.
     """
     path = _os.path.dirname(__file__)
-    path_walker = _os.path.join(path, "sample_data\\walker.dat")
-    path_walker_ex = _os.path.join(path, "sample_data\\walker_ex.dat")
+    path_walker = _os.path.join(path, "sample_data/walker.dat")
+    path_walker_ex = _os.path.join(path, "sample_data/walker_ex.dat")
 
     walker_sample = _pd.read_table(path_walker)
     walker_ex = _pd.read_table(path_walker_ex, sep=",")
@@ -57,7 +57,7 @@ def ararangua():
         A dataset with 13 drillholes.
     """
     path = _os.path.dirname(__file__)
-    file = _os.path.join(path, "sample_data\\Araranguá.xlsx")
+    file = _os.path.join(path, "sample_data/Araranguá.xlsx")
 
     ara_lito = _pd.read_excel(file, sheet_name="Lito")
     ara_collar = _pd.read_excel(file, sheet_name="Collar")
@@ -169,7 +169,7 @@ def andrade():
         Normals to the foliation planes.
     """
     path = _os.path.dirname(__file__)
-    file = _os.path.join(path, "sample_data\\andrade.txt")
+    file = _os.path.join(path, "sample_data/andrade.txt")
 
     raw_data = _pd.read_table(file)
 
