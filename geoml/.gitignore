@@ -103,4 +103,6 @@ venv.bak/
 # mypy
 .mypy_cache/
 
+# package data
 !__init__.py
+!sample_data
