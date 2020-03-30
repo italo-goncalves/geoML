@@ -21,4 +21,4 @@ setup(name='geoml',
       include_package_data=True,
       zip_safe=False,
       install_requires=['scikit-image', 'pandas', 'numpy',
-                        'tensorflow', 'tensorflow-probability', 'scipy'])
+                        'tensorflow', 'tensorflow-probability'])
