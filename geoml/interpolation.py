@@ -238,22 +238,25 @@ class CubicSpline(object):
                + d2 * CubicSpline._h4_d1(x, x1, x2)
 
     def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.d = _tf.ones_like(x)
+        self.x = _tf.Variable(x, dtype=_tf.float64, validate_shape=False)
+        self.y = _tf.Variable(y, dtype=_tf.float64, validate_shape=False)
+        self.d = _tf.Variable(_tf.ones_like(self.x), validate_shape=False)
         self.refresh(x, y)
 
     def refresh(self, x, y):
-        self.x = x
-        self.y = y
+        # self.x = x
+        # self.y = y
+        self.x.assign(x)
+        self.y.assign(y)
 
         w = x[1:] - x[:-1]
         s = (y[1:] - y[:-1]) / w
-        self.d = _tf.concat([
+        d = _tf.concat([
             _tf.expand_dims(s[0], axis=0),
             (s[:-1] * w[1:] + s[1:] * w[:-1]) / (w[1:] + w[:-1]),
             _tf.expand_dims(s[-1], axis=0),
         ], axis=0)
+        self.d.assign_add(d)
 
     def interpolate(self, xnew):
         with _tf.name_scope("cubic_interpolation"):
