@@ -142,9 +142,9 @@ class CompositionalParameter(Parameter):
     
     def set_value(self, value, transformed=False):
         if transformed:
-            self.value_transformed.assign(value)
+            # self.value_transformed.assign(value)
 
-            value = value - _tf.reduce_max(value)  # to avoid overflow
+            value = value - _tf.reduce_mean(value)  # to avoid overflow
             value = _tf.math.exp(value)
             value = value / _tf.reduce_sum(value)
             self.value.assign(value)

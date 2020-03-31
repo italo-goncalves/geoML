@@ -469,7 +469,7 @@ class WarpedGP(GP):
 
             return self.log_lik().numpy()
 
-        self.optimizer = _pso.ParticleSwarmOptimizer(len(start))
+        self.optimizer = _pso.SelfRegulatingPSO(len(start))
         self.optimizer.optimize(fitness, start=start, **kwargs)
         fitness(self.optimizer.best_position, finished=True)
 

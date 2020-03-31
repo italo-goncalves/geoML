@@ -201,11 +201,9 @@ class _LeafKernel(_Kernel):
 class _NodeKernel(_Kernel):
     """matrix kernel operation on other kernel"""
 
-    def __init__(self, operation, *args):
+    def __init__(self, *args):
         super().__init__()
 
-        # _operation must receive a list of kernel objects
-        self._operation = operation
         self.components = args
         self._all_parameters = [kernel.all_parameters for kernel in args]
         self._all_parameters = [item for sublist in self._all_parameters
@@ -213,6 +211,9 @@ class _NodeKernel(_Kernel):
         self._all_parameters += [pr for pr in self.parameters.values()]
         self.nugget_position = [i for i, comp in enumerate(self.components)
                                 if isinstance(comp, Nugget)]
+
+    def _operation(self, arg_list):
+        raise NotImplementedError
 
     def covariance_matrix(self, x, y):
         k = self._operation(
@@ -477,17 +478,17 @@ class Sum(_NodeKernel):
         n_comp = len(args)
         v = _gpr.CompositionalParameter(_tf.ones([n_comp], _tf.float64)/n_comp)
 
-        def sum_fn(inputs):
-            k = _tf.zeros_like(inputs[0])
-            for i, comp in enumerate(inputs):
-                k = k + self.parameters["variance"].value[i] * comp
-            return k
-
-        super().__init__(sum_fn, *args)
+        super().__init__(*args)
         self.parameters = {"variance": v}
         self._all_parameters.append(v)
         self._has_compact_support = all([kernel.has_compact_support
                                          for kernel in args])
+
+    def _operation(self, arg_list):
+        k = _tf.zeros_like(arg_list[0])
+        for i, comp in enumerate(arg_list):
+            k = k + self.parameters["variance"].value[i] * comp
+        return k
 
     def nugget_matmul(self, coordinates,
                       points_to_honor=None):
@@ -513,9 +514,12 @@ class Sum(_NodeKernel):
 class Product(_NodeKernel):
     """Kernel product"""
     def __init__(self, *args):
-        super().__init__(_prod_n, *args)
+        super().__init__(*args)
         self._has_compact_support = any([kernel.has_compact_support
                                          for kernel in args])
+
+    def _operation(self, arg_list):
+        return _prod_n(arg_list)
 
 
 class Matern32(_LeafKernel):
