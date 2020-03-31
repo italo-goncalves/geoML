@@ -9,6 +9,8 @@
 * Training is now based on Particle Swarm Optimization.
 * Included a `GPOptions` class to control verbosity, batch size and
 other model options.
+* The covariance matrix for directional data is now computed with a 
+finite difference method.
 
 ## version 0.1.3
 * Introduced parallel sparse cubic convolution interpolation.

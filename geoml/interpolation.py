@@ -270,17 +270,20 @@ class CubicSpline(object):
             x = _tf.squeeze(x)
             xnew = _tf.squeeze(xnew)
 
-            ynew = _tf.where(_tf.equal(pos, 0),
-                             y[0] + d[0] * (xnew - x[0]),
-                             _tf.where(_tf.equal(pos, n_knots),
-                                       y[-1] + d[-1] * (xnew - x[-1]),
-                                       CubicSpline._poly(xnew,
-                                                         _tf.gather(x, pos-1),
-                                                         _tf.gather(x, pos),
-                                                         _tf.gather(y, pos-1),
-                                                         _tf.gather(y, pos),
-                                                         _tf.gather(d, pos-1),
-                                                         _tf.gather(d, pos))))
+            ynew = _tf.where(
+                _tf.equal(pos, 0),
+                y[0] + d[0] * (xnew - x[0]),
+                _tf.where(
+                    _tf.equal(pos, n_knots),
+                    y[-1] + d[-1] * (xnew - x[-1]),
+                    CubicSpline._poly(
+                        xnew,
+                        _tf.gather(x, _tf.maximum(pos-1, 0)),
+                        _tf.gather(x, pos),
+                        _tf.gather(y, _tf.maximum(pos-1, 0)),
+                        _tf.gather(y, pos),
+                        _tf.gather(d, _tf.maximum(pos-1, 0)),
+                        _tf.gather(d, pos))))
         return ynew
 
     def interpolate_d1(self, xnew):
@@ -298,18 +301,20 @@ class CubicSpline(object):
             x = _tf.squeeze(x)
             xnew = _tf.squeeze(xnew)
 
-            ynew = _tf.where(_tf.equal(pos, 0),
-                             d[0],
-                             _tf.where(_tf.equal(pos, n_knots),
-                                       d[-1],
-                                       CubicSpline._poly_d1(
-                                           xnew,
-                                           _tf.gather(x, pos - 1),
-                                           _tf.gather(x, pos),
-                                           _tf.gather(y, pos - 1),
-                                           _tf.gather(y, pos),
-                                           _tf.gather(d, pos - 1),
-                                           _tf.gather(d, pos))))
+            ynew = _tf.where(
+                _tf.equal(pos, 0),
+                d[0],
+                _tf.where(
+                    _tf.equal(pos, n_knots),
+                    d[-1],
+                    CubicSpline._poly_d1(
+                        xnew,
+                        _tf.gather(x, _tf.maximum(pos-1, 0)),
+                        _tf.gather(x, pos),
+                        _tf.gather(y, _tf.maximum(pos-1, 0)),
+                        _tf.gather(y, pos),
+                        _tf.gather(d, _tf.maximum(pos-1, 0)),
+                        _tf.gather(d, pos))))
         return ynew
 
 
