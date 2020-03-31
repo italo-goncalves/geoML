@@ -244,8 +244,6 @@ class CubicSpline(object):
         self.refresh(x, y)
 
     def refresh(self, x, y):
-        # self.x = x
-        # self.y = y
         self.x.assign(x)
         self.y.assign(y)
 
@@ -282,11 +280,11 @@ class CubicSpline(object):
                     CubicSpline._poly(
                         xnew,
                         _tf.gather(x, _tf.maximum(pos-1, 0)),
-                        _tf.gather(x, pos),
+                        _tf.gather(x, _tf.minimum(pos, n_knots-1)),
                         _tf.gather(y, _tf.maximum(pos-1, 0)),
-                        _tf.gather(y, pos),
+                        _tf.gather(y, _tf.minimum(pos, n_knots-1)),
                         _tf.gather(d, _tf.maximum(pos-1, 0)),
-                        _tf.gather(d, pos))))
+                        _tf.gather(d, _tf.minimum(pos, n_knots-1)))))
         return ynew
 
     def interpolate_d1(self, xnew):
@@ -313,11 +311,11 @@ class CubicSpline(object):
                     CubicSpline._poly_d1(
                         xnew,
                         _tf.gather(x, _tf.maximum(pos-1, 0)),
-                        _tf.gather(x, pos),
+                        _tf.gather(x, _tf.minimum(pos, n_knots-1)),
                         _tf.gather(y, _tf.maximum(pos-1, 0)),
-                        _tf.gather(y, pos),
+                        _tf.gather(y, _tf.minimum(pos, n_knots-1)),
                         _tf.gather(d, _tf.maximum(pos-1, 0)),
-                        _tf.gather(d, pos))))
+                        _tf.gather(d, _tf.minimum(pos, n_knots-1)))))
         return ynew
 
 
