@@ -52,7 +52,8 @@ class _Transform(object):
         s = "  " * depth + self.__class__.__name__ + "\n"
         depth += 1
         for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " + str(parameter.value.numpy())
+            s += "  " * depth + name + ": " \
+                 + str(parameter.value.value().numpy())
             if parameter.fixed:
                 s += " (fixed)"
             s += "\n"

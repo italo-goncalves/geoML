@@ -179,7 +179,8 @@ class _LeafKernel(_Kernel):
         s += "\n"
         depth += 1
         for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " + str(parameter.value.numpy())
+            s += "  " * depth + name + ": " \
+                 + str(parameter.value.value().numpy())
             if parameter.fixed:
                 s += " (fixed)"
             s += "\n"
@@ -199,7 +200,7 @@ class _LeafKernel(_Kernel):
 
 
 class _NodeKernel(_Kernel):
-    """matrix kernel operation on other kernel"""
+    """A kernel operation on other kernel"""
 
     def __init__(self, *args):
         super().__init__()
@@ -262,7 +263,8 @@ class _NodeKernel(_Kernel):
             s += " (compact)"
         s += "\n"
         for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " + str(parameter.value.numpy())
+            s += "  " * depth + name + ": " \
+                 + str(parameter.value.value().numpy())
             if parameter.fixed:
                 s += " (fixed)"
             s += "\n"
