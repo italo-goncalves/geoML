@@ -424,6 +424,13 @@ class WarpedGP(GP):
 
         quantiles = _tf.map_fn(quant_fn, perc)
         quantiles = _tf.transpose(quantiles)
+
+        # single point case
+        quantiles = _tf.cond(
+            _tf.less(_tf.rank(quantiles), 2),
+            lambda: _tf.expand_dims(quantiles, 0),
+            lambda: quantiles)
+
         return quantiles
 
     @_tf.function
@@ -439,6 +446,13 @@ class WarpedGP(GP):
 
         percentiles = _tf.map_fn(perc_fn, quant)
         percentiles = _tf.transpose(percentiles)
+
+        # single point case
+        percentiles = _tf.cond(
+            _tf.less(_tf.rank(percentiles), 2),
+            lambda: _tf.expand_dims(percentiles, 0),
+            lambda: percentiles)
+
         return percentiles
 
     def train(self, **kwargs):
@@ -1584,3 +1598,393 @@ class SparseGP(WarpedGP):
             for i in range(n_sim):
                 col = name + "_sim_" + ("{:0>"+n_digits+"d}").format(i)
                 newdata.data[col] = sim[:, i]
+
+
+class ConservativeVectorField(_Model):
+    def __init__(self, spatial_data, var_1, var_2, var_3, kernel,
+                 mean_vector=None, options=GPOptions()):
+        """
+        Initializer for ConservativeVectorField.
+
+        Parameters
+        ----------
+        spatial_data :
+            Points1D, Points2D, or Points3D object.
+        var_1, var_2, var_3 : str
+            The name of the columns with the data to model.
+        kernel : Kernel
+            A kernel object.
+        """
+        super().__init__()
+        self.data = spatial_data
+        self.y_name = [var_1, var_2, var_3]
+        self._ndim = 3
+        self.optimizer = None
+        self.options = options
+        self.kernel = kernel
+
+        if spatial_data.ndim != 3:
+            raise ValueError("This model only works with data in 3 dimensions")
+
+        if mean_vector is not None:
+            self._pre_computations["mean"] = _tf.constant(
+                mean_vector, _tf.float64)
+        else:
+            self._pre_computations["mean"] = None
+
+        # tidying up
+        self.kernel.set_limits(spatial_data)
+        self._initialize_pre_computed_variables()
+        self._refresh()
+
+    def __repr__(self):
+        s = self.__class__.__name__ + "\n"
+        s += "\nKernel:\n"
+        s += repr(self.kernel)
+        return s
+
+    def _initialize_pre_computed_variables(self):
+        n_data = self.data.coords.shape[0]
+        y = self.data.data.loc[:, self.y_name].values
+        if self._pre_computations["mean"] is None:
+            self._pre_computations["mean"] = _tf.constant(
+                _np.mean(y, axis=0), _tf.float64
+            )
+
+        y = _tf.constant(y, _tf.float64) - _tf.expand_dims(
+            self._pre_computations["mean"], 0)
+        y = _tf.reshape(_tf.transpose(y), [-1])
+
+        self._pre_computations.update({
+            "y": _tf.expand_dims(y, 1),
+            "coords": _tf.constant(self.data.coords, _tf.float64),
+            "alpha": _tf.Variable(_tf.zeros([n_data*3, 1], _tf.float64)),
+            "chol": _tf.Variable(_tf.zeros([n_data*3, n_data*3], _tf.float64)),
+            "log_lik": _tf.Variable(_tf.constant(0.0, _tf.float64)),
+            "scale_factor": _tf.Variable(_tf.constant(1.0, _tf.float64)),
+        })
+
+    def _refresh(self, only_training_variables=False):
+        self._update_pre_computations(self.options.jitter)
+
+    @_tf.function
+    def _update_pre_computations(self, jitter):
+        y = self._pre_computations["y"]
+        n_data = _tf.shape(y)[0]
+
+        coords = self._pre_computations["coords"]
+
+        e1 = _tf.tile(_tf.constant([[1, 0, 0]], _tf.float64), [n_data / 3, 1])
+        e2 = _tf.tile(_tf.constant([[0, 1, 0]], _tf.float64), [n_data / 3, 1])
+        e3 = _tf.tile(_tf.constant([[0, 0, 1]], _tf.float64), [n_data / 3, 1])
+        cov_mat = _tf.concat([
+            _tf.concat([
+                self.kernel.self_covariance_matrix_d2(coords, e1),
+                self.kernel.covariance_matrix_d2(coords, coords, e1, e2),
+                self.kernel.covariance_matrix_d2(coords, coords, e1, e3)
+            ], axis=1),
+            _tf.concat([
+                self.kernel.covariance_matrix_d2(coords, coords, e2, e1),
+                self.kernel.self_covariance_matrix_d2(coords, e2),
+                self.kernel.covariance_matrix_d2(coords, coords, e2, e3)
+            ], axis=1),
+            _tf.concat([
+                self.kernel.covariance_matrix_d2(coords, coords, e3, e1),
+                self.kernel.covariance_matrix_d2(coords, coords, e3, e2),
+                self.kernel.self_covariance_matrix_d2(coords, e3)
+            ], axis=1),
+        ], axis=0)
+        scale = _tf.math.reduce_max(_tf.linalg.diag_part(cov_mat))
+        cov_mat = cov_mat / scale
+        cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64) * jitter
+
+        chol = _tf.linalg.cholesky(cov_mat)
+        alpha = _tf.linalg.cholesky_solve(chol, y)
+
+        fit = - 0.5 * _tf.reduce_sum(alpha * y, name="fit")
+        det = - _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(
+            chol)), name="det")
+        const = - 0.5 * _tf.cast(n_data, _tf.float64) \
+                * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
+        log_lik = fit + det + const
+
+        self._pre_computations["alpha"].assign(alpha)
+        self._pre_computations["chol"].assign(chol)
+        self._pre_computations["log_lik"].assign(log_lik)
+        self._pre_computations["scale_factor"].assign(scale)
+
+    @_tf.function
+    def _predict(self, x_new):
+        with _tf.name_scope("Prediction"):
+            coords = self._pre_computations["coords"]
+            n_data = _tf.shape(coords)[0]
+            n_pred = _tf.shape(x_new)[0]
+            scale = self._pre_computations["scale_factor"]
+
+            e1 = _tf.tile(_tf.constant([[1, 0, 0]], _tf.float64), [n_data, 1])
+            e2 = _tf.tile(_tf.constant([[0, 1, 0]], _tf.float64), [n_data, 1])
+            e3 = _tf.tile(_tf.constant([[0, 0, 1]], _tf.float64), [n_data, 1])
+            e1p = _tf.tile(_tf.constant([[1, 0, 0]], _tf.float64), [n_pred, 1])
+            e2p = _tf.tile(_tf.constant([[0, 1, 0]], _tf.float64), [n_pred, 1])
+            e3p = _tf.tile(_tf.constant([[0, 0, 1]], _tf.float64), [n_pred, 1])
+            k_new = _tf.concat([
+                _tf.concat([
+                    self.kernel.covariance_matrix_d2(x_new, coords, e1p, e1),
+                    self.kernel.covariance_matrix_d2(x_new, coords, e1p, e2),
+                    self.kernel.covariance_matrix_d2(x_new, coords, e1p, e3)
+                ], axis=1),
+                _tf.concat([
+                    self.kernel.covariance_matrix_d2(x_new, coords, e2p, e1),
+                    self.kernel.covariance_matrix_d2(x_new, coords, e2p, e2),
+                    self.kernel.covariance_matrix_d2(x_new, coords, e2p, e3)
+                ], axis=1),
+                _tf.concat([
+                    self.kernel.covariance_matrix_d2(x_new, coords, e3p, e1),
+                    self.kernel.covariance_matrix_d2(x_new, coords, e3p, e2),
+                    self.kernel.covariance_matrix_d2(x_new, coords, e3p, e3)
+                ], axis=1),
+            ], axis=0)
+            k_new = k_new / scale
+
+            pred_mu = _tf.matmul(k_new, self._pre_computations["alpha"])
+            pred_mu = _tf.reshape(_tf.transpose(pred_mu), [3, n_pred])
+            pred_mu = _tf.transpose(pred_mu) + _tf.expand_dims(
+                self._pre_computations["mean"], axis=0)
+
+            with _tf.name_scope("pred_var"):
+                zero = _tf.zeros([1, 3], _tf.float64)
+                e1 = _tf.constant([[1, 0, 0]], _tf.float64)
+                e2 = _tf.constant([[0, 1, 0]], _tf.float64)
+                e3 = _tf.constant([[0, 0, 1]], _tf.float64)
+                point_var = _tf.concat([
+                    _tf.concat([
+                        self.kernel.self_covariance_matrix_d2(zero, e1),
+                        self.kernel.covariance_matrix_d2(zero, zero, e1, e2),
+                        self.kernel.covariance_matrix_d2(zero, zero, e1, e3)
+                    ], axis=1),
+                    _tf.concat([
+                        self.kernel.covariance_matrix_d2(zero, zero, e2, e1),
+                        self.kernel.self_covariance_matrix_d2(zero, e2),
+                        self.kernel.covariance_matrix_d2(zero, zero, e2, e3)
+                    ], axis=1),
+                    _tf.concat([
+                        self.kernel.covariance_matrix_d2(zero, zero, e3, e1),
+                        self.kernel.covariance_matrix_d2(zero, zero, e3, e2),
+                        self.kernel.self_covariance_matrix_d2(zero, e3)
+                    ], axis=1),
+                ], axis=0)
+
+                point_var = _tf.expand_dims(_tf.linalg.diag_part(point_var),
+                                            axis=0)
+                point_var = point_var / scale
+
+                info_gain = _tf.linalg.cholesky_solve(
+                    self._pre_computations["chol"], _tf.transpose(k_new))
+                info_gain = _tf.multiply(_tf.transpose(k_new), info_gain)
+                info_gain = _tf.reduce_sum(info_gain, axis=0)
+
+                info_gain = _tf.transpose(_tf.reshape(info_gain, [3, n_pred]))
+                pred_var = point_var - info_gain
+        return pred_mu, pred_var
+
+    def log_lik(self):
+        """
+        Outputs the model's log-likelihood, given the current parameters.
+
+        Returns
+        -------
+        log_lik : double
+            The model's log-likelihood.
+        """
+        return self._pre_computations["log_lik"]
+
+    def train(self, **kwargs):
+
+        value, k_shape, k_position, \
+            min_val, max_val = self.kernel.get_parameter_values()
+
+        start = (value - min_val) / (max_val - min_val + 1e-6)
+
+        def fitness(sol, finished=False):
+            sol = sol * (max_val - min_val) + min_val
+
+            self.kernel.update_parameters(sol, k_shape, k_position)
+
+            self._refresh(only_training_variables=~finished)
+
+            return self.log_lik().numpy()
+
+        self.optimizer = _pso.ParticleSwarmOptimizer(len(start))
+        self.optimizer.optimize(fitness, start=start, **kwargs)
+        fitness(self.optimizer.best_position, finished=True)
+
+    def predict(self, newdata, name=None):
+        """
+        Makes a prediction on the specified coordinates.
+
+        Parameters
+        ----------
+        newdata :
+            matrix reference to a spatial points object of compatible dimension.
+            The prediction is written on the object's data attribute in-place.
+        name : list
+            Names of the predicted variables, used as a prefix in the output
+            columns. Defaults to self.y_name.
+        """
+        if self.ndim != newdata.ndim:
+            raise ValueError("dimension of newdata is incompatible with model")
+
+        # tidying up
+        if name is None:
+            name = self.y_name
+        x_new = newdata.coords
+
+        # prediction in batches
+        n_data = x_new.shape[0]
+        batch_id = self.options.batch_id(n_data)
+        n_batches = len(batch_id)
+
+        mu = []
+        var = []
+        for i, batch in enumerate(batch_id):
+            if self.options.verbose:
+                print("\rProcessing batch " + str(i + 1) + " of "
+                      + str(n_batches) + "       ", sep="", end="")
+
+            # TensorFlow
+            mu_i, var_i = self._predict(x_new[batch])
+
+            # update
+            mu.append(mu_i)
+            var.append(var_i)
+        if self.options.verbose:
+            print("\n")
+        mu = _tf.concat(mu, axis=0)
+        var = _tf.concat(var, axis=0)
+        mean_var = _tf.sqrt(_tf.math.reduce_prod(_tf.maximum(var, 0.0), axis=1))
+
+        mu = mu.numpy()
+        var = var.numpy()
+        mean_var = mean_var.numpy()
+
+        # output
+        for i, s in enumerate(name):
+            newdata.data[s + "_mean"] = mu[:, i]
+            newdata.data[s + "_variance"] = var[:, i]
+        newdata.data["mean_variance"] = mean_var
+
+    def cross_validation(self, partition=None):
+        raise NotImplementedError("to be implemented")
+
+    def save_state(self, file):
+        kernel_parameters = self.kernel.get_parameter_values(complete=True)
+        with open(file, 'wb') as f:
+            _pickle.dump(kernel_parameters, f)
+
+    def load_state(self, file):
+        with open(file, 'rb') as f:
+            kernel_parameters = _pickle.load(f)
+
+        k_value, k_shape, k_position, k_min_val, k_max_val = kernel_parameters
+        self.kernel.update_parameters(k_value, k_shape, k_position)
+
+    def make_surface(self, starting_point, n_directions=120, n_steps=100,
+                     step=0.25):
+
+        if len(starting_point.shape) < 2:
+            starting_point = _np.expand_dims(starting_point, 0)
+
+        # aligning search vectors
+        angle = _np.linspace(0, 2 * _np.pi, n_directions, endpoint=False)
+        base_vecs = _np.stack(
+            [_np.cos(angle), _np.sin(angle), _np.zeros_like(angle)], 1)
+
+        mu, var = self._predict(_tf.constant(starting_point, _tf.float64))
+        var = _tf.math.reduce_prod(_tf.maximum(var, 0.0),
+                                   axis=1, keepdims=True)**(1/3)
+        normal = mu / _tf.math.reduce_euclidean_norm(
+            mu, axis=1, keepdims=True)
+        normal = normal.numpy()
+
+        mean_direction = self._pre_computations["mean"].numpy()
+        v = _np.cross(_np.squeeze(normal), mean_direction)
+        c = _np.sum(_np.squeeze(normal) * mean_direction)
+
+        skew = _np.zeros([3, 3])
+        skew[1, 0] = v[2]
+        skew[2, 0] = -v[1]
+        skew[2, 1] = v[0]
+        skew = skew - _np.transpose(skew)
+
+        rot_mat = _np.eye(3) + skew + _np.matmul(skew, skew) / (1 + c)
+
+        rotated_vecs = _np.matmul(base_vecs, _np.transpose(rot_mat))
+
+        proj = _np.sum(rotated_vecs * normal, axis=1,
+                       keepdims=True) * normal
+        current_directions = rotated_vecs - proj
+        current_directions = current_directions / _np.sqrt(
+            _np.sum(current_directions ** 2, axis=1, keepdims=True) + 1e-6)
+        current_directions = _tf.constant(current_directions, _tf.float64)
+
+        # drawing surface
+        current_position = _tf.constant(starting_point, _tf.float64)
+        positions = [current_position]
+        variance = [var]
+        for i in range(n_steps):
+            if self.options.verbose:
+                print("\rStep " + str(i+1) + " of " + str(n_steps), end="")
+
+            current_position = current_position + current_directions * step
+            positions.append(current_position)
+
+            mu, var = self._predict(current_position)
+            var = _tf.math.reduce_prod(_tf.maximum(var, 0.0),
+                                       axis=1, keepdims=True) ** (1 / 3)
+            normals = mu / _tf.math.reduce_euclidean_norm(
+                mu, axis=1, keepdims=True)
+
+            proj = _tf.reduce_sum(current_directions * normals,
+                                  axis=1, keepdims=True) * normals
+
+            new_direction = current_directions - proj
+            new_direction = new_direction / (_tf.math.reduce_euclidean_norm(
+                new_direction, axis=1, keepdims=True) + 1e-6)
+            variance.append(var)
+
+            current_directions = new_direction
+
+        # output
+        points = _tf.concat(positions, axis=0)
+        variance = _tf.concat(variance, axis=0)
+        df_points = _pd.DataFrame(points.numpy(), columns=["X", "Y", "Z"])
+        df_points["variance"] = variance.numpy()
+
+        triangles = []
+        dir_id = _np.concatenate([_np.arange(1, n_directions + 1), [1]])
+        for i in range(n_directions):
+            triangles.append([0, dir_id[i], dir_id[i + 1]])
+            for j in range(n_steps - 1):
+                triangles.append([dir_id[i] + (j * n_directions),
+                                  dir_id[i + 1] + (j * n_directions),
+                                  dir_id[i] + ((j + 1) * n_directions)])
+                triangles.append([dir_id[i + 1] + (j * n_directions),
+                                  dir_id[i + 1] + ((j + 1) * n_directions),
+                                  dir_id[i] + ((j + 1) * n_directions), ])
+        triangles = _np.stack(triangles, axis=0)
+        df_tri = _pd.DataFrame(triangles, columns=["i", "j", "k"])
+
+        surf = {"type": "mesh3d",
+                "x": df_points["X"],
+                "y": df_points["Y"],
+                "z": df_points["Z"],
+                "intensity": df_points["variance"],
+                "cmin": 0, "cmax": 1,
+                "text": ["Variance :" + str(v)
+                         for v in _np.round(df_points["variance"], 4)],
+                "hoverinfo": "x+y+z+text",
+                "i": df_tri["i"],
+                "j": df_tri["j"],
+                "k": df_tri["k"]}
+
+        return df_points, df_tri, [surf]

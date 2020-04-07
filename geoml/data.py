@@ -810,6 +810,43 @@ class Points3D(_PointData):
             surf.append(obj)
         return surf
 
+    def export_planes(self, dip, azimuth, filename, size=1):
+        dip = self.data[dip]
+        azimuth = self.data[azimuth]
+
+        # conversions
+        dip = -dip * _np.pi / 180
+        azimuth = (90 - azimuth) * _np.pi / 180
+        strike = azimuth - _np.pi / 2
+
+        # dip and strike vectors
+        dipvec = _np.concatenate([
+            _np.array(_np.cos(dip) * _np.cos(azimuth), ndmin=2).transpose(),
+            _np.array(_np.cos(dip) * _np.sin(azimuth), ndmin=2).transpose(),
+            _np.array(_np.sin(dip), ndmin=2).transpose()], axis=1)*size
+        strvec = _np.concatenate([
+            _np.array(_np.cos(strike), ndmin=2).transpose(),
+            _np.array(_np.sin(strike), ndmin=2).transpose(),
+            _np.zeros([dipvec.shape[0], 1])], axis=1)*size
+
+        points = _np.stack([
+            self.coords + dipvec,
+            self.coords - 0.5*strvec - 0.5*dipvec,
+            self.coords + 0.5*strvec - 0.5*dipvec
+        ], axis=0)
+        points = _np.reshape(points, [3*points.shape[1], points.shape[2]],
+                             order="F")
+        idx = _np.reshape(_np.arange(points.shape[0]), self.coords.shape)
+
+        # export
+        with open(filename, 'w') as out_file:
+            out_file.write(
+                str(points.shape[0]) + " " + str(idx.shape[0]) + "\n")
+            for line in points:
+                out_file.write(" ".join(str(elem) for elem in line) + "\n")
+            for line in idx:
+                out_file.write(" ".join(str(elem) for elem in line) + "\n")
+
 
 class Grid1D(Points1D):
     """
