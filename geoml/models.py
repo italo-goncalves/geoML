@@ -218,7 +218,8 @@ class GP(_Model):
         log_lik : double
             The model's log-likelihood.
         """
-        return self._pre_computations["log_lik"]
+        self._refresh()
+        return self._pre_computations["log_lik"].numpy()
 
     def train(self, **kwargs):
 
@@ -1796,7 +1797,8 @@ class ConservativeVectorField(_Model):
         log_lik : double
             The model's log-likelihood.
         """
-        return self._pre_computations["log_lik"]
+        self._refresh()
+        return self._pre_computations["log_lik"].numpy()
 
     def train(self, **kwargs):
 
