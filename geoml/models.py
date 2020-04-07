@@ -209,7 +209,7 @@ class GP(_Model):
                 pred_var = point_var - _tf.reduce_sum(info_gain, axis=0)
         return pred_mu, pred_var
 
-    def log_lik(self):
+    def log_lik(self, refresh_all=True):
         """
         Outputs the model's log-likelihood, given the current parameters.
 
@@ -218,7 +218,7 @@ class GP(_Model):
         log_lik : double
             The model's log-likelihood.
         """
-        self._refresh()
+        self._refresh(only_training_variables=~refresh_all)
         return self._pre_computations["log_lik"].numpy()
 
     def train(self, **kwargs):
@@ -233,9 +233,9 @@ class GP(_Model):
 
             self.kernel.update_parameters(sol, k_shape, k_position)
 
-            self._refresh(only_training_variables=~finished)
+            # self._refresh(only_training_variables=~finished)
 
-            return self.log_lik().numpy()
+            return self.log_lik(refresh_all=finished)
 
         self.optimizer = _pso.ParticleSwarmOptimizer(len(start))
         self.optimizer.optimize(fitness, start=start, **kwargs)
@@ -480,9 +480,9 @@ class WarpedGP(GP):
 
             self.warping.update_parameters(w_params, w_shape, w_position)
 
-            self._refresh(only_training_variables=~finished)
+            # self._refresh(only_training_variables=~finished)
 
-            return self.log_lik().numpy()
+            return self.log_lik(refresh_all=finished)
 
         self.optimizer = _pso.SelfRegulatingPSO(len(start))
         self.optimizer.optimize(fitness, start=start, **kwargs)
@@ -1656,9 +1656,12 @@ class ConservativeVectorField(_Model):
             self._pre_computations["mean"], 0)
         y = _tf.reshape(_tf.transpose(y), [-1])
 
+        coords = _tf.constant(self.data.coords, _tf.float64)
+
         self._pre_computations.update({
             "y": _tf.expand_dims(y, 1),
-            "coords": _tf.constant(self.data.coords, _tf.float64),
+            "coords": coords,
+            "min_coords": _tf.reduce_min(coords, axis=0, keepdims=True),
             "alpha": _tf.Variable(_tf.zeros([n_data*3, 1], _tf.float64)),
             "chol": _tf.Variable(_tf.zeros([n_data*3, n_data*3], _tf.float64)),
             "log_lik": _tf.Variable(_tf.constant(0.0, _tf.float64)),
@@ -1700,6 +1703,7 @@ class ConservativeVectorField(_Model):
         cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64) * jitter
 
         chol = _tf.linalg.cholesky(cov_mat)
+        # y = y / _tf.sqrt(scale)
         alpha = _tf.linalg.cholesky_solve(chol, y)
 
         fit = - 0.5 * _tf.reduce_sum(alpha * y, name="fit")
@@ -1718,6 +1722,7 @@ class ConservativeVectorField(_Model):
     def _predict(self, x_new):
         with _tf.name_scope("Prediction"):
             coords = self._pre_computations["coords"]
+            min_coords = self._pre_computations["min_coords"]
             n_data = _tf.shape(coords)[0]
             n_pred = _tf.shape(x_new)[0]
             scale = self._pre_computations["scale_factor"]
@@ -1725,70 +1730,30 @@ class ConservativeVectorField(_Model):
             e1 = _tf.tile(_tf.constant([[1, 0, 0]], _tf.float64), [n_data, 1])
             e2 = _tf.tile(_tf.constant([[0, 1, 0]], _tf.float64), [n_data, 1])
             e3 = _tf.tile(_tf.constant([[0, 0, 1]], _tf.float64), [n_data, 1])
-            e1p = _tf.tile(_tf.constant([[1, 0, 0]], _tf.float64), [n_pred, 1])
-            e2p = _tf.tile(_tf.constant([[0, 1, 0]], _tf.float64), [n_pred, 1])
-            e3p = _tf.tile(_tf.constant([[0, 0, 1]], _tf.float64), [n_pred, 1])
             k_new = _tf.concat([
-                _tf.concat([
-                    self.kernel.covariance_matrix_d2(x_new, coords, e1p, e1),
-                    self.kernel.covariance_matrix_d2(x_new, coords, e1p, e2),
-                    self.kernel.covariance_matrix_d2(x_new, coords, e1p, e3)
-                ], axis=1),
-                _tf.concat([
-                    self.kernel.covariance_matrix_d2(x_new, coords, e2p, e1),
-                    self.kernel.covariance_matrix_d2(x_new, coords, e2p, e2),
-                    self.kernel.covariance_matrix_d2(x_new, coords, e2p, e3)
-                ], axis=1),
-                _tf.concat([
-                    self.kernel.covariance_matrix_d2(x_new, coords, e3p, e1),
-                    self.kernel.covariance_matrix_d2(x_new, coords, e3p, e2),
-                    self.kernel.covariance_matrix_d2(x_new, coords, e3p, e3)
-                ], axis=1),
-            ], axis=0)
+                    self.kernel.covariance_matrix_d1(x_new, coords, e1),
+                    self.kernel.covariance_matrix_d1(x_new, coords, e2),
+                    self.kernel.covariance_matrix_d1(x_new, coords, e3)
+                ], axis=1)
             k_new = k_new / scale
 
-            pred_mu = _tf.matmul(k_new, self._pre_computations["alpha"])
-            pred_mu = _tf.reshape(_tf.transpose(pred_mu), [3, n_pred])
-            pred_mu = _tf.transpose(pred_mu) + _tf.expand_dims(
-                self._pre_computations["mean"], axis=0)
+            mean = _tf.expand_dims(self._pre_computations["mean"], 0)
+            pred_mu = _tf.matmul(k_new, self._pre_computations["alpha"]) \
+                      + _tf.reduce_sum(mean * (x_new - min_coords),
+                                       axis=1, keepdims=True) #/ _tf.sqrt(scale)
 
             with _tf.name_scope("pred_var"):
-                zero = _tf.zeros([1, 3], _tf.float64)
-                e1 = _tf.constant([[1, 0, 0]], _tf.float64)
-                e2 = _tf.constant([[0, 1, 0]], _tf.float64)
-                e3 = _tf.constant([[0, 0, 1]], _tf.float64)
-                point_var = _tf.concat([
-                    _tf.concat([
-                        self.kernel.self_covariance_matrix_d2(zero, e1),
-                        self.kernel.covariance_matrix_d2(zero, zero, e1, e2),
-                        self.kernel.covariance_matrix_d2(zero, zero, e1, e3)
-                    ], axis=1),
-                    _tf.concat([
-                        self.kernel.covariance_matrix_d2(zero, zero, e2, e1),
-                        self.kernel.self_covariance_matrix_d2(zero, e2),
-                        self.kernel.covariance_matrix_d2(zero, zero, e2, e3)
-                    ], axis=1),
-                    _tf.concat([
-                        self.kernel.covariance_matrix_d2(zero, zero, e3, e1),
-                        self.kernel.covariance_matrix_d2(zero, zero, e3, e2),
-                        self.kernel.self_covariance_matrix_d2(zero, e3)
-                    ], axis=1),
-                ], axis=0)
-
-                point_var = _tf.expand_dims(_tf.linalg.diag_part(point_var),
-                                            axis=0)
-                point_var = point_var / scale
+                point_var = self.kernel.point_variance(x_new) / scale
 
                 info_gain = _tf.linalg.cholesky_solve(
                     self._pre_computations["chol"], _tf.transpose(k_new))
                 info_gain = _tf.multiply(_tf.transpose(k_new), info_gain)
                 info_gain = _tf.reduce_sum(info_gain, axis=0)
 
-                info_gain = _tf.transpose(_tf.reshape(info_gain, [3, n_pred]))
                 pred_var = point_var - info_gain
-        return pred_mu, pred_var
+        return pred_mu, pred_var * scale
 
-    def log_lik(self):
+    def log_lik(self, refresh_all=True):
         """
         Outputs the model's log-likelihood, given the current parameters.
 
@@ -1797,7 +1762,7 @@ class ConservativeVectorField(_Model):
         log_lik : double
             The model's log-likelihood.
         """
-        self._refresh()
+        self._refresh(only_training_variables=~refresh_all)
         return self._pre_computations["log_lik"].numpy()
 
     def train(self, **kwargs):
@@ -1812,9 +1777,9 @@ class ConservativeVectorField(_Model):
 
             self.kernel.update_parameters(sol, k_shape, k_position)
 
-            self._refresh(only_training_variables=~finished)
+            # self._refresh(only_training_variables=~finished)
 
-            return self.log_lik().numpy()
+            return self.log_lik(refresh_all=finished)
 
         self.optimizer = _pso.ParticleSwarmOptimizer(len(start))
         self.optimizer.optimize(fitness, start=start, **kwargs)
@@ -1829,8 +1794,8 @@ class ConservativeVectorField(_Model):
         newdata :
             matrix reference to a spatial points object of compatible dimension.
             The prediction is written on the object's data attribute in-place.
-        name : list
-            Names of the predicted variables, used as a prefix in the output
+        name : str
+            Name of the predicted variable, used as a prefix in the output
             columns. Defaults to self.y_name.
         """
         if self.ndim != newdata.ndim:
@@ -1838,7 +1803,7 @@ class ConservativeVectorField(_Model):
 
         # tidying up
         if name is None:
-            name = self.y_name
+            name = "potential"
         x_new = newdata.coords
 
         # prediction in batches
@@ -1861,19 +1826,12 @@ class ConservativeVectorField(_Model):
             var.append(var_i)
         if self.options.verbose:
             print("\n")
-        mu = _tf.concat(mu, axis=0)
-        var = _tf.concat(var, axis=0)
-        mean_var = _tf.sqrt(_tf.math.reduce_prod(_tf.maximum(var, 0.0), axis=1))
-
-        mu = mu.numpy()
-        var = var.numpy()
-        mean_var = mean_var.numpy()
+        mu = _tf.squeeze(_tf.concat(mu, axis=0))
+        var = _tf.squeeze(_tf.concat(var, axis=0))
 
         # output
-        for i, s in enumerate(name):
-            newdata.data[s + "_mean"] = mu[:, i]
-            newdata.data[s + "_variance"] = var[:, i]
-        newdata.data["mean_variance"] = mean_var
+        newdata.data[name + "_mean"] = mu.numpy()
+        newdata.data[name + "_variance"] = var.numpy()
 
     def cross_validation(self, partition=None):
         raise NotImplementedError("to be implemented")
@@ -1889,104 +1847,3 @@ class ConservativeVectorField(_Model):
 
         k_value, k_shape, k_position, k_min_val, k_max_val = kernel_parameters
         self.kernel.update_parameters(k_value, k_shape, k_position)
-
-    def make_surface(self, starting_point, n_directions=120, n_steps=100,
-                     step=0.25):
-
-        if len(starting_point.shape) < 2:
-            starting_point = _np.expand_dims(starting_point, 0)
-
-        # aligning search vectors
-        angle = _np.linspace(0, 2 * _np.pi, n_directions, endpoint=False)
-        base_vecs = _np.stack(
-            [_np.cos(angle), _np.sin(angle), _np.zeros_like(angle)], 1)
-
-        mu, var = self._predict(_tf.constant(starting_point, _tf.float64))
-        var = _tf.math.reduce_prod(_tf.maximum(var, 0.0),
-                                   axis=1, keepdims=True)**(1/3)
-        normal = mu / _tf.math.reduce_euclidean_norm(
-            mu, axis=1, keepdims=True)
-        normal = normal.numpy()
-
-        mean_direction = self._pre_computations["mean"].numpy()
-        v = _np.cross(_np.squeeze(normal), mean_direction)
-        c = _np.sum(_np.squeeze(normal) * mean_direction)
-
-        skew = _np.zeros([3, 3])
-        skew[1, 0] = v[2]
-        skew[2, 0] = -v[1]
-        skew[2, 1] = v[0]
-        skew = skew - _np.transpose(skew)
-
-        rot_mat = _np.eye(3) + skew + _np.matmul(skew, skew) / (1 + c)
-
-        rotated_vecs = _np.matmul(base_vecs, _np.transpose(rot_mat))
-
-        proj = _np.sum(rotated_vecs * normal, axis=1,
-                       keepdims=True) * normal
-        current_directions = rotated_vecs - proj
-        current_directions = current_directions / _np.sqrt(
-            _np.sum(current_directions ** 2, axis=1, keepdims=True) + 1e-6)
-        current_directions = _tf.constant(current_directions, _tf.float64)
-
-        # drawing surface
-        current_position = _tf.constant(starting_point, _tf.float64)
-        positions = [current_position]
-        variance = [var]
-        for i in range(n_steps):
-            if self.options.verbose:
-                print("\rStep " + str(i+1) + " of " + str(n_steps), end="")
-
-            current_position = current_position + current_directions * step
-            positions.append(current_position)
-
-            mu, var = self._predict(current_position)
-            var = _tf.math.reduce_prod(_tf.maximum(var, 0.0),
-                                       axis=1, keepdims=True) ** (1 / 3)
-            normals = mu / _tf.math.reduce_euclidean_norm(
-                mu, axis=1, keepdims=True)
-
-            proj = _tf.reduce_sum(current_directions * normals,
-                                  axis=1, keepdims=True) * normals
-
-            new_direction = current_directions - proj
-            new_direction = new_direction / (_tf.math.reduce_euclidean_norm(
-                new_direction, axis=1, keepdims=True) + 1e-6)
-            variance.append(var)
-
-            current_directions = new_direction
-
-        # output
-        points = _tf.concat(positions, axis=0)
-        variance = _tf.concat(variance, axis=0)
-        df_points = _pd.DataFrame(points.numpy(), columns=["X", "Y", "Z"])
-        df_points["variance"] = variance.numpy()
-
-        triangles = []
-        dir_id = _np.concatenate([_np.arange(1, n_directions + 1), [1]])
-        for i in range(n_directions):
-            triangles.append([0, dir_id[i], dir_id[i + 1]])
-            for j in range(n_steps - 1):
-                triangles.append([dir_id[i] + (j * n_directions),
-                                  dir_id[i + 1] + (j * n_directions),
-                                  dir_id[i] + ((j + 1) * n_directions)])
-                triangles.append([dir_id[i + 1] + (j * n_directions),
-                                  dir_id[i + 1] + ((j + 1) * n_directions),
-                                  dir_id[i] + ((j + 1) * n_directions), ])
-        triangles = _np.stack(triangles, axis=0)
-        df_tri = _pd.DataFrame(triangles, columns=["i", "j", "k"])
-
-        surf = {"type": "mesh3d",
-                "x": df_points["X"],
-                "y": df_points["Y"],
-                "z": df_points["Z"],
-                "intensity": df_points["variance"],
-                "cmin": 0, "cmax": 1,
-                "text": ["Variance :" + str(v)
-                         for v in _np.round(df_points["variance"], 4)],
-                "hoverinfo": "x+y+z+text",
-                "i": df_tri["i"],
-                "j": df_tri["j"],
-                "k": df_tri["k"]}
-
-        return df_points, df_tri, [surf]
