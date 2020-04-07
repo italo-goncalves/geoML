@@ -165,6 +165,8 @@ def andrade():
 
     Returns
     -------
+    points : geoml.data.Points3D
+        Base point data format.
     normals : geoml.data.Directions3D
         Normals to the foliation planes.
     """
@@ -173,9 +175,13 @@ def andrade():
 
     raw_data = _pd.read_table(file)
 
+    points = _data.Points3D(
+        coords=raw_data[["X", "Y", "Z"]],
+        data=raw_data.drop(["X", "Y", "Z"], axis=1))
+
     normals = _data.Directions3D.plane_normal(
         coords=raw_data[["X", "Y", "Z"]],
         azimuth=raw_data["dip_dir"],
         dip=raw_data["dip"])
 
-    return normals
+    return points, normals
