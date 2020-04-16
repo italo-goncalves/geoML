@@ -453,6 +453,9 @@ class Nugget(_LeafKernel):
     def covariance_matrix_d2(self, x, y, dir_x, dir_y):
         return self.covariance_matrix(x, y)
 
+    # def self_covariance_matrix_d2(self, x, dir_x):
+    #     return self.self_covariance_matrix(x)
+
     def self_covariance_matrix(self, x, points_to_honor=None):
         if points_to_honor is None:
             return _tf.eye(x.shape[0], dtype=_tf.float64)
@@ -540,3 +543,21 @@ class Matern52(_LeafKernel):
         d = _pairwise_dist(x, y)
         cov = (1 + 6*d + 12*d**2)*_tf.math.exp(-6*d)
         return cov
+
+
+class Amplify(_NodeKernel):
+    """Kernel product"""
+    def __init__(self, *args):
+        if len(args) > 1:
+            raise ValueError("Amplify must take a single argument")
+
+        super().__init__(*args)
+        self._has_compact_support = any([kernel.has_compact_support
+                                         for kernel in args])
+        amp = _gpr.PositiveParameter(1.0, 0.1, 10.0)
+        self.parameters = {"amplitude": amp}
+        self._all_parameters.append(amp)
+
+    def _operation(self, arg_list):
+        amp = self.parameters["amplitude"].value
+        return amp*arg_list[0]

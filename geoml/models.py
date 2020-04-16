@@ -157,31 +157,44 @@ class GP(_Model):
         else:
             points_to_honor = _tf.constant([False] * n_data, _tf.bool)
 
-        self._pre_computations = {
+        self._pre_computations.update({
             "y": _tf.expand_dims(y, 1),
             "coords": _tf.constant(self.data.coords[not_nan], _tf.float64),
             "alpha": _tf.Variable(_tf.zeros([n_data, 1], _tf.float64)),
             "chol": _tf.Variable(_tf.zeros([n_data, n_data], _tf.float64)),
             "log_lik": _tf.Variable(_tf.constant(0.0, _tf.float64)),
             "points_to_honor": points_to_honor,
-        }
+        })
 
     def _refresh(self, only_training_variables=False):
-        self._update_pre_computations(self.options.jitter)
+        self._update_pre_computations(
+            self.options.jitter, only_training_variables)
 
     @_tf.function
-    def _update_pre_computations(self, jitter):
+    def _update_pre_computations(self, jitter, only_training_variables=False):
         y = self._pre_computations["y"]
         n_data = _tf.shape(y)[0]
         points_to_honor = self._pre_computations["points_to_honor"]
 
         coords = self._pre_computations["coords"]
 
-        cov_mat = self.kernel.self_covariance_matrix(coords, points_to_honor)
-        cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64) * jitter
+        if only_training_variables:
+            cov_mat = self.kernel.self_covariance_matrix(coords)
+            cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64) * jitter
 
-        chol = _tf.linalg.cholesky(cov_mat)
-        alpha = _tf.linalg.cholesky_solve(chol, y)
+            chol = _tf.linalg.cholesky(cov_mat)
+            alpha = _tf.linalg.cholesky_solve(chol, y)
+
+        else:
+            cov_mat = self.kernel.self_covariance_matrix(coords,
+                                                         points_to_honor)
+            cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64) * jitter
+
+            chol = _tf.linalg.cholesky(cov_mat)
+            alpha = _tf.linalg.cholesky_solve(chol, y)
+
+            self._pre_computations["alpha"].assign(alpha)
+            self._pre_computations["chol"].assign(chol)
 
         fit = - 0.5 * _tf.reduce_sum(alpha * y, name="fit")
         det = - _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(
@@ -190,8 +203,6 @@ class GP(_Model):
                 * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
         log_lik = fit + det + const
 
-        self._pre_computations["alpha"].assign(alpha)
-        self._pre_computations["chol"].assign(chol)
         self._pre_computations["log_lik"].assign(log_lik)
 
     @_tf.function
@@ -218,7 +229,7 @@ class GP(_Model):
         log_lik : double
             The model's log-likelihood.
         """
-        self._refresh(only_training_variables=~refresh_all)
+        self._refresh(only_training_variables=not refresh_all)
         return self._pre_computations["log_lik"].numpy()
 
     def train(self, **kwargs):
@@ -232,8 +243,6 @@ class GP(_Model):
             sol = sol * (max_val - min_val) + min_val
 
             self.kernel.update_parameters(sol, k_shape, k_position)
-
-            # self._refresh(only_training_variables=~finished)
 
             return self.log_lik(refresh_all=finished)
 
@@ -321,7 +330,7 @@ class WarpedGP(GP):
     def __init__(self, spatial_data, variable, kernel,
                  warping=None, points_to_honor=None, options=GPOptions()):
         """
-        Initializer for GP.
+        Initializer for WarpedGP.
 
         Parameters
         ----------
@@ -364,7 +373,7 @@ class WarpedGP(GP):
         else:
             points_to_honor = _tf.constant([False]*n_data, _tf.bool)
 
-        self._pre_computations = {
+        self._pre_computations.update({
             "y": y,
             "y_warped": _tf.Variable(_tf.expand_dims(y, 1)),
             "y_derivative": _tf.Variable(y),
@@ -373,7 +382,7 @@ class WarpedGP(GP):
             "chol": _tf.Variable(_tf.zeros([n_data, n_data], _tf.float64)),
             "log_lik": _tf.Variable(_tf.constant(0.0, _tf.float64)),
             "points_to_honor": points_to_honor,
-        }
+        })
 
     def _refresh(self, only_training_variables=False):
         y = self._pre_computations["y"]
@@ -383,10 +392,11 @@ class WarpedGP(GP):
         y_derivative = self.warping.derivative(y)
         self._pre_computations["y_derivative"].assign(y_derivative)
 
-        self._update_pre_computations(self.options.jitter)
+        self._update_pre_computations(
+            self.options.jitter, only_training_variables)
 
     @_tf.function
-    def _update_pre_computations(self, jitter):
+    def _update_pre_computations(self, jitter, only_training_variables=False):
         y_warped = self._pre_computations["y_warped"]
         n_data = _tf.shape(y_warped)[0]
         y_derivative = self._pre_computations["y_derivative"]
@@ -394,11 +404,23 @@ class WarpedGP(GP):
 
         coords = self._pre_computations["coords"]
 
-        cov_mat = self.kernel.self_covariance_matrix(coords, points_to_honor)
-        cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64)*jitter
+        if only_training_variables:
+            cov_mat = self.kernel.self_covariance_matrix(coords)
+            cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64)*jitter
 
-        chol = _tf.linalg.cholesky(cov_mat)
-        alpha = _tf.linalg.cholesky_solve(chol, y_warped)
+            chol = _tf.linalg.cholesky(cov_mat)
+            alpha = _tf.linalg.cholesky_solve(chol, y_warped)
+
+        else:
+            cov_mat = self.kernel.self_covariance_matrix(coords,
+                                                         points_to_honor)
+            cov_mat = cov_mat + _tf.eye(n_data, dtype=_tf.float64) * jitter
+
+            chol = _tf.linalg.cholesky(cov_mat)
+            alpha = _tf.linalg.cholesky_solve(chol, y_warped)
+
+            self._pre_computations["alpha"].assign(alpha)
+            self._pre_computations["chol"].assign(chol)
 
         fit = - 0.5 * _tf.reduce_sum(alpha * y_warped, name="fit")
         det = - _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(
@@ -409,8 +431,6 @@ class WarpedGP(GP):
                             name="warping_derivative")
         log_lik = fit + det + const + wp
 
-        self._pre_computations["alpha"].assign(alpha)
-        self._pre_computations["chol"].assign(chol)
         self._pre_computations["log_lik"].assign(log_lik)
 
     @_tf.function
@@ -642,7 +662,7 @@ class GPGrad(GP):
         else:
             points_to_honor = _tf.constant([False]*n_data, _tf.bool)
 
-        self._pre_computations = {
+        self._pre_computations.update({
             "y": y,
             "coords": _tf.constant(self.data.coords[not_nan], _tf.float64),
             "alpha": _tf.Variable(_tf.zeros([n_data + n_dir, 1], _tf.float64)),
@@ -657,47 +677,67 @@ class GPGrad(GP):
                 _tf.float64),
             "y_dir": y_dir,
             "points_to_honor": points_to_honor,
-        }
+        })
 
     @_tf.function
-    def _update_pre_computations(self, jitter):
+    def _update_pre_computations(self, jitter, only_training_variables=False):
+
         y = self._pre_computations["y"]
         y_dir = self._pre_computations["y_dir"]
-        y_full = _tf.expand_dims(_tf.concat([y, y_dir], axis=0), axis=1)
         n_data = _tf.shape(y)[0]
         n_dir = _tf.shape(y_dir)[0]
 
-        points_to_honor = self._pre_computations["points_to_honor"]
-
         coords = self._pre_computations["coords"]
-        dir_coords = self._pre_computations["dir_coords"]
-        directions = self._pre_computations["directions"]
 
-        cov_coords = self.kernel.self_covariance_matrix(coords, points_to_honor)
-        cov_cross = self.kernel.covariance_matrix_d1(
-            coords, dir_coords, directions
-        )
-        cov_dir = self.kernel.self_covariance_matrix_d2(
-            dir_coords, directions)
+        if only_training_variables:
+            # directions ignored during training
+            y_full = _tf.expand_dims(y, axis=1)
+            cov_coords = self.kernel.self_covariance_matrix(coords)
 
-        cov_mat = _tf.concat([
-            _tf.concat([cov_coords, cov_cross], axis=1),
-            _tf.concat([_tf.transpose(cov_cross), cov_dir], axis=1)
-        ], axis=0)
-        cov_mat = cov_mat + _tf.eye(n_data + n_dir, dtype=_tf.float64)*jitter
+            cov_mat = cov_coords + _tf.eye(n_data, dtype=_tf.float64) * jitter
 
-        chol = _tf.linalg.cholesky(cov_mat)
-        alpha = _tf.linalg.cholesky_solve(chol, y_full)
+            chol = _tf.linalg.cholesky(cov_mat)
+            alpha = _tf.linalg.cholesky_solve(chol, y_full)
+
+            const = - 0.5 * _tf.cast(n_data, _tf.float64) \
+                    * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
+
+        else:
+            y_full = _tf.expand_dims(_tf.concat([y, y_dir], axis=0), axis=1)
+            points_to_honor = self._pre_computations["points_to_honor"]
+
+            dir_coords = self._pre_computations["dir_coords"]
+            directions = self._pre_computations["directions"]
+
+            cov_coords = self.kernel.self_covariance_matrix(coords,
+                                                            points_to_honor)
+            cov_cross = self.kernel.covariance_matrix_d1(
+                coords, dir_coords, directions
+            )
+            cov_dir = self.kernel.self_covariance_matrix_d2(
+                dir_coords, directions)
+
+            cov_mat = _tf.concat([
+                _tf.concat([cov_coords, cov_cross], axis=1),
+                _tf.concat([_tf.transpose(cov_cross), cov_dir], axis=1)
+            ], axis=0)
+            cov_mat = cov_mat + _tf.eye(n_data + n_dir,
+                                        dtype=_tf.float64) * jitter
+
+            chol = _tf.linalg.cholesky(cov_mat)
+            alpha = _tf.linalg.cholesky_solve(chol, y_full)
+
+            self._pre_computations["alpha"].assign(alpha)
+            self._pre_computations["chol"].assign(chol)
+
+            const = - 0.5 * _tf.cast(n_data + n_dir, _tf.float64) \
+                    * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
 
         fit = - 0.5 * _tf.reduce_sum(alpha * y_full, name="fit")
         det = - _tf.reduce_sum(_tf.math.log(_tf.linalg.tensor_diag_part(
             chol)), name="det")
-        const = - 0.5 * _tf.cast(n_data + n_dir, _tf.float64) \
-                * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
         log_lik = fit + det + const
 
-        self._pre_computations["alpha"].assign(alpha)
-        self._pre_computations["chol"].assign(chol)
         self._pre_computations["log_lik"].assign(log_lik)
 
     def _predict(self, x_new, n_sim=0):
@@ -1173,434 +1213,6 @@ class GPMultiClassifier(_Model):
             gp.kernel.update_parameters(d[i][0], d[i][1], d[i][2])
 
 
-class SparseGP(WarpedGP):
-    def __init__(self, spatial_data, variable, kernel,
-                 pseudo_inputs, interpolating_kernel,
-                 warping=None, points_to_honor=None, options=GPOptions()):
-        """
-        Initializer for SparseGP
-
-        Parameters
-        ----------
-        spatial_data
-        variable
-        kernel
-        pseudo_inputs : list containing spatial objects
-        interpolating_kernel : a compact support kernel
-        warping
-        points_to_honor
-        options
-        """
-        self.pseudo_inputs = pseudo_inputs
-        self._n_pseudo = [ps.coords.shape[0] for ps in pseudo_inputs]
-        self.interpolating_kernel = interpolating_kernel
-        super().__init__(spatial_data=spatial_data,
-                         variable=variable,
-                         kernel=kernel,
-                         warping=warping,
-                         points_to_honor=points_to_honor,
-                         options=options)
-
-    # @_tf.function
-    def _lanczos_0(self, coords, n_lanczos, jitter):
-        with _tf.name_scope("lanczos_0"):
-            # with _tf.device("GPU:0"):
-            cov_mat = self.interpolating_kernel.sparse_covariance_matrix(
-                coords, coords
-            )
-
-            mat_t, mat_q = _tftools.lanczos(
-                lambda b: _tf.sparse.sparse_dense_matmul(cov_mat, b),
-                _tf.ones([_tf.shape(coords)[0], 1], dtype=_tf.float64),
-                m=n_lanczos
-            )
-
-            eigvals, eigvecs = _tf.linalg.eigh(mat_t)
-            eigvals = _tf.maximum(eigvals, jitter)
-            phi = _tf.linalg.diag(_tf.sqrt(1 / eigvals))
-            phi = _tf.matmul(eigvecs, phi)
-            phi = _tf.matmul(mat_q, phi)
-        return phi
-
-    @_tf.function
-    def _lanczos_1(self, y, nugget, n_lanczos, jitter, seed):
-
-        def matmul_fn(vec):
-            out = vec * nugget
-
-            for _sparse_cov, _phi_0, _cov in zip(
-                    self._pre_computations["training_sparse_cov"],
-                    self._pre_computations["phi_0"],
-                    self._pre_computations["trainable_cov_mats"]):
-                out_i = _tf.sparse.sparse_dense_matmul(_sparse_cov, vec, True)
-                out_i = _tf.matmul(_phi_0, out_i, True, False)
-                out_i = _tf.matmul(_phi_0, out_i)
-                out_i = _tf.matmul(_cov, out_i)
-                out_i = _tf.matmul(_phi_0, out_i, True, False)
-                out_i = _tf.matmul(_phi_0, out_i)
-                out_i = _tf.sparse.sparse_dense_matmul(_sparse_cov, out_i)
-                out = out + out_i
-
-            return out
-
-        with _tf.device("GPU:0"):
-            # alpha
-            mat_t, mat_q = _tftools.lanczos(
-                matmul_fn,
-                q_0=y,
-                m=n_lanczos)
-
-            eigvals, eigvecs = _tf.linalg.eigh(mat_t)
-            eigvals = _tf.maximum(eigvals, jitter)
-            phi_1 = _tf.linalg.diag(_tf.sqrt(1 / eigvals))
-            phi_1 = _tf.matmul(eigvecs, phi_1)
-            phi_1 = _tf.matmul(mat_q, phi_1)
-
-            alpha = _tf.matmul(phi_1, y, True, False)
-            alpha = _tf.matmul(phi_1, alpha)
-
-            alpha_pred = []
-            for sparse_cov, phi_0, cov in zip(
-                    self._pre_computations["training_sparse_cov"],
-                    self._pre_computations["phi_0"],
-                    self._pre_computations["trainable_cov_mats"]):
-                ap_i = _tf.sparse.sparse_dense_matmul(sparse_cov, alpha, True)
-                ap_i = _tf.matmul(phi_0, ap_i, True, False)
-                ap_i = _tf.matmul(phi_0, ap_i)
-                ap_i = _tf.matmul(cov, ap_i)
-                ap_i = _tf.matmul(phi_0, ap_i, True, False)
-                ap_i = _tf.matmul(phi_0, ap_i)
-                alpha_pred.append(ap_i)
-            alpha_pred = _tf.concat(alpha_pred, axis=0)
-
-            # determinant
-            lanczos_det = _tftools.determinant_lanczos(
-                matmul_fn, _tf.shape(y)[0], n=5, m=n_lanczos,
-                seed=seed)
-
-        return phi_1, alpha, alpha_pred, lanczos_det
-
-    @_tf.function
-    def _lanczos_2(self, n_lanczos):
-        phi_1 = self._pre_computations["phi_1"]
-
-        def matmul_fn(vec):
-            vec = _tf.split(vec, self._n_pseudo, axis=0)
-            out = []
-
-            for sparse_cov, phi_0, cov, vec_i in zip(
-                    self._pre_computations["training_sparse_cov"],
-                    self._pre_computations["phi_0"],
-                    self._pre_computations["trainable_cov_mats"],
-                    vec):
-
-                out_i_1 = _tf.matmul(phi_0, vec_i, True, False)
-                out_i_1 = _tf.matmul(phi_0, out_i_1)
-                out_i_1 = _tf.matmul(cov, out_i_1)
-                out_i_1 = _tf.matmul(phi_0, out_i_1, True, False)
-                out_i_1 = _tf.matmul(phi_0, out_i_1)
-
-                out_i_2 = _tf.sparse.sparse_dense_matmul(sparse_cov, out_i_1)
-                out_i_2 = _tf.matmul(phi_1, out_i_2, True, False)
-                out_i_2 = _tf.matmul(phi_1, out_i_2)
-                out_i_2 = _tf.sparse.sparse_dense_matmul(
-                    sparse_cov, out_i_2, True)
-                out_i_2 = _tf.matmul(phi_0, out_i_2, True, False)
-                out_i_2 = _tf.matmul(phi_0, out_i_2)
-                out_i_2 = _tf.matmul(cov, out_i_2)
-                out_i_2 = _tf.matmul(phi_0, out_i_2, True, False)
-                out_i_2 = _tf.matmul(phi_0, out_i_2)
-
-                out.append(out_i_1 - out_i_2)
-
-            return _tf.concat(out, axis=0)
-
-        with _tf.device("GPU:0"):
-            mat_t, mat_q = _tftools.lanczos(
-                matmul_fn,
-                q_0=_tf.ones([sum(self._n_pseudo), 1], _tf.float64),
-                m=n_lanczos)
-
-            eigvals, eigvecs = _tf.linalg.eigh(mat_t)
-            phi_2 = _tf.linalg.diag(_tf.sqrt(eigvals))
-            phi_2 = _tf.matmul(eigvecs, phi_2)
-            phi_2 = _tf.matmul(mat_q, phi_2)
-
-        self._pre_computations["phi_2"].assign(phi_2)
-
-    def _batched_sparse_covariance_matrix(self, batched_coords, coords):
-        batch_id = self.options.batch_id(batched_coords.shape[0])
-        with _tf.device("GPU:0"):
-            coords = _tf.constant(coords, _tf.float64)
-            cov_mats = [self.interpolating_kernel.sparse_covariance_matrix(
-                _tf.constant(batched_coords[idx], _tf.float64), coords
-            ) for idx in batch_id]
-            full_mat = _tf.sparse.concat(axis=0, sp_inputs=cov_mats)
-            return full_mat
-
-    def _weight_by_group(self, cov_mats):
-        with _tf.device("GPU:0"):
-            avg_cov = _tf.concat(
-                [_tf.sparse.reduce_sum(cov_mat, axis=1, keepdims=True)/n
-                 for cov_mat, n in zip(cov_mats, self._n_pseudo)],
-                axis=1
-            )
-            # avg_cov = _tf.concat(
-            #     [_tf.sparse.sparse_dense_matmul(
-            #         cov_mat, _tf.ones([n, 1], _tf.float64)/n)
-            #      for cov_mat, n in zip(cov_mats, self._n_pseudo)],
-            #     axis=1
-            # )
-            logits = avg_cov - _tf.reduce_mean(avg_cov, axis=1, keepdims=True)
-            weights = _tf.sqrt(_tf.nn.softmax(logits, axis=1))
-            # weights = _tf.nn.softmax(logits, axis=1)
-
-            for i, cov_mat in enumerate(cov_mats):
-                idx = cov_mat.indices[:, 0]
-                w = _tf.gather(weights[:, i], idx)
-                cov_mats[i] = _tf.sparse.SparseTensor(
-                    indices=cov_mat.indices,
-                    values=cov_mat.values * w,
-                    dense_shape=cov_mat.dense_shape
-                )
-
-        return cov_mats
-
-    def _initialize_pre_computed_variables(self):
-        with _tf.device("GPU:0"):
-            not_nan = ~_np.isnan(self.data.data[self.y_name].values)
-            n_data = self.data.coords.shape[0]
-            y = _tf.constant(self.data.data[self.y_name].values[not_nan],
-                             _tf.float64)
-            self.warping.refresh(y)
-
-            if self.points_to_honor is not None:
-                points_to_honor = _tf.constant(
-                    self.data.data[self.points_to_honor].values[not_nan],
-                    _tf.bool)
-            else:
-                points_to_honor = _tf.constant([False]*n_data, _tf.bool)
-
-            n_lanczos = self.options.lanczos_iterations
-
-            training_coords = _tf.constant(self.data.coords[not_nan],
-                                           _tf.float64)
-
-            # pseudo_inputs and interpolators
-            phi_0 = [self._lanczos_0(_tf.constant(ps.coords, _tf.float64),
-                                     self.options.lanczos_iterations,
-                                     self.options.jitter)
-                     for ps in self.pseudo_inputs]
-            training_sparse_cov = [self._batched_sparse_covariance_matrix(
-                self.data.coords[not_nan], ps.coords
-            ) for ps in self.pseudo_inputs]
-            training_sparse_cov = self._weight_by_group(training_sparse_cov)
-            pseudo_input_coords = [_tf.constant(ps.coords, _tf.float64)
-                                   for ps in self.pseudo_inputs]
-
-            # trainable covariance matrices
-            total_ps = sum(self._n_pseudo)
-            trainable_cov_mats = [_tf.Variable(_tf.zeros([n, n], _tf.float64))
-                                  for n in self._n_pseudo]
-
-            self._pre_computations = {
-                "y": y,
-                "coords": training_coords,
-                "pseudo_input_coords": pseudo_input_coords,
-                "alpha": _tf.Variable(_tf.zeros([total_ps, 1], _tf.float64)),
-                "log_lik": _tf.Variable(_tf.constant(0.0, _tf.float64)),
-                "points_to_honor": points_to_honor,
-                "phi_0": phi_0,
-                "training_sparse_cov": training_sparse_cov,
-                "trainable_cov_mats": trainable_cov_mats,
-                "phi_1": _tf.Variable(
-                    _tf.zeros([n_data, n_lanczos], _tf.float64),
-                    validate_shape=False,
-                    shape=_tf.TensorShape([n_data, None])),
-                "phi_2": _tf.Variable(
-                    _tf.zeros([total_ps, n_lanczos], _tf.float64),
-                    validate_shape=False,
-                    shape=_tf.TensorShape([total_ps, None])),
-            }
-
-    def _refresh(self, only_training_variables=False):
-        y = self._pre_computations["y"]
-        self.warping.refresh(y)
-        y_warped = _tf.expand_dims(self.warping.forward(y), axis=1)
-        n_data = _tf.shape(y_warped)[0]
-        y_derivative = self.warping.derivative(y)
-        points_to_honor = self._pre_computations["points_to_honor"]
-        coords = self._pre_computations["coords"]
-
-        # covariance matrices
-        for i, ps_coords \
-                in enumerate(self._pre_computations["pseudo_input_coords"]):
-            self._pre_computations["trainable_cov_mats"][i].assign(
-                self.kernel.covariance_matrix(ps_coords, ps_coords)
-            )
-
-        # 1st lanczos: alpha
-        nugget_matmul = self.kernel.nugget_matmul(coords, points_to_honor)
-        nugget = nugget_matmul(_tf.ones_like(y_warped))
-
-        phi_1, alpha, alpha_pred, lanczos_det = self._lanczos_1(
-            y_warped, nugget,
-            n_lanczos=self.options.lanczos_iterations,
-            jitter=self.options.jitter,
-            seed=self.options.seed)
-
-        # log-likelihood
-        fit = - 0.5 * _tf.reduce_sum(alpha * y_warped, name="fit")
-        det = - 0.5 * lanczos_det
-        const = - 0.5 * _tf.cast(n_data, _tf.float64) \
-                * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
-        wp = _tf.reduce_sum(_tf.math.log(y_derivative),
-                            name="warping_derivative")
-        log_lik = fit + det + const + wp
-
-        # updates
-        self._pre_computations["alpha"].assign(alpha_pred)
-        self._pre_computations["log_lik"].assign(log_lik)
-        self._pre_computations["phi_1"].assign(phi_1)
-
-        # 2nd lanczos: predictive covariances
-        if not only_training_variables:
-            self._lanczos_2(self.options.lanczos_iterations)
-
-    def _predict(self, x_new, n_sim=0):
-        with _tf.name_scope("Prediction"):
-            # weight matrix
-            test_sparse_cov = [self._batched_sparse_covariance_matrix(
-                x_new, _tf.constant(ps.coords, _tf.float64)
-            ) for ps in self.pseudo_inputs]
-            test_sparse_cov = self._weight_by_group(test_sparse_cov)
-            w_test = _tf.sparse.concat(
-                axis=1, sp_inputs=test_sparse_cov)
-
-            # prediction
-            pred_mu = _tf.sparse.sparse_dense_matmul(
-                w_test, self._pre_computations["alpha"]
-            )
-
-            nugget_var = self.kernel.nugget_variance(x_new)
-
-            pred_explained_cov = _tf.sparse.sparse_dense_matmul(
-                w_test, self._pre_computations["phi_2"]
-            )
-            pred_var = _tf.reduce_sum(pred_explained_cov**2, axis=1) \
-                       + nugget_var
-
-            # simulation
-            rnd = _tf.random.stateless_normal(
-                shape=[_tf.shape(pred_explained_cov)[1], n_sim],
-                seed=[self.options.seed, 0],
-                dtype=_tf.float64
-            )
-            pred_sim = _tf.matmul(pred_explained_cov, rnd) + pred_mu
-
-            if self.options.add_noise:
-                noise = _tf.random.normal(
-                    shape=_tf.shape(pred_sim),
-                    seed=self.options.seed,
-                    dtype=_tf.float64,
-                    stddev=_tf.sqrt(_tf.expand_dims(nugget_var, axis=1))
-                )
-                pred_sim = pred_sim + noise
-
-            # warping
-            pred_sim = _tf.reshape(
-                self.warping.backward(_tf.reshape(pred_sim, [-1])),
-                _tf.shape(pred_sim)
-            )
-
-        return pred_mu, pred_var, pred_sim
-
-    def predict(self, newdata, name=None, perc=(0.025, 0.25, 0.5, 0.75, 0.975),
-                quant=(), n_sim=0):
-        """
-        Makes a prediction on the specified coordinates.
-
-        Parameters
-        ----------
-        newdata :
-            matrix reference to a spatial points object of compatible dimension.
-            The prediction is written on the object's data attribute in-place.
-        name : str
-            Name of the predicted variable, used as a prefix in the output
-            columns. Defaults to self.y_name.
-        perc : tuple, list, or array
-            The desired percentiles of the predictive distribution.
-        quant : tuple, list, or array
-            The values to calculate the predictive probability.
-        n_sim : int
-            The number of simulations to compute.
-        """
-        if self.ndim != newdata.ndim:
-            raise ValueError("dimension of newdata is incompatible with model")
-
-        # tidying up
-        if name is None:
-            name = self.y_name
-        x_new = newdata.coords
-
-        # prediction in batches
-        n_data = x_new.shape[0]
-        batch_id = self.options.batch_id(n_data)
-        n_batches = len(batch_id)
-
-        mu = []
-        var = []
-        quantiles = []
-        percentiles = []
-        sim = []
-        for i, batch in enumerate(batch_id):
-            if self.options.verbose:
-                print("\rProcessing batch " + str(i + 1) + " of "
-                      + str(n_batches) + "       ", sep="", end="")
-
-            # TensorFlow
-            mu_i, var_i, sim_i = self._predict(x_new[batch], n_sim)
-
-            # update
-            mu.append(mu_i)
-            var.append(var_i)
-            sim.append(sim_i)
-            if len(perc) > 0:
-                quantiles.append(
-                    self._quantiles(_tf.constant(perc, _tf.float64),
-                                    mu_i, var_i)
-                )
-            if len(quant) > 0:
-                percentiles.append(
-                    self._percentiles(_tf.constant(quant, _tf.float64),
-                                      mu_i, var_i)
-                )
-        if self.options.verbose:
-            print("\n")
-        mu = _tf.squeeze(_tf.concat(mu, axis=0))
-        var = _tf.squeeze(_tf.concat(var, axis=0))
-        sim = _tf.concat(sim, axis=0).numpy()
-
-        # output
-        newdata.data[name + "_mean"] = mu.numpy()
-        newdata.data[name + "_variance"] = var.numpy()
-        if len(perc) > 0:
-            quantiles = _tf.concat(quantiles, axis=0)
-            quantiles = quantiles.numpy()
-            for col, p in enumerate(perc):
-                newdata.data[name + "_p" + str(p)] = quantiles[:, col]
-        if len(quant) > 0:
-            percentiles = _tf.concat(percentiles, axis=0)
-            percentiles = percentiles.numpy()
-            for col, q in enumerate(quant):
-                newdata.data[name + "_q" + str(q)] = percentiles[:, col]
-        if n_sim > 0:
-            n_digits = str(len(str(n_sim - 1)))
-            for i in range(n_sim):
-                col = name + "_sim_" + ("{:0>"+n_digits+"d}").format(i)
-                newdata.data[col] = sim[:, i]
-
-
 class ConservativeVectorField(_Model):
     def __init__(self, spatial_data, var_1, var_2, var_3, kernel,
                  mean_vector=None, options=GPOptions()):
@@ -1847,3 +1459,266 @@ class ConservativeVectorField(_Model):
 
         k_value, k_shape, k_position, k_min_val, k_max_val = kernel_parameters
         self.kernel.update_parameters(k_value, k_shape, k_position)
+
+
+class SparseGP(WarpedGP):
+    def __init__(self, spatial_data, variable, kernel, pseudo_inputs,
+                 warping=None, points_to_honor=None, options=GPOptions()):
+        """
+        Initializer for SparseGP.
+
+        Parameters
+        ----------
+        spatial_data :
+            Points1D, Points2D, or Points3D object.
+        variable : str
+            The name of the column with the data to model.
+        kernel : Kernel
+            A kernel object.
+        pseudo_inputs :
+            Points1D, Points2D, or Points3D object.
+        warping : Warping
+            A warping object.
+        """
+        if pseudo_inputs.ndim != spatial_data.ndim:
+            raise ValueError("data and pseudo-inputs must have the same "
+                             "dimensionality")
+        self.pseudo_inputs = pseudo_inputs
+
+        super().__init__(spatial_data, variable, kernel,
+                         warping=warping,
+                         points_to_honor=points_to_honor,
+                         options=options)
+
+    def _initialize_pre_computed_variables(self):
+        super()._initialize_pre_computed_variables()
+        n_ps = self.pseudo_inputs.coords.shape[0]
+
+        self._pre_computations.update({
+            "alpha": _tf.Variable(_tf.zeros([n_ps, 1], _tf.float64)),
+            "chol": _tf.Variable(_tf.zeros([n_ps, n_ps], _tf.float64)),
+            "chol_b": _tf.Variable(_tf.zeros([n_ps, n_ps], _tf.float64)),
+            "pseudo_inputs": _tf.Variable(
+                _tf.constant(self.pseudo_inputs.coords, _tf.float64)),
+        })
+
+    def _refresh(self, only_training_variables=False):
+        y = self._pre_computations["y"]
+        self.warping.refresh(y)
+        y_warped = _tf.expand_dims(self.warping.forward(y), axis=1)
+        self._pre_computations["y_warped"].assign(y_warped)
+        y_derivative = self.warping.derivative(y)
+        self._pre_computations["y_derivative"].assign(y_derivative)
+
+        self._update_pre_computations(
+            self.options.jitter,
+            only_training_variables,
+            self.options.training_batch_size)
+
+    @_tf.function
+    def _update_pre_computations(self, jitter,
+                                 only_training_variables=False,
+                                 batch_size=2000):
+        y_warped = self._pre_computations["y_warped"]
+        n_data = _tf.shape(y_warped)[0]
+        y_derivative = self._pre_computations["y_derivative"]
+        points_to_honor = self._pre_computations["points_to_honor"]
+
+        coords = self._pre_computations["coords"]
+        pseudo_inputs = self._pre_computations["pseudo_inputs"]
+        nugget = self.kernel.nugget_variance(coords)
+
+        total_var = self.kernel.point_variance(coords) - nugget
+
+        if not only_training_variables:
+            nugget = _tf.where(points_to_honor,
+                               _tf.ones_like(nugget)*jitter,
+                               nugget)
+        nugget = _tf.expand_dims(nugget, 1)
+
+        cov_ps = self.kernel.covariance_matrix(pseudo_inputs, pseudo_inputs)
+        eye_ps = _tf.eye(_tf.shape(cov_ps)[0], dtype=_tf.float64) * jitter
+        chol_ps = _tf.linalg.cholesky(cov_ps + eye_ps)
+
+        # heavy computations in batches
+        mat_b = cov_ps
+        k_y = _tf.zeros([_tf.shape(cov_ps)[0], 1], dtype=_tf.float64)
+        explained_var = []
+        batches = self.options.batch_id(self.data.coords.shape[0], batch_size)
+        for batch in batches:
+            coords_i = _tf.gather(coords, batch)
+            y_i = _tf.gather(y_warped, batch)
+            nug_i = _tf.gather(nugget, batch)
+
+            cov_cross = self.kernel.covariance_matrix(coords_i, pseudo_inputs)
+            mat_b = mat_b + _tf.matmul(cov_cross/nug_i, cov_cross,
+                                       True, False)
+            k_y = k_y + _tf.matmul(cov_cross, y_i/nug_i, True, False)
+            explained_var.append(_tf.reduce_sum(
+                _tf.linalg.solve(chol_ps, _tf.transpose(cov_cross))**2,
+                axis=0
+            ))
+        explained_var = _tf.concat(explained_var, axis=0)
+
+        chol_b = _tf.linalg.cholesky(mat_b + eye_ps)
+        alpha = _tf.linalg.cholesky_solve(chol_b, k_y)
+
+        self._pre_computations["alpha"].assign(alpha)
+        self._pre_computations["chol"].assign(chol_ps)
+        self._pre_computations["chol_b"].assign(chol_b)
+
+        fit_1 = - 0.5 * _tf.reduce_sum(y_warped**2 / nugget)
+        fit_2 = 0.5 * _tf.reduce_sum(alpha * k_y)
+        det_1 = - _tf.reduce_sum(_tf.math.log(
+            _tf.linalg.tensor_diag_part(chol_b)))
+        det_2 = _tf.reduce_sum(_tf.math.log(
+            _tf.linalg.tensor_diag_part(chol_ps)))
+        det_3 = - 0.5 * _tf.reduce_sum(_tf.math.log(nugget))
+        const = - 0.5 * _tf.cast(n_data, _tf.float64) \
+                * _tf.constant(_np.log(2 * _np.pi), _tf.float64)
+        wp = _tf.reduce_sum(_tf.math.log(y_derivative))
+        trace = - 0.5 * _tf.reduce_sum((total_var - explained_var)
+                                       / _tf.squeeze(nugget))
+        log_lik = fit_1 + fit_2 + det_1 + det_2 + det_3 + const + wp + trace
+
+        self._pre_computations["log_lik"].assign(log_lik)
+
+    @_tf.function
+    def _predict(self, x_new, n_sim=0, seed=0, add_noise=False):
+        with _tf.name_scope("Prediction"):
+            pseudo_inputs = self._pre_computations["pseudo_inputs"]
+            k_new = self.kernel.covariance_matrix(pseudo_inputs, x_new)
+            pred_mu = _tf.matmul(k_new, self._pre_computations["alpha"],
+                                 True, False)
+
+            with _tf.name_scope("pred_var"):
+                chol_b = self._pre_computations["chol_b"]
+                nugget = self.kernel.nugget_variance(x_new)
+                pred_var = _tf.reduce_sum(
+                    _tf.linalg.solve(chol_b, k_new)**2,
+                    axis=0
+                ) + nugget
+
+                total_var = self.kernel.point_variance(x_new) - nugget
+                explained_var = _tf.reduce_sum(
+                    _tf.linalg.solve(self._pre_computations["chol"],
+                                     k_new)**2,
+                    axis=0
+                )
+                quality = explained_var / total_var
+
+            with _tf.name_scope("simulation"):
+                rnd = _tf.random.stateless_normal(
+                    shape=[_tf.shape(pseudo_inputs)[0], n_sim],
+                    seed=[seed, 0], dtype=_tf.float64
+                )
+                y_sim = _tf.matmul(
+                    k_new,
+                    _tf.linalg.solve(_tf.transpose(chol_b), rnd),
+                    True, False) + pred_mu
+
+                if add_noise:
+                    noise = _tf.random.normal(
+                        shape=_tf.shape(y_sim),
+                        stddev=_tf.sqrt(_tf.expand_dims(nugget, 1)),
+                        dtype=_tf.float64,
+                        seed=seed
+                    )
+                    y_sim = y_sim + noise
+
+        return pred_mu, pred_var, y_sim, quality
+
+    def predict(self, newdata, name=None, perc=(0.025, 0.25, 0.5, 0.75, 0.975),
+                quant=(), n_sim=0):
+        """
+        Makes a prediction on the specified coordinates.
+
+        Parameters
+        ----------
+        newdata :
+            matrix reference to a spatial points object of compatible dimension.
+            The prediction is written on the object's data attribute in-place.
+        name : str
+            Name of the predicted variable, used as a prefix in the output
+            columns. Defaults to self.y_name.
+        perc : tuple, list, or array
+            The desired percentiles of the predictive distribution.
+        quant : tuple, list, or array
+            The values to calculate the predictive probability.
+        n_sim : int
+            Number of predictive samples to draw.
+        """
+        if self.ndim != newdata.ndim:
+            raise ValueError("dimension of newdata is incompatible with model")
+
+        # tidying up
+        if name is None:
+            name = self.y_name
+        x_new = newdata.coords
+
+        # prediction in batches
+        n_data = x_new.shape[0]
+        batch_id = self.options.batch_id(n_data)
+        n_batches = len(batch_id)
+
+        mu = []
+        var = []
+        quantiles = []
+        percentiles = []
+        quality = []
+        y_sim = []
+        for i, batch in enumerate(batch_id):
+            if self.options.verbose:
+                print("\rProcessing batch " + str(i + 1) + " of "
+                      + str(n_batches) + "       ", sep="", end="")
+
+            # TensorFlow
+            mu_i, var_i, sim_i, q_i = self._predict(
+                x_new[batch],
+                seed=self.options.seed,
+                n_sim=n_sim,
+                add_noise=self.options.add_noise)
+
+            # update
+            mu.append(mu_i)
+            var.append(var_i)
+            quality.append(q_i)
+            y_sim.append(sim_i.numpy())
+            if len(perc) > 0:
+                quantiles.append(
+                    self._quantiles(_tf.constant(perc, _tf.float64),
+                                    mu_i, var_i)
+                )
+            if len(quant) > 0:
+                percentiles.append(
+                    self._percentiles(_tf.constant(quant, _tf.float64),
+                                      mu_i, var_i)
+                )
+        if self.options.verbose:
+            print("\n")
+        mu = _tf.squeeze(_tf.concat(mu, axis=0))
+        var = _tf.squeeze(_tf.concat(var, axis=0))
+        quality = _tf.squeeze(_tf.concat(quality, axis=0))
+        if n_sim > 0:
+            y_sim = _np.concatenate(y_sim, axis=0)
+
+        # output
+        newdata.data[name + "_mean"] = mu.numpy()
+        newdata.data[name + "_variance"] = var.numpy()
+        newdata.data[name + "_quality"] = quality.numpy()
+        if len(perc) > 0:
+            quantiles = _tf.concat(quantiles, axis=0)
+            quantiles = quantiles.numpy()
+            for col, p in enumerate(perc):
+                newdata.data[name + "_p" + str(p)] = quantiles[:, col]
+        if len(quant) > 0:
+            percentiles = _tf.concat(percentiles, axis=0)
+            percentiles = percentiles.numpy()
+            for col, q in enumerate(quant):
+                newdata.data[name + "_q" + str(q)] = percentiles[:, col]
+        if n_sim > 0:
+            n_digits = str(len(str(n_sim - 1)))
+            fmt = "{:0>" + n_digits + "d}"
+            for i in range(n_sim):
+                newdata.data[name + "_sim_" + fmt.format(i)] = \
+                    self.warping.backward(y_sim[:, i]).numpy()
