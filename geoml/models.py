@@ -1618,9 +1618,10 @@ class SparseGP(WarpedGP):
                     True, False) + pred_mu
 
                 if add_noise:
+                    delta = _tf.expand_dims(total_var - explained_var, 1)
                     noise = _tf.random.normal(
                         shape=_tf.shape(y_sim),
-                        stddev=_tf.sqrt(_tf.expand_dims(nugget, 1)),
+                        stddev=_tf.sqrt(delta),
                         dtype=_tf.float64,
                         seed=seed
                     )
