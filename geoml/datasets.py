@@ -40,20 +40,12 @@ def walker():
     walker_ex = _pd.read_table(path_walker_ex, sep=",")
 
     walker_point = _data.PointData(walker_sample, ["X", "Y"])
-    walker_point.add_continuous_variable(
-        "V", walker_sample["V"].values,
-        min_value=0, max_value=2000)
-    walker_point.add_continuous_variable(
-        "U", walker_sample["U"].values,
-        min_value=0, max_value=10000)
+    walker_point.add_continuous_variable("V", walker_sample["V"].values)
+    walker_point.add_continuous_variable("U", walker_sample["U"].values)
 
     walker_grid = _data.Grid2D(start=[1, 1], n=[260, 300], step=[1, 1])
-    walker_grid.add_continuous_variable(
-        "V", walker_ex["V"].values,
-        min_value=0, max_value=2000)
-    walker_grid.add_continuous_variable(
-        "U", walker_ex["U"].values,
-        min_value=0, max_value=10000)
+    walker_grid.add_continuous_variable("V", walker_ex["V"].values)
+    walker_grid.add_continuous_variable("U", walker_ex["U"].values)
 
     return walker_point, walker_grid
 
@@ -137,7 +129,7 @@ def example_fold():
     vals = _np.ones(ex_point.shape[0])
     vals[ex_point["label_1"] == "b"] = -1
     vals[ex_point["label_1"] != ex_point["label_2"]] = 0
-    point.add_continuous_variable("rock_num", vals, min_value=-3, max_value=3)
+    point.add_continuous_variable("rock_num", vals)
 
     dirs = _data.DirectionalData.from_azimuth(
         ex_dir, ["X", "Y"], "strike"
@@ -173,8 +165,7 @@ def sunspot_number():
     #                                    dtype=_np.float),
     #                         yearly_df)
     yearly = _data.PointData(yearly_df, "year")
-    yearly.add_continuous_variable("sn", yearly_df["sn"].values,
-                                   min_value=0, max_value=500)
+    yearly.add_continuous_variable("sn", yearly_df["sn"].values)
 
     monthly_df = _pd.read_table(
         "http://sidc.oma.be/silso/INFO/snmtotcsv.php",
@@ -186,8 +177,7 @@ def sunspot_number():
     # monthly = _data.Points1D(_np.arange(1, monthly_df.shape[0] + 1,
     #                                     dtype=_np.float), monthly_df)
     monthly = _data.PointData(monthly_df, "idx")
-    monthly.add_continuous_variable("sn", monthly_df["sn"].values,
-                                    min_value=0, max_value=500)
+    monthly.add_continuous_variable("sn", monthly_df["sn"].values)
 
     daily_df = _pd.read_table("http://sidc.oma.be/silso/INFO/sndtotcsv.php",
                               sep=";", header=None)
@@ -196,8 +186,7 @@ def sunspot_number():
                       axis="columns", inplace=True)
     daily_df["idx"] = _np.arange(1, daily_df.shape[0] + 1, dtype=_np.float)
     daily = _data.PointData(daily_df, "idx")
-    daily.add_continuous_variable("sn", daily_df["sn"].values,
-                                  min_value=0, max_value=500)
+    daily.add_continuous_variable("sn", daily_df["sn"].values)
 
     out = {"points": {"yearly": yearly,
                       "monthly": monthly,
