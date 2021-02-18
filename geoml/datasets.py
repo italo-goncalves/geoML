@@ -212,13 +212,13 @@ def andrade():
     path = _os.path.dirname(__file__)
     file = _os.path.join(path, "sample_data/andrade.txt")
 
-    raw_data = _pd.read_table(file)
+    raw_data = _pd.read_table(file, sep=",")
 
     planes = _data.DirectionalData.from_planes(
-        raw_data, ["X", "Y", "Z"], "dip_dir", "dip"
+        raw_data, ["X", "Y", "Z"], "azimuth", "dip"
     )
     normals = _data.DirectionalData.from_normals(
-        raw_data, ["X", "Y", "Z"], "dip_dir", "dip"
+        raw_data, ["X", "Y", "Z"], "azimuth", "dip"
     )
 
-    return planes, normals
+    return planes, normals, raw_data

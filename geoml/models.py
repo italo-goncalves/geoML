@@ -1125,8 +1125,7 @@ class StructuralField(_GPModel):
             raise ValueError("dimension of newdata is incompatible with model")
 
         # managing variables
-        newdata.add_continuous_variable(variable, quantiles=11)
-        newdata.variables[variable].reset_quantiles(-5, 5, quantiles=11)
+        newdata.add_continuous_variable(variable)
 
         # prediction in batches
         batch_id = self.options.batch_index(newdata.n_data)
