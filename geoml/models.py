@@ -281,6 +281,9 @@ class GP(_GPModel):
             const = -0.5 * _tf.cast(_tf.shape(self.cov)[0], _tf.float64)\
                     * _np.log(2 * _np.pi)
             log_lik = fit + det + const
+            
+            y_derivative = self.warping.derivative(self.y)
+            log_lik = log_lik + _tf.reduce_sum(_tf.math.log(y_derivative))
 
             if self.use_trend:
                 det_2 = _tf.reduce_sum(_tf.math.log(
