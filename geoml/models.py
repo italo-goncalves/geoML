@@ -281,7 +281,7 @@ class GP(_GPModel):
             const = -0.5 * _tf.cast(_tf.shape(self.cov)[0], _tf.float64)\
                     * _np.log(2 * _np.pi)
             log_lik = fit + det + const
-            
+
             y_derivative = self.warping.derivative(self.y)
             log_lik = log_lik + _tf.reduce_sum(_tf.math.log(y_derivative))
 
@@ -597,7 +597,7 @@ class VGP(_GPModel):
     def _log_lik_directions(self, x_dir, directions, jitter=1e-6):
         with _tf.name_scope("batched_elbo_directions"):
             # prediction
-            mu, var = self.latent_layer.predict_directions(
+            mu, var, _ = self.latent_layer.predict_directions(
                 x_dir, directions, jitter=jitter)
             has_value = _tf.ones_like(mu)
 
