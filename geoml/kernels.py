@@ -21,9 +21,11 @@ __all__ = ["Gaussian",
            "Constant",
            "Linear",
            "Cosine",
-           "Nugget",
            "Sum",
-           "Product"]
+           "Product",
+           "Matern32",
+           "Matern52",
+           "Scale"]
 
 import geoml.parameter as _gpr
 import geoml.transform as _gt
@@ -53,13 +55,19 @@ class _Kernel(object):
 
     def covariance_matrix(self, x, y):
         """Computes point-point covariance matrix between x and y tensors."""
-        pass
+        raise NotImplementedError()
 
     def covariance_matrix_d1(self, x, y, dir_y):
         """
         Computes direction-point covariance matrix between x and y tensors.
         """
+        # if step is None:
         step = 1e-3
+
+        min_coords = _tf.reduce_min(y, axis=0, keepdims=True)
+        x = x - min_coords
+        y = y - min_coords
+
         k1 = self.covariance_matrix(x, y + 0.5*step*dir_y)
         k2 = self.covariance_matrix(x, y - 0.5*step*dir_y)
         return (k1 - k2)/step
@@ -68,7 +76,13 @@ class _Kernel(object):
         """
         Computes direction-direction covariance matrix between x and y tensors.
         """
+        # if step is None:
         step = 1e-3
+
+        min_coords = _tf.reduce_min(y, axis=0, keepdims=True)
+        x = x - min_coords
+        y = y - min_coords
+
         k1 = self.covariance_matrix_d1(x + 0.5*step*dir_x, y, dir_y)
         k2 = self.covariance_matrix_d1(x - 0.5*step*dir_x, y, dir_y)
         return (k1 - k2) / step
@@ -78,60 +92,43 @@ class _Kernel(object):
         Computes the data points' self variance (covariance between the point
         and itself).
         """
-        pass
+        raise NotImplementedError()
 
-    def self_covariance_matrix(self, x, points_to_honor=None):
+    def self_covariance_matrix(self, x):
         return self.covariance_matrix(x, x)
 
     def self_covariance_matrix_d2(self, x, dir_x):
         return self.covariance_matrix_d2(x, x, dir_x, dir_x)
 
+    def point_variance_d2(self, x, dir_x, step=None):
+        if step is None:
+            step = 1e-3
+
+        min_coords = _tf.reduce_min(x, axis=0, keepdims=True)
+        x = x - min_coords
+
+        def loop_fn(elems):
+            y = _tf.expand_dims(elems[0], 0)
+            dir_y = _tf.expand_dims(elems[1], 0)
+            k = self.covariance_matrix(y, y + dir_y*step)
+            return _tf.squeeze(k)
+
+        cov_2 = _tf.map_fn(loop_fn, [x, dir_x], dtype=_tf.float64,
+                           parallel_iterations=1000)
+        cov_0 = self.point_variance(x)
+
+        return 2 * (cov_0 - cov_2) / step**2
+
     def pretty_print(self, depth=0):
-        pass
+        raise NotImplementedError()
 
     def __repr__(self):
         return self.pretty_print()
 
-    def get_parameter_values(self, complete=False):
-        value = []
-        shape = []
-        position = []
-        min_val = []
-        max_val = []
-
-        for index, parameter in enumerate(self._all_parameters):
-            if (not parameter.fixed) | complete:
-                value.append(_tf.reshape(parameter.value_transformed, [-1]).
-                                 numpy())
-                shape.append(_tf.shape(parameter.value_transformed).numpy())
-                position.append(index)
-                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
-                               numpy())
-                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
-                               numpy())
-
-        min_val = _np.concatenate(min_val, axis=0)
-        max_val = _np.concatenate(max_val, axis=0)
-        value = _np.concatenate(value, axis=0)
-
-        return value, shape, position, min_val, max_val
-
-    def update_parameters(self, value, shape, position):
-        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
-        value = _np.split(value, _np.cumsum(sizes))[:-1]
-        value = [_np.squeeze(val) if len(sh) == 0 else val
-                    for val, sh in zip(value, shape)]
-
-        for val, sh, pos in zip(value, shape, position):
-            self._all_parameters[pos].set_value(
-                _np.reshape(val, sh) if len(sh) > 0 else val,
-                transformed=True
-            )
-
     def set_limits(self, data):
         pass
 
-    def implicit_matmul(self, coordinates, points_to_honor=None):
+    def implicit_matmul(self, coordinates):
         """
         Implicit matrix-vector multiplication.
 
@@ -156,6 +153,54 @@ class _Kernel(object):
             cov_mat = _tf.sparse.from_dense(cov_mat)
         return cov_mat
 
+    def self_full_directional_covariance(self, x):
+        ndim = _tf.shape(x)[1]
+        n_data = _tf.shape(x)[0]
+        eye = _tf.eye(ndim, dtype=_tf.float64)
+        directions = _tf.tile(eye, [1, n_data])
+        directions = _tf.reshape(directions, [n_data * ndim, ndim])
+        x_tile = _tf.tile(x, [ndim, 1])
+
+        cov_d0 = self.self_covariance_matrix(x)
+        cov_d1 = self.covariance_matrix_d1(x, x_tile, directions)
+        cov_d2 = self.self_covariance_matrix_d2(x_tile, directions)
+
+        full_cov = _tf.concat(
+            [_tf.concat([cov_d0, cov_d1], axis=1),
+             _tf.concat([_tf.transpose(cov_d1), cov_d2], axis=1)],
+            axis=0)
+        return full_cov
+
+    def full_directional_covariance(self, x, base):
+        ndim = _tf.shape(x)[1]
+        n_base = _tf.shape(base)[0]
+        eye = _tf.eye(ndim, dtype=_tf.float64)
+        directions = _tf.tile(eye, [1, n_base])
+        directions = _tf.reshape(directions, [n_base * ndim, ndim])
+
+        cov_d0 = self.covariance_matrix(x, base)
+
+        base = _tf.tile(base, [ndim, 1])
+        cov_d1 = self.covariance_matrix_d1(x, base, directions)
+
+        full_cov = _tf.concat([cov_d0, cov_d1], axis=1)
+        return full_cov
+
+    def full_directional_covariance_d1(self, x, directions, base):
+        ndim = _tf.shape(x)[1]
+        n_base = _tf.shape(base)[0]
+        eye = _tf.eye(ndim, dtype=_tf.float64)
+        base_directions = _tf.tile(eye, [1, n_base])
+        base_directions = _tf.reshape(base_directions, [n_base * ndim, ndim])
+
+        cov_d1 = _tf.transpose(self.covariance_matrix_d1(base, x, directions))
+
+        base = _tf.tile(base, [ndim, 1])
+        cov_d2 = self.covariance_matrix_d2(x, base, directions, base_directions)
+
+        full_cov = _tf.concat([cov_d1, cov_d2], axis=1)
+        return full_cov
+
 
 class _LeafKernel(_Kernel):
     """Kernel that acts on actual coordinates"""
@@ -165,6 +210,17 @@ class _LeafKernel(_Kernel):
         self.transform = transform
         self._all_parameters = [pr for pr in self.parameters.values()] \
                              + [pr for pr in self.transform.parameters.values()]
+
+    def kernelize(self, x):
+        raise NotImplemented
+
+    def covariance_matrix(self, x, y):
+        with _tf.name_scope(self.__class__.__name__ + "_cov"):
+            x = self.transform.__call__(x)
+            y = self.transform.__call__(y)
+            d = _pairwise_dist(x, y)
+            k = self.kernelize(d)
+        return k
 
     def point_variance(self, x):
         with _tf.name_scope("Kernel_point_var"):
@@ -180,7 +236,7 @@ class _LeafKernel(_Kernel):
         depth += 1
         for name, parameter in self.parameters.items():
             s += "  " * depth + name + ": " \
-                 + str(parameter.value.value().numpy())
+                 + str(parameter.get_value().numpy())
             if parameter.fixed:
                 s += " (fixed)"
             s += "\n"
@@ -190,13 +246,16 @@ class _LeafKernel(_Kernel):
     def set_limits(self, data):
         self.transform.set_limits(data)
 
-    def implicit_matmul(self, coordinates, points_to_honor=None):
-        cov_mat = self.self_covariance_matrix(coordinates, points_to_honor)
+    def implicit_matmul(self, coordinates):
+        cov_mat = self.self_covariance_matrix(coordinates)
 
         def matmul_fn(vector):
             return _tf.matmul(cov_mat, vector)
 
         return matmul_fn
+
+    def feature_matrix(self, x):
+        raise NotImplementedError()
 
 
 class _NodeKernel(_Kernel):
@@ -210,8 +269,6 @@ class _NodeKernel(_Kernel):
         self._all_parameters = [item for sublist in self._all_parameters
                                 for item in sublist]
         self._all_parameters += [pr for pr in self.parameters.values()]
-        self.nugget_position = [i for i, comp in enumerate(self.components)
-                                if isinstance(comp, Nugget)]
 
     def _operation(self, arg_list):
         raise NotImplementedError
@@ -242,9 +299,9 @@ class _NodeKernel(_Kernel):
         )
         return v
 
-    def self_covariance_matrix(self, x, points_to_honor=None):
+    def self_covariance_matrix(self, x):
         k = self._operation(
-            [kernel.self_covariance_matrix(x, points_to_honor)
+            [kernel.self_covariance_matrix(x)
              for kernel in self.components]
         )
         return k
@@ -264,7 +321,7 @@ class _NodeKernel(_Kernel):
         s += "\n"
         for name, parameter in self.parameters.items():
             s += "  " * depth + name + ": " \
-                 + str(parameter.value.value().numpy())
+                 + str(parameter.get_value().numpy())
             if parameter.fixed:
                 s += " (fixed)"
             s += "\n"
@@ -287,63 +344,60 @@ class _NodeKernel(_Kernel):
 
         return matmul_fn
 
-    def nugget_matmul(self, coordinates,
-                      points_to_honor=None):
-        funs = [self.components[i].implicit_matmul(
-            coordinates, points_to_honor)
-            for i in self.nugget_position]
 
-        def matmul_fn(vector):
-            results = [fun(vector) for fun in funs]
-            return self._operation(results)
+class _WrapperKernel(_Kernel):
+    def __init__(self, base_kernel):
+        super().__init__()
+        self.base_kernel = base_kernel
+        self._all_parameters += base_kernel.all_parameters
+        self._has_compact_support = self.base_kernel.has_compact_support
 
-        return matmul_fn
-
-    def nugget_variance(self, x):
-        v = self._operation(
-            [kernel.point_variance(x) for kernel in self.components
-             if isinstance(kernel, Nugget)]
-        )
-        return v
+    def pretty_print(self, depth=0):
+        s = ""
+        s += "  " * depth + self.__class__.__name__
+        if self.has_compact_support:
+            s += " (compact)"
+        s += "\n"
+        depth += 1
+        for name, parameter in self.parameters.items():
+            s += "  " * depth + name + ": " \
+                 + str(parameter.get_value().numpy())
+            if parameter.fixed:
+                s += " (fixed)"
+            s += "\n"
+        s += self.base_kernel.pretty_print(depth)
+        return s
 
 
 class Gaussian(_LeafKernel):
     """Gaussian kernel"""
-
-    def covariance_matrix(self, x, y):
-        with _tf.name_scope("Gaussian_cov"):
-            x = self.transform.__call__(x)
-            y = self.transform.__call__(y)
-            d2 = _tf.pow(_pairwise_dist(x, y), 2)
-            k = _tf.exp(-3 * d2)
-        return k
+    def kernelize(self, x):
+        return _tf.exp(-3 * x**2)
 
 
 class Spherical(_LeafKernel):
     """Spherical kernel"""
-    def __init__(self, transform=_gt.Identity()):
+    def __init__(self, transform=_gt.Identity(), epsilon=1e-12):
         super().__init__(transform)
         self._has_compact_support = True
+        self.epsilon = epsilon  # required to be able to compute gradients
 
-    def covariance_matrix(self, x, y):
-        with _tf.name_scope("Spherical_cov"):
-            x = self.transform.__call__(x)
-            y = self.transform.__call__(y)
-            d = _pairwise_dist(x, y)
-            k = 1 - 1.5 * d + 0.5 * _tf.pow(d, 3)
-            k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 1 - 1.5 * d + 0.5 * _tf.pow(d, 3)
+        k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
         return k
 
 
 class Exponential(_LeafKernel):
     """Exponential kernel"""
+    def __init__(self, transform=_gt.Identity(), epsilon=1e-12):
+        super().__init__(transform)
+        self.epsilon = epsilon  # required to be able to compute gradients
 
-    def covariance_matrix(self, x, y):
-        with _tf.name_scope("Exponential_cov"):
-            x = self.transform.__call__(x)
-            y = self.transform.__call__(y)
-            d = _pairwise_dist(x, y)
-            k = _tf.exp(-3 * d)
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = _tf.exp(-3 * d)
         return k
 
 
@@ -363,6 +417,12 @@ class Cubic(_LeafKernel):
             k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
         return k
 
+    def kernelize(self, x):
+        k = 1 - 7 * _tf.pow(x, 2) + 35 / 4 * _tf.pow(x, 3) \
+            - 7 / 2 * _tf.pow(x, 5) + 3 / 4 * _tf.pow(x, 7)
+        k = _tf.where(_tf.less(x, 1.0), k, _tf.zeros_like(k))
+        return k
+
 
 class Constant(_LeafKernel):
     """Constant kernel"""
@@ -372,7 +432,10 @@ class Constant(_LeafKernel):
             k = _tf.ones([_tf.shape(x)[0], _tf.shape(y)[0]], dtype=_tf.float64)
         return k
 
-    def implicit_matmul(self, coordinates, points_to_honor=None):
+    def kernelize(self, x):
+        return _tf.ones_like(x)
+
+    def implicit_matmul(self, coordinates):
         def matmul_fn(vector):
             result = _tf.ones_like(vector) * _tf.reduce_sum(vector)
             return result
@@ -396,7 +459,7 @@ class Linear(_LeafKernel):
             v = _tf.reduce_sum(_tf.pow(x, 2), 1)
         return v
 
-    def implicit_matmul(self, coordinates, points_to_honor=None):
+    def implicit_matmul(self, coordinates):
         def matmul_fn(vector):
             result = _tf.matmul(coordinates, vector, True, False)
             result = _tf.matmul(coordinates, result)
@@ -404,77 +467,14 @@ class Linear(_LeafKernel):
 
         return matmul_fn
 
+    def feature_matrix(self, x):
+        return self.transform(x)
+
 
 class Cosine(_LeafKernel):
     """Cosine kernel"""
-
-    def covariance_matrix(self, x, y):
-        with _tf.name_scope("Cosine_cov"):
-            x = self.transform.__call__(x)
-            y = self.transform.__call__(y)
-            d = _pairwise_dist(x, y)
-            k = _tf.cos(2.0 * _np.pi * d)
-        return k
-
-    def covariance_matrix_d1(self, x, y, dir_y):
-        with _tf.name_scope("Cosine_point_dir_cov"):
-            x = self.transform.__call__(x)
-            y = self.transform.__call__(y)
-            dir_y = self.transform.__call__(dir_y)
-            sx = _tf.shape(x, name="shape_x")
-            x_prod = _tf.matmul(x, dir_y, False, True)
-            y_prod = _tf.reduce_sum(y * dir_y, axis=1, keepdims=True)
-            y_prod = _tf.transpose(y_prod)
-            y_prod = _tf.tile(y_prod, [sx[0], 1])
-            dif = x_prod - y_prod
-            d = _pairwise_dist(x, y)
-            k = - _tf.sin(2.0 * _np.pi * d)
-            k = k * dif * 2.0 * _np.pi / (d + 1e-9)
-        return k
-
-    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
-        raise NotImplementedError()
-
-
-class Nugget(_LeafKernel):
-    """Nugget effect"""
-    def __init__(self):
-        super().__init__()
-        self._has_compact_support = True
-
-    def covariance_matrix(self, x, y):
-        sx = _tf.shape(x)[0]
-        sy = _tf.shape(y)[0]
-        return _tf.zeros([sx, sy], _tf.float64)
-
-    def covariance_matrix_d1(self, x, y, dir_y):
-        return self.covariance_matrix(x, y)
-
-    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
-        return self.covariance_matrix(x, y)
-
-    # def self_covariance_matrix_d2(self, x, dir_x):
-    #     return self.self_covariance_matrix(x)
-
-    def self_covariance_matrix(self, x, points_to_honor=None):
-        if points_to_honor is None:
-            return _tf.eye(x.shape[0], dtype=_tf.float64)
-        else:
-            nugget_vector = _tf.where(
-                points_to_honor,
-                _tf.zeros(_tf.shape(points_to_honor), dtype=_tf.float64),
-                _tf.ones(_tf.shape(points_to_honor), dtype=_tf.float64))
-            return _tf.linalg.diag(nugget_vector)
-
-    def implicit_matmul(self, coordinates, points_to_honor=None):
-        if points_to_honor is None:
-            return lambda vector: vector
-        else:
-            nugget_vector = _tf.where(
-                points_to_honor,
-                _tf.zeros([coordinates.shape[0]], dtype=_tf.float64),
-                _tf.ones([coordinates.shape[0]], dtype=_tf.float64))
-            return lambda vector: vector * _tf.expand_dims(nugget_vector, 1)
+    def kernelize(self, x):
+        return _tf.cos(2.0 * _np.pi * x)
 
 
 class Sum(_NodeKernel):
@@ -492,28 +492,8 @@ class Sum(_NodeKernel):
     def _operation(self, arg_list):
         k = _tf.zeros_like(arg_list[0])
         for i, comp in enumerate(arg_list):
-            k = k + self.parameters["variance"].value[i] * comp
+            k = k + self.parameters["variance"].get_value()[i] * comp
         return k
-
-    def nugget_matmul(self, coordinates,
-                      points_to_honor=None):
-        funs = [self.components[i].implicit_matmul(
-            coordinates, points_to_honor)
-            for i in self.nugget_position]
-
-        def matmul_fn(vector):
-            results = [fun(vector)*self.parameters["variance"].value[i]
-                       for fun, i in zip(funs, self.nugget_position)]
-            return _tf.add_n(results)
-
-        return matmul_fn
-
-    def nugget_variance(self, x):
-        nugget_comp = [self.components[i] for i in self.nugget_position]
-
-        v = [self.parameters["variance"].value[i] * comp.point_variance(x)
-             for comp, i in zip(nugget_comp, self.nugget_position)]
-        return _tf.add_n(v)
 
 
 class Product(_NodeKernel):
@@ -528,36 +508,76 @@ class Product(_NodeKernel):
 
 
 class Matern32(_LeafKernel):
-    def covariance_matrix(self, x, y):
-        x = self.transform(x)
-        y = self.transform(y)
-        d = _pairwise_dist(x, y)
-        cov = (1 + 5*d)*_tf.math.exp(-5*d)
-        return cov
+    def kernelize(self, x):
+        return (1 + 5*x)*_tf.math.exp(-5*x)
 
 
 class Matern52(_LeafKernel):
-    def covariance_matrix(self, x, y):
-        x = self.transform(x)
-        y = self.transform(y)
-        d = _pairwise_dist(x, y)
-        cov = (1 + 6*d + 12*d**2)*_tf.math.exp(-6*d)
+    def kernelize(self, x):
+        return (1 + 6*x + 12*x**2)*_tf.math.exp(-6*x)
+
+
+class RationalQuadratic(_LeafKernel):
+    def __init__(self, transform=_gt.Identity(), scale=1):
+        super().__init__(transform)
+        self.parameters.update({
+            "scale": _gpr.PositiveParameter(scale, 1e-3, 100)})
+        self._all_parameters.append(self.parameters["scale"])
+
+    def kernelize(self, x):
+        alpha = self.parameters["scale"].get_value()
+        cov = (1 + 3 * x ** 2 / alpha) ** (-alpha)
         return cov
 
 
-class Amplify(_NodeKernel):
-    """Kernel product"""
-    def __init__(self, *args):
-        if len(args) > 1:
-            raise ValueError("Amplify must take a single argument")
-
-        super().__init__(*args)
-        self._has_compact_support = any([kernel.has_compact_support
-                                         for kernel in args])
-        amp = _gpr.PositiveParameter(1.0, 0.1, 10.0)
-        self.parameters = {"amplitude": amp}
+class Scale(_WrapperKernel):
+    """Kernel scaling"""
+    def __init__(self, base_kernel):
+        super().__init__(base_kernel)
+        amp = _gpr.PositiveParameter(1.0, 1e-4, 1e4)
+        self.parameters["amplitude"] = amp
         self._all_parameters.append(amp)
 
-    def _operation(self, arg_list):
-        amp = self.parameters["amplitude"].value
-        return amp*arg_list[0]
+    def covariance_matrix(self, x, y):
+        return self.parameters["amplitude"].get_value() \
+               * self.base_kernel.covariance_matrix(x, y)
+
+    def point_variance(self, x):
+        return self.parameters["amplitude"].get_value() \
+               * self.base_kernel.point_variance(x)
+
+
+class _RadialBasisFunction(_LeafKernel):
+    def __init__(self, max_distance, epsilon=1e-12):
+        super().__init__(_gt.Identity())
+        self.max_distance = max_distance
+        self.epsilon = epsilon  # required to be able to compute gradients
+
+
+class RBF3D(_RadialBasisFunction):
+    """RBF 3D"""
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 2 * d**3 + 3 * d**2 * self.max_distance + self.max_distance**3
+        k = k / self.max_distance**3
+        return k
+
+
+class RBF2D(_RadialBasisFunction):
+    """Thin plate spline RBF (2D)"""
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 2 * _tf.math.log(d) * d ** 2 \
+            - (1 + 2*_np.log(self.max_distance)) * d**2 \
+            + self.max_distance**2
+        k = k / self.max_distance ** 2
+        return k
+
+
+class RBF1D(_RadialBasisFunction):
+    """Cubic RBF (1D)"""
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 2*d**3 - 3 * d**2 * self.max_distance + self.max_distance**3
+        k = k / self.max_distance ** 3
+        return k

@@ -1,3 +1,12 @@
+## version 0.3.0
+* Introduced variational models.
+* All training is now gradient-based.
+* Changed the data manipulation system, defining variable types (continuous,
+categorical, etc.) and Attributes (mean, variance, entropy, etc.) that can be
+accessed and plotted directly.
+* Plotly interface is now in a specific module.
+* New `Section3D` data object.
+
 ## version 0.2.0
 * Code updated to TensorFlow 2.0.
 * Cubic convolution implemented in TensorFlow.
@@ -11,6 +20,7 @@
 other model options.
 * The covariance matrix for directional data is now computed with a 
 finite difference method.
+* Drillholes can now be segmented in roughly fixed intervals.
 
 ## version 0.1.3
 * Introduced parallel sparse cubic convolution interpolation.

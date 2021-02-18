@@ -3,15 +3,16 @@ Spatial modeling using machine learning concepts.
 
 This is a work in progress. Current functionality includes:
 
-* Gaussian Process modeling in 1D, 2D, and 3D, with 
+* Gaussian process modeling in 1D, 2D, and 3D, with 
 anisotropy ellipsoid;
+* Variational Gaussian process for classification and multivariate
+modeling (currently experimenting with deep learning);
 * Support for directional data (structural geology
 measurements, scalar field gradients, etc.);
 * Support for classification with boundary data (points
 lying in the boundary between two rock types);
 * Limited 3D plotting with plotly;
-* Back-end powered by TensorFlow;
-* Gradient-free training with particle swarm optimization.
+* Back-end powered by TensorFlow.
 
 ## Installation
 Clone the repo and update the path to include the package's folder.

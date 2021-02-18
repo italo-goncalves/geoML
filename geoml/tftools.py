@@ -71,13 +71,13 @@ def prod_n(inputs, name=None):
     Parameters
     ----------
     inputs : list
-        matrix list of Tensor objects, all with the same shape and type.
+        A list of Tensor objects, all with the same shape and type.
     name : str
-        matrix name for the _operation (optional).
+        A name for the operation (optional).
 
     Returns
     -------
-    matrix Tensor of same shape and type as the elements of inputs.
+    A Tensor of same shape and type as the elements of inputs.
     """
     if name is None:
         name = "prod_n"
@@ -85,6 +85,18 @@ def prod_n(inputs, name=None):
         out = _tf.stack(inputs, axis=0)
         out = _tf.reduce_prod(out, axis=0)
         return out
+
+
+def zero_nans(x):
+    x = _tf.where(_tf.math.is_nan(x), _tf.zeros_like(x), x)
+    return x
+
+
+def ensure_rank_2(x):
+    x = _tf.cond(_tf.equal(_tf.rank(x), 1),
+                 lambda: x[:, None],
+                 lambda: x)
+    return x
 
 
 def conjugate_gradient(matmul_fun, b, x_0=None, tol=1e-3, jitter=1e-9,
@@ -631,13 +643,97 @@ def highest_value_probability(mu, var, seed, n_samples=10000):
     samples = _tf.expand_dims(_tf.sqrt(var), 2)*rnd + _tf.expand_dims(mu, 2)
     max_ind = _tf.math.argmax(samples, axis=1)
 
-    def count_fn(i):
-        which = _tf.cast(_tf.equal(max_ind, i), _tf.float32)
-        return _tf.reduce_sum(which, axis=1) + 1.0
+    # def count_fn(i):
+    #     which = _tf.cast(_tf.equal(max_ind, i), _tf.float32)
+    #     return _tf.reduce_sum(which, axis=1) + 1.0
+    #
+    # counts = _tf.map_fn(count_fn, _tf.range(n_values, dtype=_tf.int64),
+    #                     dtype=_tf.float32)
+    # counts = _tf.transpose(counts)
 
-    counts = _tf.map_fn(count_fn, _tf.range(n_values, dtype=_tf.int64),
-                        dtype=_tf.float32)
-    counts = _tf.transpose(counts)
+    counts = _tf.math.bincount(
+        max_ind, minlength=n_values, maxlength=n_values, dtype=_tf.float64)
+    counts = counts + 1.0
 
     prob = counts/_tf.reduce_sum(counts, axis=1, keepdims=True)
     return prob
+
+
+def reshape_lower_traingular(vec):
+    length = _tf.cast(_tf.shape(vec)[0], _tf.float64)
+
+    size = _tf.cast((_tf.sqrt(8*length + 1) - 1)/2, _tf.int32)
+
+    def tril_indices(s):
+        return _np.stack(_np.tril_indices(s), 1)
+
+    idx = _tf.py_function(tril_indices, [size], _tf.int32)
+    mat = _tf.scatter_nd(idx, vec, [size, size])
+    return mat
+
+
+def get_lower_traingular(mat):
+    size = _tf.shape(mat)[0]
+
+    def tril_indices(s):
+        return _np.stack(_np.tril_indices(s), 1)
+
+    idx = _tf.py_function(tril_indices, [size], _tf.int32)
+    mat = _tf.gather_nd(mat, idx)
+    return mat
+
+
+# def rebuild_spd(mat):
+#     vals, vecs = _tf.linalg.eigh(mat)
+#
+#     keep = _tf.squeeze(_tf.where(_tf.greater(vals, 0.0)))
+#     mat_ok = _tf.reduce_all(_tf.greater(vals, 0.0))
+#
+#     vals, vecs = _tf.cond(
+#         _tf.equal(_tf.rank(keep), 0),
+#         lambda: [- _tf.expand_dims(vals[0], 0),
+#                  _tf.expand_dims(vecs[:, 0], 1)],
+#         lambda: [_tf.gather(vals, keep),
+#                  _tf.gather(vecs, keep, axis=1)]
+#     )
+#
+#     basis = _tf.matmul(vecs, _tf.linalg.diag(_tf.sqrt(vals)))
+#     new_mat = _tf.matmul(basis, basis, False, True)
+#
+#     proj_mat = _tf.matmul(basis, _tf.linalg.solve(
+#         _tf.matmul(basis, basis, True, False), _tf.transpose(basis)))
+#     return new_mat, proj_mat, mat_ok
+
+def rebuild_spd(mat):
+    # vals, vecs = _tf.linalg.eigh(mat)
+
+    # total = _tf.reduce_sum(vals)
+    # vals = _tf.maximum(
+    #     vals, - _tf.minimum(_tf.constant(0.0, _tf.float64),
+    #                         _tf.reduce_min(vals)))
+    # vals = vals / _tf.reduce_sum(vals) * total
+    # vals = _tf.maximum(vals, _tf.constant(1e-6, _tf.float64))
+
+    # basis = _tf.matmul(vecs, _tf.linalg.diag(_tf.sqrt(vals)))
+    # new_mat = _tf.matmul(basis, basis, False, True)
+
+    scale = _tf.reduce_max(_tf.math.abs(mat))
+    s, u, v = _tf.linalg.svd(mat / scale)
+    s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
+    new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(s), v, adjoint_b=True))
+
+    return new_mat * scale
+
+
+def check_spd(mat):
+    vals = _tf.linalg.eigvalsh(mat)
+    return _tf.reduce_all(_tf.greater(vals, _tf.constant(0, _tf.float64)))
+
+
+def pseudo_inv(mat):
+    scale = _tf.reduce_max(_tf.math.abs(mat))
+    s, u, v = _tf.linalg.svd(mat / scale)
+    # s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
+    new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(1/s), v, adjoint_b=True))
+
+    return new_mat / scale

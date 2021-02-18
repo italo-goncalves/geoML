@@ -168,7 +168,7 @@
 <dl class="class">
 <dt id="geoml.data.Points1D">
 <em class="property">class </em><code class="descclassname">geoml.data.</code><code class="descname">Points1D</code><span class="sig-paren">(</span><em>coords</em>, <em>data=None</em>, <em>coords_label=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/data.html#Points1D"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.data.Points1D" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.data._PointData</span></code></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.data.PointData</span></code></p>
 <p>Point data in 1D</p>
 <dl class="attribute">
 <dt id="geoml.data.Points1D.coords">
@@ -274,7 +274,7 @@
 <dl class="class">
 <dt id="geoml.data.Points2D">
 <em class="property">class </em><code class="descclassname">geoml.data.</code><code class="descname">Points2D</code><span class="sig-paren">(</span><em>coords</em>, <em>data=None</em>, <em>coords_label=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/data.html#Points2D"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.data.Points2D" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.data._PointData</span></code></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.data.PointData</span></code></p>
 <p>Point data in 2D.</p>
 <dl class="attribute">
 <dt id="geoml.data.Points2D.coords">
@@ -380,7 +380,7 @@
 <dl class="class">
 <dt id="geoml.data.Points3D">
 <em class="property">class </em><code class="descclassname">geoml.data.</code><code class="descname">Points3D</code><span class="sig-paren">(</span><em>coords</em>, <em>data=None</em>, <em>coords_label=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/data.html#Points3D"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.data.Points3D" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.data._PointData</span></code></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.data.PointData</span></code></p>
 <p>Point data in 3D.</p>
 <dl class="attribute">
 <dt id="geoml.data.Points3D.coords">
@@ -926,8 +926,8 @@ a classification model.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.data.DrillholeData.as_points">
-<code class="descname">as_points</code><span class="sig-paren">(</span><em>locations=array([0.05</em>, <em>0.5</em>, <em>0.95])</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/data.html#DrillholeData.as_points"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.data.DrillholeData.as_points" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.data.DrillholeData.segment_relative">
+<code class="descname">segment_relative</code><span class="sig-paren">(</span><em>locations=array([0.05</em>, <em>0.5</em>, <em>0.95])</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/data.html#DrillholeData.segment_relative"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.data.DrillholeData.segment_relative" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
@@ -1308,7 +1308,7 @@ to 1e-9.</li>
 <dl class="class">
 <dt id="geoml.models.GP">
 <em class="property">class </em><code class="descclassname">geoml.models.</code><code class="descname">GP</code><span class="sig-paren">(</span><em>sp_data</em>, <em>variable</em>, <em>kernels</em>, <em>warping=()</em>, <em>interpolate=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GP"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GP" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.models._Model</span></code></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.models.VGP</span></code></p>
 <p>Base Gaussian Process model, not optimized for a large amount of data.
 It is expected to work well with up to ~5000 data points.</p>
 <p>Internally the model assumes unit range, unit variance and
@@ -1417,8 +1417,8 @@ zero mean.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GP.log_lik">
-<code class="descname">log_lik</code><span class="sig-paren">(</span><em>session=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GP.log_lik"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GP.log_lik" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GP.elbo">
+<code class="descname">elbo</code><span class="sig-paren">(</span><em>session=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GP.elbo"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GP.elbo" title="Permalink to this definition">¶</a></dt>
 <dd><p>Outputs the model’s log-likelihood, given the current parameters.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1426,7 +1426,7 @@ zero mean.</p>
 <tbody valign="top">
 <tr class="field-odd field"><th class="field-name">Parameters:</th><td class="field-body"><strong>session</strong> – An active TensorFlow session. If omitted, one will be created.</td>
 </tr>
-<tr class="field-even field"><th class="field-name">Returns:</th><td class="field-body"><strong>log_lik</strong> – The model’s log-likelihood.</td>
+<tr class="field-even field"><th class="field-name">Returns:</th><td class="field-body"><strong>elbo</strong> – The model’s log-likelihood.</td>
 </tr>
 <tr class="field-odd field"><th class="field-name">Return type:</th><td class="field-body">double</td>
 </tr>
@@ -1628,8 +1628,8 @@ assumed to be 0.</li>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GPGrad.log_lik">
-<code class="descname">log_lik</code><span class="sig-paren">(</span><em>session=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPGrad.log_lik"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPGrad.log_lik" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPGrad.elbo">
+<code class="descname">elbo</code><span class="sig-paren">(</span><em>session=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPGrad.elbo"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPGrad.elbo" title="Permalink to this definition">¶</a></dt>
 <dd><p>Outputs the model’s log-likelihood, given the current parameters.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
@@ -1637,7 +1637,7 @@ assumed to be 0.</li>
 <tbody valign="top">
 <tr class="field-odd field"><th class="field-name">Parameters:</th><td class="field-body"><strong>session</strong> – An active TensorFlow session. If omitted, one will be created.</td>
 </tr>
-<tr class="field-even field"><th class="field-name">Returns:</th><td class="field-body"><strong>log_lik</strong> – The model’s log-likelihood.</td>
+<tr class="field-even field"><th class="field-name">Returns:</th><td class="field-body"><strong>elbo</strong> – The model’s log-likelihood.</td>
 </tr>
 <tr class="field-odd field"><th class="field-name">Return type:</th><td class="field-body">double</td>
 </tr>
@@ -1674,7 +1674,7 @@ TensorFlow error, try decreasing this value.</li>
 <dl class="class">
 <dt id="geoml.models.GPMultiClassifier">
 <em class="property">class </em><code class="descclassname">geoml.models.</code><code class="descname">GPMultiClassifier</code><span class="sig-paren">(</span><em>sp_data</em>, <em>var_1</em>, <em>var_2</em>, <em>kernels</em>, <em>dir_data=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.models._Model</span></code></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.models.VGP</span></code></p>
 <p>GP for classification. This model uses topological relations between the
 class labels to find a low-dimensional representation of the data. A
 separate GP model is trained on each latent variable.</p>
@@ -1742,14 +1742,14 @@ It is assumed that these are directions with zero variation.</li>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.models.GPMultiClassifier.log_lik">
-<code class="descname">log_lik</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier.log_lik"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier.log_lik" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.models.GPMultiClassifier.elbo">
+<code class="descname">elbo</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/models.html#GPMultiClassifier.elbo"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.models.GPMultiClassifier.elbo" title="Permalink to this definition">¶</a></dt>
 <dd><p>Outputs the model’s log-likelihood, given the current parameters.</p>
 <table class="docutils field-list" frame="void" rules="none">
 <col class="field-name" />
 <col class="field-body" />
 <tbody valign="top">
-<tr class="field-odd field"><th class="field-name">Returns:</th><td class="field-body"><strong>log_lik</strong> – The model’s log-likelihood.</td>
+<tr class="field-odd field"><th class="field-name">Returns:</th><td class="field-body"><strong>elbo</strong> – The model’s log-likelihood.</td>
 </tr>
 <tr class="field-even field"><th class="field-name">Return type:</th><td class="field-body">double</td>
 </tr>
@@ -1803,7 +1803,7 @@ TensorFlow error, try decreasing this value.</li>
 <dl class="class">
 <dt id="geoml.parameter.CompositionalParameter">
 <em class="property">class </em><code class="descclassname">geoml.parameter.</code><code class="descname">CompositionalParameter</code><span class="sig-paren">(</span><em>value</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#CompositionalParameter"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.CompositionalParameter" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <a class="reference internal" href="#geoml.parameter.Parameter" title="geoml.parameter.Parameter"><code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.parameter.Parameter</span></code></a></p>
+<dd><p>Bases: <a class="reference internal" href="#geoml.parameter.RealParameter" title="geoml.parameter.RealParameter"><code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.parameter.RealParameter</span></code></a></p>
 <p>A vector parameter in clr coordinates</p>
 <dl class="method">
 <dt id="geoml.parameter.CompositionalParameter.__init__">
@@ -1824,45 +1824,45 @@ TensorFlow error, try decreasing this value.</li>
 </dd></dl>
 
 <dl class="class">
-<dt id="geoml.parameter.Parameter">
-<em class="property">class </em><code class="descclassname">geoml.parameter.</code><code class="descname">Parameter</code><span class="sig-paren">(</span><em>value</em>, <em>min_val</em>, <em>max_val</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter">
+<em class="property">class </em><code class="descclassname">geoml.parameter.</code><code class="descname">RealParameter</code><span class="sig-paren">(</span><em>value</em>, <em>min_val</em>, <em>max_val</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter" title="Permalink to this definition">¶</a></dt>
 <dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
 <p>Trainable model parameter. Can be a vector or scalar.</p>
 <p>The fixed property applies to the array as a whole.</p>
 <dl class="method">
-<dt id="geoml.parameter.Parameter.__init__">
-<code class="descname">__init__</code><span class="sig-paren">(</span><em>value</em>, <em>min_val</em>, <em>max_val</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.__init__" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.__init__">
+<code class="descname">__init__</code><span class="sig-paren">(</span><em>value</em>, <em>min_val</em>, <em>max_val</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.__init__" title="Permalink to this definition">¶</a></dt>
 <dd><p>Initialize self.  See help(type(self)) for accurate signature.</p>
 </dd></dl>
 
 <dl class="method">
-<dt id="geoml.parameter.Parameter.fix">
-<code class="descname">fix</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.fix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.fix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.fix">
+<code class="descname">fix</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.fix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.fix" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.parameter.Parameter.init_tf_placeholder">
-<code class="descname">init_tf_placeholder</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.init_tf_placeholder"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.init_tf_placeholder" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.init_tf_placeholder">
+<code class="descname">init_tf_placeholder</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.init_tf_placeholder"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.init_tf_placeholder" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.parameter.Parameter.refresh">
-<code class="descname">refresh</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.refresh"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.refresh" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.refresh">
+<code class="descname">refresh</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.refresh"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.refresh" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.parameter.Parameter.set_limits">
-<code class="descname">set_limits</code><span class="sig-paren">(</span><em>min_val=None</em>, <em>max_val=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.set_limits"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.set_limits" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.set_limits">
+<code class="descname">set_limits</code><span class="sig-paren">(</span><em>min_val=None</em>, <em>max_val=None</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.set_limits"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.set_limits" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.parameter.Parameter.set_value">
-<code class="descname">set_value</code><span class="sig-paren">(</span><em>value</em>, <em>transf=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.set_value"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.set_value" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.set_value">
+<code class="descname">set_value</code><span class="sig-paren">(</span><em>value</em>, <em>transf=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.set_value"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.set_value" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="method">
-<dt id="geoml.parameter.Parameter.unfix">
-<code class="descname">unfix</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#Parameter.unfix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.Parameter.unfix" title="Permalink to this definition">¶</a></dt>
+<dt id="geoml.parameter.RealParameter.unfix">
+<code class="descname">unfix</code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#RealParameter.unfix"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.RealParameter.unfix" title="Permalink to this definition">¶</a></dt>
 <dd></dd></dl>
 
 </dd></dl>
@@ -1870,8 +1870,8 @@ TensorFlow error, try decreasing this value.</li>
 <dl class="class">
 <dt id="geoml.parameter.PositiveParameter">
 <em class="property">class </em><code class="descclassname">geoml.parameter.</code><code class="descname">PositiveParameter</code><span class="sig-paren">(</span><em>value</em>, <em>min_val</em>, <em>max_val</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#PositiveParameter"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.PositiveParameter" title="Permalink to this definition">¶</a></dt>
-<dd><p>Bases: <a class="reference internal" href="#geoml.parameter.Parameter" title="geoml.parameter.Parameter"><code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.parameter.Parameter</span></code></a></p>
-<p>Parameter in log scale</p>
+<dd><p>Bases: <a class="reference internal" href="#geoml.parameter.RealParameter" title="geoml.parameter.RealParameter"><code class="xref py py-class docutils literal notranslate"><span class="pre">geoml.parameter.RealParameter</span></code></a></p>
+<p>RealParameter in log scale</p>
 <dl class="method">
 <dt id="geoml.parameter.PositiveParameter.__init__">
 <code class="descname">__init__</code><span class="sig-paren">(</span><em>value</em>, <em>min_val</em>, <em>max_val</em>, <em>fixed=False</em><span class="sig-paren">)</span><a class="reference internal" href="_modules/geoml/parameter.html#PositiveParameter.__init__"><span class="viewcode-link">[source]</span></a><a class="headerlink" href="#geoml.parameter.PositiveParameter.__init__" title="Permalink to this definition">¶</a></dt>

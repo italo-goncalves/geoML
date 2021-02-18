@@ -23,6 +23,7 @@ __all__ = ["Identity",
 
 import geoml.interpolation as _gint
 import geoml.parameter as _gpr
+import geoml.tftools as _tftools
 
 import numpy as _np
 import tensorflow as _tf
@@ -35,7 +36,7 @@ class _Warping(object):
     Attributes
     ----------
     parameters : dict
-        matrix dictionary with Parameter objects.
+        matrix dictionary with RealParameter objects.
     """
     def __init__(self):
         self.parameters = {}
@@ -53,9 +54,6 @@ class _Warping(object):
         pass
     
     def backward(self, x):
-        pass
-    
-    def refresh(self, y):
         pass
     
     def derivative(self, x):
@@ -112,7 +110,9 @@ class Identity(_Warping):
         return x
     
     def derivative(self, x):
-        return _tf.ones_like(x)
+        x_warp = _tf.ones_like(x)
+        x_warp = _tf.where(_tf.math.is_nan(x), x, x_warp)
+        return x_warp
 
 
 class Spline(_Warping):
@@ -124,10 +124,6 @@ class Spline(_Warping):
     ----------
     n_knots : int
         The number of knots to build the spline.
-    base_spline :
-        matrix spline object to convert from the original to warped space.
-    reverse_spline :
-        matrix spline object to convert from the warped to original space.
     """
     def __init__(self, n_knots=5):
         """
@@ -140,53 +136,84 @@ class Spline(_Warping):
         """
         super().__init__()
         self.n_knots = n_knots
+        comp = _np.ones(n_knots) / n_knots
         self.parameters = {
-            "warped_partition": _gpr.CompositionalParameter(
-                _np.ones([n_knots + 1]) / (n_knots + 1))}
+            "warped_partition": _gpr.CompositionalParameter(comp)}
         self._all_parameters = [pr for pr in self.parameters.values()]
-
-        dummy_vals = _tf.range(0, n_knots, dtype=_tf.float64) / n_knots
-        self.base_spline = _gint.MonotonicCubicSpline(dummy_vals, dummy_vals)
-        self.reverse_spline = _gint.MonotonicCubicSpline(dummy_vals, dummy_vals)
+        self.spline = _gint.MonotonicCubicSpline()
+        self.x_original = _np.linspace(-5, 5, n_knots + 1)
         
-    def refresh(self, y):
-        """
-        Rebuilds the spline using the given data's range.
-
-        The range of the warped coordinates is fixed within the [-5, 5]
-        interval.
-        """
-        y_seq = _tf.linspace(_tf.reduce_min(y), _tf.reduce_max(y), self.n_knots)
-        warped_coordinates = _tf.cumsum(
-            self.parameters["warped_partition"].value)[:self.n_knots]
-        warped_coordinates = 10*warped_coordinates - 5
-
-        self.base_spline.refresh(y_seq, warped_coordinates)
-
-        # modeling in the opposite direction with more points
-        # to preserve the base curve's shape
-        y_dif = _tf.reduce_max(y) - _tf.reduce_min(y)
-        y_seq_expanded = _tf.linspace(_tf.reduce_min(y) - 0.1*y_dif,
-                                      _tf.reduce_max(y) + 0.1*y_dif,
-                                      self.n_knots*10)
-        warped_coordinates_expanded = self.base_spline.interpolate(
-            y_seq_expanded)
-        self.reverse_spline.refresh(
-            warped_coordinates_expanded, y_seq_expanded)
+    # def refresh(self, y):
+    #     """
+    #     Rebuilds the spline using the given data's range.
+    #
+    #     The range of the warped coordinates is fixed within the [-5, 5]
+    #     interval.
+    #     """
+    #     y_no_nan = _tf.gather_nd(y, _tf.where(~ _tf.math.is_nan(y)))
+    #     y_seq = _tf.linspace(_tf.reduce_min(y_no_nan),
+    #                          _tf.reduce_max(y_no_nan),
+    #                          self.n_knots)
+    #     warped_coordinates = _tf.cumsum(
+    #         self.parameters["warped_partition"].get_value())
+    #     warped_coordinates = _tf.gather(warped_coordinates,
+    #                                     _np.arange(self.n_knots))
+    #     warped_coordinates = 10*warped_coordinates - 5
+    #
+    #     self.x_fwd = y_seq
+    #     self.y_fwd = warped_coordinates
+    #
+    #     # modeling in the opposite direction with more points
+    #     # to preserve the base curve's shape
+    #     y_dif = _tf.reduce_max(y_no_nan) - _tf.reduce_min(y_no_nan)
+    #     y_seq_expanded = _tf.linspace(_tf.reduce_min(y_no_nan) - 0.1*y_dif,
+    #                                   _tf.reduce_max(y_no_nan) + 0.1*y_dif,
+    #                                   self.n_knots*10)
+    #     warped_coordinates_expanded = self.spline.interpolate(
+    #         self.x_fwd, self.y_fwd, y_seq_expanded)
+    #     self.x_back.assign(_tf.squeeze(warped_coordinates_expanded))
+    #     self.y_back.assign(y_seq_expanded)
     
     def forward(self, x):
-        return self.base_spline.interpolate(x)
+        warped_coordinates = _tf.cumsum(
+            self.parameters["warped_partition"].get_value())
+        warped_coordinates = _tf.concat(
+            [_tf.constant([0.0], _tf.float64), warped_coordinates], axis=0)
+        warped_coordinates = 10 * warped_coordinates - 5
+
+        x = _tftools.ensure_rank_2(x)
+        x_warp = self.spline.interpolate(
+            self.x_original, warped_coordinates, x)
+        return x_warp
     
     def backward(self, x):
-        return self.reverse_spline.interpolate(x)
+        warped_coordinates = _tf.cumsum(
+            self.parameters["warped_partition"].get_value())
+        warped_coordinates = _tf.concat(
+            [_tf.constant([0.0], _tf.float64), warped_coordinates], axis=0)
+        warped_coordinates = 10 * warped_coordinates - 5
+
+        x = _tftools.ensure_rank_2(x)
+        x_back = self.spline.interpolate(
+            warped_coordinates, self.x_original, x)
+        return x_back
     
     def derivative(self, x):
-        return self.base_spline.interpolate_d1(x)
+        warped_coordinates = _tf.cumsum(
+            self.parameters["warped_partition"].get_value())
+        warped_coordinates = _tf.concat(
+            [_tf.constant([0.0], _tf.float64), warped_coordinates], axis=0)
+        warped_coordinates = 10 * warped_coordinates - 5
+
+        x = _tftools.ensure_rank_2(x)
+        x_warp = self.spline.interpolate_d1(
+            self.x_original, warped_coordinates, x)
+        return x_warp
 
 
 class ZScore(_Warping):
     """
-    matrix Warping that simply normalizes the values to z-scores.
+    A Warping that simply normalizes the values to z-scores.
     """
     def __init__(self, mean=None, std=None):
         """
@@ -203,57 +230,75 @@ class ZScore(_Warping):
         (if omitted) or specified.
         """
         super().__init__()
-        self.def_mean = mean
-        self.def_std = std
-        self.y_mean = None
-        self.y_std = None
-    
-    def refresh(self, y):
-        if self.def_mean is None:
-            self.y_mean = _tf.reduce_mean(y)
-        else:
-            self.y_mean = _tf.constant(self.def_mean, _tf.float64)
-        if self.def_std is None:
-            self.y_std = _tf.sqrt(_tf.reduce_mean((y - self.y_mean)**2))
-        else:
-            self.y_std = _tf.constant(self.def_std, _tf.float64)
+        self.parameters["mean"] = _gpr.RealParameter(0, -1e9, 1e9)
+        if mean is not None:
+            self.parameters["mean"].set_value(mean)
+            self.parameters["mean"].set_limits(mean - 2*_np.abs(mean),
+                                               mean + 2*_np.abs(mean))
+        self.parameters["std"] = _gpr.PositiveParameter(1, 1e-9, 1e9)
+        if std is not None:
+            self.parameters["std"].set_value(std)
+            self.parameters["std"].set_limits(std / 10, std * 10)
+        self._all_parameters.append(self.parameters["mean"])
+        self._all_parameters.append(self.parameters["std"])
         
     def forward(self, x):
-        return (x - self.y_mean) / self.y_std
+        mean = self.parameters["mean"].get_value()
+        std = self.parameters["std"].get_value()
+        x = _tftools.ensure_rank_2(x)
+        return (x - mean) / std
     
     def backward(self, x):
-        return x * self.y_std + self.y_mean
+        mean = self.parameters["mean"].get_value()
+        std = self.parameters["std"].get_value()
+        x = _tftools.ensure_rank_2(x)
+        return x * std + mean
     
     def derivative(self, x):
-        return _tf.ones_like(x) / self.y_std
+        std = self.parameters["std"].get_value()
+        x = _tftools.ensure_rank_2(x)
+        return _tf.ones_like(x) / std
 
 
 class Softplus(_Warping):
     """
     Transforms the data using the inverse of the softplus function. 
-    All the data must be positive. Negative values will be replaced with
-    half of the smallest positive value.
+    All the data must be positive.
     """
+    def __init__(self, shift=1e-6):
+        """
+        Initializer for Softplus.
+
+        Parameters
+        ----------
+        shift : float
+            A positive value to add to the data. Use it if you have zeros.
+        """
+        super().__init__()
+        if shift <= 0:
+            raise ValueError("shift must be positive")
+        self.shift = shift
+
     # computation only for x < 50.0 to avoid overflow
     def forward(self, x):
-        x_positive = _tf.gather(x, _tf.squeeze(_tf.where(_tf.greater(x, 0.0))))
-        x_warp = _tf.maximum(x, 0.5 * _tf.reduce_min(x_positive))
-
+        x = _tftools.ensure_rank_2(x)
+        x_warp = x + self.shift
         x_warp = _tf.where(_tf.greater(x_warp, 50.0),
                            x_warp,
                            _tf.math.log(_tf.math.expm1(x_warp)))
+        x_warp = _tf.where(_tf.math.is_nan(x), x, x_warp)
         return x_warp
     
     def backward(self, x):
-        x_warp = _tf.where(_tf.greater(x, 50.0),
+        x = _tftools.ensure_rank_2(x)
+        x_back = _tf.where(_tf.greater(x, 50.0),
                            x,
                            _tf.math.log1p(_tf.math.exp(x)))
-        return x_warp
+        return x_back
     
     def derivative(self, x):
-        x_positive = _tf.gather(x, _tf.squeeze(_tf.where(_tf.greater(x, 0.0))))
-        x_warp = _tf.maximum(x, 0.5 * _tf.reduce_min(x_positive))
-
+        x = _tftools.ensure_rank_2(x)
+        x_warp = x + self.shift
         x_warp = _tf.where(_tf.greater(x_warp, 50.0),
                            _tf.ones_like(x_warp),
                            1/(- _tf.math.expm1(-x_warp)))
@@ -264,20 +309,19 @@ class Log(_Warping):
     """
     Log-scale warping.
     """
-    def __init__(self, shift=None):
+    def __init__(self, shift=1e-6):
         """
         Initializer for Log.
 
         Parameters
         ----------
         shift : float
-            matrix positive value to add to the data. Use it if you have zeros.
-            The default is half of the smallest positive value in data.
+            A positive value to add to the data. Use it if you have zeros.
         """
         super().__init__()
+        if shift <= 0:
+            raise ValueError("shift must be positive")
         self.shift = shift
-        if shift is not None:
-            self.shift = _tf.constant(shift, _tf.float64)
 
     def forward(self, x):
         return _tf.math.log(x + self.shift)
@@ -288,11 +332,11 @@ class Log(_Warping):
     def derivative(self, x):
         return 1 / (x + self.shift)
 
-    def refresh(self, y):
-        if self.shift is None:
-            y_positive = _tf.gather(y,
-                                    _tf.squeeze(_tf.where(_tf.greater(y, 0.0))))
-            self.shift = 0.5 * _tf.reduce_min(y_positive)
+
+class Scale(ZScore):
+    def __init__(self, scale):
+        super().__init__(mean=-1e-3, std=scale)
+        self.parameters["mean"].fix()
 
 
 class ChainedWarping(_Warping):
@@ -314,23 +358,21 @@ class ChainedWarping(_Warping):
         return s
 
     def forward(self, x):
+        x = _tftools.ensure_rank_2(x)
         for wp in self.warpings:
             x = wp.forward(x)
         return x
 
     def backward(self, x):
+        x = _tftools.ensure_rank_2(x)
         warping_rev = self.warpings.copy()
         warping_rev.reverse()
         for wp in warping_rev:
             x = wp.backward(x)
         return x
 
-    def refresh(self, y):
-        for wp in self.warpings:
-            wp.refresh(y)
-            y = wp.forward(y)
-
     def derivative(self, x):
+        x = _tftools.ensure_rank_2(x)
         d = _tf.ones_like(x)
         for wp in self.warpings:
             d = d * wp.derivative(x)

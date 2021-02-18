@@ -16,38 +16,59 @@
 
 __all__ = ["RealParameter",
            "PositiveParameter",
-           "CompositionalParameter"]
+           "CompositionalParameter",
+           "CircularParameter"]
 
 import tensorflow as _tf
+import numpy as _np
+
+# import geoml.tftools as _tftools
 
 
-class Parameter(object):
+class RealParameter(object):
     """
     Trainable model parameter. Can be a vector, matrix, or scalar.
 
     The `fixed` property applies to the array as a whole.
     """
-    def __init__(self, value, min_val, max_val, fixed=False):
-        self.value = _tf.Variable(value, dtype=_tf.float64)
+    def __init__(self, value, min_val, max_val, fixed=False,
+                 name="Parameter"):
+        self.name = name
         self.fixed = fixed
 
-        self.max = _tf.constant(max_val, dtype=_tf.float64)
-        self.min = _tf.constant(min_val, dtype=_tf.float64)
+        value = _np.array(value)
+        min_val = _np.array(min_val)
+        max_val = _np.array(max_val)
 
-        if not self.max.shape == self.value.shape:
+        if not max_val.shape == value.shape:
             raise ValueError(
                 "Shape of max_val do not match shape of value: expected %s "
-                "and found %s" % (str(self.value.shape), str(self.max.shape)))
+                "and found %s" % (str(value.shape),
+                                  str(max_val.shape)))
 
-        if not self.min.shape == self.value.shape:
+        if not min_val.shape == value.shape:
             raise ValueError(
                 "Shape of min_val do not match shape of value: expected %s "
-                "and found %s" % (str(self.value.shape), str(self.min.shape)))
+                "and found %s" % (str(value.shape),
+                                  str(min_val.shape)))
 
-        self.value_transformed = _tf.Variable(value, dtype=_tf.float64)
-        self.max_transformed = _tf.constant(max_val, dtype=_tf.float64)
-        self.min_transformed = _tf.constant(min_val, dtype=_tf.float64)
+        self.shape = value.shape
+
+        self.variable = _tf.Variable(self._transform(value),
+                                     dtype=_tf.float64, name=name)
+
+        self.max_transformed = _tf.Variable(
+            self._transform(max_val), dtype=_tf.float64)
+        self.min_transformed = _tf.Variable(
+            self._transform(min_val), dtype=_tf.float64)
+
         self.refresh()
+
+    def _transform(self, x):
+        return x
+
+    def _back_transform(self, x):
+        return x
 
     def fix(self):
         self.fixed = True
@@ -57,103 +78,149 @@ class Parameter(object):
 
     def set_limits(self, min_val=None, max_val=None):
         if min_val is not None:
-            min_val = _tf.constant(min_val, dtype=_tf.float64)
-            if not min_val.shape == self.value.shape:
-                raise ValueError(
-                    "Shape of min_val do not match shape of value: expected %s "
-                    "and found %s" % (
-                        str(self.value.shape), str(min_val.shape)))
-
-            self.min = min_val
-            self.min_transformed = _tf.constant(min_val, dtype=_tf.float64)
+            self.min_transformed.assign(self._transform(min_val))
 
         if max_val is not None:
-            max_val = _tf.constant(max_val, dtype=_tf.float64)
-            if not max_val.shape == self.value.shape:
-                raise ValueError(
-                    "Shape of max_val do not match shape of value: expected %s "
-                    "and found %s" % (
-                        str(self.value.shape), str(max_val.shape)))
-
-            self.max = max_val
-            self.max_transformed = _tf.constant(max_val, dtype=_tf.float64)
-
+            self.max_transformed.assign(self._transform(max_val))
         self.refresh()
 
     def set_value(self, value, transformed=False):
-        self.value.assign(value)
+        if transformed:
+            self.variable.assign(value)
+        else:
+            self.variable.assign(self._transform(value))
         self.refresh()
 
+    def get_value(self):
+        return self._back_transform(self.variable)
+
     def refresh(self):
-        pass
+        value = _tf.maximum(self.min_transformed,
+                            _tf.minimum(self.max_transformed, self.variable))
+        self.variable.assign(value)
+
+    def randomize(self):
+        val = (self.variable - self.min_transformed) \
+              / (self.max_transformed - self.min_transformed)
+        val = val + _np.random.uniform(size=self.shape, low=-0.05, high=0.05)
+        val = _tf.maximum(0, _tf.minimum(1, val))
+        val = val * (self.max_transformed - self.min_transformed) \
+              + self.min_transformed
+        self.variable.assign(val)
 
 
-class RealParameter(Parameter):
-    """
-    Trainable model parameter. Can be a vector, matrix, or scalar.
-    
-    The `fixed` property applies to the array as a whole.
-    """
-    def refresh(self):
-        self.value.assign(_tf.minimum(self.value, self.max))
-        self.value.assign(_tf.maximum(self.value, self.min))
-
-        self.value_transformed.assign(self.value.value())
-        self.value_transformed.assign(
-            _tf.minimum(self.value_transformed, self.max_transformed))
-        self.value_transformed.assign(
-            _tf.maximum(self.value_transformed, self.min_transformed))
-
-
-class PositiveParameter(Parameter):
+class PositiveParameter(RealParameter):
     """Parameter in log scale"""
 
-    def set_value(self, value, transformed=False):
-        if transformed:
-            self.value_transformed.assign(value)
-            self.value.assign(_tf.math.exp(value))
-        else:
-            self.value.assign(value)
-        self.refresh()
+    def _transform(self, x):
+        return _tf.math.log(_tf.cast(x, _tf.float64))
+
+    def _back_transform(self, x):
+        return _tf.math.exp(x)
+
+
+class CompositionalParameter(RealParameter):
+    """
+    A vector parameter in logit coordinates
+    """
+    def __init__(self, value, fixed=False, name="Parameter"):
+        super().__init__(value, value, value, fixed, name=name)
+        self.min_transformed.assign(-10 * _tf.ones_like(self.variable))
+        self.max_transformed.assign(10 * _tf.ones_like(self.variable))
+        self.variable.assign(self._transform(value))
+
+    def _transform(self, x):
+        x_tr = _tf.math.log(_tf.cast(x, _tf.float64))
+        return x_tr - _tf.reduce_mean(x_tr)
+
+    def _back_transform(self, x):
+        return _tf.nn.softmax(x)
+
+
+class CircularParameter(RealParameter):
+    def refresh(self):
+        amp = self.max_transformed - self.min_transformed
+        n_laps = _tf.floor((self.variable - self.min_transformed) / amp)
+        value = self.variable - n_laps * amp
+        self.variable.assign(value)
+
+
+class UnitColumnNormParameter(RealParameter):
+    def __init__(self, value, min_val, max_val, fixed=False, name="Parameter"):
+        value = _np.array(value)
+        if len(value.shape) != 2:
+            raise ValueError("value must be rank 2")
+        super().__init__(value, min_val, max_val, fixed, name)
 
     def refresh(self):
-        self.value.assign(_tf.minimum(self.value, self.max))
-        self.value.assign(_tf.maximum(self.value, self.min))
-
-        self.value_transformed.assign(_tf.math.log(self.value))
-        self.max_transformed = _tf.math.log(self.max)
-        self.min_transformed = _tf.math.log(self.min)
+        value = self.get_value()
+        normalized = value / (_tf.math.reduce_euclidean_norm(
+            value, axis=0, keepdims=True) + 1e-6)
+        self.variable.assign(normalized)
 
 
-class CompositionalParameter(Parameter):
-    """
-    matrix vector parameter in logit coordinates
-    """
-    def __init__(self, value, fixed=False):
-        value = _tf.constant(value, dtype=_tf.float64)
-        min_val = _tf.zeros_like(value)
-        max_val = _tf.ones_like(value)
-        super().__init__(value, min_val, max_val, fixed)
-        self.min_transformed = _tf.ones_like(value) * -10
-        self.max_transformed = _tf.ones_like(value) * 10
-        
-    def set_limits(self, min_val=None, max_val=None):
-        pass
-    
-    def set_value(self, value, transformed=False):
-        if transformed:
-            # self.value_transformed.assign(value)
+class UnitColumnSumParameter(RealParameter):
+    def __init__(self, value, fixed=False, name="Parameter"):
+        value = _np.array(value)
+        if len(value.shape) != 2:
+            raise ValueError("value must be rank 2")
+        super().__init__(value, value, value, fixed, name)
+        self.min_transformed.assign(-100 * _tf.ones_like(self.variable))
+        self.max_transformed.assign(100 * _tf.ones_like(self.variable))
+        self.variable.assign(self._transform(value))
 
-            value = value - _tf.reduce_mean(value)  # to avoid overflow
-            value = _tf.math.exp(value)
-            value = value / _tf.reduce_sum(value)
-            self.value.assign(value)
-        else:
-            self.value.assign(value)
-        self.refresh()
+    def _transform(self, x):
+        x_tr = _tf.math.log(_tf.cast(x, _tf.float64))
+        return x_tr - _tf.reduce_mean(x_tr, axis=0, keepdims=True)
+
+    def _back_transform(self, x):
+        return _tf.nn.softmax(x, axis=0)
+
+
+class NaturalParameter(RealParameter):
+    def __init__(self, dim, n_latent):
+        mat = _np.tile(_np.eye(dim)[None, :, :], [n_latent, 1, 1])
+        vec = _np.zeros([n_latent, dim])
+        start = _np.concatenate(
+            [_np.reshape(mat, [-1]), _np.reshape(vec, [-1])],
+            axis=0)
+
+        self.dim = dim
+        self.n_latent = n_latent
+        self.theta = _tf.Variable(_tf.constant(-0.5 * start, _tf.float64))
+        super().__init__(start, start - 20, start + 20)
+
+    def get_value(self):
+        # self.variable = [eta_2, eta_1]
+        n_cov = self.n_latent * self.dim**2
+        eta_2 = _tf.reshape(self.variable[:n_cov],
+                            [self.n_latent, self.dim, self.dim])
+        eta_1 = _tf.reshape(self.variable[n_cov:],
+                            [self.n_latent, self.dim, 1])
+        mat_s = eta_2 - _tf.matmul(eta_1, eta_1, False, True)
+        return eta_1, mat_s
 
     def refresh(self):
-        self.value.assign(self.value / _tf.reduce_sum(self.value))
+        n_cov = self.n_latent * self.dim ** 2
+        theta_2 = _tf.reshape(self.theta[:n_cov],
+                              [self.n_latent, self.dim, self.dim])
+        theta_1 = _tf.reshape(self.theta[n_cov:],
+                              [self.n_latent, self.dim, 1])
 
-        logit = _tf.math.log(self.value)
-        self.value_transformed.assign(logit - _tf.reduce_mean(logit))
+        eye = _tf.eye(self.dim, dtype=_tf.float64, batch_shape=[self.n_latent])
+        theta_2 = 0.5 * (theta_2 + _tf.transpose(theta_2, [0, 2, 1]))
+        theta_2_chol = _tf.linalg.cholesky(-2 * theta_2 + eye * 0.01)
+
+        # eta_1 = -0.5 * _tf.linalg.solve(theta_2, theta_1)
+        # eta_2 = -0.5 * _tf.linalg.solve(
+        #     theta_2, # + eye * 1e-6,
+        #     _tf.matmul(theta_1, eta_1, False, True) + eye)
+        eta_1 = _tf.linalg.cholesky_solve(theta_2_chol, theta_1)
+        eta_2 = _tf.linalg.cholesky_solve(
+            theta_2_chol,
+            _tf.matmul(theta_1, eta_1, False, True) + eye)
+        eta = _tf.concat(
+            [_tf.reshape(eta_2, [-1]), _tf.reshape(eta_1, [-1])],
+            axis=0
+        )
+        self.variable.assign(eta)

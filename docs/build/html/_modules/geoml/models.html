@@ -156,7 +156,7 @@
 <span class="kn">import</span> <span class="nn">geoml.data</span> <span class="k">as</span> <span class="nn">_data</span>
 
 
-<span class="k">class</span> <span class="nc">_Model</span><span class="p">:</span>
+<span class="k">class</span> <span class="nc">VGP</span><span class="p">:</span>
     <span class="sd">&quot;&quot;&quot;Base model class&quot;&quot;&quot;</span>
 
     <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
@@ -182,7 +182,7 @@
         <span class="k">pass</span>
 
 
-<div class="viewcode-block" id="GP"><a class="viewcode-back" href="../../geoml.html#geoml.models.GP">[docs]</a><span class="k">class</span> <span class="nc">GP</span><span class="p">(</span><span class="n">_Model</span><span class="p">):</span>
+<div class="viewcode-block" id="GP"><a class="viewcode-back" href="../../geoml.html#geoml.models.GP">[docs]</a><span class="k">class</span> <span class="nc">GP</span><span class="p">(</span><span class="n">VGP</span><span class="p">):</span>
     <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Base Gaussian Process model, not optimized for a large amount of data.</span>
 <span class="sd">    It is expected to work well with up to ~5000 data points.</span>
@@ -275,7 +275,7 @@
                 <span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_alpha</span><span class="p">(</span><span class="n">mat_k</span><span class="p">,</span> <span class="n">y_tf</span><span class="p">)</span>
 
                 <span class="c1"># log-likelihood</span>
-                <span class="n">log_lik</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_log_lik</span><span class="p">(</span><span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">y_tf</span><span class="p">,</span> <span class="n">yd_tf</span><span class="p">)</span>
+                <span class="n">elbo</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_log_lik</span><span class="p">(</span><span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">y_tf</span><span class="p">,</span> <span class="n">yd_tf</span><span class="p">)</span>
 
                 <span class="c1"># prediction</span>
                 <span class="n">pred_mu</span><span class="p">,</span> <span class="n">pred_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_predict</span><span class="p">(</span><span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_new_tf</span><span class="p">,</span> <span class="n">interp</span><span class="p">)</span>
@@ -285,7 +285,7 @@
                                    <span class="s2">&quot;y_tf&quot;</span><span class="p">:</span> <span class="n">y_tf</span><span class="p">,</span>
                                    <span class="s2">&quot;yd_tf&quot;</span><span class="p">:</span> <span class="n">yd_tf</span><span class="p">,</span>
                                    <span class="s2">&quot;K&quot;</span><span class="p">:</span> <span class="n">mat_k</span><span class="p">,</span>
-                                   <span class="s2">&quot;log_lik&quot;</span><span class="p">:</span> <span class="n">log_lik</span><span class="p">,</span>
+                                   <span class="s2">&quot;elbo&quot;</span><span class="p">:</span> <span class="n">elbo</span><span class="p">,</span>
                                    <span class="s2">&quot;x_new_tf&quot;</span><span class="p">:</span> <span class="n">x_new_tf</span><span class="p">,</span>
                                    <span class="s2">&quot;pred_mu&quot;</span><span class="p">:</span> <span class="n">pred_mu</span><span class="p">,</span>
                                    <span class="s2">&quot;pred_var&quot;</span><span class="p">:</span> <span class="n">pred_var</span><span class="p">,</span>
@@ -310,13 +310,13 @@
 
     <span class="nd">@staticmethod</span>
     <span class="k">def</span> <span class="nf">_log_lik</span><span class="p">(</span><span class="n">chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">yd</span><span class="p">):</span>
-        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;log_lik&quot;</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;elbo&quot;</span><span class="p">):</span>
             <span class="n">n_data</span> <span class="o">=</span> <span class="n">y</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">value</span>
-            <span class="n">log_lik</span> <span class="o">=</span> <span class="o">-</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">alpha</span> <span class="o">*</span> <span class="n">y</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;fit&quot;</span><span class="p">)</span> \
+            <span class="n">elbo</span> <span class="o">=</span> <span class="o">-</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">alpha</span> <span class="o">*</span> <span class="n">y</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;fit&quot;</span><span class="p">)</span> \
                       <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">diag_part</span><span class="p">(</span><span class="n">chol</span><span class="p">)),</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;det&quot;</span><span class="p">)</span> \
                       <span class="o">-</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">n_data</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span><span class="p">))</span> \
                       <span class="o">+</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">yd</span><span class="p">),</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;warping_derivative&quot;</span><span class="p">)</span>
-        <span class="k">return</span> <span class="n">log_lik</span>
+        <span class="k">return</span> <span class="n">elbo</span>
 
     <span class="k">def</span> <span class="nf">_predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_new</span><span class="p">,</span> <span class="n">interp</span><span class="p">):</span>
         <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Prediction&quot;</span><span class="p">):</span>
@@ -329,7 +329,7 @@
                 <span class="n">pred_var</span> <span class="o">=</span> <span class="n">point_var</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">pred_var</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
         <span class="k">return</span> <span class="n">pred_mu</span><span class="p">,</span> <span class="n">pred_var</span>
 
-<div class="viewcode-block" id="GP.log_lik"><a class="viewcode-back" href="../../geoml.html#geoml.models.GP.log_lik">[docs]</a>    <span class="k">def</span> <span class="nf">log_lik</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<div class="viewcode-block" id="GP.elbo"><a class="viewcode-back" href="../../geoml.html#geoml.models.GP.elbo">[docs]</a>    <span class="k">def</span> <span class="nf">elbo</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
         <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Outputs the model&#39;s log-likelihood, given the current parameters.</span>
 
@@ -340,13 +340,13 @@
 
 <span class="sd">        Returns</span>
 <span class="sd">        -------</span>
-<span class="sd">        log_lik : double</span>
+<span class="sd">        elbo : double</span>
 <span class="sd">            The model&#39;s log-likelihood.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="n">session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">Session</span><span class="p">(</span><span class="n">graph</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">graph</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-                <span class="n">log_lik</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">log_lik</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
-            <span class="k">return</span> <span class="n">log_lik</span>
+                <span class="n">elbo</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">elbo</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">elbo</span>
 
         <span class="c1"># updating y</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">cov_model</span><span class="o">.</span><span class="n">warp_refresh</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">y</span><span class="p">)</span>
@@ -358,8 +358,8 @@
         <span class="n">feed</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;y_tf&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="mi">1</span><span class="p">)),</span>
                      <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;yd_tf&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">yd</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="mi">1</span><span class="p">))})</span>
         <span class="n">session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;init&quot;</span><span class="p">],</span> <span class="n">feed_dict</span><span class="o">=</span><span class="n">feed</span><span class="p">)</span>
-        <span class="n">log_lik</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;log_lik&quot;</span><span class="p">],</span> <span class="n">feed_dict</span><span class="o">=</span><span class="n">feed</span><span class="p">)</span>
-        <span class="k">return</span> <span class="n">log_lik</span></div>
+        <span class="n">elbo</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;elbo&quot;</span><span class="p">],</span> <span class="n">feed_dict</span><span class="o">=</span><span class="n">feed</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">elbo</span></div>
 
 <div class="viewcode-block" id="GP.train"><a class="viewcode-back" href="../../geoml.html#geoml.models.GP.train">[docs]</a>    <span class="k">def</span> <span class="nf">train</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
 
@@ -370,7 +370,7 @@
             <span class="n">pd2</span><span class="p">[</span><span class="s2">&quot;param_val&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">z</span>
 
             <span class="bp">self</span><span class="o">.</span><span class="n">cov_model</span><span class="o">.</span><span class="n">update_params</span><span class="p">(</span><span class="n">pd2</span><span class="p">)</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">log_lik</span><span class="p">(</span><span class="n">sess</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">elbo</span><span class="p">(</span><span class="n">sess</span><span class="p">)</span>
 
         <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">Session</span><span class="p">(</span><span class="n">graph</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">graph</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
             <span class="n">opt</span> <span class="o">=</span> <span class="n">_gen</span><span class="o">.</span><span class="n">training_real</span><span class="p">(</span><span class="n">fitness</span><span class="o">=</span><span class="k">lambda</span> <span class="n">z</span><span class="p">:</span> <span class="n">fitness</span><span class="p">(</span><span class="n">z</span><span class="p">,</span> <span class="n">session</span><span class="p">),</span>
@@ -419,7 +419,7 @@
         <span class="c1"># prediction in batches</span>
         <span class="n">n_data</span> <span class="o">=</span> <span class="n">x_new</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
         <span class="n">n_batches</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">n_data</span> <span class="o">/</span> <span class="n">batch_size</span><span class="p">))</span>
-        <span class="n">batch_id</span> <span class="o">=</span> <span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="n">batch_size</span><span class="p">,</span>
+        <span class="n">batch_index</span> <span class="o">=</span> <span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="n">batch_size</span><span class="p">,</span>
                                <span class="n">_np</span><span class="o">.</span><span class="n">minimum</span><span class="p">((</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">batch_size</span><span class="p">,</span> <span class="n">n_data</span><span class="p">))</span>
                     <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_batches</span><span class="p">)]</span>
 
@@ -433,7 +433,7 @@
             <span class="c1"># placeholders</span>
             <span class="n">feed</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_model</span><span class="o">.</span><span class="n">feed_dict</span><span class="p">()</span>
             <span class="n">feed</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;y_tf&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="mi">1</span><span class="p">)),</span>
-                         <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;x_new_tf&quot;</span><span class="p">]:</span> <span class="n">x_new</span><span class="p">[</span><span class="n">batch_id</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="p">:]})</span>
+                         <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;x_new_tf&quot;</span><span class="p">]:</span> <span class="n">x_new</span><span class="p">[</span><span class="n">batch_index</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="p">:]})</span>
 
             <span class="c1"># TensorFlow</span>
             <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">Session</span><span class="p">(</span><span class="n">graph</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">graph</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
@@ -581,7 +581,7 @@
 
                 <span class="c1"># log-likelihood</span>
                 <span class="n">yd</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">y_join</span><span class="p">)</span>
-                <span class="n">log_lik</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_log_lik</span><span class="p">(</span><span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">y_join</span><span class="p">,</span> <span class="n">yd</span><span class="p">)</span>
+                <span class="n">elbo</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_log_lik</span><span class="p">(</span><span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">y_join</span><span class="p">,</span> <span class="n">yd</span><span class="p">)</span>
 
                 <span class="c1"># prediction</span>
                 <span class="n">pred_mu</span><span class="p">,</span> <span class="n">pred_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_predict</span><span class="p">(</span><span class="n">mat_chol</span><span class="p">,</span> <span class="n">alpha</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_new_tf</span><span class="p">,</span>
@@ -593,14 +593,14 @@
                                    <span class="s2">&quot;y_tf&quot;</span><span class="p">:</span> <span class="n">y_tf</span><span class="p">,</span>
                                    <span class="s2">&quot;y_dir&quot;</span><span class="p">:</span> <span class="n">y_dir</span><span class="p">,</span>
                                    <span class="s2">&quot;K&quot;</span><span class="p">:</span> <span class="n">mat_k</span><span class="p">,</span>
-                                   <span class="s2">&quot;log_lik&quot;</span><span class="p">:</span> <span class="n">log_lik</span><span class="p">,</span>
+                                   <span class="s2">&quot;elbo&quot;</span><span class="p">:</span> <span class="n">elbo</span><span class="p">,</span>
                                    <span class="s2">&quot;x_new_tf&quot;</span><span class="p">:</span> <span class="n">x_new_tf</span><span class="p">,</span>
                                    <span class="s2">&quot;pred_mu&quot;</span><span class="p">:</span> <span class="n">pred_mu</span><span class="p">,</span>
                                    <span class="s2">&quot;pred_var&quot;</span><span class="p">:</span> <span class="n">pred_var</span><span class="p">,</span>
                                    <span class="s2">&quot;init&quot;</span><span class="p">:</span> <span class="n">_tf</span><span class="o">.</span><span class="n">global_variables_initializer</span><span class="p">()}</span></div>
 
     <span class="c1">#        with tf.Session(graph = self.graph) as session:</span>
-    <span class="c1">#            self._refresh(session)</span>
+    <span class="c1">#            self._svi_batch(session)</span>
 
     <span class="k">def</span> <span class="nf">_covariance_matrix_compressed</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">interp</span><span class="p">,</span> <span class="n">x_dir</span><span class="p">,</span> <span class="n">directions</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
         <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;covariance_matrix&quot;</span><span class="p">):</span>
@@ -635,11 +635,11 @@
                 <span class="n">pred_var</span> <span class="o">=</span> <span class="n">point_var</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">pred_var</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
         <span class="k">return</span> <span class="n">pred_mu</span><span class="p">,</span> <span class="n">pred_var</span>
 
-<div class="viewcode-block" id="GPGrad.log_lik"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPGrad.log_lik">[docs]</a>    <span class="k">def</span> <span class="nf">log_lik</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<div class="viewcode-block" id="GPGrad.elbo"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPGrad.elbo">[docs]</a>    <span class="k">def</span> <span class="nf">elbo</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">session</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
         <span class="k">if</span> <span class="n">session</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">Session</span><span class="p">(</span><span class="n">graph</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">graph</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
-                <span class="n">log_lik</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">log_lik</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
-            <span class="k">return</span> <span class="n">log_lik</span>
+                <span class="n">elbo</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">elbo</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">elbo</span>
 
         <span class="n">y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">y</span>
         <span class="n">y_dir</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">y_dir</span>
@@ -648,8 +648,8 @@
         <span class="n">feed</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;y_tf&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="mi">1</span><span class="p">)),</span>
                      <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;y_dir&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">y_dir</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y_dir</span><span class="p">),</span> <span class="mi">1</span><span class="p">))})</span>
         <span class="n">session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;init&quot;</span><span class="p">],</span> <span class="n">feed_dict</span><span class="o">=</span><span class="n">feed</span><span class="p">)</span>
-        <span class="n">log_lik</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;log_lik&quot;</span><span class="p">],</span> <span class="n">feed_dict</span><span class="o">=</span><span class="n">feed</span><span class="p">)</span>
-        <span class="k">return</span> <span class="n">log_lik</span></div>
+        <span class="n">elbo</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;elbo&quot;</span><span class="p">],</span> <span class="n">feed_dict</span><span class="o">=</span><span class="n">feed</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">elbo</span></div>
 
 <div class="viewcode-block" id="GPGrad.predict"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPGrad.predict">[docs]</a>    <span class="k">def</span> <span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">newdata</span><span class="p">,</span> <span class="n">perc</span><span class="o">=</span><span class="p">(</span><span class="mf">0.025</span><span class="p">,</span> <span class="mf">0.25</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">0.75</span><span class="p">,</span> <span class="mf">0.975</span><span class="p">),</span>
                 <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">verbose</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="mi">20000</span><span class="p">):</span>
@@ -667,7 +667,7 @@
         <span class="c1"># prediction in batches</span>
         <span class="n">n_data</span> <span class="o">=</span> <span class="n">x_new</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
         <span class="n">n_batches</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">n_data</span> <span class="o">/</span> <span class="n">batch_size</span><span class="p">))</span>
-        <span class="n">batch_id</span> <span class="o">=</span> <span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="n">batch_size</span><span class="p">,</span>
+        <span class="n">batch_index</span> <span class="o">=</span> <span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">i</span> <span class="o">*</span> <span class="n">batch_size</span><span class="p">,</span>
                                <span class="n">_np</span><span class="o">.</span><span class="n">minimum</span><span class="p">((</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">batch_size</span><span class="p">,</span> <span class="n">n_data</span><span class="p">))</span>
                     <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_batches</span><span class="p">)]</span>
 
@@ -682,7 +682,7 @@
             <span class="n">feed</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_model</span><span class="o">.</span><span class="n">feed_dict</span><span class="p">()</span>
             <span class="n">feed</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;y_tf&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y</span><span class="p">),</span> <span class="mi">1</span><span class="p">)),</span>
                          <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;y_dir&quot;</span><span class="p">]:</span> <span class="n">_np</span><span class="o">.</span><span class="n">resize</span><span class="p">(</span><span class="n">y_dir</span><span class="p">,</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">y_dir</span><span class="p">),</span> <span class="mi">1</span><span class="p">)),</span>
-                         <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;x_new_tf&quot;</span><span class="p">]:</span> <span class="n">x_new</span><span class="p">[</span><span class="n">batch_id</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="p">:]})</span>
+                         <span class="bp">self</span><span class="o">.</span><span class="n">tf_handles</span><span class="p">[</span><span class="s2">&quot;x_new_tf&quot;</span><span class="p">]:</span> <span class="n">x_new</span><span class="p">[</span><span class="n">batch_index</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="p">:]})</span>
 
             <span class="c1"># TensorFlow</span>
             <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">Session</span><span class="p">(</span><span class="n">graph</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">graph</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
@@ -717,7 +717,7 @@
 <span class="c1">#        return K</span>
 
 
-<div class="viewcode-block" id="GPMultiClassifier"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPMultiClassifier">[docs]</a><span class="k">class</span> <span class="nc">GPMultiClassifier</span><span class="p">(</span><span class="n">_Model</span><span class="p">):</span>
+<div class="viewcode-block" id="GPMultiClassifier"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPMultiClassifier">[docs]</a><span class="k">class</span> <span class="nc">GPMultiClassifier</span><span class="p">(</span><span class="n">VGP</span><span class="p">):</span>
     <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    GP for classification. This model uses topological relations between the</span>
 <span class="sd">    class labels to find a low-dimensional representation of the data. A</span>
@@ -797,16 +797,16 @@
                             <span class="n">dir_data</span><span class="o">=</span><span class="n">dir_data</span><span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">GPs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">gp</span><span class="p">)</span></div>
 
-<div class="viewcode-block" id="GPMultiClassifier.log_lik"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPMultiClassifier.log_lik">[docs]</a>    <span class="k">def</span> <span class="nf">log_lik</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<div class="viewcode-block" id="GPMultiClassifier.elbo"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPMultiClassifier.elbo">[docs]</a>    <span class="k">def</span> <span class="nf">elbo</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Outputs the model&#39;s log-likelihood, given the current parameters.</span>
 
 <span class="sd">        Returns</span>
 <span class="sd">        -------</span>
-<span class="sd">        log_lik : double</span>
+<span class="sd">        elbo : double</span>
 <span class="sd">            The model&#39;s log-likelihood.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">return</span> <span class="nb">sum</span><span class="p">([</span><span class="n">gp</span><span class="o">.</span><span class="n">log_lik</span><span class="p">()</span> <span class="k">for</span> <span class="n">gp</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">GPs</span><span class="p">])</span></div>
+        <span class="k">return</span> <span class="nb">sum</span><span class="p">([</span><span class="n">gp</span><span class="o">.</span><span class="n">elbo</span><span class="p">()</span> <span class="k">for</span> <span class="n">gp</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">GPs</span><span class="p">])</span></div>
 
 <div class="viewcode-block" id="GPMultiClassifier.train"><a class="viewcode-back" href="../../geoml.html#geoml.models.GPMultiClassifier.train">[docs]</a>    <span class="k">def</span> <span class="nf">train</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
         <span class="n">verb</span> <span class="o">=</span> <span class="kc">True</span>

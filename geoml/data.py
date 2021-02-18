@@ -14,841 +14,1124 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["Points1D", "Points2D", "Points3D",
+__all__ = ["PointData",
            "Grid1D", "Grid2D", "Grid3D",
-           "Directions2D", "Directions3D",
+           "DirectionalData",
            "DrillholeData",
-           "merge"]
+           "batch_index",
+           "export_planes"]
 
+import geoml.plotly as _py
+import geoml.interpolation as _gint
+
+import tensorflow as _tf
 import pandas as _pd
 import numpy as _np
-import collections as _collections
 import copy as _copy
+import collections as _col
 
 from skimage import measure as _measure
 
 
-def _update(d, u):
-    """
-    https://stackoverflow.com/questions/3232943/
-    update-value-of-a-nested-dictionary-of-varying-depth
-    """
-    for k, v in u.items():
-        if isinstance(v, _collections.Mapping):
-            d[k] = _update(d.get(k, {}), v)
-        else:
-            d[k] = v
-    return d
-
-
-def _bounding_box(coords):
+def bounding_box(points):
     """
     Computes a point set's bounding box and its diagonal
     """
-    bbox = _np.array([[_np.min(coords[:, i]) for i in range(coords.shape[1])],
-                      [_np.max(coords[:, i]) for i in range(coords.shape[1])]])
+    if len(points.shape) < 2:
+        points = _np.expand_dims(points, axis=0)
+    bbox = _np.array([[_np.min(points[:, i]) for i in range(points.shape[1])],
+                      [_np.max(points[:, i]) for i in range(points.shape[1])]])
     d = _np.sqrt(sum([_np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
     d = _np.squeeze(d)
     return bbox, d
+
+
+class _Variable(object):
+    """Representation of a dependent random variable."""
+
+    def __init__(self, name, coordinates):
+        self.name = name
+        self.coordinates = coordinates
+        self._length = 1
+
+    @property
+    def length(self):
+        return self._length
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        raise NotImplementedError
+
+    def __getitem__(self, item):
+        raise NotImplementedError
+
+    def as_data_frame(self, **kwargs):
+        raise NotImplementedError
+
+    def get_measurements(self):
+        raise NotImplementedError
+
+    def prediction_input(self):
+        return {}
+
+    def training_input(self, idx=None):
+        return {}
+
+    def copy_to(self, coordinates):
+        coordinates.variables[self.name] = self.__class__.from_variable(
+            coordinates, self
+        )
+
+    def update(self, idx, **kwargs):
+        raise NotImplementedError
+
+    def allocate_simulations(self, n_sim):
+        raise NotImplementedError
+
+    def set_coordinates(self, coordinates):
+        raise NotImplementedError
+
+    class _Attribute(object):
+        """A specific sequence of variable values, tied to data locations."""
+
+        def __init__(self, coordinates, values=None, dtype=None):
+            self.coordinates = coordinates
+
+            if dtype is None:
+                dtype = _np.float
+
+            if values is None:
+                values = _np.array([_np.nan] * coordinates.n_data,
+                                   dtype=dtype)
+            values = _np.array(values, ndmin=1, dtype=dtype)
+            if len(values.shape) > 1:
+                values = _np.squeeze(values)
+
+            if len(values.shape) != 1:
+                raise ValueError("Values must be 1-dimensional")
+
+            if len(values) != coordinates.n_data:
+                raise ValueError("Values and coordinates size mismatch")
+
+            self.values = values
+
+        def __str__(self):
+            return self.values.__str__()
+
+        def __repr__(self):
+            return self.values.__repr__()
+
+        def __getitem__(self, item):
+            self.values = _np.array(self.values[item], ndmin=1)
+            return self
+
+        def as_image(self):
+            """
+            Reshapes the data in the form of a matrix for plotting.
+
+            The output can be used in plotting functions such as
+            matplotlib's imshow(). If you use it, do not forget to set
+            origin="lower".
+
+            Returns
+            -------
+            image : array
+                matrix 2-dimensional array.
+            """
+            if not isinstance(self.coordinates, Grid2D):
+                raise ValueError("method only available for Grid2D data"
+                                 "objects")
+
+            image = _np.reshape(self.values.astype(_np.float),
+                                newshape=self.coordinates.grid_size,
+                                order="F")
+            image = image.transpose()
+            return image
+
+        def as_cube(self):
+            """
+            Returns a rank-3 array filled with the specified variable.
+
+            Returns
+            -------
+            cube : array
+                matrix cubic array.
+            """
+            if not isinstance(self.coordinates, Grid3D):
+                raise ValueError("method only available for Grid3D data"
+                                 "objects")
+
+            cube = _np.reshape(self.values.astype(_np.float),
+                               self.coordinates.grid_size, order="F")
+            return cube
+
+        def get_contour(self, value):
+            """
+            Calls the marching cubes algorithm to extract a isosurface.
+
+            Parameters
+            ----------
+            value : double
+                The value on which to calculate the isosurface.
+
+            Returns
+            -------
+            verts : array
+                Mesh vertices.
+            faces : array
+                Mesh faces.
+            normals : array
+                Mesh normals.
+            values : array
+                Value that can be used for color coding.
+
+
+            This method calls skimage.measure.marching_cubes().
+            See the original documentation for details.
+            """
+            cube = self.as_cube()
+            verts, faces, normals, values = _measure.marching_cubes(
+                cube, value, gradient_direction="ascent",
+                allow_degenerate=False, spacing=self.coordinates.step_size)
+            for i in range(3):
+                verts[:, i] += self.coordinates.grid[i][0]
+            return verts, faces, normals, values
+
+        def draw_contour(self, value, **kwargs):
+            """Creates plotly object with the contour at the specified value."""
+            verts, faces, normals, values = self.get_contour(value)
+            return _py.isosurface(verts, faces, **kwargs)
+
+        def export_contour(self, value, filename, triangles=True):
+            verts, faces, normals, values = self.get_contour(value)
+            
+            with open(filename, 'w') as out_file:
+                if triangles:
+                    out_file.write(
+                        str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
+                for line in verts:
+                    out_file.write(" ".join(str(elem) for elem in line) + "\n")
+                if triangles:
+                    for line in faces:
+                        out_file.write(
+                            " ".join(str(elem) for elem in line) + "\n")
+
+        def draw_numeric(self, **kwargs):
+            if self.coordinates.n_dim != 3:
+                raise NotImplemented("method currently available only for"
+                                     "3D coordinates")
+
+            if isinstance(self.coordinates, Section3D):
+                values = _np.reshape(self.values, self.coordinates.grid_shape,
+                                     order="F")
+                gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
+                                        self.coordinates.grid_shape,
+                                        order="F")
+                gridded_y = _np.reshape(self.coordinates.coordinates[:, 1],
+                                        self.coordinates.grid_shape,
+                                        order="F")
+                gridded_z = _np.reshape(self.coordinates.coordinates[:, 2],
+                                        self.coordinates.grid_shape,
+                                        order="F")
+
+                return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
+                                              values, **kwargs)
+
+            return _py.numeric_points_3d(
+                self.coordinates.coordinates,
+                self.values,
+                **kwargs)
+
+        def draw_categorical(self, colors, **kwargs):
+            if self.coordinates.n_dim != 3:
+                raise NotImplemented("method currently available only for"
+                                     "3D coordinates")
+
+            return _py.categorical_points_3d(
+                self.coordinates.coordinates,
+                self.values,
+                colors,
+                **kwargs)
+
+
+class ContinuousVariable(_Variable):
+    def __init__(self, name, coordinates, measurements=None,
+                 quantiles=None, probabilities=(0.025, 0.5, 0.975)):
+        super().__init__(name, coordinates)
+
+        if measurements is None:
+            self.measurements = self._Attribute(coordinates)
+        else:
+            self.measurements = self._Attribute(coordinates, measurements)
+
+        self.latent_mean = self._Attribute(coordinates)
+        self.latent_variance = self._Attribute(coordinates)
+
+        self.simulations = []
+
+        self.quantiles = _col.OrderedDict()
+        self.reset_quantiles(probabilities)
+
+        self.probabilities = _col.OrderedDict()
+        self.reset_probabilities(quantiles)
+
+    def get_measurements(self):
+        return self.measurements.values[:, None]
+
+    def reset_quantiles(self, probabilities=None):
+        self.quantiles = _col.OrderedDict()
+        if probabilities is not None:
+            for p in probabilities:
+                self.quantiles[p] = self._Attribute(self.coordinates)
+
+    def reset_probabilities(self, quantiles=None):
+        self.probabilities = _col.OrderedDict()
+        if quantiles is not None:
+            for q in quantiles:
+                self.probabilities[q] = self._Attribute(self.coordinates)
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        new_var = ContinuousVariable(variable.name, coordinates,
+                                     quantiles=None, probabilities=None)
+        if len(variable.quantiles) > 0:
+            new_var.reset_quantiles(variable.quantiles.keys())
+        if len(variable.probabilities) > 0:
+            new_var.reset_probabilities(variable.probabilities.keys())
+
+        return new_var
+
+    def __getitem__(self, item):
+        # new_obj = _copy.deepcopy(self)
+        self.measurements = self.measurements[item]
+        self.latent_mean = self.latent_mean[item]
+        self.latent_variance = self.latent_variance[item]
+
+        for i, sim in enumerate(self.simulations):
+            self.simulations[i] = sim[item]
+
+        if len(self.quantiles) > 0:
+            for key, val in self.quantiles.items():
+                self.quantiles[key] = val[item]
+
+        if len(self.probabilities) > 0:
+            for key, val in self.probabilities.items():
+                self.probabilities[key] = val[item]
+
+        return self
+
+    def as_data_frame(self, measurements=True, latent=True,
+                      simulations=True, quantiles=True,
+                      probabilities=True, **kwargs):
+        df = _pd.DataFrame({})
+
+        if measurements:
+            df[self.name] = self.measurements.values
+
+        if latent:
+            df[self.name + "_latent_mean"] = self.latent_mean.values
+            df[self.name + "_latent_variance"] = self.latent_variance.values
+
+        if simulations:
+            for i, sim in enumerate(self.simulations):
+                df[self.name + "_sim_" + str(i)] = sim.values
+
+        if quantiles:
+            if len(self.quantiles) > 0:
+                for key, val in self.quantiles.items():
+                    df[self.name + "_q" + str(key)] = val.values
+
+        if probabilities:
+            if len(self.probabilities) > 0:
+                for key, val in self.probabilities.items():
+                    df[self.name + "_p" + str(key)] = val.values
+
+        return df
+
+    def prediction_input(self):
+        d = {"quantiles": None, "probabilities": None}
+        if len(self.quantiles) > 0:
+            d["probabilities"] = _tf.constant(
+                [k for k in self.quantiles.keys()], _tf.float64)
+        if len(self.probabilities) > 0:
+            d["quantiles"] = _tf.constant(
+                [k for k in self.probabilities.keys()], _tf.float64)
+
+        return d
+
+    def update(self, idx, **kwargs):
+        self.latent_mean.values[idx] = kwargs["mean"].numpy()
+        self.latent_variance.values[idx] = kwargs["variance"].numpy()
+
+        if "simulations" in kwargs.keys():
+            sims = kwargs["simulations"].numpy()
+            for s in range(sims.shape[1]):
+                self.simulations[s].values[idx] = sims[:, s]
+
+        if "quantiles" in kwargs.keys():
+            quant = kwargs["quantiles"].numpy()
+            prob_keys = self.quantiles.keys()
+            for i, p in zip(range(quant.shape[1]), prob_keys):
+                self.quantiles[p].values[idx] = quant[:, i]
+
+        if "probabilities" in kwargs.keys():
+            prob = kwargs["probabilities"].numpy()
+            quant_keys = self.quantiles.keys()
+            for i, q in zip(range(prob.shape[1]), quant_keys):
+                self.probabilities[q].values[idx] = prob[:, i]
+
+    def allocate_simulations(self, n_sim):
+        self.simulations = [self._Attribute(self.coordinates)
+                            for _ in range(n_sim)]
+
+    def set_coordinates(self, coordinates):
+        self.coordinates = coordinates
+        self.measurements.coordinates = coordinates
+        self.latent_mean.coordinates = coordinates
+        self.latent_variance.coordinates = coordinates
+
+        for sim in self.simulations:
+            sim.coordinates = coordinates
+
+        if len(self.quantiles) > 0:
+            for p in self.quantiles.values():
+                p.coordinates = coordinates
+
+        if len(self.probabilities) > 0:
+            for q in self.probabilities.values():
+                q.coordinates = coordinates
+
+
+class _Component(_Variable):
+    def __init__(self, name, coordinates, measurements=None):
+        super().__init__(name, coordinates)
+        n_data = coordinates.n_data
+
+        if measurements is None:
+            self.measurements = self._Attribute(coordinates)
+        else:
+            self.measurements = self._Attribute(coordinates, measurements)
+
+        self.probability = self._Attribute(coordinates, _np.zeros(n_data))
+        self.indicator_mean = self._Attribute(coordinates)
+        self.indicator_variance = self._Attribute(coordinates)
+        self.indicator_predicted = self._Attribute(coordinates)
+        self.simulations = []
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+        new_obj.probability = self.probability[item]
+        new_obj.measurements = self.measurements[item]
+        new_obj.indicator_mean = self.indicator_mean[item]
+        new_obj.indicator_variance = self.indicator_variance[item]
+        new_obj.indicator_predicted = self.indicator_predicted[item]
+
+        for i, sim in enumerate(self.simulations):
+            new_obj.simulations[i] = sim[item]
+
+        return new_obj
+
+    def set_coordinates(self, coordinates):
+        self.coordinates = coordinates
+        self.probability.coordinates = coordinates
+        self.indicator_mean.coordinates = coordinates
+        self.indicator_variance.coordinates = coordinates
+        self.indicator_predicted.coordinates = coordinates
+
+        for sim in self.simulations:
+            sim.coordinates = coordinates
+
+    def as_data_frame(self, probability=True, predictions=True,
+                      simulations=False):
+        df = _pd.DataFrame({})
+
+        if probability:
+            df[self.name + "_probability"] = self.probability.values
+            df[self.name + "_indicator"] = self.measurements.values
+
+        if predictions:
+            df[self.name + "_indicator_mean"] = self.indicator_mean.values
+            df[self.name + "_indicator_variance"] = \
+                self.indicator_variance.values
+            df[self.name + "_indicator_predicted"] = \
+                self.indicator_predicted.values
+
+        if simulations:
+            for i, sim in enumerate(self.simulations):
+                df[self.name + "_sim_" + str(i)] = sim.values
+
+        return df
+
+    def update(self, idx, **kwargs):
+        self.indicator_mean.values[idx] = kwargs["mean"].numpy()
+        self.indicator_variance.values[idx] = kwargs["variance"].numpy()
+        self.probability.values[idx] = kwargs["probability"].numpy()
+
+        if "indicator" in kwargs:
+            self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
+
+        sims = kwargs["simulations"].numpy()
+        for s in range(sims.shape[1]):
+            self.simulations[s].values[idx] = sims[:, s]
+
+    def allocate_simulations(self, n_sim):
+        self.simulations = [self._Attribute(self.coordinates)
+                            for _ in range(n_sim)]
+
+
+class CompositionalVariable(_Variable):
+    def __init__(self, name, coordinates, labels, measurements=None):
+        super().__init__(name, coordinates)
+
+        self.labels = labels
+        self._length = len(labels)
+
+        self.components = {}
+        for i, label in enumerate(labels):
+            self.components[label] = _Component(
+                label,
+                coordinates,
+                measurements[:, i] if measurements is not None else None)
+
+    def get_measurements(self):
+        out = [self.components[label].measurements.values
+               for label in self.labels]
+        return _np.stack(out, axis=1)
+
+    def set_coordinates(self, coordinates):
+        self.coordinates = coordinates
+        for comp in self.components.values():
+            comp.set_coordinates(coordinates)
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        new_var = CompositionalVariable(variable.name, coordinates,
+                                        variable.labels)
+        return new_var
+
+    @classmethod
+    def from_data_frame(cls, name, coordinates, df, columns=None,
+                        *args, **kwargs):
+        new_var = CompositionalVariable(
+            name,
+            coordinates,
+            labels=columns,
+            measurements=df.loc[:, columns].values)
+        return new_var
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+
+        for name, comp in self.components.items():
+            new_obj.components[name] = comp[item]
+
+        return new_obj
+
+    def as_data_frame(self, probability=True, predictions=True, **kwargs):
+        all_dfs = []
+        for key, val in self.components.items():
+            cat_df = val.as_data_frame(
+                probability=probability,
+                predictions=predictions,
+                **kwargs)
+            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
+            all_dfs.append(cat_df)
+        all_dfs = _pd.concat(all_dfs, axis=1)
+
+        return all_dfs
+
+    def update(self, idx, **kwargs):
+        mean = _tf.unstack(kwargs["mean"], axis=1)
+        variance = _tf.unstack(kwargs["variance"], axis=1)
+        probability = _tf.unstack(kwargs["probability"], axis=1)
+        simulations = _tf.unstack(kwargs["simulations"], axis=1)
+
+        for lb, m, v, p, s in zip(
+                self.labels, mean, variance,
+                probability, simulations):
+            self.components[lb].update(idx, **{
+                "mean": m,
+                "variance": v,
+                "probability": p,
+                "simulations": s
+            })
+
+    def allocate_simulations(self, n_sim):
+        for comp in self.labels:
+            self.components[comp].allocate_simulations(n_sim)
+
+
+class _Category(_Variable):
+    def __init__(self, name, coordinates):
+        super().__init__(name, coordinates)
+        n_data = coordinates.n_data
+
+        self.probability = self._Attribute(coordinates, _np.zeros(n_data))
+        self.indicator = self._Attribute(coordinates, - _np.ones(n_data))
+        self.indicator_mean = self._Attribute(coordinates)
+        self.indicator_variance = self._Attribute(coordinates)
+        self.indicator_predicted = self._Attribute(coordinates)
+        self.simulations = []
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+        new_obj.probability = self.probability[item]
+        new_obj.indicator = self.indicator[item]
+        new_obj.indicator_mean = self.indicator_mean[item]
+        new_obj.indicator_variance = self.indicator_variance[item]
+        new_obj.indicator_predicted = self.indicator_predicted[item]
+
+        for i, sim in enumerate(self.simulations):
+            new_obj.simulations[i].values = sim.values[item]
+
+        return new_obj
+
+    def set_coordinates(self, coordinates):
+        self.coordinates = coordinates
+        self.probability.coordinates = coordinates
+        self.indicator_mean.coordinates = coordinates
+        self.indicator_variance.coordinates = coordinates
+        self.indicator_predicted.coordinates = coordinates
+
+        for sim in self.simulations:
+            sim.coordinates = coordinates
+
+    def as_data_frame(self, probability=True, predictions=True,
+                      simulations=False):
+        df = _pd.DataFrame({})
+
+        if probability:
+            df[self.name + "_probability"] = self.probability.values
+            df[self.name + "_indicator"] = self.indicator.values
+
+        if predictions:
+            df[self.name + "_indicator_mean"] = self.indicator_mean.values
+            df[self.name + "_indicator_variance"] = \
+                self.indicator_variance.values
+            df[self.name + "_indicator_predicted"] = \
+                self.indicator_predicted.values
+
+        if simulations:
+            for i, sim in enumerate(self.simulations):
+                df[self.name + "_sim_" + str(i)] = sim.values
+
+        return df
+
+    def update(self, idx, **kwargs):
+        self.indicator_predicted.values[idx] = kwargs["measurements"].numpy()
+        self.indicator_mean.values[idx] = kwargs["mean"].numpy()
+        self.indicator_variance.values[idx] = kwargs["variance"].numpy()
+        self.probability.values[idx] = kwargs["probability"].numpy()
+
+        sims = kwargs["simulations"].numpy()
+        for s in range(sims.shape[1]):
+            self.simulations[s].values[idx] = sims[:, s]
+
+    def allocate_simulations(self, n_sim):
+        self.simulations = [self._Attribute(self.coordinates)
+                            for _ in range(n_sim)]
+
+
+class RockTypeVariable(CompositionalVariable):
+    def __init__(self, name, coordinates, labels=None, measurements_a=None,
+                 measurements_b=None):
+        if measurements_b is None:
+            measurements_b = measurements_a
+
+        if labels is None:
+            if measurements_a is None:
+                raise Exception("either the labels or measurements"
+                                "must be provided")
+            cat_a = _pd.Categorical(measurements_a)
+            cat_b = _pd.Categorical(measurements_b)
+            labels = _pd.api.types.union_categoricals([cat_a, cat_b])
+            labels = labels.categories.values
+
+        n_cat = len(labels)
+        n_data = coordinates.n_data
+
+        avg_vals = None
+        if measurements_a is not None:
+            vals_a = _np.zeros([n_data, n_cat])
+            vals_b = vals_a
+            for i, label in enumerate(labels):
+                vals_a[measurements_a == label, i] = 1
+                vals_b[measurements_b == label, i] = 1
+            avg_vals = 0.5 * (vals_a + vals_b)
+
+        super().__init__(name, coordinates,
+                         labels=labels, measurements=avg_vals)
+        # self._length *= 2
+
+        self.predicted = self._Attribute(
+            coordinates, _np.array([""]*n_data), dtype=_np.object)
+        self.entropy = self._Attribute(coordinates)
+        self.uncertainty = self._Attribute(coordinates)
+
+        if measurements_a is None:
+            self.measurements_a = self._Attribute(
+                coordinates, _np.array([""] * n_data), dtype=_np.object)
+            self.measurements_b = self._Attribute(
+                coordinates, _np.array([""] * n_data), dtype=_np.object)
+            self.boundary = self._Attribute(
+                coordinates, [False]*n_data, dtype=_np.bool)
+        else:
+            self.measurements_a = self._Attribute(
+                coordinates, measurements_a, dtype=_np.object)
+            self.measurements_b = self._Attribute(
+                coordinates, measurements_b, dtype=_np.object)
+            self.boundary = self._Attribute(
+                coordinates, measurements_a != measurements_b, dtype=_np.bool)
+
+    # def get_measurements(self):
+    #     out = [self.components[label].measurements.values
+    #            for label in self.labels]
+    #     out = _np.stack(out, axis=1)
+    #     return _np.concatenate([out, out], axis=1)
+
+    def set_coordinates(self, coordinates):
+        super().set_coordinates(coordinates)
+        self.predicted.coordinates = coordinates
+        self.entropy.coordinates = coordinates
+        self.uncertainty.coordinates = coordinates
+        self.boundary.coordinates = coordinates
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        new_var = RockTypeVariable(variable.name, coordinates,
+                                   variable.labels)
+        return new_var
+
+    @classmethod
+    def from_data_frame(cls, name, coordinates, df, col_a=None, col_b=None,
+                        *args, **kwargs):
+        labels = _pd.api.types.union_categoricals(
+            [_pd.Categorical(df[col_a]),
+             _pd.Categorical(df[col_b])])
+        labels = labels.categories.values
+
+        new_var = RockTypeVariable(name, coordinates, labels,
+                                   measurements_a=df[col_a].values,
+                                   measurements_b=df[col_b].values)
+        return new_var
+
+    def __getitem__(self, item):
+        new_obj = super().__getitem__(item)
+
+        new_obj.predicted = self.predicted[item]
+        new_obj.entropy = self.entropy[item]
+        new_obj.uncertainty = self.uncertainty[item]
+        new_obj.boundary = self.boundary[item]
+        new_obj.measurements_a = self.measurements_a[item]
+        new_obj.measurements_b = self.measurements_b[item]
+
+        return new_obj
+
+    def as_data_frame(self, probability=True, predictions=True, **kwargs):
+        df = super().as_data_frame(probability, predictions, **kwargs)
+        df[self.name + "_a"] = self.measurements_a.values
+        df[self.name + "_b"] = self.measurements_b.values
+
+        if predictions:
+            df[self.name + "_predicted"] = self.predicted.values
+            df[self.name + "_entropy"] = self.entropy.values
+            df[self.name + "_uncertainty"] = self.uncertainty.values
+
+        return df
+
+    def update(self, idx, **kwargs):
+        self.entropy.values[idx] = kwargs["entropy"].numpy()
+        self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
+
+        max_prob = _np.argmax(kwargs["probability"].numpy(), axis=1)
+        self.predicted.values[idx] = _np.array(self.labels)[max_prob]
+        # self.predicted.values[idx] = self.labels[max_prob]
+
+        mean = _tf.unstack(kwargs["mean"], axis=1)
+        variance = _tf.unstack(kwargs["variance"], axis=1)
+        indicators = _tf.unstack(kwargs["indicators"], axis=1)
+        probability = _tf.unstack(kwargs["probability"], axis=1)
+        simulations = _tf.unstack(kwargs["simulations"], axis=1)
+
+        for lb, m, v, i, p, s in zip(
+                self.labels, mean, variance, indicators,
+                probability, simulations):
+            self.components[lb].update(idx, **{
+                "mean": m,
+                "variance": v,
+                "indicator": i,
+                "probability": p,
+                "simulations": s
+            })
+
+    def training_input(self, idx=None):
+        if idx is None:
+            idx = _np.arange(self.coordinates.n_data)
+        return {"is_boundary": _tf.constant(self.boundary.values[idx, None],
+                                            _tf.bool)}
+
+
+class CategoricalVariable(RockTypeVariable):
+    def __init__(self, name, coordinates, labels, measurements=None):
+        super().__init__(name, coordinates, labels, measurements_a=measurements)
+
+
+class BinaryVariable(_Variable):
+    def __init__(self, name, coordinates, labels, measurements=None):
+        super().__init__(name, coordinates)
+        n_data = coordinates.n_data
+
+        self.labels = labels
+        self._length = 1
+        if len(labels) != 2:
+            raise ValueError("there must be exactly 2 labels - found %d"
+                             % len(labels))
+
+        self.indicator = self._Attribute(
+            coordinates, _np.array([_np.nan]*n_data))
+        if measurements is None:
+            self.measurements = self._Attribute(
+                coordinates, [""]*n_data, dtype=_np.object)
+            self.weights = self._Attribute(coordinates)
+        else:
+            self.measurements = self._Attribute(
+                coordinates, measurements, dtype=_np.object)
+            self.weights = self._Attribute(coordinates, _np.ones(n_data))
+            self.indicator.values[measurements == labels[0]] = 1
+            self.indicator.values[measurements == labels[1]] = 0
+
+        self.predicted = self._Attribute(
+            coordinates, [""]*n_data, dtype=_np.object)
+        self.probability = self._Attribute(coordinates, _np.zeros(n_data))
+        self.entropy = self._Attribute(coordinates)
+        self.uncertainty = self._Attribute(coordinates)
+
+        self.latent_mean = self._Attribute(coordinates)
+        self.latent_variance = self._Attribute(coordinates)
+
+        self.simulations = []
+
+        if measurements is not None:
+            for label in labels:
+                idx = measurements == label
+                n_in_label = _np.sum(idx)
+                if n_in_label > 0:
+                    self.weights.values[idx] = \
+                        n_data / (n_in_label * len(labels))
+
+    def get_measurements(self):
+        return self.indicator.values[:, None]
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        new_var = BinaryVariable(variable.name, coordinates, variable.labels)
+        return new_var
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+        new_obj.probability = self.probability[item]
+        new_obj.indicator = self.indicator[item]
+        new_obj.latent_mean = self.latent_mean[item]
+        new_obj.latent_variance = self.latent_variance[item]
+        new_obj.predicted = self.predicted[item]
+        new_obj.entropy = self.entropy[item]
+        new_obj.uncertainty = self.uncertainty[item]
+        new_obj.measurements = self.measurements[item]
+        new_obj.weights = self.weights[item]
+
+        for i, sim in enumerate(self.simulations):
+            new_obj.simulations[i].values = sim.values[item]
+
+        return new_obj
+
+    def set_coordinates(self, coordinates):
+        self.coordinates = coordinates
+        self.probability.coordinates = coordinates
+        self.indicator.coordinates = coordinates
+        self.latent_mean.coordinates = coordinates
+        self.latent_variance.coordinates = coordinates
+        self.predicted.coordinates = coordinates
+        self.entropy.coordinates = coordinates
+        self.uncertainty.coordinates = coordinates
+        self.measurements.coordinates = coordinates
+        self.weights.coordinates = coordinates
+
+        for sim in self.simulations:
+            sim.coordinates = coordinates
+
+    def as_data_frame(self, measurements=True, latent=True,
+                      predictions=True, simulations=False):
+        df = _pd.DataFrame({})
+
+        if measurements:
+            df[self.name + "_measurements"] = self.measurements.values
+            df[self.name + "_weights"] = self.weights.values
+
+        if predictions:
+            df[self.name + "_predicted"] = self.predicted.values
+            df[self.name + "_probability"] = self.probability.values
+            df[self.name + "_entropy"] = self.entropy.values
+            df[self.name + "_uncertainty"] = self.uncertainty.values
+
+        if latent:
+            df[self.name + "_latent_mean"] = self.latent_mean.values
+            df[self.name + "_latent_variance"] = self.latent_variance.values
+
+        if simulations:
+            for i, sim in enumerate(self.simulations):
+                df[self.name + "_sim_" + str(i)] = sim.values
+
+        return df
+
+    def update(self, idx, **kwargs):
+        prob = kwargs["probability"].numpy()
+        label_idx = _np.ones(prob.shape, dtype=_np.int64)
+        label_idx[prob < 0.5] = 0
+
+        self.predicted.values[idx] = _np.array(self.labels)[label_idx]
+        self.latent_mean.values[idx] = kwargs["mean"].numpy()
+        self.latent_variance.values[idx] = kwargs["variance"].numpy()
+        self.probability.values[idx] = prob
+
+        sims = kwargs["simulations"].numpy()
+        for s in range(sims.shape[1]):
+            self.simulations[s].values[idx] = sims[:, s]
+
+    def allocate_simulations(self, n_sim):
+        self.simulations = [self._Attribute(self.coordinates)
+                            for _ in range(n_sim)]
+
+    @classmethod
+    def from_data_frame(cls, name, coordinates, df, col, positive_class):
+        labels = _pd.Categorical(df[col])
+        labels = labels.categories.values.tolist()
+
+        pos = None
+        for i, label in enumerate(labels):
+            if label == positive_class:
+                pos = i
+        labels.pop(pos)
+        labels.append(positive_class)
+        labels = labels[::-1]
+
+        new_var = BinaryVariable(name, coordinates, labels,
+                                 measurements=df[col].values)
+        return new_var
+
+
+class AnomalyVariable(BinaryVariable):
+    def __init__(self, name, coordinates, label, measurements=None):
+        labels = [label, "_dummy"]
+        super().__init__(name, coordinates, labels, measurements)
+
+    @classmethod
+    def from_data_frame(cls, name, coordinates, df, col, positive_class):
+        new_var = AnomalyVariable(name, coordinates, positive_class,
+                                  measurements=df[col].values)
+        return new_var
 
 
 class _SpatialData(object):
     """Abstract class for spatial data in general"""
 
     def __init__(self):
-        self._ndim = None
-        self.bounding_box = None
+        self._n_dim = None
+        self._bounding_box = None
+        self._n_data = None
+        self._diagonal = None
+        self.variables = {}
 
     def __repr__(self):
         return self.__str__()
 
     @property
-    def ndim(self):
-        return self._ndim
+    def n_dim(self):
+        return self._n_dim
 
-    def aspect_ratio(self, vex=1):
+    @property
+    def bounding_box(self):
+        return self._bounding_box
+
+    @property
+    def n_data(self):
+        return self._n_data
+
+    @property
+    def diagonal(self):
+        return self._diagonal
+
+    def aspect_ratio(self, vertical_exaggeration=1):
         """
         Returns a list with plotly layout data.
         """
-        if self._ndim == 1:
-            raise ValueError("aspect not available for one-dimensional " +
-                             "objects")
-        elif self._ndim == 2:
-            return {"xaxis": {"constrain": "domain",
-                              "showexponent": "none",
-                              "exponentformat": "none"},
-                    "yaxis": {"scaleanchor": "x",
-                              "showexponent": "none",
-                              "exponentformat": "none",
-                              "scaleratio": vex}}
-        elif self._ndim == 3:
-            # aspect ratio
-            aspect = _np.apply_along_axis(lambda x: x[1] - x[0],
-                                          0,
-                                          self.bounding_box)
-            aspect = aspect / aspect[0]
-            aspect[-1] = aspect[-1] * vex
-
-            # expanded bounding box
-            def expand_10_perc(x):
-                dif = x[1] - x[0]
-                return [x[0] - 0.1 * dif, x[1] + 0.1 * dif]
-
-            bbox = _np.apply_along_axis(lambda x: expand_10_perc(x),
-                                        0,
-                                        self.bounding_box)
-            return {"scene": {"aspectratio": {"x": aspect[0],
-                                              "y": aspect[1],
-                                              "z": aspect[2]},
-                              "xaxis": {"showexponent": "none",
-                                        "exponentformat": "none",
-                                        "range": bbox[:, 0]},
-                              "yaxis": {"showexponent": "none",
-                                        "exponentformat": "none",
-                                        "range": bbox[:, 1]},
-                              "zaxis": {"showexponent": "none",
-                                        "exponentformat": "none",
-                                        "range": bbox[:, 2]}}}
+        if self._n_dim == 2:
+            return _py.aspect_ratio_2d(vertical_exaggeration)
+        elif self._n_dim == 3:
+            return _py.aspect_ratio_3d(self.bounding_box, vertical_exaggeration)
+        else:
+            raise ValueError("aspect ratio only available for 2- and "
+                             "3-dimensional data objects")
 
     def draw_bounding_box(self, **kwargs):
-        idx = _np.array([0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1])
-        idy = _np.array([0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1])
-        idz = _np.array([0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1])
-        obj = {"type": "scatter3d",
-               "mode": "lines",
-               "x": self.bounding_box[idx, 0],
-               "y": self.bounding_box[idy, 1],
-               "z": self.bounding_box[idz, 2],
-               "hoverinfo": "x+y+z",
-               "name": "bounding box"}
-        obj = _update(obj, kwargs)
-        return [obj]
-
-
-class _PointData(_SpatialData):
-    """
-        Abstract class for data represented as points in arbitrary locations.
-    """
-    def __init__(self, coords, data=None):
-        super().__init__()
-        self.coords = None
-        self.coords_label = None
-        if data is not None:
-            if len(coords) != data.shape[0]:
-                raise ValueError("number of rows of data and length of "
-                                 "coords do not match")
+        if self._n_dim == 2:
+            raise NotImplementedError
+        elif self._n_dim == 3:
+            return _py.bounding_box_3d(self.bounding_box, **kwargs)
         else:
-            data = _pd.DataFrame()
-        self.data = _pd.DataFrame(data)
+            raise ValueError("bounding_box only available for 2- and "
+                             "3-dimensional data objects")
 
-    def as_data_frame(self):
+
+class PointData(_SpatialData):
+    """
+        Data represented as points in arbitrary locations.
+    """
+
+    def __init__(self, data, coordinates):
+        """
+
+        Parameters
+        ----------
+        data : _pd.DataFrame
+        coordinates : str or list
+        """
+        super().__init__()
+
+        if isinstance(coordinates, str):
+            coordinates = [coordinates]
+
+        self.coordinate_labels = coordinates
+        self.coordinates = _np.array(data.loc[:, coordinates], ndmin=2)
+
+        self._n_dim = self.coordinates.shape[1]
+        self._n_data = self.coordinates.shape[0]
+        if self._n_data > 0:
+            self._bounding_box, self._diagonal = bounding_box(self.coordinates)
+        else:
+            self._bounding_box = _np.zeros([2, self.n_dim])
+            self._diagonal = 0
+
+    def as_data_frame(self, **kwargs):
         """
         Conversion of a spatial object to a data frame.
         """
-        df = _pd.DataFrame(self.coords,
-                           columns=self.coords_label)
-        df = _pd.concat([df, self.data], axis=1)
+        df = [_pd.DataFrame(self.coordinates,
+                            columns=self.coordinate_labels)]
+        for variable in self.variables.values():
+            df.append(variable.as_data_frame(**kwargs))
+        df = _pd.concat(df, axis=1)
         return df
 
-    def aggregate_categorical(self, column, grid):
-        """
-        Aggregation of categorical data in a regular grid.
-
-        Parameters
-        ----------
-        column : str
-            The name of the column with the data to work on.
-        grid :
-            matrix Grid*D object.
-
-        Returns
-        -------
-        out :
-            matrix point object with the aggregated data.
-
-        This method is used to downsample large point clouds. Given a grid
-        with regularly spaced coordinates, the label assigned to each
-        grid coordinate is the dominant label among all the data points in
-        its vicinity, considering that each coordinate is the center of a
-        rectangular cell. Cells without any data are dropped.
-        """
-        if self.ndim != grid.ndim:
-            raise ValueError("grid dimension different from object's")
-
-        # writing grid id
-        if grid.ndim == 1:
-            grid_id = _np.array(range(int(grid.grid_size[0])))
-            cols = ["xid"]
-        if grid.ndim == 2:
-            grid_id = _np.array(
-                [(x, y) for y in range(int(grid.grid_size[1]))
-                        for x in range(int(grid.grid_size[0]))])
-            cols = ["xid", "yid"]
-        if grid.ndim == 3:
-            grid_id = _np.array([(x, y, z)
-                                for z in range(int(grid.grid_size[2]))
-                                for y in range(int(grid.grid_size[1]))
-                                for x in range(int(grid.grid_size[0]))])
-            cols = ["xid", "yid", "zid"]
-        grid_id = _pd.DataFrame(grid_id, columns=cols)
-
-        # resetting grid
-        grid = _copy.deepcopy(grid)
-        grid.data = grid_id
-
-        # identifying cell id
-        # raw_data = self.as_data_frame()
-        raw_data = _pd.DataFrame(self.data)
-        raw_data["xid"] = _np.round(
-            (self.coords[:, 0] - grid.grid[0][0]
-             - grid.step_size[0] / 2) / grid.step_size[0])
-        if self.ndim >= 2:
-            raw_data["yid"] = _np.round(
-                (self.coords[:, 1] - grid.grid[1][0]
-                 - grid.step_size[1] / 2) / grid.step_size[1])
-        if self.ndim == 3:
-            raw_data["zid"] = _np.round(
-                (self.coords[:, 2] - grid.grid[2][0]
-                 - grid.step_size[2] / 2) / grid.step_size[2])
-
-        # counting values inside cells
-        grid_full = grid.as_data_frame()
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + [column]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = data_3.set_index(cols) \
-            .join(grid_full.set_index(cols)) \
-            .reset_index(drop=True)
-        out = self.__class__(data_4.loc[:, self.coords_label],
-                             data_4[column])
-        return out
-
-    def aggregate_numeric(self, column, grid):
-        """
-        Aggregation of numeric data in a regular grid.
-
-        Parameters
-        ----------
-        column : str
-            The name of the column with the data to work on.
-        grid :
-            matrix Grid*D object.
-
-        Returns
-        -------
-        out :
-            matrix point object with the aggregated data.
-
-        This method is used to downsample large point clouds. Aggregation is
-        done by taking the mean of the data values in each grid cell.
-        """
-        if self.ndim != grid.ndim:
-            raise ValueError("grid dimension different from object's")
-
-        # writing grid id
-        if grid.ndim == 1:
-            grid_id = _np.array(range(int(grid.grid_size[0])))
-            cols = ["xid"]
-        if grid.ndim == 2:
-            grid_id = _np.array(
-                [(x, y) for y in range(int(grid.grid_size[1]))
-                        for x in range(int(grid.grid_size[0]))])
-            cols = ["xid", "yid"]
-        if grid.ndim == 3:
-            grid_id = _np.array([(x, y, z)
-                                for z in range(int(grid.grid_size[2]))
-                                for y in range(int(grid.grid_size[1]))
-                                for x in range(int(grid.grid_size[0]))])
-            cols = ["xid", "yid", "zid"]
-        grid_id = _pd.DataFrame(grid_id, columns=cols)
-
-        # resetting grid
-        grid = _copy.deepcopy(grid)
-        grid.data = grid_id
-
-        # identifying cell id
-        # raw_data = self.as_data_frame()
-        raw_data = _pd.DataFrame(self.data.loc[:, column])
-        raw_data["xid"] = _np.round(
-            (self.coords[:, 0] - grid.grid[0][0]
-             - grid.step_size[0] / 2) / grid.step_size[0])
-        if self.ndim >= 2:
-            raw_data["yid"] = _np.round(
-                (self.coords[:, 1] - grid.grid[1][0]
-                 - grid.step_size[1] / 2) / grid.step_size[1])
-        if self.ndim == 3:
-            raw_data["zid"] = _np.round(
-                (self.coords[:, 2] - grid.grid[2][0]
-                 - grid.step_size[2] / 2) / grid.step_size[2])
-
-        # mean of values inside cells
-        grid_full = grid.as_data_frame()
-        # raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols).mean()
-        # data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = data_2.join(grid_full.set_index(cols)) \
-                       .reset_index(drop=True)
-        out = self.__class__(data_3.loc[:, self.coords_label],
-                             data_3[column])
-        return out
-
-
-class Points1D(_PointData):
-    """
-    Point data in 1D
-
-    Attributes
-    ----------
-    coords : array
-        matrix matrix with the spatial coordinates.
-    data : data frame
-        The coordinates' attributes.
-    coords_label : list
-        Label for spatial coordinates.
-    bounding_box : array
-        Object's spatial limits.
-    diagonal : double
-        The extent of the data's range, the diagonal of the bounding box.
-    """
-    def __init__(self, coords, data=None, coords_label=None):
-        """
-        Initializer for Points1D
-
-        Parameters
-        ----------
-        coords : array, pandas series or data frame containing one column
-            matrix vector with the spatial coordinates.
-        data : data frame
-            The coordinates' attributes (optional).
-        coords_label : str
-            Optional string to label the coordinates.
-            Extracted from coords object if available.
-        """
-        super().__init__(coords, data)
-        if isinstance(coords_label, str):
-            coords_label = [coords_label]
-        if isinstance(coords, _pd.core.frame.DataFrame):
-            if coords_label is None:
-                coords_label = coords.columns
-            coords = coords.values
-            if coords.shape[1] != 1:
-                raise ValueError("coords data frame must have only one column")
-        if isinstance(coords, _pd.core.series.Series):
-            if coords_label is None:
-                coords_label = coords.name
-            coords = coords.values
-        if coords_label is None:
-            coords_label = ["X"]
-
-        self._ndim = 1
-        self.coords = _np.array(coords, ndmin=2, dtype=_np.float).transpose()
-        if coords.shape[0] > 0:
-            self.bounding_box = _np.array([[_np.min(coords)],
-                                           [_np.max(coords)]])
-            self.diagonal = _np.max(coords) - _np.min(coords)
+    @classmethod
+    def from_array(cls, coordinates, coordinate_labels=None):
+        df = _pd.DataFrame(coordinates)
+        if coordinate_labels is not None:
+            df.columns = coordinate_labels
         else:
-            self.bounding_box = _np.zeros([2, 1])
-            self.diagonal = 0
-        self.coords_label = coords_label
+            n_dim = coordinates.shape[1]
+            if n_dim <= 3:
+                df.columns = ["X", "Y", "Z"][0:n_dim]
+            else:
+                df.columns = ["V" + str(i) for i in range(n_dim)]
+        return PointData(df, df.columns)
 
     def __str__(self):
-        s = "Object of class " + self.__class__.__name__ + " with " \
-            + str(len(self.coords)) + " data locations\n\n"
+        s = "Object of class %s with %s data locations\n\n" \
+            % (self.__class__.__name__, str(self.n_data))
 
-        if self.data is not None:
-            s += "Data preview:\n\n"
-            s += str(self.data.head())
+        if len(self.variables) > 0:
+            s += "Variables:\n"
+            for name, var in self.variables.items():
+                s += "    %s: %s\n" % (name, var.__class__.__name__)
         return s
 
-    def draw_numeric(self, column, **kwargs):
-        raise NotImplementedError()
+    def __getitem__(self, item):
+        # new_obj = _copy.deepcopy(self)
+        # new_obj.coordinates = new_obj.coordinates[item]
+        # if len(new_obj.coordinates.shape) < 2:
+        #     new_obj.coordinates = _np.expand_dims(new_obj.coordinates, axis=1)
+        # new_obj._n_data = new_obj.coordinates.shape[0]
+        # new_obj._bounding_box, new_obj._diagonal = bounding_box(
+        #     new_obj.coordinates)
 
-    def draw_categorical(self, column, colors, **kwargs):
-        raise NotImplementedError()
+        # for name, var in new_obj.variables.items():
+        #     new_obj.variables[name] = var[item]
 
-    def subset_region(self, xmin, xmax, include_min=True, include_max=False):
-        df = self.as_data_frame()
-        keep = (df[self.coords_label[0]] >= xmin) \
-               & (df[self.coords_label[0]] <= xmax)
-        if not include_min:
-            keep = keep & (df[self.coords_label[0]] > xmin)
-        if not include_max:
-            keep = keep & (df[self.coords_label[0]] < xmax)
-        df = df.loc[keep, :]
-        df.reset_index(drop=True, inplace=True)
-        coords = df[self.coords_label]
-        data = df.drop(self.coords_label, axis=1)
-        return Points1D(coords, data)
+        self_copy = _copy.deepcopy(self)
+        new_obj = PointData.from_array(self_copy.coordinates[item])
+        new_obj.coordinate_labels = self_copy.coordinate_labels
+        for name, var in self_copy.variables.items():
+            new_obj.variables[name] = var[item]
+            new_obj.variables[name].set_coordinates(new_obj)
+        return new_obj
 
-    def divide_by_region(self, n=1):
-        break_points = _np.linspace(self.bounding_box[0],
-                                    self.bounding_box[1],
-                                    n + 1)
-        divided = [self.subset_region(break_points[i], break_points[i+1],
-                                      include_max=(i == n-1))
-                   for i in range(n)]
-        return divided
+    def subset_region(self, min_val, max_val,
+                      include_min=None, include_max=None):
+        if not (isinstance(min_val, list)
+                or isinstance(min_val, tuple)
+                or isinstance(min_val, _np.ndarray)):
+            min_val = [min_val]
+        if not (isinstance(max_val, list)
+                or isinstance(max_val, tuple)
+                or isinstance(max_val, _np.ndarray)):
+            max_val = [max_val]
+        if include_min is None:
+            include_min = [True] * self.n_dim
+        if include_max is None:
+            include_max = [False] * self.n_dim
+        if not (isinstance(include_min, list)
+                or isinstance(include_min, tuple)):
+            include_min = [include_min]
+        if not (isinstance(include_max, list)
+                or isinstance(include_max, tuple)):
+            include_max = [include_max]
 
-    def assign_region(self, n=1, prefix="region"):
-        break_points = _np.linspace(self.bounding_box[0],
-                                    self.bounding_box[1],
-                                    n + 1)
-        region = _np.zeros(self.coords.shape[0], dtype=_np.int32)
+        checks = (len(min_val) == self.n_dim,
+                  len(max_val) == self.n_dim,
+                  len(include_min) == self.n_dim,
+                  len(include_max) == self.n_dim)
+        if not all(checks):
+            raise ValueError("all arguments must match the data dimension")
 
-        for i in range(n):
-            keep = (self.coords[:, 0] >= break_points[i]) \
-                   & (self.coords[:, 0] <= break_points[i+1])
-            if i < n-1:
-                keep = keep & (self.coords[:, 0] < break_points[i+1])
-            region[keep] = i
+        keep = _np.array([True] * self.n_data)
+        for i in range(self.n_dim):
+            keep = keep & (self.coordinates[:, i] >= min_val[i])
+            if not include_min[i]:
+                keep = keep & (self.coordinates[:, i] > min_val[i])
+            keep = keep & (self.coordinates[:, i] <= max_val[i])
+            if not include_max[i]:
+                keep = keep & (self.coordinates[:, i] < max_val[i])
 
-        if self.data is None:
-            self.data = _pd.DataFrame(
-                region, columns=[prefix + "_" + self.coords_label[0]])
-        else:
-            self.data[prefix + "_" + self.coords_label[0]] = region
+        return self[keep] if sum(keep) > 0 else None
 
+    def add_continuous_variable(self, name, measurements=None,
+                                quantiles=None,
+                                probabilities=(0.025, 0.5, 0.975)):
+        self.variables[name] = ContinuousVariable(
+            name, self, measurements, quantiles=quantiles,
+            probabilities=probabilities)
 
-class Points2D(_PointData):
-    """
-    Point data in 2D.
+    def add_categorical_variable(self, name, labels, measurements=None):
+        self.variables[name] = CategoricalVariable(
+            name, self, labels, measurements)
 
-    Attributes
-    ----------
-    coords : array
-        matrix matrix with the spatial coordinates.
-    data : data frame
-        The coordinates' attributes.
-    coords_label : list
-        Label for spatial coordinates.
-    bounding_box : array
-        Object's spatial limits.
-    diagonal : double
-        The extent of the data's range, the diagonal of the bounding box.
-    """
-    def __init__(self, coords, data=None, coords_label=None):
-        """
-        Initializer for Points2D
+    def add_rock_type_variable(self, name, labels, measurements_a=None,
+                               measurements_b=None):
+        self.variables[name] = RockTypeVariable(
+            name, self, labels, measurements_a, measurements_b)
 
-        Parameters
-        ----------
-        coords : array or data frame
-            The spatial coordinates. Must contain two columns.
-        data : data frame
-            The coordinates' attributes (optional)
-        coords_label : list
-            Optional string to label the coordinates.
-            Extracted from coords object if available.
-        """
-        super().__init__(coords, data)
-        if isinstance(coords, _pd.core.frame.DataFrame):
-            if coords_label is None:
-                coords_label = coords.columns
-            coords = coords.values
-        if coords_label is None:
-            coords_label = ["X", "Y"]
+    def add_binary_variable(self, name, labels, measurements=None):
+        self.variables[name] = BinaryVariable(name, self, labels, measurements)
 
-        self.coords = _np.array(coords, dtype=_np.float)
-        if coords.shape[0] > 0:
-            self.bounding_box, self.diagonal = _bounding_box(coords)
-        else:
-            self.bounding_box = _np.zeros([2, 2])
-            self.diagonal = 0
-        self.coords_label = coords_label
-        self._ndim = 2
+    def add_anomaly_variable(self, name, label, measurements=None):
+        self.variables[name] = AnomalyVariable(name, self, label, measurements)
 
-    def __str__(self):
-        s = "Object of class " + self.__class__.__name__ + " with " \
-            + str(self.coords.shape[0]) + " data locations\n\n"
-
-        if self.data is not None:
-            s += "Data preview:\n\n"
-            s += str(self.data.head())
-        return s
-
-    def draw_numeric(self, column, **kwargs):
-        raise NotImplementedError()
-
-    def draw_categorical(self, column, colors, **kwargs):
-        raise NotImplementedError()
-
-    def subset_region(self, xmin, xmax, ymin, ymax,
-                      include_min_x=True, include_max_x=False,
-                      include_min_y=True, include_max_y=False):
-        df = self.as_data_frame()
-        keep = (df[self.coords_label[0]] >= xmin) \
-               & (df[self.coords_label[0]] <= xmax) \
-               & (df[self.coords_label[1]] >= ymin) \
-               & (df[self.coords_label[1]] <= ymax)
-        if not include_min_x:
-            keep = keep & (df[self.coords_label[0]] > xmin)
-        if not include_min_y:
-            keep = keep & (df[self.coords_label[1]] > ymin)
-        if not include_max_x:
-            keep = keep & (df[self.coords_label[0]] < xmax)
-        if not include_max_y:
-            keep = keep & (df[self.coords_label[1]] < ymax)
-        df = df.loc[keep, :]
-        df.reset_index(drop=True, inplace=True)
-        coords = df[self.coords_label]
-        data = df.drop(self.coords_label, axis=1)
-        return Points2D(coords, data)
-
-    def divide_by_region(self, nx=1, ny=1):
-        break_points_x = _np.linspace(self.bounding_box[0, 0],
-                                      self.bounding_box[1, 0],
-                                      nx + 1)
-        break_points_y = _np.linspace(self.bounding_box[0, 1],
-                                      self.bounding_box[1, 1],
-                                      ny + 1)
-
-        divided = [[
-            self.subset_region(
-                break_points_x[i], break_points_x[i + 1],
-                break_points_y[j], break_points_y[j + 1],
-                include_max_x=(i == nx - 1),
-                include_max_y=(j == ny - 1)
-            )
-            for j in range(ny)]
-            for i in range(nx)]
-        return divided
-
-    def assign_region(self, nx=1, ny=1, prefix="region"):
-        break_points_x = _np.linspace(self.bounding_box[0, 0],
-                                      self.bounding_box[1, 0],
-                                      nx + 1)
-        break_points_y = _np.linspace(self.bounding_box[0, 1],
-                                      self.bounding_box[1, 1],
-                                      ny + 1)
-
-        region = _np.zeros([self.coords.shape[0], 2], dtype=_np.int32)
-
-        for i in range(nx):
-            keep = (self.coords[:, 0] >= break_points_x[i]) \
-                   & (self.coords[:, 0] <= break_points_x[i + 1])
-            if i < nx - 1:
-                keep = keep & (self.coords[:, 0] < break_points_x[i + 1])
-            region[keep, 0] = i
-        for j in range(ny):
-            keep = (self.coords[:, 1] >= break_points_y[j]) \
-                   & (self.coords[:, 1] <= break_points_y[j + 1])
-            if j < ny - 1:
-                keep = keep & (self.coords[:, 1] < break_points_y[j + 1])
-            region[keep, 1] = j
-
-        if self.data is None:
-            self.data = _pd.DataFrame(
-                region,
-                columns=[prefix + "_" + lab for lab in self.coords_label])
-        else:
-            for d in range(self.ndim):
-                self.data[prefix + "_" + self.coords_label[d]] = region[:, d]
+    def add_compositional_variable(self, name, labels, measurements=None):
+        self.variables[name] = CompositionalVariable(
+            name, self, labels, measurements)
 
 
-class Points3D(_PointData):
-    """
-    Point data in 3D.
-
-    Attributes
-    ----------
-    coords : array
-        matrix matrix with the spatial coordinates.
-    data : data frame
-        The coordinates' attributes.
-    coords_label : str
-        Label for spatial coordinates.
-    bounding_box : array
-        Object's spatial limits.
-    diagonal : double
-        The extent of the data's range, the diagonal of the bounding box.
-    """
-
-    def __init__(self, coords, data=None, coords_label=None):
-        """
-        Initializer for Points3D.
-
-        Parameters
-        ----------
-        coords : array or data frame
-            The spatial coordinates. Must contain two columns.
-        data : data frame
-            The coordinates' attributes (optional)
-        coords_label : str
-            Optional string to label the coordinates.
-            Extracted from coords object if available.
-        """
-        super().__init__(coords, data)
-        if isinstance(coords, _pd.core.frame.DataFrame):
-            if coords_label is None:
-                coords_label = coords.columns
-            coords = coords.values
-        if coords_label is None:
-            coords_label = ["X", "Y", "Z"]
-
-        self.coords = _np.array(coords, dtype=_np.float)
-        if coords.shape[0] > 0:
-            self.bounding_box, self.diagonal = _bounding_box(coords)
-        else:
-            self.bounding_box = _np.zeros([2, 3])
-            self.diagonal = 0
-        self.coords_label = coords_label
-        self._ndim = 3
-
-    def __str__(self):
-        s = "Object of class " + self.__class__.__name__ \
-            + " with " + str(self.coords.shape[0]) + " data locations\n\n"
-
-        if self.data is not None:
-            s += "Data preview:\n\n"
-            s += str(self.data.head())
-        return s
-
-    def draw_numeric(self, column, **kwargs):
-        # x, y, z, and text as lists
-        values = self.data[column].tolist()
-        text = [str(num) for num in values]
-        x = self.coords[:, 0].tolist()
-        y = self.coords[:, 1].tolist()
-        z = self.coords[:, 2].tolist()
-
-        obj = {"mode": "markers",
-               "name": column,
-               "text": text,
-               "marker": {"color": values}}
-
-        obj.update({"type": "scatter3d",
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "hoverinfo": "x+y+z+text"})
-        obj = _update(obj, kwargs)
-        return [obj]
-
-    def draw_categorical(self, column, colors, **kwargs):
-        """
-        Visualization of categorical data.
-
-        Parameters
-        ----------
-        column : str
-            Name of the categorical variable to plot.
-        colors : dict
-            Dictionary mapping the data labels to plotly color
-            specifications.
-        kwargs
-            Additional arguments passed on to plotly's scatter3d
-            function.
-
-        Returns
-        -------
-        out : list
-            A singleton list containing the data to plot in plotly's format.
-        """
-        # x, y, z, and colors as lists
-        color_val = _np.arange(len(colors))
-        colors_dict = dict(zip(colors.keys(), color_val))
-        colors2 = self.data[column].map(colors_dict).tolist()
-        colors3 = [colors.get(item) for item in colors]
-        cmax = len(color_val) - 1
-
-        text = self.data[column].tolist()
-        x = self.coords[:, 0].tolist()
-        y = self.coords[:, 1].tolist()
-        z = self.coords[:, 2].tolist()
-
-        obj = {"mode": "markers",
-               "name": column,
-               "text": text,
-               "marker": {"color": colors2,
-                          "colorscale": [[i / cmax, colors3[i]]
-                                         for i in color_val]}}
-
-        obj.update({"type": "scatter3d",
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "hoverinfo": "x+y+z+text"})
-        obj = _update(obj, kwargs)
-        return [obj]
-
-    def subset_region(self, xmin, xmax, ymin, ymax, zmin, zmax,
-                      include_min_x=True, include_max_x=False,
-                      include_min_y=True, include_max_y=False,
-                      include_min_z=True, include_max_z=False
-                      ):
-        df = self.as_data_frame()
-        keep = (df[self.coords_label[0]] >= xmin) \
-               & (df[self.coords_label[0]] <= xmax) \
-               & (df[self.coords_label[1]] >= ymin) \
-               & (df[self.coords_label[1]] <= ymax) \
-               & (df[self.coords_label[2]] >= zmin) \
-               & (df[self.coords_label[2]] <= zmax)
-        if not include_min_x:
-            keep = keep & (df[self.coords_label[0]] > xmin)
-        if not include_min_y:
-            keep = keep & (df[self.coords_label[1]] > ymin)
-        if not include_min_z:
-            keep = keep & (df[self.coords_label[2]] > zmin)
-        if not include_max_x:
-            keep = keep & (df[self.coords_label[0]] < xmax)
-        if not include_max_y:
-            keep = keep & (df[self.coords_label[1]] < ymax)
-        if not include_max_z:
-            keep = keep & (df[self.coords_label[2]] < zmax)
-        df = df.loc[keep, :]
-        df.reset_index(drop=True, inplace=True)
-        coords = df[self.coords_label]
-        data = df.drop(self.coords_label, axis=1)
-        return Points3D(coords, data)
-
-    def divide_by_region(self, nx=1, ny=1, nz=1):
-        break_points_x = _np.linspace(self.bounding_box[0, 0],
-                                      self.bounding_box[1, 0],
-                                      nx + 1)
-        break_points_y = _np.linspace(self.bounding_box[0, 1],
-                                      self.bounding_box[1, 1],
-                                      ny + 1)
-        break_points_z = _np.linspace(self.bounding_box[0, 2],
-                                      self.bounding_box[1, 2],
-                                      nz + 1)
-
-        divided = [[[
-            self.subset_region(
-                break_points_x[i], break_points_x[i + 1],
-                break_points_y[j], break_points_y[j + 1],
-                break_points_z[k], break_points_z[k + 1],
-                include_max_x=(i == nx - 1),
-                include_max_y=(j == ny - 1),
-                include_max_z=(k == nz - 1)
-            )
-            for k in range(nz)]
-            for j in range(ny)]
-            for i in range(nx)]
-        return divided
-
-    def assign_region(self, nx=1, ny=1, nz=1, prefix="region"):
-        break_points_x = _np.linspace(self.bounding_box[0, 0],
-                                      self.bounding_box[1, 0],
-                                      nx + 1)
-        break_points_y = _np.linspace(self.bounding_box[0, 1],
-                                      self.bounding_box[1, 1],
-                                      ny + 1)
-        break_points_z = _np.linspace(self.bounding_box[0, 2],
-                                      self.bounding_box[1, 2],
-                                      nz + 1)
-
-        region = _np.zeros([self.coords.shape[0], 3], dtype=_np.int32)
-
-        for i in range(nx):
-            keep = (self.coords[:, 0] >= break_points_x[i]) \
-                   & (self.coords[:, 0] <= break_points_x[i + 1])
-            if i < nx - 1:
-                keep = keep & (self.coords[:, 0] < break_points_x[i + 1])
-            region[keep, 0] = i
-        for j in range(ny):
-            keep = (self.coords[:, 1] >= break_points_y[j]) \
-                   & (self.coords[:, 1] <= break_points_y[j + 1])
-            if j < ny - 1:
-                keep = keep & (self.coords[:, 1] < break_points_y[j + 1])
-            region[keep, 1] = j
-        for k in range(nz):
-            keep = (self.coords[:, 2] >= break_points_z[k]) \
-                   & (self.coords[:, 2] <= break_points_z[k + 1])
-            if k < nz - 1:
-                keep = keep & (self.coords[:, 2] < break_points_z[k + 1])
-            region[keep, 2] = k
-
-        if self.data is None:
-            self.data = _pd.DataFrame(
-                region,
-                columns=[prefix + "_" + lab for lab in self.coords_label])
-        else:
-            for d in range(self.ndim):
-                self.data[prefix + "_" + self.coords_label[d]] = region[:, d]
-
-    def draw_planes(self, dip, azimuth, size=1, **kwargs):
-        dip = self.data[dip]
-        azimuth = self.data[azimuth]
-
-        # conversions
-        dip = -dip * _np.pi / 180
-        azimuth = (90 - azimuth) * _np.pi / 180
-        strike = azimuth - _np.pi / 2
-
-        # dip and strike vectors
-        dipvec = _np.concatenate([
-            _np.array(_np.cos(dip) * _np.cos(azimuth), ndmin=2).transpose(),
-            _np.array(_np.cos(dip) * _np.sin(azimuth), ndmin=2).transpose(),
-            _np.array(_np.sin(dip), ndmin=2).transpose()], axis=1)*size
-        strvec = _np.concatenate([
-            _np.array(_np.cos(strike), ndmin=2).transpose(),
-            _np.array(_np.sin(strike), ndmin=2).transpose(),
-            _np.zeros([dipvec.shape[0], 1])], axis=1)*size
-
-        # surfaces
-        surf = []
-        for i, point in enumerate(self.coords):
-            surf_points = _np.stack([
-                point + dipvec[i],
-                point - 0.5*strvec[i] - 0.5*dipvec[i],
-                point + 0.5*strvec[i] - 0.5*dipvec[i]
-            ], axis=0)
-            obj = {"type": "mesh3d",
-                   "x": surf_points[:, 0],
-                   "y": surf_points[:, 1],
-                   "z": surf_points[:, 2],
-                   "hoverinfo": "x+y+z+text"}
-            obj = _update(obj, kwargs)
-            surf.append(obj)
-        return surf
-
-    def export_planes(self, dip, azimuth, filename, size=1):
-        dip = self.data[dip]
-        azimuth = self.data[azimuth]
-
-        # conversions
-        dip = -dip * _np.pi / 180
-        azimuth = (90 - azimuth) * _np.pi / 180
-        strike = azimuth - _np.pi / 2
-
-        # dip and strike vectors
-        dipvec = _np.concatenate([
-            _np.array(_np.cos(dip) * _np.cos(azimuth), ndmin=2).transpose(),
-            _np.array(_np.cos(dip) * _np.sin(azimuth), ndmin=2).transpose(),
-            _np.array(_np.sin(dip), ndmin=2).transpose()], axis=1)*size
-        strvec = _np.concatenate([
-            _np.array(_np.cos(strike), ndmin=2).transpose(),
-            _np.array(_np.sin(strike), ndmin=2).transpose(),
-            _np.zeros([dipvec.shape[0], 1])], axis=1)*size
-
-        points = _np.stack([
-            self.coords + dipvec,
-            self.coords - 0.5*strvec - 0.5*dipvec,
-            self.coords + 0.5*strvec - 0.5*dipvec
-        ], axis=0)
-        points = _np.reshape(points, [3*points.shape[1], points.shape[2]],
-                             order="F")
-        idx = _np.reshape(_np.arange(points.shape[0]), self.coords.shape)
-
-        # export
-        with open(filename, 'w') as out_file:
-            out_file.write(
-                str(points.shape[0]) + " " + str(idx.shape[0]) + "\n")
-            for line in points:
-                out_file.write(" ".join(str(elem) for elem in line) + "\n")
-            for line in idx:
-                out_file.write(" ".join(str(elem) for elem in line) + "\n")
-
-
-class Grid1D(Points1D):
+class Grid1D(PointData):
     """
     Equally spaced points in 1D.
 
@@ -861,7 +1144,8 @@ class Grid1D(Points1D):
     grid_size : list
         The number of points in grid.
     """
-    def __init__(self, start, n, step=None, end=None):
+
+    def __init__(self, start, n, step=None, end=None, label=None):
         """
         Initializer for Grid1D.
 
@@ -875,6 +1159,8 @@ class Grid1D(Points1D):
             Spacing between grid nodes.
         end :
             Last grid point.
+        label : str
+            The label for the coordinate.
 
 
         Either step or end must be given. If both are given, end is ignored.
@@ -887,13 +1173,97 @@ class Grid1D(Points1D):
             step = (end - start) / (n - 1)
         grid = _np.linspace(start, end, n, dtype=_np.float)
 
-        super().__init__(grid)
+        if label is None:
+            label = "X"
+        grid_df = _pd.DataFrame({label: grid})
+
+        super().__init__(grid_df, label)
         self.step_size = [step]
         self.grid = [grid]
         self.grid_size = [int(n)]
 
+    def aggregate_categorical(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
 
-class Grid2D(Points2D):
+        grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
+        cols = ["xid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements_a.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data_2 = raw_data.copy()
+        raw_data_2["value"] = data.variables[variable].measurements_b.values
+        raw_data = _pd.concat([raw_data, raw_data_2],
+                              axis=0).reset_index(drop=True)
+
+        # counting values inside cells
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + ["value"]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = grid_full.set_index(cols) \
+            .join(data_3.set_index(cols)) \
+            .reset_index(drop=True)
+        self.variables[variable] = CategoricalVariable(
+            variable, self, data.variables[variable].labels,
+            data_4["value"].values
+        )
+
+    def aggregate_numeric(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.arange(int(self.grid_size[0]))[:, None]
+        cols = ["xid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+
+        # aggregating
+        data_2 = raw_data.groupby(cols).mean()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # output
+        data_3 = grid_full.join(data_2.set_index(cols), on=cols) \
+            .reset_index(drop=False)
+        self.variables[variable] = ContinuousVariable(
+            variable, self, data_3["value"].values
+        )
+
+    def make_interpolator(self, coordinates):
+        return _gint.cubic_conv_1d(self.grid[0], coordinates)
+
+    def make_filter(self, size):
+        if size <= 0:
+            raise ValueError("size must be positive")
+
+        return Grid1D(start=-size * self.step_size[0],
+                      end=size * self.step_size[0],
+                      n=2*size+1)
+
+
+class Grid2D(PointData):
     """
     Equally spaced points in 2D.
 
@@ -907,7 +1277,7 @@ class Grid2D(Points2D):
         The number of points in grid.
     """
 
-    def __init__(self, start, n, step=None, end=None):
+    def __init__(self, start, n, step=None, end=None, labels=None):
         """
         Initializer for Grid2D.
 
@@ -921,6 +1291,8 @@ class Grid2D(Points2D):
             Spacing between grid nodes.
         end : length 2 array, list, or tuple
             Last grid point.
+        labels : list
+            The labels for the coordinates.
 
 
         Either step or end must be given. If both are given, end is ignored.
@@ -934,45 +1306,115 @@ class Grid2D(Points2D):
             end = start + (n - 1) * step
         else:
             end = _np.array(end)
-            step = _np.array([(end[0]-start[0])/(n[0]-1),
-                              (end[1]-start[1])/(n[1]-1)])
+            step = _np.array([(end[0] - start[0]) / (n[0] - 1),
+                              (end[1] - start[1]) / (n[1] - 1)])
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
         coords = _np.array([(x, y) for y in grid_y for x in grid_x],
                            dtype=_np.float)
 
-        super().__init__(coords)
+        if labels is None:
+            labels = ["X", "Y"]
+        grid = _pd.DataFrame(coords, columns=labels)
+
+        super().__init__(grid, labels)
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y]
-        # self.grid_size = n.tolist()
         self.grid_size = [int(num) for num in n]
 
-    def as_image(self, column):
-        """
-        Reshapes the data in the form of a matrix for plotting.
+    def aggregate_categorical(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
 
-        The output can be used in plotting functions such as
-        matplotlib's imshow(). If you use it, do not forget to set
-        origin="lower".
+        grid_id = _np.array([(x, y)
+                             for y in range(int(self.grid_size[1]))
+                             for x in range(int(self.grid_size[0]))])
+        cols = ["xid", "yid"]
 
-        Parameters
-        ----------
-        column : str
-            The name of the column to use.
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
 
-        Returns
-        -------
-        image : array
-            matrix 2-dimensional array.
-        """
-        image = _np.reshape(self.data[column].values,
-                            newshape=self.grid_size,
-                            order="F")
-        image = image.transpose()
-        return image
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements_a.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+        raw_data_2 = raw_data.copy()
+        raw_data_2["value"] = data.variables[variable].measurements_b.values
+        raw_data = _pd.concat([raw_data, raw_data_2],
+                              axis=0).reset_index(drop=True)
+
+        # counting values inside cells
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + ["value"]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = grid_full.set_index(cols) \
+            .join(data_3.set_index(cols)) \
+            .reset_index(drop=True)
+        self.variables[variable] = CategoricalVariable(
+            variable, self, data.variables[variable].labels,
+            data_4["value"].values
+        )
+
+    def aggregate_numeric(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.array([(x, y)
+                             for y in range(int(self.grid_size[1]))
+                             for x in range(int(self.grid_size[0]))])
+        cols = ["xid", "yid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+
+        # aggregating
+        data_2 = raw_data.groupby(cols).mean()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # output
+        data_3 = grid_full.join(data_2.set_index(cols), on=cols)\
+            .reset_index(drop=False)
+        self.variables[variable] = ContinuousVariable(
+            variable, self, data_3["value"].values
+        )
+
+    def make_interpolator(self, coordinates):
+        return _gint.cubic_conv_2d(coordinates, self.grid[0], self.grid[1])
+
+    def make_filter(self, size):
+        size = _np.array(size)
+        if _np.any(size <= 0):
+            raise ValueError("size must be positive")
+
+        return Grid2D(start=-size * _np.array(self.step_size),
+                      end=size * _np.array(self.step_size),
+                      n=2 * size + 1)
 
 
-class Grid3D(Points3D):
+class Grid3D(PointData):
     """
     Equally spaced points in 3D.
 
@@ -986,7 +1428,7 @@ class Grid3D(Points3D):
         The number of points in grid.
     """
 
-    def __init__(self, start, n, step=None, end=None):
+    def __init__(self, start, n, step=None, end=None, labels=None):
         """
         Initializer for Grid3D.
 
@@ -1000,6 +1442,8 @@ class Grid3D(Points3D):
             Spacing between grid nodes.
         end : length 2 array, list, or tuple
             Last grid point.
+        labels : list
+            The labels for the coordinates.
 
 
         Either step or end must be given. If both are given, end is ignored.
@@ -1023,444 +1467,184 @@ class Grid3D(Points3D):
         coords = _np.array([(x, y, z) for z in grid_z for y in grid_y
                             for x in grid_x], dtype=_np.float)
 
-        super().__init__(coords)
+        if labels is None:
+            labels = ["X", "Y", "Z"]
+        grid = _pd.DataFrame(coords, columns=labels)
+
+        super().__init__(grid, labels)
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y, grid_z]
-        # self.grid_size = n.tolist()
         self.grid_size = [int(num) for num in n]
 
-    def as_cube(self, column):
+    def aggregate_categorical(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.array([(x, y, z)
+                             for z in range(int(self.grid_size[2]))
+                             for y in range(int(self.grid_size[1]))
+                             for x in range(int(self.grid_size[0]))])
+        cols = ["xid", "yid", "zid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements_a.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+        raw_data["zid"] = _np.round(
+            (data.coordinates[:, 2] - self.grid[2][0]
+             - self.step_size[2] / 2) / self.step_size[2])
+        raw_data_2 = raw_data.copy()
+        raw_data_2["value"] = data.variables[variable].measurements_b.values
+        raw_data = _pd.concat([raw_data, raw_data_2],
+                              axis=0).reset_index(drop=True)
+
+        # counting values inside cells
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + ["value"]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = grid_full.set_index(cols) \
+            .join(data_3.set_index(cols)) \
+            .reset_index(drop=True)
+        self.variables[variable] = CategoricalVariable(
+            variable, self, data.variables[variable].labels,
+            data_4["value"].values
+        )
+
+    def aggregate_numeric(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.array([(x, y, z)
+                             for z in range(int(self.grid_size[2]))
+                             for y in range(int(self.grid_size[1]))
+                             for x in range(int(self.grid_size[0]))])
+        cols = ["xid", "yid", "zid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+        raw_data["zid"] = _np.round(
+            (data.coordinates[:, 2] - self.grid[2][0]
+             - self.step_size[2] / 2) / self.step_size[2])
+
+        # aggregating
+        data_2 = raw_data.groupby(cols).mean()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # output
+        data_3 = grid_full.join(data_2.set_index(cols), on=cols) \
+            .reset_index(drop=False)
+        self.variables[variable] = ContinuousVariable(
+            variable, self, data_3["value"].values
+        )
+
+    def make_interpolator(self, coordinates):
+        return _gint.cubic_conv_3d(coordinates,
+                                   self.grid[0], self.grid[1], self.grid[2])
+
+    def make_filter(self, size):
+        size = _np.array(size)
+        if _np.any(size <= 0):
+            raise ValueError("size must be positive")
+
+        return Grid3D(start=-size * _np.array(self.step_size),
+                      end=size * _np.array(self.step_size),
+                      n=2 * size + 1)
+
+
+class DirectionalData(PointData):
+    def __init__(self, data, coordinates, directions):
         """
-        Returns a rank-3 array filled with the specified variable.
 
         Parameters
         ----------
-        column : str
-            The column with the variable to use.
-
-        Returns
-        -------
-        cube : array
-            matrix cubic array.
+        data : _pd.DataFrame
+        coordinates : str or list
         """
-        cube = _np.reshape(self.data[column].values,
-                           self.grid_size, order="F")
-        return cube
+        super().__init__(data, coordinates)
 
-    def get_contour(self, column, value):
-        """
-        Calls the marching cubes algorithm to extract a isosurface.
+        if isinstance(directions, str):
+            directions = [directions]
+        if len(directions) != self.n_dim:
+            raise ValueError("arguments coordinates and directions must"
+                             "have the same length")
 
-        Parameters
-        ----------
-        column : str
-            The column with the variable to contour.
-        value : double
-            The value on which to calculate the isosurface.
+        self.direction_labels = directions
+        self.directions = _np.array(data.loc[:, directions], ndmin=2)
 
-        Returns
-        -------
-        verts : array
-            Mesh vertices.
-        faces : array
-            Mesh faces.
-        normals : array
-            Mesh normals.
-        values : array
-            Value that can be used for color coding.
+        all_coords = _np.concatenate([self._bounding_box, self.directions],
+                                     axis=0)
+        self._bounding_box, self._diagonal = bounding_box(all_coords)
 
-
-        This method calls skimage.measure.marching_cubes_lewiner().
-        See the original documentation for details.
-        """
-        cube = self.as_cube(column)
-        verts, faces, normals, values = _measure.marching_cubes_lewiner(
-            cube, value, gradient_direction="ascent",
-            allow_degenerate=False, spacing=self.step_size)
-        return verts, faces, normals, values
-
-    def draw_contour(self, column, value, **kwargs):
-        """Creates plotly object with the contour at the specified value."""
-        obj = {}
-
-        verts, faces, normals, values = self.get_contour(column, value)
-        for i in range(3):
-            verts[:, i] += self.grid[i][0]
-        obj.update({"type": "mesh3d",
-                    "x": verts[:, 0],
-                    "y": verts[:, 1],
-                    "z": verts[:, 2],
-                    "i": faces[:, 0],
-                    "j": faces[:, 1],
-                    "k": faces[:, 2],
-                    "text": column})
-        obj = _update(obj, kwargs)
-        return [obj]
-
-    def export_contour(self, column, value, filename, triangles=True):
-        verts, faces, normals, values = self.get_contour(column, value)
-        for i in range(3):
-            verts[:, i] += self.grid[i][0]
-        with open(filename, 'w') as out_file:
-            if triangles:
-                out_file.write(
-                    str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
-            for line in verts:
-                out_file.write(" ".join(str(elem) for elem in line) + "\n")
-            if triangles:
-                for line in faces:
-                    out_file.write(" ".join(str(elem) for elem in line) + "\n")
-
-    def draw_section_numeric(self, column, axis=0, **kwargs):
-        """
-        Returns a list with all possible sections along the specified axis,
-        in plotly format.
-        """
-        if (axis > 3) | (axis < 0):
-            raise ValueError("axis must be 0, 1, or 2")
-
-        sections = []
-        minval = self.data[column].values.min()
-        maxval = self.data[column].values.max()
-
-        # sections in X
-        if axis == 0:
-            for i in range(self.grid_size[0]):
-                value = self.grid[0][i]
-                idx = self.coords[:, 0] == value
-                y, z = _np.meshgrid(self.grid[1], self.grid[2], indexing="ij")
-                col = self.data.loc[idx, column].values
-                col = _np.reshape(col,
-                                  [self.grid_size[1], self.grid_size[2]],
-                                  order="F")
-                sections.append({
-                    "type": "surface",
-                    "x": _np.ones_like(y) * value,
-                    "y": y,
-                    "z": z,
-                    "surfacecolor": col,
-                    "cmin": minval,
-                    "cmax": maxval})
-                sections[i] = _update(sections[i], kwargs)
-
-        if axis == 1:
-            for i in range(self.grid_size[1]):
-                value = self.grid[1][i]
-                idx = self.coords[:, 1] == value
-                x, z = _np.meshgrid(self.grid[0], self.grid[2], indexing="ij")
-                col = self.data.loc[idx, column].values
-                col = _np.reshape(col,
-                                  [self.grid_size[0], self.grid_size[2]],
-                                  order="F")
-                sections.append({
-                    "type": "surface",
-                    "x": x,
-                    "y": _np.ones_like(x) * value,
-                    "z": z,
-                    "surfacecolor": col,
-                    "cmin": minval,
-                    "cmax": maxval})
-                sections[i] = _update(sections[i], kwargs)
-
-        if axis == 2:
-            for i in range(self.grid_size[2]):
-                value = self.grid[2][i]
-                idx = self.coords[:, 2] == value
-                x, y = _np.meshgrid(self.grid[0], self.grid[1], indexing="ij")
-                col = self.data.loc[idx, column].values
-                col = _np.reshape(col,
-                                  [self.grid_size[0], self.grid_size[1]],
-                                  order="F")
-                sections.append({
-                    "type": "surface",
-                    "x": x,
-                    "y": y,
-                    "z": _np.ones_like(x) * value,
-                    "surfacecolor": col,
-                    "cmin": minval,
-                    "cmax": maxval})
-                sections[i] = _update(sections[i], kwargs)
-
-        return sections
-
-    def draw_section_categorical(self, column, colors, axis=0, **kwargs):
-        """
-        Returns a list with all possible sections along the specified axis,
-        in plotly format.
-        """
-        if (axis > 3) | (axis < 0):
-            raise ValueError("axis must be 0, 1, or 2")
-
-        color_val = _np.arange(len(colors))
-        colors_dict = dict(zip(colors.keys(), color_val))
-        colors2 = self.data[column].map(colors_dict).values
-        colors3 = [colors.get(item) for item in colors]
-
-        # fooling the continuous colorbar
-        minval = 0
-        maxval = len(color_val)
-        colorscale = [[(i + 0.5) / maxval, colors3[i]] for i in color_val]
-        for i in _np.flip(color_val):
-            colorscale.insert(i + 1, [(i + 1) / maxval, colors3[i]])
-            colorscale.insert(i, [(i + 0) / maxval, colors3[i]])
-
-        sections = []
-        # sections in X
-        if axis == 0:
-            for i in range(self.grid_size[0]):
-                value = self.grid[0][i]
-                idx = self.coords[:, 0] == value
-                y, z = _np.meshgrid(self.grid[1], self.grid[2], indexing="ij")
-                col = _np.reshape(colors2[idx],
-                                  [self.grid_size[1], self.grid_size[2]],
-                                  order="F")
-                sections.append({
-                    "type": "surface",
-                    "x": _np.ones_like(y) * value,
-                    "y": y,
-                    "z": z,
-                    "surfacecolor": col + 0.5,
-                    "colorscale": colorscale,
-                    "cmin": minval,
-                    "cmax": maxval,
-                    "colorbar": {"tickmode": "array",
-                                 "ticktext": [item for item in colors],
-                                 "tickvals": color_val + 0.5}})
-                sections[i] = _update(sections[i], kwargs)
-
-        if axis == 1:
-            for i in range(self.grid_size[1]):
-                value = self.grid[1][i]
-                idx = self.coords[:, 1] == value
-                x, z = _np.meshgrid(self.grid[0], self.grid[2], indexing="ij")
-                col = _np.reshape(colors2[idx],
-                                  [self.grid_size[0], self.grid_size[2]],
-                                  order="F")
-                sections.append({
-                    "type": "surface",
-                    "x": x,
-                    "y": _np.ones_like(x) * value,
-                    "z": z,
-                    "surfacecolor": col + 0.5,
-                    "colorscale": colorscale,
-                    "cmin": minval,
-                    "cmax": maxval,
-                    "colorbar": {"tickmode": "array",
-                                 "ticktext": [item for item in colors],
-                                 "tickvals": color_val + 0.5}})
-                sections[i] = _update(sections[i], kwargs)
-
-        if axis == 2:
-            for i in range(self.grid_size[2]):
-                value = self.grid[2][i]
-                idx = self.coords[:, 2] == value
-                x, y = _np.meshgrid(self.grid[0], self.grid[1], indexing="ij")
-                col = _np.reshape(colors2[idx],
-                                  [self.grid_size[0], self.grid_size[1]],
-                                  order="F")
-                sections.append({
-                    "type": "surface",
-                    "x": x,
-                    "y": y,
-                    "z": _np.ones_like(x) * value,
-                    "surfacecolor": col + 0.5,
-                    "colorscale": colorscale,
-                    "cmin": minval,
-                    "cmax": maxval,
-                    "colorbar": {"tickmode": "array",
-                                 "ticktext": [item for item in colors],
-                                 "tickvals": color_val + 0.5}})
-                sections[i] = _update(sections[i], kwargs)
-
-        return sections
-
-
-class Directions2D(Points2D):
-    """
-    Spatial directions in 2D.
-    """
-
-    def __init__(self, coords, directions, data=None, coords_label=None,
-                 directions_label=None):
-        """
-        Initializer for Directions2D.
-
-        Parameters
-        ----------
-        coords : a 2-dimensional array or data frame
-            Array-like object with the spatial coordinates.
-        directions : a 2-dimensional array or data frame
-            It is expected that the rows have unit norm.
-        data : pandas DataFrame (optional)
-            matrix data frame with additional attributes.
-        coords_label : str
-            Optional string to label the coordinates.
-            Extracted from coords object if available.
-        directions_label : str
-            Optional string to label the directions.
-            Extracted from directions object if available.
-        """
-        if coords.shape != directions.shape:
-            raise ValueError("shape of coords and directions do not match")
-        super().__init__(coords, data, coords_label)
-        if isinstance(directions, _pd.core.frame.DataFrame):
-            if directions_label is None:
-                directions_label = directions.columns
-            directions = directions.values
-        if directions_label is None:
-            directions_label = ["d" + s for s in self.coords_label]
-
-        self.directions = directions
-        self.directions_label = directions_label
-
-    @classmethod
-    def from_azimuth(cls, coords, azimuth, data=None):
-        """
-        Creates a Directions2D object from azimuth data.
-
-        Parameters
-        ----------
-        coords : array or data frame
-            The coordinates containing the azimuth measurements.
-        azimuth : array
-            Azimuth, between 0 and 360 degrees.
-        data : data frame
-            Additional data.
-
-        Returns
-        -------
-        matrix Directions2D object.
-        """
-        directions = _pd.DataFrame({"dX": _np.sin(azimuth / 180 * _np.pi),
-                                    "dY": _np.cos(azimuth / 180 * _np.pi)})
-        return Directions2D(coords, directions, data)
-
-    def draw_arrows(self, size=1):
-        raise NotImplementedError()
-
-    def subset_region(self, xmin, xmax, ymin, ymax,
-                      include_min_x=True, include_max_x=False,
-                      include_min_y=True, include_max_y=False):
-        df = self.as_data_frame()
-        keep = (df[self.coords_label[0]] >= xmin) \
-               & (df[self.coords_label[0]] <= xmax) \
-               & (df[self.coords_label[1]] >= ymin) \
-               & (df[self.coords_label[1]] <= ymax)
-        if not include_min_x:
-            keep = keep & (df[self.coords_label[0]] > xmin)
-        if not include_min_y:
-            keep = keep & (df[self.coords_label[1]] > ymin)
-        if not include_max_x:
-            keep = keep & (df[self.coords_label[0]] < xmax)
-        if not include_max_y:
-            keep = keep & (df[self.coords_label[1]] < ymax)
-        df = df.loc[keep, :]
-        df.reset_index(drop=True, inplace=True)
-        coords = df[self.coords_label]
-        directions = df[self.directions_label]
-        data = df.drop(list(self.coords_label) + list(self.directions_label),
-                       axis=1)
-        return Directions2D(coords, directions, data)
-
-    def as_data_frame(self):
+    def as_data_frame(self, full=False):
         """
         Conversion of a spatial object to a data frame.
         """
-        df_coords = _pd.DataFrame(self.coords,
-                                  columns=self.coords_label)
-        df_directions = _pd.DataFrame(self.directions,
-                                      columns=self.directions_label)
-        df = _pd.concat([df_coords, df_directions, self.data], axis=1)
+        df = [_pd.DataFrame(self.coordinates, columns=self.coordinate_labels),
+              _pd.DataFrame(self.directions, columns=self.direction_labels)]
+        for variable in self.variables.values():
+            df.append(variable.as_data_frame(full))
+        df = _pd.concat(df, axis=1)
         return df
 
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+        new_obj.coordinates = self.coordinates[item]
+        if len(new_obj.coordinates.shape) < 2:
+            new_obj.coordinates = _np.expand_dims(new_obj.coordinates, axis=0)
+        new_obj.directions = self.directions[item]
+        if len(new_obj.directions.shape) < 2:
+            new_obj.directions = _np.expand_dims(new_obj.directions, axis=0)
+        new_obj._n_data = new_obj.coordinates.shape[0]
 
-class Directions3D(Points3D):
-    """
-    Spatial directions in 3D.
-    """
+        all_coords = _np.concatenate([new_obj.coordinates, new_obj.directions],
+                                     axis=0)
+        new_obj._bounding_box, new_obj._diagonal = bounding_box(all_coords)
 
-    def __init__(self, coords, directions, data=None, coords_label=None,
-                 directions_label=None):
-        """
-        Initializer for Directions3D
-
-        Parameters
-        ----------
-        coords : a 2-dimensional array or data frame
-            Array-like object with the spatial coordinates.
-        directions : a 2-dimensional array or data frame
-            It is expected that the rows have unit norm.
-        data : pandas DataFrame (optional)
-            matrix data frame with additional attributes.
-        coords_label : str
-            Optional string to label the coordinates.
-            Extracted from coords object if available.
-        directions_label : str
-            Optional string to label the directions.
-            Extracted from directions object if available.
-        """
-        if coords.shape != directions.shape:
-            raise ValueError("shape of coords and directions do not match")
-        super().__init__(coords, data, coords_label)
-        if isinstance(directions, _pd.core.frame.DataFrame):
-            if directions_label is None:
-                directions_label = directions.columns
-            directions = directions.values
-        if directions_label is None:
-            directions_label = ["d" + s for s in self.coords_label]
-
-        self.directions = directions
-        self.directions_label = directions_label
-
-    def draw_arrows(self, size=1, **kwargs):
-        head = self.coords + size / 2 * self.directions
-        tail = self.coords - size / 2 * self.directions
-
-        x = []
-        y = []
-        z = []
-        for i in range(head.shape[0]):
-            x.extend([tail[i, 0], head[i, 0], None])
-            y.extend([tail[i, 1], head[i, 1], None])
-            z.extend([tail[i, 2], head[i, 2], None])
-
-        obj = {"type": "scatter3d",
-               "mode": "lines",
-               "x": x,
-               "y": y,
-               "z": z,
-               "hoverinfo": "none"}
-
-        obj = _update(obj, kwargs)
-        return [obj]
+        for name, var in self.variables.items():
+            new_obj.variables[name] = var[item]
+            new_obj.variables[name].set_coordinates(new_obj)
+        return new_obj
 
     @classmethod
-    def from_planes(cls, coords, azimuth, dip, data=None):
-        """
-        Creates a Directions3D object from planar information,
-        represented by azimuth direction and dip.
-        
-        Parameters
-        ----------
-        coords : array-like or data frame with 3 columns
-            The data points' spatial coordinates.
-        azimuth : array
-            Azimuth direction, between 0 and 360 degrees.
-        dip : array
-            Dip, between 0 and 90 degrees.
-        data : pandas DataFrame
-            matrix data frame with additional data.
-        
-        Returns
-        -------
-        matrix Directions3D object.
-        """
+    def from_azimuth(cls, data, coordinates, azimuth):
+        azimuth = data[azimuth]
+        data = data.copy()
+        data["dX"] = _np.sin(azimuth / 180 * _np.pi)
+        data["dY"] = _np.cos(azimuth / 180 * _np.pi)
+        return DirectionalData(data, coordinates, ["dX", "dY"])
+
+    @classmethod
+    def from_planes(cls, data, coordinates, azimuth, dip):
         # conversions
-        dip = -dip * _np.pi / 180
-        azimuth = (90 - azimuth) * _np.pi / 180
+        dip = -data[dip].values * _np.pi / 180
+        azimuth = (90 - data[azimuth].values) * _np.pi / 180
         strike = azimuth - _np.pi / 2
-        if isinstance(coords, _pd.core.frame.DataFrame):
-            coords = coords.values
 
         # dip and strike vectors
         dipvec = _np.concatenate([
@@ -1474,123 +1658,44 @@ class Directions3D(Points3D):
 
         # result
         vecs = _np.concatenate([dipvec, strvec], axis=0)
-        coords = _np.concatenate([coords, coords], axis=0)
-        if data is not None:
-            data = _pd.concat([data, data], axis=0)
-        return cls(coords, vecs, data)
+        vecs = _pd.DataFrame(vecs, columns=["dX", "dY", "dZ"])
+        data = _pd.concat([data, data], axis=0).reset_index(drop=True)
+        data = _pd.concat([data, vecs], axis=1)
+        return DirectionalData(data, coordinates, ["dX", "dY", "dZ"])
 
     @classmethod
-    def from_lines(cls, coords, azimuth, dip, data=None):
-        """
-        Creates a Directions3D object from linear information.
-        
-        Parameters
-        ----------
-        coords : array-like or data frame with 3 columns.
-            The data coordinates.
-        azimuth : array
-            Azimuth direction, between 0 and 360 degrees.
-        dip : array
-            Dip, between 0 and 90 degrees.
-        data : data frame
-            matrix data frame with additional data.
-        
-        Returns
-        -------
-        matrix Directions3D object.
-        """
-        # conversions
-        dip = -dip * _np.pi / 180
-        azimuth = (90 - azimuth) * _np.pi / 180
-        if isinstance(coords, _pd.core.frame.DataFrame):
-            coords = coords.values
+    def from_azimuth_and_dip(cls, data, coordinates, azimuth, dip):
+        dip = -data[dip] * _np.pi / 180
+        azimuth = (90 - data[azimuth]) * _np.pi / 180
 
-        # dip and strike vectors
         dipvec = _np.concatenate([
             _np.array(_np.cos(dip) * _np.cos(azimuth), ndmin=2).transpose(),
             _np.array(_np.cos(dip) * _np.sin(azimuth), ndmin=2).transpose(),
             _np.array(_np.sin(dip), ndmin=2).transpose()], axis=1)
 
         # result
-        return cls(coords, dipvec, data)
+        vecs = _pd.DataFrame(dipvec, columns=["dX", "dY", "dZ"])
+        data = _pd.concat([data, vecs], axis=1)
+        return DirectionalData(data, coordinates, ["dX", "dY", "dZ"])
 
     @classmethod
-    def plane_normal(cls, coords, azimuth, dip, data=None):
-        """
-        Creates a Directions3D object representing the normal
-        vectors of the planes parameterized by azimuth and dip.
-        
-        Parameters
-        ----------
-        coords : array-like or data frame with 3 columns.
-            The data coordinates.
-        azimuth : array
-            Azimuth direction, between 0 and 360 degrees.
-        dip : array
-            Dip, between 0 and 90 degrees.
-        data : data frame
-            matrix data frame with additional data.
-        
-        Returns
-        -------
-        matrix Directions3D object.
-        """
-        n_data = coords.shape[0]
-        plane_dirs = cls.from_planes(coords, azimuth, dip)
+    def from_normals(cls, data, coordinates, azimuth, dip):
+        n_data = data.shape[0]
+        plane_dirs = cls.from_planes(data, coordinates, azimuth, dip)
         vec1 = plane_dirs.directions[0:n_data, :]
         vec2 = plane_dirs.directions[n_data:(2 * n_data), :]
 
         normalvec = vec1[:, [1, 2, 0]] * vec2[:, [2, 0, 1]] \
                     - vec1[:, [2, 0, 1]] * vec2[:, [1, 2, 0]]
-        normalvec = _np.apply_along_axis(lambda x: x/_np.sqrt(_np.sum(x ** 2)),
-                                         axis=1,
-                                         arr=normalvec)
+        normalvec = _np.apply_along_axis(
+            lambda x: x / _np.sqrt(_np.sum(x ** 2)),
+            axis=1,
+            arr=normalvec)
 
         # result
-        return cls(coords, normalvec, data)
-
-    def subset_region(self, xmin, xmax, ymin, ymax, zmin, zmax,
-                      include_min_x=True, include_max_x=False,
-                      include_min_y=True, include_max_y=False,
-                      include_min_z=True, include_max_z=False
-                      ):
-        df = self.as_data_frame()
-        keep = (df[self.coords_label[0]] >= xmin) \
-               & (df[self.coords_label[0]] <= xmax) \
-               & (df[self.coords_label[1]] >= ymin) \
-               & (df[self.coords_label[1]] <= ymax) \
-               & (df[self.coords_label[2]] >= zmin) \
-               & (df[self.coords_label[2]] <= zmax)
-        if not include_min_x:
-            keep = keep & (df[self.coords_label[0]] > xmin)
-        if not include_min_y:
-            keep = keep & (df[self.coords_label[1]] > ymin)
-        if not include_min_z:
-            keep = keep & (df[self.coords_label[2]] > zmin)
-        if not include_max_x:
-            keep = keep & (df[self.coords_label[0]] < xmax)
-        if not include_max_y:
-            keep = keep & (df[self.coords_label[1]] < ymax)
-        if not include_max_z:
-            keep = keep & (df[self.coords_label[2]] < zmax)
-        df = df.loc[keep, :]
-        df.reset_index(drop=True, inplace=True)
-        coords = df[self.coords_label]
-        directions = df[self.directions_label]
-        data = df.drop(list(self.coords_label) + list(self.directions_label),
-                       axis=1)
-        return Directions3D(coords, directions, data)
-
-    def as_data_frame(self):
-        """
-        Conversion of a spatial object to a data frame.
-        """
-        df_coords = _pd.DataFrame(self.coords,
-                                  columns=self.coords_label)
-        df_directions = _pd.DataFrame(self.directions,
-                                      columns=self.directions_label)
-        df = _pd.concat([df_coords, df_directions, self.data], axis=1)
-        return df
+        vecs = _pd.DataFrame(- normalvec, columns=["dX", "dY", "dZ"])
+        data = _pd.concat([data, vecs], axis=1)
+        return DirectionalData(data, coordinates, ["dX", "dY", "dZ"])
 
 
 class DrillholeData(_SpatialData):
@@ -1608,7 +1713,7 @@ class DrillholeData(_SpatialData):
     """
 
     def __init__(self, collar=None, assay=None, survey=None, holeid="HOLEID",
-                 x="X", y="Y", z="Z", fr="FROM", to="TO", **kwargs):
+                 x="X", y="Y", z="Z", fr="FROM", to="TO"):
         """
         Initializer for DrillholeData.
 
@@ -1631,65 +1736,89 @@ class DrillholeData(_SpatialData):
         The column HOLEID in the output is reserved.
         """
         super().__init__()
-        if "coords_from" in kwargs:
-            # internal instantiation
-            self.coords_from = kwargs["coords_from"]
-            self.coords_to = kwargs["coords_to"]
-            self.data = kwargs["data"]
-        else:
-            # instantiation from input
-            if survey is not None:
-                raise NotImplementedError("survey data is not yet supported")
+        if survey is not None:
+            raise NotImplementedError("survey data is not yet supported")
 
-            # column names
-            collar_names = collar.columns
-            collar_names = collar_names[[a not in [x, y, z]
-                                         for a in collar_names.tolist()]]
-            assay_names = assay.columns
-            assay_names = assay_names[[a not in [holeid, fr, to]
-                                       for a in assay_names.tolist()]]
-            if (holeid not in collar_names) & (holeid not in assay_names):
-                raise ValueError("holeid column must be present in collar "
-                                 "and assay data frames")
+        assay = assay.drop([x, y, z], axis=1, errors="ignore")
 
-            # processing data
-            df = _pd.merge(collar,
-                           assay,
-                           on=holeid,
-                           suffixes=("_collar", "_assay"))
-            df_from = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[fr]})
-            df_to = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[to]})
-            coords_from = df.loc[:, [x, y, z]].values - df_from.values
-            coords_to = df.loc[:, [x, y, z]].values - df_to.values
-            df = df.drop([x, y, z], axis=1)
-            df = df.rename(columns={holeid: "HOLEID"})
+        # column names
+        collar_names = collar.columns
+        collar_names = collar_names[[a not in [x, y, z]
+                                     for a in collar_names.tolist()]]
+        assay_names = assay.columns
+        assay_names = assay_names[[a not in [holeid, fr, to]
+                                   for a in assay_names.tolist()]]
+        if (holeid not in collar_names) & (holeid not in assay_names):
+            raise ValueError("holeid column must be present in collar "
+                             "and assay data frames")
 
-            # output
-            self.coords_from = coords_from
-            self.coords_to = coords_to
-            self.data = df
+        # processing data
+        df = _pd.merge(collar,
+                       assay,
+                       on=holeid,
+                       suffixes=("_collar", "_assay"))
+        df_from = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[fr]})
+        df_to = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[to]})
+        coords_from = df.loc[:, [x, y, z]].values - df_from.values
+        coords_to = df.loc[:, [x, y, z]].values - df_to.values
+        df = df.drop([x, y, z], axis=1)
+        df = df.rename(columns={holeid: "HOLEID"})
 
-        self._ndim = self.coords_from.shape[1]
+        # output
+        self.coords_from = coords_from
+        self.coords_to = coords_to
+        self.data = df
+        self.coordinate_labels = [x, y, z]
+
+        self._n_dim = self.coords_from.shape[1]
+        self._n_data = self.coords_from.shape[1]
         self.lengths = _np.sqrt(_np.sum((self.coords_from
                                          - self.coords_to) ** 2,
-                                axis=1))
+                                        axis=1))
 
         coords2 = _np.concatenate([self.coords_from, self.coords_to], axis=0)
-        self.bounding_box, self.diagonal = _bounding_box(coords2)
+        self._bounding_box, self._diagonal = bounding_box(coords2)
 
     def __str__(self):
         s = "Object of class " + self.__class__.__name__ + "\n\n"
         s += str(self.coords_from.shape[0]) + " drillhole segments in "
-        s += str(self._ndim) + " dimension"
-        if self._ndim > 1:
-            s += "s"
-        s += "\n\n"
+        s += str(self._n_dim) + " dimensions\n\n"
         if self.data is not None:
             s += "Data preview:\n\n"
             s += str(self.data.head())
         return s
 
-    def as_points(self, locations=_np.array([0.05, 0.5, 0.95])):
+    def as_data_frame(self):
+        df = _pd.concat([
+            _pd.DataFrame(
+                self.coords_from,
+                columns=[s + "_from" for s in self.coordinate_labels]),
+            _pd.DataFrame(
+                self.coords_to,
+                columns=[s + "_to" for s in self.coordinate_labels]),
+            self.data
+        ], axis=1)
+        return df
+
+    def segment_fixed(self, interval=5):
+        dif = self.coords_to - self.coords_from
+        length = _np.sqrt(_np.sum(dif ** 2, axis=1))
+        points = []
+        newdata = []
+        for i, ln in enumerate(length):
+            n = int(_np.ceil(ln / interval))
+            position = _np.cumsum(_np.ones(n) / (n + 1))
+            points.extend([self.coords_from[i, :] + dif[i, :] * x
+                           for x in position])
+            newdata.append(self.data.iloc[[i] * n, :])
+        points = _np.stack(points, axis=0)
+        points = _pd.DataFrame(points, columns=self.coordinate_labels)
+        df = _pd.concat(newdata, ignore_index=True)
+        df = _pd.concat([points, df], axis=1)
+
+        return PointData(df, self.coordinate_labels), df
+
+    def segment_relative(self, locations=(0.05, 0.5, 0.95)):
         if locations.__class__ is not _np.ndarray:
             locations = _np.array(locations)
         if (_np.min(locations) < 0) | (_np.max(locations) > 1):
@@ -1699,9 +1828,11 @@ class DrillholeData(_SpatialData):
         dif = self.coords_to - self.coords_from
         points = [self.coords_from + dif * x for x in locations]
         points = _np.concatenate(points, axis=0)
+        points = _pd.DataFrame(points, columns=self.coordinate_labels)
         df = _pd.concat([self.data] * len(locations), ignore_index=True)
+        df = _pd.concat([points, df], axis=1)
 
-        return Points3D(points, df)
+        return PointData(df, self.coordinate_labels), df
 
     def merge_segments(self, by):
         """
@@ -1734,8 +1865,8 @@ class DrillholeData(_SpatialData):
         val_to = self.data.loc[1:self.coords_from.shape[0], by].values
         same_value = [val_from[i] == val_to[i] for i in range(len(val_to))]
         # condition 4 - same hole
-        hole_from = self.data.loc[0:(self.coords_from.shape[0] - 1), "HOLEID"]\
-                        .values
+        hole_from = self.data.loc[0:(self.coords_from.shape[0] - 1), "HOLEID"] \
+            .values
         hole_to = self.data.loc[1:self.coords_from.shape[0], "HOLEID"].values
         same_hole = [hole_from[i] == hole_to[i] for i in range(len(hole_to))]
         # final vector
@@ -1749,8 +1880,8 @@ class DrillholeData(_SpatialData):
         # merge_ids may contain empty elements
         merge_ids = [x for x in merge_ids if x.size > 0]
         # coordinates
-        new_coords_from = _np.zeros([len(merge_ids), self._ndim])
-        new_coords_to = _np.zeros([len(merge_ids), self._ndim])
+        new_coords_from = _np.zeros([len(merge_ids), self._n_dim])
+        new_coords_to = _np.zeros([len(merge_ids), self._n_dim])
         for i in range(len(merge_ids)):
             new_coords_from[i, :] = self.coords_from[merge_ids[i][0], :]
             new_coords_to[i, :] = self.coords_to[merge_ids[i][-1], :]
@@ -1758,14 +1889,27 @@ class DrillholeData(_SpatialData):
         cols = by if by == "HOLEID" else ["HOLEID", by]
         new_df = self.data.loc[[x[0] for x in merge_ids], cols]
         new_df = new_df.reset_index(drop=True)  # very important
+
         # initialization
-        return DrillholeData(coords_from=new_coords_from,
-                             coords_to=new_coords_to,
-                             data=new_df)
+        new_obj = _copy.deepcopy(self)
+        new_obj.coords_from = new_coords_from
+        new_obj.coords_to = new_coords_to
+        new_obj.data = new_df
+
+        new_obj._n_data = new_obj.coords_from.shape[0]
+        new_obj.lengths = _np.sqrt(_np.sum((new_obj.coords_from
+                                            - new_obj.coords_to) ** 2,
+                                           axis=1))
+
+        coords2 = _np.concatenate(
+            [new_obj.coords_from, new_obj.coords_to], axis=0)
+        new_obj._bounding_box, new_obj._diagonal = bounding_box(coords2)
+
+        return new_obj
 
     def get_contacts(self, by):
         """
-        Returns a Points3D with the coordinates of the contacts between
+        Returns a PointData with the coordinates of the contacts between
         two different categories.
         
         Parameters
@@ -1773,189 +1917,146 @@ class DrillholeData(_SpatialData):
         by : name of the column with the category
         """
         merged = self.merge_segments(by)
-        points = merged.as_points(_np.array([0, 1]))
+        points, df = merged.segment_relative(_np.array([0, 1]))
+        points.add_categorical_variable(
+            by, _pd.unique(df[by]), measurements=df[by].values)
+        points.add_categorical_variable(
+            "HOLEID", _pd.unique(df["HOLEID"]),
+            measurements=df["HOLEID"].values)
 
         # finding duplicates
-        dup_label = _pd.DataFrame(points.coords).duplicated(keep="last")
+        dup_label = _pd.DataFrame(points.coordinates).duplicated(keep="last")
         dup1 = _np.where(dup_label.values)[0]
         dup2 = dup1 - 1
 
         # new object
-        new_points = points.coords[dup1, :]
+        new_points = points.coordinates[dup1, :]
+        new_points = _pd.DataFrame(new_points, columns=self.coordinate_labels)
         new_data = _pd.DataFrame(
-            {"HOLEID": points.data.loc[dup2, "HOLEID"].values,
-             by + "_up": points.data.loc[dup2, by].values,
-             by + "_down": points.data.loc[dup1, by].values})
+            {"HOLEID": points.variables["HOLEID"].measurements_a.values[dup2],
+             by + "_a": points.variables[by].measurements_a.values[dup2],
+             by + "_b": points.variables[by].measurements_b.values[dup1]})
         new_data = new_data.reset_index(drop=True)
-        return Points3D(new_points, new_data)
+        new_data = _pd.concat([new_points, new_data], axis=1)
 
-    def as_classification_input(self, by,
-                                locations=_np.array([0.25, 0.5, 0.75])):
+        new_obj = PointData(new_data, self.coordinate_labels)
+        new_obj.add_rock_type_variable(
+            by, points.variables[by].labels,
+            measurements_a=new_data[by + "_a"].values,
+            measurements_b=new_data[by + "_b"].values)
+        return new_obj
+
+    def as_classification_input(self, by, interval=5):
         """
-        Returns a Points3D object in a format suitable for use as input to
+        Returns a PointData object in a format suitable for use as input to
         a classification model.
         """
         merged = self.merge_segments(by)
-        point = merged.as_points(locations)
-        point.data[by + "_up"] = point.data[by]
-        point.data[by + "_down"] = point.data[by]
+        points, df = merged.segment_fixed(interval)
+        points.add_categorical_variable(
+            by, _pd.unique(df[by]), measurements=df[by].values)
+
+        df = points.as_data_frame()
         contacts = merged.get_contacts(by)
-        out = merge(point, contacts)
-        out.data = out.data.drop(by, axis=1)
-        return out
+        contacts = contacts.as_data_frame()
+        new_data = _pd.concat([df, contacts], axis=0)
+
+        new_obj = PointData(new_data, self.coordinate_labels)
+        new_obj.add_rock_type_variable(
+            by, points.variables[by].labels,
+            measurements_a=new_data[by + "_a"].values,
+            measurements_b=new_data[by + "_b"].values)
+        return new_obj
 
     def draw_categorical(self, column, colors, **kwargs):
         # converting to points and reordering
         merged = self.merge_segments(column)
-        points = Points3D(
-            _np.concatenate([merged.coords_from, merged.coords_to], axis=0),
-            _pd.concat([merged.data] * 2, axis=0).reset_index(drop=True))
-        seq = _np.arange(merged.coords_from.shape[0])
+        points = _np.concatenate([merged.coords_from, merged.coords_to], axis=0)
+        df = _pd.concat([
+            _pd.DataFrame(points, columns=self.coordinate_labels),
+            _pd.concat([merged.data] * 2, axis=0).reset_index(drop=True)
+        ], axis=1)
+        seq = _np.arange(merged.n_data)
         sort_idx = _np.argsort(_np.concatenate([seq, seq + 0.1]))
-        points.coords = points.coords[sort_idx, :]
-        points.data = points.data.loc[sort_idx, :].reset_index(drop=True)
-
-        # x, y, z, and colors as lists
-        color_val = _np.arange(len(colors))
-        colors_dict = dict(zip(colors.keys(), color_val))
-        colors2 = points.data[column].map(colors_dict).tolist()
-        colors3 = [colors.get(item) for item in colors]
-        cmax = len(color_val) - 1
-        n_data = points.coords.shape[0]
-        text = points.data[column].tolist()
-        x = points.coords[:, 0].tolist()
-        y = points.coords[:, 1].tolist() if self._ndim > 1 else [None] * n_data
-        z = points.coords[:, 2].tolist() if self._ndim > 2 else [None] * n_data
-
-        # inserting None elements to break undesired lines
-        # points object will always have an even number of rows
-        # None elements must be inserted every 3rd position
-        indexes = _np.flip(_np.arange(start=0, stop=n_data, step=2))
-        for idx in indexes:
-            colors2.insert(idx, "rgb(0,0,0)")  # dummy color
-            x.insert(idx, None)
-            y.insert(idx, None)
-            z.insert(idx, None)
-            text.insert(idx, None)
-
-        obj = {"mode": "lines",
-               "name": column,
-               "text": text,
-               "line": {"color": colors2,
-                        "colorscale": [[i / cmax, colors3[i]]
-                                       for i in color_val]}}
-        if self._ndim == 1:
-            obj.update({"type": "scatter",
-                        "x": x,
-                        "y": _np.repeat(0, points.coords.shape[0]),
-                        "hoveron": "fills",
-                        "hoverinfo": "x+text"})
-        elif self._ndim == 2:
-            obj.update({"type": "scatter",
-                        "x": x,
-                        "y": y,
-                        "hoveron": "fills",
-                        "hoverinfo": "x+y+text"})
-        elif self._ndim == 3:
-            obj.update({"type": "scatter3d",
-                        "x": x,
-                        "y": y,
-                        "z": z,
-                        "hoverinfo": "x+y+z+text"})
-        obj = _update(obj, kwargs)
-        return [obj]
+        df = df.iloc[sort_idx, :].reset_index(drop=True)
+        # return df
+        return _py.segments_3d(df.loc[:, self.coordinate_labels].values,
+                               df[column].values, colors, **kwargs)
 
     def draw_numeric(self, column, **kwargs):
         raise NotImplementedError()
 
 
-def merge(x, y):
-    """
-    Merges point objects
-    """
-    if x.ndim != y.ndim:
-        raise ValueError("dimensions of x and y do not match")
-    if isinstance(x, _PointData) & isinstance(y, _PointData):
-        # coordinates
-        new_coords = _np.concatenate([x.coords, y.coords], axis=0)
-
-        # data
-        all_cols = []
-        if x.data is not None:
-            all_cols += x.data.columns.values.tolist()
-        if y.data is not None:
-            all_cols += y.data.columns.values.tolist()
-        all_cols = _pd.unique(all_cols)
-
-        df_x = _pd.DataFrame(columns=all_cols)
-        df_y = _pd.DataFrame(columns=all_cols)
-        if x.data is not None:
-            for col in x.data.columns:
-                df_x[col] = x.data[col]
-        if y.data is not None:
-            for col in y.data.columns:
-                df_y[col] = y.data[col]
-        new_data = _pd.concat([df_x, df_y]).reset_index(drop=True)
-
-        if x.ndim == 1:
-            return Points1D(new_coords, new_data)
-        if x.ndim == 2:
-            return Points2D(new_coords, new_data)
-        if x.ndim == 3:
-            return Points3D(new_coords, new_data)
-    else:
-        raise ValueError("x and y are not compatible for merging")
+def batch_index(n_data, batch_size):
+    n_batches = int(_np.ceil(n_data / batch_size))
+    idx = [_np.arange(i * batch_size,
+                      _np.minimum((i + 1) * batch_size,
+                                  n_data))
+           for i in range(n_batches)]
+    return idx
 
 
-class PointsND(object):
-    """General, high-dimensional data"""
+def export_planes(coordinates, dip, azimuth, filename, size=1):
+    # conversions
+    dip = -dip * _np.pi / 180
+    azimuth = (90 - azimuth) * _np.pi / 180
+    strike = azimuth - _np.pi / 2
 
-    def __init__(self, data, columns_x, columns_y=None):
-        self._ndim = len(columns_x)
-        self.coords_label = columns_x
-        self.coords = data.loc[:, columns_x].values
-        self.bounding_box, self.diagonal = _bounding_box(self.coords)
-        if columns_y is not None:
-            self.data = _pd.DataFrame(data.loc[:, columns_y])
-        else:
-            self.data = _pd.DataFrame()
+    # dip and strike vectors
+    dipvec = _np.concatenate([
+        _np.array(_np.cos(dip) * _np.cos(azimuth), ndmin=2).transpose(),
+        _np.array(_np.cos(dip) * _np.sin(azimuth), ndmin=2).transpose(),
+        _np.array(_np.sin(dip), ndmin=2).transpose()], axis=1) * size
+    strvec = _np.concatenate([
+        _np.array(_np.cos(strike), ndmin=2).transpose(),
+        _np.array(_np.sin(strike), ndmin=2).transpose(),
+        _np.zeros([dipvec.shape[0], 1])], axis=1) * size
 
-    def __repr__(self):
-        return self.__str__()
+    points = _np.stack([
+        coordinates + dipvec,
+        coordinates - 0.5 * strvec - 0.5 * dipvec,
+        coordinates + 0.5 * strvec - 0.5 * dipvec
+    ], axis=0)
+    points = _np.reshape(points, [3 * points.shape[1], points.shape[2]],
+                         order="F")
+    idx = _np.reshape(_np.arange(points.shape[0]), coordinates.shape)
 
-    @property
-    def ndim(self):
-        return self._ndim
-
-    def as_data_frame(self):
-        """
-        Conversion to a data frame.
-        """
-        df = _pd.DataFrame(self.coords,
-                           columns=self.coords_label)
-        df = _pd.concat([df, self.data], axis=1)
-        return df
-
-    def __str__(self):
-        s = "Object of class " + self.__class__.__name__ + " with " \
-            + str(len(self.coords)) + " data points\n\n"
-
-        if self.data is not None:
-            s += "Data preview:\n\n"
-            s += str(self.data.head())
-        return s
+    # export
+    with open(filename, 'w') as out_file:
+        out_file.write(
+            str(points.shape[0]) + " " + str(idx.shape[0]) + "\n")
+        for line in points:
+            out_file.write(" ".join(str(elem) for elem in line) + "\n")
+        for line in idx:
+            out_file.write(" ".join(str(elem) for elem in line) + "\n")
 
 
-class CirculantGrid1D(Grid1D):
-    """
-    Grid with circulant structure.
-    """
-    def __init__(self, grid, expand=0.2):
-        n_points = float(grid.grid_size[0]) * (1 + expand)
-        n_points = int(_np.ceil(n_points))
-        if n_points % 2 == 0:
-            n_points += 1
-        start = grid.grid[0][0]
-        step = grid.step_size[0]
-        super().__init__(start, n_points, step)
-        self.point_zero = _np.array([[self.grid[0][n_points // 2]]])
+class Section3D(PointData):
+    def __init__(self, center, azimuth, dip, width, height, n_x, n_y,
+                 coordinate_labels=("X", "Y", "Z")):
+        grid = Grid2D(start=[- width/2, - height/2],
+                      end=[width/2, height/2],
+                      n=[n_x, n_y])
+        base_coords = _np.concatenate(
+            [grid.coordinates, _np.zeros([grid.n_data, 1])], axis=1)
+
+        azimuth = azimuth * _np.pi / 180
+        dip = - dip * _np.pi / 180
+        ry = _np.reshape(_np.array(
+            [1, 0, 0,
+             0, _np.cos(dip), -_np.sin(dip),
+             0, _np.sin(dip), _np.cos(dip)]
+        ), [3, 3])
+        rz = _np.reshape(_np.array(
+            [_np.cos(azimuth), _np.sin(azimuth), 0,
+             -_np.sin(azimuth), _np.cos(azimuth), 0,
+             0, 0, 1]
+        ), [3, 3])
+        rotation_matrix = _np.matmul(rz, ry).T
+
+        center = _np.array(center, ndmin=2)
+        rotated_coords = _np.matmul(base_coords, rotation_matrix) + center
+
+        df = _pd.DataFrame(rotated_coords, columns=coordinate_labels)
+        super().__init__(df, coordinate_labels)
+        self.grid_shape = [n_x, n_y]

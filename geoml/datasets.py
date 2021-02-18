@@ -27,7 +27,7 @@ def walker():
 
     Returns
     -------
-    walker_point : geoml.data.Points2D
+    walker_point : geoml.data.PointData
         Dataset with 470 samples.
     walker_grid : geoml.data.Grid2D
         Full data.
@@ -36,13 +36,24 @@ def walker():
     path_walker = _os.path.join(path, "sample_data/walker.dat")
     path_walker_ex = _os.path.join(path, "sample_data/walker_ex.dat")
 
-    walker_sample = _pd.read_table(path_walker)
+    walker_sample = _pd.read_table(path_walker, na_values=-999)
     walker_ex = _pd.read_table(path_walker_ex, sep=",")
 
-    walker_point = _data.Points2D(walker_sample[["X", "Y"]],
-                                  walker_sample.drop(["X", "Y"], axis=1))
+    walker_point = _data.PointData(walker_sample, ["X", "Y"])
+    walker_point.add_continuous_variable(
+        "V", walker_sample["V"].values,
+        min_value=0, max_value=2000)
+    walker_point.add_continuous_variable(
+        "U", walker_sample["U"].values,
+        min_value=0, max_value=10000)
+
     walker_grid = _data.Grid2D(start=[1, 1], n=[260, 300], step=[1, 1])
-    walker_grid.data = walker_ex.drop(["X", "Y"], axis=1)
+    walker_grid.add_continuous_variable(
+        "V", walker_ex["V"].values,
+        min_value=0, max_value=2000)
+    walker_grid.add_continuous_variable(
+        "U", walker_ex["U"].values,
+        min_value=0, max_value=10000)
 
     return walker_point, walker_grid
 
@@ -76,40 +87,67 @@ def example_fold():
 
     Returns
     -------
-    point : geoml.data.Points2D
+    point : geoml.data.PointData
         Some coordinates with two rock labels.
-    dirs : geoml.data.Directions2D
-        Structural measurements representing a fold.
+    dirs : geoml.data.DirectionalData
+        Structural measurements_a representing a fold.
     """
     ex_point = _pd.DataFrame(
-        {"X": _np.array([25, 40, 60, 85,
-                         5, 10, 45, 50, 55, 75, 90,
-                         15, 20, 30, 50, 65, 75, 90, 25, 50, 65, 75]),
-         "Y": _np.array([25, 60, 50, 15,
-                         50, 80, 10, 30, 10, 75, 90,
-                         15, 35, 65, 85, 65, 50, 20, 10, 50, 20, 10]),
-         "rock": _np.concatenate([_np.repeat("rock_a", 4),
-                                  _np.repeat("rock_b", 7),
+        {"X": _np.array([
+            # rock a
+            25, 40, 60, 85, 89, 76, 66, 74, 64, 50, 50, 31, 21, 25, 16, 30,
+            # rock b
+            5, 10, 45, 50, 55, 75, 90, 91, 74, 64,
+            76, 66, 50, 50, 29, 19, 14, 25,
+            # boundary
+            15, 20, 30, 50, 65, 75, 90, 25, 50, 65, 75,
+        ]),
+         "Y": _np.array([
+             # rock a
+             25, 60, 50, 15, 19, 11, 21, 49, 64, 51, 84, 64, 34, 11, 16, 45,
+             # rock b
+             50, 80, 10, 30, 10, 75, 90, 21, 9, 19,
+             51, 66, 49, 86, 66, 36, 14, 9,
+             # boundary
+             15, 35, 65, 85, 65, 50, 20, 10, 50, 20, 10,
+         ]),
+         "rock": _np.concatenate([_np.repeat("a", 16),
+                                  _np.repeat("b", 18),
                                   _np.repeat("boundary", 11)])})
-    ex_point["label_1"] = _pd.Categorical(_np.concatenate(
-        [_np.repeat("rock_a", 4),
-         _np.repeat("rock_b", 7),
-         _np.repeat("rock_a", 11)]))
-    ex_point["label_2"] = _pd.Categorical(_np.concatenate(
-        [_np.repeat("rock_a", 4),
-         _np.repeat("rock_b", 7),
-         _np.repeat("rock_b", 11)]))
+    ex_point["label_1"] = _np.concatenate(
+        [_np.repeat("a", 16),
+         _np.repeat("b", 18),
+         _np.repeat("a", 11)])
+    ex_point["label_2"] = _np.concatenate(
+        [_np.repeat("a", 16),
+         _np.repeat("b", 18),
+         _np.repeat("b", 11)])
 
     ex_dir = _pd.DataFrame(
-        {"X": _np.array([40, 50, 70, 90, 30, 20, 10]),
+        {"X": _np.array([40, 50, 70, 90, 30, 20, 20]),
          "Y": _np.array([40, 85, 70, 30, 50, 60, 10]),
-         "strike": _np.array([30, 90, 325, 325, 30, 30, 30])})
+         "strike": _np.array([30, 90, 145, 145, 30, 30, 30])})
+    ex_dir["azimuth"] = ex_dir["strike"] - 90
 
-    point = _data.Points2D(ex_point[["X", "Y"]],
-                           ex_point.drop(["X", "Y"], axis=1))
-    dirs = _data.Directions2D.from_azimuth(ex_dir[["X", "Y"]], ex_dir["strike"])
+    point = _data.PointData(ex_point, ["X", "Y"])
+    point.add_rock_type_variable("rock", labels=["a", "b"],
+                                 measurements_a=ex_point["label_1"].values,
+                                 measurements_b=ex_point["label_2"].values)
 
-    return point, dirs
+    vals = _np.ones(ex_point.shape[0])
+    vals[ex_point["label_1"] == "b"] = -1
+    vals[ex_point["label_1"] != ex_point["label_2"]] = 0
+    point.add_continuous_variable("rock_num", vals, min_value=-3, max_value=3)
+
+    dirs = _data.DirectionalData.from_azimuth(
+        ex_dir, ["X", "Y"], "strike"
+    )
+
+    normals = _data.DirectionalData.from_azimuth(
+        ex_dir, ["X", "Y"], "azimuth"
+    )
+
+    return point, dirs, normals
 
 
 def sunspot_number():
@@ -122,12 +160,8 @@ def sunspot_number():
 
     Returns
     -------
-    yearly - Point1D
-        Yearly averages since 1700.
-    monthly - Point1D
-        Monthly averages since 1700.
-    daily - Point1D
-        Daily total sunspot number since 1818.
+    out - dict
+        Dict containing the processed and original data.
     """
     yearly_df = _pd.read_table(
         "http://sidc.be/silso/INFO/snytotcsv.php",
@@ -135,9 +169,12 @@ def sunspot_number():
     yearly_df.set_axis(["year", "sn", "sn_std",
                         "n_obs", "definitive"],
                        axis="columns", inplace=True)
-    yearly = _data.Points1D(_np.arange(1700, yearly_df.shape[0] + 1700,
-                                       dtype=_np.float),
-                            yearly_df)
+    # yearly = _data.Points1D(_np.arange(1700, yearly_df.shape[0] + 1700,
+    #                                    dtype=_np.float),
+    #                         yearly_df)
+    yearly = _data.PointData(yearly_df, "year")
+    yearly.add_continuous_variable("sn", yearly_df["sn"].values,
+                                   min_value=0, max_value=500)
 
     monthly_df = _pd.read_table(
         "http://sidc.oma.be/silso/INFO/snmtotcsv.php",
@@ -145,18 +182,31 @@ def sunspot_number():
     monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
                          "n_obs", "definitive"],
                         axis="columns", inplace=True)
-    monthly = _data.Points1D(_np.arange(1, monthly_df.shape[0] + 1,
-                                        dtype=_np.float), monthly_df)
+    monthly_df["idx"] = _np.arange(1, monthly_df.shape[0] + 1, dtype=_np.float)
+    # monthly = _data.Points1D(_np.arange(1, monthly_df.shape[0] + 1,
+    #                                     dtype=_np.float), monthly_df)
+    monthly = _data.PointData(monthly_df, "idx")
+    monthly.add_continuous_variable("sn", monthly_df["sn"].values,
+                                    min_value=0, max_value=500)
 
     daily_df = _pd.read_table("http://sidc.oma.be/silso/INFO/sndtotcsv.php",
                               sep=";", header=None)
     daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
                        "n_obs", "definitive"],
                       axis="columns", inplace=True)
-    daily = _data.Points1D(_np.arange(1, daily_df.shape[0] + 1,
-                                      dtype=_np.float), daily_df)
+    daily_df["idx"] = _np.arange(1, daily_df.shape[0] + 1, dtype=_np.float)
+    daily = _data.PointData(daily_df, "idx")
+    daily.add_continuous_variable("sn", daily_df["sn"].values,
+                                  min_value=0, max_value=500)
 
-    return yearly, monthly, daily
+    out = {"points": {"yearly": yearly,
+                      "monthly": monthly,
+                      "daily": daily},
+           "data_frames": {"yearly": yearly_df,
+                           "monthly": monthly_df,
+                           "daily": daily_df}}
+
+    return out
 
 
 def andrade():
@@ -165,9 +215,9 @@ def andrade():
 
     Returns
     -------
-    points : geoml.data.Points3D
-        Base point data format.
-    normals : geoml.data.Directions3D
+    planes : geoml.data.DirectionalData
+        Directions parallel to the foliation planes.
+    normals : geoml.data.DirectionalData
         Normals to the foliation planes.
     """
     path = _os.path.dirname(__file__)
@@ -175,13 +225,11 @@ def andrade():
 
     raw_data = _pd.read_table(file)
 
-    points = _data.Points3D(
-        coords=raw_data[["X", "Y", "Z"]],
-        data=raw_data.drop(["X", "Y", "Z"], axis=1))
+    planes = _data.DirectionalData.from_planes(
+        raw_data, ["X", "Y", "Z"], "dip_dir", "dip"
+    )
+    normals = _data.DirectionalData.from_normals(
+        raw_data, ["X", "Y", "Z"], "dip_dir", "dip"
+    )
 
-    normals = _data.Directions3D.plane_normal(
-        coords=raw_data[["X", "Y", "Z"]],
-        azimuth=raw_data["dip_dir"],
-        dip=raw_data["dip"])
-
-    return points, normals
+    return planes, normals

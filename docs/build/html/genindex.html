@@ -199,7 +199,7 @@
 </li>
         <li><a href="geoml.html#geoml.parameter.CompositionalParameter.__init__">(geoml.parameter.CompositionalParameter method)</a>
 </li>
-        <li><a href="geoml.html#geoml.parameter.Parameter.__init__">(geoml.parameter.Parameter method)</a>
+        <li><a href="geoml.html#geoml.parameter.RealParameter.__init__">(geoml.parameter.RealParameter method)</a>
 </li>
         <li><a href="geoml.html#geoml.parameter.PositiveParameter.__init__">(geoml.parameter.PositiveParameter method)</a>
 </li>
@@ -232,7 +232,7 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="geoml.html#geoml.data.DrillholeData.as_classification_input">as_classification_input() (geoml.data.DrillholeData method)</a>
 </li>
-      <li><a href="geoml.html#geoml.data.DrillholeData.as_points">as_points() (geoml.data.DrillholeData method)</a>
+      <li><a href="geoml.html#geoml.data.DrillholeData.segment_relative">segment_relative() (geoml.data.DrillholeData method)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -442,7 +442,7 @@
 <h2 id="F">F</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="geoml.html#geoml.parameter.Parameter.fix">fix() (geoml.parameter.Parameter method)</a>
+      <li><a href="geoml.html#geoml.parameter.RealParameter.fix">fix() (geoml.parameter.RealParameter method)</a>
 </li>
       <li><a href="geoml.html#geoml.transform.Anisotropy2D.forward">forward() (geoml.transform.Anisotropy2D method)</a>
 
@@ -550,7 +550,7 @@
         <li><a href="geoml.html#geoml.warping.Identity">(class in geoml.warping)</a>
 </li>
       </ul></li>
-      <li><a href="geoml.html#geoml.parameter.Parameter.init_tf_placeholder">init_tf_placeholder() (geoml.parameter.Parameter method)</a>
+      <li><a href="geoml.html#geoml.parameter.RealParameter.init_tf_placeholder">init_tf_placeholder() (geoml.parameter.RealParameter method)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
@@ -576,12 +576,12 @@
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="geoml.html#geoml.models.GP.log_lik">log_lik() (geoml.models.GP method)</a>
+      <li><a href="geoml.html#geoml.models.GP.elbo">elbo() (geoml.models.GP method)</a>
 
       <ul>
-        <li><a href="geoml.html#geoml.models.GPMultiClassifier.log_lik">(geoml.models.GPMultiClassifier method)</a>
+        <li><a href="geoml.html#geoml.models.GPMultiClassifier.elbo">(geoml.models.GPMultiClassifier method)</a>
 </li>
-        <li><a href="geoml.html#geoml.models.GPGrad.log_lik">(geoml.models.GPGrad method)</a>
+        <li><a href="geoml.html#geoml.models.GPGrad.elbo">(geoml.models.GPGrad method)</a>
 </li>
       </ul></li>
   </ul></td>
@@ -620,7 +620,7 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="geoml.html#geoml.tftools.pairwise_dist">pairwise_dist() (in module geoml.tftools)</a>
 </li>
-      <li><a href="geoml.html#geoml.parameter.Parameter">Parameter (class in geoml.parameter)</a>
+      <li><a href="geoml.html#geoml.parameter.RealParameter">RealParameter (class in geoml.parameter)</a>
 </li>
       <li><a href="geoml.html#geoml.data.Directions3D.plane_normal">plane_normal() (geoml.data.Directions3D class method)</a>
 </li>
@@ -660,7 +660,7 @@
 </li>
       <li><a href="geoml.html#geoml.genetic.real_mutation_radial">real_mutation_radial() (in module geoml.genetic)</a>
 </li>
-      <li><a href="geoml.html#geoml.parameter.Parameter.refresh">refresh() (geoml.parameter.Parameter method)</a>
+      <li><a href="geoml.html#geoml.parameter.RealParameter.refresh">refresh() (geoml.parameter.RealParameter method)</a>
 
       <ul>
         <li><a href="geoml.html#geoml.transform.Anisotropy2D.refresh">(geoml.transform.Anisotropy2D method)</a>
@@ -693,7 +693,7 @@
       <li><a href="geoml.html#geoml.parameter.CompositionalParameter.set_limits">set_limits() (geoml.parameter.CompositionalParameter method)</a>
 
       <ul>
-        <li><a href="geoml.html#geoml.parameter.Parameter.set_limits">(geoml.parameter.Parameter method)</a>
+        <li><a href="geoml.html#geoml.parameter.RealParameter.set_limits">(geoml.parameter.RealParameter method)</a>
 </li>
         <li><a href="geoml.html#geoml.parameter.PositiveParameter.set_limits">(geoml.parameter.PositiveParameter method)</a>
 </li>
@@ -707,7 +707,7 @@
       <li><a href="geoml.html#geoml.parameter.CompositionalParameter.set_value">set_value() (geoml.parameter.CompositionalParameter method)</a>
 
       <ul>
-        <li><a href="geoml.html#geoml.parameter.Parameter.set_value">(geoml.parameter.Parameter method)</a>
+        <li><a href="geoml.html#geoml.parameter.RealParameter.set_value">(geoml.parameter.RealParameter method)</a>
 </li>
         <li><a href="geoml.html#geoml.parameter.PositiveParameter.set_value">(geoml.parameter.PositiveParameter method)</a>
 </li>
@@ -758,7 +758,7 @@
 <h2 id="U">U</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="geoml.html#geoml.parameter.Parameter.unfix">unfix() (geoml.parameter.Parameter method)</a>
+      <li><a href="geoml.html#geoml.parameter.RealParameter.unfix">unfix() (geoml.parameter.RealParameter method)</a>
 </li>
   </ul></td>
 </tr></table>
