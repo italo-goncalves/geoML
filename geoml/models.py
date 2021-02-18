@@ -486,7 +486,7 @@ class VGP(_GPModel):
 
         # directions
         self.directional_likelihood = _lk.Gaussian()
-        self.directional_likelihood.parameters["noise"].set_value(1e-12)
+        self.directional_likelihood.parameters["noise"].set_value(1e-6)
         self.directional_data = directional_data
         self.total_data_dir = 0
 
