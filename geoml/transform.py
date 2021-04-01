@@ -342,7 +342,7 @@ class Anisotropy3D(_Transform):
     
     def set_limits(self, data):
         self.parameters["maxrange"].set_limits(
-            min_val=data.diagonal / 100,
+            min_val=data.diagonal / 1000,
             max_val=data.diagonal * 2)
 
 

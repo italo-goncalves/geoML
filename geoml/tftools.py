@@ -51,6 +51,20 @@ def pairwise_dist(mat_a, mat_b):
     return dist
 
 
+@_tf.function(
+    input_signature=[_tf.TensorSpec(shape=[None, None], dtype=_tf.float64),
+                     _tf.TensorSpec(shape=[None, None], dtype=_tf.float64)])
+def pairwise_dist_l1(mat_a, mat_b):
+    """
+    Computes L1 pairwise distances between each elements of matrix and
+    each elements of mat_b.
+    """
+    with _tf.name_scope('pairwise_dist_l1'):
+        dif = mat_a[:, None, :] - mat_b[None, :, :]
+        dist = _tf.math.abs(dif)[:, :, 0]
+    return dist
+
+
 @_tf.function
 def composition_close(matrix):
     """
@@ -310,17 +324,17 @@ def lanczos(matmul_fn, q_0, m=30):
             swap_memory=False,
             parallel_iterations=1)
 
-        keep = _tf.squeeze(_tf.where(_tf.greater(beta, 1e-12)))
-        keep = _tf.cond(_tf.greater(_tf.rank(keep), 0),
-                        lambda: keep,
-                        lambda: _tf.constant([0], keep.dtype))
-        beta = _tf.gather(beta, keep)
-        beta = _tf.cond(_tf.greater(_tf.rank(beta), 0),
-                        lambda: beta,
-                        lambda: _tf.expand_dims(beta, axis=0))
-        pos = _tf.shape(beta)[0]
-        alpha = alpha[0:pos]
-        mat_q = mat_q[:, 0:pos]
+        # keep = _tf.squeeze(_tf.where(_tf.greater(beta, 1e-12)))
+        # keep = _tf.cond(_tf.greater(_tf.rank(keep), 0),
+        #                 lambda: keep,
+        #                 lambda: _tf.constant([0], keep.dtype))
+        # beta = _tf.gather(beta, keep)
+        # beta = _tf.cond(_tf.greater(_tf.rank(beta), 0),
+        #                 lambda: beta,
+        #                 lambda: _tf.expand_dims(beta, axis=0))
+        # pos = _tf.shape(beta)[0]
+        # alpha = alpha[0:pos]
+        # mat_q = mat_q[:, 0:pos]
 
         alpha_min = _tf.reduce_min(alpha)
         alpha = _tf.cond(_tf.greater(alpha_min, 0.0),
@@ -328,8 +342,10 @@ def lanczos(matmul_fn, q_0, m=30):
                          lambda: alpha - 1.1 * alpha_min)
 
         alpha = _tf.linalg.tensor_diag(alpha)
+        # beta = _tf.linalg.tensor_diag(
+        #     _tf.concat([beta[0:(pos-1)], [0.0]], axis=0))
         beta = _tf.linalg.tensor_diag(
-            _tf.concat([beta[0:(pos-1)], [0.0]], axis=0))
+            _tf.concat([beta[0:-1], [0.0]], axis=0))
         mat_t = alpha + _tf.roll(beta, 1, axis=1) + _tf.roll(beta, 1, axis=0)
 
     return mat_t, mat_q
@@ -343,6 +359,7 @@ def determinant_lanczos(matmul_fn, size, n=10, m=100, seed=1234):
                                            dtype=_tf.float64,
                                            minval=0, maxval=1)
         rnd = _tf.round(rnd) * 2 - 1
+        rnd = rnd / _tf.math.reduce_euclidean_norm(rnd, axis=0, keepdims=True)
 
         def loop_fn(vec):
             vec = _tf.expand_dims(vec, axis=1)
@@ -704,36 +721,46 @@ def get_lower_traingular(mat):
 #         _tf.matmul(basis, basis, True, False), _tf.transpose(basis)))
 #     return new_mat, proj_mat, mat_ok
 
-def rebuild_spd(mat):
-    # vals, vecs = _tf.linalg.eigh(mat)
-
-    # total = _tf.reduce_sum(vals)
-    # vals = _tf.maximum(
-    #     vals, - _tf.minimum(_tf.constant(0.0, _tf.float64),
-    #                         _tf.reduce_min(vals)))
-    # vals = vals / _tf.reduce_sum(vals) * total
-    # vals = _tf.maximum(vals, _tf.constant(1e-6, _tf.float64))
-
-    # basis = _tf.matmul(vecs, _tf.linalg.diag(_tf.sqrt(vals)))
-    # new_mat = _tf.matmul(basis, basis, False, True)
-
-    scale = _tf.reduce_max(_tf.math.abs(mat))
-    s, u, v = _tf.linalg.svd(mat / scale)
-    s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
-    new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(s), v, adjoint_b=True))
-
-    return new_mat * scale
-
-
-def check_spd(mat):
-    vals = _tf.linalg.eigvalsh(mat)
-    return _tf.reduce_all(_tf.greater(vals, _tf.constant(0, _tf.float64)))
-
-
-def pseudo_inv(mat):
-    scale = _tf.reduce_max(_tf.math.abs(mat))
-    s, u, v = _tf.linalg.svd(mat / scale)
-    # s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
-    new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(1/s), v, adjoint_b=True))
-
-    return new_mat / scale
+# def rebuild_spd(mat):
+#     # vals, vecs = _tf.linalg.eigh(mat)
+#
+#     # total = _tf.reduce_sum(vals)
+#     # vals = _tf.maximum(
+#     #     vals, - _tf.minimum(_tf.constant(0.0, _tf.float64),
+#     #                         _tf.reduce_min(vals)))
+#     # vals = vals / _tf.reduce_sum(vals) * total
+#     # vals = _tf.maximum(vals, _tf.constant(1e-6, _tf.float64))
+#
+#     # basis = _tf.matmul(vecs, _tf.linalg.diag(_tf.sqrt(vals)))
+#     # new_mat = _tf.matmul(basis, basis, False, True)
+#
+#     scale = _tf.reduce_max(_tf.math.abs(mat))
+#     s, u, v = _tf.linalg.svd(mat / scale)
+#     s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
+#     new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(s), v, adjoint_b=True))
+#
+#     return new_mat * scale
+#
+#
+# def check_spd(mat):
+#     vals = _tf.linalg.eigvalsh(mat)
+#     return _tf.reduce_all(_tf.greater(vals, _tf.constant(0, _tf.float64)))
+#
+#
+# def pseudo_inv(mat):
+#     scale = _tf.reduce_max(_tf.math.abs(mat))
+#     s, u, v = _tf.linalg.svd(mat / scale)
+#     # s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
+#     new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(1/s), v, adjoint_b=True))
+#
+#     return new_mat / scale
+#
+#
+# def random_rotations(dim, n, seed):
+#     with _tf.name_scope("random_rotations"):
+#         rnd = _tf.random.stateless_normal([n, dim, dim], seed,
+#                                           dtype=_tf.float64)
+#         q, r = _tf.linalg.qr(rnd)
+#         sign = _tf.math.sign(_tf.linalg.diag_part(r))
+#         q = _tf.matmul(q, _tf.linalg.diag(sign))
+#         return q

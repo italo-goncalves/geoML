@@ -206,7 +206,7 @@ class _ContinuousLikelihood(_Likelihood):
 
         lik_var = distribution.variance()
         weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
-        weights = weights**2
+        # weights = weights**2
 
         out = {"mean": _tf.squeeze(mu),
                "variance": _tf.squeeze(var),
@@ -240,14 +240,14 @@ class _ContinuousLikelihood(_Likelihood):
         #     return q
 
         if probabilities is not None:
-            # prob_vals = distribution.cdf(vals)
+            warped_vals = self.warping.backward(vals)
             prob_vals = _tf.map_fn(lambda x: distribution.cdf(x),
                                    _tf.transpose(vals))
 
-            n_data = _tf.shape(vals)[0]
+            n_data = _tf.shape(warped_vals)[0]
             quant = self._spline.interpolate(
                 prob_vals,
-                _tf.transpose(vals),
+                _tf.transpose(warped_vals),
                 _tf.tile(probabilities[:, None], [1, n_data])
             )
 
@@ -473,7 +473,7 @@ class EpsilonInsensitive(_ContinuousLikelihood):
             n_data = _tf.shape(vals)[0]
             quant = self._spline.interpolate(
                 prob_vals,
-                _tf.transpose(vals),
+                _tf.transpose(self.warping.backward(vals)),
                 _tf.tile(probabilities[:, None], [1, n_data])
             )
 
@@ -492,13 +492,14 @@ class EpsilonInsensitive(_ContinuousLikelihood):
 
 
 class Bernoulli(_Likelihood):
-    def __init__(self, shift=0):
+    def __init__(self, shift=0, sharpness=1):
         super().__init__()
         shift = _gpr.RealParameter(shift, -5, 5)
         slope = _gpr.PositiveParameter(1, 0.01, 100)
         self.parameters.update({"shift": shift, "slope": slope})
         self._all_parameters.append(shift)
         self._all_parameters.append(slope)
+        self.sharpness = sharpness
 
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
         vals = _tf.expand_dims(_ROOTS, axis=0)
@@ -516,7 +517,7 @@ class Bernoulli(_Likelihood):
 
         lik = _tf.reduce_sum(log_density * has_value)
 
-        return lik
+        return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, *args, **kwargs):
         vals = _tf.expand_dims(_ROOTS, axis=0)
@@ -531,23 +532,29 @@ class Bernoulli(_Likelihood):
         prob = distribution.cdf(vals)
         prob = _tf.reduce_sum(prob * w, axis=1)
 
+        entropy = (- prob * _tf.math.log(prob)
+                   - (1 - prob) * _tf.math.log(1 - prob)) / _np.log(2)
+        uncertainty = _tf.sqrt(_tf.squeeze(var) * entropy)
+
         prob_sims = distribution.cdf(sims)
 
         lik_var = prob * (1 - prob)
         weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
-        weights = weights ** 2
+        # weights = weights ** 2
 
         out = {"mean": _tf.squeeze(mu),
                "variance": _tf.squeeze(var),
                "simulations": prob_sims[:, 0, :],
                "probability": prob,
+               "entropy": entropy,
+               "uncertainty": uncertainty,
                "weights": _tf.squeeze(weights)}
 
         return out
 
     @classmethod
-    def one_class(cls):
-        lik = Bernoulli(shift=-3)
+    def one_class(cls, sharpness=1):
+        lik = Bernoulli(shift=-3, sharpness=sharpness)
         lik.parameters["shift"].fix()
         return lik
 
@@ -590,7 +597,7 @@ class BernoulliMaximumMargin(_Likelihood):
 
         lik_var = prob * (1 - prob)
         weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
-        weights = weights ** 2
+        # weights = weights ** 2
 
         out = {"mean": _tf.squeeze(mu),
                "variance": _tf.squeeze(var),
@@ -649,7 +656,7 @@ class Dirichlet(_ContinuousLikelihood):
         lik_var = distribution.variance()
         lik_var = _tf.reduce_sum(_tf.reduce_mean(lik_var, axis=1), axis=1)
         weights = _tf.reduce_sum(explained_var, axis=1) / (lik_var + 1e-6)
-        weights = weights ** 2
+        # weights = weights ** 2
 
         out = {"mean": mu,
                "variance": var,
@@ -703,7 +710,9 @@ class CategoricalGaussianIndicator(_Likelihood):
         log_n = _tf.math.log(_tf.cast(_tf.shape(mu)[1], _tf.float64))
         entropy = - _tf.reduce_sum(prob * _tf.math.log(prob), axis=1) / log_n
         entropy = _tf.maximum(entropy, 0.0)
-        uncertainty = _tf.sqrt(_tf.reduce_mean(var, axis=1) * entropy)
+        # avg_var = _tf.reduce_mean(var, axis=1)
+        avg_var = _tf.reduce_sum(var * prob, axis=1)
+        uncertainty = _tf.sqrt(avg_var * entropy)
         indicators = _tf.math.log(prob + 1e-6)
 
         idx = _tf.range(_tf.shape(mu)[0])[:, None]
@@ -725,7 +734,7 @@ class CategoricalGaussianIndicator(_Likelihood):
         lik_var = prob * (1 - prob)
         lik_var = _tf.reduce_sum(lik_var, axis=1)
         weights = _tf.reduce_sum(explained_var, axis=1) / (lik_var + 1e-6)
-        weights = weights ** 2
+        # weights = weights ** 2
 
         output = {"mean": mu,
                   "variance": var,

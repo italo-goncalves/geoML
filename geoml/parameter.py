@@ -14,15 +14,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["RealParameter",
-           "PositiveParameter",
-           "CompositionalParameter",
-           "CircularParameter"]
+# __all__ = ["RealParameter",
+#            "PositiveParameter",
+#            "CompositionalParameter",
+#            "CircularParameter"]
+
+import geoml.tftools as _tftools
 
 import tensorflow as _tf
 import numpy as _np
-
-# import geoml.tftools as _tftools
 
 
 class RealParameter(object):
@@ -224,3 +224,26 @@ class NaturalParameter(RealParameter):
             axis=0
         )
         self.variable.assign(eta)
+
+
+class OrthonormalMatrix(RealParameter):
+    def __init__(self, rows, cols, batch_shape=(),
+                 fixed=False, name="Parameter"):
+        if cols > rows:
+            raise ValueError("cols cannot be higher than rows")
+        # rnd = _tf.random.stateless_normal(batch_shape + (rows, cols),
+        #                                   seed=[rows, cols])
+        rnd = _tf.random.normal(batch_shape + (rows, cols))
+        q, _ = _tf.linalg.qr(rnd)
+        value = q.numpy()
+        min_val = -1.1 * _np.ones_like(value)
+        max_val = 1.1 * _np.ones_like(value)
+        super().__init__(value, min_val, max_val, fixed, name)
+
+    def refresh(self):
+        value = self.get_value()
+        norm = _tf.math.reduce_euclidean_norm(value, axis=0, keepdims=True)
+        value = value / (norm + 1e-6)
+        q, _ = _tf.linalg.qr(value)
+        # q = q * norm
+        self.variable.assign(q)

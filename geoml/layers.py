@@ -18,6 +18,7 @@ import geoml.parameter as _gpr
 import geoml.tftools as _tftools
 import geoml.kernels as _kr
 import geoml.transform as _tr
+import geoml.interpolation as _gint
 
 import numpy as _np
 import tensorflow as _tf
@@ -104,18 +105,22 @@ class Generic(_LatentVariableLayer):
                 _np.tile(box[1, :], [self.n_ps, 1]),
                 fixed=fix_inducing_points
             ),
-            # "alpha": _gpr.RealParameter(
-            #     _np.zeros([self.n_latent, self.n_ps, 1]) + 0.1,
-            #     _np.zeros([self.n_latent, self.n_ps, 1]) - 10,
-            #     _np.zeros([self.n_latent, self.n_ps, 1]) + 10
-            # ),
             "alpha_white": _gpr.RealParameter(
-                _np.zeros([self.n_latent, self.n_ps, 1]) + 0.01,
+                _np.random.normal(
+                    scale=1e-6,
+                    size=[self.n_latent, self.n_ps, 1]
+                ),
+                # _np.zeros([self.n_latent, self.n_ps, 1]) + 0.01,
                 _np.zeros([self.n_latent, self.n_ps, 1]) - 10,
                 _np.zeros([self.n_latent, self.n_ps, 1]) + 10
             ),
             "delta": _gpr.PositiveParameter(
                 _np.ones([self.n_latent, self.n_ps]) * 1,
+                # _np.random.normal(
+                #     loc=1,
+                #     scale=1e-3,
+                #     size=[self.n_latent, self.n_ps]
+                # ),
                 _np.ones([self.n_latent, self.n_ps]) * 1e-6,
                 _np.ones([self.n_latent, self.n_ps]) * 1e4
             )
@@ -262,6 +267,10 @@ class Generic(_LatentVariableLayer):
 
 
 class _GriddedLayer(_LatentVariableLayer):
+    def __init__(self):
+        super().__init__()
+        self.kernel = _kr.Gaussian()
+
     @staticmethod
     def rowwise_separable_matmul(mat_list, mat):
         # shape of matrices in mat_list: [batch, n_rows, grid_size_i]
@@ -269,34 +278,50 @@ class _GriddedLayer(_LatentVariableLayer):
         with _tf.name_scope("rowwise_separable_matmul"):
             dims = [_tf.shape(m)[2] for m in mat_list]
             mat_2 = _tf.transpose(mat, perm=[0, 2, 1])
-            mat_2 = _tf.reshape(
-                mat_2, [_tf.shape(mat_2)[0], _tf.shape(mat_2)[1]] + dims)
+            mat_sh = _tf.shape(mat_2)
+            mat_2 = _tf.reshape(mat_2, [mat_sh[0], mat_sh[1]] + dims)
 
             op_str = ""
-            idx = "abc"[:len(dims)]
-            for i in range(len(dims)):
-                op_str += "...i" + idx[i] + ","
+            idx = "abcde"[:len(dims)]
+            for s in idx:
+                op_str += "...i%s," % s
             op_str += "...j" + idx + "->...ij"
 
             all_mats = mat_list + [mat_2]
             out = _tf.einsum(op_str, *all_mats)
             return out
 
-    @staticmethod
-    def covariance_matrix(x, y, ranges):
+    def covariance_matrix(self, x, y, ranges):
         # x, y and ranges must be 1d
         with _tf.name_scope("separable_covariance_matrix"):
-            dist = x[:, None] - y[None, :]
-            dist_sq = (dist[None, :, :] / ranges[:, None, None]) ** 2
-            cov = _tf.exp(-3 * dist_sq)
+            dist = _tf.math.abs(x[:, None] - y[None, :])
+            dist = dist[None, :, :] / ranges[:, None, None]
+            cov = self.kernel.kernelize(dist)
             return cov
 
     def set_kernel_limits(self, data):
         pass
 
+    @staticmethod
+    def tensorized_max_eigval(matmul_fn, size, n_vecs=5, iterations=10):
+        with _tf.name_scope("tensorized_max_eigval"):
+            vecs_x = _tf.sign(_tf.random.normal([size, n_vecs],
+                                                dtype=_tf.float64))
+            for _ in range(iterations):
+                vecs_x = matmul_fn(vecs_x)
+            vecs_y = matmul_fn(vecs_x)
+
+            num = _tftools.prod_n([_tf.reduce_sum(x*y, axis=0)
+                                   for x, y in zip(vecs_x, vecs_y)])
+            den = _tftools.prod_n([_tf.reduce_sum(x**2, axis=0)
+                                   for x in vecs_x])
+
+            eigvals = num / den
+            return _tf.reduce_max(eigvals)
+
 
 class Decoupled(_GriddedLayer):
-    def __init__(self, n_latent, sparse_grid, dense_grid):
+    def __init__(self, n_latent, sparse_grid, dense_grid, mean_components=10):
         super().__init__()
         if sparse_grid.__class__.__name__ not in ("Grid1D", "Grid2D", "Grid3D"):
             raise Exception("sparse_grid must be a grid object")
@@ -307,20 +332,22 @@ class Decoupled(_GriddedLayer):
                              " do not match")
         n_dim = sparse_grid.n_dim
 
+        if not isinstance(mean_components, (list, tuple)):
+            mean_components = [mean_components] * n_dim
+        self.total_comp = _np.prod(mean_components)
+
         self._n_latent = n_latent
-        self.cov = [None] * n_dim
-        self.cov_inv = [None] * n_dim
-        self.cov_chol = [None] * n_dim
+        self.sparse_cov = [None] * n_dim
+        self.sparse_cov_inv = [None] * n_dim
+        self.sparse_cov_chol = [None] * n_dim
         self.dense_cov = [None] * n_dim
+        self.dense_cov_chol = [None] * n_dim
         self.dense_cov_inv = [None] * n_dim
         self.cross_grid_cov = [None] * n_dim
-        # self.cross_grid_weights = [None] * n_dim
-        # self.mat_s = None
-        # self.chol_s = None
-        self.cov_smooth = None
-        self.cov_smooth_chol = None
-        self.cov_smooth_inv = None
-        self.chol_r = None
+        self.sparse_cov_smooth = None
+        self.sparse_cov_smooth_chol = None
+        self.sparse_cov_smooth_inv = None
+        self.sparse_chol_r = None
 
         self.dense_pseudo_inputs = [_tf.constant(g, _tf.float64)
                                     for g in dense_grid.grid]
@@ -329,15 +356,11 @@ class Decoupled(_GriddedLayer):
 
         self.dense_n_ps = dense_grid.coordinates.shape[0]
         self.sparse_n_ps = sparse_grid.coordinates.shape[0]
-        self.grid_size = sparse_grid.grid_size
+        self.sparse_grid_size = sparse_grid.grid_size
+        self.dense_grid_size = dense_grid.grid_size
 
         self.parameters.update({
-            "alpha_dense": _gpr.RealParameter(
-                _np.zeros([self.n_latent, self.dense_n_ps, 1]) + 0.01,
-                _np.zeros([self.n_latent, self.dense_n_ps, 1]) - 10,
-                _np.zeros([self.n_latent, self.dense_n_ps, 1]) + 10
-            ),
-            "alpha_sparse": _gpr.RealParameter(
+            "alpha_white_sparse": _gpr.RealParameter(
                 _np.zeros([self.n_latent, self.sparse_n_ps, 1]) - 0.01,
                 _np.zeros([self.n_latent, self.sparse_n_ps, 1]) - 10,
                 _np.zeros([self.n_latent, self.sparse_n_ps, 1]) + 10
@@ -346,6 +369,14 @@ class Decoupled(_GriddedLayer):
                 _np.ones([self.n_latent, self.sparse_n_ps]),
                 _np.ones([self.n_latent, self.sparse_n_ps]) * 1e-6,
                 _np.ones([self.n_latent, self.sparse_n_ps]) * 10
+            ),
+            "core_tensor": _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.n_latent] + mean_components
+                ),
+                _np.ones([self.n_latent] + mean_components) * -10,
+                _np.ones([self.n_latent] + mean_components) * 10
             )
         })
 
@@ -353,8 +384,10 @@ class Decoupled(_GriddedLayer):
             n_ps = dense_grid.grid_size[d]
             dif = dense_grid.grid[d][-1] - dense_grid.grid[d][0]
             self.parameters.update({
+                "alpha_white_dense_%d" % d: _gpr.OrthonormalMatrix(
+                    n_ps, mean_components[d], (self.n_latent,)
+                ),
                 "ranges_%d" % d: _gpr.PositiveParameter(
-                    # _np.ones([self.n_latent]) * dif / 2,
                     dif / _np.arange(1, self.n_latent + 1),
                     _np.ones([self.n_latent]) * dif / n_ps,
                     _np.ones([self.n_latent]) * dif * 2
@@ -365,37 +398,44 @@ class Decoupled(_GriddedLayer):
 
     def refresh(self, jitter=1e-9):
         with _tf.name_scope("decoupled_layer_refresh"):
-            n_dim = len(self.cov)
+            n_dim = len(self.sparse_cov)
 
             # prior
             for d in range(n_dim):
                 ps = self.sparse_pseudo_inputs[d]
                 rng = self.parameters["ranges_%d" % d].get_value()
 
-                eye = _tf.eye(self.grid_size[d], dtype=_tf.float64,
+                eye = _tf.eye(self.sparse_grid_size[d], dtype=_tf.float64,
                               batch_shape=[self.n_latent])
                 cov_ps = self.covariance_matrix(ps, ps, rng)
                 chol_k = _tf.linalg.cholesky(cov_ps + eye * jitter)
                 k_inv = _tf.linalg.cholesky_solve(chol_k, eye)
 
-                self.cov[d] = cov_ps
-                self.cov_chol[d] = chol_k
-                self.cov_inv[d] = k_inv
+                self.sparse_cov[d] = cov_ps
+                self.sparse_cov_chol[d] = chol_k
+                self.sparse_cov_inv[d] = k_inv
 
                 ps_dense = self.dense_pseudo_inputs[d]
                 dense_cov = self.covariance_matrix(ps_dense, ps_dense, rng)
                 self.dense_cov[d] = dense_cov
+
+                eye_dense = _tf.eye(self.dense_grid_size[d], dtype=_tf.float64,
+                                    batch_shape=[self.n_latent])
+                self.dense_cov_chol[d] = _tf.linalg.cholesky(
+                    self.dense_cov[d] + eye_dense * jitter)
 
                 cross_cov = self.covariance_matrix(ps, ps_dense, rng)
                 self.cross_grid_cov[d] = cross_cov
 
             # posterior
             kron = _tf.linalg.LinearOperatorKronecker([
-                _tf.linalg.LinearOperatorFullMatrix(mat) for mat in self.cov
+                _tf.linalg.LinearOperatorFullMatrix(mat)
+                for mat in self.sparse_cov
             ])
             cov = kron.to_dense()
             kron_inv = _tf.linalg.LinearOperatorKronecker([
-                _tf.linalg.LinearOperatorFullMatrix(mat) for mat in self.cov_inv
+                _tf.linalg.LinearOperatorFullMatrix(mat)
+                for mat in self.sparse_cov_inv
             ])
             cov_inv = kron_inv.to_dense()
 
@@ -405,22 +445,20 @@ class Decoupled(_GriddedLayer):
             eye = _tf.eye(self.sparse_n_ps, dtype=_tf.float64,
                           batch_shape=[self.n_latent])
 
-            self.cov_smooth = cov + delta_diag
-            self.cov_smooth_chol = _tf.linalg.cholesky(
-                self.cov_smooth + eye * jitter)
-            self.cov_smooth_inv = _tf.linalg.cholesky_solve(
-                self.cov_smooth_chol, eye)
-            self.chol_r = _tf.linalg.cholesky(
-                cov_inv - self.cov_smooth_inv + eye * jitter)
+            self.sparse_cov_smooth = cov + delta_diag
+            self.sparse_cov_smooth_chol = _tf.linalg.cholesky(
+                self.sparse_cov_smooth + eye * jitter)
+            self.sparse_cov_smooth_inv = _tf.linalg.cholesky_solve(
+                self.sparse_cov_smooth_chol, eye)
+            self.sparse_chol_r = _tf.linalg.cholesky(
+                cov_inv - self.sparse_cov_smooth_inv + eye * jitter)
 
     def predict(self, x, n_sim=1, seed=(0, 0), jitter=1e-9):
         self.refresh(jitter)
 
         with _tf.name_scope("decoupled_layer_prediction"):
-            alpha_dense = self.parameters["alpha_dense"].get_value()
-            alpha_sparse = self.parameters["alpha_sparse"].get_value()
             x_split = _tf.unstack(x, axis=1)
-            n_dim = len(self.cov)
+            n_dim = len(self.sparse_cov)
 
             # covariances
             point_var = _tf.ones([self.n_latent, _tf.shape(x)[0]],
@@ -446,20 +484,52 @@ class Decoupled(_GriddedLayer):
                         batch_shape=[self.n_latent])
             )
 
-            kron_correction = _tf.linalg.LinearOperatorKronecker([
-                _tf.linalg.LinearOperatorFullMatrix(_tf.matmul(mat1, mat2))
-                for mat1, mat2 in zip(self.cov_inv, self.cross_grid_cov)
-            ])
-            alpha_correction = kron_correction.matmul(alpha_dense)
-
             # latent prediction
-            # [n_latent, dense_n_ps, 1]
-            mu = self.rowwise_separable_matmul(cov_cross_dense, alpha_dense) \
-                 + self.rowwise_separable_matmul(
-                cov_cross_sparse, alpha_sparse - alpha_correction)
+            alpha_white_sparse = self.parameters["alpha_white_sparse"] \
+                .get_value()
+            kron = _tf.linalg.LinearOperatorKronecker([
+                _tf.linalg.LinearOperatorLowerTriangular(mat)
+                for mat in self.sparse_cov_chol
+            ])
+            alpha_sparse = kron.solve(alpha_white_sparse, adjoint=True)
+            mu_sparse = self.rowwise_separable_matmul(
+                cov_cross_sparse, alpha_sparse)
 
+            alpha_dense = []
+            alpha_correction = []
+            for d in range(n_dim):
+                aw = self.parameters["alpha_white_dense_%d" % d].get_value()
+                ad = _tf.linalg.solve(self.dense_cov_chol[d], aw, adjoint=True)
+                alpha_dense.append(ad)
+
+                a_cross = _tf.linalg.solve(
+                    self.sparse_cov_chol[d],
+                    _tf.matmul(self.cross_grid_cov[d], ad)
+                )
+                alpha_correction.append(a_cross)
+
+            mus_dense = [_tf.matmul(cov, a)
+                         for cov, a in zip(cov_cross_dense, alpha_dense)]
+            dims = "abcde"[:n_dim]
+            op = ""
+            for s in dims:
+                op += "xy%s," % s
+            op += "x" + dims + "->xy"
+            core = self.parameters["core_tensor"].get_value()
+            mu_dense = _tf.einsum(op, *mus_dense, core)
+            mu_dense = _tf.expand_dims(mu_dense, 2)
+
+            mus_correction = [_tf.matmul(cov, a)
+                              for cov, a in zip(cov_cross_sparse,
+                                                alpha_correction)]
+            mu_correction = _tf.einsum(op, *mus_correction, core)
+            mu_correction = _tf.expand_dims(mu_correction, 2)
+
+            mu = mu_dense + mu_sparse - mu_correction
+
+            # variance
             explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross_full, self.cov_smooth_inv)
+                _tf.matmul(cov_cross_full, self.sparse_cov_smooth_inv)
                 * cov_cross_full,
                 axis=2, keepdims=False)  # [n_latent, n_data]
             var = point_var - explained_var
@@ -470,7 +540,7 @@ class Decoupled(_GriddedLayer):
                 seed=seed, dtype=_tf.float64
             )
             sims = _tf.matmul(cov_cross_full,
-                              _tf.matmul(self.chol_r, rnd)) + mu
+                              _tf.matmul(self.sparse_chol_r, rnd)) + mu
 
             return mu, var, sims, explained_var
 
@@ -478,372 +548,50 @@ class Decoupled(_GriddedLayer):
         self.refresh(jitter)
 
         with _tf.name_scope("decoupled_KL_divergence"):
-            alpha_dense = self.parameters["alpha_dense"].get_value()
-            alpha_sparse = self.parameters["alpha_sparse"].get_value()
+            n_dim = len(self.sparse_cov)
+
+            alpha_white_sparse = self.parameters["alpha_white_sparse"] \
+                .get_value()
+            alpha_white_dense = [
+                self.parameters["alpha_white_dense_%d" % d].get_value()
+                for d in range(n_dim)
+            ]
+            alpha_white_correction = []
+            for d in range(n_dim):
+                ad = _tf.linalg.solve(
+                    self.dense_cov_chol[d], alpha_white_dense[d], adjoint=True)
+
+                a_cross = _tf.linalg.solve(
+                    self.sparse_cov_chol[d],
+                    _tf.matmul(self.cross_grid_cov[d], ad)
+                )
+                alpha_white_correction.append(a_cross)
+
+            core = self.parameters["core_tensor"].get_value()
+
+            dims = "abcde"[:n_dim]
+            dims_2 = "rstuv"[:n_dim]
+            op = ""
+            for s, s2 in zip(dims, dims_2):
+                op += "x%s%s," % (s2, s)
+            op += "x" + dims + "->x" + dims_2
+
+            core_correction = _tf.einsum(op, *alpha_white_correction, core)
+
+            fit = _tf.reduce_sum(core ** 2) \
+                  + _tf.reduce_sum(alpha_white_sparse**2) \
+                  - _tf.reduce_sum(core_correction ** 2)
+
             delta = self.parameters["delta"].get_value()
-
-            kron_dense = _tf.linalg.LinearOperatorKronecker(
-                [_tf.linalg.LinearOperatorFullMatrix(mat)
-                 for mat in self.dense_cov]
-            )
-            pseudo_mean_dense = kron_dense.matmul(alpha_dense)
-
-            kron_sparse = _tf.linalg.LinearOperatorKronecker(
-                [_tf.linalg.LinearOperatorFullMatrix(mat)
-                 for mat in self.cov]
-            )
-            pseudo_mean_sparse = kron_sparse.matmul(alpha_sparse)
-
-            kron_cross = _tf.linalg.LinearOperatorKronecker(
-                [_tf.linalg.LinearOperatorFullMatrix(
-                    _tf.matmul(mat1, _tf.matmul(mat2, mat1), True, False))
-                 for mat1, mat2 in zip(self.cross_grid_cov, self.cov_inv)]
-            )
-            pseudo_mean_correction = kron_cross.matmul(alpha_dense)
-
-            fit = _tf.reduce_sum(alpha_dense * pseudo_mean_dense) \
-                  + _tf.reduce_sum(alpha_sparse * pseudo_mean_sparse) \
-                  - _tf.reduce_sum(alpha_dense * pseudo_mean_correction)
-
             cov_sparse = _tf.linalg.LinearOperatorKronecker(
                 [_tf.linalg.LinearOperatorFullMatrix(mat)
-                 for mat in self.cov]).to_dense()
+                 for mat in self.sparse_cov]).to_dense()
 
-            tr = _tf.reduce_sum(self.cov_smooth_inv * cov_sparse)
+            tr = _tf.reduce_sum(self.sparse_cov_smooth_inv * cov_sparse)
             det_1 = 2 * _tf.reduce_sum(_tf.math.log(
-                _tf.linalg.diag_part(self.cov_smooth_chol)))
+                _tf.linalg.diag_part(self.sparse_cov_smooth_chol)))
             det_2 = _tf.reduce_sum(_tf.math.log(delta))
             kl = 0.5 * (- tr + fit + det_1 - det_2)
-
-            return kl
-
-
-class Separable(_GriddedLayer):
-    def __init__(self, n_latent, inducing_points):
-        super().__init__()
-        if inducing_points.__class__.__name__ \
-                not in ("Grid1D", "Grid2D", "Grid3D"):
-            raise Exception("inducing_points must be a grid object")
-        n_dim = inducing_points.n_dim
-
-        self._n_latent = n_latent
-        self.cov = [None] * n_dim
-        self.cov_smooth = [None] * n_dim
-        self.cov_smooth_chol = [None] * n_dim
-        self.cov_smooth_inv = [None] * n_dim
-        self.cov_inv = [None] * n_dim
-        self.cov_chol = [None] * n_dim
-        self.mat_r = [None] * n_dim
-        self.chol_r = [None] * n_dim
-        self.pseudo_inputs = [_tf.constant(g, _tf.float64)
-                              for g in inducing_points.grid]
-
-        self.n_ps = inducing_points.coordinates.shape[0]
-        self.grid_size = inducing_points.grid_size
-        self.parameters.update({
-            "alpha_white": _gpr.RealParameter(
-                _np.zeros([self.n_latent, self.n_ps, 1]) + 0.01,
-                _np.zeros([self.n_latent, self.n_ps, 1]) - 10,
-                _np.zeros([self.n_latent, self.n_ps, 1]) + 10
-            )
-        })
-
-        for d in range(n_dim):
-            n_ps = inducing_points.grid_size[d]
-            step = inducing_points.step_size[d]
-            dif = inducing_points.grid[d][-1] - inducing_points.grid[d][0]
-            self.parameters.update({
-                "delta_%d" % d: _gpr.PositiveParameter(
-                    _np.ones([self.n_latent, n_ps]),
-                    _np.ones([self.n_latent, n_ps]) * 0.001,
-                    _np.ones([self.n_latent, n_ps]) + 10
-                ),
-                "ranges_%d" % d: _gpr.PositiveParameter(
-                    # dif / _np.arange(1, self.n_latent + 1),
-                    _np.ones([self.n_latent]) * step,
-                    _np.ones([self.n_latent]) * step / 2,
-                    _np.ones([self.n_latent]) * dif * 2,
-                    fixed=False
-                )
-            })
-
-        self._all_parameters += [v for v in self.parameters.values()]
-
-    def refresh(self, jitter=1e-9):
-        with _tf.name_scope("separable_layer_refresh"):
-            n_dim = len(self.cov)
-
-            for d in range(n_dim):
-                # prior
-                ps = self.pseudo_inputs[d]
-                rng = self.parameters["ranges_%d" % d].get_value()
-
-                eye = _tf.eye(self.grid_size[d], dtype=_tf.float64,
-                              batch_shape=[self.n_latent])
-                cov_ps = self.covariance_matrix(ps, ps, rng)
-                chol_k = _tf.linalg.cholesky(cov_ps + eye * jitter)
-                k_inv = _tf.linalg.cholesky_solve(chol_k, eye)
-
-                self.cov[d] = cov_ps
-                self.cov_chol[d] = chol_k
-                self.cov_inv[d] = k_inv
-
-                # posterior
-                delta = self.parameters["delta_%d" % d].get_value()
-                delta_diag = _tf.linalg.diag(delta)
-                self.cov_smooth[d] = self.cov[d] + delta_diag
-                self.cov_smooth_chol[d] = _tf.linalg.cholesky(
-                    self.cov_smooth[d] + eye * jitter)
-                self.cov_smooth_inv[d] = _tf.linalg.cholesky_solve(
-                    self.cov_smooth_chol[d], eye)
-                self.chol_r[d] = _tf.linalg.cholesky(
-                    self.cov_inv[d] - self.cov_smooth_inv[d] + eye * jitter)
-                self.mat_r[d] = _tf.matmul(self.chol_r[d], self.chol_r[d],
-                                           False, True)
-
-    def predict(self, x, n_sim=1, seed=(0, 0), jitter=1e-9):
-        with _tf.name_scope("separable_layer_prediction"):
-            self.refresh(jitter)
-
-            x_split = _tf.unstack(x, axis=1)
-            n_dim = len(self.cov)
-
-            alpha_white = self.parameters["alpha_white"].get_value()
-            kron_op_alpha = _tf.linalg.LinearOperatorKronecker(
-                [_tf.linalg.LinearOperatorLowerTriangular(mat)
-                 for mat in self.cov_chol]
-            )
-            alpha = kron_op_alpha.solve(alpha_white, adjoint=True)
-
-            # covariances
-            point_var = _tf.ones([self.n_latent, _tf.shape(x)[0]],
-                                 dtype=_tf.float64)
-
-            cov_cross = []
-            for d in range(n_dim):
-                rng = self.parameters["ranges_%d" % d].get_value()
-                cov = self.covariance_matrix(
-                    x_split[d], self.pseudo_inputs[d], rng)
-                cov_cross.append(cov)  # [n_latent, n_data, n_ps_d]
-
-            # latent prediction
-            mu = self.rowwise_separable_matmul(
-                cov_cross, alpha)  # [n_latent, n_ps, 1]
-
-            explained_var = _tftools.prod_n(
-                [_tf.reduce_sum(_tf.matmul(cov_cr, cov_inv) * cov_cr,
-                                axis=2, keepdims=False)  # [n_latent, n_data]
-                 for cov_cr, cov_inv in zip(cov_cross, self.cov_smooth_inv)])
-            var = point_var - explained_var
-            var = _tf.maximum(var, 0.0)
-
-            rnd = _tf.random.stateless_normal(
-                shape=[self.n_latent, self.n_ps, n_sim],
-                seed=seed, dtype=_tf.float64
-            )
-            kron_op = _tf.linalg.LinearOperatorKronecker(
-                [_tf.linalg.LinearOperatorLowerTriangular(mat)
-                 for mat in self.chol_r]
-            )
-            sims = self.rowwise_separable_matmul(
-                cov_cross, kron_op.matmul(rnd))
-            sims = sims + mu
-
-            return mu, var, sims, explained_var
-
-    def kl_divergence(self, jitter=1e-9):
-        with _tf.name_scope("separable_KL_divergence"):
-            self.refresh(jitter)
-
-            alpha_white = self.parameters["alpha_white"].get_value()
-
-            tr = _tftools.prod_n(
-                [_tf.reduce_sum(cov * mat_r)
-                 for cov, mat_r in zip(self.cov, self.mat_r)])
-            fit = _tf.reduce_sum(alpha_white**2)
-            det_k = _tf.add_n(
-                [2 * _tf.reduce_sum(_tf.math.log(
-                    _tf.linalg.diag_part(chol))) * self.n_ps / n
-                 for chol, n in zip(self.cov_chol, self.grid_size)])
-            det_r = _tf.add_n(
-                [2 * _tf.reduce_sum(_tf.math.log(
-                    _tf.linalg.diag_part(chol))) * self.n_ps / n
-                 for chol, n in zip(self.chol_r, self.grid_size)])
-            const = _tf.constant(self.n_ps * self.n_latent, _tf.float64)
-            kl = 0.5 * (tr + fit - const - det_k - det_r)
-
-            return kl
-
-
-class FullySeparable(_GriddedLayer):
-    def __init__(self, n_latent, inducing_points, n_components=10):
-        super().__init__()
-        if inducing_points.__class__.__name__ \
-                not in ("Grid1D", "Grid2D", "Grid3D"):
-            raise Exception("inducing_points must be a grid object")
-        n_dim = inducing_points.n_dim
-
-        self._n_latent = n_latent
-        self.cov = [None] * n_dim
-        self.cov_smooth = [None] * n_dim
-        self.cov_smooth_chol = [None] * n_dim
-        self.cov_smooth_inv = [None] * n_dim
-        self.cov_inv = [None] * n_dim
-        self.cov_chol = [None] * n_dim
-        self.mat_r = [None] * n_dim
-        self.chol_r = [None] * n_dim
-        self.pseudo_inputs = [_tf.constant(g, _tf.float64)
-                              for g in inducing_points.grid]
-
-        self.n_ps = inducing_points.coordinates.shape[0]
-        self.grid_size = inducing_points.grid_size
-        # self.parameters.update({
-        #     "alpha_white": _gpr.RealParameter(
-        #         _np.zeros([self.n_latent, self.n_ps, 1]) + 0.01,
-        #         _np.zeros([self.n_latent, self.n_ps, 1]) - 10,
-        #         _np.zeros([self.n_latent, self.n_ps, 1]) + 10
-        #     )
-        # })
-
-        for d in range(n_dim):
-            n_ps = inducing_points.grid_size[d]
-            step = inducing_points.step_size[d]
-            dif = inducing_points.grid[d][-1] - inducing_points.grid[d][0]
-            self.parameters.update({
-                "alpha_white_%d" % d: _gpr.RealParameter(
-                    _np.random.normal(
-                        scale=1e-3,
-                        size=[self.n_latent, n_ps, n_components]
-                    ),
-                    # _np.zeros([self.n_latent, n_ps, n_components]) + 0.01,
-                    _np.zeros([self.n_latent, n_ps, n_components]) - 10,
-                    _np.zeros([self.n_latent, n_ps, n_components]) + 10,
-                ),
-                "delta_%d" % d: _gpr.PositiveParameter(
-                    _np.ones([self.n_latent, n_ps]),
-                    _np.ones([self.n_latent, n_ps]) * 0.001,
-                    _np.ones([self.n_latent, n_ps]) + 10
-                ),
-                "ranges_%d" % d: _gpr.PositiveParameter(
-                    # dif / _np.arange(1, self.n_latent + 1),
-                    _np.ones([self.n_latent]) * step,
-                    _np.ones([self.n_latent]) * step / 2,
-                    _np.ones([self.n_latent]) * dif * 2,
-                    fixed=False
-                )
-            })
-
-        self._all_parameters += [v for v in self.parameters.values()]
-
-    def refresh(self, jitter=1e-9):
-        with _tf.name_scope("separable_layer_refresh"):
-            n_dim = len(self.cov)
-
-            for d in range(n_dim):
-                # prior
-                ps = self.pseudo_inputs[d]
-                rng = self.parameters["ranges_%d" % d].get_value()
-
-                eye = _tf.eye(self.grid_size[d], dtype=_tf.float64,
-                              batch_shape=[self.n_latent])
-                cov_ps = self.covariance_matrix(ps, ps, rng)
-                chol_k = _tf.linalg.cholesky(cov_ps + eye * jitter)
-                k_inv = _tf.linalg.cholesky_solve(chol_k, eye)
-
-                self.cov[d] = cov_ps
-                self.cov_chol[d] = chol_k
-                self.cov_inv[d] = k_inv
-
-                # posterior
-                delta = self.parameters["delta_%d" % d].get_value()
-                delta_diag = _tf.linalg.diag(delta)
-                self.cov_smooth[d] = self.cov[d] + delta_diag
-                self.cov_smooth_chol[d] = _tf.linalg.cholesky(
-                    self.cov_smooth[d] + eye * jitter)
-                self.cov_smooth_inv[d] = _tf.linalg.cholesky_solve(
-                    self.cov_smooth_chol[d], eye)
-                self.chol_r[d] = _tf.linalg.cholesky(
-                    self.cov_inv[d] - self.cov_smooth_inv[d] + eye * jitter)
-                self.mat_r[d] = _tf.matmul(self.chol_r[d], self.chol_r[d],
-                                           False, True)
-
-    def predict(self, x, n_sim=1, seed=(0, 0), jitter=1e-9):
-        with _tf.name_scope("separable_layer_prediction"):
-            self.refresh(jitter)
-
-            x_split = _tf.unstack(x, axis=1)
-            n_dim = len(self.cov)
-
-            alphas = []
-            for d in range(n_dim):
-                alphas.append(_tf.linalg.solve(
-                    self.cov_chol[d],
-                    self.parameters["alpha_white_%d" % d].get_value()
-                ))
-
-            # covariances
-            point_var = _tf.ones([self.n_latent, _tf.shape(x)[0]],
-                                 dtype=_tf.float64)
-
-            cov_cross = []
-            for d in range(n_dim):
-                rng = self.parameters["ranges_%d" % d].get_value()
-                cov = self.covariance_matrix(
-                    x_split[d], self.pseudo_inputs[d], rng)
-                cov_cross.append(cov)  # [n_latent, n_data, n_ps_d]
-
-            # latent prediction
-            mu = _tftools.prod_n([_tf.matmul(cov, a)
-                                  for cov, a in zip(cov_cross, alphas)])
-            mu = _tf.reduce_sum(mu, axis=2, keepdims=True)
-
-            explained_var = _tftools.prod_n(
-                [_tf.reduce_sum(_tf.matmul(cov_cr, cov_inv) * cov_cr,
-                                axis=2, keepdims=False)  # [n_latent, n_data]
-                 for cov_cr, cov_inv in zip(cov_cross, self.cov_smooth_inv)])
-            var = point_var - explained_var
-            var = _tf.maximum(var, 0.0)
-
-            rnd = [_tf.random.stateless_normal(
-                shape=[self.n_latent, n, n_sim],
-                seed=seed, dtype=_tf.float64
-            ) for n in self.grid_size]
-            sims = [_tf.matmul(cov, _tf.matmul(ch, r))
-                    for cov, ch, r in zip(cov_cross, self.chol_r, rnd)]
-            sims = _tftools.prod_n(sims) + mu
-
-            return mu, var, sims, explained_var
-
-    def kl_divergence(self, jitter=1e-9):
-        with _tf.name_scope("separable_KL_divergence"):
-            self.refresh(jitter)
-
-            alpha_white = []
-            for d in range(len(self.cov)):
-                a = self.parameters["alpha_white_%d" % d].get_value()
-                a = _tf.expand_dims(a, -1)  # [lat, ps, comp, 1]
-                a = _tf.transpose(a, [0, 2, 1, 3])  # [lat, comp, ps, 1]
-                alpha_white.append(a)
-            alpha_white = _tf.linalg.LinearOperatorKronecker(
-                [_tf.linalg.LinearOperatorFullMatrix(a) for a in alpha_white]
-            )
-            alpha_white = alpha_white.to_dense()
-            alpha_white = _tf.reduce_sum(alpha_white, axis=1)  # [lat, ps, 1]
-
-            tr = _tftools.prod_n(
-                [_tf.reduce_sum(cov * mat_r)
-                 for cov, mat_r in zip(self.cov, self.mat_r)])
-            fit = _tf.reduce_sum(alpha_white ** 2)
-            det_k = _tf.add_n(
-                [2 * _tf.reduce_sum(_tf.math.log(
-                    _tf.linalg.diag_part(chol))) * self.n_ps / n
-                 for chol, n in zip(self.cov_chol, self.grid_size)])
-            det_r = _tf.add_n(
-                [2 * _tf.reduce_sum(_tf.math.log(
-                    _tf.linalg.diag_part(chol))) * self.n_ps / n
-                 for chol, n in zip(self.chol_r, self.grid_size)])
-            const = _tf.constant(self.n_ps * self.n_latent, _tf.float64)
-            kl = 0.5 * (tr + fit - const - det_k - det_r)
 
             return kl
 
@@ -1749,10 +1497,11 @@ class Add(_LatentVariableLayer):
 
 
 class LinearCombination(Add):
-    def __init__(self, *latent_variables):
+    def __init__(self, *latent_variables, equal_weights=False):
         super().__init__(*latent_variables)
         weights = _gpr.CompositionalParameter(
-            _np.ones(len(latent_variables)) / len(latent_variables))
+            _np.ones(len(latent_variables)) / len(latent_variables),
+            fixed=equal_weights)
         self.parameters.update({"weights": weights})
         self._all_parameters.append(weights)
 
@@ -1943,3 +1692,476 @@ class Multiply(_LatentVariableLayer):
     def kl_divergence(self, jitter=1e-9):
         return _tf.add_n([v.kl_divergence(jitter)
                           for v in self.latent_variables])
+
+
+class ProductOfExperts(_LatentVariableLayer):
+    def __init__(self, *latent_variables):
+        super().__init__()
+        self.latent_variables = latent_variables
+        # self.temperature = temperature
+        # self.parameters["temperature"] = _gpr.PositiveParameter(
+        #     1, 0.1, 1000, fixed=True)
+        # self._all_parameters.append(self.parameters["temperature"])
+        for v in self.latent_variables:
+            self._all_parameters += v.all_parameters
+
+    @property
+    def n_latent(self):
+        return self.latent_variables[0].n_latent
+
+    def set_kernel_limits(self, data):
+        for v in self.latent_variables:
+            v.set_kernel_limits(data)
+
+    def refresh(self, jitter=1e-9):
+        for v in self.latent_variables:
+            v.refresh(jitter)
+
+    def predict(self, x, n_sim=1, seed=(0, 0), jitter=1e-9):
+        all_mu = []
+        all_var = []
+        all_sims = []
+        all_explained_var = []
+
+        for i, v in enumerate(self.latent_variables):
+            mu, var, sims, explained_var = v.predict(
+                x, n_sim, [seed[0] + i, seed[1]], jitter)
+            all_mu.append(mu)
+            all_var.append(var)
+            all_sims.append(sims)
+            all_explained_var.append(explained_var)
+
+        all_mu = _tf.stack(all_mu, axis=0)
+        all_var = _tf.stack(all_var, axis=0)
+        all_sims = _tf.stack(all_sims, axis=0)
+        all_explained_var = _tf.stack(all_explained_var, axis=0)
+
+        # weights = _tf.nn.softmax(- self.temperature * all_var, axis=0)
+
+        # temperature = self.parameters["temperature"].get_value()
+        weights = (all_explained_var / (all_var + 1e-6)) + 1e-6  # ** temperature
+        weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
+
+        w_mu = _tf.reduce_sum(weights[:, :, :, None] * all_mu, axis=0)
+        w_var = _tf.reduce_sum(weights * all_var, axis=0)
+        w_sims = _tf.reduce_sum(weights[:, :, :, None] * all_sims, axis=0)
+        w_explained_var = _tf.reduce_sum(weights * all_explained_var, axis=0)
+
+        return w_mu, w_var, w_sims, w_explained_var
+
+    def predict_directions(self, x, dir_x, jitter=1e-9):
+        all_mu = []
+        all_var = []
+        all_explained_var = []
+
+        for i, v in enumerate(self.latent_variables):
+            mu, var, explained_var = v.predict_directions(x, dir_x, jitter)
+            all_mu.append(mu)
+            all_var.append(var)
+            all_explained_var.append(explained_var)
+
+        all_mu = _tf.stack(all_mu, axis=0)
+        all_var = _tf.stack(all_var, axis=0)
+        all_explained_var = _tf.stack(all_explained_var, axis=0)
+
+        # weights = _tf.nn.softmax(- self.temperature * all_var, axis=0)
+
+        # temperature = self.parameters["temperature"].get_value()
+        weights = (all_explained_var / (all_var + 1e-6))  # ** temperature
+        weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
+
+        w_mu = _tf.reduce_sum(weights[:, :, None] * all_mu, axis=0)
+        w_var = _tf.reduce_sum(weights * all_var, axis=0)
+        w_explained_var = _tf.reduce_sum(weights * all_explained_var, axis=0)
+
+        return w_mu, w_var, w_explained_var
+
+    def kl_divergence(self, jitter=1e-9):
+        return _tf.add_n([v.kl_divergence(jitter)
+                          for v in self.latent_variables])
+
+
+class Tensorized(_GriddedLayer):
+    def __init__(self, n_latent, inducing_points, n_components=10):
+        super().__init__()
+        if inducing_points.__class__.__name__ \
+                not in ("Grid1D", "Grid2D", "Grid3D"):
+            raise Exception("inducing_points must be a grid object")
+        n_dim = inducing_points.n_dim
+        self.n_dim = n_dim
+
+        self._n_latent = n_latent
+        self.cov_u = [None] * n_dim
+        # self.cov_u_chol = [None] * n_dim
+        # self.cov_u_inv = [None] * n_dim
+        self.cov_v = None
+        self.chol_v = None
+        self.cov_v_inv = None
+        self.posterior_v_inv = None
+        self.posterior_v_inv_chol = None
+        self.mat_r = None
+        self.chol_r = None
+
+        self.pseudo_inputs = [_tf.constant(g, _tf.float64)
+                              for g in inducing_points.grid]
+
+        self.n_ps = inducing_points.coordinates.shape[0]
+        self.grid_size = inducing_points.grid_size
+
+        if not isinstance(n_components, (list, tuple)):
+            n_components = [n_components] * n_dim
+        self.n_components = n_components
+        self.total_comp = _np.prod(n_components)
+
+        self.dim_idx = "abcde"[:n_dim]
+
+        for d in range(n_dim):
+            n_ps = inducing_points.grid_size[d]
+            step = inducing_points.step_size[d]
+            dif = inducing_points.grid[d][-1] - inducing_points.grid[d][0]
+            self.parameters.update({
+                "ortho_%d" % d: _gpr.OrthonormalMatrix(
+                    n_ps, n_components[d], (self.n_latent,)
+                ),
+                "ranges_%d" % d: _gpr.PositiveParameter(
+                    _np.ones([self.n_latent]) * step,
+                    _np.ones([self.n_latent]) * step / 2,
+                    _np.ones([self.n_latent]) * dif * 2,
+                    fixed=False
+                )
+            })
+
+        self.parameters.update({
+            "alpha_core": _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.n_latent, self.total_comp, 1]
+                ),
+                _np.ones([self.n_latent, self.total_comp, 1]) * -10,
+                _np.ones([self.n_latent, self.total_comp, 1]) * 10
+            ),
+            "delta_core": _gpr.PositiveParameter(
+                _np.ones([self.n_latent, self.total_comp]),
+                _np.ones([self.n_latent, self.total_comp]) * 1e-3,
+                _np.ones([self.n_latent, self.total_comp]) * 1e3
+            ),
+        })
+
+        self._all_parameters += [v for v in self.parameters.values()]
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("tensorized_layer_refresh"):
+            # prior
+            for d in range(self.n_dim):
+                ps = self.pseudo_inputs[d]
+                rng = self.parameters["ranges_%d" % d].get_value()
+
+                # eye = _tf.eye(self.grid_size[d], dtype=_tf.float64,
+                #               batch_shape=[self.n_latent])
+                cov_ip = self.covariance_matrix(ps, ps, rng)
+
+                self.cov_u[d] = cov_ip
+                # self.cov_u_chol[d] = _tf.linalg.cholesky(
+                #     cov_ip + eye * jitter
+                # )
+                # self.cov_u_inv[d] = _tf.linalg.cholesky_solve(
+                #     self.cov_u_chol[d], eye)
+
+            ortho = [self.parameters["ortho_%d" % d].get_value()
+                     for d in range(self.n_dim)]
+            eye = _tf.eye(self.total_comp, dtype=_tf.float64,
+                          batch_shape=(self.n_latent,))
+
+            kron = _tf.linalg.LinearOperatorKronecker(
+                [_tf.linalg.LinearOperatorFullMatrix(
+                    _tf.matmul(_tf.matmul(o, k, True), o)
+                ) for k, o in zip(self.cov_u, ortho)]
+            )
+            self.cov_v = kron.to_dense()
+            self.chol_v = _tf.linalg.cholesky(self.cov_v + eye * jitter)
+            self.cov_v_inv = _tf.linalg.cholesky_solve(self.chol_v, eye)
+
+            # posterior
+            delta = self.parameters["delta_core"].get_value()
+            chol = _tf.linalg.cholesky(
+                self.cov_v + _tf.linalg.diag(delta) + eye * jitter)
+
+            self.posterior_v_inv_chol = _tf.linalg.solve(chol, eye)
+            # self.posterior_v_inv = _tf.linalg.cholesky_solve(chol, eye)
+            self.posterior_v_inv = _tf.linalg.solve(
+                chol, self.posterior_v_inv_chol, True)
+            self.mat_r = self.cov_v_inv - self.posterior_v_inv
+            self.chol_r = _tf.linalg.cholesky(self.mat_r + eye * jitter)
+
+    def predict(self, x, n_sim=1, seed=(0, 0), jitter=1e-9):
+        with _tf.name_scope("tensorized_layer_prediction"):
+            self.refresh(jitter)
+
+            x_split = _tf.unstack(x, axis=1)
+            n_dim = len(self.cov_u)
+            n_data = _tf.shape(x)[0]
+
+            # covariances
+            cov_cross = []
+            for d in range(n_dim):
+                rng = self.parameters["ranges_%d" % d].get_value()
+                cov = self.covariance_matrix(
+                    x_split[d], self.pseudo_inputs[d], rng)
+                cov_cross.append(cov)  # [n_latent, n_data, n_ps_d]
+
+            ortho = [self.parameters["ortho_%d" % d].get_value()
+                     for d in range(self.n_dim)]
+            interp = [_tf.matmul(a, b) for a, b in zip(cov_cross, ortho)]
+
+            # op = ""
+            # for s in self.dim_idx:
+            #     op += "...%s," % s
+            # op = op[:-1] + "->..." + self.dim_idx
+            # interp = _tf.einsum(op, *interp)
+            # interp = _tf.reshape(interp, [self.n_latent, n_data, -1])
+
+            # latent mean prediction
+            alpha_core = self.parameters["alpha_core"].get_value()
+            mu = self.rowwise_separable_matmul(
+                interp, _tf.linalg.solve(self.chol_v, alpha_core, adjoint=True))
+            # mu = _tf.matmul(
+            #     interp, _tf.linalg.solve(self.chol_v, alpha_core, adjoint=True))
+
+            # latent variance prediction
+            # eye = _tf.eye(self.total_comp, dtype=_tf.float64,
+            #               batch_shape=(self.n_latent,))
+            # explained_var = _tf.reduce_sum(
+            #     self.rowwise_separable_matmul(interp, self.posterior_v_inv)
+            #     * self.rowwise_separable_matmul(interp, eye),
+            #     axis=2
+            # )
+            # explained_var = _tf.reduce_sum(
+            #     _tf.matmul(interp, self.posterior_v_inv) * interp,
+            #     axis=2
+            # )
+            explained_var = _tf.reduce_sum(
+                self.rowwise_separable_matmul(
+                    interp,
+                    _tf.transpose(self.posterior_v_inv_chol, [0, 2, 1]))**2,
+                axis=2
+            )
+            var = 1.0 - explained_var
+            var = _tf.maximum(var, 0.0)
+
+            # simulations
+            rnd = _tf.random.stateless_normal(
+                shape=[self.n_latent, self.total_comp, n_sim],
+                seed=seed,
+                dtype=_tf.float64
+            )
+
+            sims = self.rowwise_separable_matmul(
+                interp, _tf.matmul(self.chol_r, rnd)) + mu
+            # sims = _tf.matmul(
+            #     interp, _tf.matmul(self.chol_r, rnd)) + mu
+
+            return mu, var, sims, explained_var
+
+    def kl_divergence(self, jitter=1e-9):
+        with _tf.name_scope("tensorized_KL_divergence"):
+            self.refresh(jitter)
+
+            alpha_core = self.parameters["alpha_core"].get_value()
+
+            # trace
+            tr = - _tf.reduce_sum(self.chol_v * self.posterior_v_inv)
+
+            # fit
+            fit = _tf.reduce_sum(alpha_core**2)
+
+            # det K
+            det_k = 2 * _tf.reduce_sum(_tf.math.log(
+                _tf.linalg.diag_part(self.chol_v)
+            ))
+
+            # det S
+            det_r = 2 * _tf.reduce_sum(_tf.math.log(
+                _tf.linalg.diag_part(self.chol_r)
+            ))
+
+            kl = 0.5 * (tr + fit - det_k - det_r)
+
+            return kl
+
+
+class TensorizedTied(_GriddedLayer):
+    def __init__(self, n_latent, inducing_points, n_components=10):
+        super().__init__()
+        if inducing_points.__class__.__name__ \
+                not in ("Grid1D", "Grid2D", "Grid3D"):
+            raise Exception("inducing_points must be a grid object")
+        n_dim = inducing_points.n_dim
+        self.n_dim = n_dim
+
+        self._n_latent = n_latent
+        self.cov_u = [None] * n_dim
+        # self.cov_u_chol = [None] * n_dim
+        # self.cov_u_inv = [None] * n_dim
+        self.cov_v = None
+        self.chol_v = None
+        self.cov_v_inv = None
+        self.posterior_v_inv = None
+        self.posterior_v_inv_chol = None
+        self.mat_r = None
+        self.chol_r = None
+
+        self.pseudo_inputs = [_tf.constant(g, _tf.float64)
+                              for g in inducing_points.grid]
+
+        self.n_ps = inducing_points.coordinates.shape[0]
+        self.grid_size = inducing_points.grid_size
+
+        if not isinstance(n_components, (list, tuple)):
+            n_components = [n_components] * n_dim
+        self.n_components = n_components
+        self.total_comp = _np.prod(n_components)
+
+        self.dim_idx = "abcde"[:n_dim]
+
+        for d in range(n_dim):
+            n_ps = inducing_points.grid_size[d]
+            step = inducing_points.step_size[d]
+            dif = inducing_points.grid[d][-1] - inducing_points.grid[d][0]
+            self.parameters.update({
+                "ortho_%d" % d: _gpr.OrthonormalMatrix(
+                    n_ps, n_components[d], (1,)
+                ),
+                "ranges_%d" % d: _gpr.PositiveParameter(
+                    _np.ones([self.n_latent]) * step,
+                    _np.ones([self.n_latent]) * step / 2,
+                    _np.ones([self.n_latent]) * dif * 2,
+                    fixed=False
+                )
+            })
+
+        self.parameters.update({
+            "alpha_core": _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.n_latent, self.total_comp, 1]
+                ),
+                _np.ones([self.n_latent, self.total_comp, 1]) * -10,
+                _np.ones([self.n_latent, self.total_comp, 1]) * 10
+            ),
+            "delta_core": _gpr.PositiveParameter(
+                _np.ones([self.n_latent, self.total_comp]),
+                _np.ones([self.n_latent, self.total_comp]) * 1e-3,
+                _np.ones([self.n_latent, self.total_comp]) * 1e3
+            ),
+        })
+
+        self._all_parameters += [v for v in self.parameters.values()]
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("tensorized_layer_refresh"):
+            # prior
+            for d in range(self.n_dim):
+                ps = self.pseudo_inputs[d]
+                rng = self.parameters["ranges_%d" % d].get_value()
+
+                cov_ip = self.covariance_matrix(ps, ps, rng)
+                self.cov_u[d] = cov_ip
+
+            ortho = [_tf.tile(self.parameters["ortho_%d" % d].get_value(),
+                              [self.n_latent, 1, 1])
+                     for d in range(self.n_dim)]
+            eye = _tf.eye(self.total_comp, dtype=_tf.float64,
+                          batch_shape=(self.n_latent,))
+
+            kron = _tf.linalg.LinearOperatorKronecker(
+                [_tf.linalg.LinearOperatorFullMatrix(
+                    _tf.matmul(_tf.matmul(o, k, True), o)
+                ) for k, o in zip(self.cov_u, ortho)]
+            )
+            self.cov_v = kron.to_dense()
+            self.chol_v = _tf.linalg.cholesky(self.cov_v + eye * jitter)
+            self.cov_v_inv = _tf.linalg.cholesky_solve(self.chol_v, eye)
+
+            # posterior
+            delta = self.parameters["delta_core"].get_value()
+            chol = _tf.linalg.cholesky(
+                self.cov_v + _tf.linalg.diag(delta) + eye * jitter)
+
+            self.posterior_v_inv_chol = _tf.linalg.solve(chol, eye)
+            # self.posterior_v_inv = _tf.linalg.cholesky_solve(chol, eye)
+            self.posterior_v_inv = _tf.linalg.solve(
+                chol, self.posterior_v_inv_chol, True)
+            self.mat_r = self.cov_v_inv - self.posterior_v_inv
+            self.chol_r = _tf.linalg.cholesky(self.mat_r + eye * jitter)
+
+    def predict(self, x, n_sim=1, seed=(0, 0), jitter=1e-9):
+        with _tf.name_scope("tensorized_layer_prediction"):
+            self.refresh(jitter)
+
+            x_split = _tf.unstack(x, axis=1)
+            n_dim = len(self.cov_u)
+            n_data = _tf.shape(x)[0]
+
+            # covariances
+            cov_cross = []
+            for d in range(n_dim):
+                rng = self.parameters["ranges_%d" % d].get_value()
+                cov = self.covariance_matrix(
+                    x_split[d], self.pseudo_inputs[d], rng)
+                cov_cross.append(cov)  # [n_latent, n_data, n_ps_d]
+
+            ortho = [_tf.tile(self.parameters["ortho_%d" % d].get_value(),
+                              [self.n_latent, 1, 1])
+                     for d in range(self.n_dim)]
+            interp = [_tf.matmul(a, b) for a, b in zip(cov_cross, ortho)]
+
+            alpha_core = self.parameters["alpha_core"].get_value()
+            mu = self.rowwise_separable_matmul(
+                interp, _tf.linalg.solve(self.chol_v, alpha_core, adjoint=True))
+
+            explained_var = _tf.reduce_sum(
+                self.rowwise_separable_matmul(
+                    interp,
+                    _tf.transpose(self.posterior_v_inv_chol, [0, 2, 1]))**2,
+                axis=2
+            )
+            var = 1.0 - explained_var
+            var = _tf.maximum(var, 0.0)
+
+            # simulations
+            rnd = _tf.random.stateless_normal(
+                shape=[self.n_latent, self.total_comp, n_sim],
+                seed=seed,
+                dtype=_tf.float64
+            )
+
+            sims = self.rowwise_separable_matmul(
+                interp, _tf.matmul(self.chol_r, rnd)) + mu
+
+            return mu, var, sims, explained_var
+
+    def kl_divergence(self, jitter=1e-9):
+        with _tf.name_scope("tensorized_KL_divergence"):
+            self.refresh(jitter)
+
+            alpha_core = self.parameters["alpha_core"].get_value()
+
+            # trace
+            tr = - _tf.reduce_sum(self.chol_v * self.posterior_v_inv)
+
+            # fit
+            fit = _tf.reduce_sum(alpha_core**2)
+
+            # det K
+            det_k = 2 * _tf.reduce_sum(_tf.math.log(
+                _tf.linalg.diag_part(self.chol_v)
+            ))
+
+            # det S
+            det_r = 2 * _tf.reduce_sum(_tf.math.log(
+                _tf.linalg.diag_part(self.chol_r)
+            ))
+
+            kl = 0.5 * (tr + fit - det_k - det_r)
+
+            return kl

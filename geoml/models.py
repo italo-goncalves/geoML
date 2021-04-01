@@ -449,6 +449,7 @@ class VGP(_GPModel):
     def __init__(self, data, variables, likelihoods,
                  latent_layer,
                  directional_data=None,
+                 force_independence=False,
                  options=GPOptions()):
         super().__init__(options=options)
 
@@ -483,6 +484,14 @@ class VGP(_GPModel):
                 name="mixing_weights",
             ),
         })
+
+        if force_independence:
+            if n_latent != sum(self.var_lengths):
+                raise Exception("Cannot force independence: number of"
+                                "latent variables do not match the number"
+                                "of data variables.")
+            self.parameters["mixing_weights"].set_value(_np.eye(n_latent))
+            self.parameters["mixing_weights"].fix()
 
         # directions
         self.directional_likelihood = _lk.Gaussian()
@@ -589,7 +598,8 @@ class VGP(_GPModel):
 
             # batch weight
             batch_size = _tf.reduce_sum(has_value)
-            elbo = elbo * self.data.n_data / batch_size
+            # elbo = elbo * self.data.n_data / batch_size
+            elbo = elbo * self.total_data / batch_size
 
             return elbo
 
@@ -1281,7 +1291,8 @@ class GPEnsemble(_EnsembleModel):
 
 class VGPEnsemble(_EnsembleModel):
     def __init__(self, data, variables, likelihoods, latent_layers,
-                 directional_data=None, options=GPOptions()):
+                 directional_data=None, force_independence=False,
+                 options=GPOptions()):
         super().__init__(options)
         if not isinstance(data, (tuple, list)):
             raise ValueError("data must be a list or tuple containing"
@@ -1306,6 +1317,7 @@ class VGPEnsemble(_EnsembleModel):
             likelihoods=_copy.deepcopy(likelihoods),
             latent_layer=l,
             directional_data=dd,
+            force_independence=force_independence,
             options=options)
             for d, l, dd in zip(data, latent_layers, directional_data)]
 
@@ -1381,17 +1393,25 @@ class VGPEnsemble(_EnsembleModel):
             )
             return out
 
+        @_tf.function
+        def combined_pred(x):
+            outputs = [batch_pred(model, x) for model in self.models]
+            return self.combine(outputs)
+
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
                 print("\rProcessing batch %s of %s       "
                       % (str(i + 1), str(n_batches)), end="")
 
-            outputs = [batch_pred(
-                model,
-                _tf.constant(newdata.coordinates[batch], _tf.float64))
-                for model in self.models]
+            # outputs = [batch_pred(
+            #     model,
+            #     _tf.constant(newdata.coordinates[batch], _tf.float64))
+            #     for model in self.models]
+            #
+            # output = self.combine(outputs)
 
-            output = self.combine(outputs)
+            output = combined_pred(
+                _tf.constant(newdata.coordinates[batch], _tf.float64))
 
             for v, upd in zip(self.variables, output):
                 newdata.variables[v].update(batch, **upd)
@@ -1399,12 +1419,14 @@ class VGPEnsemble(_EnsembleModel):
         if self.options.verbose:
             print("\n")
 
+    @_tf.function
     def combine(self, outputs):
         combined = [{} for _ in self.variables]
         for i, variable in enumerate(self.variables):
             var_keys = outputs[0][i].keys()
 
             weights = _tf.stack([out[i]["weights"] for out in outputs], axis=1)
+            weights = weights + 1e-6
             weights = weights / _tf.reduce_sum(weights, axis=1, keepdims=True)
 
             for key in var_keys:

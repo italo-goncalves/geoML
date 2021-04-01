@@ -376,7 +376,7 @@ class ContinuousVariable(_Variable):
 
         if "probabilities" in kwargs.keys():
             prob = kwargs["probabilities"].numpy()
-            quant_keys = self.quantiles.keys()
+            quant_keys = self.probabilities.keys()
             for i, q in zip(range(prob.shape[1]), quant_keys):
                 self.probabilities[q].values[idx] = prob[:, i]
 
@@ -891,6 +891,8 @@ class BinaryVariable(_Variable):
         self.predicted.values[idx] = _np.array(self.labels)[label_idx]
         self.latent_mean.values[idx] = kwargs["mean"].numpy()
         self.latent_variance.values[idx] = kwargs["variance"].numpy()
+        self.entropy.values[idx] = kwargs["entropy"].numpy()
+        self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
         self.probability.values[idx] = prob
 
         sims = kwargs["simulations"].numpy()
@@ -1222,6 +1224,42 @@ class Grid1D(PointData):
             data_4["value"].values
         )
 
+    def aggregate_binary(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
+        cols = ["xid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+
+        # counting values inside cells
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + ["value"]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = grid_full.set_index(cols) \
+            .join(data_3.set_index(cols)) \
+            .reset_index(drop=True)
+        self.variables[variable] = BinaryVariable(
+            variable, self, data.variables[variable].labels,
+            data_4["value"].values
+        )
+
     def aggregate_numeric(self, data, variable):
         data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
 
@@ -1363,6 +1401,47 @@ class Grid2D(PointData):
             .join(data_3.set_index(cols)) \
             .reset_index(drop=True)
         self.variables[variable] = CategoricalVariable(
+            variable, self, data.variables[variable].labels,
+            data_4["value"].values
+        )
+
+    def aggregate_binary(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.array([(x, y)
+                             for y in range(int(self.grid_size[1]))
+                             for x in range(int(self.grid_size[0]))])
+        cols = ["xid", "yid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+
+        # counting values inside cells
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + ["value"]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = grid_full.set_index(cols) \
+            .join(data_3.set_index(cols)) \
+            .reset_index(drop=True)
+        self.variables[variable] = BinaryVariable(
             variable, self, data.variables[variable].labels,
             data_4["value"].values
         )
@@ -1521,6 +1600,51 @@ class Grid3D(PointData):
             .join(data_3.set_index(cols)) \
             .reset_index(drop=True)
         self.variables[variable] = CategoricalVariable(
+            variable, self, data.variables[variable].labels,
+            data_4["value"].values
+        )
+
+    def aggregate_binary(self, data, variable):
+        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        grid_id = _np.array([(x, y, z)
+                             for z in range(int(self.grid_size[2]))
+                             for y in range(int(self.grid_size[1]))
+                             for x in range(int(self.grid_size[0]))])
+        cols = ["xid", "yid", "zid"]
+
+        grid_full = _pd.DataFrame(
+            _np.concatenate([self.coordinates, grid_id], axis=1),
+            columns=self.coordinate_labels + cols)
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+        raw_data["zid"] = _np.round(
+            (data.coordinates[:, 2] - self.grid[2][0]
+             - self.step_size[2] / 2) / self.step_size[2])
+
+        # counting values inside cells
+        raw_data["dummy"] = 0
+        data_2 = raw_data.groupby(cols + ["value"]).count()
+        data_2.reset_index(level=data_2.index.names, inplace=True)
+
+        # determining dominant label
+        data_3 = data_2.groupby(cols).idxmax()
+        data_3 = data_2.loc[data_3.iloc[:, 0], :]
+
+        # output
+        data_4 = grid_full.set_index(cols) \
+            .join(data_3.set_index(cols)) \
+            .reset_index(drop=True)
+        self.variables[variable] = BinaryVariable(
             variable, self, data.variables[variable].labels,
             data_4["value"].values
         )

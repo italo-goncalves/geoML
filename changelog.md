@@ -1,3 +1,10 @@
+## version 0.3.1
+* New autoregressive latent variable.
+* New tensorized latent variable.
+* New Product of Experts latent variable.
+* Spline warping is now centered at zero.
+* Ensembles now handled in a specific model.
+
 ## version 0.3.0
 * Introduced variational models.
 * All training is now gradient-based.

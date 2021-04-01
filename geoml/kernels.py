@@ -31,6 +31,7 @@ import geoml.parameter as _gpr
 import geoml.transform as _gt
 
 from geoml.tftools import pairwise_dist as _pairwise_dist
+from geoml.tftools import pairwise_dist_l1 as _pairwise_dist_l1
 from geoml.tftools import prod_n as _prod_n
 
 import tensorflow as _tf
@@ -53,11 +54,11 @@ class _Kernel(object):
     def has_compact_support(self):
         return self._has_compact_support
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         """Computes point-point covariance matrix between x and y tensors."""
         raise NotImplementedError()
 
-    def covariance_matrix_d1(self, x, y, dir_y):
+    def covariance_matrix_d1(self, x, y, dir_y, l1_distance=False):
         """
         Computes direction-point covariance matrix between x and y tensors.
         """
@@ -68,11 +69,11 @@ class _Kernel(object):
         x = x - min_coords
         y = y - min_coords
 
-        k1 = self.covariance_matrix(x, y + 0.5*step*dir_y)
-        k2 = self.covariance_matrix(x, y - 0.5*step*dir_y)
+        k1 = self.covariance_matrix(x, y + 0.5*step*dir_y, l1_distance)
+        k2 = self.covariance_matrix(x, y - 0.5*step*dir_y, l1_distance)
         return (k1 - k2)/step
 
-    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y, l1_distance=False):
         """
         Computes direction-direction covariance matrix between x and y tensors.
         """
@@ -83,8 +84,10 @@ class _Kernel(object):
         x = x - min_coords
         y = y - min_coords
 
-        k1 = self.covariance_matrix_d1(x + 0.5*step*dir_x, y, dir_y)
-        k2 = self.covariance_matrix_d1(x - 0.5*step*dir_x, y, dir_y)
+        k1 = self.covariance_matrix_d1(x + 0.5*step*dir_x, y, dir_y,
+                                       l1_distance)
+        k2 = self.covariance_matrix_d1(x - 0.5*step*dir_x, y, dir_y,
+                                       l1_distance)
         return (k1 - k2) / step
 
     def point_variance(self, x):
@@ -94,11 +97,11 @@ class _Kernel(object):
         """
         raise NotImplementedError()
 
-    def self_covariance_matrix(self, x):
-        return self.covariance_matrix(x, x)
+    def self_covariance_matrix(self, x, l1_distance=False):
+        return self.covariance_matrix(x, x, l1_distance)
 
-    def self_covariance_matrix_d2(self, x, dir_x):
-        return self.covariance_matrix_d2(x, x, dir_x, dir_x)
+    def self_covariance_matrix_d2(self, x, dir_x, l1_distance=False):
+        return self.covariance_matrix_d2(x, x, dir_x, dir_x, l1_distance)
 
     def point_variance_d2(self, x, dir_x, step=None):
         if step is None:
@@ -214,11 +217,14 @@ class _LeafKernel(_Kernel):
     def kernelize(self, x):
         raise NotImplemented
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         with _tf.name_scope(self.__class__.__name__ + "_cov"):
             x = self.transform.__call__(x)
             y = self.transform.__call__(y)
-            d = _pairwise_dist(x, y)
+            if l1_distance:
+                d = _pairwise_dist_l1(x, y)
+            else:
+                d = _pairwise_dist(x, y)
             k = self.kernelize(d)
         return k
 
@@ -273,22 +279,23 @@ class _NodeKernel(_Kernel):
     def _operation(self, arg_list):
         raise NotImplementedError
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         k = self._operation(
-            [kernel.covariance_matrix(x, y) for kernel in self.components]
-        )
-        return k
-
-    def covariance_matrix_d1(self, x, y, dir_y):
-        k = self._operation(
-            [kernel.covariance_matrix_d1(x, y, dir_y)
+            [kernel.covariance_matrix(x, y, l1_distance)
              for kernel in self.components]
         )
         return k
 
-    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
+    def covariance_matrix_d1(self, x, y, dir_y, l1_distance=False):
         k = self._operation(
-            [kernel.covariance_matrix_d2(x, y, dir_x, dir_y)
+            [kernel.covariance_matrix_d1(x, y, dir_y, l1_distance)
+             for kernel in self.components]
+        )
+        return k
+
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y, l1_distance=False):
+        k = self._operation(
+            [kernel.covariance_matrix_d2(x, y, dir_x, dir_y, l1_distance)
              for kernel in self.components]
         )
         return k
@@ -299,16 +306,16 @@ class _NodeKernel(_Kernel):
         )
         return v
 
-    def self_covariance_matrix(self, x):
+    def self_covariance_matrix(self, x, l1_distance=False):
         k = self._operation(
-            [kernel.self_covariance_matrix(x)
+            [kernel.self_covariance_matrix(x, l1_distance)
              for kernel in self.components]
         )
         return k
 
-    def self_covariance_matrix_d2(self, x, dir_x):
+    def self_covariance_matrix_d2(self, x, dir_x, l1_distance=False):
         k = self._operation(
-            [kernel.self_covariance_matrix_d2(x, dir_x)
+            [kernel.self_covariance_matrix_d2(x, dir_x, l1_distance)
              for kernel in self.components]
         )
         return k
@@ -407,11 +414,14 @@ class Cubic(_LeafKernel):
         super().__init__(transform)
         self._has_compact_support = True
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         with _tf.name_scope("Cubic_cov"):
             x = self.transform.__call__(x)
             y = self.transform.__call__(y)
-            d = _pairwise_dist(x, y)
+            if l1_distance:
+                d = _pairwise_dist_l1(x, y)
+            else:
+                d = _pairwise_dist(x, y)
             k = 1 - 7 * _tf.pow(d, 2) + 35 / 4 * _tf.pow(d, 3) \
                 - 7 / 2 * _tf.pow(d, 5) + 3 / 4 * _tf.pow(d, 7)
             k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
@@ -427,7 +437,7 @@ class Cubic(_LeafKernel):
 class Constant(_LeafKernel):
     """Constant kernel"""
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         with _tf.name_scope("Constant_cov"):
             k = _tf.ones([_tf.shape(x)[0], _tf.shape(y)[0]], dtype=_tf.float64)
         return k
@@ -446,7 +456,7 @@ class Constant(_LeafKernel):
 class Linear(_LeafKernel):
     """Linear kernel"""
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         with _tf.name_scope("Linear_cov"):
             x = self.transform.__call__(x)
             y = self.transform.__call__(y)
@@ -538,9 +548,9 @@ class Scale(_WrapperKernel):
         self.parameters["amplitude"] = amp
         self._all_parameters.append(amp)
 
-    def covariance_matrix(self, x, y):
+    def covariance_matrix(self, x, y, l1_distance=False):
         return self.parameters["amplitude"].get_value() \
-               * self.base_kernel.covariance_matrix(x, y)
+               * self.base_kernel.covariance_matrix(x, y, l1_distance)
 
     def point_variance(self, x):
         return self.parameters["amplitude"].get_value() \

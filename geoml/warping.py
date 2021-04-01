@@ -123,63 +123,42 @@ class Spline(_Warping):
     Attributes
     ----------
     n_knots : int
-        The number of knots to build the spline.
+        Total number of knots.
     """
-    def __init__(self, n_knots=5):
+    def __init__(self, knots_per_arm=5):
         """
         Initializer for Spline.
 
         Parameters
         ----------
-        n_knots : int
-            The number of knots to build the spline
+        knots_per_arm : int
+            The number of knots used to build each side (positive and negative)
+            of the spline.
         """
         super().__init__()
-        self.n_knots = n_knots
-        comp = _np.ones(n_knots) / n_knots
+        self.n_knots = knots_per_arm * 2 + 1
+        comp = _np.ones(knots_per_arm) / knots_per_arm
         self.parameters = {
-            "warped_partition": _gpr.CompositionalParameter(comp)}
+            "warped_partition_left": _gpr.CompositionalParameter(comp),
+            "warped_partition_right": _gpr.CompositionalParameter(comp)
+        }
         self._all_parameters = [pr for pr in self.parameters.values()]
         self.spline = _gint.MonotonicCubicSpline()
-        self.x_original = _np.linspace(-5, 5, n_knots + 1)
-        
-    # def refresh(self, y):
-    #     """
-    #     Rebuilds the spline using the given data's range.
-    #
-    #     The range of the warped coordinates is fixed within the [-5, 5]
-    #     interval.
-    #     """
-    #     y_no_nan = _tf.gather_nd(y, _tf.where(~ _tf.math.is_nan(y)))
-    #     y_seq = _tf.linspace(_tf.reduce_min(y_no_nan),
-    #                          _tf.reduce_max(y_no_nan),
-    #                          self.n_knots)
-    #     warped_coordinates = _tf.cumsum(
-    #         self.parameters["warped_partition"].get_value())
-    #     warped_coordinates = _tf.gather(warped_coordinates,
-    #                                     _np.arange(self.n_knots))
-    #     warped_coordinates = 10*warped_coordinates - 5
-    #
-    #     self.x_fwd = y_seq
-    #     self.y_fwd = warped_coordinates
-    #
-    #     # modeling in the opposite direction with more points
-    #     # to preserve the base curve's shape
-    #     y_dif = _tf.reduce_max(y_no_nan) - _tf.reduce_min(y_no_nan)
-    #     y_seq_expanded = _tf.linspace(_tf.reduce_min(y_no_nan) - 0.1*y_dif,
-    #                                   _tf.reduce_max(y_no_nan) + 0.1*y_dif,
-    #                                   self.n_knots*10)
-    #     warped_coordinates_expanded = self.spline.interpolate(
-    #         self.x_fwd, self.y_fwd, y_seq_expanded)
-    #     self.x_back.assign(_tf.squeeze(warped_coordinates_expanded))
-    #     self.y_back.assign(y_seq_expanded)
+        self.x_original = _np.linspace(-5, 5, knots_per_arm * 2 + 1)
+
+    def _get_warped_coordinates(self):
+        warped_left = _tf.cumsum(
+            self.parameters["warped_partition_left"].get_value())
+        warped_right = _tf.cumsum(
+            self.parameters["warped_partition_right"].get_value()) + 1.0
+        warped_coordinates = _tf.concat(
+            [_tf.constant([0.0], _tf.float64), warped_left, warped_right],
+            axis=0) / 2
+        warped_coordinates = 10 * warped_coordinates - 5
+        return warped_coordinates
     
     def forward(self, x):
-        warped_coordinates = _tf.cumsum(
-            self.parameters["warped_partition"].get_value())
-        warped_coordinates = _tf.concat(
-            [_tf.constant([0.0], _tf.float64), warped_coordinates], axis=0)
-        warped_coordinates = 10 * warped_coordinates - 5
+        warped_coordinates = self._get_warped_coordinates()
 
         x = _tftools.ensure_rank_2(x)
         x_warp = self.spline.interpolate(
@@ -187,11 +166,7 @@ class Spline(_Warping):
         return x_warp
     
     def backward(self, x):
-        warped_coordinates = _tf.cumsum(
-            self.parameters["warped_partition"].get_value())
-        warped_coordinates = _tf.concat(
-            [_tf.constant([0.0], _tf.float64), warped_coordinates], axis=0)
-        warped_coordinates = 10 * warped_coordinates - 5
+        warped_coordinates = self._get_warped_coordinates()
 
         x = _tftools.ensure_rank_2(x)
         x_back = self.spline.interpolate(
@@ -199,11 +174,7 @@ class Spline(_Warping):
         return x_back
     
     def derivative(self, x):
-        warped_coordinates = _tf.cumsum(
-            self.parameters["warped_partition"].get_value())
-        warped_coordinates = _tf.concat(
-            [_tf.constant([0.0], _tf.float64), warped_coordinates], axis=0)
-        warped_coordinates = 10 * warped_coordinates - 5
+        warped_coordinates = self._get_warped_coordinates()
 
         x = _tftools.ensure_rank_2(x)
         x_warp = self.spline.interpolate_d1(
