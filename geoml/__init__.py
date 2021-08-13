@@ -1,9 +1,9 @@
-__version__ = '0.3.0'
+__version__ = '0.3.2'
 __author__ = 'Ítalo Gomes Gonçalves'
 __all__ = ['transform', 'warping', 'data',
-           'interpolation', 'layers', 'tftools',
+           'interpolation', 'tftools',
            'models', 'kernels', 'datasets',
-           'likelihood', 'plotly']
+           'likelihood', 'latent']
 
 # from . import interpolation
 # from . import parameter
