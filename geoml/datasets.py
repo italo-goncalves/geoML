@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -222,3 +222,38 @@ def andrade():
     )
 
     return planes, normals, raw_data
+
+
+def jura():
+    """
+    Jura mountains dataset (Goovaerts, 1997).
+
+    Returns
+    -------
+    jura_train : geoml.data.PointData
+        Training data (2 categorical variables and 7 continuous).
+
+    """
+    elements = ["Cd", "Co", "Cr", "Cu", "Ni", "Pb", "Zn"]
+
+    path = _os.path.dirname(__file__)
+    file = _os.path.join(path, "sample_data/jura_sample.dat")
+
+    raw_data = _pd.read_table(file, sep=" ", header=None,
+                              skiprows=13, engine="python",
+                              skipinitialspace=True)
+    raw_data.columns = ["X", "Y", "Landuse", "Rock"] + elements
+    raw_data["Landuse"] = raw_data["Landuse"].astype("str")
+    raw_data["Rock"] = raw_data["Rock"].astype("str")
+
+    landuse_labels = _np.unique(raw_data["Landuse"])
+    rock_labels = _np.unique(raw_data["Rock"])
+
+    jura_train = _data.PointData(raw_data, coordinates=["X", "Y"])
+    jura_train.add_categorical_variable("Landuse", landuse_labels,
+                                        raw_data["Landuse"])
+    jura_train.add_categorical_variable("Rock", rock_labels, raw_data["Rock"])
+    for el in elements:
+        jura_train.add_continuous_variable(el, raw_data[el])
+
+    return jura_train

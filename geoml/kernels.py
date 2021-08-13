@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -38,17 +38,155 @@ import tensorflow as _tf
 import numpy as _np
 
 
-class _Kernel(object):
-    """Abstract kernel class"""
-
+class _Kernel(_gpr.Parametric):
     def __init__(self):
-        self._all_parameters = []
-        self.parameters = {}
+        super().__init__()
         self._has_compact_support = False
 
     @property
-    def all_parameters(self):
-        return self._all_parameters
+    def has_compact_support(self):
+        return self._has_compact_support
+
+    def kernelize(self, x):
+        raise NotImplemented
+
+    def implicit_matmul(self, coordinates):
+        """
+        Implicit matrix-vector multiplication.
+
+        Returns a function that multiplies the kernel's covariance matrix
+        (defined at the given coordinates) with a vector efficiently.
+        """
+        raise NotImplemented
+
+
+class Gaussian(_Kernel):
+    """Gaussian kernel"""
+    def kernelize(self, x):
+        return _tf.exp(-3 * x**2)
+
+
+class Spherical(_Kernel):
+    """Spherical kernel"""
+    def __init__(self, epsilon=1e-12):
+        super().__init__()
+        self._has_compact_support = True
+        self.epsilon = epsilon  # required to be able to compute gradients
+
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 1 - 1.5 * d + 0.5 * _tf.pow(d, 3)
+        k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
+        return k
+
+
+class Exponential(_Kernel):
+    """Exponential kernel"""
+    def __init__(self, epsilon=1e-12):
+        super().__init__()
+        self.epsilon = epsilon  # required to be able to compute gradients
+
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = _tf.exp(-3 * d)
+        return k
+
+
+class Cubic(_Kernel):
+    """Cubic kernel"""
+    def __init__(self):
+        super().__init__()
+        self._has_compact_support = True
+
+    def kernelize(self, x):
+        k = 1 - 7 * _tf.pow(x, 2) + 35 / 4 * _tf.pow(x, 3) \
+            - 7 / 2 * _tf.pow(x, 5) + 3 / 4 * _tf.pow(x, 7)
+        k = _tf.where(_tf.less(x, 1.0), k, _tf.zeros_like(k))
+        return k
+
+
+class Constant(_Kernel):
+    """Constant kernel"""
+    def kernelize(self, x):
+        return _tf.ones_like(x)
+
+    def implicit_matmul(self, coordinates):
+        def matmul_fn(vector):
+            result = _tf.ones_like(vector) * _tf.reduce_sum(vector)
+            return result
+
+        return matmul_fn
+
+
+class Cosine(_Kernel):
+    """Cosine kernel"""
+    def kernelize(self, x):
+        return _tf.cos(2.0 * _np.pi * x)
+
+
+class Matern32(_Kernel):
+    def kernelize(self, x):
+        return (1 + 5*x)*_tf.math.exp(-5*x)
+
+
+class Matern52(_Kernel):
+    def kernelize(self, x):
+        return (1 + 6*x + 12*x**2)*_tf.math.exp(-6*x)
+
+
+class RationalQuadratic(_Kernel):
+    def __init__(self, scale=1):
+        super().__init__()
+        self._add_parameter("scale", _gpr.PositiveParameter(scale, 1e-3, 100))
+
+    def kernelize(self, x):
+        alpha = self.parameters["scale"].get_value()
+        cov = (1 + 3 * x ** 2 / alpha) ** (-alpha)
+        return cov
+
+
+class _RadialBasisFunction(_Kernel):
+    def __init__(self, max_distance, epsilon=1e-12):
+        super().__init__()
+        self.max_distance = max_distance
+        self.epsilon = epsilon  # required to be able to compute gradients
+
+
+class RBF3D(_RadialBasisFunction):
+    """RBF 3D"""
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 2 * d**3 + 3 * d**2 * self.max_distance + self.max_distance**3
+        k = k / self.max_distance**3
+        return k
+
+
+class RBF2D(_RadialBasisFunction):
+    """Thin plate spline RBF (2D)"""
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 2 * _tf.math.log(d) * d ** 2 \
+            - (1 + 2*_np.log(self.max_distance)) * d**2 \
+            + self.max_distance**2
+        k = k / self.max_distance ** 2
+        return k
+
+
+class RBF1D(_RadialBasisFunction):
+    """Cubic RBF (1D)"""
+    def kernelize(self, x):
+        d = _tf.sqrt(x ** 2 + self.epsilon)
+        k = 2*d**3 - 3 * d**2 * self.max_distance + self.max_distance**3
+        k = k / self.max_distance ** 3
+        return k
+
+
+class _AbstractCovariance(_gpr.Parametric):
+    """Abstract covariance function class"""
+
+    def __init__(self):
+        super().__init__()
+        self._has_compact_support = False
 
     @property
     def has_compact_support(self):
@@ -60,7 +198,7 @@ class _Kernel(object):
 
     def covariance_matrix_d1(self, x, y, dir_y, l1_distance=False):
         """
-        Computes direction-point covariance matrix between x and y tensors.
+        Computes point-direction covariance matrix between x and y tensors.
         """
         # if step is None:
         step = 1e-3
@@ -121,12 +259,6 @@ class _Kernel(object):
         cov_0 = self.point_variance(x)
 
         return 2 * (cov_0 - cov_2) / step**2
-
-    def pretty_print(self, depth=0):
-        raise NotImplementedError()
-
-    def __repr__(self):
-        return self.pretty_print()
 
     def set_limits(self, data):
         pass
@@ -205,17 +337,14 @@ class _Kernel(object):
         return full_cov
 
 
-class _LeafKernel(_Kernel):
-    """Kernel that acts on actual coordinates"""
+class Covariance(_AbstractCovariance):
+    """Covariance that acts on actual coordinates"""
 
-    def __init__(self, transform=_gt.Identity()):
+    def __init__(self, kernel, transform=_gt.Identity()):
         super().__init__()
-        self.transform = transform
-        self._all_parameters = [pr for pr in self.parameters.values()] \
-                             + [pr for pr in self.transform.parameters.values()]
-
-    def kernelize(self, x):
-        raise NotImplemented
+        self.kernel = self._register(kernel)
+        self.transform = self._register(transform)
+        self._has_compact_support = self.kernel.has_compact_support
 
     def covariance_matrix(self, x, y, l1_distance=False):
         with _tf.name_scope(self.__class__.__name__ + "_cov"):
@@ -225,7 +354,7 @@ class _LeafKernel(_Kernel):
                 d = _pairwise_dist_l1(x, y)
             else:
                 d = _pairwise_dist(x, y)
-            k = self.kernelize(d)
+            k = self.kernel.kernelize(d)
         return k
 
     def point_variance(self, x):
@@ -264,17 +393,14 @@ class _LeafKernel(_Kernel):
         raise NotImplementedError()
 
 
-class _NodeKernel(_Kernel):
-    """A kernel operation on other kernel"""
+class _NodeCovariance(_AbstractCovariance):
+    """A covariance operation on another covariance"""
 
     def __init__(self, *args):
         super().__init__()
-
         self.components = args
-        self._all_parameters = [kernel.all_parameters for kernel in args]
-        self._all_parameters = [item for sublist in self._all_parameters
-                                for item in sublist]
-        self._all_parameters += [pr for pr in self.parameters.values()]
+        for arg in args:
+            self._register(arg)
 
     def _operation(self, arg_list):
         raise NotImplementedError
@@ -352,12 +478,11 @@ class _NodeKernel(_Kernel):
         return matmul_fn
 
 
-class _WrapperKernel(_Kernel):
-    def __init__(self, base_kernel):
+class _WrapperCovariance(_AbstractCovariance):
+    def __init__(self, base_covariance):
         super().__init__()
-        self.base_kernel = base_kernel
-        self._all_parameters += base_kernel.all_parameters
-        self._has_compact_support = self.base_kernel.has_compact_support
+        self.base_covariance = self._register(base_covariance)
+        self._has_compact_support = self.base_covariance.has_compact_support
 
     def pretty_print(self, depth=0):
         s = ""
@@ -372,89 +497,15 @@ class _WrapperKernel(_Kernel):
             if parameter.fixed:
                 s += " (fixed)"
             s += "\n"
-        s += self.base_kernel.pretty_print(depth)
+        s += self.base_covariance.pretty_print(depth)
         return s
 
 
-class Gaussian(_LeafKernel):
-    """Gaussian kernel"""
-    def kernelize(self, x):
-        return _tf.exp(-3 * x**2)
-
-
-class Spherical(_LeafKernel):
-    """Spherical kernel"""
-    def __init__(self, transform=_gt.Identity(), epsilon=1e-12):
-        super().__init__(transform)
-        self._has_compact_support = True
-        self.epsilon = epsilon  # required to be able to compute gradients
-
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 1 - 1.5 * d + 0.5 * _tf.pow(d, 3)
-        k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
-        return k
-
-
-class Exponential(_LeafKernel):
-    """Exponential kernel"""
-    def __init__(self, transform=_gt.Identity(), epsilon=1e-12):
-        super().__init__(transform)
-        self.epsilon = epsilon  # required to be able to compute gradients
-
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = _tf.exp(-3 * d)
-        return k
-
-
-class Cubic(_LeafKernel):
-    """Cubic kernel"""
+class Linear(_AbstractCovariance):
+    """Linear covariance"""
     def __init__(self, transform=_gt.Identity()):
-        super().__init__(transform)
-        self._has_compact_support = True
-
-    def covariance_matrix(self, x, y, l1_distance=False):
-        with _tf.name_scope("Cubic_cov"):
-            x = self.transform.__call__(x)
-            y = self.transform.__call__(y)
-            if l1_distance:
-                d = _pairwise_dist_l1(x, y)
-            else:
-                d = _pairwise_dist(x, y)
-            k = 1 - 7 * _tf.pow(d, 2) + 35 / 4 * _tf.pow(d, 3) \
-                - 7 / 2 * _tf.pow(d, 5) + 3 / 4 * _tf.pow(d, 7)
-            k = _tf.where(_tf.less(d, 1.0), k, _tf.zeros_like(k))
-        return k
-
-    def kernelize(self, x):
-        k = 1 - 7 * _tf.pow(x, 2) + 35 / 4 * _tf.pow(x, 3) \
-            - 7 / 2 * _tf.pow(x, 5) + 3 / 4 * _tf.pow(x, 7)
-        k = _tf.where(_tf.less(x, 1.0), k, _tf.zeros_like(k))
-        return k
-
-
-class Constant(_LeafKernel):
-    """Constant kernel"""
-
-    def covariance_matrix(self, x, y, l1_distance=False):
-        with _tf.name_scope("Constant_cov"):
-            k = _tf.ones([_tf.shape(x)[0], _tf.shape(y)[0]], dtype=_tf.float64)
-        return k
-
-    def kernelize(self, x):
-        return _tf.ones_like(x)
-
-    def implicit_matmul(self, coordinates):
-        def matmul_fn(vector):
-            result = _tf.ones_like(vector) * _tf.reduce_sum(vector)
-            return result
-
-        return matmul_fn
-
-
-class Linear(_LeafKernel):
-    """Linear kernel"""
+        super().__init__()
+        self.transform = self._register(transform)
 
     def covariance_matrix(self, x, y, l1_distance=False):
         with _tf.name_scope("Linear_cov"):
@@ -481,13 +532,7 @@ class Linear(_LeafKernel):
         return self.transform(x)
 
 
-class Cosine(_LeafKernel):
-    """Cosine kernel"""
-    def kernelize(self, x):
-        return _tf.cos(2.0 * _np.pi * x)
-
-
-class Sum(_NodeKernel):
+class Sum(_NodeCovariance):
     """Kernel sum"""
     def __init__(self, *args):
         n_comp = len(args)
@@ -506,7 +551,7 @@ class Sum(_NodeKernel):
         return k
 
 
-class Product(_NodeKernel):
+class Product(_NodeCovariance):
     """Kernel product"""
     def __init__(self, *args):
         super().__init__(*args)
@@ -517,77 +562,16 @@ class Product(_NodeKernel):
         return _prod_n(arg_list)
 
 
-class Matern32(_LeafKernel):
-    def kernelize(self, x):
-        return (1 + 5*x)*_tf.math.exp(-5*x)
-
-
-class Matern52(_LeafKernel):
-    def kernelize(self, x):
-        return (1 + 6*x + 12*x**2)*_tf.math.exp(-6*x)
-
-
-class RationalQuadratic(_LeafKernel):
-    def __init__(self, transform=_gt.Identity(), scale=1):
-        super().__init__(transform)
-        self.parameters.update({
-            "scale": _gpr.PositiveParameter(scale, 1e-3, 100)})
-        self._all_parameters.append(self.parameters["scale"])
-
-    def kernelize(self, x):
-        alpha = self.parameters["scale"].get_value()
-        cov = (1 + 3 * x ** 2 / alpha) ** (-alpha)
-        return cov
-
-
-class Scale(_WrapperKernel):
+class Scale(_WrapperCovariance):
     """Kernel scaling"""
-    def __init__(self, base_kernel):
-        super().__init__(base_kernel)
-        amp = _gpr.PositiveParameter(1.0, 1e-4, 1e4)
-        self.parameters["amplitude"] = amp
-        self._all_parameters.append(amp)
+    def __init__(self, base_covariance):
+        super().__init__(base_covariance)
+        self._add_parameter("amplitude", _gpr.PositiveParameter(1.0, 1e-4, 1e4))
 
     def covariance_matrix(self, x, y, l1_distance=False):
         return self.parameters["amplitude"].get_value() \
-               * self.base_kernel.covariance_matrix(x, y, l1_distance)
+               * self.base_covariance.covariance_matrix(x, y, l1_distance)
 
     def point_variance(self, x):
         return self.parameters["amplitude"].get_value() \
-               * self.base_kernel.point_variance(x)
-
-
-class _RadialBasisFunction(_LeafKernel):
-    def __init__(self, max_distance, epsilon=1e-12):
-        super().__init__(_gt.Identity())
-        self.max_distance = max_distance
-        self.epsilon = epsilon  # required to be able to compute gradients
-
-
-class RBF3D(_RadialBasisFunction):
-    """RBF 3D"""
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 2 * d**3 + 3 * d**2 * self.max_distance + self.max_distance**3
-        k = k / self.max_distance**3
-        return k
-
-
-class RBF2D(_RadialBasisFunction):
-    """Thin plate spline RBF (2D)"""
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 2 * _tf.math.log(d) * d ** 2 \
-            - (1 + 2*_np.log(self.max_distance)) * d**2 \
-            + self.max_distance**2
-        k = k / self.max_distance ** 2
-        return k
-
-
-class RBF1D(_RadialBasisFunction):
-    """Cubic RBF (1D)"""
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 2*d**3 - 3 * d**2 * self.max_distance + self.max_distance**3
-        k = k / self.max_distance ** 3
-        return k
+               * self.base_covariance.point_variance(x)

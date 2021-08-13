@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -19,10 +19,84 @@
 #            "CompositionalParameter",
 #            "CircularParameter"]
 
-import geoml.tftools as _tftools
+# import geoml.tftools as _tftools
 
 import tensorflow as _tf
 import numpy as _np
+import pickle as _pickle
+
+
+class Parametric(object):
+    """An abstract class for objects with trainable parameters"""
+    def __init__(self):
+        self.parameters = {}
+        self._all_parameters = []
+
+    def pretty_print(self, depth=0):
+        raise NotImplementedError()
+
+    def __repr__(self):
+        return self.pretty_print()
+
+    @property
+    def all_parameters(self):
+        return self._all_parameters
+
+    def _add_parameter(self, name, parameter):
+        self.parameters[name] = parameter
+        self._all_parameters.append(parameter)
+
+    def _register(self, parametric):
+        self._all_parameters.extend(parametric.all_parameters)
+        return parametric
+
+    def get_parameter_values(self, complete=False):
+        value = []
+        shape = []
+        position = []
+        min_val = []
+        max_val = []
+
+        for index, parameter in enumerate(self._all_parameters):
+            if (not parameter.fixed) | complete:
+                value.append(_tf.reshape(parameter.variable, [-1]).
+                                 numpy())
+                shape.append(_tf.shape(parameter.variable).numpy())
+                position.append(index)
+                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
+                               numpy())
+                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
+                               numpy())
+
+        min_val = _np.concatenate(min_val, axis=0)
+        max_val = _np.concatenate(max_val, axis=0)
+        value = _np.concatenate(value, axis=0)
+
+        return value, shape, position, min_val, max_val
+
+    def update_parameters(self, value, shape, position):
+        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
+        value = _np.split(value, _np.cumsum(sizes))[:-1]
+        value = [_np.squeeze(val) if len(sh) == 0 else val
+                    for val, sh in zip(value, shape)]
+
+        for val, sh, pos in zip(value, shape, position):
+            self._all_parameters[pos].set_value(
+                _np.reshape(val, sh) if len(sh) > 0 else val,
+                transformed=True
+            )
+
+    def save_state(self, file):
+        parameters = self.get_parameter_values(complete=True)
+        with open(file, 'wb') as f:
+            _pickle.dump(parameters, f)
+
+    def load_state(self, file):
+        with open(file, 'rb') as f:
+            parameters = _pickle.load(f)
+
+        value, shape, position, k_min_val, k_max_val = parameters
+        self.update_parameters(value, shape, position)
 
 
 class RealParameter(object):
@@ -175,55 +249,6 @@ class UnitColumnSumParameter(RealParameter):
 
     def _back_transform(self, x):
         return _tf.nn.softmax(x, axis=0)
-
-
-class NaturalParameter(RealParameter):
-    def __init__(self, dim, n_latent):
-        mat = _np.tile(_np.eye(dim)[None, :, :], [n_latent, 1, 1])
-        vec = _np.zeros([n_latent, dim])
-        start = _np.concatenate(
-            [_np.reshape(mat, [-1]), _np.reshape(vec, [-1])],
-            axis=0)
-
-        self.dim = dim
-        self.n_latent = n_latent
-        self.theta = _tf.Variable(_tf.constant(-0.5 * start, _tf.float64))
-        super().__init__(start, start - 20, start + 20)
-
-    def get_value(self):
-        # self.variable = [eta_2, eta_1]
-        n_cov = self.n_latent * self.dim**2
-        eta_2 = _tf.reshape(self.variable[:n_cov],
-                            [self.n_latent, self.dim, self.dim])
-        eta_1 = _tf.reshape(self.variable[n_cov:],
-                            [self.n_latent, self.dim, 1])
-        mat_s = eta_2 - _tf.matmul(eta_1, eta_1, False, True)
-        return eta_1, mat_s
-
-    def refresh(self):
-        n_cov = self.n_latent * self.dim ** 2
-        theta_2 = _tf.reshape(self.theta[:n_cov],
-                              [self.n_latent, self.dim, self.dim])
-        theta_1 = _tf.reshape(self.theta[n_cov:],
-                              [self.n_latent, self.dim, 1])
-
-        eye = _tf.eye(self.dim, dtype=_tf.float64, batch_shape=[self.n_latent])
-        theta_2 = 0.5 * (theta_2 + _tf.transpose(theta_2, [0, 2, 1]))
-        theta_2_chol = _tf.linalg.cholesky(-2 * theta_2 + eye * 0.01)
-
-        # eta_1 = -0.5 * _tf.linalg.solve(theta_2, theta_1)
-        # eta_2 = -0.5 * _tf.linalg.solve(
-        #     theta_2, # + eye * 1e-6,
-        #     _tf.matmul(theta_1, eta_1, False, True) + eye)
-        eta_1 = _tf.linalg.cholesky_solve(theta_2_chol, theta_1)
-        eta_2 = _tf.linalg.cholesky_solve(
-            theta_2_chol,
-            _tf.matmul(theta_1, eta_1, False, True) + eye)
-        eta = _tf.concat(
-            [_tf.reshape(eta_2, [-1]), _tf.reshape(eta_1, [-1])],
-            axis=0
-        )
-        self.variable.assign(eta)
 
 
 class OrthonormalMatrix(RealParameter):

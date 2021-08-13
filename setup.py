@@ -7,7 +7,7 @@ from setuptools import setup
 
 
 setup(name='geoml',
-      version='0.3.0',
+      version='0.3.2',
       description='Machine learning for spatial data',
       #      long_description=readme(),
       keywords=['machine learning', 'spatial data', 'gaussian process'],
@@ -20,5 +20,5 @@ setup(name='geoml',
       package_data={'geoml': ['sample_data/*.dat']},
       include_package_data=True,
       zip_safe=False,
-      install_requires=['scikit-image', 'pandas', 'numpy',
+      install_requires=['scikit-image', 'pandas', 'numpy', 'pyvista',
                         'tensorflow', 'tensorflow-probability'])

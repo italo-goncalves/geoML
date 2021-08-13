@@ -15,7 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 __all__ = ["GP", "GPEnsemble", "StructuralField", "GPOptions",
-           "VGP", "VGPEnsemble"]
+           "VGPNetwork", "VGPNetworkEnsemble"]
 
 import geoml.data as _data
 import geoml.parameter as _gpr
@@ -24,7 +24,6 @@ import geoml.warping as _warp
 
 import numpy as _np
 import tensorflow as _tf
-import pickle as _pickle
 import copy as _copy
 
 import tensorflow_probability as _tfp
@@ -58,97 +57,39 @@ class GPOptions(_ModelOptions):
         self.training_samples = training_samples
 
 
-class _GPModel:
+class _GPModel(_gpr.Parametric):
     def __init__(self, options=GPOptions()):
+        super().__init__()
         self.options = options
         self._pre_computations = {}
-        self._all_parameters = []
-        self.parameters = {}
         self._n_dim = None
 
     @property
     def n_dim(self):
         return self._n_dim
 
-    @property
-    def all_parameters(self):
-        return self._all_parameters
-
-    def get_parameter_values(self, complete=False):
-        value = []
-        shape = []
-        position = []
-        min_val = []
-        max_val = []
-
-        for index, parameter in enumerate(self._all_parameters):
-            if (not parameter.fixed) | complete:
-                value.append(_tf.reshape(parameter.variable, [-1]).
-                             numpy())
-                shape.append(_tf.shape(parameter.variable).numpy())
-                position.append(index)
-                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
-                               numpy())
-                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
-                               numpy())
-
-        min_val = _np.concatenate(min_val, axis=0)
-        max_val = _np.concatenate(max_val, axis=0)
-        value = _np.concatenate(value, axis=0)
-
-        return value, shape, position, min_val, max_val
-
-    def update_parameters(self, value, shape, position):
-        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
-        value = _np.split(value, _np.cumsum(sizes))[:-1]
-        value = [_np.squeeze(val) if len(sh) == 0 else val
-                 for val, sh in zip(value, shape)]
-
-        for val, sh, pos in zip(value, shape, position):
-            self._all_parameters[pos].set_value(
-                _np.reshape(val, sh) if len(sh) > 0 else val,
-                transformed=True
-            )
-
-    def save_state(self, file):
-        parameters = self.get_parameter_values(complete=True)
-        with open(file, 'wb') as f:
-            _pickle.dump(parameters, f)
-
-    def load_state(self, file):
-        with open(file, 'rb') as f:
-            parameters = _pickle.load(f)
-
-        value, shape, position, k_min_val, k_max_val = parameters
-        self.update_parameters(value, shape, position)
-
 
 class GP(_GPModel):
     """
     Basic Gaussian process model.
     """
-    def __init__(self, data, variable, kernel, warping=None, tangents=None,
+    def __init__(self, data, variable, covariance, warping=None, tangents=None,
                  use_trend=False, options=GPOptions()):
         super().__init__(options)
 
         self.data = data
         self.variable = variable
-        self.kernel = kernel
-        self.kernel.set_limits(data)
+        self.covariance = self._register(covariance)
+        self.covariance.set_limits(data)
 
         if warping is None:
             warping = _warp.Identity()
-        self.warping = warping
+        self.warping = self._register(warping)
 
         self.tangents = tangents
         self.use_trend = use_trend
 
-        self._all_parameters.extend(kernel.all_parameters)
-        self._all_parameters.extend(warping.all_parameters)
-        self.parameters.update({
-            "noise": _gpr.PositiveParameter(0.1, 1e-6, 10)
-        })
-        self._all_parameters.append(self.parameters["noise"])
+        self._add_parameter("noise", _gpr.PositiveParameter(0.1, 1e-6, 10))
 
         self.training_log = []
         self.optimizer = _tf.keras.optimizers.Adam(
@@ -179,7 +120,7 @@ class GP(_GPModel):
         s = "Gaussian process model\n\n"
         s += "Variable: " + self.variable + "\n\n"
         s += "Kernel:\n"
-        s += repr(self.kernel)
+        s += repr(self.covariance)
         s += "\nWarping:\n"
         s += repr(self.warping)
         return s
@@ -207,10 +148,10 @@ class GP(_GPModel):
                 self.directions = _tf.constant(self.tangents.directions,
                                                _tf.float64)
 
-                cov = self.kernel.self_covariance_matrix(self.x)
-                cov_d1 = self.kernel.covariance_matrix_d1(
+                cov = self.covariance.self_covariance_matrix(self.x)
+                cov_d1 = self.covariance.covariance_matrix_d1(
                     self.x, self.x_dir, self.directions)
-                cov_d2 = self.kernel.self_covariance_matrix_d2(
+                cov_d2 = self.covariance.self_covariance_matrix_d2(
                     self.x_dir, self.directions)
 
                 self.cov = _tf.concat([
@@ -230,7 +171,7 @@ class GP(_GPModel):
                     _tf.zeros([self.tangents.n_data], _tf.float64)
                 ], axis=0)
             else:
-                self.cov = self.kernel.self_covariance_matrix(self.x)
+                self.cov = self.covariance.self_covariance_matrix(self.x)
                 self.y_warped = self.warping.forward(self.y[:, None])
 
                 eye = _tf.eye(_np.sum(keep), dtype=_tf.float64)
@@ -308,9 +249,9 @@ class GP(_GPModel):
             noise = self.parameters["noise"].get_value()
 
             # covariance
-            cov_new = self.kernel.covariance_matrix(x_new, self.x)
+            cov_new = self.covariance.covariance_matrix(x_new, self.x)
             if self.tangents is not None:
-                cov_new_d1 = self.kernel.covariance_matrix_d1(
+                cov_new_d1 = self.covariance.covariance_matrix_d1(
                     x_new, self.x_dir, self.directions)
                 cov_new = _tf.concat([cov_new, cov_new_d1], axis=1)
             cov_new = cov_new / self.scale[None, :]
@@ -318,7 +259,7 @@ class GP(_GPModel):
             # prediction
             mu = _tf.matmul(cov_new, self.alpha)
 
-            point_var = self.kernel.point_variance(x_new)[:, None]
+            point_var = self.covariance.point_variance(x_new)[:, None]
             explained_var = _tf.reduce_sum(
                 _tf.matmul(cov_new, self.cov_inv) * cov_new,
                 axis=1, keepdims=True)
@@ -444,75 +385,66 @@ class GP(_GPModel):
             print("\n")
 
 
-class VGP(_GPModel):
+class VGPNetwork(_GPModel):
     """Vanilla VGP"""
     def __init__(self, data, variables, likelihoods,
-                 latent_layer,
+                 latent_network,
                  directional_data=None,
-                 force_independence=False,
                  options=GPOptions()):
         super().__init__(options=options)
 
         self.data = data
-        self.latent_layer = latent_layer
+        self.latent_network = self._register(latent_network)
 
-        if not (isinstance(likelihoods, list)
-                or isinstance(likelihoods, tuple)):
+        if not (isinstance(likelihoods, (list, tuple))):
             likelihoods = [likelihoods]
         self.likelihoods = likelihoods
+        self.lik_sizes = [lik.size for lik in likelihoods]
 
         if not (isinstance(variables, (list, tuple))):
             variables = [variables]
         self.variables = variables
         self.var_lengths = [data.variables[v].length for v in variables]
 
-        # mixing weights
-        n_latent = self.latent_layer.n_latent
-        _np.random.seed(self.options.seed)
-        mix_start = _np.random.normal(
-            size=[n_latent, sum(self.var_lengths) - 1])
-        mix_start = mix_start / _np.sqrt(_np.sum(mix_start ** 2,
-                                                 axis=0, keepdims=True))
-        mix_start = _np.concatenate(
-            [mix_start, - _np.sum(mix_start, axis=1, keepdims=True) + 1e-6],
-            axis=1)
-        self.parameters.update({
-            "mixing_weights": _gpr.UnitColumnNormParameter(
-                mix_start,
-                _np.zeros([n_latent, sum(self.var_lengths)]) - 1,
-                _np.zeros([n_latent, sum(self.var_lengths)]) + 1,
-                name="mixing_weights",
-            ),
-        })
-
-        if force_independence:
-            if n_latent != sum(self.var_lengths):
-                raise Exception("Cannot force independence: number of"
-                                "latent variables do not match the number"
-                                "of data variables.")
-            self.parameters["mixing_weights"].set_value(_np.eye(n_latent))
-            self.parameters["mixing_weights"].fix()
+        # dealing with NaNs
+        y = _np.concatenate([data.variables[v].get_measurements()
+                             for v in self.variables], axis=1)
+        self.y = y.copy()
+        self.y[_np.isnan(y)] = 0
+        self.has_value = (~ _np.isnan(y)) * 1.0
+        self.total_data = _np.sum(self.has_value)
 
         # directions
         self.directional_likelihood = _lk.Gaussian()
         self.directional_likelihood.parameters["noise"].set_value(1e-6)
         self.directional_data = directional_data
         self.total_data_dir = 0
+        self.y_dir = None
+        self.has_value_dir = None
+        self.var_lengths_dir = None
 
         if directional_data is not None:
             if self.data.n_dim != directional_data.n_dim:
                 raise ValueError("the directional data must have the"
                                  "same number of dimensions as the"
                                  "point data")
-            self.total_data_dir = directional_data.n_data
 
-        # dealing with NaNs
-        y = _np.concatenate([data.variables[v].get_measurements()
-                             for v in self.variables], axis=1)
-        y[_np.isnan(y)] = 0
-        self.y = y
-        self.has_value = (~ _np.isnan(y)) * 1.0
-        self.total_data = _np.sum(self.has_value)
+            self.var_lengths_dir = [1] * sum(self.var_lengths)
+
+            y_dir = []
+            for v, s in zip(variables, self.var_lengths):
+                if v in directional_data.variables.keys():
+                    y_dir.append(_np.tile(
+                        directional_data.variables[v].get_measurements(),
+                        [1, s]))
+                else:
+                    y_dir.append(_np.ones([directional_data.n_data, s])*_np.nan)
+            y_dir = _np.concatenate(y_dir, axis=1)
+
+            self.y_dir = y_dir.copy()
+            self.y_dir[_np.isnan(y_dir)] = 0
+            self.has_value_dir = (~ _np.isnan(y_dir)) * 1.0
+            self.total_data_dir = _np.sum(self.has_value_dir)
 
         # optimizer
         self.training_log = []
@@ -522,18 +454,14 @@ class VGP(_GPModel):
         )
 
         # setting trainable parameters
-        self._all_parameters.extend(self.latent_layer.all_parameters)
-        self.latent_layer.set_kernel_limits(self.data)
-        self.latent_layer.refresh(self.options.jitter)
+        self.latent_network.refresh(self.options.jitter)
+        self.latent_network.set_parameter_limits(data)
         for likelihood in likelihoods:
-            self._all_parameters.extend(likelihood.all_parameters)
-        self._all_parameters.append(self.parameters["mixing_weights"])
+            self._register(likelihood)
 
-        # pre_computations
-        self._pre_computations.update({
-            "elbo": _tf.Variable(_tf.constant(0.0, _tf.float64)),
-            "kl_div": _tf.Variable(_tf.constant(0.0, _tf.float64)),
-        })
+        # intermediate tensors
+        self.elbo = _tf.Variable(_tf.constant(0.0, _tf.float64))
+        self.kl_div = _tf.Variable(_tf.constant(0.0, _tf.float64))
 
     def __repr__(self):
         s = "Variational Gaussian process model\n\n"
@@ -541,7 +469,7 @@ class VGP(_GPModel):
         for v, lik in zip(self.variables, self.likelihoods):
             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
         s += "\nLatent layer:\n"
-        s += repr(self.latent_layer)
+        s += repr(self.latent_network)
         return s
 
     def set_learning_rate(self, rate):
@@ -552,42 +480,44 @@ class VGP(_GPModel):
 
     @_tf.function
     def _training_elbo(self, x, y, has_value, training_inputs,
-                       x_dir=None, directions=None, samples=20,
+                       x_dir=None, directions=None, y_dir=None,
+                       has_value_directions=None,
+                       samples=20,
                        seed=0, jitter=1e-6):
+        self.latent_network.refresh(jitter)
 
         elbo = self._log_lik(x, y, has_value, training_inputs,
-                             samples=samples, seed=seed, jitter=jitter)
+                             samples=samples, seed=seed)
 
         if x_dir is not None:
             elbo = elbo + self._log_lik_directions(
-                x_dir, directions, jitter=jitter)
+                x_dir, directions, y_dir, has_value_directions)
 
-        elbo = elbo - self._kl_divergence(jitter=jitter)
+        kl = self.latent_network.kl_divergence()
+        elbo = elbo - kl
 
-        self._pre_computations["elbo"].assign(elbo)
+        self.elbo.assign(elbo)
+        self.kl_div.assign(kl)
         return elbo
 
     @_tf.function
     def _log_lik(self, x, y, has_value, training_inputs,
-                 samples=20, seed=0, jitter=1e-6):
+                 samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
             # prediction
-            mu, var, sims, _ = self.latent_layer.predict(
-                x, n_sim=samples, seed=[seed, 0], jitter=jitter)
+            mu, var, sims, _ = self.latent_network.predict(
+                x, n_sim=samples, seed=[seed, 0])
 
-            # mixing
-            mixing_weights = self.parameters["mixing_weights"].get_value()
-
-            mu = _tf.matmul(mu[:, :, 0], mixing_weights, True, False)
-            var = _tf.matmul(var, mixing_weights ** 2, True, False)
-            sims = _tf.einsum("lds,lv->dvs", sims, mixing_weights)
+            mu = _tf.transpose(mu[:, :, 0])
+            var = _tf.transpose(var)
+            sims = _tf.transpose(sims, [1, 0, 2])
 
             # likelihood
             y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.var_lengths, axis=1)
-            var = _tf.split(var, self.var_lengths, axis=1)
+            mu = _tf.split(mu, self.lik_sizes, axis=1)
+            var = _tf.split(var, self.lik_sizes, axis=1)
             hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.var_lengths, axis=1)
+            sims = _tf.split(sims, self.lik_sizes, axis=1)
 
             elbo = _tf.constant(0.0, _tf.float64)
             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
@@ -598,29 +528,29 @@ class VGP(_GPModel):
 
             # batch weight
             batch_size = _tf.reduce_sum(has_value)
-            # elbo = elbo * self.data.n_data / batch_size
             elbo = elbo * self.total_data / batch_size
 
             return elbo
 
     @_tf.function
-    def _log_lik_directions(self, x_dir, directions, jitter=1e-6):
+    def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
         with _tf.name_scope("batched_elbo_directions"):
             # prediction
-            mu, var, _ = self.latent_layer.predict_directions(
-                x_dir, directions, jitter=jitter)
-            has_value = _tf.ones_like(mu)
+            mu, var = self.latent_network.predict_directions(
+                x_dir, directions)
+
+            mu = _tf.transpose(mu[:, :, 0])
+            var = _tf.transpose(var)
 
             # likelihood
-            mu = _tf.split(_tf.transpose(mu[:, :, 0]),
-                           self.latent_layer.n_latent, axis=1)
-            var = _tf.split(_tf.transpose(var),
-                            self.latent_layer.n_latent, axis=1)
-            hv = _tf.split(has_value, self.latent_layer.n_latent, axis=1)
+            y_s = _tf.split(y_dir, self.var_lengths_dir, axis=1)
+            mu = _tf.split(mu, self.var_lengths_dir, axis=1)
+            var = _tf.split(var, self.var_lengths_dir, axis=1)
+            hv = _tf.split(has_value, self.var_lengths_dir, axis=1)
             elbo = _tf.constant(0.0, _tf.float64)
-            for mu_i, var_i, hv_i in zip(mu, var, hv):
+            for mu_i, var_i, y_i, hv_i in zip(mu, var, y_s, hv):
                 elbo = elbo + self.directional_likelihood.log_lik(
-                    mu_i, var_i, _tf.zeros_like(mu_i), hv_i)
+                    mu_i, var_i, y_i, hv_i)
 
             # batch weight
             batch_size = _tf.cast(_tf.shape(x_dir)[0], _tf.float64)
@@ -628,30 +558,15 @@ class VGP(_GPModel):
 
             return elbo
 
-    @_tf.function
-    def _kl_divergence(self, jitter=1e-6):
-        with _tf.name_scope("KL_divergence"):
-            kl = self.latent_layer.kl_divergence(jitter)
-            self._pre_computations["kl_div"].assign(kl)
-            return kl
-
-    # def elbo(self):
-    #     """
-    #     Outputs the model's ELBO, given the current parameters.
-    #
-    #     Returns
-    #     -------
-    #     elbo : double
-    #         The model's expected lower bound on the log-likelihood.
-    #     """
-    #     return self._pre_computations["elbo"].numpy()
-
     def train_full(self, max_iter=1000):
         training_inputs = [self.data.variables[v].training_input()
                            for v in self.variables]
 
-        model_variables = [pr.variable for pr in self._all_parameters
+        unique_params = list(set(self._all_parameters))
+        model_variables = [pr.variable for pr in unique_params
                            if not pr.fixed]
+        # model_variables = [pr.variable for pr in self._all_parameters
+        #                    if not pr.fixed]
 
         def loss():
             if self.directional_data is None:
@@ -674,6 +589,9 @@ class VGP(_GPModel):
                         _tf.float64),
                     directions=_tf.constant(
                         self.directional_data.directions, _tf.float64),
+                    y_dir=_tf.constant(self.y_dir, _tf.float64),
+                    has_value_directions=_tf.constant(
+                        self.has_value_dir, _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed)
@@ -684,7 +602,7 @@ class VGP(_GPModel):
             for pr in self._all_parameters:
                 pr.refresh()
 
-            current_elbo = self._pre_computations["elbo"].numpy()
+            current_elbo = self.elbo.numpy()
             self.training_log.append(current_elbo)
 
             if self.options.verbose:
@@ -695,7 +613,8 @@ class VGP(_GPModel):
             print("\n")
 
     def train_svi(self, epochs=100):
-        model_variables = [pr.variable for pr in self._all_parameters
+        unique_params = list(set(self._all_parameters))
+        model_variables = [pr.variable for pr in unique_params
                            if not pr.fixed]
 
         def loss(idx):
@@ -726,6 +645,9 @@ class VGP(_GPModel):
                         _tf.float64),
                     directions=_tf.constant(
                         self.directional_data.directions, _tf.float64),
+                    y_dir=_tf.constant(self.y_dir, _tf.float64),
+                    has_value_directions=_tf.constant(
+                        self.has_value_dir, _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -747,7 +669,7 @@ class VGP(_GPModel):
                 for pr in self._all_parameters:
                     pr.refresh()
 
-                current_elbo.append(self._pre_computations["elbo"].numpy())
+                current_elbo.append(self.elbo.numpy())
                 self.training_log.append(current_elbo[-1])
 
             total_elbo = _np.mean(current_elbo)
@@ -759,7 +681,8 @@ class VGP(_GPModel):
             print("\n")
 
     def train_batched(self, epochs=100):
-        model_variables = [pr.variable for pr in self._all_parameters
+        unique_params = list(set(self._all_parameters))
+        model_variables = [pr.variable for pr in unique_params
                            if not pr.fixed]
 
         def loss(idx):
@@ -790,6 +713,9 @@ class VGP(_GPModel):
                         _tf.float64),
                     directions=_tf.constant(
                         self.directional_data.directions, _tf.float64),
+                    y_dir=_tf.constant(self.y_dir, _tf.float64),
+                    has_value_directions=_tf.constant(
+                        self.has_value_dir, _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -813,8 +739,7 @@ class VGP(_GPModel):
                 for j, grad_j in enumerate(all_grads):
                     grad_j.append(grad[j])
 
-                current_elbo.append(
-                    self._pre_computations["elbo"].numpy())
+                current_elbo.append(self.elbo.numpy())
 
             all_grads = [_tf.add_n(grad_j) for grad_j in all_grads]
             self.optimizer.apply_gradients(
@@ -836,26 +761,23 @@ class VGP(_GPModel):
 
     @_tf.function
     def predict_raw(self, x_new, variable_inputs, n_sim=1, seed=0, jitter=1e-6):
-        self.latent_layer.refresh(jitter)
+        self.latent_network.refresh(jitter)
 
         with _tf.name_scope("Prediction"):
             pred_mu, pred_var, pred_sim, pred_exp_var = \
-                self.latent_layer.predict(
-                    x_new, n_sim=n_sim, seed=[seed, 0], jitter=jitter
+                self.latent_network.predict(
+                    x_new, n_sim=n_sim, seed=[seed, 0]
                 )
 
-            # mixing
-            mixing_weights = self.parameters["mixing_weights"].get_value()
-            pred_mu = _tf.matmul(pred_mu[:, :, 0], mixing_weights, True, False)
-            pred_var = _tf.matmul(pred_var, mixing_weights ** 2, True, False)
-            pred_sim = _tf.einsum("lds,lv->dvs", pred_sim, mixing_weights)
-            pred_exp_var = _tf.matmul(pred_exp_var, mixing_weights ** 2,
-                                      True, False)
+            pred_mu = _tf.transpose(pred_mu[:, :, 0])
+            pred_var = _tf.transpose(pred_var)
+            pred_sim = _tf.transpose(pred_sim, [1, 0, 2])
+            pred_exp_var = _tf.transpose(pred_exp_var)
 
-            pred_mu = _tf.split(pred_mu, self.var_lengths, axis=1)
-            pred_var = _tf.split(pred_var, self.var_lengths, axis=1)
-            pred_sim = _tf.split(pred_sim, self.var_lengths, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.var_lengths, axis=1)
+            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
+            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
+            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
+            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
 
             output = []
             for mu, var, sim, exp_var, lik, v_inp in zip(
@@ -920,14 +842,14 @@ class VGP(_GPModel):
 
 class StructuralField(_GPModel):
     """Structural field modeling based on gradient data"""
-    def __init__(self, tangents, kernel, normals=None, mean_vector=None,
+    def __init__(self, tangents, covariance, normals=None, mean_vector=None,
                  options=GPOptions()):
         super().__init__(options=options)
 
         self.tangents = tangents
         self.normals = normals
-        self.kernel = kernel
-        self.kernel.set_limits(self.tangents)
+        self.covariance = self._register(covariance)
+        self.covariance.set_limits(self.tangents)
 
         if mean_vector is None:
             # initialized as vertical
@@ -940,16 +862,15 @@ class StructuralField(_GPModel):
             amsgrad=True
         )
 
-        self._all_parameters.extend(self.kernel.all_parameters)
-        self.parameters.update({
-            "mean_vector": _gpr.UnitColumnNormParameter(
+        self._add_parameter(
+            "mean_vector",
+            _gpr.UnitColumnNormParameter(
                 _np.array(mean_vector, ndmin=2).T,
                 - _np.ones([self.tangents.n_dim, 1]),
-                _np.ones([self.tangents.n_dim, 1])),
-            "noise": _gpr.PositiveParameter(1e-4, 1e-6, 10, fixed=True)
-        })
-        self._all_parameters.append(self.parameters["mean_vector"])
-        self._all_parameters.append(self.parameters["noise"])
+                _np.ones([self.tangents.n_dim, 1]))
+        )
+        self._add_parameter("noise",
+                            _gpr.PositiveParameter(1e-4, 1e-6, 10, fixed=True))
 
         if self.normals is None:
             # noise not used
@@ -972,7 +893,7 @@ class StructuralField(_GPModel):
     def __repr__(self):
         s = "Gaussian process structural field model\n\n"
         s += "Kernel:\n"
-        s += repr(self.kernel)
+        s += repr(self.covariance)
         return s
 
     def set_learning_rate(self, rate):
@@ -1013,7 +934,7 @@ class StructuralField(_GPModel):
             self.all_coordinates = _tf.constant(all_coordinates, _tf.float64)
             self.all_directions = _tf.constant(all_directions, _tf.float64)
 
-            self.cov = self.kernel.self_covariance_matrix_d2(
+            self.cov = self.covariance.self_covariance_matrix_d2(
                 self.all_coordinates, self.all_directions
             )
             self.scale = _tf.reduce_max(_tf.linalg.diag_part(self.cov))
@@ -1077,19 +998,19 @@ class StructuralField(_GPModel):
             mean_vector = self.parameters["mean_vector"].get_value()
 
             # mean of field
-            cov_new = self.kernel.covariance_matrix_d1(
+            cov_new = self.covariance.covariance_matrix_d1(
                 x_new, self.all_coordinates, self.all_directions) / self.scale
 
             mu = _tf.matmul(cov_new, self.alpha)
             mu = mu + _tf.matmul(x_new, mean_vector)
 
             # variance of gradient along mean direction
-            cov_new = self.kernel.covariance_matrix_d2(
+            cov_new = self.covariance.covariance_matrix_d2(
                 x_new, self.all_coordinates,
                 _tf.transpose(mean_vector), self.all_directions
             ) / self.scale
 
-            point_var = self.kernel.point_variance(x_new)[:, None]
+            point_var = self.covariance.point_variance(x_new)[:, None]
             explained_var = _tf.reduce_sum(
                 _tf.matmul(cov_new, self.cov_inv) * cov_new,
                 axis=1, keepdims=True)
@@ -1104,14 +1025,14 @@ class StructuralField(_GPModel):
         with _tf.name_scope("Prediction"):
             mean_vector = self.parameters["mean_vector"].get_value()
 
-            cov_new = self.kernel.covariance_matrix_d2(
+            cov_new = self.covariance.covariance_matrix_d2(
                 x_new, self.all_coordinates,
                 x_new_dir, self.all_directions) / self.scale
 
             mu = _tf.matmul(cov_new, self.alpha)
             mu = mu + _tf.matmul(x_new_dir, mean_vector)
 
-            point_var = self.kernel.point_variance(x_new)[:, None]
+            point_var = self.covariance.point_variance(x_new)[:, None]
             explained_var = _tf.reduce_sum(
                 _tf.matmul(cov_new, self.cov_inv) * cov_new,
                 axis=1, keepdims=True)
@@ -1180,7 +1101,7 @@ class _EnsembleModel(_GPModel):
 
 
 class GPEnsemble(_EnsembleModel):
-    def __init__(self, data, variable, kernel, warping=None, tangents=None,
+    def __init__(self, data, variable, covariance, warping=None, tangents=None,
                  use_trend=False, options=GPOptions()):
         super().__init__(options)
         if not isinstance(data, (tuple, list)):
@@ -1200,12 +1121,14 @@ class GPEnsemble(_EnsembleModel):
         self.models = [GP(
             data=d,
             variable=variable,
-            kernel=_copy.deepcopy(kernel),
+            covariance=_copy.deepcopy(covariance),
             warping=_copy.deepcopy(warping),
             tangents=t,
             use_trend=use_trend,
             options=options)
             for d, t in zip(data, tangents)]
+        for model in self.models:
+            self._register(model)
 
         self.variable = variable
 
@@ -1289,17 +1212,16 @@ class GPEnsemble(_EnsembleModel):
         return combined
 
 
-class VGPEnsemble(_EnsembleModel):
-    def __init__(self, data, variables, likelihoods, latent_layers,
-                 directional_data=None, force_independence=False,
-                 options=GPOptions()):
+class VGPNetworkEnsemble(_EnsembleModel):
+    def __init__(self, data, variables, likelihoods, latent_networks,
+                 directional_data=None, options=GPOptions()):
         super().__init__(options)
         if not isinstance(data, (tuple, list)):
             raise ValueError("data must be a list or tuple containing"
                              "data objects")
-        if not isinstance(latent_layers, (tuple, list)):
-            raise ValueError("latent_layer must be a list or tuple containing"
-                             "layer objects")
+        if not isinstance(latent_networks, (tuple, list)):
+            raise ValueError("latent_trees must be a list or tuple containing"
+                             "latent variable objects")
         if directional_data is None:
             directional_data = [None for _ in data]
         elif not isinstance(directional_data, (tuple, list)):
@@ -1311,15 +1233,16 @@ class VGPEnsemble(_EnsembleModel):
             raise Exception("all data objects must have the same dimension")
         self._n_dim = list(dims)[0]
 
-        self.models = [VGP(
+        self.models = [VGPNetwork(
             data=d,
             variables=variables,
             likelihoods=_copy.deepcopy(likelihoods),
-            latent_layer=l,
+            latent_network=l,
             directional_data=dd,
-            force_independence=force_independence,
             options=options)
-            for d, l, dd in zip(data, latent_layers, directional_data)]
+            for d, l, dd in zip(data, latent_networks, directional_data)]
+        for model in self.models:
+            self._register(model)
 
         if not (isinstance(variables, (list, tuple))):
             variables = [variables]

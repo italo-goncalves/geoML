@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -31,16 +31,8 @@ import numpy as _np
 import tensorflow as _tf
 
 
-class _Transform(object):
+class _Transform(_gpr.Parametric):
     """An abstract class for variable transformations"""
-    def __init__(self):
-        if not hasattr(self, "parameters"):
-            self.parameters = {}
-        self._all_parameters = [pr for pr in self.parameters.values()]
-
-    @property
-    def all_parameters(self):
-        return self._all_parameters
         
     def refresh(self):
         pass
@@ -65,47 +57,9 @@ class _Transform(object):
     def __repr__(self):
         return self.pretty_print()
 
-    def get_parameter_values(self, complete=False):
-        value = []
-        shape = []
-        position = []
-        min_val = []
-        max_val = []
-
-        for index, parameter in enumerate(self._all_parameters):
-            if (not parameter.fixed) | complete:
-                value.append(_tf.reshape(parameter.variable, [-1]).
-                                 numpy())
-                shape.append(_tf.shape(parameter.variable).numpy())
-                position.append(index)
-                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
-                               numpy())
-                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
-                               numpy())
-
-        min_val = _np.concatenate(min_val, axis=0)
-        max_val = _np.concatenate(max_val, axis=0)
-        value = _np.concatenate(value, axis=0)
-
-        return value, shape, position, min_val, max_val
-
-    def update_parameters(self, value, shape, position):
-        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
-        value = _np.split(value, _np.cumsum(sizes))[:-1]
-        value = [_np.squeeze(val) if len(sh) == 0 else val
-                    for val, sh in zip(value, shape)]
-
-        for val, sh, pos in zip(value, shape, position):
-            self._all_parameters[pos].set_value(
-                _np.reshape(val, sh) if len(sh) > 0 else val,
-                transformed=True
-            )
-
 
 class Identity(_Transform):
     """The identity transformation"""
-    def __init__(self):
-        super().__init__()
     
     def __call__(self, x):
         with _tf.name_scope("Identity_transform"):
@@ -124,8 +78,7 @@ class Isotropic(_Transform):
             The range. Must be positive.
         """
         super().__init__()
-        self.parameters = {"range": _gpr.PositiveParameter(r, 0.1, 10000)}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("range", _gpr.PositiveParameter(r, 0.1, 10000))
     
     def __call__(self, x):
         with _tf.name_scope("Isotropic_transform"):
@@ -155,11 +108,13 @@ class Anisotropy2D(_Transform):
             matrix multiple of maxrange, contained in the [0,1) interval.
         """
         super().__init__()
-        self.parameters = {
-            "maxrange": _gpr.PositiveParameter(maxrange, 0.1, 10000),
-            "minrange_fct": _gpr.RealParameter(minrange_fct, 0.05, 1),
-            "azimuth": _gpr.CircularParameter(azimuth, 0, 180)}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("maxrange",
+                            _gpr.PositiveParameter(maxrange, 0.1, 10000))
+        self._add_parameter("minrange_fct",
+                            _gpr.RealParameter(minrange_fct, 0.05, 1))
+        self._add_parameter("azimuth",
+                            _gpr.CircularParameter(azimuth, 0, 180))
+
         self._anis = None
         self._anis_inv = None
 
@@ -213,11 +168,13 @@ class Anisotropy2DMath(_Transform):
             The rotation angle in degrees.
         """
         super().__init__()
-        self.parameters = {
-            "range_x": _gpr.PositiveParameter(range_x, 0.1, 10000),
-            "range_y": _gpr.PositiveParameter(range_y, 0.1, 10000),
-            "theta": _gpr.CircularParameter(theta, 0, 360)}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("range_x",
+                            _gpr.PositiveParameter(range_x, 0.1, 10000))
+        self._add_parameter("range_y",
+                            _gpr.PositiveParameter(range_y, 0.1, 10000))
+        self._add_parameter("theta",
+                            _gpr.CircularParameter(theta, 0, 360))
+
         self._anis = None
         self._anis_inv = None
 
@@ -281,14 +238,19 @@ class Anisotropy3D(_Transform):
             Rake angle, from -90 to 90 degrees.
         """
         super().__init__()
-        self.parameters = {
-            "maxrange": _gpr.PositiveParameter(maxrange, 0.1, 10000),
-            "midrange_fct": _gpr.RealParameter(midrange_fct, 0.05, 1),
-            "minrange_fct": _gpr.RealParameter(minrange_fct, 0.01, 1),
-            "azimuth": _gpr.CircularParameter(azimuth, 0, 360),
-            "dip": _gpr.RealParameter(dip, 0, 90),
-            "rake": _gpr.RealParameter(rake, -90, 90)}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("maxrange",
+                            _gpr.PositiveParameter(maxrange, 0.1, 10000))
+        self._add_parameter("midrange_fct",
+                            _gpr.RealParameter(midrange_fct, 0.05, 1))
+        self._add_parameter("minrange_fct",
+                            _gpr.RealParameter(minrange_fct, 0.01, 1))
+        self._add_parameter("azimuth",
+                            _gpr.CircularParameter(azimuth, 0, 360))
+        self._add_parameter("dip",
+                            _gpr.RealParameter(dip, 0, 90))
+        self._add_parameter("rake",
+                            _gpr.RealParameter(rake, -90, 90))
+
         self._anis = None
         self._anis_inv = None
 
@@ -362,14 +324,19 @@ class Anisotropy3DMath(_Transform):
             The rotation angles in degrees.
         """
         super().__init__()
-        self.parameters = {
-            "range_x": _gpr.PositiveParameter(range_x, 0.1, 10000),
-            "range_y": _gpr.PositiveParameter(range_y, 0.1, 10000),
-            "range_z": _gpr.PositiveParameter(range_z, 0.1, 10000),
-            "theta_x": _gpr.CircularParameter(theta_x, 0, 360),
-            "theta_y": _gpr.CircularParameter(theta_y, 0, 360),
-            "theta_z": _gpr.CircularParameter(theta_z, 0, 360)}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("range_x",
+                            _gpr.PositiveParameter(range_x, 0.1, 10000))
+        self._add_parameter("range_y",
+                            _gpr.PositiveParameter(range_y, 0.1, 10000))
+        self._add_parameter("range_z",
+                            _gpr.PositiveParameter(range_z, 0.1, 10000))
+        self._add_parameter("theta_x",
+                            _gpr.CircularParameter(theta_x, 0, 360))
+        self._add_parameter("theta_y",
+                            _gpr.CircularParameter(theta_y, 0, 360))
+        self._add_parameter("theta_z",
+                            _gpr.CircularParameter(theta_z, 0, 360))
+
         self._anis = None
         self._anis_inv = None
 
@@ -441,9 +408,8 @@ class ProjectionTo1D(_Transform):
             conjunction with a space-expanding transform.
         """
         super().__init__()
-        self.parameters = {"directions": _gpr.PositiveParameter(
-            _np.ones(n_dim), _np.ones(n_dim) * 0.001, _np.ones(n_dim))}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("directions", _gpr.PositiveParameter(
+            _np.ones(n_dim), _np.ones(n_dim) * 0.001, _np.ones(n_dim)))
 
     def __call__(self, x):
         with _tf.name_scope("ProjectionTo1D_transform"):
@@ -467,9 +433,8 @@ class AnisotropyARD(_Transform):
             The number of dimensions.
         """
         super().__init__()
-        self.parameters = {"ranges": _gpr.PositiveParameter(
-            _np.ones(n_dim), _np.ones(n_dim)*0.001, _np.ones(n_dim)*1000)}
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("ranges", _gpr.PositiveParameter(
+            _np.ones(n_dim), _np.ones(n_dim)*0.001, _np.ones(n_dim)*1000))
 
     def __call__(self, x):
         with _tf.name_scope("ARD_transform"):
@@ -489,16 +454,9 @@ class AnisotropyARD(_Transform):
 class ChainedTransform(_Transform):
     def __init__(self, *transforms):
         super().__init__()
-        count = -1
-        for tr in transforms:
-            count += 1
-            names = list(tr.parameters.keys())
-            names = [s + "_" + str(count) for s in names]
-            self.parameters.update(zip(names, tr.parameters.values()))
         self.transforms = transforms
-        self._all_parameters = [tr.all_parameters for tr in transforms]
-        self._all_parameters = [item for sublist in self._all_parameters
-                                for item in sublist]
+        for tr in transforms:
+            self._register(tr)
 
     def __call__(self, x):
         for tr in self.transforms:
@@ -533,7 +491,7 @@ class NormalizeWithBoundingBox(_Transform):
             coords_min = _tf.expand_dims(self.box[0, :], axis=0)
             coords_dif = _tf.expand_dims(self.box[1, :] - self.box[0, :],
                                          axis=0)
-            return 2*(x - coords_min)/coords_dif - 1
+            return 6*(x - coords_min)/coords_dif - 3
 
 
 class Periodic(_Transform):
@@ -564,13 +522,12 @@ class Linear(_Transform):
     def __init__(self, dim_in, dim_out, bias=True):
         w = _tf.random.normal([dim_in, dim_out], dtype=_tf.float64)
         b = _tf.zeros([1, dim_out], dtype=_tf.float64)
-        self.parameters = {
-            "weights": _gpr.RealParameter(
-                w, -1000 * _tf.ones_like(w), 1000 * _tf.ones_like(w)),
-        }
+
+        self._add_parameter("weights", _gpr.RealParameter(
+                w, -1000 * _tf.ones_like(w), 1000 * _tf.ones_like(w)))
         if bias:
-            self.parameters["bias"] = _gpr.RealParameter(
-                b, b - 1000, b + 1000)
+            self._add_parameter("bias",
+                                _gpr.RealParameter(b, b - 1000, b + 1000))
         self.dim_in = dim_in
         self.dim_out = dim_out
         super().__init__()

@@ -1,3 +1,12 @@
+## version 0.3.2
+* Tensorized latent variable removed for now (back to the old chalkboard).
+* Full deep GP implementation.
+* Added Jura dataset.
+* Added likelihoods for compositional variables.
+* `kernels` module now has a specific object for covariance functions.
+* Implemented the ability to convert data objects to `pyvista`.
+* Dropped `plotly` functionality.
+
 ## version 0.3.1
 * New autoregressive latent variable.
 * New tensorized latent variable.

@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -23,7 +23,8 @@ import numpy as _np
 import tensorflow as _tf
 import tensorflow_probability as _tfp
 _tfd = _tfp.distributions
-
+from scipy.linalg import helmert as _helmert
+import copy as _copy
 
 _ROOTS = _tf.constant(dtype=_tf.float64, value=[
     1.383022449870097241150498e-1,
@@ -99,50 +100,14 @@ _WEIGHTS = _tf.concat([_WEIGHTS[::-1], _WEIGHTS], axis=0)
 _WEIGHTS = _WEIGHTS / _tf.reduce_sum(_WEIGHTS)
 
 
-class _Likelihood:
-    def __init__(self):
-        self._all_parameters = []
-        self.parameters = {}
+class _Likelihood(_gpr.Parametric):
+    def __init__(self, size):
+        super().__init__()
+        self._size = size
 
     @property
-    def all_parameters(self):
-        return self._all_parameters
-
-    def get_parameter_values(self, complete=False):
-        value = []
-        shape = []
-        position = []
-        min_val = []
-        max_val = []
-
-        for index, parameter in enumerate(self._all_parameters):
-            if (not parameter.fixed) | complete:
-                value.append(_tf.reshape(parameter.variable, [-1]).
-                             numpy())
-                shape.append(_tf.shape(parameter.variable).numpy())
-                position.append(index)
-                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
-                               numpy())
-                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
-                               numpy())
-
-        min_val = _np.concatenate(min_val, axis=0)
-        max_val = _np.concatenate(max_val, axis=0)
-        value = _np.concatenate(value, axis=0)
-
-        return value, shape, position, min_val, max_val
-
-    def update_parameters(self, value, shape, position):
-        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
-        value = _np.split(value, _np.cumsum(sizes))[:-1]
-        value = [_np.squeeze(val) if len(sh) == 0 else val
-                 for val, sh in zip(value, shape)]
-
-        for val, sh, pos in zip(value, shape, position):
-            self._all_parameters[pos].set_value(
-                _np.reshape(val, sh) if len(sh) > 0 else val,
-                transformed=True
-            )
+    def size(self):
+        return self._size
 
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
         raise NotImplementedError
@@ -159,9 +124,8 @@ class _Likelihood:
 
 class _ContinuousLikelihood(_Likelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__()
-        self._all_parameters += warping.all_parameters
-        self.warping = warping
+        super().__init__(1)
+        self.warping = self._register(warping)
         self._use_monte_carlo = use_monte_carlo
         self._spline = _gint.MonotonicCubicSpline()
 
@@ -279,9 +243,7 @@ class _ContinuousLikelihood(_Likelihood):
 class Gaussian(_ContinuousLikelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
-        noise = _gpr.PositiveParameter(0.1, 1e-12, 10)
-        self.parameters.update({"noise": noise})
-        self._all_parameters.append(noise)
+        self._add_parameter("noise", _gpr.PositiveParameter(0.1, 1e-12, 10))
 
     def _make_distribution(self, loc):
         return _tfd.Normal(loc, _tf.sqrt(self.parameters["noise"].get_value()))
@@ -290,9 +252,7 @@ class Gaussian(_ContinuousLikelihood):
 class Laplace(_ContinuousLikelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
-        scale = _gpr.PositiveParameter(0.1, 1e-9, 10)
-        self.parameters.update({"scale": scale})
-        self._all_parameters.append(scale)
+        self._add_parameter("scale", _gpr.PositiveParameter(0.1, 1e-9, 10))
 
     def _make_distribution(self, loc):
         return _tfd.Laplace(loc, self.parameters["scale"].get_value())
@@ -301,9 +261,7 @@ class Laplace(_ContinuousLikelihood):
 class Gamma(_ContinuousLikelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
-        mean_alpha = _gpr.RealParameter(0, -3, 3)
-        self.parameters.update({"mean_alpha": mean_alpha})
-        self._all_parameters.append(mean_alpha)
+        self._add_parameter("mean_alpha", _gpr.RealParameter(0, -3, 3))
 
     def _make_distribution(self, loc):
         mean_alpha = self.parameters["mean_alpha"].get_value()
@@ -314,10 +272,8 @@ class Gamma(_ContinuousLikelihood):
 class Beta(_ContinuousLikelihood):
     def __init__(self, concentration=1, use_monte_carlo=False):
         super().__init__(use_monte_carlo=use_monte_carlo)
-        concentration = _gpr.PositiveParameter(
-            concentration, 1e-3, 10, fixed=False)
-        self.parameters.update({"concentration": concentration})
-        self._all_parameters.append(concentration)
+        self._add_parameter("concentration", _gpr.PositiveParameter(
+            concentration, 1e-3, 10, fixed=False))
 
     def _make_distribution(self, loc):
         loc = _tf.nn.sigmoid(loc)
@@ -333,11 +289,8 @@ class Beta(_ContinuousLikelihood):
 class StudentT(_ContinuousLikelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
-        scale = _gpr.PositiveParameter(0.1, 1e-9, 10)
-        df = _gpr.PositiveParameter(5.0, 2.01, 50.0)
-        self.parameters.update({"scale": scale, "df": df})
-        self._all_parameters.append(scale)
-        self._all_parameters.append(df)
+        self._add_parameter("scale", _gpr.PositiveParameter(0.1, 1e-9, 10))
+        self._add_parameter("df", _gpr.PositiveParameter(5.0, 2.01, 50.0))
 
     def _make_distribution(self, loc):
         return _tfd.StudentT(
@@ -349,11 +302,8 @@ class StudentT(_ContinuousLikelihood):
 class EpsilonInsensitive(_ContinuousLikelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
-        epsilon = _gpr.PositiveParameter(0.001, 1e-9, 10)
-        c_rate = _gpr.PositiveParameter(1, 1e-3, 1e3, fixed=False)
-        self.parameters.update({"epsilon": epsilon, "c_rate": c_rate})
-        self._all_parameters.append(epsilon)
-        self._all_parameters.append(c_rate)
+        self._add_parameter("epsilon", _gpr.PositiveParameter(0.001, 1e-9, 10))
+        self._add_parameter("c_rate", _gpr.PositiveParameter(1, 1e-3, 1e3))
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
@@ -493,13 +443,10 @@ class EpsilonInsensitive(_ContinuousLikelihood):
 
 class Bernoulli(_Likelihood):
     def __init__(self, shift=0, sharpness=1):
-        super().__init__()
-        shift = _gpr.RealParameter(shift, -5, 5)
-        slope = _gpr.PositiveParameter(1, 0.01, 100)
-        self.parameters.update({"shift": shift, "slope": slope})
-        self._all_parameters.append(shift)
-        self._all_parameters.append(slope)
+        super().__init__(1)
         self.sharpness = sharpness
+        self._add_parameter("shift", _gpr.RealParameter(shift, -5, 5))
+        self._add_parameter("slope", _gpr.PositiveParameter(1, 0.01, 100))
 
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
         vals = _tf.expand_dims(_ROOTS, axis=0)
@@ -561,10 +508,8 @@ class Bernoulli(_Likelihood):
 
 class BernoulliMaximumMargin(_Likelihood):
     def __init__(self):
-        super().__init__()
-        c_rate = _gpr.PositiveParameter(1, 1e-3, 1e3)
-        self.parameters.update({"c_rate": c_rate})
-        self._all_parameters.append(c_rate)
+        super().__init__(1)
+        self._add_parameter("c_rate", _gpr.PositiveParameter(1, 1e-3, 1e3))
 
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
         y = 2 * y - 1
@@ -617,59 +562,9 @@ class BernoulliMaximumMargin(_Likelihood):
         return prob
 
 
-class Dirichlet(_ContinuousLikelihood):
-    def __init__(self, n_components, sharpness=1, slack=1e-6):
-        super().__init__()
-        self.n_components = n_components
-        self.slack = slack
-        self.sharpness = sharpness
-
-    def _make_distribution(self, loc):
-        return _tfd.Dirichlet(loc * self.sharpness)
-
-    def log_lik(self, mu, var, y, has_value, samples=None,
-                *args, **kwargs):
-        y = y * (1 - self.n_components * self.slack) + self.slack
-
-        samples = _tf.nn.softmax(samples, axis=1)
-        distribution = self._make_distribution(
-            _tf.transpose(samples, [0, 2, 1])  # [data, sims, comp]
-        )
-
-        log_density = distribution.log_prob(y[:, None, :])  # [data, sims]
-        log_density = _tf.reduce_mean(log_density, axis=1, keepdims=True)
-        has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
-
-        lik = _tf.reduce_sum(log_density * has_value)
-
-        return lik
-
-    def predict(self, mu, var, sims, explained_var,
-                *args, quantiles=None, **kwargs):
-        sims = _tf.nn.softmax(sims, axis=1)
-        prob = _tf.reduce_mean(sims, axis=2)
-
-        distribution = self._make_distribution(
-            _tf.transpose(sims, [0, 2, 1])  # [data, sims, comp]
-        )
-
-        lik_var = distribution.variance()
-        lik_var = _tf.reduce_sum(_tf.reduce_mean(lik_var, axis=1), axis=1)
-        weights = _tf.reduce_sum(explained_var, axis=1) / (lik_var + 1e-6)
-        # weights = weights ** 2
-
-        out = {"mean": mu,
-               "variance": var,
-               "probability": prob,
-               "simulations": sims,
-               "weights": weights}
-
-        return out
-
-
 class CategoricalGaussianIndicator(_Likelihood):
-    def __init__(self, tol=1e-3, sharpness=5):
-        super().__init__()
+    def __init__(self, n_components, tol=1e-3, sharpness=5):
+        super().__init__(n_components)
         self.tol = _tf.constant(tol, _tf.float64)
         self.sharpness = _tf.constant(sharpness, _tf.float64)
 
@@ -708,7 +603,7 @@ class CategoricalGaussianIndicator(_Likelihood):
         prob = _tf.nn.softmax(prob_pos, axis=1)
 
         log_n = _tf.math.log(_tf.cast(_tf.shape(mu)[1], _tf.float64))
-        entropy = - _tf.reduce_sum(prob * _tf.math.log(prob), axis=1) / log_n
+        entropy = - _tf.reduce_sum(prob * _tf.math.log(prob + 1e-6), axis=1) / log_n
         entropy = _tf.maximum(entropy, 0.0)
         # avg_var = _tf.reduce_mean(var, axis=1)
         avg_var = _tf.reduce_sum(var * prob, axis=1)
@@ -745,3 +640,161 @@ class CategoricalGaussianIndicator(_Likelihood):
                   "indicators": ind_skew,
                   "weights": weights}
         return output
+
+
+class _CompositionalLikelihood(_Likelihood):
+    def __init__(self, n_components, n_basis=None, contrast_matrix=None,
+                 warping=_warp.Identity()):
+        if n_basis is None:
+            n_basis = n_components - 1
+        elif n_basis >= n_components:
+            raise ValueError("n_basis must be smaller than n_components")
+
+        super().__init__(n_basis)
+        self.n_components = n_components
+
+        self._add_parameter(
+            "basis",
+            _gpr.OrthonormalMatrix(n_components - 1, n_basis)
+        )
+
+        if contrast_matrix is None:
+            contrast_matrix = _helmert(n_components)
+        elif contrast_matrix.shape != (n_components - 1, n_components):
+            raise ValueError("invalid shape for contrast_matrix; "
+                             "shape must be (n_components - 1, n_components)")
+        self.contrast = _tf.constant(contrast_matrix, _tf.float64)
+
+        self.warpings = [self._register(_copy.deepcopy(warping))
+                         for _ in range(n_basis)]
+
+    def _make_distribution(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def log_lik(self, mu, var, y, has_value, samples=None,
+                *args, **kwargs):
+        basis = self.parameters["basis"].get_value()
+
+        y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
+        y_ilr = _tf.matmul(y_ilr, basis)
+        y_split = _tf.split(y_ilr, self.size, axis=1)
+
+        y_warped = _tf.concat(
+            [wp.forward(z) for wp, z in zip(self.warpings, y_split)],
+            axis=1)
+        y_derivative = [wp.derivative(z)
+                        for wp, z in zip(self.warpings, y_split)]
+        log_derivative = _tf.math.log(_tf.concat(y_derivative, axis=1))
+
+        distribution = self._make_distribution(samples)
+
+        log_density = distribution.log_prob(y_warped[:, :, None])
+        log_density = _tf.math.reduce_mean(
+            log_density, axis=2, keepdims=False)
+
+        has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
+
+        lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
+
+        return lik
+
+    def predict(self, mu, var, sims, explained_var,
+                *args, quantiles=None, **kwargs):
+        basis = self.parameters["basis"].get_value()
+        rotated_contrast = _tf.matmul(basis, self.contrast, True)
+
+        # ignores warping, used only for calculating weights
+        mu = _tf.matmul(mu, rotated_contrast)
+        var = _tf.matmul(var, rotated_contrast**2)
+        explained_var = _tf.matmul(explained_var, rotated_contrast ** 2)
+
+        # backward warping
+        sims = _tf.split(sims, self.size, axis=1)
+        sims = [wp.backward(s[:, 0, :]) for wp, s in zip(self.warpings, sims)]
+        sims = _tf.stack(sims, axis=1)
+
+        # reverse ilr
+        sims = _tf.einsum("nij,ik->nkj", sims, rotated_contrast)
+        sims = _tf.nn.softmax(sims, axis=1)
+
+        # average composition
+        prob = _tf.reduce_mean(sims, axis=2)
+
+        weights = _tf.reduce_sum(explained_var, axis=1) \
+                  / (_tf.reduce_sum(var, axis=1) + 1e-6)
+
+        out = {"mean": mu,
+               "variance": var,
+               "simulations": sims,
+               "probability": prob,
+               "weights": weights}
+
+        return out
+
+
+class CompositionalGaussian(_CompositionalLikelihood):
+    def __init__(self, n_components, n_basis=None, contrast_matrix=None,
+                 warping=_warp.Identity()):
+        super().__init__(n_components, n_basis, contrast_matrix, warping)
+        self._add_parameter(
+            "noise",
+            _gpr.PositiveParameter(
+                _np.ones([1, self.size, 1]) * 0.1,
+                _np.ones([1, self.size, 1]) * 1e-6,
+                _np.ones([1, self.size, 1]) * 10))
+
+    def _make_distribution(self, loc):
+        return _tfd.Normal(loc, _tf.sqrt(self.parameters["noise"].get_value()))
+
+
+class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
+    def __init__(self, n_components, n_basis=None, contrast_matrix=None,
+                 warping=_warp.Identity()):
+        super().__init__(n_components, n_basis, contrast_matrix, warping)
+        self._add_parameter(
+            "epsilon",
+            _gpr.PositiveParameter(
+                _np.ones([1, self.size, 1]) * 1e-3,
+                _np.ones([1, self.size, 1]) * 1e-6,
+                _np.ones([1, self.size, 1]) * 10))
+        self._add_parameter(
+            "c_rate",
+            _gpr.PositiveParameter(
+                _np.ones([1, self.size, 1]),
+                _np.ones([1, self.size, 1]) * 1e-3,
+                _np.ones([1, self.size, 1]) * 1e3))
+
+    def log_lik(self, mu, var, y, has_value, samples=None,
+                *args, **kwargs):
+        basis = self.parameters["basis"].get_value()
+
+        y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
+        y_ilr = _tf.matmul(y_ilr, basis)
+        y_split = _tf.split(y_ilr, self.size, axis=1)
+
+        y_warped = _tf.concat(
+            [wp.forward(z) for wp, z in zip(self.warpings, y_split)],
+            axis=1)
+        y_derivative = [wp.derivative(z)
+                        for wp, z in zip(self.warpings, y_split)]
+        log_derivative = _tf.math.log(_tf.concat(y_derivative, axis=1))
+
+        epsilon = self.parameters["epsilon"].get_value()
+        c_rate = self.parameters["c_rate"].get_value()
+
+        y_centered = _tf.math.abs(y_warped[:, :, None] - samples)
+
+        log_density = _tf.where(
+            _tf.less_equal(y_centered, epsilon),
+            _tf.zeros_like(y_centered),
+            - c_rate * (y_centered - epsilon)
+        )
+        log_density = log_density - _tf.math.log(2 * (epsilon + 1 / c_rate))
+        log_density = _tf.math.reduce_mean(
+            log_density, axis=2, keepdims=False)
+
+        has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
+
+        lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
+
+        return lik

@@ -8,7 +8,7 @@
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR matrix PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -29,22 +29,10 @@ import numpy as _np
 import tensorflow as _tf
 
 
-class _Warping(object):
+class _Warping(_gpr.Parametric):
     """
     Base warping class.
-
-    Attributes
-    ----------
-    parameters : dict
-        matrix dictionary with RealParameter objects.
     """
-    def __init__(self):
-        self.parameters = {}
-        self._all_parameters = [pr for pr in self.parameters.values()]
-
-    @property
-    def all_parameters(self):
-        return self._all_parameters
 
     def __repr__(self):
         s = self.__class__.__name__ + "\n"
@@ -58,47 +46,6 @@ class _Warping(object):
     
     def derivative(self, x):
         pass
-
-    def get_parameter_values(self, complete=False):
-        value = []
-        shape = []
-        position = []
-        min_val = []
-        max_val = []
-
-        for index, parameter in enumerate(self._all_parameters):
-            if (not parameter.fixed) | complete:
-                value.append(_tf.reshape(parameter.value_transformed, [-1]).
-                                 numpy())
-                shape.append(_tf.shape(parameter.value_transformed).numpy())
-                position.append(index)
-                min_val.append(_tf.reshape(parameter.min_transformed, [-1]).
-                               numpy())
-                max_val.append(_tf.reshape(parameter.max_transformed, [-1]).
-                               numpy())
-
-        if len(value) > 0:
-            min_val = _np.concatenate(min_val, axis=0)
-            max_val = _np.concatenate(max_val, axis=0)
-            value = _np.concatenate(value, axis=0)
-        else:
-            min_val = _np.array(min_val)
-            max_val = _np.array(max_val)
-            value = _np.array(value)
-
-        return value, shape, position, min_val, max_val
-
-    def update_parameters(self, value, shape, position):
-        sizes = _np.array([int(_np.prod(sh)) for sh in shape])
-        value = _np.split(value, _np.cumsum(sizes))[:-1]
-        value = [_np.squeeze(val) if len(sh) == 0 else val
-                 for val, sh in zip(value, shape)]
-
-        for val, sh, pos in zip(value, shape, position):
-            self._all_parameters[pos].set_value(
-                _np.reshape(val, sh) if len(sh) > 0 else val,
-                transformed=True
-            )
 
 
 class Identity(_Warping):
@@ -138,11 +85,10 @@ class Spline(_Warping):
         super().__init__()
         self.n_knots = knots_per_arm * 2 + 1
         comp = _np.ones(knots_per_arm) / knots_per_arm
-        self.parameters = {
-            "warped_partition_left": _gpr.CompositionalParameter(comp),
-            "warped_partition_right": _gpr.CompositionalParameter(comp)
-        }
-        self._all_parameters = [pr for pr in self.parameters.values()]
+        self._add_parameter("warped_partition_left",
+                            _gpr.CompositionalParameter(comp))
+        self._add_parameter("warped_partition_right",
+                            _gpr.CompositionalParameter(comp))
         self.spline = _gint.MonotonicCubicSpline()
         self.x_original = _np.linspace(-5, 5, knots_per_arm * 2 + 1)
 
@@ -201,17 +147,16 @@ class ZScore(_Warping):
         (if omitted) or specified.
         """
         super().__init__()
-        self.parameters["mean"] = _gpr.RealParameter(0, -1e9, 1e9)
+        self._add_parameter("mean", _gpr.RealParameter(0, -1e9, 1e9))
         if mean is not None:
             self.parameters["mean"].set_value(mean)
             self.parameters["mean"].set_limits(mean - 2*_np.abs(mean),
                                                mean + 2*_np.abs(mean))
-        self.parameters["std"] = _gpr.PositiveParameter(1, 1e-9, 1e9)
+
+        self._add_parameter("std", _gpr.PositiveParameter(1, 1e-9, 1e9))
         if std is not None:
             self.parameters["std"].set_value(std)
             self.parameters["std"].set_limits(std / 10, std * 10)
-        self._all_parameters.append(self.parameters["mean"])
-        self._all_parameters.append(self.parameters["std"])
         
     def forward(self, x):
         mean = self.parameters["mean"].get_value()
@@ -313,16 +258,9 @@ class Scale(ZScore):
 class ChainedWarping(_Warping):
     def __init__(self, *warpings):
         super().__init__()
-        count = -1
-        for wp in warpings:
-            count += 1
-            names = list(wp.parameters.keys())
-            names = [s + "_" + str(count) for s in names]
-            self.parameters.update(zip(names, wp.parameters.values()))
         self.warpings = list(warpings)
-        self._all_parameters = [wp.all_parameters for wp in warpings]
-        self._all_parameters = [item for sublist in self._all_parameters
-                                for item in sublist]
+        for wp in warpings:
+            self._register(wp)
 
     def __repr__(self):
         s = "".join([repr(wp) for wp in self.warpings])
