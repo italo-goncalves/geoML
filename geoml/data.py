@@ -21,7 +21,6 @@ __all__ = ["PointData",
            "batch_index",
            "export_planes"]
 
-import geoml.plotly as _py
 import geoml.interpolation as _gint
 
 import tensorflow as _tf
