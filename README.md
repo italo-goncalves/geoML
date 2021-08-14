@@ -24,7 +24,7 @@ Dependencies:
 * `numpy`
 * `tensorflow` (preferably `tensorflow-gpu`)
 * `tensorflow-probability`
-* `pyvista` for 3D visualization
+* `pyvista` and `plotly` for 3D visualization
 
 ## Examples
 The following notebooks demonstrate the capabilities of the package (if one

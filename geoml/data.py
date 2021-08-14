@@ -21,8 +21,6 @@ __all__ = ["PointData",
            "batch_index",
            "export_planes"]
 
-import geoml.interpolation as _gint
-
 import tensorflow as _tf
 import pandas as _pd
 import numpy as _np
@@ -31,6 +29,9 @@ import collections as _col
 import pyvista as _pv
 
 from skimage import measure as _measure
+
+import geoml.interpolation as _gint
+import geoml.plotly as _py
 
 
 def bounding_box(points):
@@ -232,6 +233,48 @@ class _Variable(object):
                     points.point_arrays[label] = self.values
             elif not all(_np.isnan(self.values)):
                 points.point_arrays[label] = self.values
+
+        def draw_contour(self, value, **kwargs):
+            """Creates plotly object with the contour at the specified value."""
+            verts, faces, normals, values = self.get_contour(value)
+            return _py.isosurface(verts, faces, **kwargs)
+
+        def draw_numeric(self, **kwargs):
+            if self.coordinates.n_dim != 3:
+                raise NotImplemented("method currently available only for"
+                                     "3D coordinates")
+
+            if isinstance(self.coordinates, Section3D):
+                values = _np.reshape(self.values, self.coordinates.grid_shape,
+                                     order="F")
+                gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
+                                        self.coordinates.grid_shape,
+                                        order="F")
+                gridded_y = _np.reshape(self.coordinates.coordinates[:, 1],
+                                        self.coordinates.grid_shape,
+                                        order="F")
+                gridded_z = _np.reshape(self.coordinates.coordinates[:, 2],
+                                        self.coordinates.grid_shape,
+                                        order="F")
+
+                return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
+                                              values, **kwargs)
+
+            return _py.numeric_points_3d(
+                self.coordinates.coordinates,
+                self.values,
+                **kwargs)
+
+        def draw_categorical(self, colors, **kwargs):
+            if self.coordinates.n_dim != 3:
+                raise NotImplemented("method currently available only for"
+                                     "3D coordinates")
+
+            return _py.categorical_points_3d(
+                self.coordinates.coordinates,
+                self.values,
+                colors,
+                **kwargs)
 
 
 class ContinuousVariable(_Variable):
@@ -1166,6 +1209,27 @@ class _SpatialData(object):
     @property
     def diagonal(self):
         return self._diagonal
+
+    def aspect_ratio(self, vertical_exaggeration=1):
+        """
+        Returns a list with plotly layout data.
+        """
+        if self._n_dim == 2:
+            return _py.aspect_ratio_2d(vertical_exaggeration)
+        elif self._n_dim == 3:
+            return _py.aspect_ratio_3d(self.bounding_box, vertical_exaggeration)
+        else:
+            raise ValueError("aspect ratio only available for 2- and "
+                             "3-dimensional data objects")
+
+    def draw_bounding_box(self, **kwargs):
+        if self._n_dim == 2:
+            raise NotImplementedError
+        elif self._n_dim == 3:
+            return _py.bounding_box_3d(self.bounding_box, **kwargs)
+        else:
+            raise ValueError("bounding_box only available for 2- and "
+                             "3-dimensional data objects")
 
 
 class PointData(_SpatialData):
@@ -2294,6 +2358,24 @@ class DrillholeData(_SpatialData):
             pv_dh.cell_arrays[col] = df[col].values
 
         return pv_dh
+
+    def draw_categorical(self, column, colors, **kwargs):
+        # converting to points and reordering
+        merged = self.merge_segments(column)
+        points = _np.concatenate([merged.coords_from, merged.coords_to], axis=0)
+        df = _pd.concat([
+            _pd.DataFrame(points, columns=self.coordinate_labels),
+            _pd.concat([merged.data] * 2, axis=0).reset_index(drop=True)
+        ], axis=1)
+        seq = _np.arange(merged.n_data)
+        sort_idx = _np.argsort(_np.concatenate([seq, seq + 0.1]))
+        df = df.iloc[sort_idx, :].reset_index(drop=True)
+        # return df
+        return _py.segments_3d(df.loc[:, self.coordinate_labels].values,
+                               df[column].values, colors, **kwargs)
+
+    def draw_numeric(self, column, **kwargs):
+        raise NotImplementedError()
 
 
 def batch_index(n_data, batch_size):
