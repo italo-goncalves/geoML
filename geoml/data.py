@@ -1167,27 +1167,6 @@ class _SpatialData(object):
     def diagonal(self):
         return self._diagonal
 
-    def aspect_ratio(self, vertical_exaggeration=1):
-        """
-        Returns a list with plotly layout data.
-        """
-        if self._n_dim == 2:
-            return _py.aspect_ratio_2d(vertical_exaggeration)
-        elif self._n_dim == 3:
-            return _py.aspect_ratio_3d(self.bounding_box, vertical_exaggeration)
-        else:
-            raise ValueError("aspect ratio only available for 2- and "
-                             "3-dimensional data objects")
-
-    def draw_bounding_box(self, **kwargs):
-        if self._n_dim == 2:
-            raise NotImplementedError
-        elif self._n_dim == 3:
-            return _py.bounding_box_3d(self.bounding_box, **kwargs)
-        else:
-            raise ValueError("bounding_box only available for 2- and "
-                             "3-dimensional data objects")
-
 
 class PointData(_SpatialData):
     """
@@ -2094,7 +2073,7 @@ class DrillholeData(_SpatialData):
         self.coordinate_labels = [x, y, z]
 
         self._n_dim = self.coords_from.shape[1]
-        self._n_data = self.coords_from.shape[1]
+        self._n_data = self.coords_from.shape[0]
         self.lengths = _np.sqrt(_np.sum((self.coords_from
                                          - self.coords_to) ** 2,
                                         axis=1))
@@ -2291,24 +2270,6 @@ class DrillholeData(_SpatialData):
             measurements_b=new_data[by + "_b"].values)
         return new_obj
 
-    def draw_categorical(self, column, colors, **kwargs):
-        # converting to points and reordering
-        merged = self.merge_segments(column)
-        points = _np.concatenate([merged.coords_from, merged.coords_to], axis=0)
-        df = _pd.concat([
-            _pd.DataFrame(points, columns=self.coordinate_labels),
-            _pd.concat([merged.data] * 2, axis=0).reset_index(drop=True)
-        ], axis=1)
-        seq = _np.arange(merged.n_data)
-        sort_idx = _np.argsort(_np.concatenate([seq, seq + 0.1]))
-        df = df.iloc[sort_idx, :].reset_index(drop=True)
-        # return df
-        return _py.segments_3d(df.loc[:, self.coordinate_labels].values,
-                               df[column].values, colors, **kwargs)
-
-    def draw_numeric(self, column, **kwargs):
-        raise NotImplementedError()
-
     def as_pyvista(self):
         # empty object
         drill_coords = []
@@ -2326,6 +2287,10 @@ class DrillholeData(_SpatialData):
         # scalars
         df = self.data.dropna(axis=1, how="all")
         for col in df.columns:
+            # fixing special characters
+            if df[col].dtype == 'object':
+                df[col] = df[col].str.normalize('NFKD')\
+                    .str.encode('ascii', errors='ignore').str.decode('utf-8')
             pv_dh.cell_arrays[col] = df[col].values
 
         return pv_dh
