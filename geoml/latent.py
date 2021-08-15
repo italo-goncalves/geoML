@@ -177,17 +177,19 @@ class LatentNetworkOutput(_LatentVariable):
         return all_mean, all_var, all_sims, all_exp_var
 
     def predict_directions(self, x, dir_x, step=1e-3):
-        all_mean, all_var = [], []
+        all_mean, all_var, all_exp_var = [], [], []
 
         for p in self.parents:
-            mean, var = p.predict_directions(x, dir_x, step)
+            mean, var, exp_var = p.predict_directions(x, dir_x, step)
             all_mean.append(mean)
             all_var.append(var)
+            all_exp_var.append(exp_var)
 
         all_mean = _tf.concat(all_mean, axis=0)
         all_var = _tf.concat(all_var, axis=0)
+        all_exp_var = _tf.concat(all_exp_var, axis=0)
 
-        return all_mean, all_var
+        return all_mean, all_var, all_exp_var
 
     def kl_divergence(self):
         unique_parents = self.get_all_parents()

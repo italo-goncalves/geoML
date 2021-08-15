@@ -536,7 +536,7 @@ class VGPNetwork(_GPModel):
     def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
         with _tf.name_scope("batched_elbo_directions"):
             # prediction
-            mu, var = self.latent_network.predict_directions(
+            mu, var, _ = self.latent_network.predict_directions(
                 x_dir, directions)
 
             mu = _tf.transpose(mu[:, :, 0])
