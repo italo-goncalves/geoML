@@ -438,7 +438,10 @@ class VGPNetwork(_GPModel):
                         directional_data.variables[v].get_measurements(),
                         [1, s]))
                 else:
-                    y_dir.append(_np.ones([directional_data.n_data, s])*_np.nan)
+                    # y_dir.append(_np.ones([directional_data.n_data, s])
+                    # *_np.nan)
+                    # zero by default
+                    y_dir.append(_np.zeros([directional_data.n_data, s]))
             y_dir = _np.concatenate(y_dir, axis=1)
 
             self.y_dir = y_dir.copy()
