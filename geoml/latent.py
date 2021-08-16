@@ -223,12 +223,10 @@ class BasicInput(_RootLatentVariable):
         self.transform.refresh()
         self.inducing_points = self.transform(
             self.parameters["inducing_points"].get_value())
-        self.inducing_points_variance = _tf.zeros_like(self.inducing_points)
-        # self.inducing_points_variance = _tf.ones_like(self.inducing_points)
+        self.inducing_points_variance = _tf.ones_like(self.inducing_points)
 
     def propagate(self, x, x_var=None):
         x_tr = self.transform(x)
-        # return x_tr, _tf.zeros_like(x_tr)
         return x_tr, _tf.ones_like(x_tr)
 
     def kl_divergence(self):
@@ -240,7 +238,6 @@ class BasicInput(_RootLatentVariable):
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         x_tr = _tf.transpose(self.transform(x))
         var = _tf.ones_like(x_tr)
-        # var = _tf.zeros_like(x_tr)
         if n_sim > 0:
             sims = _tf.tile(x_tr[None, :, :], [1, 1, n_sim])
             return x_tr[:, :, None], var, sims, _tf.zeros_like(var)
@@ -354,7 +351,7 @@ class BasicGP(_FunctionalLatentVariable):
             _gpr.PositiveParameter(
                 _np.ones([1, self.parent.size]),
                 _np.ones([1, self.parent.size]) * 1e-6,
-                _np.ones([1, self.parent.size]) * 10
+                _np.ones([1, self.parent.size]) * 10, fixed=True
             )
         )
 
