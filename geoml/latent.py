@@ -223,8 +223,8 @@ class BasicInput(_RootLatentVariable):
         self.transform.refresh()
         self.inducing_points = self.transform(
             self.parameters["inducing_points"].get_value())
-        # self.inducing_points_variance = _tf.zeros_like(self.inducing_points)
-        self.inducing_points_variance = _tf.ones_like(self.inducing_points)
+        self.inducing_points_variance = _tf.zeros_like(self.inducing_points)
+        # self.inducing_points_variance = _tf.ones_like(self.inducing_points)
 
     def propagate(self, x, x_var=None):
         x_tr = self.transform(x)
@@ -240,6 +240,7 @@ class BasicInput(_RootLatentVariable):
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         x_tr = _tf.transpose(self.transform(x))
         var = _tf.ones_like(x_tr)
+        # var = _tf.zeros_like(x_tr)
         if n_sim > 0:
             sims = _tf.tile(x_tr[None, :, :], [1, 1, n_sim])
             return x_tr[:, :, None], var, sims, _tf.zeros_like(var)
@@ -363,20 +364,20 @@ class BasicGP(_FunctionalLatentVariable):
             # [n_data, n_data, n_dim]
             dif = x[:, None, :] - y[None, :, :]
 
-            # avg_rng = 0.5 * (rng_x[:, None, :]**2 + rng_y[None, :, :]**2)
-            avg_rng = rng_x[:, None, :] ** 2 + rng_y[None, :, :] ** 2
+            avg_rng = 0.5 * (rng_x[:, None, :]**2 + rng_y[None, :, :]**2)
+            # avg_rng = rng_x[:, None, :] ** 2 + rng_y[None, :, :] ** 2
 
             dist = _tf.sqrt(_tf.reduce_sum(dif**2 / avg_rng, axis=-1))
             cov = self.kernel.kernelize(dist)
 
             # normalization
             det_avg = _tf.reduce_prod(avg_rng, axis=-1, keepdims=False)**(1/2)
-            # det_x = _tf.reduce_prod(rng_x**2, axis=-1, keepdims=True)**(1/4)
-            # det_y = _tf.reduce_prod(rng_y**2, axis=-1, keepdims=True)**(1/4)
-            det_x = _tf.reduce_prod(2*rng_x ** 2, axis=-1, keepdims=True) ** (
-                        1 / 4)
-            det_y = _tf.reduce_prod(2*rng_y ** 2, axis=-1, keepdims=True) ** (
-                        1 / 4)
+            det_x = _tf.reduce_prod(rng_x**2, axis=-1, keepdims=True)**(1/4)
+            det_y = _tf.reduce_prod(rng_y**2, axis=-1, keepdims=True)**(1/4)
+            # det_x = _tf.reduce_prod(2*rng_x ** 2, axis=-1, keepdims=True) ** (
+            #             1 / 4)
+            # det_y = _tf.reduce_prod(2*rng_y ** 2, axis=-1, keepdims=True) ** (
+            #             1 / 4)
 
             norm = det_x * _tf.transpose(det_y) / det_avg
 
@@ -389,6 +390,7 @@ class BasicGP(_FunctionalLatentVariable):
             self.parent.refresh(jitter)
             ranges = self.parameters["ranges"].get_value()
             avg_var = _tf.reduce_mean(ranges**2, axis=1, keepdims=True)
+            # avg_var = _tf.ones_like(ranges)
 
             # prior
             ip = self.parent.inducing_points
@@ -526,6 +528,7 @@ class BasicGP(_FunctionalLatentVariable):
 
             dif = mu_1 - mu_2
             avg_var = 0.5 * (var_1 + var_2)
+            # avg_var = var_1 + var_2
             dist_sq = _tf.reduce_sum(dif ** 2 / avg_var, axis=1, keepdims=True)
 
             cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
@@ -533,6 +536,8 @@ class BasicGP(_FunctionalLatentVariable):
             det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (1 / 2)
             det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1 / 4)
             det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1 / 4)
+            # det_1 = _tf.reduce_prod(2*var_1, axis=1, keepdims=True) ** (1 / 4)
+            # det_2 = _tf.reduce_prod(2*var_2, axis=1, keepdims=True) ** (1 / 4)
 
             norm = det_1 * det_2 / det_avg
             cov_step = cov_step * norm
@@ -597,50 +602,26 @@ class BasicGP(_FunctionalLatentVariable):
 
 
 class Linear(_FunctionalLatentVariable):
-    def __init__(self, parent, size=1, orthonormal=False):
+    def __init__(self, parent, size=1):
         super().__init__(parent)
         self._size = size
-        # self.transposed = transposed
-        self.transposed = self.size > parent.size
 
-        # if not transposed:
-        #     if self.size > parent.size:
-        #         raise ValueError("output size cannot be larger than "
-        #                          "the input size - use the transposed=True "
-        #                          "option")
-        # else:
-        #     if self.size < parent.size:
-        #         raise ValueError("output size cannot be smaller than "
-        #                          "the input size - use the transposed=False "
-        #                          "option")
-
-        mat_size = (parent.size, self.size) if not self.transposed \
-            else (self.size, parent.size)
-        if orthonormal:
-            self._add_parameter(
-                "weights",
-                _gpr.OrthonormalMatrix(mat_size[0], mat_size[1])
+        rnd = _np.random.normal(size=(parent.size, self.size))
+        rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
+        self._add_parameter(
+            "weights",
+            _gpr.UnitColumnNormParameter(
+                rnd, - _np.ones_like(rnd), _np.ones_like(rnd)
             )
-        else:
-            rnd = _np.random.normal(size=mat_size)
-            rnd = rnd / _np.sqrt(_np.sum(rnd**2, axis=0, keepdims=True))
-            self._add_parameter(
-                "weights",
-                _gpr.UnitColumnNormParameter(
-                    rnd, - _np.ones_like(rnd), _np.ones_like(rnd)
-                )
-            )
+        )
 
         # binary classification
         if (parent.size == 1) & (self.size == 2):
-            # self.parameters["weights"].set_value([[1, -1]])
-            self.parameters["weights"].set_value([[1], [-1]])
+            self.parameters["weights"].set_value([[1, -1]])
             self.parameters["weights"].fix()
 
     def refresh(self, jitter=1e-9):
         weights = self.parameters["weights"].get_value()
-        if self.transposed:
-            weights = _tf.transpose(weights)
 
         self.parent.refresh(jitter)
 
@@ -659,8 +640,6 @@ class Linear(_FunctionalLatentVariable):
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         weights = self.parameters["weights"].get_value()
-        if self.transposed:
-            weights = _tf.transpose(weights)
 
         if n_sim > 0:
             mu, var, sims, exp_var = self.parent.predict(x, x_var, n_sim, seed)
@@ -681,8 +660,6 @@ class Linear(_FunctionalLatentVariable):
         mu, var, explained_var = self.parent.predict_directions(x, dir_x, step)
 
         weights = self.parameters["weights"].get_value()
-        if self.transposed:
-            weights = _tf.transpose(weights)
 
         mu = _tf.einsum("xab,xy->yab", mu, weights)
         var = _tf.einsum("xa,xy->ya", var, weights ** 2)
