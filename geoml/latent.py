@@ -351,7 +351,7 @@ class BasicGP(_FunctionalLatentVariable):
             _gpr.PositiveParameter(
                 _np.ones([1, self.parent.size]),
                 _np.ones([1, self.parent.size]) * 1e-6,
-                _np.ones([1, self.parent.size]) * 10, fixed=True
+                _np.ones([1, self.parent.size]) * 10
             )
         )
 
