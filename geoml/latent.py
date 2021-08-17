@@ -201,7 +201,9 @@ class BasicInput(_RootLatentVariable):
     def __init__(self, inducing_points, transform=_tr.Identity(),
                  fix_inducing_points=True, fix_transform=False):
         super().__init__()
-        self._size = inducing_points.n_dim
+        test_point = _np.ones([1, inducing_points.n_dim])
+        test_point = transform(test_point)
+        self._size = test_point.shape[1]
 
         self.transform = self._register(transform)
         if fix_transform:
