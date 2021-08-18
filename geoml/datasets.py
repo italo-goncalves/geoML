@@ -274,7 +274,7 @@ def arctic_lake():
 
     """
     path = _os.path.dirname(__file__)
-    file = _os.path.join(path, "sample_data/arctic_lake.csv")
+    file = _os.path.join(path, "sample_data/Arctic_lake.csv")
 
     raw_data = _pd.read_csv(file)
 
