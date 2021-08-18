@@ -257,3 +257,30 @@ def jura():
         jura_train.add_continuous_variable(el, raw_data[el])
 
     return jura_train
+
+
+def arctic_lake():
+    """
+    A compositional dataset.
+
+    Returns
+    -------
+    arctic_lake_data : geoml.data.PointData
+
+    References
+    ----------
+    Pawlowsky-Glahn, V., Egozcue, J. J., & Tolosana-Delgado, R. (2015).
+    Modeling and Analysis of Compositional Data. John Wiley & Sons.
+
+    """
+    path = _os.path.dirname(__file__)
+    file = _os.path.join(path, "sample_data/arctic_lake.csv")
+
+    raw_data = _pd.read_csv(file)
+
+    arctic_lake_data = _data.PointData(raw_data, ["Depth (m)"])
+    arctic_lake_data.add_compositional_variable(
+        "comp", labels=['Sand', 'Silt', 'Clay'],
+        measurements=raw_data.values[:, :3] / 100)
+
+    return arctic_lake_data
