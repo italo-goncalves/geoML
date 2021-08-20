@@ -28,7 +28,7 @@ Dependencies:
 
 ## Examples
 The following notebooks demonstrate the capabilities of the package (if one
- of them is broken, it is probably going through an update).
+ of them seems broken, it is probably going through an update).
 
 * [Walker Lake](https://colab.research.google.com/drive/1zH-dAytMwR_OocDgJWE3Sy8pbcq0PdAJ)
 * [2D classification with structural constraints](https://colab.research.google.com/drive/1eiIa8kavRIp5SK5R89ozkIj5lmeRrx9x)
@@ -36,4 +36,8 @@ The following notebooks demonstrate the capabilities of the package (if one
 * [3D classification](https://colab.research.google.com/drive/1oC8b-eCgrfLxMcVsxVv6EvQyeKelUUjE)
 * [Potential field modeling using only directional data](https://colab.research.google.com/drive/141zuv7VH431fVt0dwHQiKCSJmYd6E9u8)
 * [Jura](https://colab.research.google.com/drive/1v7Us_ljM5zwkLy6IIKfOjREazZSLepjU?usp=sharing)
+* [Compositional data](https://colab.research.google.com/drive/14bvDkre3UNxXywUWq2QEs6Q4w-gd30Mb?usp=sharing)
+* [Gold modeling with auxiliary variables](https://colab.research.google.com/drive/16OFpI1a-V-Wfsgkw_jhlh2NXGFwuHZ0C?usp=sharing)
+* [VGP training step by step](https://colab.research.google.com/drive/1rF7bWdrTK54qLiXWcv46J9aMloDTe6r_?usp=sharing)
+
 
