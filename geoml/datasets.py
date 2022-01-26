@@ -232,31 +232,57 @@ def jura():
     -------
     jura_train : geoml.data.PointData
         Training data (2 categorical variables and 7 continuous).
-
+    jura_val : geoml.data.PointData
+        Validation data (2 categorical variables and 7 continuous).
     """
     elements = ["Cd", "Co", "Cr", "Cu", "Ni", "Pb", "Zn"]
 
     path = _os.path.dirname(__file__)
-    file = _os.path.join(path, "sample_data/jura_sample.dat")
+    # file = _os.path.join(path, "sample_data/jura_sample.dat")
+    #
+    # raw_data = _pd.read_table(file, sep=" ", header=None,
+    #                           skiprows=13, engine="python",
+    #                           skipinitialspace=True)
+    # raw_data.columns = ["X", "Y", "Landuse", "Rock"] + elements
+    # raw_data["Landuse"] = raw_data["Landuse"].astype("str")
+    # raw_data["Rock"] = raw_data["Rock"].astype("str")
+    #
+    # landuse_labels = _np.unique(raw_data["Landuse"])
+    # rock_labels = _np.unique(raw_data["Rock"])
+    #
+    # jura_train = _data.PointData(raw_data, coordinates=["X", "Y"])
+    # jura_train.add_categorical_variable("Landuse", landuse_labels,
+    #                                     raw_data["Landuse"])
+    # jura_train.add_categorical_variable("Rock", rock_labels, raw_data["Rock"])
+    # for el in elements:
+    #     jura_train.add_continuous_variable(el, raw_data[el])
 
-    raw_data = _pd.read_table(file, sep=" ", header=None,
-                              skiprows=13, engine="python",
-                              skipinitialspace=True)
-    raw_data.columns = ["X", "Y", "Landuse", "Rock"] + elements
-    raw_data["Landuse"] = raw_data["Landuse"].astype("str")
-    raw_data["Rock"] = raw_data["Rock"].astype("str")
+    file_a = _os.path.join(path, "sample_data/jura_train.csv")
 
-    landuse_labels = _np.unique(raw_data["Landuse"])
-    rock_labels = _np.unique(raw_data["Rock"])
+    train_df = _pd.read_csv(file_a)
 
-    jura_train = _data.PointData(raw_data, coordinates=["X", "Y"])
+    landuse_labels = _np.unique(train_df["Landuse"])
+    rock_labels = _np.unique(train_df["Rock"])
+
+    jura_train = _data.PointData(train_df, coordinates=["Xloc", "Yloc"])
     jura_train.add_categorical_variable("Landuse", landuse_labels,
-                                        raw_data["Landuse"])
-    jura_train.add_categorical_variable("Rock", rock_labels, raw_data["Rock"])
+                                        train_df["Landuse"])
+    jura_train.add_categorical_variable("Rock", rock_labels, train_df["Rock"])
     for el in elements:
-        jura_train.add_continuous_variable(el, raw_data[el])
+        jura_train.add_continuous_variable(el, train_df[el])
 
-    return jura_train
+    file_b = _os.path.join(path, "sample_data/jura_val.csv")
+
+    val_df = _pd.read_csv(file_b)
+
+    jura_val = _data.PointData(val_df, coordinates=["Xloc", "Yloc"])
+    jura_val.add_categorical_variable("Landuse", landuse_labels,
+                                      val_df["Landuse"])
+    jura_val.add_categorical_variable("Rock", rock_labels, val_df["Rock"])
+    for el in elements:
+        jura_val.add_continuous_variable(el, val_df[el])
+
+    return jura_train, jura_val
 
 
 def arctic_lake():

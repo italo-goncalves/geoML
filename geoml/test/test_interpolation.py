@@ -6,13 +6,14 @@ import geoml
 import timeit
 
 # cubic_conv_1d
-x = np.linspace(0, 10, 11)
+x = geoml.data.Grid1D(0, n=11, step=1)
 np.random.seed(1234)
 xnew = np.random.uniform(0, 10, 100)
 
-x = tf.constant(x)
-xnew = tf.constant(xnew)
-mat = geoml.interpolation.cubic_conv_1d(x, xnew)
+# x = tf.constant(x, dtype=tf.float64)
+xnew = tf.constant(xnew, dtype=tf.float64)
+interp = geoml.interpolation.CubicConv1D(x)
+mat = interp.make_interpolation_matrix(xnew[:, None])
 w = mat.matmul(tf.eye(11, dtype=tf.float64))
 
 # speed
@@ -21,29 +22,44 @@ import tensorflow as tf
 import numpy as np
 import geoml
 
-x = np.linspace(0, 10, 1001)
+x = geoml.data.Grid1D(0, n=11, step=1)
 np.random.seed(1234)
 xnew = np.random.uniform(0, 10, 10000)
 
-x = tf.constant(x)
-xnew = tf.constant(xnew)
+xnew = tf.constant(xnew, dtype=tf.float64)[:, None]
+interp = geoml.interpolation.CubicConv1D(x)
 # warming up
-geoml.interpolation.cubic_conv_1d(x, xnew)
+interp.make_interpolation_matrix(xnew)
 """
-timeit.timeit("geoml.interpolation.cubic_conv_1d(x, xnew)", 
-              setup=setup, number=100) # ~0.6s
+timeit.timeit("interp.make_interpolation_matrix(xnew)", 
+              setup=setup, number=100) # ~1.28s
 
 
 # cubic_conv_2d
-x = np.linspace(0, 10, 11)
-np.random.seed(1234)
-xnew = np.random.uniform(0, 10, 100)
-ynew = np.random.uniform(0, 10, 100)
+x = geoml.data.Grid2D(start=[0, 0], end=[10, 10], n=[11, 11])
+xnew = geoml.data.Grid2D(start=[0, 0], end=[10, 10], n=[121, 121])
 
-x = tf.constant(x)
-xnew = tf.constant(xnew)
-mat = geoml.interpolation.cubic_conv_2d(x, xnew, x, ynew)
-w = mat.matmul(tf.eye(11*11, dtype=tf.float64))
+# y = np.random.normal(size=[x.n_data, 1])
+# y = np.arange(x.n_data)[:, None] * 1.0
+y = (x.coordinates[:, 0] * x.coordinates[:, 1])[:, None]
+x.add_continuous_variable("y", y[:, 0])
+
+interp = geoml.interpolation.CubicConv2DSeparable(x)
+mat = interp.make_interpolation_matrix(xnew.coordinates, derivative=1)
+w = mat.matmul(tf.eye(x.n_data, dtype=tf.float64))
+
+y_interp = mat.matmul(y)
+xnew.add_continuous_variable("y", y_interp.numpy()[:, 0])
+
+plt.figure()
+plt.imshow(xnew.variables["y"].measurements.as_image(), origin="lower")
+
+mat_2 = geoml.interpolation.cubic_conv_2d(xnew.coordinates, x.grid[0], x.grid[1])
+w_2 = mat_2.matmul(tf.eye(x.n_data, dtype=tf.float64))
+
+n = 439
+plt.matshow(np.reshape(mat.weights[n, :], [4, 4]).T)
+plt.matshow(np.reshape(mat_2.weights[n, :], [4, 4]).T)
 
 setup = """
 import numpy as np

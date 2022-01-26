@@ -233,6 +233,21 @@ class UnitColumnNormParameter(RealParameter):
         self.variable.assign(normalized)
 
 
+class CenteredUnitColumnNormParameter(RealParameter):
+    def __init__(self, value, min_val, max_val, fixed=False, name="Parameter"):
+        value = _np.array(value)
+        if len(value.shape) != 2:
+            raise ValueError("value must be rank 2")
+        super().__init__(value, min_val, max_val, fixed, name)
+
+    def refresh(self):
+        value = self.get_value()
+        value = value - _tf.reduce_mean(value, axis=1, keepdims=True)
+        normalized = value / (_tf.math.reduce_euclidean_norm(
+            value, axis=0, keepdims=True) + 1e-6)
+        self.variable.assign(normalized)
+
+
 class UnitColumnSumParameter(RealParameter):
     def __init__(self, value, fixed=False, name="Parameter"):
         value = _np.array(value)
@@ -267,6 +282,29 @@ class OrthonormalMatrix(RealParameter):
 
     def refresh(self):
         value = self.get_value()
+        norm = _tf.math.reduce_euclidean_norm(value, axis=0, keepdims=True)
+        value = value / (norm + 1e-6)
+        q, _ = _tf.linalg.qr(value)
+        # q = q * norm
+        self.variable.assign(q)
+
+
+class CenteredOrthonormalMatrix(RealParameter):
+    def __init__(self, rows, cols, batch_shape=(),
+                 fixed=False, name="Parameter"):
+        if cols > rows:
+            raise ValueError("cols cannot be higher than rows")
+        rnd = _tf.random.normal(batch_shape + (rows, cols))
+        rnd = rnd - _tf.reduce_mean(rnd, axis=-2, keepdims=True)
+        q, _ = _tf.linalg.qr(rnd)
+        value = q.numpy()
+        min_val = -1.1 * _np.ones_like(value)
+        max_val = 1.1 * _np.ones_like(value)
+        super().__init__(value, min_val, max_val, fixed, name)
+
+    def refresh(self):
+        value = self.get_value()
+        value = value - _tf.reduce_mean(value, axis=-2, keepdims=True)
         norm = _tf.math.reduce_euclidean_norm(value, axis=0, keepdims=True)
         value = value / (norm + 1e-6)
         q, _ = _tf.linalg.qr(value)

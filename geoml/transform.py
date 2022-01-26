@@ -444,11 +444,12 @@ class AnisotropyARD(_Transform):
         return x_tr
 
     def set_limits(self, data):
-        dif = data.bounding_box[1, :] - data.bounding_box[0, :]
+        box = data.bounding_box.as_array()
+        dif = box[1, :] - box[0, :]
         self.parameters["ranges"].set_limits(
             min_val=dif / 100,
             max_val=dif * 2)
-        self.parameters["ranges"].set_value(dif/2)
+        self.parameters["ranges"].set_value(dif/10)
 
 
 class ChainedTransform(_Transform):
@@ -484,7 +485,7 @@ class SelectVariables(_Transform):
 class NormalizeWithBoundingBox(_Transform):
     def __init__(self, box):
         super().__init__()
-        self.box = _tf.constant(box, _tf.float64)
+        self.box = _tf.constant(box.as_array(), _tf.float64)
 
     def __call__(self, x):
         with _tf.name_scope("NormalizeWithBoundingBox_transform"):

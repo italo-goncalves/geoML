@@ -21,6 +21,7 @@ import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.likelihood as _lk
 import geoml.warping as _warp
+import geoml
 
 import numpy as _np
 import tensorflow as _tf
@@ -407,12 +408,20 @@ class VGPNetwork(_GPModel):
         self.var_lengths = [data.variables[v].length for v in variables]
 
         # dealing with NaNs
+        # TODO: get_measurements() should return has_value with the measurements
         y = _np.concatenate([data.variables[v].get_measurements()
                              for v in self.variables], axis=1)
         self.y = y.copy()
         self.y[_np.isnan(y)] = 0
         self.has_value = (~ _np.isnan(y)) * 1.0
         self.total_data = _np.sum(self.has_value)
+
+        # initializing likelihoods
+        for i, v in enumerate(self.variables):
+            y = data.variables[v].get_measurements()
+            has_value = ~ _np.any(_np.isnan(y), axis=1)
+            y = y[has_value, :]
+            self.likelihoods[i].initialize(y)
 
         # directions
         self.directional_likelihood = _lk.Gaussian()
@@ -457,7 +466,7 @@ class VGPNetwork(_GPModel):
         )
 
         # setting trainable parameters
-        self.latent_network.refresh(self.options.jitter)
+        # self.latent_network.refresh(self.options.jitter)
         self.latent_network.set_parameter_limits(data)
         for likelihood in likelihoods:
             self._register(likelihood)
@@ -489,14 +498,19 @@ class VGPNetwork(_GPModel):
                        seed=0, jitter=1e-6):
         self.latent_network.refresh(jitter)
 
+        # ELBO
         elbo = self._log_lik(x, y, has_value, training_inputs,
                              samples=samples, seed=seed)
 
+        # ELBO for directions
         if x_dir is not None:
             elbo = elbo + self._log_lik_directions(
                 x_dir, directions, y_dir, has_value_directions)
 
-        kl = self.latent_network.kl_divergence()
+        # KL-divergence
+        unique_nodes = self.latent_network.get_unique_parents()
+        unique_nodes.append(self.latent_network)
+        kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
         elbo = elbo - kl
 
         self.elbo.assign(elbo)
@@ -758,6 +772,99 @@ class VGPNetwork(_GPModel):
             if self.options.verbose:
                 print("\rEpoch %s | ELBO: %s" %
                       (str(i + 1), str(total_elbo)), end="")
+
+        if self.options.verbose:
+            print("\n")
+
+    def train_svi_experts(self, global_epochs=10, epochs_per_expert=10):
+        if not isinstance(self.latent_network, geoml.latent.ProductOfExperts):
+            raise Exception("the last netwwork node must be a"
+                            "ProductOfExperts")
+
+        unique_params = set(self._all_parameters)
+        network_params = set(self.latent_network.all_parameters)
+        other_params = unique_params.difference(network_params)
+        expert_params = []
+        expert_variables = []
+        for expert in self.latent_network.parents:
+            expert_p = list(other_params.union(set(expert.all_parameters)))
+            expert_variables.append([pr.variable for pr in expert_p
+                                     if not pr.fixed])
+            expert_params.append(expert_p)
+        # model_variables = [pr.variable for pr in unique_params
+        #                    if not pr.fixed]
+
+        def loss(idx):
+            training_inputs = [
+                self.data.variables[v].training_input(idx)
+                for v in self.variables]
+
+            if self.directional_data is None:
+                return - self._training_elbo(
+                    _tf.constant(self.data.coordinates[idx],
+                                 _tf.float64),
+                    _tf.constant(self.y[idx], _tf.float64),
+                    _tf.constant(self.has_value[idx], _tf.float64),
+                    training_inputs,
+                    samples=self.options.training_samples,
+                    jitter=self.options.jitter,
+                    seed=self.options.seed
+                )
+            else:
+                return - self._training_elbo(
+                    _tf.constant(self.data.coordinates[idx],
+                                 _tf.float64),
+                    _tf.constant(self.y[idx], _tf.float64),
+                    _tf.constant(self.has_value[idx], _tf.float64),
+                    training_inputs,
+                    x_dir=_tf.constant(
+                        self.directional_data.coordinates,
+                        _tf.float64),
+                    directions=_tf.constant(
+                        self.directional_data.directions, _tf.float64),
+                    y_dir=_tf.constant(self.y_dir, _tf.float64),
+                    has_value_directions=_tf.constant(
+                        self.has_value_dir, _tf.float64),
+                    samples=self.options.training_samples,
+                    jitter=self.options.jitter,
+                    seed=self.options.seed
+                )
+
+        # spatial index
+        spatial_index = []
+        for expert in self.latent_network.parents:
+            box = expert.root.bounding_box
+            inside = box.contains_points(self.data.coordinates)
+            spatial_index.append(_np.where(inside)[0])
+
+        # main loop
+        _np.random.seed(self.options.seed)
+        for g in range(global_epochs):
+            for i, expert in enumerate(self.latent_network.parents):
+                n_data = len(spatial_index[i])
+
+                for j in range(epochs_per_expert):
+                    current_elbo = []
+
+                    shuffled = _np.random.choice(n_data, n_data, replace=False)
+                    batches = self.options.batch_index(n_data)
+
+                    for batch in batches:
+                        self.optimizer.minimize(
+                            lambda: loss(spatial_index[i][shuffled[batch]]),
+                            expert_variables[i])
+
+                        for pr in expert_params[i]:
+                            pr.refresh()
+
+                        current_elbo.append(self.elbo.numpy())
+                        self.training_log.append(current_elbo[-1])
+
+                    total_elbo = float(_np.mean(current_elbo))
+                    if self.options.verbose:
+                        print("\rEpoch %d | Expert %d | "
+                              "Expert epoch %d | ELBO: %f" %
+                              (g + 1, i + 1, j + 1, total_elbo), end="")
 
         if self.options.verbose:
             print("\n")
@@ -1239,7 +1346,8 @@ class VGPNetworkEnsemble(_EnsembleModel):
         self.models = [VGPNetwork(
             data=d,
             variables=variables,
-            likelihoods=_copy.deepcopy(likelihoods),
+            # likelihoods=_copy.deepcopy(likelihoods),
+            likelihoods=likelihoods,
             latent_network=l,
             directional_data=dd,
             options=options)
@@ -1259,26 +1367,32 @@ class VGPNetworkEnsemble(_EnsembleModel):
             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
         return s
 
-    def train_full(self, max_iter=1000):
-        for i, model in enumerate(self.models):
-            if self.options.verbose:
-                print("Training model %d of %d" % (i + 1, len(self.models)))
+    def train_full(self, cycles=10, max_iter_per_model=100):
+        for c in range(cycles):
+            for i, model in enumerate(self.models):
+                if self.options.verbose:
+                    print("Cycle %d of %d - training model %d of %d" %
+                          (c + 1, cycles, i + 1, len(self.models)))
 
-            model.train_full(max_iter=max_iter)
+                model.train_full(max_iter=max_iter_per_model)
 
-    def train_svi(self, epochs=100):
-        for i, model in enumerate(self.models):
-            if self.options.verbose:
-                print("Training model %d of %d" % (i + 1, len(self.models)))
+    def train_svi(self, cycles=10, epochs_per_model=10):
+        for c in range(cycles):
+            for i, model in enumerate(self.models):
+                if self.options.verbose:
+                    print("Cycle %d of %d - training model %d of %d" %
+                          (c + 1, cycles, i + 1, len(self.models)))
 
-            model.train_svi(epochs=epochs)
+                model.train_svi(epochs=epochs_per_model)
 
-    def train_batched(self, epochs=100):
-        for i, model in enumerate(self.models):
-            if self.options.verbose:
-                print("Training model %d of %d" % (i + 1, len(self.models)))
+    def train_batched(self, cycles=10, epochs_per_model=10):
+        for c in range(cycles):
+            for i, model in enumerate(self.models):
+                if self.options.verbose:
+                    print("Cycle %d of %d - training model %d of %d" %
+                          (c + 1, cycles, i + 1, len(self.models)))
 
-            model.train_batched(epochs=epochs)
+                model.train_batched(epochs=epochs_per_model)
 
     def predict(self, newdata, n_sim=20):
         """
@@ -1374,3 +1488,100 @@ class VGPNetworkEnsemble(_EnsembleModel):
                     combined[i][key] = tensor
 
         return combined
+
+
+class ConvolutionalVGP(VGPNetwork):
+    @_tf.function
+    def _training_elbo(self, x, y, has_value, training_inputs,
+                       x_dir=None, directions=None, y_dir=None,
+                       has_value_directions=None,
+                       samples=20,
+                       seed=0, jitter=1e-6):
+        self.latent_network.refresh(seed=[seed, 0], n_sim=samples)
+
+        # ELBO
+        elbo = self._log_lik(x, y, has_value, training_inputs)
+
+        # ELBO for directions
+        if x_dir is not None:
+            elbo = elbo + self._log_lik_directions(
+                x_dir, directions, y_dir, has_value_directions)
+
+        # KL-divergence
+        unique_nodes = self.latent_network.get_unique_parents()
+        unique_nodes.append(self.latent_network)
+        kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
+        elbo = elbo - kl
+
+        self.elbo.assign(elbo)
+        self.kl_div.assign(kl)
+        return elbo
+
+    @_tf.function
+    def _log_lik(self, x, y, has_value, training_inputs):
+        with _tf.name_scope("batched_elbo"):
+            # prediction
+            mu, var, sims, _ = self.latent_network.predict(x)
+
+            # likelihood
+            y_s = _tf.split(y, self.var_lengths, axis=1)
+            mu = _tf.split(mu, self.lik_sizes, axis=1)
+            var = _tf.split(var, self.lik_sizes, axis=1)
+            hv = _tf.split(has_value, self.var_lengths, axis=1)
+            sims = _tf.split(sims, self.lik_sizes, axis=1)
+
+            elbo = 0.0  # _tf.constant(0.0, _tf.float64)
+            for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
+                    self.likelihoods, mu, var, y_s,
+                    hv, sims, training_inputs):
+                elbo = elbo + likelihood.log_lik(
+                    mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
+
+            # batch weight
+            batch_size = _tf.reduce_sum(has_value)
+            elbo = elbo * self.total_data / batch_size
+
+            return elbo
+
+    @_tf.function
+    def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
+        with _tf.name_scope("batched_elbo_directions"):
+            # prediction
+            mu, var, _ = self.latent_network.predict_directions(
+                x_dir, directions)
+
+            # likelihood
+            y_s = _tf.split(y_dir, self.var_lengths_dir, axis=1)
+            mu = _tf.split(mu, self.var_lengths_dir, axis=1)
+            var = _tf.split(var, self.var_lengths_dir, axis=1)
+            hv = _tf.split(has_value, self.var_lengths_dir, axis=1)
+            elbo = _tf.constant(0.0, _tf.float64)
+            for mu_i, var_i, y_i, hv_i in zip(mu, var, y_s, hv):
+                elbo = elbo + self.directional_likelihood.log_lik(
+                    mu_i, var_i, y_i, hv_i)
+
+            # batch weight
+            batch_size = _tf.cast(_tf.shape(x_dir)[0], _tf.float64)
+            elbo = elbo * self.total_data_dir / batch_size
+
+            return elbo
+
+    @_tf.function
+    def predict_raw(self, x_new, variable_inputs, n_sim=1, seed=0, jitter=1e-6):
+        self.latent_network.refresh(seed=[seed, 0], n_sim=n_sim)
+
+        with _tf.name_scope("Prediction"):
+            pred_mu, pred_var, pred_sim, pred_exp_var = \
+                self.latent_network.predict(x_new)
+
+            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
+            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
+            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
+            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+
+            output = []
+            for mu, var, sim, exp_var, lik, v_inp in zip(
+                    pred_mu, pred_var, pred_sim, pred_exp_var,
+                    self.likelihoods, variable_inputs):
+                output.append(lik.predict(mu, var, sim, exp_var, **v_inp))
+            return output

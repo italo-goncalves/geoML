@@ -22,7 +22,7 @@ Dependencies:
 * `scikit-image`
 * `pandas`
 * `numpy`
-* `tensorflow` (preferably `tensorflow-gpu`)
+* `tensorflow`
 * `tensorflow-probability`
 * `pyvista` and `plotly` for 3D visualization
 

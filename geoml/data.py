@@ -47,6 +47,72 @@ def bounding_box(points):
     return bbox, d
 
 
+class BoundingBox(object):
+    def __init__(self, min_values, max_values):
+        min_values = _np.array(min_values, ndmin=2)
+        max_values = _np.array(max_values, ndmin=2)
+
+        if min_values.shape != max_values.shape:
+            raise ValueError("min_values and max_values must have the"
+                             "same size")
+
+        self._n_dim = min_values.shape[1]
+        self._min = min_values
+        self._max = max_values
+        self._diagonal = _np.sqrt(_np.sum((max_values - min_values)**2))
+
+    @property
+    def n_dim(self):
+        return self._n_dim
+
+    @property
+    def diagonal(self):
+        return self._diagonal
+
+    @property
+    def min(self):
+        return self._min
+
+    @property
+    def max(self):
+        return self._max
+
+    def as_array(self):
+        return _np.concatenate([self.min, self.max], axis=0)
+
+    def __repr__(self):
+        return self.as_array().__repr__()
+
+    def overlaps_with(self, other):
+        if other.n_dim != self.n_dim:
+            raise ValueError("box dimensions mismatch")
+
+        checks = []
+        for min_A, max_A, min_B, max_B in zip(
+                self.min[0], self.max[0], other.min[0], other.max[0]):
+            checks.append(min_A > max_B)
+            checks.append(min_B > max_A)
+        return not any(checks)
+
+    @classmethod
+    def from_array(cls, array):
+        if len(array.shape) < 2:
+            array = _np.expand_dims(array, axis=0)
+        min_values = _np.min(array, axis=0, keepdims=True)
+        max_values = _np.max(array, axis=0, keepdims=True)
+        return BoundingBox(min_values, max_values)
+
+    def contains_points(self, array):
+        if array.shape[1] != self.n_dim:
+            raise ValueError("box and points dimensions mismatch")
+
+        check_1 = array >= self.min
+        check_2 = array <= self.max
+
+        contains = _np.all(_np.concatenate([check_1, check_2], axis=1), axis=1)
+        return contains
+
+
 class _Variable(object):
     """Representation of a dependent random variable."""
 
@@ -138,7 +204,7 @@ class _Variable(object):
 
             The output can be used in plotting functions such as
             matplotlib's imshow(). If you use it, do not forget to set
-            origin="lower".
+            `origin="lower"`.
 
             Returns
             -------
@@ -149,7 +215,7 @@ class _Variable(object):
                 raise ValueError("method only available for Grid2D data"
                                  "objects")
 
-            image = _np.reshape(self.values.astype(_np.float),
+            image = _np.reshape(self.values, #.astype(_np.float),
                                 newshape=self.coordinates.grid_size,
                                 order="F")
             image = image.transpose()
@@ -591,7 +657,11 @@ class CompositionalVariable(_Variable):
     def get_measurements(self):
         out = [self.components[label].measurements.values
                for label in self.labels]
-        return _np.stack(out, axis=1)
+        out = _np.stack(out, axis=1)
+        total = _np.sum(out, axis=1, keepdims=True)
+        total = _np.where(_np.abs(total - 1) < 1e-10, 1.0, _np.nan)
+        out = out * total
+        return out
 
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
@@ -1208,7 +1278,7 @@ class _SpatialData(object):
 
     @property
     def diagonal(self):
-        return self._diagonal
+        return self._bounding_box.diagonal
 
     def aspect_ratio(self, vertical_exaggeration=1):
         """
@@ -1256,10 +1326,13 @@ class PointData(_SpatialData):
         self._n_dim = self.coordinates.shape[1]
         self._n_data = self.coordinates.shape[0]
         if self._n_data > 0:
-            self._bounding_box, self._diagonal = bounding_box(self.coordinates)
+            # self._bounding_box, self._diagonal = bounding_box(self.coordinates)
+            self._bounding_box = BoundingBox.from_array(self.coordinates)
         else:
-            self._bounding_box = _np.zeros([2, self.n_dim])
-            self._diagonal = 0
+            # self._bounding_box = _np.zeros([2, self.n_dim])
+            # self._diagonal = 0
+            self._bounding_box = BoundingBox.from_array(
+                _np.zeros([2, self.n_dim]))
 
     def as_data_frame(self, **kwargs):
         """
@@ -1445,7 +1518,8 @@ class Grid1D(PointData):
         self.grid_size = [int(n)]
 
     def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
         cols = ["xid"]
@@ -1485,7 +1559,8 @@ class Grid1D(PointData):
         )
 
     def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
         cols = ["xid"]
@@ -1521,7 +1596,8 @@ class Grid1D(PointData):
         )
 
     def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.arange(int(self.grid_size[0]))[:, None]
         cols = ["xid"]
@@ -1613,7 +1689,8 @@ class Grid2D(PointData):
         self.grid_size = [int(num) for num in n]
 
     def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([(x, y)
                              for y in range(int(self.grid_size[1]))
@@ -1658,7 +1735,8 @@ class Grid2D(PointData):
         )
 
     def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([(x, y)
                              for y in range(int(self.grid_size[1]))
@@ -1699,7 +1777,8 @@ class Grid2D(PointData):
         )
 
     def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([(x, y)
                              for y in range(int(self.grid_size[1]))
@@ -1798,8 +1877,34 @@ class Grid3D(PointData):
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = [int(num) for num in n]
 
-    def aggregate_categorical(self, data, variable):
+    def index_data(self, data, variable):
         data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+
+        # grid_id = _np.array([(x, y, z)
+        #                      for z in range(int(self.grid_size[2]))
+        #                      for y in range(int(self.grid_size[1]))
+        #                      for x in range(int(self.grid_size[0]))])
+        # cols = ["xid", "yid", "zid"]
+
+        # identifying cell id
+        raw_data = _pd.DataFrame({
+            "value": data.variables[variable].measurements.values,
+        })
+        raw_data["xid"] = _np.round(
+            (data.coordinates[:, 0] - self.grid[0][0]
+             - self.step_size[0] / 2) / self.step_size[0])
+        raw_data["yid"] = _np.round(
+            (data.coordinates[:, 1] - self.grid[1][0]
+             - self.step_size[1] / 2) / self.step_size[1])
+        raw_data["zid"] = _np.round(
+            (data.coordinates[:, 2] - self.grid[2][0]
+             - self.step_size[2] / 2) / self.step_size[2])
+
+        return raw_data
+
+    def aggregate_categorical(self, data, variable):
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([(x, y, z)
                              for z in range(int(self.grid_size[2]))
@@ -1848,7 +1953,8 @@ class Grid3D(PointData):
         )
 
     def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([(x, y, z)
                              for z in range(int(self.grid_size[2]))
@@ -1893,7 +1999,8 @@ class Grid3D(PointData):
         )
 
     def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
+        data = data.subset_region(self.bounding_box.min[0],
+                                  self.bounding_box.max[0])
 
         grid_id = _np.array([(x, y, z)
                              for z in range(int(self.grid_size[2]))
@@ -1963,7 +2070,8 @@ class DirectionalData(PointData):
         self.direction_labels = directions
         self.directions = _np.array(data.loc[:, directions], ndmin=2)
 
-        all_coords = _np.concatenate([self._bounding_box, self.directions],
+        all_coords = _np.concatenate([self._bounding_box.as_array(),
+                                      self.directions],
                                      axis=0)
         self._bounding_box, self._diagonal = bounding_box(all_coords)
 
@@ -2079,7 +2187,8 @@ class DrillholeData(_SpatialData):
     """
 
     def __init__(self, collar=None, assay=None, survey=None, holeid="HOLEID",
-                 x="X", y="Y", z="Z", fr="FROM", to="TO"):
+                 x="X", y="Y", z="Z", fr="FROM", to="TO", az=None,
+                 dip=None):
         """
         Initializer for DrillholeData.
 
@@ -2102,8 +2211,17 @@ class DrillholeData(_SpatialData):
         The column HOLEID in the output is reserved.
         """
         super().__init__()
+        collar = collar.copy()
+
         if survey is not None:
             raise NotImplementedError("survey data is not yet supported")
+
+        if az is None:
+            az = "AZIMUTH"
+            collar[az] = 0
+        if dip is None:
+            dip = "DIP"
+            collar[dip] = 90
 
         assay = assay.drop([x, y, z], axis=1, errors="ignore")
 
@@ -2123,10 +2241,21 @@ class DrillholeData(_SpatialData):
                        assay,
                        on=holeid,
                        suffixes=("_collar", "_assay"))
-        df_from = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[fr]})
-        df_to = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[to]})
-        coords_from = df.loc[:, [x, y, z]].values - df_from.values
-        coords_to = df.loc[:, [x, y, z]].values - df_to.values
+
+        directions = DirectionalData.from_azimuth_and_dip(
+            df, [x, y, z], az, dip
+        ).directions
+
+        # df_from = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[fr]})
+        # df_to = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[to]})
+        # coords_from = df.loc[:, [x, y, z]].values - df_from.values
+        # coords_to = df.loc[:, [x, y, z]].values - df_to.values
+
+        coords_from = df.loc[:, [x, y, z]].values \
+                      + directions * df[fr].values[:, None]
+        coords_to = df.loc[:, [x, y, z]].values \
+                      + directions * df[to].values[:, None]
+
         df = df.drop([x, y, z], axis=1)
         df = df.rename(columns={holeid: "HOLEID"})
 
@@ -2143,7 +2272,8 @@ class DrillholeData(_SpatialData):
                                         axis=1))
 
         coords2 = _np.concatenate([self.coords_from, self.coords_to], axis=0)
-        self._bounding_box, self._diagonal = bounding_box(coords2)
+        # self._bounding_box, self._diagonal = bounding_box(coords2)
+        self._bounding_box = BoundingBox.from_array(coords2)
 
     def __str__(self):
         s = "Object of class " + self.__class__.__name__ + "\n\n"

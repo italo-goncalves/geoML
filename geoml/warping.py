@@ -47,6 +47,9 @@ class _Warping(_gpr.Parametric):
     def derivative(self, x):
         pass
 
+    def initialize(self, x):
+        return self.forward(x)
+
 
 class Identity(_Warping):
     """Identity warping"""
@@ -150,13 +153,13 @@ class ZScore(_Warping):
         self._add_parameter("mean", _gpr.RealParameter(0, -1e9, 1e9))
         if mean is not None:
             self.parameters["mean"].set_value(mean)
-            self.parameters["mean"].set_limits(mean - 2*_np.abs(mean),
-                                               mean + 2*_np.abs(mean))
+            # self.parameters["mean"].set_limits(mean - 2*_np.abs(mean),
+            #                                    mean + 2*_np.abs(mean))
 
         self._add_parameter("std", _gpr.PositiveParameter(1, 1e-9, 1e9))
         if std is not None:
             self.parameters["std"].set_value(std)
-            self.parameters["std"].set_limits(std / 10, std * 10)
+            self.parameters["std"].set_limits(std / 100, std * 10)
         
     def forward(self, x):
         mean = self.parameters["mean"].get_value()
@@ -174,6 +177,15 @@ class ZScore(_Warping):
         std = self.parameters["std"].get_value()
         x = _tftools.ensure_rank_2(x)
         return _tf.ones_like(x) / std
+
+    def initialize(self, x):
+        mean = _np.mean(x)
+        std = _np.std(x)
+        self.parameters["mean"].set_value(mean)
+        self.parameters["std"].set_value(std)
+        self.parameters["mean"].set_limits(mean - 3*std, mean + 3*std)
+        self.parameters["std"].set_limits(std / 100, std * 10)
+        return super().initialize(x)
 
 
 class Softplus(_Warping):
@@ -287,3 +299,9 @@ class ChainedWarping(_Warping):
             d = d * wp.derivative(x)
             x = wp.forward(x)
         return d
+
+    def initialize(self, x):
+        x = _tftools.ensure_rank_2(x)
+        for wp in self.warpings:
+            x = wp.initialize(x)
+        return x

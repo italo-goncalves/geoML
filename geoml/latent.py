@@ -51,7 +51,7 @@ class _LatentVariable(_gpr.Parametric):
     def refresh(self, jitter=1e-9):
         pass
 
-    def get_all_parents(self):
+    def get_unique_parents(self):
         raise NotImplementedError
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
@@ -82,7 +82,7 @@ class _RootLatentVariable(_LatentVariable):
         super().__init__()
         self.root = self
 
-    def get_all_parents(self):
+    def get_unique_parents(self):
         return []
 
 
@@ -93,8 +93,8 @@ class _FunctionalLatentVariable(_LatentVariable):
         parent.children.append(self)
         self.root = parent.root
 
-    def get_all_parents(self):
-        return [self.parent] + self.parent.get_all_parents()
+    def get_unique_parents(self):
+        return [self.parent] + self.parent.get_unique_parents()
 
     def propagate(self, x, x_var=None):
         mu, var = self.predict(x, x_var, n_sim=0)
@@ -125,10 +125,10 @@ class _Operation(_LatentVariable):
             self._register(lat)
             lat.children.append(self)
 
-    def get_all_parents(self):
+    def get_unique_parents(self):
         all_parents = self.parents.copy()
         for p in self.parents:
-            all_parents.extend(p.get_all_parents())
+            all_parents.extend(p.get_unique_parents())
         return list(set(all_parents))
 
     def set_parameter_limits(self, data):
@@ -137,6 +137,8 @@ class _Operation(_LatentVariable):
 
 
 class LatentNetworkOutput(_LatentVariable):
+    # The only difference between this class and Concatenate is that this one
+    # adds up the KL-divergences of all unique parents
     def __init__(self, *latent_variables):
         super().__init__()
         self.parents = list(latent_variables)
@@ -145,10 +147,10 @@ class LatentNetworkOutput(_LatentVariable):
             self._register(lat)
             lat.children.append(self)
 
-    def get_all_parents(self):
+    def get_unique_parents(self):
         all_parents = self.parents.copy()
         for p in self.parents:
-            all_parents.extend(p.get_all_parents())
+            all_parents.extend(p.get_unique_parents())
         return list(set(all_parents))
 
     def set_parameter_limits(self, data):
@@ -192,7 +194,7 @@ class LatentNetworkOutput(_LatentVariable):
         return all_mean, all_var, all_exp_var
 
     def kl_divergence(self):
-        unique_parents = self.get_all_parents()
+        unique_parents = self.get_unique_parents()
         kl = _tf.add_n([p.kl_divergence() for p in unique_parents])
         return kl
 
@@ -204,6 +206,7 @@ class BasicInput(_RootLatentVariable):
         test_point = _np.ones([1, inducing_points.n_dim])
         test_point = transform(test_point)
         self._size = test_point.shape[1]
+        self.bounding_box = inducing_points.bounding_box
 
         self.transform = self._register(transform)
         if fix_transform:
@@ -211,25 +214,28 @@ class BasicInput(_RootLatentVariable):
                 p.fix()
 
         self.n_ip = inducing_points.coordinates.shape[0]
-        box = inducing_points.bounding_box
         self._add_parameter(
             "inducing_points",
             _gpr.RealParameter(
                 inducing_points.coordinates,
-                _np.tile(box[0, :], [self.n_ip, 1]),
-                _np.tile(box[1, :], [self.n_ip, 1]),
+                _np.tile(self.bounding_box.min, [self.n_ip, 1]),
+                _np.tile(self.bounding_box.max, [self.n_ip, 1]),
                 fixed=fix_inducing_points
             ))
 
+        self.inducing_points_variance = _tf.zeros(
+            [self.n_ip, self.size], _tf.float64)
+
     def refresh(self, jitter=1e-9):
-        self.transform.refresh()
-        self.inducing_points = self.transform(
-            self.parameters["inducing_points"].get_value())
-        self.inducing_points_variance = _tf.ones_like(self.inducing_points)
+        with _tf.name_scope("basic_input_refresh"):
+            self.transform.refresh()
+            self.inducing_points = self.transform(
+                self.parameters["inducing_points"].get_value())
+            # self.inducing_points_variance = _tf.ones_like(self.inducing_points)
 
     def propagate(self, x, x_var=None):
         x_tr = self.transform(x)
-        return x_tr, _tf.ones_like(x_tr)
+        return x_tr, _tf.zeros_like(x_tr)
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
@@ -239,7 +245,7 @@ class BasicInput(_RootLatentVariable):
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         x_tr = _tf.transpose(self.transform(x))
-        var = _tf.ones_like(x_tr)
+        var = _tf.zeros_like(x_tr)
         if n_sim > 0:
             sims = _tf.tile(x_tr[None, :, :], [1, 1, n_sim])
             return x_tr[:, :, None], var, sims, _tf.zeros_like(var)
@@ -351,34 +357,54 @@ class BasicGP(_FunctionalLatentVariable):
         self._add_parameter(
             "ranges",
             _gpr.PositiveParameter(
-                _np.ones([1, self.parent.size]),
-                _np.ones([1, self.parent.size]) * 1e-6,
-                _np.ones([1, self.parent.size]) * 10
+                _np.ones([1, 1, self.parent.size]),
+                _np.ones([1, 1, self.parent.size]) * 1e-6,
+                _np.ones([1, 1, self.parent.size]) * 10,
+                fixed=True
             )
         )
 
-    def covariance_matrix(self, x, y, rng_x, rng_y):
+    def covariance_matrix(self, x, y, var_x=None, var_y=None):
         with _tf.name_scope("basic_covariance_matrix"):
+            ranges = self.parameters["ranges"].get_value()
+            if var_x is None:
+                var_x = _tf.zeros_like(x)
+            if var_y is None:
+                var_y = _tf.zeros_like(y)
+            var_x = var_x[:, None, :]
+            var_y = var_y[None, :, :]
 
             # [n_data, n_data, n_dim]
             dif = x[:, None, :] - y[None, :, :]
 
-            avg_rng = 0.5 * (rng_x[:, None, :]**2 + rng_y[None, :, :]**2)
-            # avg_rng = rng_x[:, None, :] ** 2 + rng_y[None, :, :] ** 2
+            # avg_rng = 0.5 * (var_x[:, None, :] ** 2 + var_y[None, :, :] ** 2)
+            # # avg_rng = rng_x[:, None, :] ** 2 + rng_y[None, :, :] ** 2
+            #
+            # dist = _tf.sqrt(_tf.reduce_sum(dif**2 / avg_rng, axis=-1))
+            # cov = self.kernel.kernelize(dist)
+            #
+            # # normalization
+            # det_avg = _tf.reduce_prod(avg_rng, axis=-1, keepdims=False)**(1/2)
+            # det_x = _tf.reduce_prod(var_x ** 2, axis=-1, keepdims=True) ** (1 / 4)
+            # det_y = _tf.reduce_prod(var_y ** 2, axis=-1, keepdims=True) ** (1 / 4)
+            # # det_x = _tf.reduce_prod(2*rng_x ** 2, axis=-1, keepdims=True) ** (
+            # #             1 / 4)
+            # # det_y = _tf.reduce_prod(2*rng_y ** 2, axis=-1, keepdims=True) ** (
+            # #             1 / 4)
 
-            dist = _tf.sqrt(_tf.reduce_sum(dif**2 / avg_rng, axis=-1))
+            # norm = det_x * _tf.transpose(det_y) / det_avg
+
+            total_var = ranges**2 + (var_x + var_y) / 2
+            dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
             cov = self.kernel.kernelize(dist)
 
             # normalization
-            det_avg = _tf.reduce_prod(avg_rng, axis=-1, keepdims=False)**(1/2)
-            det_x = _tf.reduce_prod(rng_x**2, axis=-1, keepdims=True)**(1/4)
-            det_y = _tf.reduce_prod(rng_y**2, axis=-1, keepdims=True)**(1/4)
-            # det_x = _tf.reduce_prod(2*rng_x ** 2, axis=-1, keepdims=True) ** (
-            #             1 / 4)
-            # det_y = _tf.reduce_prod(2*rng_y ** 2, axis=-1, keepdims=True) ** (
-            #             1 / 4)
+            # det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
+            # det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
+            det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
 
-            norm = det_x * _tf.transpose(det_y) / det_avg
+            # norm = det_x * det_y / det_2
+            norm = _tf.reduce_prod(ranges) / det_2
 
             # output
             cov = cov * norm
@@ -387,19 +413,19 @@ class BasicGP(_FunctionalLatentVariable):
     def refresh(self, jitter=1e-9):
         with _tf.name_scope("basic_refresh"):
             self.parent.refresh(jitter)
-            ranges = self.parameters["ranges"].get_value()
-            avg_var = _tf.reduce_mean(ranges**2, axis=1, keepdims=True)
+            # ranges = self.parameters["ranges"].get_value()
+            # avg_var = _tf.reduce_mean(ranges**2, axis=1, keepdims=True)
             # avg_var = _tf.ones_like(ranges)
 
             # prior
             ip = self.parent.inducing_points
             ip_var = self.parent.inducing_points_variance
-            ip_std = _tf.sqrt(ip_var + ranges**2)
+            # ip_std = _tf.sqrt(ip_var + ranges**2)
             # ip_std = _tf.sqrt(ip_var)
 
             eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
 
-            cov = self.covariance_matrix(ip, ip, ip_std, ip_std) + eye * jitter
+            cov = self.covariance_matrix(ip, ip, ip_var, ip_var) + eye * jitter
             chol = _tf.linalg.cholesky(cov)
             cov_inv = _tf.linalg.cholesky_solve(chol, eye)
 
@@ -407,12 +433,12 @@ class BasicGP(_FunctionalLatentVariable):
             self.cov_chol = _tf.tile(chol[None, :, :], [self.size, 1, 1])
             self.cov_inv = _tf.tile(cov_inv[None, :, :], [self.size, 1, 1])
 
-            prior_ranges = _tf.sqrt(ip_var + avg_var)
-            self.prior_cov = self.covariance_matrix(
-                ip, ip, prior_ranges, prior_ranges) + eye * jitter
-            self.prior_cov_chol = _tf.linalg.cholesky(self.prior_cov)
-            self.prior_cov_inv = _tf.linalg.cholesky_solve(
-                self.prior_cov_chol, eye)
+            # prior_ranges = _tf.sqrt(ip_var + avg_var)
+            # self.prior_cov = self.covariance_matrix(
+            #     ip, ip, prior_ranges, prior_ranges) + eye * jitter
+            # self.prior_cov_chol = _tf.linalg.cholesky(self.prior_cov)
+            # self.prior_cov_inv = _tf.linalg.cholesky_solve(
+            #     self.prior_cov_chol, eye)
 
             # posterior
             eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
@@ -441,16 +467,16 @@ class BasicGP(_FunctionalLatentVariable):
         with _tf.name_scope("basic_prediction"):
             x, x_var = self.parent.propagate(x, x_var)
 
-            ranges = self.parameters["ranges"].get_value()
-            total_ranges = _tf.sqrt(ranges ** 2 + x_var)
-            ip_ranges = _tf.sqrt(
-                ranges ** 2 + self.parent.inducing_points_variance)
+            # ranges = self.parameters["ranges"].get_value()
+            # total_ranges = _tf.sqrt(ranges ** 2 + x_var)
+            # ip_ranges = _tf.sqrt(
+            #     ranges ** 2 + self.parent.inducing_points_variance)
             # total_ranges = _tf.sqrt(x_var)
             # ip_ranges = _tf.sqrt(self.parent.inducing_points_variance)
 
             cov_cross = self.covariance_matrix(
                 x, self.parent.inducing_points,
-                total_ranges, ip_ranges)
+                x_var, self.parent.inducing_points_variance)
             cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
 
             mu = _tf.matmul(cov_cross, self.alpha)
@@ -485,13 +511,13 @@ class BasicGP(_FunctionalLatentVariable):
             kl = 0.5 * (- tr + fit + det_1 - det_2)
 
             # range regularization
-            det_3 = 2 * _tf.reduce_sum(_tf.math.log(
-                _tf.linalg.diag_part(self.prior_cov_chol))) * self.size
-            det_4 = 2 * _tf.reduce_sum(_tf.math.log(
-                _tf.linalg.diag_part(self.cov_chol)))
-            tr_2 = _tf.reduce_sum(self.prior_cov_inv[None, :, :] * self.cov)
-            kl_rng = 0.5 * (tr_2 + det_3 - det_4 - self.root.n_ip * self.size)
-            kl = kl + kl_rng
+            # det_3 = 2 * _tf.reduce_sum(_tf.math.log(
+            #     _tf.linalg.diag_part(self.prior_cov_chol))) * self.size
+            # det_4 = 2 * _tf.reduce_sum(_tf.math.log(
+            #     _tf.linalg.diag_part(self.cov_chol)))
+            # tr_2 = _tf.reduce_sum(self.prior_cov_inv[None, :, :] * self.cov)
+            # kl_rng = 0.5 * (tr_2 + det_3 - det_4 - self.root.n_ip * self.size)
+            # kl = kl + kl_rng
 
             return kl
 
@@ -872,6 +898,7 @@ class Exponentiation(_FunctionalLatentVariable):
         super().__init__(parent)
         self._add_parameter("amp_mean", _gpr.RealParameter(0, -5, 5))
         self._add_parameter("amp_scale", _gpr.PositiveParameter(0.25, 0.01, 10))
+        self._size = parent.size
 
     def refresh(self, jitter=1e-9):
         amp_mean = self.parameters["amp_mean"].get_value()
@@ -909,9 +936,9 @@ class Exponentiation(_FunctionalLatentVariable):
                 sims = sims * _tf.sqrt(amp_scale) + amp_mean
                 explained_var = explained_var * amp_scale
 
-                amp_mu = _tf.exp(mu) * (1 + 0.5 * var)
-                amp_var = _tf.exp(2 * mu) * var * (1 + var)
-                amp_explained_var = _tf.exp(2 * mu) \
+                amp_mu = _tf.exp(mu) * (1 + 0.5 * var[:, :, None])
+                amp_var = _tf.exp(2 * mu[:, :, 0]) * var * (1 + var)
+                amp_explained_var = _tf.exp(2 * mu[:, :, 0]) \
                                     * (var + explained_var) \
                                     * (1 + var + explained_var) \
                                     - amp_var
@@ -1022,6 +1049,110 @@ class Multiply(_Operation):
             - pred_var
 
         return pred_mu, pred_var, pred_explained_var
+
+    def kl_divergence(self):
+        return _tf.constant(0.0, _tf.float64)
+
+
+class CopyGP(_FunctionalLatentVariable):
+    def __init__(self, parent, teacher_gp):
+        super().__init__(parent)
+
+        self.teacher_gp = teacher_gp
+        self._size = teacher_gp.size
+
+        teacher_gp.refresh(1e-6)
+
+        self.teacher_inducing_points = _tf.constant(
+            teacher_gp.parent.inducing_points, _tf.float64)
+        self.teacher_inducing_points_variance = _tf.constant(
+            teacher_gp.parent.inducing_points_variance, _tf.float64)
+        self.teacher_smooth_inv = _tf.constant(
+            teacher_gp.cov_smooth_inv, _tf.float64)
+        self.teacher_alpha = _tf.constant(teacher_gp.alpha, _tf.float64)
+        self.teacher_chol_r = _tf.constant(teacher_gp.chol_r, _tf.float64)
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("copy_gp_refresh"):
+            self.parent.refresh(jitter)
+            ranges = self.teacher_gp.parameters["ranges"].get_value()
+
+            cov = self.teacher_gp.covariance_matrix(
+                self.parent.inducing_points,
+                _tf.sqrt(self.parent.inducing_points_variance + ranges**2),
+                self.teacher_inducing_points,
+                _tf.sqrt(self.teacher_inducing_points_variance + ranges ** 2))
+            cov = _tf.tile(cov[None, :, :], [self.size, 1, 1])
+
+            # inducing points
+            pred_inputs = _tf.matmul(cov, self.teacher_alpha)
+            self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
+            pred_var = 1.0 - _tf.reduce_sum(
+                    _tf.matmul(cov, self.teacher_smooth_inv) * cov,
+                    axis=2, keepdims=False
+                )
+            self.inducing_points_variance = _tf.transpose(pred_var)
+
+    def covariance_matrix(self, x, y, rng_x, rng_y):
+        return self.teacher_gp.covariance_matrix(x, y, rng_x, rng_y)
+
+    def covariance_matrix_d1(self, y, dir_y, step=1e-3):
+        return self.teacher_gp.covariance_matrix_d1(y, dir_y, step)
+
+    def point_variance_d2(self, x, dir_x, step=1e-3):
+        return self.teacher_gp.point_variance_d2(x, dir_x, step)
+
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("basic_prediction"):
+            x, x_var = self.parent.propagate(x, x_var)
+
+            ranges = self.teacher_gp.parameters["ranges"].get_value()
+            total_ranges = _tf.sqrt(ranges ** 2 + x_var)
+            ip_ranges = _tf.sqrt(
+                ranges ** 2 + self.teacher_inducing_points_variance)
+
+            cov_cross = self.covariance_matrix(
+                x, self.teacher_inducing_points,
+                total_ranges, ip_ranges)
+            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
+
+            mu = _tf.matmul(cov_cross, self.teacher_alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.teacher_smooth_inv) * cov_cross,
+                axis=2, keepdims=False)
+            var = _tf.maximum(1.0 - explained_var, 0.0)
+
+            if n_sim > 0:
+                rnd = _tf.random.stateless_normal(
+                    shape=[self.size, self.root.n_ip, n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                sims = _tf.matmul(
+                    cov_cross, _tf.matmul(self.teacher_chol_r, rnd)) + mu
+
+                return mu, var, sims, explained_var
+
+            else:
+                return mu, var
+
+    def predict_directions(self, x, dir_x, step=1e-3):
+        with _tf.name_scope("basic_prediction_directions"):
+
+            cov_cross = self.covariance_matrix_d1(x, dir_x, step)
+            cov_cross = _tf.transpose(cov_cross)
+            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
+
+            mu = _tf.matmul(cov_cross, self.teacher_alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.teacher_smooth_inv) * cov_cross,
+                axis=2, keepdims=False)
+
+            point_var = self.point_variance_d2(x, dir_x, step)
+            var = _tf.maximum(point_var - explained_var, 0.0)
+
+            return mu, var, explained_var
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)

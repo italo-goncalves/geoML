@@ -44,32 +44,27 @@ def aspect_ratio_2d(vertical_exaggeration=1):
 
 def aspect_ratio_3d(bounding_box, vertical_exaggeration=1):
     # aspect ratio
-    aspect = _np.apply_along_axis(lambda x: x[1] - x[0],
-                                  0,
-                                  bounding_box)
+    aspect = bounding_box.max[0] - bounding_box.min[0]
     aspect = aspect / aspect[0]
     aspect[-1] = aspect[-1] * vertical_exaggeration
 
     # expanded bounding box
-    def expand_10_perc(x):
-        dif = x[1] - x[0]
-        return [x[0] - 0.1 * dif, x[1] + 0.1 * dif]
+    exp_box = _np.stack([bounding_box.min[0] - 0.1 * aspect,
+                         bounding_box.max[0] + 0.1 * aspect],
+                        axis=0)
 
-    bbox = _np.apply_along_axis(lambda x: expand_10_perc(x),
-                                0,
-                                bounding_box)
     return {"scene": {"aspectratio": {"x": aspect[0],
                                       "y": aspect[1],
                                       "z": aspect[2]},
                       "xaxis": {"showexponent": "none",
                                 "exponentformat": "none",
-                                "range": bbox[:, 0]},
+                                "range": exp_box[:, 0]},
                       "yaxis": {"showexponent": "none",
                                 "exponentformat": "none",
-                                "range": bbox[:, 1]},
+                                "range": exp_box[:, 1]},
                       "zaxis": {"showexponent": "none",
                                 "exponentformat": "none",
-                                "range": bbox[:, 2]}}}
+                                "range": exp_box[:, 2]}}}
 
 
 def bounding_box_3d(bounding_box, **kwargs):
