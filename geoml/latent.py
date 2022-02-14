@@ -377,23 +377,6 @@ class BasicGP(_FunctionalLatentVariable):
             # [n_data, n_data, n_dim]
             dif = x[:, None, :] - y[None, :, :]
 
-            # avg_rng = 0.5 * (var_x[:, None, :] ** 2 + var_y[None, :, :] ** 2)
-            # # avg_rng = rng_x[:, None, :] ** 2 + rng_y[None, :, :] ** 2
-            #
-            # dist = _tf.sqrt(_tf.reduce_sum(dif**2 / avg_rng, axis=-1))
-            # cov = self.kernel.kernelize(dist)
-            #
-            # # normalization
-            # det_avg = _tf.reduce_prod(avg_rng, axis=-1, keepdims=False)**(1/2)
-            # det_x = _tf.reduce_prod(var_x ** 2, axis=-1, keepdims=True) ** (1 / 4)
-            # det_y = _tf.reduce_prod(var_y ** 2, axis=-1, keepdims=True) ** (1 / 4)
-            # # det_x = _tf.reduce_prod(2*rng_x ** 2, axis=-1, keepdims=True) ** (
-            # #             1 / 4)
-            # # det_y = _tf.reduce_prod(2*rng_y ** 2, axis=-1, keepdims=True) ** (
-            # #             1 / 4)
-
-            # norm = det_x * _tf.transpose(det_y) / det_avg
-
             total_var = ranges**2 + (var_x + var_y) / 2
             dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
             cov = self.kernel.kernelize(dist)
@@ -532,13 +515,17 @@ class BasicGP(_FunctionalLatentVariable):
             y_pr_minus, y_var_minus = self.parent.propagate(
                 y - 0.5 * step * dir_y)
 
-            ranges = self.parameters["ranges"].get_value()
-            x_rng = _tf.sqrt(x_var + ranges**2)
-            y_rng_plus = _tf.sqrt(y_var_plus + ranges**2)
-            y_rng_minus = _tf.sqrt(y_var_minus + ranges ** 2)
+            # ranges = self.parameters["ranges"].get_value()
+            # x_rng = _tf.sqrt(x_var + ranges**2)
+            # y_rng_plus = _tf.sqrt(y_var_plus + ranges**2)
+            # y_rng_minus = _tf.sqrt(y_var_minus + ranges ** 2)
 
-            cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_rng, y_rng_plus)
-            cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_rng, y_rng_minus)
+            # cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_rng, y_rng_plus)
+            # cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_rng, y_rng_minus)
+
+            cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_var, y_var_plus)
+            cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_var,
+                                           y_var_minus)
 
             return (cov_1 - cov_2) / step
 
@@ -547,24 +534,22 @@ class BasicGP(_FunctionalLatentVariable):
             mu_1, var_1 = self.parent.propagate(x + 0.5 * dir_x * step)
             mu_2, var_2 = self.parent.propagate(x - 0.5 * dir_x * step)
 
-            ranges = self.parameters["ranges"].get_value()
+            ranges = self.parameters["ranges"].get_value()[0, :, :]
             var_1 = var_1 + ranges ** 2
             var_2 = var_2 + ranges ** 2
 
             dif = mu_1 - mu_2
             avg_var = 0.5 * (var_1 + var_2)
-            # avg_var = var_1 + var_2
             dist_sq = _tf.reduce_sum(dif ** 2 / avg_var, axis=1, keepdims=True)
 
             cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
 
             det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (1 / 2)
-            det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1 / 4)
-            det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1 / 4)
-            # det_1 = _tf.reduce_prod(2*var_1, axis=1, keepdims=True) ** (1 / 4)
-            # det_2 = _tf.reduce_prod(2*var_2, axis=1, keepdims=True) ** (1 / 4)
+            # det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1 / 4)
+            # det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1 / 4)
 
-            norm = det_1 * det_2 / det_avg
+            norm = _tf.reduce_prod(ranges) / det_avg
+            # norm = det_1 * det_2 / det_avg
             cov_step = cov_step * norm
 
             point_var = 2 * (1.0 - cov_step) / step ** 2
