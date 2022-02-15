@@ -7,13 +7,14 @@ This is a work in progress. Current functionality includes:
 anisotropy ellipsoid;
 * Variational Gaussian process for classification and multivariate
 modeling;
+* Support for compositional data;
 * Support for directional data (structural geology
 measurements, scalar field gradients, etc.);
 * Support for classification with boundary data (points
 lying in the boundary between two rock types);
-* Non-stationary modeling with deep learning;
+* Deep learning for non-stationary modeling;
 * Exports results to [PyVista](https://github.com/pyvista/pyvista) format;
-* Back-end powered by TensorFlow.
+* Back-end powered by [TensorFlow](https://www.tensorflow.org/).
 
 ## Installation
 Clone the repo and update the path to include the package's folder.
@@ -38,6 +39,8 @@ The following notebooks demonstrate the capabilities of the package (if one
 * [Jura](https://colab.research.google.com/drive/1v7Us_ljM5zwkLy6IIKfOjREazZSLepjU?usp=sharing)
 * [Compositional data](https://colab.research.google.com/drive/14bvDkre3UNxXywUWq2QEs6Q4w-gd30Mb?usp=sharing)
 * [Gold modeling with auxiliary variables](https://colab.research.google.com/drive/16OFpI1a-V-Wfsgkw_jhlh2NXGFwuHZ0C?usp=sharing)
+
+
+## Learning materials
+* [Understanding inducing points](https://colab.research.google.com/drive/1P84msQDE3j64MXMcZ5c8q0u6b4myPaT7?usp=sharing)
 * [VGP training step by step](https://colab.research.google.com/drive/1rF7bWdrTK54qLiXWcv46J9aMloDTe6r_?usp=sharing)
-
-
