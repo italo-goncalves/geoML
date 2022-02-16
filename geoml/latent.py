@@ -382,12 +382,12 @@ class BasicGP(_FunctionalLatentVariable):
             cov = self.kernel.kernelize(dist)
 
             # normalization
-            # det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
-            # det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
+            det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
+            det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
             det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
 
-            # norm = det_x * det_y / det_2
-            norm = _tf.reduce_prod(ranges) / det_2
+            norm = det_x * det_y / det_2
+            # norm = _tf.reduce_prod(ranges) / det_2
 
             # output
             cov = cov * norm
@@ -544,12 +544,12 @@ class BasicGP(_FunctionalLatentVariable):
 
             cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
 
-            det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (1 / 2)
-            # det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1 / 4)
-            # det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1 / 4)
+            det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (1/2)
+            det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1/4)
+            det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1/4)
 
-            norm = _tf.reduce_prod(ranges) / det_avg
-            # norm = det_1 * det_2 / det_avg
+            # norm = _tf.reduce_prod(ranges) / det_avg
+            norm = det_1 * det_2 / det_avg
             cov_step = cov_step * norm
 
             point_var = 2 * (1.0 - cov_step) / step ** 2
