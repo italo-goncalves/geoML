@@ -21,6 +21,7 @@ import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.likelihood as _lk
 import geoml.warping as _warp
+import geoml.tftools as _tftools
 import geoml
 
 import numpy as _np
@@ -1470,7 +1471,7 @@ class VGPNetworkEnsemble(_EnsembleModel):
             weights = weights / _tf.reduce_sum(weights, axis=1, keepdims=True)
 
             for key in var_keys:
-                if key is not "weights":
+                if key != "weights":
                     tensor = _tf.stack([out[i][key] for out in outputs], axis=1)
                     if "variance" in key:
                         w = weights**2
@@ -1490,98 +1491,98 @@ class VGPNetworkEnsemble(_EnsembleModel):
         return combined
 
 
-class ConvolutionalVGP(VGPNetwork):
-    @_tf.function
-    def _training_elbo(self, x, y, has_value, training_inputs,
-                       x_dir=None, directions=None, y_dir=None,
-                       has_value_directions=None,
-                       samples=20,
-                       seed=0, jitter=1e-6):
-        self.latent_network.refresh(seed=[seed, 0], n_sim=samples)
-
-        # ELBO
-        elbo = self._log_lik(x, y, has_value, training_inputs)
-
-        # ELBO for directions
-        if x_dir is not None:
-            elbo = elbo + self._log_lik_directions(
-                x_dir, directions, y_dir, has_value_directions)
-
-        # KL-divergence
-        unique_nodes = self.latent_network.get_unique_parents()
-        unique_nodes.append(self.latent_network)
-        kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
-        elbo = elbo - kl
-
-        self.elbo.assign(elbo)
-        self.kl_div.assign(kl)
-        return elbo
-
-    @_tf.function
-    def _log_lik(self, x, y, has_value, training_inputs):
-        with _tf.name_scope("batched_elbo"):
-            # prediction
-            mu, var, sims, _ = self.latent_network.predict(x)
-
-            # likelihood
-            y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.lik_sizes, axis=1)
-            var = _tf.split(var, self.lik_sizes, axis=1)
-            hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.lik_sizes, axis=1)
-
-            elbo = 0.0  # _tf.constant(0.0, _tf.float64)
-            for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
-                    self.likelihoods, mu, var, y_s,
-                    hv, sims, training_inputs):
-                elbo = elbo + likelihood.log_lik(
-                    mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
-
-            # batch weight
-            batch_size = _tf.reduce_sum(has_value)
-            elbo = elbo * self.total_data / batch_size
-
-            return elbo
-
-    @_tf.function
-    def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
-        with _tf.name_scope("batched_elbo_directions"):
-            # prediction
-            mu, var, _ = self.latent_network.predict_directions(
-                x_dir, directions)
-
-            # likelihood
-            y_s = _tf.split(y_dir, self.var_lengths_dir, axis=1)
-            mu = _tf.split(mu, self.var_lengths_dir, axis=1)
-            var = _tf.split(var, self.var_lengths_dir, axis=1)
-            hv = _tf.split(has_value, self.var_lengths_dir, axis=1)
-            elbo = _tf.constant(0.0, _tf.float64)
-            for mu_i, var_i, y_i, hv_i in zip(mu, var, y_s, hv):
-                elbo = elbo + self.directional_likelihood.log_lik(
-                    mu_i, var_i, y_i, hv_i)
-
-            # batch weight
-            batch_size = _tf.cast(_tf.shape(x_dir)[0], _tf.float64)
-            elbo = elbo * self.total_data_dir / batch_size
-
-            return elbo
-
-    @_tf.function
-    def predict_raw(self, x_new, variable_inputs, n_sim=1, seed=0, jitter=1e-6):
-        self.latent_network.refresh(seed=[seed, 0], n_sim=n_sim)
-
-        with _tf.name_scope("Prediction"):
-            pred_mu, pred_var, pred_sim, pred_exp_var = \
-                self.latent_network.predict(x_new)
-
-            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
-            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
-            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
-
-            output = []
-            for mu, var, sim, exp_var, lik, v_inp in zip(
-                    pred_mu, pred_var, pred_sim, pred_exp_var,
-                    self.likelihoods, variable_inputs):
-                output.append(lik.predict(mu, var, sim, exp_var, **v_inp))
-            return output
+# class ConvolutionalVGP(VGPNetwork):
+#     @_tf.function
+#     def _training_elbo(self, x, y, has_value, training_inputs,
+#                        x_dir=None, directions=None, y_dir=None,
+#                        has_value_directions=None,
+#                        samples=20,
+#                        seed=0, jitter=1e-6):
+#         self.latent_network.refresh(seed=[seed, 0], n_sim=samples)
+#
+#         # ELBO
+#         elbo = self._log_lik(x, y, has_value, training_inputs)
+#
+#         # ELBO for directions
+#         if x_dir is not None:
+#             elbo = elbo + self._log_lik_directions(
+#                 x_dir, directions, y_dir, has_value_directions)
+#
+#         # KL-divergence
+#         unique_nodes = self.latent_network.get_unique_parents()
+#         unique_nodes.append(self.latent_network)
+#         kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
+#         elbo = elbo - kl
+#
+#         self.elbo.assign(elbo)
+#         self.kl_div.assign(kl)
+#         return elbo
+#
+#     @_tf.function
+#     def _log_lik(self, x, y, has_value, training_inputs):
+#         with _tf.name_scope("batched_elbo"):
+#             # prediction
+#             mu, var, sims, _ = self.latent_network.predict(x)
+#
+#             # likelihood
+#             y_s = _tf.split(y, self.var_lengths, axis=1)
+#             mu = _tf.split(mu, self.lik_sizes, axis=1)
+#             var = _tf.split(var, self.lik_sizes, axis=1)
+#             hv = _tf.split(has_value, self.var_lengths, axis=1)
+#             sims = _tf.split(sims, self.lik_sizes, axis=1)
+#
+#             elbo = 0.0  # _tf.constant(0.0, _tf.float64)
+#             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
+#                     self.likelihoods, mu, var, y_s,
+#                     hv, sims, training_inputs):
+#                 elbo = elbo + likelihood.log_lik(
+#                     mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
+#
+#             # batch weight
+#             batch_size = _tf.reduce_sum(has_value)
+#             elbo = elbo * self.total_data / batch_size
+#
+#             return elbo
+#
+#     @_tf.function
+#     def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
+#         with _tf.name_scope("batched_elbo_directions"):
+#             # prediction
+#             mu, var, _ = self.latent_network.predict_directions(
+#                 x_dir, directions)
+#
+#             # likelihood
+#             y_s = _tf.split(y_dir, self.var_lengths_dir, axis=1)
+#             mu = _tf.split(mu, self.var_lengths_dir, axis=1)
+#             var = _tf.split(var, self.var_lengths_dir, axis=1)
+#             hv = _tf.split(has_value, self.var_lengths_dir, axis=1)
+#             elbo = _tf.constant(0.0, _tf.float64)
+#             for mu_i, var_i, y_i, hv_i in zip(mu, var, y_s, hv):
+#                 elbo = elbo + self.directional_likelihood.log_lik(
+#                     mu_i, var_i, y_i, hv_i)
+#
+#             # batch weight
+#             batch_size = _tf.cast(_tf.shape(x_dir)[0], _tf.float64)
+#             elbo = elbo * self.total_data_dir / batch_size
+#
+#             return elbo
+#
+#     @_tf.function
+#     def predict_raw(self, x_new, variable_inputs, n_sim=1, seed=0, jitter=1e-6):
+#         self.latent_network.refresh(seed=[seed, 0], n_sim=n_sim)
+#
+#         with _tf.name_scope("Prediction"):
+#             pred_mu, pred_var, pred_sim, pred_exp_var = \
+#                 self.latent_network.predict(x_new)
+#
+#             pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
+#             pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
+#             pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
+#             pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+#
+#             output = []
+#             for mu, var, sim, exp_var, lik, v_inp in zip(
+#                     pred_mu, pred_var, pred_sim, pred_exp_var,
+#                     self.likelihoods, variable_inputs):
+#                 output.append(lik.predict(mu, var, sim, exp_var, **v_inp))
+#             return output

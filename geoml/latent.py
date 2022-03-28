@@ -201,7 +201,8 @@ class LatentNetworkOutput(_LatentVariable):
 
 class BasicInput(_RootLatentVariable):
     def __init__(self, inducing_points, transform=_tr.Identity(),
-                 fix_inducing_points=True, fix_transform=False):
+                 fix_inducing_points=True, fix_transform=False,
+                 center=False):
         super().__init__()
         test_point = _np.ones([1, inducing_points.n_dim])
         test_point = transform(test_point)
@@ -226,15 +227,18 @@ class BasicInput(_RootLatentVariable):
         self.inducing_points_variance = _tf.zeros(
             [self.n_ip, self.size], _tf.float64)
 
+        self.center = _np.zeros_like(self.bounding_box.max)
+        if center:
+            self.center = 0.5 * (self.bounding_box.min + self.bounding_box.max)
+
     def refresh(self, jitter=1e-9):
         with _tf.name_scope("basic_input_refresh"):
             self.transform.refresh()
             self.inducing_points = self.transform(
-                self.parameters["inducing_points"].get_value())
-            # self.inducing_points_variance = _tf.ones_like(self.inducing_points)
+                self.parameters["inducing_points"].get_value() - self.center)
 
     def propagate(self, x, x_var=None):
-        x_tr = self.transform(x)
+        x_tr = self.transform(x - self.center)
         return x_tr, _tf.zeros_like(x_tr)
 
     def kl_divergence(self):
@@ -244,10 +248,10 @@ class BasicInput(_RootLatentVariable):
         self.transform.set_limits(data)
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        x_tr = _tf.transpose(self.transform(x))
+        x_tr = _tf.transpose(self.transform(x - self.center))
         var = _tf.zeros_like(x_tr)
         if n_sim > 0:
-            sims = _tf.tile(x_tr[None, :, :], [1, 1, n_sim])
+            sims = _tf.tile(x_tr[:, :, None], [1, 1, n_sim])
             return x_tr[:, :, None], var, sims, _tf.zeros_like(var)
         else:
             return x_tr[:, :, None], var
@@ -450,13 +454,6 @@ class BasicGP(_FunctionalLatentVariable):
         with _tf.name_scope("basic_prediction"):
             x, x_var = self.parent.propagate(x, x_var)
 
-            # ranges = self.parameters["ranges"].get_value()
-            # total_ranges = _tf.sqrt(ranges ** 2 + x_var)
-            # ip_ranges = _tf.sqrt(
-            #     ranges ** 2 + self.parent.inducing_points_variance)
-            # total_ranges = _tf.sqrt(x_var)
-            # ip_ranges = _tf.sqrt(self.parent.inducing_points_variance)
-
             cov_cross = self.covariance_matrix(
                 x, self.parent.inducing_points,
                 x_var, self.parent.inducing_points_variance)
@@ -493,35 +490,16 @@ class BasicGP(_FunctionalLatentVariable):
             det_2 = _tf.reduce_sum(_tf.math.log(delta))
             kl = 0.5 * (- tr + fit + det_1 - det_2)
 
-            # range regularization
-            # det_3 = 2 * _tf.reduce_sum(_tf.math.log(
-            #     _tf.linalg.diag_part(self.prior_cov_chol))) * self.size
-            # det_4 = 2 * _tf.reduce_sum(_tf.math.log(
-            #     _tf.linalg.diag_part(self.cov_chol)))
-            # tr_2 = _tf.reduce_sum(self.prior_cov_inv[None, :, :] * self.cov)
-            # kl_rng = 0.5 * (tr_2 + det_3 - det_4 - self.root.n_ip * self.size)
-            # kl = kl + kl_rng
-
             return kl
 
     def covariance_matrix_d1(self, y, dir_y, step=1e-3):
         with _tf.name_scope("basic_covariance_matrix_d1"):
-
-            # x_pr, x_var = self.parent.propagate(x)
             x_pr = self.parent.inducing_points
             x_var = self.parent.inducing_points_variance
             y_pr_plus, y_var_plus = self.parent.propagate(
                 y + 0.5 * step * dir_y)
             y_pr_minus, y_var_minus = self.parent.propagate(
                 y - 0.5 * step * dir_y)
-
-            # ranges = self.parameters["ranges"].get_value()
-            # x_rng = _tf.sqrt(x_var + ranges**2)
-            # y_rng_plus = _tf.sqrt(y_var_plus + ranges**2)
-            # y_rng_minus = _tf.sqrt(y_var_minus + ranges ** 2)
-
-            # cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_rng, y_rng_plus)
-            # cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_rng, y_rng_minus)
 
             cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_var, y_var_plus)
             cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_var,
@@ -612,18 +590,28 @@ class BasicGP(_FunctionalLatentVariable):
 
 
 class Linear(_FunctionalLatentVariable):
-    def __init__(self, parent, size=1):
+    def __init__(self, parent, size=1, unit_norm=True):
         super().__init__(parent)
         self._size = size
 
-        rnd = _np.random.normal(size=(parent.size, self.size))
-        rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
-        self._add_parameter(
-            "weights",
-            _gpr.UnitColumnNormParameter(
-                rnd, - _np.ones_like(rnd), _np.ones_like(rnd)
+        if unit_norm:
+            rnd = _np.random.normal(size=(parent.size, self.size))
+            rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
+            self._add_parameter(
+                "weights",
+                _gpr.UnitColumnNormParameter(
+                    rnd, - _np.ones_like(rnd), _np.ones_like(rnd)
+                )
             )
-        )
+        else:
+            self._add_parameter(
+                "weights",
+                _gpr.RealParameter(
+                    _np.ones([parent.size, self.size]),
+                    _np.zeros([parent.size, self.size]) - 15,
+                    _np.zeros([parent.size, self.size]) + 15
+                )
+            )
 
         # binary classification
         if (parent.size == 1) & (self.size == 2):
@@ -705,7 +693,8 @@ class SelectInput(_FunctionalLatentVariable):
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         mu, var = self.propagate(x, x_var)
         if n_sim > 0:
-            return _tf.transpose(mu)[:, :, None], _tf.transpose(var), None, None
+            return _tf.transpose(mu)[:, :, None],\
+                   _tf.transpose(var), None, None
         else:
             return _tf.transpose(mu)[:, :, None], _tf.transpose(var)
 
@@ -731,7 +720,8 @@ class LinearCombination(_Operation):
 
         if all([lat.inducing_points is not None for lat in self.parents]):
             weights = self.parameters["weights"].get_value()[:, None, None]
-            ip = _tf.stack([lat.inducing_points for lat in self.parents], axis=0)
+            ip = _tf.stack([lat.inducing_points for lat in self.parents],
+                           axis=0)
             ip = _tf.reduce_sum(ip * weights, axis=0)
 
             ip_var = _tf.stack(
@@ -882,7 +872,8 @@ class Exponentiation(_FunctionalLatentVariable):
     def __init__(self, parent):
         super().__init__(parent)
         self._add_parameter("amp_mean", _gpr.RealParameter(0, -5, 5))
-        self._add_parameter("amp_scale", _gpr.PositiveParameter(0.25, 0.01, 10))
+        self._add_parameter(
+            "amp_scale", _gpr.PositiveParameter(0.25, 0.01, 10))
         self._size = parent.size
 
     def refresh(self, jitter=1e-9):
@@ -1037,6 +1028,220 @@ class Multiply(_Operation):
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
+
+
+class Add(_Operation):
+    def __init__(self, *latent_variables):
+        super().__init__(*latent_variables)
+        sizes = [p.size for p in self.parents]
+        if not all(s == sizes[0] for s in sizes):
+            raise ValueError("all parents must have the same size")
+
+        self._size = sizes[0]
+
+    def refresh(self, jitter=1e-9):
+        for lat in self.parents:
+            lat.refresh(jitter)
+
+        if all([lat.inducing_points is not None for lat in self.parents]):
+            ip = _tf.stack([lat.inducing_points for lat in self.parents],
+                           axis=0)
+            ip = _tf.reduce_sum(ip, axis=0)
+
+            ip_var = _tf.stack(
+                [lat.inducing_points_variance for lat in self.parents], axis=0)
+            ip_var = _tf.reduce_sum(ip_var, axis=0)
+
+            self.inducing_points = ip
+            self.inducing_points_variance = ip_var
+
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        all_mu = []
+        all_var = []
+        all_sims = []
+        all_explained_var = []
+
+        for i, v in enumerate(self.parents):
+            mu, var, sims, explained_var = v.predict(
+                x, x_var, n_sim, [seed[0] + i, seed[1]])
+            all_mu.append(mu)
+            all_var.append(var)
+            all_sims.append(sims)
+            all_explained_var.append(explained_var)
+
+        all_mu = _tf.stack(all_mu, axis=-1)
+        all_var = _tf.stack(all_var, axis=-1)
+        all_sims = _tf.stack(all_sims, axis=-1)
+        all_explained_var = _tf.stack(all_explained_var, axis=-1)
+
+        all_mu = _tf.reduce_sum(all_mu, axis=-1)
+        all_var = _tf.reduce_sum(all_var, axis=-1)
+        all_sims = _tf.reduce_sum(all_sims, axis=-1)
+        all_explained_var = _tf.reduce_sum(all_explained_var, axis=-1)
+
+        return all_mu, all_var, all_sims, all_explained_var
+
+    def predict_directions(self, x, dir_x, jitter=1e-9):
+        all_mu = []
+        all_var = []
+        all_explained_var = []
+
+        for i, v in enumerate(self.parents):
+            mu, var, explained_var = v.predict_directions(x, dir_x, jitter)
+            all_mu.append(mu)
+            all_var.append(var)
+            all_explained_var.append(explained_var)
+
+        all_mu = _tf.stack(all_mu, axis=-1)
+        all_var = _tf.stack(all_var, axis=-1)
+        all_explained_var = _tf.stack(all_explained_var, axis=-1)
+
+        all_mu = _tf.reduce_sum(all_mu, axis=-1)
+        all_var = _tf.reduce_sum(all_var, axis=-1)
+        all_explained_var = _tf.reduce_sum(all_explained_var, axis=-1)
+
+        return all_mu, all_var, all_explained_var
+
+    def propagate(self, x, x_var=None):
+        mu, var, _, _ = self.predict(x, x_var, n_sim=1)
+        mu = _tf.transpose(mu[:, :, 0])
+        var = _tf.transpose(var)
+        return mu, var
+
+    def kl_divergence(self):
+        return _tf.constant(0.0, _tf.float64)
+
+
+class Bias(_FunctionalLatentVariable):
+    def __init__(self, parent, scale=5):
+        super().__init__(parent)
+        self._size = parent.size
+
+        self._add_parameter(
+            "bias",
+            _gpr.RealParameter(
+                _np.zeros([self.size]),
+                _np.zeros([self.size]) - scale,
+                _np.zeros([self.size]) + scale
+            )
+        )
+
+    def refresh(self, jitter=1e-9):
+        bias = self.parameters["bias"].get_value()[None, :]
+
+        self.parent.refresh(jitter)
+
+        if self.parent.inducing_points is not None:
+            self.inducing_points = self.parent.inducing_points + bias
+            self.inducing_points_variance = \
+                self.parent.inducing_points_variance
+
+    def kl_divergence(self):
+        return _tf.constant(0.0, _tf.float64)
+
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        bias = self.parameters["bias"].get_value()
+
+        if n_sim > 0:
+            mu, var, sims, exp_var = self.parent.predict(x, x_var, n_sim, seed)
+
+            mu = mu + bias[:, None, None]
+            sims = sims + bias[:, None, None]
+
+            return mu, var, sims, exp_var
+        else:
+            mu, var = self.parent.predict(x, x_var, n_sim, seed)
+            mu = mu + bias[:, None, None]
+            return mu, var
+
+    def predict_directions(self, x, dir_x, step=1e-3):
+        return self.parent.predict_directions(x, dir_x, step)
+
+
+class ApplyLinearTrendGP(_Operation):
+    def __init__(self, linear_parent, gp_parent):
+        super().__init__(linear_parent, gp_parent)
+
+        if not isinstance(linear_parent, Linear):
+            raise ValueError("linear_parent must be of class Linear")
+        if not isinstance(gp_parent, BasicGP):
+            raise ValueError("gp_parent must be of a GP class")
+
+        if linear_parent.size != gp_parent.size:
+            raise ValueError("size mismatch between parents")
+        self._size = linear_parent.size
+
+        self._add_parameter(
+            "gp_weight",
+            _gpr.RealParameter(
+                _np.ones([self.size]) * 0.5,
+                _np.ones([self.size]) * 0.01,
+                _np.ones([self.size]) * 0.99
+            )
+        )
+
+    def kl_divergence(self):
+        return _tf.constant(0.0, _tf.float64)
+
+    def refresh(self, jitter=1e-9):
+        self.parents[0].refresh(jitter)
+        self.parents[1].refresh(jitter)
+
+        with _tf.name_scope("ApplyLinearTrendGP_refresh"):
+            w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[None, :]
+            w_lin = _tf.sqrt(2*(1 - w_gp**2))
+
+            self.inducing_points = w_lin * self.parents[0].inducing_points \
+                                   + w_gp * self.parents[1].inducing_points
+            self.inducing_points_variance = \
+                w_lin**2 * self.parents[0].inducing_points_variance \
+                + w_gp**2 * self.parents[1].inducing_points_variance
+
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("ApplyLinearTrendGP_predict"):
+            w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[:, None]
+            w_lin = _tf.sqrt(2 * (1 - w_gp ** 2))
+
+            if n_sim > 0:
+                lin_mu, lin_var, lin_sims, lin_exp_var = \
+                    self.parents[0].predict(x, x_var, n_sim, seed)
+                gp_mu, gp_var, gp_sims, gp_exp_var = \
+                    self.parents[1].predict(x, x_var, n_sim, seed)
+
+                mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
+                var = w_gp**2 * gp_var + w_lin**2 * lin_var
+                exp_var = w_gp ** 2 * gp_exp_var + w_lin ** 2 * lin_exp_var
+                sims = w_gp[:, :, None] * gp_sims \
+                       + w_lin[:, :, None] * lin_sims
+
+                return mu, var, sims, exp_var
+
+            else:
+                lin_mu, lin_var = \
+                    self.parents[0].predict(x, x_var, n_sim, seed)
+                gp_mu, gp_var = \
+                    self.parents[1].predict(x, x_var, n_sim, seed)
+
+                mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
+                var = w_gp ** 2 * gp_var + w_lin ** 2 * lin_var
+
+                return mu, var
+
+    def predict_directions(self, x, dir_x):
+        with _tf.name_scope("ApplyLinearTrendGP_predict_dir"):
+            w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[:, None]
+            w_lin = _tf.sqrt(2 * (1 - w_gp ** 2))
+
+            lin_mu, lin_var, lin_exp_var = \
+                self.parents[0].predict_directions(x, dir_x)
+            gp_mu, gp_var, gp_exp_var = \
+                self.parents[1].predict_directions(x, dir_x)
+
+            mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
+            var = w_gp ** 2 * gp_var + w_lin ** 2 * lin_var
+            exp_var = w_gp ** 2 * gp_exp_var + w_lin ** 2 * lin_exp_var
+
+            return mu, var, exp_var
 
 
 class CopyGP(_FunctionalLatentVariable):

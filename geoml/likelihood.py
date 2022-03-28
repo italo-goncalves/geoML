@@ -1086,3 +1086,107 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
         lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
 
         return lik
+
+
+class OrderedGaussianIndicator(_Likelihood):
+    def __init__(self, levels, tol=1e-3):
+        super().__init__(1)
+        self.levels = levels
+        self.tol = tol
+
+    def log_lik(self, mu, var, y, has_value,
+                samples=None, *args, **kwargs):
+        mu = mu + (self.levels - 1) / 2
+        var = var * self.levels**2
+
+        dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+
+        log_density = _tf.zeros_like(mu)
+
+        if self.levels == 1:
+            prob_zero = _tf.math.log(
+                dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
+            prob_neg = dist.log_cdf(- self.tol)
+            prob_pos = dist.log_survival_function(self.tol)
+
+            log_density = _tf.where(
+                _tf.less(y, - self.tol),
+                prob_neg,
+                _tf.where(
+                    _tf.greater(y, self.tol),
+                    prob_pos,
+                    prob_zero
+                )
+            )
+
+        else:
+            for i in range(self.levels):
+                prob_zero = _tf.math.log(
+                    dist.cdf(i + self.tol) - dist.cdf(i - self.tol) + 1e-6)
+
+                if i == 0:
+                    prob_neg = dist.log_cdf(- self.tol)
+                    prob_pos = _tf.math.log(
+                        dist.survival_function(i + self.tol)
+                        - dist.survival_function(i + 1 - self.tol)
+                        + 1e-6
+                    )
+                elif i == self.levels - 1:
+                    prob_neg = _tf.math.log(
+                        dist.cdf(i - self.tol)
+                        - dist.cdf(i - 1 + self.tol)
+                        + 1e-6
+                    )
+                    prob_pos = dist.log_survival_function(i + self.tol)
+                else:
+                    prob_neg = _tf.math.log(
+                        dist.cdf(i - self.tol)
+                        - dist.cdf(i - 1 + self.tol)
+                        + 1e-6
+                    )
+                    prob_pos = _tf.math.log(
+                        dist.survival_function(i + self.tol)
+                        - dist.survival_function(i + 1 - self.tol)
+                        + 1e-6
+                    )
+
+                log_density = _tf.where(
+                    _tf.logical_and(
+                        _tf.less(y, i - self.tol),
+                        _tf.greater(y, i - 1 + self.tol)
+                    ),
+                    prob_neg,
+                    _tf.where(
+                        _tf.logical_and(
+                            _tf.greater(y, i + self.tol),
+                            _tf.less(y, i + 1 - self.tol)
+                        ),
+                        prob_pos,
+                        _tf.where(
+                            _tf.logical_and(
+                                _tf.greater(y, i - self.tol),
+                                _tf.less(y, i + self.tol)
+                            ),
+                            prob_zero,
+                            log_density
+                        )
+                    )
+                )
+
+        has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
+        log_density = _tf.reduce_sum(log_density * has_value)
+
+        return log_density
+
+    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+        weights = _tf.squeeze(explained_var / (var + 1e-6))
+
+        mu = mu + (self.levels - 1) / 2
+        var = var * self.levels ** 2
+        sims = sims + (self.levels - 1) / 2
+
+        output = {"mean": _tf.squeeze(mu),
+                  "variance": _tf.squeeze(var),
+                  "simulations": sims[:, 0, :],
+                  "weights": weights}
+        return output

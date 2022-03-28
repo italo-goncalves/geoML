@@ -270,8 +270,15 @@ class _Variable(object):
                 verts[:, i] += self.coordinates.grid[i][0]
             return verts, faces, normals, values
 
-        def export_contour(self, value, filename, triangles=True):
+        def export_contour(self, value, filename, triangles=True,
+                           offset=None):
             verts, faces, normals, values = self.get_contour(value)
+
+            if offset is None:
+                offset = _np.zeros([1, 3])
+            else:
+                offset = _np.array(_np.squeeze(offset))[None, :]
+            verts = verts + offset
             
             with open(filename, 'w') as out_file:
                 if triangles:
