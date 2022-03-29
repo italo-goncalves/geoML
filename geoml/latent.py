@@ -256,6 +256,13 @@ class BasicInput(_RootLatentVariable):
         else:
             return x_tr[:, :, None], var
 
+    def predict_directions(self, x, dir_x, step=1e-3):
+        x_plus = self.transform(x + dir_x*step/2 - self.center)
+        x_minus = self.transform(x - dir_x * step / 2 - self.center)
+
+        mu = _tf.transpose((x_plus - x_minus) / step)
+        return mu[:, :, None], _tf.zeros_like(mu), _tf.zeros_like(mu)
+
 
 class Concatenate(_Operation):
     def __init__(self, *latent_variables):
