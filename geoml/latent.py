@@ -57,7 +57,7 @@ class _LatentVariable(_gpr.Parametric):
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         raise NotImplementedError
 
-    def predict_directions(self, x, dir_x):
+    def predict_directions(self, x, dir_x, step=1e-3):
         raise NotImplementedError
 
     def kl_divergence(self):
@@ -840,13 +840,13 @@ class ProductOfExperts(_Operation):
         else:
             return w_mu, w_var
 
-    def predict_directions(self, x, dir_x):
+    def predict_directions(self, x, dir_x, step=1e-3):
         all_mu = []
         all_var = []
         all_explained_var = []
 
         for i, p in enumerate(self.parents):
-            mu, var, explained_var = p.predict_directions(x, dir_x)
+            mu, var, explained_var = p.predict_directions(x, dir_x, step)
             all_mu.append(mu)
             all_var.append(var)
             all_explained_var.append(explained_var)
@@ -932,12 +932,13 @@ class Exponentiation(_FunctionalLatentVariable):
 
                 return amp_mu, amp_var
 
-    def predict_directions(self, x, dir_x):
+    def predict_directions(self, x, dir_x, step=1e-3):
         with _tf.name_scope("exponentiation_prediction"):
             amp_mean = self.parameters["amp_mean"].get_value()
             amp_scale = self.parameters["amp_scale"].get_value()
 
-            mu, var, explained_var = self.parent.predict_directions(x, dir_x)
+            mu, var, explained_var = self.parent.predict_directions(
+                x, dir_x, step)
 
             mu = mu * _tf.sqrt(amp_scale) + amp_mean
             var = var * amp_scale
@@ -1227,15 +1228,15 @@ class ApplyLinearTrendGP(_Operation):
 
                 return mu, var
 
-    def predict_directions(self, x, dir_x):
+    def predict_directions(self, x, dir_x, step=1e-3):
         with _tf.name_scope("ApplyLinearTrendGP_predict_dir"):
             w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[:, None]
             w_lin = _tf.sqrt(2 * (1 - w_gp ** 2))
 
             lin_mu, lin_var, lin_exp_var = \
-                self.parents[0].predict_directions(x, dir_x)
+                self.parents[0].predict_directions(x, dir_x, step)
             gp_mu, gp_var, gp_exp_var = \
-                self.parents[1].predict_directions(x, dir_x)
+                self.parents[1].predict_directions(x, dir_x, step)
 
             mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
             var = w_gp ** 2 * gp_var + w_lin ** 2 * lin_var
