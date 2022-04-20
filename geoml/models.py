@@ -75,7 +75,8 @@ class GP(_GPModel):
     """
     Basic Gaussian process model.
     """
-    def __init__(self, data, variable, covariance, warping=None, tangents=None,
+    def __init__(self, data, variable, covariance, warping=None,
+                 directional_data=None, interpolation=False,
                  use_trend=False, options=GPOptions()):
         super().__init__(options)
 
@@ -88,10 +89,13 @@ class GP(_GPModel):
             warping = _warp.Identity()
         self.warping = self._register(warping)
 
-        self.tangents = tangents
+        self.directional_data = directional_data
         self.use_trend = use_trend
 
         self._add_parameter("noise", _gpr.PositiveParameter(0.1, 1e-6, 10))
+        if interpolation:
+            self.parameters["noise"].set_value(1e-6)
+            self.parameters["noise"].fix()
 
         self.training_log = []
         self.optimizer = _tf.keras.optimizers.Adam(
@@ -111,6 +115,7 @@ class GP(_GPModel):
         self.x = None
         self.y = None
         self.x_dir = None
+        self.y_dir = None
         self.directions = None
         self.y_warped = None
         self.trend = None
@@ -144,10 +149,10 @@ class GP(_GPModel):
             self.x = _tf.constant(self.data.coordinates[keep, :],
                                   _tf.float64)
 
-            if self.tangents is not None:
-                self.x_dir = _tf.constant(self.tangents.coordinates,
+            if self.directional_data is not None:
+                self.x_dir = _tf.constant(self.directional_data.coordinates,
                                           _tf.float64)
-                self.directions = _tf.constant(self.tangents.directions,
+                self.directions = _tf.constant(self.directional_data.directions,
                                                _tf.float64)
 
                 cov = self.covariance.self_covariance_matrix(self.x)
@@ -161,16 +166,21 @@ class GP(_GPModel):
                     _tf.concat([_tf.transpose(cov_d1), cov_d2], axis=1)
                 ], axis=0)
 
+                self.y_dir = _tf.constant(
+                    self.directional_data.variables[self.variable]
+                        .measurements.values,
+                    _tf.float64
+                )
                 self.y_warped = _tf.concat([
                     self.warping.forward(self.y[:, None]),
-                    _tf.zeros([self.tangents.n_data, 1], _tf.float64)
+                    self.y_dir[:, None]
                 ], axis=0)
 
-                eye = _tf.eye(_np.sum(keep) + self.tangents.n_data,
+                eye = _tf.eye(_np.sum(keep) + self.directional_data.n_data,
                               dtype=_tf.float64)
                 noise = _tf.concat([
                     _tf.ones([_np.sum(keep)], _tf.float64),
-                    _tf.zeros([self.tangents.n_data], _tf.float64)
+                    _tf.zeros([self.directional_data.n_data], _tf.float64)
                 ], axis=0)
             else:
                 self.cov = self.covariance.self_covariance_matrix(self.x)
@@ -195,9 +205,9 @@ class GP(_GPModel):
                     _tf.ones([_np.sum(keep), 1], _tf.float64), self.x
                 ], axis=1)
 
-                if self.tangents is not None:
+                if self.directional_data is not None:
                     trend_grad = _tf.concat([
-                        _tf.zeros([self.tangents.n_data, 1], _tf.float64),
+                        _tf.zeros([self.directional_data.n_data, 1], _tf.float64),
                         self.directions
                     ], axis=1)
                     self.trend = _tf.concat([self.trend, trend_grad], axis=0)
@@ -252,7 +262,7 @@ class GP(_GPModel):
 
             # covariance
             cov_new = self.covariance.covariance_matrix(x_new, self.x)
-            if self.tangents is not None:
+            if self.directional_data is not None:
                 cov_new_d1 = self.covariance.covariance_matrix_d1(
                     x_new, self.x_dir, self.directions)
                 cov_new = _tf.concat([cov_new, cov_new_d1], axis=1)
@@ -425,8 +435,9 @@ class VGPNetwork(_GPModel):
             self.likelihoods[i].initialize(y)
 
         # directions
-        self.directional_likelihood = _lk.Gaussian()
-        self.directional_likelihood.parameters["noise"].set_value(1e-6)
+        self.directional_likelihood = _lk.GradientIndicator()
+        # self.directional_likelihood = _lk.Gaussian()
+        # self.directional_likelihood.parameters["noise"].set_value(1e-6)
         self.directional_data = directional_data
         self.total_data_dir = 0
         self.y_dir = None
@@ -1234,7 +1245,7 @@ class GPEnsemble(_EnsembleModel):
             variable=variable,
             covariance=_copy.deepcopy(covariance),
             warping=_copy.deepcopy(warping),
-            tangents=t,
+            directional_data=t,
             use_trend=use_trend,
             options=options)
             for d, t in zip(data, tangents)]
