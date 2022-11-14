@@ -36,7 +36,7 @@ def walker():
     path_walker = _os.path.join(path, "sample_data/walker.dat")
     path_walker_ex = _os.path.join(path, "sample_data/walker_ex.dat")
 
-    walker_sample = _pd.read_table(path_walker, na_values=-999)
+    walker_sample = _pd.read_table(path_walker, na_values=-999) * 1.0
     walker_ex = _pd.read_table(path_walker_ex, sep=",")
 
     walker_point = _data.PointData(walker_sample, ["X", "Y"])

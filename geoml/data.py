@@ -21,6 +21,7 @@ __all__ = ["PointData",
            "batch_index",
            "export_planes"]
 
+import pandas as pd
 import tensorflow as _tf
 import pandas as _pd
 import numpy as _np
@@ -36,19 +37,45 @@ import geoml.plotly as _py
 
 def bounding_box(points):
     """
-    Computes a point set's bounding box and its diagonal
+    Computes a point set's bounding box and its diagonal.
+
+    Parameters
+    ----------
+    points : array
+        A set of coordinates.
+
+    Returns
+    -------
+    bbox : array-like
+        Array with the box's minimum and maximum values in each direction.
+    d : float
+        The box's diagonal length.
     """
     if len(points.shape) < 2:
         points = _np.expand_dims(points, axis=0)
     bbox = _np.array([[_np.min(points[:, i]) for i in range(points.shape[1])],
                       [_np.max(points[:, i]) for i in range(points.shape[1])]])
-    d = _np.sqrt(sum([_np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
+    d = _np.sqrt(sum([
+        _np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
     d = _np.squeeze(d)
     return bbox, d
 
 
 class BoundingBox(object):
+    """
+    An n-dimensional box.
+    """
     def __init__(self, min_values, max_values):
+        """
+        An n-dimensional box.
+
+        Parameters
+        ----------
+        min_values : array
+            The box's minimum values in each direction.
+        max_values : array
+            The box's maximum values in each direction.
+        """
         min_values = _np.array(min_values, ndmin=2)
         max_values = _np.array(max_values, ndmin=2)
 
@@ -84,6 +111,19 @@ class BoundingBox(object):
         return self.as_array().__repr__()
 
     def overlaps_with(self, other):
+        """
+        Checks if box overlaps with another box.
+
+        Parameters
+        ----------
+        other : BoundingBox
+            The other box.
+
+        Returns
+        -------
+        check : bool
+            The checking result.
+        """
         if other.n_dim != self.n_dim:
             raise ValueError("box dimensions mismatch")
 
@@ -96,6 +136,19 @@ class BoundingBox(object):
 
     @classmethod
     def from_array(cls, array):
+        """
+        Builds bounding box from an array with minimum and maximum coordinates.
+
+        Parameters
+        ----------
+        array : array
+            Array with the minimum and maximum coordinates.
+
+        Returns
+        -------
+        box : BoundingBox
+            A box object.
+        """
         if len(array.shape) < 2:
             array = _np.expand_dims(array, axis=0)
         min_values = _np.min(array, axis=0, keepdims=True)
@@ -103,6 +156,19 @@ class BoundingBox(object):
         return BoundingBox(min_values, max_values)
 
     def contains_points(self, array):
+        """
+        Checks if points are contained within the box.
+
+        Parameters
+        ----------
+        array : array
+            A set of coordinates.
+
+        Returns
+        -------
+        check : bool
+            True if all points are contained within the box.
+        """
         if array.shape[1] != self.n_dim:
             raise ValueError("box and points dimensions mismatch")
 
@@ -203,13 +269,13 @@ class _Variable(object):
             Reshapes the data in the form of a matrix for plotting.
 
             The output can be used in plotting functions such as
-            matplotlib's imshow(). If you use it, do not forget to set
+            matplotlib's `imshow()`. If you use it, do not forget to set
             `origin="lower"`.
 
             Returns
             -------
-            image : array
-                matrix 2-dimensional array.
+            image : _np.array
+                A 2-dimensional array.
             """
             if not isinstance(self.coordinates, Grid2D):
                 raise ValueError("method only available for Grid2D data"
@@ -227,8 +293,8 @@ class _Variable(object):
 
             Returns
             -------
-            cube : array
-                matrix cubic array.
+            cube : _np.array
+                A rank-3 array.
             """
             if not isinstance(self.coordinates, Grid3D):
                 raise ValueError("method only available for Grid3D data"
@@ -240,7 +306,10 @@ class _Variable(object):
 
         def get_contour(self, value):
             """
-            Calls the marching cubes algorithm to extract a isosurface.
+            Isosurface extraction.
+
+            This method calls `skimage.measure.marching_cubes()`.
+            See the original documentation for details.
 
             Parameters
             ----------
@@ -249,18 +318,8 @@ class _Variable(object):
 
             Returns
             -------
-            verts : array
-                Mesh vertices.
-            faces : array
-                Mesh faces.
-            normals : array
-                Mesh normals.
-            values : array
-                Value that can be used for color coding.
-
-
-            This method calls skimage.measure.marching_cubes().
-            See the original documentation for details.
+            surf : Surface3D
+                A `Surface3D` object.
             """
             cube = self.as_cube()
             verts, faces, normals, values = _measure.marching_cubes(
@@ -268,7 +327,8 @@ class _Variable(object):
                 allow_degenerate=False, spacing=self.coordinates.step_size)
             for i in range(3):
                 verts[:, i] += self.coordinates.grid[i][0]
-            return verts, faces, normals, values
+            # return verts, faces, normals, values
+            return Surface3D(verts, faces, normals)
 
         def export_contour(self, value, filename, triangles=True,
                            offset=None):
@@ -309,8 +369,9 @@ class _Variable(object):
 
         def draw_contour(self, value, **kwargs):
             """Creates plotly object with the contour at the specified value."""
-            verts, faces, normals, values = self.get_contour(value)
-            return _py.isosurface(verts, faces, **kwargs)
+            surf_obj = self.get_contour(value)
+            return _py.isosurface(
+                surf_obj.coordinates, surf_obj.triangles, **kwargs)
 
         def draw_numeric(self, **kwargs):
             if self.coordinates.n_dim != 3:
@@ -333,6 +394,11 @@ class _Variable(object):
                 return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
                                               values, **kwargs)
 
+            if isinstance(self.coordinates, Surface3D):
+                return _py.isosurface(self.coordinates.coordinates,
+                                      self.coordinates.triangles,
+                                      values=self.values)
+
             return _py.numeric_points_3d(
                 self.coordinates.coordinates,
                 self.values,
@@ -351,6 +417,25 @@ class _Variable(object):
 
 
 class ContinuousVariable(_Variable):
+    """
+    Representation of a continuous random variable.
+
+    Attributes
+    ----------
+    measurements : _Attribute
+        The raw measurements.
+    latent_mean : _Attribute
+        The mean of the latent Gaussian representation.
+    latent_variance : _Attribute
+        The variance of the latent Gaussian representation.
+    simulations : list
+        Draws from the variable's posterior distribution.
+    quantiles : dict
+        The variables quantiles, indexed by the corresponding percentile.
+    probabilities : dict
+        Cumulative distribution probabilities, indexed by the corresponding
+        quantile.
+    """
     def __init__(self, name, coordinates, measurements=None,
                  quantiles=None, probabilities=(0.025, 0.5, 0.975)):
         super().__init__(name, coordinates)
@@ -375,12 +460,30 @@ class ContinuousVariable(_Variable):
         return self.measurements.values[:, None]
 
     def reset_quantiles(self, probabilities=None):
+        """
+        Resets the variable's quantiles.
+
+        Parameters
+        ----------
+        probabilities : array
+            An array of probabilities, ordered values from 0 to 1 (exclusive),
+            on which the models will compute the corresponding quantiles.
+        """
         self.quantiles = _col.OrderedDict()
         if probabilities is not None:
             for p in probabilities:
                 self.quantiles[p] = self._Attribute(self.coordinates)
 
     def reset_probabilities(self, quantiles=None):
+        """
+        Resets the variable's probabilities.
+
+        Parameters
+        ----------
+        quantiles : array
+            An array of quantiles, ordered values on which the models will
+            compute the corresponding cumulative probabilities.
+        """
         self.probabilities = _col.OrderedDict()
         if quantiles is not None:
             for q in quantiles:
@@ -419,6 +522,29 @@ class ContinuousVariable(_Variable):
     def as_data_frame(self, measurements=True, latent=True,
                       simulations=True, quantiles=True,
                       probabilities=True, **kwargs):
+        """
+        Converts the object to a DataFrame.
+
+        Parameters
+        ----------
+        measurements : bool
+            Whether to include the measurements.
+        latent : bool
+            Whether to include the latent Gaussian variable.
+        simulations : bool
+            Whether to include the latent Gaussian variable.
+        quantiles : bool
+            Whether to include the quantiles.
+        probabilities : bool
+            Whether to include the probabilities.
+        kwargs : dict
+            Ignored.
+
+        Returns
+        -------
+        df : pd.DataFrame
+            The converted object.
+        """
         df = _pd.DataFrame({})
 
         if measurements:
@@ -1048,6 +1174,62 @@ class CategoricalVariable(RockTypeVariable):
             self.components[comp].fill_pyvista_points(points, self.name)
 
 
+class OrderedRockType(RockTypeVariable):
+    def __init__(self, name, coordinates, labels=None, measurements_a=None,
+                 measurements_b=None):
+        super().__init__(name, coordinates, labels, measurements_a,
+                         measurements_b)
+        self._length = 1
+
+        if measurements_b is None:
+            measurements_b = measurements_a
+
+        implicit_values = -0.5 * _np.ones_like(measurements_a)
+        for i in range(len(labels[:-1])):
+            implicit_values = _np.where(
+                (measurements_a == labels[i])
+                & (measurements_b == labels[i + 1]),
+                i,
+                implicit_values
+            )
+            implicit_values = _np.where(
+                (measurements_a == labels[i + 1])
+                & (measurements_b == labels[i]),
+                i,
+                implicit_values
+            )
+            implicit_values = _np.where(
+                (measurements_a == labels[i])
+                & (measurements_b == labels[i]),
+                i - 0.5,
+                implicit_values
+            )
+            implicit_values = _np.where(
+                (measurements_a == labels[i + 1])
+                & (measurements_b == labels[i + 1]),
+                i + 0.5,
+                implicit_values
+            )
+            # implicit_values[(measurements_a == labels[i])
+            #                 & (measurements_b == labels[i + 1])] = i
+            # implicit_values[(measurements_a == labels[i + 1])
+            #                 & (measurements_b == labels[i])] = i
+            # implicit_values[(measurements_a == labels[i])
+            #                 & (measurements_b == labels[i])] = i - 0.5
+            # implicit_values[(measurements_a == labels[i + 1])
+            #                 & (measurements_b == labels[i + 1])] = i + 0.5
+
+        self.implicit_values = self._Attribute(coordinates, implicit_values)
+
+    def get_measurements(self):
+        return self.implicit_values.values[:, None]
+
+    def __getitem__(self, item):
+        new_obj = super().__getitem__(item)
+        new_obj.implicit_values = self.implicit_values[item]
+        return new_obj
+
+
 class BinaryVariable(_Variable):
     def __init__(self, name, coordinates, labels, measurements=None):
         super().__init__(name, coordinates)
@@ -1309,7 +1491,50 @@ class _SpatialData(object):
                              "3-dimensional data objects")
 
 
-class PointData(_SpatialData):
+class _PointBased(_SpatialData):
+    """Abstract class for data objects based on points"""
+    def __str__(self):
+        s = "Object of class %s with %s data locations\n\n" \
+            % (self.__class__.__name__, str(self.n_data))
+
+        if len(self.variables) > 0:
+            s += "Variables:\n"
+            for name, var in self.variables.items():
+                s += "    %s: %s\n" % (name, var.__class__.__name__)
+        return s
+
+    def add_continuous_variable(self, name, measurements=None,
+                                quantiles=None,
+                                probabilities=(0.025, 0.5, 0.975)):
+        self.variables[name] = ContinuousVariable(
+            name, self, measurements, quantiles=quantiles,
+            probabilities=probabilities)
+
+    def add_categorical_variable(self, name, labels, measurements=None):
+        self.variables[name] = CategoricalVariable(
+            name, self, labels, measurements)
+
+    def add_rock_type_variable(self, name, labels, measurements_a=None,
+                               measurements_b=None, ordered=False):
+        if ordered:
+            self.variables[name] = OrderedRockType(
+                name, self, labels, measurements_a, measurements_b)
+        else:
+            self.variables[name] = RockTypeVariable(
+                name, self, labels, measurements_a, measurements_b)
+
+    def add_binary_variable(self, name, labels, measurements=None):
+        self.variables[name] = BinaryVariable(name, self, labels, measurements)
+
+    def add_anomaly_variable(self, name, label, measurements=None):
+        self.variables[name] = AnomalyVariable(name, self, label, measurements)
+
+    def add_compositional_variable(self, name, labels, measurements=None):
+        self.variables[name] = CompositionalVariable(
+            name, self, labels, measurements)
+
+
+class PointData(_PointBased):
     """
         Data represented as points in arbitrary locations.
     """
@@ -1333,11 +1558,8 @@ class PointData(_SpatialData):
         self._n_dim = self.coordinates.shape[1]
         self._n_data = self.coordinates.shape[0]
         if self._n_data > 0:
-            # self._bounding_box, self._diagonal = bounding_box(self.coordinates)
             self._bounding_box = BoundingBox.from_array(self.coordinates)
         else:
-            # self._bounding_box = _np.zeros([2, self.n_dim])
-            # self._diagonal = 0
             self._bounding_box = BoundingBox.from_array(
                 _np.zeros([2, self.n_dim]))
 
@@ -1365,28 +1587,7 @@ class PointData(_SpatialData):
                 df.columns = ["V" + str(i) for i in range(n_dim)]
         return PointData(df, df.columns)
 
-    def __str__(self):
-        s = "Object of class %s with %s data locations\n\n" \
-            % (self.__class__.__name__, str(self.n_data))
-
-        if len(self.variables) > 0:
-            s += "Variables:\n"
-            for name, var in self.variables.items():
-                s += "    %s: %s\n" % (name, var.__class__.__name__)
-        return s
-
     def __getitem__(self, item):
-        # new_obj = _copy.deepcopy(self)
-        # new_obj.coordinates = new_obj.coordinates[item]
-        # if len(new_obj.coordinates.shape) < 2:
-        #     new_obj.coordinates = _np.expand_dims(new_obj.coordinates, axis=1)
-        # new_obj._n_data = new_obj.coordinates.shape[0]
-        # new_obj._bounding_box, new_obj._diagonal = bounding_box(
-        #     new_obj.coordinates)
-
-        # for name, var in new_obj.variables.items():
-        #     new_obj.variables[name] = var[item]
-
         self_copy = _copy.deepcopy(self)
         new_obj = PointData.from_array(self_copy.coordinates[item])
         new_obj.coordinate_labels = self_copy.coordinate_labels
@@ -1434,32 +1635,6 @@ class PointData(_SpatialData):
 
         return self[keep] if sum(keep) > 0 else None
 
-    def add_continuous_variable(self, name, measurements=None,
-                                quantiles=None,
-                                probabilities=(0.025, 0.5, 0.975)):
-        self.variables[name] = ContinuousVariable(
-            name, self, measurements, quantiles=quantiles,
-            probabilities=probabilities)
-
-    def add_categorical_variable(self, name, labels, measurements=None):
-        self.variables[name] = CategoricalVariable(
-            name, self, labels, measurements)
-
-    def add_rock_type_variable(self, name, labels, measurements_a=None,
-                               measurements_b=None):
-        self.variables[name] = RockTypeVariable(
-            name, self, labels, measurements_a, measurements_b)
-
-    def add_binary_variable(self, name, labels, measurements=None):
-        self.variables[name] = BinaryVariable(name, self, labels, measurements)
-
-    def add_anomaly_variable(self, name, label, measurements=None):
-        self.variables[name] = AnomalyVariable(name, self, label, measurements)
-
-    def add_compositional_variable(self, name, labels, measurements=None):
-        self.variables[name] = CompositionalVariable(
-            name, self, labels, measurements)
-
     def as_pyvista(self):
         if not self.n_dim == 3:
             raise ValueError("as_pyvista method is only supported "
@@ -1471,6 +1646,35 @@ class PointData(_SpatialData):
             self.variables[var].fill_pyvista_points(pv_points)
 
         return pv_points
+
+    def get_data_variance(self):
+        return _np.zeros_like(self.coordinates)
+
+
+class GaussianData(PointData):
+    def __init__(self, data, coordinates_mean, coordinates_variance):
+        super().__init__(data, coordinates_mean)
+        self.variance = _np.array(data.loc[:, coordinates_variance], ndmin=2)
+
+    @classmethod
+    def from_array(cls, coordinates, coordinates_variance,
+                   coordinate_labels=None):
+        df = _pd.DataFrame(coordinates)
+        if coordinate_labels is None:
+            n_dim = coordinates.shape[1]
+            if n_dim <= 3:
+                coordinate_labels = ["X", "Y", "Z"][0:n_dim]
+            else:
+                coordinate_labels = ["V" + str(i) for i in range(n_dim)]
+
+        df.columns = coordinate_labels
+        var_labels = [s + "_var" for s in coordinate_labels]
+        df_var = _pd.DataFrame(coordinates_variance, columns=var_labels)
+        df = _pd.concat([df, df_var], axis=1)
+        return GaussianData(df, coordinate_labels, var_labels)
+
+    def get_data_variance(self):
+        return self.variance
 
 
 class Grid1D(PointData):
@@ -1631,9 +1835,6 @@ class Grid1D(PointData):
         self.variables[variable] = ContinuousVariable(
             variable, self, data_3["value"].values
         )
-
-    def make_interpolator(self, coordinates):
-        return _gint.cubic_conv_1d(self.grid[0], coordinates)
 
 
 class Grid2D(PointData):
@@ -1817,9 +2018,6 @@ class Grid2D(PointData):
         self.variables[variable] = ContinuousVariable(
             variable, self, data_3["value"].values
         )
-
-    def make_interpolator(self, coordinates):
-        return _gint.cubic_conv_2d(coordinates, self.grid[0], self.grid[1])
 
 
 class Grid3D(PointData):
@@ -2055,6 +2253,44 @@ class Grid3D(PointData):
             self.variables[var].fill_pyvista_cube(pv_grid)
 
         return pv_grid
+
+
+class GridND(_SpatialData):
+    """
+    Implicit grid in N dimensions.
+    """
+    def __init__(self, start, n, step=None, end=None, labels=None):
+        super().__init__()
+        if (step is None) & (end is None):
+            raise ValueError("one of step or end must be given")
+        start = _np.array(start)
+        n = _np.array(n)
+        if step is not None:
+            step = _np.array(step)
+            end = start + (n - 1) * step
+        else:
+            end = _np.array(end)
+            step = _np.array([(e - st) / (n_ - 1)
+                              for st, e, n_ in zip(start, end, n)])
+
+        self.grid = []
+        for st, e, n_ in zip(start, end, n):
+            self.grid.append(_np.linspace(st, e, n_))
+
+        self.step_size = step.tolist()
+        self.grid_size = [int(num) for num in n]
+        self.labels = labels
+
+        self._n_dim = len(self.grid)
+        self._n_data = _np.prod(self.grid_size)
+        self._bounding_box = BoundingBox.from_array(
+            _np.stack([start, end], axis=0))
+
+    def __str__(self):
+        s = "Object of class %s with %s data locations\n" \
+            % (self.__class__.__name__, str(self.n_data))
+
+        return s
 
 
 class DirectionalData(PointData):
@@ -2588,3 +2824,50 @@ class Section3D(PointData):
         df = _pd.DataFrame(rotated_coords, columns=coordinate_labels)
         super().__init__(df, coordinate_labels)
         self.grid_shape = [n_x, n_y]
+
+
+class Surface3D(_PointBased):
+    def __init__(self, points, triangles, normals):
+        super().__init__()
+
+        if points.shape[1] != 3:
+            raise ValueError("points must be an array with 3 columns")
+        if triangles.shape[1] != 3:
+            raise ValueError("triangles must be an array with 3 columns")
+        if normals.shape[1] != 3:
+            raise ValueError("normals must be an array with 3 columns")
+
+        if triangles.shape[1] != normals.shape[1]:
+            raise ValueError("triangles and normals must have the same"
+                             "number of lines")
+
+        self.coordinates = points
+        self.triangles = triangles
+        self.normals = normals
+
+        self._n_dim = 3
+        self._n_data = self.coordinates.shape[0]
+        if self._n_data > 0:
+            self._bounding_box = BoundingBox.from_array(self.coordinates)
+        else:
+            self._bounding_box = BoundingBox.from_array(
+                _np.zeros([2, self.n_dim]))
+
+    def export_micromine(self, points_filename="points",
+                         triangles_filename="triangles",
+                         offset=[0, 0, 0], **kwargs):
+        points_df = [
+            _pd.DataFrame({"id": _np.arange(self.n_data)}),
+            _pd.DataFrame(self.coordinates, columns=["EAST", "NORTH", "RL"])
+        ]
+        for variable in self.variables.values():
+            points_df.append(variable.as_data_frame(**kwargs))
+        points_df = _pd.concat(points_df, axis=1)
+        points_df["EAST"] += offset[0]
+        points_df["NORTH"] += offset[1]
+        points_df["RL"] += offset[2]
+        points_df.to_csv(points_filename + ".csv", index=False)
+
+        triangles_df = pd.DataFrame(
+            self.triangles, columns=["PointId1", "PointId2", "PointId3"])
+        triangles_df.to_csv(triangles_filename + ".csv", index=False)

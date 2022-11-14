@@ -19,7 +19,8 @@ __all__ = ['CubicSpline',
            'CubicConv1D',
            'CubicConv2DSeparable',
            'CubicConv3DSeparable',
-           'CubicConv2DFull']
+           'CubicConv2DFull',
+           'CubicConvND']
 
 import geoml.tftools as _tftools
 
@@ -31,6 +32,7 @@ class _Interpolator:
     def __init__(self, grid):
         self.grid = grid.grid
         self. _n_dim = grid.n_dim
+        self.grid_size = grid.grid_size
 
     @property
     def n_dim(self):
@@ -293,6 +295,26 @@ class CubicConv3DSeparable(_Interpolator):
             raise ValueError("invalid direction for derivative")
 
         return interp_x.outer_product(interp_y.outer_product(interp_z))
+
+
+class CubicConvND(_Interpolator):
+    def make_interpolation_matrix(self, coordinates, derivative=-1):
+        if derivative >= self.n_dim:
+            raise ValueError("invalid direction for derivative")
+
+        interp_mats = []
+        for i in range(self.n_dim):
+            weights, cols = self.cubic_conv_1d(
+                self.grid[i], coordinates[:, i],
+                derivative=0 if derivative == i else -1)
+            interp_mats.append(self._InterpolationMatrix(
+                weights, cols, self.grid_size[i]))
+
+        final_interp = interp_mats[-1]
+        for i in range(self.n_dim -2, -1, -1):
+            final_interp = interp_mats[i].outer_product(final_interp)
+
+        return final_interp
 
 
 class CubicConv2DFull(_Interpolator):

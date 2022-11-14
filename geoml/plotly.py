@@ -208,7 +208,7 @@ def categorical_points_3d(coordinates, values, colors, **kwargs):
     return [obj]
 
 
-def isosurface(verts, faces, **kwargs):
+def isosurface(verts, faces, values=None, **kwargs):
     obj = {"type": "mesh3d",
            "x": verts[:, 0],
            "y": verts[:, 1],
@@ -216,6 +216,8 @@ def isosurface(verts, faces, **kwargs):
            "i": faces[:, 0],
            "j": faces[:, 1],
            "k": faces[:, 2]}
+    if values is not None:
+        obj["intensity"] = values
     obj = _deep_update(obj, kwargs)
     return [obj]
 

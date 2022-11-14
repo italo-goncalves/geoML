@@ -167,11 +167,11 @@ def conjugate_gradient(matmul_fun, b, x_0=None, tol=1e-3, jitter=1e-9,
 
         def body(i_, r_, p_, x_, rtr_):
             ap = matmul_fun(p_)
-            alpha = rtr_ / (_tf.reduce_sum(p_ * ap)) # + jitter)
+            alpha = rtr_ / (_tf.reduce_sum(p_ * ap) + jitter)
             x_ = x_ + alpha * p_
             r_ = r_ + alpha * ap
             rtr_new = _tf.reduce_sum(r_ * r_)
-            p_ = -r_ + p_ * rtr_new / (rtr_) # + jitter)
+            p_ = -r_ + p_ * rtr_new / (rtr_ + jitter)
             return i_ + 1, r_, p_, x_, rtr_new
 
         out = _tf.while_loop(cond, body, (i, r, p, x, rtr))
@@ -295,6 +295,7 @@ def lanczos(matmul_fn, q_0, m=30):
             q_i = r_ / beta_i
             mat_q_ = _tf.concat([mat_q_, q_i], axis=1)
             r_ = matmul_fn(q_i) - beta_i * v
+            # r_ = matmul_fn(q_i) - alpha_[-1]*q_i - beta_i * v
             alpha_i = _tf.reduce_sum(q_i * r_)
             alpha_i = _tf.expand_dims(alpha_i, axis=0)
             alpha_ = _tf.concat([alpha_, alpha_i], axis=0)
@@ -303,7 +304,7 @@ def lanczos(matmul_fn, q_0, m=30):
             # reorthogonalization
             r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
             r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
-            r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
+            # r_ = r_ - _tf.matmul(mat_q_, _tf.matmul(mat_q_, r_, True, False))
 
             beta_i = _tf.math.reduce_euclidean_norm(r_)
             beta_i = _tf.expand_dims(beta_i, axis=0)
@@ -700,67 +701,113 @@ def get_lower_traingular(mat):
     return mat
 
 
-# def rebuild_spd(mat):
-#     vals, vecs = _tf.linalg.eigh(mat)
-#
-#     keep = _tf.squeeze(_tf.where(_tf.greater(vals, 0.0)))
-#     mat_ok = _tf.reduce_all(_tf.greater(vals, 0.0))
-#
-#     vals, vecs = _tf.cond(
-#         _tf.equal(_tf.rank(keep), 0),
-#         lambda: [- _tf.expand_dims(vals[0], 0),
-#                  _tf.expand_dims(vecs[:, 0], 1)],
-#         lambda: [_tf.gather(vals, keep),
-#                  _tf.gather(vecs, keep, axis=1)]
-#     )
-#
-#     basis = _tf.matmul(vecs, _tf.linalg.diag(_tf.sqrt(vals)))
-#     new_mat = _tf.matmul(basis, basis, False, True)
-#
-#     proj_mat = _tf.matmul(basis, _tf.linalg.solve(
-#         _tf.matmul(basis, basis, True, False), _tf.transpose(basis)))
-#     return new_mat, proj_mat, mat_ok
+def grid_laplacian(x, axis):
+    r"""
+    Laplacian along tensor axis.
 
-# def rebuild_spd(mat):
-#     # vals, vecs = _tf.linalg.eigh(mat)
-#
-#     # total = _tf.reduce_sum(vals)
-#     # vals = _tf.maximum(
-#     #     vals, - _tf.minimum(_tf.constant(0.0, _tf.float64),
-#     #                         _tf.reduce_min(vals)))
-#     # vals = vals / _tf.reduce_sum(vals) * total
-#     # vals = _tf.maximum(vals, _tf.constant(1e-6, _tf.float64))
-#
-#     # basis = _tf.matmul(vecs, _tf.linalg.diag(_tf.sqrt(vals)))
-#     # new_mat = _tf.matmul(basis, basis, False, True)
-#
-#     scale = _tf.reduce_max(_tf.math.abs(mat))
-#     s, u, v = _tf.linalg.svd(mat / scale)
-#     s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
-#     new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(s), v, adjoint_b=True))
-#
-#     return new_mat * scale
-#
-#
-# def check_spd(mat):
-#     vals = _tf.linalg.eigvalsh(mat)
-#     return _tf.reduce_all(_tf.greater(vals, _tf.constant(0, _tf.float64)))
-#
-#
-# def pseudo_inv(mat):
-#     scale = _tf.reduce_max(_tf.math.abs(mat))
-#     s, u, v = _tf.linalg.svd(mat / scale)
-#     # s = _tf.maximum(s, _tf.constant(0.0, _tf.float64))
-#     new_mat = _tf.matmul(u, _tf.matmul(_tf.linalg.diag(1/s), v, adjoint_b=True))
-#
-#     return new_mat / scale
-#
-#
-# def random_rotations(dim, n, seed):
-#     with _tf.name_scope("random_rotations"):
-#         rnd = _tf.random.stateless_normal([n, dim, dim], seed,
-#                                           dtype=_tf.float64)
-#         q, r = _tf.linalg.qr(rnd)
-#         sign = _tf.math.sign(_tf.linalg.diag_part(r))
-#         q = _tf.matmul(q, _tf.linalg.diag(sign))
-#         return q
+    This function computes the Laplacian along the specified axis of a tensor.
+
+    The operation can be made computationally efficient based on the fact that,
+    on a regular grid, the Laplacian can be computed as a Kronecker sum of the
+    Laplacians on each individual dimension.
+
+    Parameters
+    ----------
+    x : _tf.Tensor
+        Tensor on which to compute the Laplacian.
+    axis : list
+        List indicating on which axes to compute the Laplacian
+
+    Returns
+    -------
+    lap : _tf.Tensor
+        A tensor with the same shape as `x`, with the Laplacian computed
+        along the specified axes.
+    """
+    r = len(axis)
+    lap = _tf.zeros_like(x)
+    i = _tf.constant(0)
+
+    def laplacian(x_, axis_):
+        n = _tf.shape(x_)[axis_]
+        x_rev = _tf.reverse(x_, [axis_])
+
+        dummy, a = _tf.split(x_, [1, n - 1], axis_)
+        a = a - _tf.split(x_, [n - 1, 1], axis_)[0]
+        b = _tf.split(x_rev, [1, n - 1], axis_)[1] - \
+            _tf.split(x_rev, [n - 1, 1], axis_)[0]
+        b = _tf.reverse(b, [axis_])
+
+        a = _tf.concat([_tf.zeros_like(dummy), a], axis=axis_)
+        b = _tf.concat([b, _tf.zeros_like(dummy)], axis=axis_)
+
+        return a + b
+
+    def loop_fn(i_, lap_):
+        return i_ + 1, lap_ + laplacian(x, axis_=axis[i_])
+
+    def cond_fn(i_, lap_):
+        return _tf.less(i_, r)
+
+    i, lap = _tf.while_loop(cond_fn, loop_fn, (i, lap))
+
+    return lap
+
+
+def masked_laplacian(x, mask, axis):
+    r"""
+    Laplacian along tensor axis.
+
+    This function computes the Laplacian along the specified axis of a tensor.
+
+    The operation can be made computationally efficient based on the fact that,
+    on a regular grid, the Laplacian can be computed as a Kronecker sum of the
+    Laplacians on each individual dimension.
+
+    Parameters
+    ----------
+    x : _tf.Tensor
+        Tensor on which to compute the Laplacian.
+    axis : list
+        List indicating on which axes to compute the Laplacian
+
+    Returns
+    -------
+    lap : _tf.Tensor
+        A tensor with the same shape as `x`, with the Laplacian computed
+        along the specified axes.
+    """
+    r = len(axis)
+    lap = _tf.zeros_like(x)
+    i = _tf.constant(0)
+
+    def laplacian(x_, axis_):
+        n = _tf.shape(x_)[axis_]
+        x_rev = _tf.reverse(x_, [axis_])
+
+        dummy, a = _tf.split(x_, [1, n - 1], axis_)
+        a = a - _tf.split(x_, [n - 1, 1], axis_)[0]
+        b = _tf.split(x_rev, [1, n - 1], axis_)[1] - \
+            _tf.split(x_rev, [n - 1, 1], axis_)[0]
+        b = _tf.reverse(b, [axis_])
+
+        _, mask_1 = _tf.split(mask, [1, n - 1], axis_)
+        mask_2, _ = _tf.split(mask, [n - 1, 1], axis_)
+
+        a = a * mask_1 * mask_2
+        b = b * mask_1 * mask_2
+
+        a = _tf.concat([_tf.zeros_like(dummy), a], axis=axis_)
+        b = _tf.concat([b, _tf.zeros_like(dummy)], axis=axis_)
+
+        return a + b
+
+    def loop_fn(i_, lap_):
+        return i_ + 1, lap_ + laplacian(x, axis_=axis[i_])
+
+    def cond_fn(i_, lap_):
+        return _tf.less(i_, r)
+
+    i, lap = _tf.while_loop(cond_fn, loop_fn, (i, lap))
+
+    return lap

@@ -39,20 +39,72 @@ class _Warping(_gpr.Parametric):
         return s
         
     def forward(self, x):
+        """
+        Passes values through the class's warping function.
+
+        Parameters
+        ----------
+        x : array-like
+            Vector with values to warp.
+
+        Returns
+        -------
+        x : array-like
+            Vector with warped values.
+        """
         pass
     
     def backward(self, x):
+        """
+        Transforms values back to the original units.
+
+        Parameters
+        ----------
+        x : array-like
+            Vector with values to warp back to the original units.
+
+        Returns
+        -------
+        x : array-like
+            Vector with warped back values.
+        """
         pass
     
     def derivative(self, x):
+        """
+        Computes the derivative of the warping function.
+
+        Parameters
+        ----------
+        x : array-like
+            Vector with values to warp.
+
+        Returns
+        -------
+        x : array-like
+            Vector with the derivatives.
+        """
         pass
 
     def initialize(self, x):
+        """
+        Uses the provided values to initialize the object's parameters.
+
+        Parameters
+        ----------
+        x : array-like
+            Vector with values to warp.
+
+        Returns
+        -------
+        x : array-like
+            Vector with warped values.
+        """
         return self.forward(x)
 
 
 class Identity(_Warping):
-    """Identity warping"""
+    """Identity warping."""
     def forward(self, x):
         return x
     
@@ -69,6 +121,10 @@ class Spline(_Warping):
     """
     Uses a monotonic spline to convert from original to warped space and
     back.
+
+    The spline is assumed to work with normalized (z-score) values. It is
+    centered at the origin and the arms span up to +/- 5 in each axis. Its main
+    use is to transform an asymmetric distribution to one closer to a Gaussian.
 
     Attributes
     ----------
@@ -262,13 +318,24 @@ class Log(_Warping):
 
 
 class Scale(ZScore):
+    """Linear scaling, assuming a mean of zero."""
     def __init__(self, scale):
         super().__init__(mean=-1e-3, std=scale)
         self.parameters["mean"].fix()
 
 
 class ChainedWarping(_Warping):
+    """
+    Chains multiple Warping objects.
+    """
     def __init__(self, *warpings):
+        """
+
+        Parameters
+        ----------
+        warpings : list
+            List with Warping objects to apply in sequence.
+        """
         super().__init__()
         self.warpings = list(warpings)
         for wp in warpings:

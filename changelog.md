@@ -5,6 +5,7 @@
 * Added likelihoods for compositional variables.
 * `kernels` module now has a specific object for covariance functions.
 * Implemented the ability to convert data objects to `pyvista`.
+* Implemented `Surface3D` data object.
 
 ## version 0.3.1
 * New autoregressive latent variable.

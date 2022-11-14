@@ -105,9 +105,10 @@ _WEIGHTS = _WEIGHTS / _tf.reduce_sum(_WEIGHTS)
 
 
 class _Likelihood(_gpr.Parametric):
-    def __init__(self, size):
+    def __init__(self, size, use_monte_carlo=False):
         super().__init__()
         self._size = size
+        self._use_monte_carlo = use_monte_carlo
 
     @property
     def size(self):
@@ -131,9 +132,21 @@ class _Likelihood(_gpr.Parametric):
 
 class _ContinuousLikelihood(_Likelihood):
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(1)
+        """
+        Initializer for continuous likelihoods.
+
+        Parameters
+        ----------
+        warping : geoml.warping.Warping
+            A Warping object that normalizes the data values.
+        use_monte_carlo : bool
+            Whether to use Monte Carlo samples in training, instead of the
+            probability density function. Used mainly to maintain consistency
+            while using other likelihood for another variable, which does not
+            have an analytical form.
+        """
+        super().__init__(1, use_monte_carlo)
         self.warping = self._register(warping)
-        self._use_monte_carlo = use_monte_carlo
         self._spline = _gint.MonotonicCubicSpline()
 
     def initialize(self, y):
@@ -252,6 +265,12 @@ class _ContinuousLikelihood(_Likelihood):
 
 
 class Gaussian(_ContinuousLikelihood):
+    """
+    Gaussian likelihood.
+
+    Equivalent to a squared error model. The latent variable maps to the mean,
+    while the noise variance is a parameter.
+    """
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
         self._add_parameter("noise", _gpr.PositiveParameter(0.1, 1e-12, 10))
@@ -261,6 +280,12 @@ class Gaussian(_ContinuousLikelihood):
 
 
 class Laplace(_ContinuousLikelihood):
+    """
+    Laplace likelihood.
+
+    Equivalent to a linear error model. The latent variable maps to the mean,
+    while the distribution's scale factor is a parameter.
+    """
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
         self._add_parameter("scale", _gpr.PositiveParameter(0.1, 1e-9, 10))
@@ -270,6 +295,13 @@ class Laplace(_ContinuousLikelihood):
 
 
 class Gamma(_ContinuousLikelihood):
+    """
+    Gamma likelihood.
+
+    Used for strictly positive variables. The latent variable is shifted by a
+    parameter and then mapped to the distribution's shape. The rate parameter
+    is fixed at 1.0.
+    """
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
         self._add_parameter("mean_alpha", _gpr.RealParameter(0, -3, 3))
@@ -298,6 +330,12 @@ class Beta(_ContinuousLikelihood):
 
 
 class StudentT(_ContinuousLikelihood):
+    """
+    Student-T likelihood.
+
+    A heavy-tailed distribution. The latent variable maps to the mean,
+    while the scale and degrees of freedom are parameters.
+    """
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
         self._add_parameter("scale", _gpr.PositiveParameter(0.1, 1e-9, 10))
@@ -311,6 +349,13 @@ class StudentT(_ContinuousLikelihood):
 
 
 class EpsilonInsensitive(_ContinuousLikelihood):
+    """
+    Epsilon-insensitive likelihood.
+
+    Similar to the Laplace likelihood, with an addition `epsilon` parameter,
+    below which error are not penalized. Can be used to obtain a model similar
+    to the Support Vector Machine.
+    """
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
         self._add_parameter("epsilon", _gpr.PositiveParameter(0.001, 1e-9, 10))
@@ -454,7 +499,178 @@ class EpsilonInsensitive(_ContinuousLikelihood):
         return out
 
 
+class Huber(_ContinuousLikelihood):
+    """
+    Huber likelihood.
+
+    Based on the Huber loss.
+    """
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
+        super().__init__(warping, use_monte_carlo)
+        self._add_parameter("threshold", _gpr.PositiveParameter(3, 1e-2, 10))
+        self._add_parameter("std", _gpr.PositiveParameter(0.1, 1e-3, 1))
+
+    def log_lik(self, mu, var, y, has_value, samples=None,
+                *args, **kwargs):
+        y_warped = self.warping.forward(y)
+        y_derivative = self.warping.derivative(y)
+        log_derivative = _tf.math.log(y_derivative)
+
+        thr = self.parameters["threshold"].get_value()
+        std = self.parameters["std"].get_value()
+
+        norm = 2 * (_np.sqrt(_np.pi / 2) * _tf.math.erf(thr / _np.sqrt(2))
+                    + _tf.math.exp(-0.5 * thr**2) / thr)
+
+        if self._use_monte_carlo:
+            samples = samples[:, 0, :]
+
+            y_centered = _tf.math.abs((y_warped - samples) / std)
+
+            log_density = _tf.where(
+                _tf.less_equal(y_centered, thr),
+                - 0.5 * y_centered**2,
+                - thr * (y_centered - 0.5*thr)
+            )
+            log_density = log_density - _tf.math.log(norm)
+            log_density = _tf.reduce_mean(log_density, axis=1, keepdims=True)
+
+        else:
+            vals = _tf.expand_dims(_ROOTS, axis=0)
+            vals = _tf.sqrt(2 * var) * vals + mu  # [n_data, n_vals]
+            w = _tf.expand_dims(_WEIGHTS, axis=0)
+
+            y_centered = _tf.math.abs((y_warped - vals) / std)
+
+            log_density = _tf.where(
+                _tf.less_equal(y_centered, thr),
+                - 0.5 * y_centered ** 2,
+                - thr * (y_centered - 0.5 * thr)
+            )
+            log_density = log_density - _tf.math.log(norm)
+            log_density = _tf.math.reduce_logsumexp(
+                log_density + _tf.math.log(w), axis=1, keepdims=True)
+
+        lik = _tf.reduce_sum(
+            (log_density + log_derivative) * has_value)
+
+        return lik
+
+    def cdf(self, x):
+        thr = self.parameters["threshold"].get_value()
+        std = self.parameters["std"].get_value()
+
+        norm = 2 * (_np.sqrt(_np.pi / 2) * _tf.math.erf(thr / _np.sqrt(2))
+                    + _tf.math.exp(-0.5 * thr ** 2) / thr)
+
+        x = x / std
+
+        val_1 = _tf.math.exp(thr * x + 0.5 * thr ** 2) / thr
+        val_2 = _tf.math.exp(-0.5 * thr ** 2) / thr \
+                + _np.sqrt(_np.pi / 2) * (_tf.math.erf(thr / _np.sqrt(2))
+                                          + _tf.math.erf(x / _np.sqrt(2)))
+        val_3 = _tf.math.exp(-0.5 * thr ** 2) / thr \
+                + 2 * _np.sqrt(_np.pi / 2) * _tf.math.erf(thr / _np.sqrt(2)) \
+                + (_tf.math.exp(-0.5*thr**2) -
+                   _tf.math.exp(0.5*thr**2 - thr*x)) / thr
+
+        prob = _tf.where(_tf.greater(x, -thr), val_2, val_1)
+        prob = _tf.where(_tf.greater(x, thr), val_3, prob)
+
+        prob = prob / norm
+        return prob
+
+    def variance(self):
+        thr = self.parameters["threshold"].get_value()
+        std = self.parameters["std"].get_value()
+
+        norm = 2 * (_np.sqrt(_np.pi / 2) * _tf.math.erf(thr / _np.sqrt(2))
+                    + _tf.math.exp(-0.5 * thr ** 2) / thr)
+
+        n1 = 2 * (_np.sqrt(_np.pi / 2) * _tf.math.erf(thr / _np.sqrt(2))
+                  - thr * _tf.math.exp(-0.5 * thr ** 2))
+        n2 = 2 * _tf.math.exp(-0.5 * thr ** 2) \
+             * (thr + 2/thr + 2 / thr**3)
+        return (n1 + n2) / norm * std**2
+
+    def predict(self, mu, var, sims, explained_var, *args, quantiles=None,
+                probabilities=None, **kwargs):
+        lik_var = self.variance()
+        weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
+        weights = weights ** 2
+
+        out = {"mean": _tf.squeeze(mu),
+               "variance": _tf.squeeze(var),
+               "simulations": self.warping.backward(sims[:, 0, :]),
+               "weights": weights
+               }
+
+        vals = _tf.expand_dims(_ROOTS, axis=0)
+        vals = _tf.sqrt(2 * var) * vals + mu  # [n_data, n_vals]
+        w = _tf.expand_dims(_WEIGHTS, axis=0)
+
+        def prob_fn(q):
+            q = _tf.expand_dims(q, 0)
+            p = self.cdf(_tf.squeeze(self.warping.forward(q)) - vals)
+            p = _tf.reduce_sum(p * w, axis=1)
+            return p
+
+        if quantiles is not None:
+            prob = _tf.map_fn(prob_fn, quantiles)
+            prob = _tf.transpose(prob)
+
+            # single point case
+            # prob = _tf.cond(
+            #     _tf.less(_tf.rank(prob), 2),
+            #     lambda: _tf.expand_dims(prob, 0),
+            #     lambda: prob)
+
+            out["probabilities"] = prob
+
+        # def quant_fn(p):
+        #     p = _tf.expand_dims(p, 0)
+        #     q = distribution.quantile(_tf.squeeze(self.warping.backward(p)))
+        #     q = _tf.reduce_sum(q * w, axis=1)
+        #     return q
+        #
+        if probabilities is not None:
+            def prob_fn_2(q):
+                q = _tf.expand_dims(q, 1)
+                p = self.cdf(q - vals)
+                p = _tf.reduce_sum(p * w, axis=1)
+                return p
+
+            prob_vals = _tf.map_fn(prob_fn_2, _tf.transpose(vals))
+
+            n_data = _tf.shape(vals)[0]
+            quant = self._spline.interpolate(
+                prob_vals,
+                _tf.transpose(self.warping.backward(vals)),
+                _tf.tile(probabilities[:, None], [1, n_data])
+            )
+
+            # quant = _tf.map_fn(quant_fn, probabilities)
+            quant = _tf.transpose(quant)
+
+            # single point case
+            # quant = _tf.cond(
+            #     _tf.less(_tf.rank(quant), 2),
+            #     lambda: _tf.expand_dims(quant, 0),
+            #     lambda: quant)
+
+            out["quantiles"] = quant
+
+        return out
+
+
 class HeteroscedasticGaussian(_ContinuousLikelihood):
+    """
+    Heteroscedastic Gaussian likelihood (experimental).
+
+    Allows the modeling of spatially-dependent noise. Requires two latent
+    variables, one for the mean and other for the log-variance. The analytical
+    form uses approximations; better results are obtained by Monte Carlo.
+    """
     def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
         super().__init__(warping, use_monte_carlo)
         self._size = 2
@@ -578,6 +794,21 @@ class HeteroscedasticGaussian(_ContinuousLikelihood):
 
 class Bernoulli(_Likelihood):
     def __init__(self, shift=0, sharpness=1):
+        """
+        Bernoulli likelihood.
+
+        Used for binary categorical variables.
+
+        Parameters
+        ----------
+        shift : double
+            How much to favor the positive or negative class. Value between
+            -5 and 5.
+        sharpness : int
+            Data augmentation. The weight of the data is multiplied by this
+            factor. Results in sharper transitions between positive and
+            negative regions.
+        """
         super().__init__(1)
         self.sharpness = sharpness
         self._add_parameter("shift", _gpr.RealParameter(shift, -5, 5))
@@ -698,6 +929,8 @@ class BernoulliMaximumMargin(_Likelihood):
 
 
 class _CategoricalLikelihood(_Likelihood):
+    def __init__(self, size, use_monte_carlo=False):
+        super().__init__(size, use_monte_carlo)
 
     @staticmethod
     def entropy_and_indicators(probabilities, var, explained_var):
@@ -736,8 +969,26 @@ class _CategoricalLikelihood(_Likelihood):
 
 
 class CategoricalGaussianIndicator(_CategoricalLikelihood):
-    def __init__(self, n_components, tol=1e-3, sharpness=5):
-        super().__init__(n_components)
+    def __init__(self, n_components, tol=1e-3, sharpness=1,
+                 use_monte_carlo=False):
+        """
+        Gaussian likelihood for indicator variables.
+
+        Assumes mutually exclusive categories (i.e. no geological rules),
+        leading to maximum entropy far from the data points. Is capable of
+        dealing with boundary data.
+
+        Parameters
+        ----------
+        n_components : int
+            The number of categories.
+        tol : double
+            Normal score tolerance for boundary data.
+        sharpness : int
+            Data augmentation. The weight of the data is multiplied by this
+            factor. Results in sharper transitions between categories.
+        """
+        super().__init__(n_components, use_monte_carlo)
         self.tol = _tf.constant(tol, _tf.float64)
         self.sharpness = _tf.constant(sharpness, _tf.float64)
 
@@ -745,19 +996,62 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
                 samples=None, *args, **kwargs):
         y = 2 * y - 1
 
-        dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
-        prob_neg = dist.log_cdf(- self.tol)
-        prob_zero = _tf.math.log(
-            dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
-        prob_pos = dist.log_survival_function(self.tol)
+        if self._use_monte_carlo:
+            # pos = _tf.where(
+            #     _tf.greater(samples, self.tol),
+            #     _tf.ones_like(samples),
+            #     _tf.zeros_like(samples)
+            # )
+            # neg = _tf.where(
+            #     _tf.less(samples, - self.tol),
+            #     _tf.ones_like(samples),
+            #     _tf.zeros_like(samples)
+            # )
+            #
+            # prob_pos = _tf.reduce_mean(pos, axis=-1)
+            # prob_neg = _tf.reduce_mean(neg, axis=-1)
+            # prob_zero = 1 - prob_neg - prob_pos
+            #
+            # prob_pos = _tf.math.log(prob_pos + 1e-6)
+            # prob_neg = _tf.math.log(prob_neg + 1e-6)
+            # prob_zero = _tf.math.log(prob_zero + 1e-6)
 
-        log_density = _tf.where(
-            _tf.less(y, - self.tol),
-            prob_neg,
-            _tf.where(_tf.greater(y, self.tol),
-                      prob_pos,
-                      prob_zero)
-        )
+            dist = _tfd.Normal(samples, self.tol)
+            prob_neg = dist.log_cdf(- self.tol)
+            prob_zero = _tf.math.log(
+                dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
+            prob_pos = dist.log_survival_function(self.tol)
+
+            # prob_neg = _tf.reduce_mean(prob_neg, axis=-1)
+            # prob_pos = _tf.reduce_mean(prob_pos, axis=-1)
+            # prob_zero = _tf.reduce_mean(prob_zero, axis=-1)
+
+            n_sim = _tf.shape(samples)[2]
+            y = _tf.tile(y[:, :, None], [1, 1, n_sim])
+
+            log_density = _tf.where(
+                _tf.less(y, - self.tol),
+                prob_neg,
+                _tf.where(_tf.greater(y, self.tol),
+                          prob_pos,
+                          prob_zero)
+            )
+            log_density = _tf.reduce_mean(log_density, axis=2)
+
+        else:
+            dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+            prob_neg = dist.log_cdf(- self.tol)
+            prob_zero = _tf.math.log(
+                dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
+            prob_pos = dist.log_survival_function(self.tol)
+
+            log_density = _tf.where(
+                _tf.less(y, - self.tol),
+                prob_neg,
+                _tf.where(_tf.greater(y, self.tol),
+                          prob_pos,
+                          prob_zero)
+            )
 
         log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
 
@@ -793,33 +1087,191 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
             prob, var, explained_var
         )
 
-        # log_n = _tf.math.log(_tf.cast(_tf.shape(mu)[1], _tf.float64))
-        # entropy = - _tf.reduce_sum(prob * _tf.math.log(prob + 1e-6), axis=1) / log_n
-        # entropy = _tf.maximum(entropy, 0.0)
-        # # avg_var = _tf.reduce_mean(var, axis=1)
-        # avg_var = _tf.reduce_sum(var * prob, axis=1)
-        # uncertainty = _tf.sqrt(avg_var * entropy)
-        # indicators = _tf.math.log(prob + 1e-6)
+        output = {"mean": mu,
+                  "variance": var,
+                  "probability": prob,
+                  "simulations": sims,
+                  "entropy": entropy,
+                  "uncertainty": uncertainty,
+                  "indicators": ind_skew,
+                  "weights": weights}
+        return output
+
+
+class SequentialGaussianIndicator(CategoricalGaussianIndicator):
+    # def __init__(self, n_components, tol=1e-3, sharpness=1):
+    #     super().__init__(n_components - 1, tol, sharpness)
+
+    def log_lik(self, mu, var, y, has_value, is_boundary=None,
+                samples=None, *args, **kwargs):
+        y = 2 * y - 1
+
+        n_data = _tf.shape(mu)[0]
+
+        # sequential logic
+        # ones = _tf.ones_like(y[:, 0])
+        # zeros = _tf.zeros_like(y[:, 0])
+        # keep_vals = [_tf.where(_tf.greater(y[:, 0], 0.0), ones, zeros)]
+        # contacts = _tf.where(_tf.equal(y[:, 0], 0.0), ones, zeros)
+        # for i in range(1, self.size):
+        #     # positives for class i
+        #     k = _tf.where(_tf.greater(y[:, i], 0.0), ones, zeros)
         #
-        # idx = _tf.range(_tf.shape(mu)[0])[:, None]
-        #
-        # def ind_fn(z):
-        #     idx_cat, col = z
-        #     tmp_ind = _tf.tensor_scatter_nd_update(
-        #         indicators,
-        #         _tf.concat([idx, _tf.ones_like(idx) * idx_cat], axis=1),
-        #         _tf.ones([n_data], _tf.float64) * -999
+        #     # negatives up to class i-1
+        #     k = _tf.where(_tf.logical_or(
+        #         _tf.equal(k, 1.0), _tf.equal(keep_vals[i - 1], 1.0)),
+        #         ones, zeros
         #     )
-        #     return col - _tf.reduce_max(tmp_ind, axis=1)
         #
-        # ind_skew = _tf.map_fn(
-        #     ind_fn, [_tf.range(n_cat), _tf.transpose(indicators)],
-        #     dtype=_tf.float64)
-        # ind_skew = _tf.transpose(ind_skew)
+        #     # contacts up to class i-1
+        #     contacts = _tf.where(
+        #         _tf.logical_or(
+        #             _tf.equal(contacts, 1.0),
+        #             _tf.equal(y[:, i], 0.0)
+        #         ),
+        #         ones, zeros
+        #     )
+        #     k = _tf.where(_tf.logical_or(
+        #         _tf.equal(k, 1.0), _tf.equal(contacts, 1.0)),
+        #         ones, zeros
+        #     )
+        #     keep_vals.append(k)
+        # keep_vals = _tf.stack(keep_vals, axis=1)
+
+        # mu = _tf.concat([
+        #     _tf.ones([n_data, 1], _tf.float64),
+        #     mu
+        # ], axis=1)
+        # var = _tf.concat([
+        #     _tf.ones([n_data, 1], _tf.float64) * 1e-6,
+        #     var
+        # ], axis=1)
+
+        # dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+        # prob_pos = dist.survival_function(self.tol)
+
+        # # interference over previous classes
+        # mu_int = [mu[:, 0, None]]
+        # var_int = [var[:, 0, None]]
+        # for i in range(1, self.size):
+        #     dist_int = _tfd.Normal(
+        #         _tf.concat(mu_int, axis=1),
+        #         _tf.sqrt(_tf.concat(var_int, axis=1) + 1e-6))
+        #     prob_pos_int = dist_int.survival_function(self.tol)
+        #     for j in range(i):
+        #         w = 1.0 - 2*prob_pos[:, i, None]*prob_pos_int[:, j, None]
+        #         mu_int[j] = mu_int[j] * w
+        #         var_int[j] = var_int[j] * w**2
+        #     mu_int.append(mu[:, i, None])
+        #     var_int.append(var[:, i, None])
+        # mu_int = _tf.concat(mu_int, axis=1)
+        # var_int = _tf.concat(var_int, axis=1)
         #
-        # lik_var = prob * (1 - prob)
-        # lik_var = _tf.reduce_sum(lik_var, axis=1)
-        # weights = _tf.reduce_sum(explained_var, axis=1) / (lik_var + 1e-6)
+        # dist = _tfd.Normal(mu_int, _tf.sqrt(var_int + 1e-6))
+        # prob_neg = dist.log_cdf(- self.tol)
+        # prob_zero = _tf.math.log(
+        #     dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
+        # prob_pos = dist.log_survival_function(self.tol)
+
+        dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+        prob_neg = dist.cdf(- self.tol)
+        prob_pos = dist.survival_function(self.tol)
+
+        prob_neg = _tf.unstack(prob_neg, axis=1)
+        prob_pos = _tf.unstack(prob_pos, axis=1)
+        for i in range(1, self.size):
+            for j in range(i):
+                prob_neg[j] = prob_neg[j] * prob_neg[i] + prob_pos[i]
+                prob_pos[j] = prob_pos[j] * prob_neg[i]
+        prob_neg = _tf.stack(prob_neg, axis=1)
+        prob_pos = _tf.stack(prob_pos, axis=1)
+
+        prob_zero = _tf.math.log(1 - prob_pos - prob_neg + 1e-6)
+        prob_neg = _tf.math.log(prob_neg + 1e-6)
+        prob_pos = _tf.math.log(prob_pos + 1e-6)
+
+        log_density = _tf.where(
+            _tf.less(y, - self.tol),
+            prob_neg,
+            _tf.where(_tf.greater(y, self.tol),
+                      prob_pos,
+                      prob_zero)
+        )
+
+        log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
+
+        has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
+        log_density = _tf.reduce_sum(log_density * has_value)
+
+        return log_density * self.sharpness
+
+    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+        # n_data = _tf.shape(mu)[0]
+        # mu = _tf.concat([
+        #     _tf.ones([n_data, 1], _tf.float64),
+        #     mu
+        # ], axis=1)
+        # var = _tf.concat([
+        #     _tf.ones([n_data, 1], _tf.float64) * 1e-6,
+        #     var
+        # ], axis=1)
+
+        # dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+        # prob_pos = dist.survival_function(self.tol)
+        #
+        # # interference over previous classes
+        # mu_int = [mu[:, 0, None]]
+        # var_int = [var[:, 0, None]]
+        # for i in range(1, self.size):
+        #     dist_int = _tfd.Normal(
+        #         _tf.concat(mu_int, axis=1),
+        #         _tf.sqrt(_tf.concat(var_int, axis=1) + 1e-6))
+        #     prob_pos_int = dist_int.survival_function(self.tol)
+        #     for j in range(i):
+        #         w = 1.0 - 2 * prob_pos[:, i, None] * prob_pos_int[:, j, None]
+        #         mu_int[j] = mu_int[j] * w
+        #         var_int[j] = var_int[j] * w ** 2
+        #     mu_int.append(mu[:, i, None])
+        #     var_int.append(var[:, i, None])
+        # mu_int = _tf.concat(mu_int, axis=1)
+        # var_int = _tf.concat(var_int, axis=1)
+        #
+        # dist = _tfd.Normal(mu_int, _tf.sqrt(var_int + 1e-6))
+        # log_prob_positive = dist.log_survival_function(self.tol)
+        # log_prob_negative = dist.log_prob(- self.tol)
+
+        dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+        prob_neg = dist.cdf(0)
+        prob_pos = dist.survival_function(0)
+
+        prob_neg = _tf.unstack(prob_neg, axis=1)
+        prob_pos = _tf.unstack(prob_pos, axis=1)
+        for i in range(1, self.size):
+            for j in range(i):
+                prob_neg[j] = prob_neg[j] * prob_neg[i] + prob_pos[i]
+                prob_pos[j] = prob_pos[j] * prob_neg[i]
+        prob_neg = _tf.stack(prob_neg, axis=1)
+        prob_pos = _tf.stack(prob_pos, axis=1)
+        log_prob_negative = _tf.math.log(prob_neg + 1e-6)
+        log_prob_positive = _tf.math.log(prob_pos + 1e-6)
+
+        # probability of being class i AND not being the others
+        log_prob_final = []
+        for i in range(self.size):
+            log_prob_i = []
+            for j in range(self.size):
+                if j == i:
+                    log_prob_i.append(log_prob_positive[:, j])
+                else:
+                    log_prob_i.append(log_prob_negative[:, j])
+            log_prob_final.append(_tf.add_n(log_prob_i))
+        log_prob_final = _tf.stack(log_prob_final, axis=1)
+
+        prob = _tf.nn.softmax(log_prob_final, axis=1)
+
+        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
+            prob, var, explained_var
+        )
 
         output = {"mean": mu,
                   "variance": var,
@@ -830,6 +1282,109 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
                   "indicators": ind_skew,
                   "weights": weights}
         return output
+
+
+# class CategoricalGaussianIndicatorMax(CategoricalGaussianIndicator):
+#     def log_lik(self, mu, var, y, has_value, is_boundary=None,
+#                 samples=None, *args, **kwargs):
+#         y = 2 * y - 1
+#
+#         dist_pos = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+#         dist_neg = _tfd.Normal(-mu, _tf.sqrt(var + 1e-6))
+#
+#         # prob below -tol
+#         cdf_pos = dist_pos.log_cdf(- self.tol)
+#         cdf_neg = dist_neg.log_cdf(- self.tol)
+#
+#         cdf_pos = _tf.unstack(cdf_pos, axis=1)
+#         cdf_neg = _tf.unstack(cdf_neg, axis=1)
+#
+#         prob_neg = []
+#         for i in range(self.size):
+#             cdf = _tf.stack(
+#                 [cdf_pos[j] if j == i else cdf_neg[j]
+#                  for j in range(self.size)],
+#                 axis=1)
+#             prob_neg.append(_tf.reduce_sum(cdf, axis=1))
+#         prob_neg = _tf.stack(prob_neg, axis=1)
+#
+#         # prob above +tol
+#         cdf_pos = dist_pos.log_cdf(self.tol)
+#         cdf_neg = dist_neg.log_cdf(self.tol)
+#
+#         cdf_pos = _tf.unstack(cdf_pos, axis=1)
+#         cdf_neg = _tf.unstack(cdf_neg, axis=1)
+#
+#         prob_pos = []
+#         for i in range(self.size):
+#             cdf = _tf.stack(
+#                 [cdf_pos[j] if j == i else cdf_neg[j]
+#                  for j in range(self.size)],
+#                 axis=1)
+#             prob_pos.append(_tf.reduce_sum(cdf, axis=1))
+#         prob_pos = _tf.stack(prob_pos, axis=1)
+#         prob_pos = _tf.math.log(1.0 - _tf.math.exp(prob_pos) + 1e-6)
+#
+#         prob_zero = _tf.math.log(
+#             1.0 - _tf.math.exp(prob_pos) - _tf.math.exp(prob_neg) + 1e-6)
+#
+#         # log_density = _tf.where(
+#         #     _tf.less(y, - self.tol),
+#         #     prob_neg,
+#         #     _tf.where(_tf.greater(y, self.tol),
+#         #               prob_pos,
+#         #               prob_zero)
+#         # )
+#         log_density = _tf.where(
+#             _tf.greater(y, self.tol),
+#             prob_pos,
+#             _tf.where(_tf.less(y, - self.tol),
+#                       0.0,
+#                       prob_zero)
+#         )
+#
+#         log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
+#
+#         has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
+#         log_density = _tf.reduce_sum(log_density * has_value)
+#
+#         return log_density * self.sharpness
+#
+#     def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+#         dist_pos = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+#         dist_neg = _tfd.Normal(-mu, _tf.sqrt(var + 1e-6))
+#
+#         # probability of max(class i, not class j), j != i
+#         cdf_pos = dist_pos.log_cdf(0.0)
+#         cdf_neg = dist_neg.log_cdf(0.0)
+#
+#         cdf_pos = _tf.unstack(cdf_pos, axis=1)
+#         cdf_neg = _tf.unstack(cdf_neg, axis=1)
+#
+#         logits = []
+#         for i in range(self.size):
+#             cdf = _tf.stack(
+#                 [cdf_pos[j] if j == i else cdf_neg[j]
+#                  for j in range(self.size)],
+#                 axis=1)
+#             logits.append(_tf.reduce_sum(cdf, axis=1))
+#         logits = _tf.stack(logits, axis=1)
+#         logits = _tf.math.log(1.0 - _tf.math.exp(logits) + 1e-6)
+#         prob = _tf.nn.softmax(logits)
+#
+#         entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
+#             prob, var, explained_var
+#         )
+#
+#         output = {"mean": mu,
+#                   "variance": var,
+#                   "probability": prob,
+#                   "simulations": sims,
+#                   "entropy": entropy,
+#                   "uncertainty": uncertainty,
+#                   "indicators": ind_skew,
+#                   "weights": weights}
+#         return output
 
 
 class LowRankGaussianIndicator(_CategoricalLikelihood):
@@ -908,6 +1463,31 @@ class LowRankGaussianIndicator(_CategoricalLikelihood):
 class _CompositionalLikelihood(_Likelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
                  warping=_warp.Identity()):
+        """
+        Compositional likelihood.
+
+        Used to model compositional variables (i.e. multiple variables which
+        are constrained to unit sum). Assumes the data sums to 1. Requires up
+        to `N-1` latent variables for `N` components. Due to the non-linear
+        constraint, employs Monte Carlo for training.
+
+        A good contrast matrix can improve the modeling results. See the
+        compositional data literature for how to build one. Good contrasts
+        often involve major vs minor elements, oxides vs sulfides, etc.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of components in the composition.
+        n_basis : int
+            Number of latent variables to use. Default is `n_components-1`. A
+            smaller value forces a PCA-like decomposition of the contrasts.
+        contrast_matrix : array
+            A `n_components-1` by `n_components` matrix of contrasts.
+        warping : Warping
+            A warping object to be applied to each contrast, trained
+            independently.
+        """
         if n_basis is None:
             n_basis = n_components - 1
         elif n_basis >= n_components:
@@ -1088,11 +1668,12 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
         return lik
 
 
-class OrderedGaussianIndicator(_Likelihood):
-    def __init__(self, levels, tol=1e-3):
+class OrderedGaussianIndicator(_CategoricalLikelihood):
+    def __init__(self, levels, tol=1e-6, sharpness=1):
         super().__init__(1)
         self.levels = levels
         self.tol = tol
+        self.sharpness = sharpness
 
     def log_lik(self, mu, var, y, has_value,
                 samples=None, *args, **kwargs):
@@ -1174,21 +1755,43 @@ class OrderedGaussianIndicator(_Likelihood):
                 )
 
         has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
-        log_density = _tf.reduce_sum(log_density * has_value)
 
-        return log_density
+        weights = 2 - _tf.math.exp(log_density)
+        weights = weights / _tf.reduce_sum(weights * has_value) \
+                  * _tf.reduce_sum(has_value)
+
+        log_density = _tf.reduce_sum(log_density * has_value * weights)
+
+        return log_density * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, *args, **kwargs):
-        weights = _tf.squeeze(explained_var / (var + 1e-6))
-
         mu = mu + (self.levels - 1) / 2
-        var = var * self.levels ** 2
+        # var = var * self.levels ** 2
+        # explained_var = explained_var * self.levels ** 2
         sims = sims + (self.levels - 1) / 2
 
-        output = {"mean": _tf.squeeze(mu),
-                  "variance": _tf.squeeze(var),
-                  "simulations": sims[:, 0, :],
-                  "weights": weights}
+        dist = _tfd.Normal(mu, _tf.sqrt(var * self.levels ** 2 + 1e-6))
+
+        prob = [dist.cdf(0)]
+        for level in range(self.levels):
+            prob.append(dist.cdf(level + 1) - dist.cdf(level))
+        prob[-1] = dist.survival_function(self.levels - 1)
+        prob = _tf.concat(prob, axis=1)
+
+        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
+            prob, var, explained_var
+        )
+
+        levels = _np.arange(self.levels + 1)
+
+        output = {"mean": mu - levels[None, :],
+                  "variance": _tf.tile(var, [1, self.levels + 1]),
+                  "simulations": sims - levels[None, :, None],
+                  "weights": weights,
+                  "probability": prob,
+                  "entropy": entropy,
+                  "uncertainty": uncertainty,
+                  "indicators": ind_skew}
         return output
 
 

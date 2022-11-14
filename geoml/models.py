@@ -17,6 +17,8 @@
 __all__ = ["GP", "GPEnsemble", "StructuralField", "GPOptions",
            "VGPNetwork", "VGPNetworkEnsemble"]
 
+import numpy as np
+
 import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.likelihood as _lk
@@ -27,6 +29,7 @@ import geoml
 import numpy as _np
 import tensorflow as _tf
 import copy as _copy
+import itertools as _iter
 
 import tensorflow_probability as _tfp
 _tfd = _tfp.distributions
@@ -505,14 +508,14 @@ class VGPNetwork(_GPModel):
     @_tf.function
     def _training_elbo(self, x, y, has_value, training_inputs,
                        x_dir=None, directions=None, y_dir=None,
-                       has_value_directions=None,
+                       has_value_directions=None, x_var=None,
                        samples=20,
                        seed=0, jitter=1e-6):
         self.latent_network.refresh(jitter)
 
         # ELBO
         elbo = self._log_lik(x, y, has_value, training_inputs,
-                             samples=samples, seed=seed)
+                             x_var=x_var, samples=samples, seed=seed)
 
         # ELBO for directions
         if x_dir is not None:
@@ -530,12 +533,12 @@ class VGPNetwork(_GPModel):
         return elbo
 
     @_tf.function
-    def _log_lik(self, x, y, has_value, training_inputs,
+    def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
             # prediction
             mu, var, sims, _ = self.latent_network.predict(
-                x, n_sim=samples, seed=[seed, 0])
+                x, x_var=x_var, n_sim=samples, seed=[seed, 0])
 
             mu = _tf.transpose(mu[:, :, 0])
             var = _tf.transpose(var)
@@ -604,6 +607,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y, _tf.float64),
                     _tf.constant(self.has_value, _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance(),
+                                       _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed)
@@ -613,6 +618,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y, _tf.float64),
                     _tf.constant(self.has_value, _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance(),
+                                       _tf.float64),
                     x_dir=_tf.constant(
                         self.directional_data.coordinates,
                         _tf.float64),
@@ -658,6 +665,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                                       _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -669,6 +678,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                                       _tf.float64),
                     x_dir=_tf.constant(
                         self.directional_data.coordinates,
                         _tf.float64),
@@ -709,10 +720,29 @@ class VGPNetwork(_GPModel):
         if self.options.verbose:
             print("\n")
 
-    def train_batched(self, epochs=100):
+    def train_window(self, start, step_size, n_steps, epochs=10):
         unique_params = list(set(self._all_parameters))
         model_variables = [pr.variable for pr in unique_params
                            if not pr.fixed]
+
+        if not isinstance(start, (list, tuple)):
+            start = [start]
+        if not isinstance(step_size, (list, tuple)):
+            step_size = [step_size]
+        if not isinstance(n_steps, (list, tuple)):
+            n_steps = [n_steps]
+
+        positions = [np.arange(i)*s for i, s in zip(n_steps, step_size)]
+        combinations = _np.array(list(_iter.product(*positions)))
+        combinations = combinations + _np.array(start)[None, :]
+
+        # spatial index
+        spatial_index = []
+        for comb in combinations:
+            box = _data.BoundingBox(comb, comb + _np.array(step_size))
+            inside = box.contains_points(self.data.coordinates)
+            if np.any(inside):
+                spatial_index.append(_np.where(inside)[0])
 
         def loss(idx):
             training_inputs = [
@@ -726,6 +756,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                                       _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -737,6 +769,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                                       _tf.float64),
                     x_dir=_tf.constant(
                         self.directional_data.coordinates,
                         _tf.float64),
@@ -754,33 +788,18 @@ class VGPNetwork(_GPModel):
         for i in range(epochs):
             current_elbo = []
 
-            shuffled = _np.random.choice(
-                self.data.n_data, self.data.n_data, replace=False)
-            batches = self.options.batch_index(
-                self.data.n_data, self.options.training_batch_size)
+            for batch in spatial_index:
+                self.optimizer.minimize(
+                    lambda: loss(batch),
+                    model_variables)
 
-            all_grads = [[] for _ in model_variables]
-            for batch in batches:
-                with _tf.GradientTape() as g:
-                    output = loss(shuffled[batch])
-                grad = g.gradient(output, model_variables)
-
-                for j, grad_j in enumerate(all_grads):
-                    grad_j.append(grad[j])
+                for pr in self._all_parameters:
+                    pr.refresh()
 
                 current_elbo.append(self.elbo.numpy())
-
-            all_grads = [_tf.add_n(grad_j) for grad_j in all_grads]
-            self.optimizer.apply_gradients(
-                zip(all_grads, model_variables)
-            )
-
-            for pr in self._all_parameters:
-                pr.refresh()
+                self.training_log.append(current_elbo[-1])
 
             total_elbo = _np.mean(current_elbo)
-            self.training_log.append(total_elbo)
-
             if self.options.verbose:
                 print("\rEpoch %s | ELBO: %s" %
                       (str(i + 1), str(total_elbo)), end="")
@@ -789,9 +808,9 @@ class VGPNetwork(_GPModel):
             print("\n")
 
     def train_svi_experts(self, global_epochs=10, epochs_per_expert=10):
-        if not isinstance(self.latent_network, geoml.latent.ProductOfExperts):
-            raise Exception("the last netwwork node must be a"
-                            "ProductOfExperts")
+        if not isinstance(self.latent_network, geoml.latent.Refine):
+            raise Exception("the last network node must be a"
+                            "Refine object")
 
         unique_params = set(self._all_parameters)
         network_params = set(self.latent_network.all_parameters)
@@ -818,6 +837,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                                       _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -829,6 +850,8 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
                     training_inputs,
+                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                                       _tf.float64),
                     x_dir=_tf.constant(
                         self.directional_data.coordinates,
                         _tf.float64),
@@ -882,13 +905,14 @@ class VGPNetwork(_GPModel):
             print("\n")
 
     @_tf.function
-    def predict_raw(self, x_new, variable_inputs, n_sim=1, seed=0, jitter=1e-6):
+    def predict_raw(self, x_new, variable_inputs, x_var=None,
+                    n_sim=1, seed=0, jitter=1e-6):
         self.latent_network.refresh(jitter)
 
         with _tf.name_scope("Prediction"):
             pred_mu, pred_var, pred_sim, pred_exp_var = \
                 self.latent_network.predict(
-                    x_new, n_sim=n_sim, seed=[seed, 0]
+                    x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0]
                 )
 
             pred_mu = _tf.transpose(pred_mu[:, :, 0])
@@ -937,15 +961,18 @@ class VGPNetwork(_GPModel):
         n_batches = len(batch_id)
 
         # @_tf.function
-        def batch_pred(x):
+        def batch_pred(x, x_var=None):
             out = self.predict_raw(
                 x,
                 variable_inputs,
+                x_var=x_var,
                 seed=self.options.seed,
                 n_sim=n_sim,
                 jitter=self.options.jitter
             )
             return out
+
+        data_var = newdata.get_data_variance()
 
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
@@ -953,7 +980,8 @@ class VGPNetwork(_GPModel):
                       % (str(i + 1), str(n_batches)), end="")
 
             output = batch_pred(
-                _tf.constant(newdata.coordinates[batch], _tf.float64))
+                _tf.constant(newdata.coordinates[batch], _tf.float64),
+                _tf.constant(data_var[batch], _tf.float64))
 
             for v, upd in zip(self.variables, output):
                 newdata.variables[v].update(batch, **upd)
@@ -1359,11 +1387,12 @@ class VGPNetworkEnsemble(_EnsembleModel):
             data=d,
             variables=variables,
             # likelihoods=_copy.deepcopy(likelihoods),
-            likelihoods=likelihoods,
+            likelihoods=lik,
             latent_network=l,
             directional_data=dd,
             options=options)
-            for d, l, dd in zip(data, latent_networks, directional_data)]
+            for d, l, dd, lik in zip(
+                data, latent_networks, directional_data, likelihoods)]
         for model in self.models:
             self._register(model)
 
@@ -1379,32 +1408,31 @@ class VGPNetworkEnsemble(_EnsembleModel):
             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
         return s
 
-    def train_full(self, cycles=10, max_iter_per_model=100):
-        for c in range(cycles):
-            for i, model in enumerate(self.models):
-                if self.options.verbose:
-                    print("Cycle %d of %d - training model %d of %d" %
-                          (c + 1, cycles, i + 1, len(self.models)))
+    # def train_full(self, cycles=10, max_iter_per_model=100):
+    #     for c in range(cycles):
+    #         for i, model in enumerate(self.models):
+    #             if self.options.verbose:
+    #                 print("Cycle %d of %d - training model %d of %d" %
+    #                       (c + 1, cycles, i + 1, len(self.models)))
+    #
+    #             model.train_full(max_iter=max_iter_per_model)
+    #
+    # def train_svi(self, cycles=10, epochs_per_model=10):
+    #     for c in range(cycles):
+    #         for i, model in enumerate(self.models):
+    #             if self.options.verbose:
+    #                 print("Cycle %d of %d - training model %d of %d" %
+    #                       (c + 1, cycles, i + 1, len(self.models)))
+    #
+    #             model.train_svi(epochs=epochs_per_model)
 
-                model.train_full(max_iter=max_iter_per_model)
+    def train_full(self, max_iter=1000):
+        for model in self.models:
+            model.train_full(max_iter)
 
-    def train_svi(self, cycles=10, epochs_per_model=10):
-        for c in range(cycles):
-            for i, model in enumerate(self.models):
-                if self.options.verbose:
-                    print("Cycle %d of %d - training model %d of %d" %
-                          (c + 1, cycles, i + 1, len(self.models)))
-
-                model.train_svi(epochs=epochs_per_model)
-
-    def train_batched(self, cycles=10, epochs_per_model=10):
-        for c in range(cycles):
-            for i, model in enumerate(self.models):
-                if self.options.verbose:
-                    print("Cycle %d of %d - training model %d of %d" %
-                          (c + 1, cycles, i + 1, len(self.models)))
-
-                model.train_batched(epochs=epochs_per_model)
+    def train_svi(self, epochs=100):
+        for model in self.models:
+            model.train_svi(epochs)
 
     def predict(self, newdata, n_sim=20):
         """
@@ -1525,8 +1553,12 @@ class VGPNetworkEnsemble(_EnsembleModel):
 #         kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
 #         elbo = elbo - kl
 #
+#         # wasserstein distance
+#         div = self.latent_network.wasserstein_distance()
+#         elbo = elbo - div
+#
 #         self.elbo.assign(elbo)
-#         self.kl_div.assign(kl)
+#         self.kl_div.assign(div)
 #         return elbo
 #
 #     @_tf.function
@@ -1597,3 +1629,5 @@ class VGPNetworkEnsemble(_EnsembleModel):
 #                     self.likelihoods, variable_inputs):
 #                 output.append(lik.predict(mu, var, sim, exp_var, **v_inp))
 #             return output
+
+
