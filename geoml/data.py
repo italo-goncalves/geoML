@@ -28,6 +28,7 @@ import numpy as _np
 import copy as _copy
 import collections as _col
 import pyvista as _pv
+import itertools as _iter
 
 from skimage import measure as _measure
 
@@ -457,7 +458,10 @@ class ContinuousVariable(_Variable):
         self.reset_probabilities(quantiles)
 
     def get_measurements(self):
-        return self.measurements.values[:, None]
+        values = self.measurements.values.copy()[:, None]
+        has_value = (~ _np.isnan(values)) * 1.0
+        values[_np.isnan(values)] = 0
+        return values, has_value
 
     def reset_quantiles(self, probabilities=None):
         """
@@ -794,7 +798,11 @@ class CompositionalVariable(_Variable):
         total = _np.sum(out, axis=1, keepdims=True)
         total = _np.where(_np.abs(total - 1) < 1e-10, 1.0, _np.nan)
         out = out * total
-        return out
+
+        has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
+        has_value = _np.tile(has_value, [1, self.length])
+        out[_np.isnan(out)] = 0
+        return out, has_value
 
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
@@ -924,7 +932,7 @@ class _Category(_Variable):
         return df
 
     def update(self, idx, **kwargs):
-        self.indicator_predicted.values[idx] = kwargs["measurements"].numpy()
+        self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
         self.indicator_mean.values[idx] = kwargs["mean"].numpy()
         self.indicator_variance.values[idx] = kwargs["variance"].numpy()
         self.probability.values[idx] = kwargs["probability"].numpy()
@@ -1222,7 +1230,10 @@ class OrderedRockType(RockTypeVariable):
         self.implicit_values = self._Attribute(coordinates, implicit_values)
 
     def get_measurements(self):
-        return self.implicit_values.values[:, None]
+        values = self.implicit_values.values.copy()[:, None]
+        has_value = (~ _np.isnan(values)) * 1.0
+        values[_np.isnan(values)] = 0
+        return values, has_value
 
     def __getitem__(self, item):
         new_obj = super().__getitem__(item)
@@ -1274,7 +1285,10 @@ class BinaryVariable(_Variable):
                         n_data / (n_in_label * len(labels))
 
     def get_measurements(self):
-        return self.indicator.values[:, None]
+        values = self.indicator.values.copy()[:, None]
+        has_value = (~ _np.isnan(values)) * 1.0
+        values[_np.isnan(values)] = 0
+        return values, has_value
 
     @classmethod
     def from_variable(cls, coordinates, variable):
@@ -1493,6 +1507,10 @@ class _SpatialData(object):
 
 class _PointBased(_SpatialData):
     """Abstract class for data objects based on points"""
+    def __init__(self):
+        super().__init__()
+        self.coordinates = None
+
     def __str__(self):
         s = "Object of class %s with %s data locations\n\n" \
             % (self.__class__.__name__, str(self.n_data))
@@ -1532,6 +1550,9 @@ class _PointBased(_SpatialData):
     def add_compositional_variable(self, name, labels, measurements=None):
         self.variables[name] = CompositionalVariable(
             name, self, labels, measurements)
+
+    def get_data_variance(self):
+        return _np.zeros_like(self.coordinates)
 
 
 class PointData(_PointBased):
@@ -1647,9 +1668,6 @@ class PointData(_PointBased):
 
         return pv_points
 
-    def get_data_variance(self):
-        return _np.zeros_like(self.coordinates)
-
 
 class GaussianData(PointData):
     def __init__(self, data, coordinates_mean, coordinates_variance):
@@ -1677,7 +1695,28 @@ class GaussianData(PointData):
         return self.variance
 
 
-class Grid1D(PointData):
+class _GriddedData(PointData):
+    def __init__(self, data, coordinates):
+        super().__init__(data, coordinates)
+        self.grid = None
+        self.grid_size = None
+        self.step_site = None
+
+    def index_data(self, data):
+        if data.n_dim != self.n_dim:
+            raise ValueError("Data dimension mismatch. Expected dimension %d"
+                             " and found %d." % (self.n_dim, data.n_dim))
+
+        cell_id = [
+            _np.ceil((data.coordinates[:, i] - self.grid[i][0]
+                       - self.step_size[i]/2) / self.step_size[i]).astype(int)
+            for i in range(self.n_dim)
+        ]
+
+        return _np.stack(cell_id, axis=1)
+
+
+class Grid1D(_GriddedData):
     """
     Equally spaced points in 1D.
 
@@ -1837,7 +1876,7 @@ class Grid1D(PointData):
         )
 
 
-class Grid2D(PointData):
+class Grid2D(_GriddedData):
     """
     Equally spaced points in 2D.
 
@@ -1884,8 +1923,8 @@ class Grid2D(PointData):
                               (end[1] - start[1]) / (n[1] - 1)])
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
-        coords = _np.array([(x, y) for y in grid_y for x in grid_x],
-                           dtype=_np.float)
+        coords = _np.array(list(_iter.product(grid_y, grid_x)),
+                           dtype=_np.float)[:, ::-1]
 
         if labels is None:
             labels = ["X", "Y"]
@@ -2020,7 +2059,7 @@ class Grid2D(PointData):
         )
 
 
-class Grid3D(PointData):
+class Grid3D(_GriddedData):
     """
     Equally spaced points in 3D.
 
@@ -2070,8 +2109,8 @@ class Grid3D(PointData):
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
         grid_z = _np.linspace(start[2], end[2], n[2])
-        coords = _np.array([(x, y, z) for z in grid_z for y in grid_y
-                            for x in grid_x], dtype=_np.float)
+        coords = _np.array(list(_iter.product(grid_z, grid_y, grid_x)),
+                           dtype=_np.float)[:, ::-1]
 
         if labels is None:
             labels = ["X", "Y", "Z"]
@@ -2081,31 +2120,6 @@ class Grid3D(PointData):
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = [int(num) for num in n]
-
-    def index_data(self, data, variable):
-        data = data.subset_region(self.bounding_box[0], self.bounding_box[1])
-
-        # grid_id = _np.array([(x, y, z)
-        #                      for z in range(int(self.grid_size[2]))
-        #                      for y in range(int(self.grid_size[1]))
-        #                      for x in range(int(self.grid_size[0]))])
-        # cols = ["xid", "yid", "zid"]
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-
-        return raw_data
 
     def aggregate_categorical(self, data, variable):
         data = data.subset_region(self.bounding_box.min[0],
@@ -2255,7 +2269,7 @@ class Grid3D(PointData):
         return pv_grid
 
 
-class GridND(_SpatialData):
+class GridND(_GriddedData):
     """
     Implicit grid in N dimensions.
     """
@@ -2871,3 +2885,63 @@ class Surface3D(_PointBased):
         triangles_df = pd.DataFrame(
             self.triangles, columns=["PointId1", "PointId2", "PointId3"])
         triangles_df.to_csv(triangles_filename + ".csv", index=False)
+
+
+def _blockdata(cls):
+    # Decorator to extend functionality of some classes
+    # Used to avoid multiple inheritance
+
+    old_init = cls.__init__
+
+    def new_init(self, start, n, step, discretization=None):
+        old_init(self, start, n, step)
+        if discretization is None:
+            discretization = [1] * self.n_dim
+        self.discretization = discretization
+
+        self._bounding_box = BoundingBox(
+            _np.min(self.coordinates, axis=0) - _np.array(self.step_size) / 2,
+            _np.max(self.coordinates, axis=0) + _np.array(self.step_size) / 2,
+        )
+
+        sub_grid = _np.array(
+            list(_iter.product(
+                *[_np.arange(d) for d in self.discretization[::-1]]
+            )),
+            dtype=_np.float)[:, ::-1]
+        sub_grid -= (_np.array(self.discretization)[None, :] - 1) / 2
+        sub_grid *= _np.array(self.step_size)[None, :]
+        sub_grid /= (_np.array(self.discretization)[None, :] + 1)
+        self.sub_grid = sub_grid
+
+    def discretized_coordinates(self, index):
+        center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
+        return self.sub_grid + center
+
+    def inducing_grid(self, index):
+        center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
+        grid = self.sub_grid
+        discr = _np.array(self.discretization)[None, :]
+        grid = grid * (discr + 1) / (discr - 1) + center
+        return PointData.from_array(grid)
+
+    cls.__init__ = new_init
+    cls.discretized_coordinates = discretized_coordinates
+    cls.inducing_grid = inducing_grid
+
+    return cls
+
+
+@_blockdata
+class Blocks1D(Grid1D):
+    pass
+
+
+@_blockdata
+class Blocks2D(Grid2D):
+    pass
+
+
+@_blockdata
+class Blocks3D(Grid3D):
+    pass

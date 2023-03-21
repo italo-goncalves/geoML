@@ -131,69 +131,6 @@ class _Operation(_LatentVariable):
             p.set_parameter_limits(data)
 
 
-class LatentNetworkOutput(_LatentVariable):
-    # The only difference between this class and Concatenate is that this one
-    # adds up the KL-divergences of all unique parents
-    def __init__(self, *latent_variables):
-        super().__init__()
-        self.parents = list(latent_variables)
-        self._size = sum([p.size for p in self.parents])
-        for lat in latent_variables:
-            self._register(lat)
-            lat.children.append(self)
-
-    def get_unique_parents(self):
-        all_parents = self.parents.copy()
-        for p in self.parents:
-            all_parents.extend(p.get_unique_parents())
-        return list(set(all_parents))
-
-    def set_parameter_limits(self, data):
-        for p in self.parents:
-            p.set_parameter_limits(data)
-
-    def refresh(self, jitter=1e-9):
-        for p in self.parents:
-            p.refresh(jitter)
-
-    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        all_mean, all_var, all_sims, all_exp_var = [], [], [], []
-
-        for p in self.parents:
-            mean, var, sims, exp_var = p.predict(x, x_var, n_sim, seed)
-            all_mean.append(mean)
-            all_var.append(var)
-            all_sims.append(sims)
-            all_exp_var.append(exp_var)
-
-        all_mean = _tf.concat(all_mean, axis=0)
-        all_var = _tf.concat(all_var, axis=0)
-        all_sims = _tf.concat(all_sims, axis=0)
-        all_exp_var = _tf.concat(all_exp_var, axis=0)
-
-        return all_mean, all_var, all_sims, all_exp_var
-
-    def predict_directions(self, x, dir_x, step=1e-3):
-        all_mean, all_var, all_exp_var = [], [], []
-
-        for p in self.parents:
-            mean, var, exp_var = p.predict_directions(x, dir_x, step)
-            all_mean.append(mean)
-            all_var.append(var)
-            all_exp_var.append(exp_var)
-
-        all_mean = _tf.concat(all_mean, axis=0)
-        all_var = _tf.concat(all_var, axis=0)
-        all_exp_var = _tf.concat(all_exp_var, axis=0)
-
-        return all_mean, all_var, all_exp_var
-
-    def kl_divergence(self):
-        unique_parents = self.get_unique_parents()
-        kl = _tf.add_n([p.kl_divergence() for p in unique_parents])
-        return kl
-
-
 class BasicInput(_RootLatentVariable):
     def __init__(self, inducing_points, transform=_tr.Identity(),
                  fix_inducing_points=True, fix_transform=False,
@@ -208,6 +145,7 @@ class BasicInput(_RootLatentVariable):
         if fix_transform:
             for p in self.transform.all_parameters:
                 p.fix()
+        self.transform.set_limits(inducing_points)
 
         self.n_ip = inducing_points.coordinates.shape[0]
         self._add_parameter(
@@ -252,7 +190,8 @@ class BasicInput(_RootLatentVariable):
         var = _tf.zeros_like(x_tr)
         if n_sim > 0:
             sims = _tf.tile(x_tr[:, :, None], [1, 1, n_sim])
-            return x_tr[:, :, None], var, sims, _tf.zeros_like(var)
+            return x_tr[:, :, None], var, sims, \
+                   _tf.zeros_like(var), _tf.zeros_like(var)
         else:
             return x_tr[:, :, None], var
 
@@ -297,20 +236,22 @@ class Concatenate(_Operation):
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         if n_sim > 0:
-            means, variances, sims, exp_vars = [], [], [], []
+            means, variances, sims, exp_vars, influences = [], [], [], [], []
             for lat in self.parents:
-                m, v, s, ev = lat.predict(x, x_var, n_sim, seed)
+                m, v, s, ev, inf = lat.predict(x, x_var, n_sim, seed)
                 means.append(m)
                 variances.append(v)
                 sims.append(s)
                 exp_vars.append(ev)
+                influences.append(inf)
 
             mean = _tf.concat(means, axis=0)
             var = _tf.concat(variances, axis=0)
             sims = _tf.concat(sims, axis=0)
             exp_var = _tf.concat(exp_vars, axis=0)
+            influence = _tf.concat(influences, axis=0)
 
-            return mean, var, sims, exp_var
+            return mean, var, sims, exp_var, influence
         else:
             means, variances = [], []
             for lat in self.parents:
@@ -360,7 +301,7 @@ class BasicGP(_FunctionalLatentVariable):
             _gpr.PositiveParameter(
                 _np.ones([self.size, n_ip]),
                 _np.ones([self.size, n_ip]) * 1e-6,
-                _np.ones([self.size, n_ip]) * 1e4
+                _np.ones([self.size, n_ip]) * 1e2
             ))
 
         self._add_parameter(
@@ -405,15 +346,10 @@ class BasicGP(_FunctionalLatentVariable):
     def refresh(self, jitter=1e-9):
         with _tf.name_scope("basic_refresh"):
             self.parent.refresh(jitter)
-            # ranges = self.parameters["ranges"].get_value()
-            # avg_var = _tf.reduce_mean(ranges**2, axis=1, keepdims=True)
-            # avg_var = _tf.ones_like(ranges)
 
             # prior
             ip = self.parent.inducing_points
             ip_var = self.parent.inducing_points_variance
-            # ip_std = _tf.sqrt(ip_var + ranges**2)
-            # ip_std = _tf.sqrt(ip_var)
 
             eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
 
@@ -421,38 +357,38 @@ class BasicGP(_FunctionalLatentVariable):
             chol = _tf.linalg.cholesky(cov)
             cov_inv = _tf.linalg.cholesky_solve(chol, eye)
 
-            self.cov = _tf.tile(cov[None, :, :], [self.size, 1, 1])
-            self.cov_chol = _tf.tile(chol[None, :, :], [self.size, 1, 1])
-            self.cov_inv = _tf.tile(cov_inv[None, :, :], [self.size, 1, 1])
-
-            # prior_ranges = _tf.sqrt(ip_var + avg_var)
-            # self.prior_cov = self.covariance_matrix(
-            #     ip, ip, prior_ranges, prior_ranges) + eye * jitter
-            # self.prior_cov_chol = _tf.linalg.cholesky(self.prior_cov)
-            # self.prior_cov_inv = _tf.linalg.cholesky_solve(
-            #     self.prior_cov_chol, eye)
+            self.cov = cov  # _tf.tile(cov[None, :, :], [self.size, 1, 1])
+            self.cov_chol = chol  # = _tf.tile(chol[None, :, :], [self.size, 1, 1])
+            self.cov_inv = cov_inv  #_tf.tile(cov_inv[None, :, :], [self.size, 1, 1])
 
             # posterior
             eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
             delta = self.parameters["delta"].get_value()
             delta_diag = _tf.linalg.diag(delta)
-            self.cov_smooth = self.cov + delta_diag
+            self.cov_smooth = self.cov[None, :, :] + delta_diag
             self.cov_smooth_chol = _tf.linalg.cholesky(
                 self.cov_smooth + eye * jitter)
             self.cov_smooth_inv = _tf.linalg.cholesky_solve(
                 self.cov_smooth_chol, eye)
             self.chol_r = _tf.linalg.cholesky(
-                self.cov_inv - self.cov_smooth_inv + eye * jitter)
+                self.cov_inv[None, :, :] - self.cov_smooth_inv + eye * jitter)
 
             # inducing points
             alpha_white = self.parameters["alpha_white"].get_value()
-            pred_inputs = _tf.matmul(self.cov_chol, alpha_white)
+            # pred_inputs = _tf.matmul(self.cov_chol, alpha_white)
+            pred_inputs = _tf.einsum("ab,sbc->sac", self.cov_chol, alpha_white)
             self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
-            self.alpha = _tf.matmul(self.cov_inv, pred_inputs)
+            # self.alpha = _tf.matmul(self.cov_inv, pred_inputs)
+            self.alpha = _tf.einsum("ab,sbc->sac", self.cov_inv, pred_inputs)
+            # pred_var = 1.0 - _tf.reduce_sum(
+            #         _tf.matmul(self.cov, self.cov_smooth_inv) * self.cov,
+            #         axis=2, keepdims=False
+            #     )
             pred_var = 1.0 - _tf.reduce_sum(
-                    _tf.matmul(self.cov, self.cov_smooth_inv) * self.cov,
-                    axis=2, keepdims=False
-                )
+                _tf.einsum("ab,sbc->sac", self.cov, self.cov_smooth_inv)
+                * self.cov[None, :, :],
+                axis=2, keepdims=False
+            )
             self.inducing_points_variance = _tf.transpose(pred_var)
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
@@ -462,23 +398,31 @@ class BasicGP(_FunctionalLatentVariable):
             cov_cross = self.covariance_matrix(
                 x, self.parent.inducing_points,
                 x_var, self.parent.inducing_points_variance)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
 
-            mu = _tf.matmul(cov_cross, self.alpha)
+            mu = _tf.einsum("ab,sbc->sac", cov_cross, self.alpha)
 
             explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.cov_smooth_inv) * cov_cross,
+                _tf.einsum("ab,sbc->sac", cov_cross, self.cov_smooth_inv)
+                * cov_cross[None, :, :],
                 axis=2, keepdims=False)
             var = _tf.maximum(1.0 - explained_var, 0.0)
+
+            influence = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.cov_inv) * cov_cross,
+                axis=1, keepdims=False)
+            influence = _tf.tile(influence[None, :], [self.size, 1])
 
             if n_sim > 0:
                 rnd = _tf.random.stateless_normal(
                     shape=[self.size, self.root.n_ip, n_sim],
                     seed=seed, dtype=_tf.float64
                 )
-                sims = _tf.matmul(cov_cross, _tf.matmul(self.chol_r, rnd)) + mu
+                sims = _tf.einsum(
+                    "ab,sbc->sac",
+                    cov_cross,
+                    _tf.matmul(self.chol_r, rnd)) + mu
 
-                return mu, var, sims, explained_var
+                return mu, var, sims, explained_var, influence
 
             else:
                 return mu, var
@@ -546,12 +490,12 @@ class BasicGP(_FunctionalLatentVariable):
 
             cov_cross = self.covariance_matrix_d1(x, dir_x, step)
             cov_cross = _tf.transpose(cov_cross)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
 
-            mu = _tf.matmul(cov_cross, self.alpha)
+            mu = _tf.einsum("ab,sbc->sac", cov_cross, self.alpha)
 
             explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.cov_smooth_inv) * cov_cross,
+                _tf.einsum("ab,sbc->sac", cov_cross, self.cov_smooth_inv)
+                * cov_cross[None, :, :],
                 axis=2, keepdims=False)
 
             point_var = self.point_variance_d2(x, dir_x, step)
@@ -723,14 +667,16 @@ class Linear(_FunctionalLatentVariable):
         weights = self.parameters["weights"].get_value()
 
         if n_sim > 0:
-            mu, var, sims, exp_var = self.parent.predict(x, x_var, n_sim, seed)
+            mu, var, sims, exp_var, influence = \
+                self.parent.predict(x, x_var, n_sim, seed)
 
             mu = _tf.einsum("xab,xy->yab", mu, weights)
             var = _tf.einsum("xa,xy->ya", var, weights ** 2)
             sims = _tf.einsum("xab,xy->yab", sims, weights)
-            exp_var = _tf.einsum("xa,xy->ya", exp_var, weights**2)
+            exp_var = _tf.einsum("xa,xy->ya", exp_var, weights ** 2)
+            influence = _tf.einsum("xa,xy->ya", influence, weights ** 2)
 
-            return mu, var, sims, exp_var
+            return mu, var, sims, exp_var, influence
         else:
             mu, var = self.parent.predict(x, x_var, n_sim, seed)
             mu = _tf.einsum("xab,xy->yab", mu, weights)
@@ -774,12 +720,19 @@ class SelectInput(_FunctionalLatentVariable):
         return _tf.constant(0.0, _tf.float64)
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        mu, var = self.propagate(x, x_var)
+        mu, var, sims, exp_var, influence = \
+            self.parent.predict(x, x_var, n_sim, seed)
+        mu = _tf.gather(mu, self.columns, axis=0)
+        var = _tf.gather(var, self.columns, axis=0)
+
         if n_sim > 0:
-            return _tf.transpose(mu)[:, :, None],\
-                   _tf.transpose(var), None, None
+            sims = _tf.gather(sims, self.columns, axis=0)
+            exp_var = _tf.gather(exp_var, self.columns, axis=0)
+            influence = _tf.gather(influence, self.columns, axis=0)
+
+            return mu, var, sims, exp_var, influence
         else:
-            return _tf.transpose(mu)[:, :, None], _tf.transpose(var)
+            return mu, var
 
 
 class LinearCombination(_Operation):
@@ -829,28 +782,32 @@ class LinearCombination(_Operation):
         all_var = []
         all_sims = []
         all_explained_var = []
+        all_influence = []
         weights = self.parameters["weights"].get_value()
 
         for i, v in enumerate(self.parents):
-            mu, var, sims, explained_var = v.predict(
+            mu, var, sims, explained_var, influence = v.predict(
                 x, x_var, n_sim, [seed[0] + i, seed[1]])
             all_mu.append(mu)
             all_var.append(var)
             all_sims.append(sims)
             all_explained_var.append(explained_var)
+            all_influence.append(influence)
 
         all_mu = _tf.stack(all_mu, axis=-1)
         all_var = _tf.stack(all_var, axis=-1)
         all_sims = _tf.stack(all_sims, axis=-1)
         all_explained_var = _tf.stack(all_explained_var, axis=-1)
+        all_influence = _tf.stack(all_influence, axis=-1)
 
         all_mu = _tf.reduce_sum(all_mu * weights, axis=-1)
         all_var = _tf.reduce_sum(all_var * weights**2, axis=-1)
         all_sims = _tf.reduce_sum(all_sims * weights, axis=-1)
         all_explained_var = _tf.reduce_sum(all_explained_var * weights**2,
                                            axis=-1)
+        all_influence = _tf.reduce_sum(all_influence * weights ** 2, axis=-1)
 
-        return all_mu, all_var, all_sims, all_explained_var
+        return all_mu, all_var, all_sims, all_explained_var, all_influence
 
     def predict_directions(self, x, dir_x, jitter=1e-9):
         all_mu = []
@@ -906,21 +863,24 @@ class ProductOfExperts(_Operation):
         all_var = []
         all_sims = []
         all_explained_var = []
+        all_influence = []
 
         eff_n_sim = _np.maximum(n_sim, 1)
 
         for i, p in enumerate(self.parents):
-            mu, var, sims, explained_var = p.predict(
+            mu, var, sims, explained_var, influence = p.predict(
                 x, x_var, eff_n_sim, [seed[0] + i, seed[1]])
             all_mu.append(mu)
             all_var.append(var)
             all_sims.append(sims)
             all_explained_var.append(explained_var)
+            all_influence.append(influence)
 
         all_mu = _tf.stack(all_mu, axis=0)
         all_var = _tf.stack(all_var, axis=0)
         all_sims = _tf.stack(all_sims, axis=0)
         all_explained_var = _tf.stack(all_explained_var, axis=0)
+        all_influence = _tf.stack(all_influence, axis=0)
 
         weights = (all_explained_var / (all_var + 1e-6)) + 1e-6
         weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
@@ -930,9 +890,10 @@ class ProductOfExperts(_Operation):
         w_sims = _tf.reduce_sum(weights[:, :, :, None] * all_sims, axis=0)
         w_explained_var = _tf.reduce_sum(
             weights * all_explained_var, axis=0)
+        w_influence = _tf.reduce_sum(weights * all_influence, axis=0)
 
         if n_sim > 0:
-            return w_mu, w_var, w_sims, w_explained_var
+            return w_mu, w_var, w_sims, w_explained_var, w_influence
         else:
             return w_mu, w_var
 
@@ -1000,7 +961,7 @@ class Exponentiation(_FunctionalLatentVariable):
             amp_scale = self.parameters["amp_scale"].get_value()
 
             if n_sim > 0:
-                mu, var, sims, explained_var = self.parent.predict(
+                mu, var, sims, explained_var, influence = self.parent.predict(
                     x, x_var, n_sim, seed)
 
                 mu = mu * _tf.sqrt(amp_scale) + amp_mean
@@ -1016,7 +977,7 @@ class Exponentiation(_FunctionalLatentVariable):
                                     - amp_var
                 amp_sims = _tf.exp(sims)
 
-                return amp_mu, amp_var, amp_sims, amp_explained_var
+                return amp_mu, amp_var, amp_sims, amp_explained_var, influence
             else:
                 mu, var = self.parent.predict(x, x_var, n_sim=0)
 
@@ -1068,24 +1029,28 @@ class Multiply(_Operation):
         all_var = []
         all_sims = []
         all_explained_var = []
+        all_influence = []
 
         for i, v in enumerate(self.parents):
-            mu, var, sims, explained_var = v.predict(
+            mu, var, sims, explained_var, influence = v.predict(
                 x, x_var, n_sim, [seed[0] + i, seed[1]])
             all_mu.append(mu)
             all_var.append(var)
             all_sims.append(sims)
             all_explained_var.append(explained_var)
+            all_influence.append(influence)
 
         all_mu = _tf.stack(all_mu, axis=0)
         all_var = _tf.stack(all_var, axis=0)
         all_sims = _tf.stack(all_sims, axis=0)
         all_explained_var = _tf.stack(all_explained_var, axis=0)
+        all_influence = _tf.stack(all_influence, axis=0)
 
         pred_mu = _tf.reduce_prod(all_mu, axis=0)
         pred_var = _tf.reduce_prod(all_mu[:, :, :, 0] ** 2 + all_var, axis=0) \
                    - _tf.reduce_prod(all_mu[:, :, :, 0] ** 2, axis=0)
         pred_sims = _tf.reduce_prod(all_sims, axis=0)
+        pred_influence = _tf.reduce_mean(all_influence, axis=0)
 
         pred_explained_var = \
             _tf.reduce_prod(
@@ -1094,7 +1059,7 @@ class Multiply(_Operation):
             - _tf.reduce_prod(all_mu[:, :, :, 0] ** 2, axis=0) \
             - pred_var
 
-        return pred_mu, pred_var, pred_sims, pred_explained_var
+        return pred_mu, pred_var, pred_sims, pred_explained_var, pred_influence
 
     def predict_directions(self, x, dir_x, jitter=1e-9):
         all_mu = []
@@ -1140,44 +1105,48 @@ class Add(_Operation):
         for lat in self.parents:
             lat.refresh(jitter)
 
-        if all([lat.inducing_points is not None for lat in self.parents]):
-            ip = _tf.stack([lat.inducing_points for lat in self.parents],
-                           axis=0)
-            ip = _tf.reduce_sum(ip, axis=0)
-
-            ip_var = _tf.stack(
-                [lat.inducing_points_variance for lat in self.parents], axis=0)
-            ip_var = _tf.reduce_sum(ip_var, axis=0)
-
-            self.inducing_points = ip
-            self.inducing_points_variance = ip_var
+        # if all([lat.inducing_points is not None for lat in self.parents]):
+        #     ip = _tf.stack([lat.inducing_points for lat in self.parents],
+        #                    axis=0)
+        #     ip = _tf.reduce_sum(ip, axis=0)
+        #
+        #     ip_var = _tf.stack(
+        #         [lat.inducing_points_variance for lat in self.parents], axis=0)
+        #     ip_var = _tf.reduce_sum(ip_var, axis=0)
+        #
+        #     self.inducing_points = ip
+        #     self.inducing_points_variance = ip_var
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         all_mu = []
         all_var = []
         all_sims = []
         all_explained_var = []
+        all_influence = []
 
         if n_sim > 0:
             for i, v in enumerate(self.parents):
-                mu, var, sims, explained_var = v.predict(
+                mu, var, sims, explained_var, influence = v.predict(
                     x, x_var, n_sim, [seed[0] + i, seed[1]])
                 all_mu.append(mu)
                 all_var.append(var)
                 all_sims.append(sims)
                 all_explained_var.append(explained_var)
+                all_influence.append(influence)
 
             all_mu = _tf.stack(all_mu, axis=-1)
             all_var = _tf.stack(all_var, axis=-1)
             all_sims = _tf.stack(all_sims, axis=-1)
             all_explained_var = _tf.stack(all_explained_var, axis=-1)
+            all_influence = _tf.stack(all_influence, axis=-1)
 
             all_mu = _tf.reduce_sum(all_mu, axis=-1)
             all_var = _tf.reduce_sum(all_var, axis=-1)
             all_sims = _tf.reduce_sum(all_sims, axis=-1)
             all_explained_var = _tf.reduce_sum(all_explained_var, axis=-1)
+            all_influence = _tf.reduce_mean(all_influence, axis=-1)
 
-            return all_mu, all_var, all_sims, all_explained_var
+            return all_mu, all_var, all_sims, all_explained_var, all_influence
 
         else:
             for i, v in enumerate(self.parents):
@@ -1256,12 +1225,13 @@ class Bias(_FunctionalLatentVariable):
         bias = self.parameters["bias"].get_value()
 
         if n_sim > 0:
-            mu, var, sims, exp_var = self.parent.predict(x, x_var, n_sim, seed)
+            mu, var, sims, exp_var, influence = \
+                self.parent.predict(x, x_var, n_sim, seed)
 
             mu = mu + bias[:, None, None]
             sims = sims + bias[:, None, None]
 
-            return mu, var, sims, exp_var
+            return mu, var, sims, exp_var, influence
         else:
             mu, var = self.parent.predict(x, x_var, n_sim, seed)
             mu = mu + bias[:, None, None]
@@ -1271,90 +1241,64 @@ class Bias(_FunctionalLatentVariable):
         return self.parent.predict_directions(x, dir_x, step)
 
 
-class ApplyLinearTrendGP(_Operation):
-    def __init__(self, linear_parent, gp_parent):
-        super().__init__(linear_parent, gp_parent)
-
-        if not isinstance(linear_parent, Linear):
-            raise ValueError("linear_parent must be of class Linear")
-        if not isinstance(gp_parent, (BasicGP, GPWithGradient)):
-            raise ValueError("gp_parent must be of a GP class")
-
-        if linear_parent.size != gp_parent.size:
-            raise ValueError("size mismatch between parents")
-        self._size = linear_parent.size
+class Scale(_FunctionalLatentVariable):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._size = parent.size
 
         self._add_parameter(
-            "gp_weight",
-            _gpr.RealParameter(
-                _np.ones([self.size]) * 0.5,
-                _np.ones([self.size]) * 0.01,
-                _np.ones([self.size]) * 0.99
+            "scale",
+            _gpr.PositiveParameter(
+                _np.ones([self.size]),
+                _np.ones([self.size]) / 100,
+                _np.ones([self.size]) * 10
             )
         )
+
+    def refresh(self, jitter=1e-9):
+        scale = self.parameters["scale"].get_value()[None, :]
+
+        self.parent.refresh(jitter)
+
+        if self.parent.inducing_points is not None:
+            self.inducing_points = self.parent.inducing_points \
+                                   * _tf.sqrt(scale)
+            self.inducing_points_variance = \
+                self.parent.inducing_points_variance * scale
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
 
-    def refresh(self, jitter=1e-9):
-        self.parents[0].refresh(jitter)
-        self.parents[1].refresh(jitter)
-
-        with _tf.name_scope("ApplyLinearTrendGP_refresh"):
-            w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[None, :]
-            w_lin = _tf.sqrt(2*(1 - w_gp**2))
-
-            self.inducing_points = w_lin * self.parents[0].inducing_points \
-                                   + w_gp * self.parents[1].inducing_points
-            self.inducing_points_variance = \
-                w_lin**2 * self.parents[0].inducing_points_variance \
-                + w_gp**2 * self.parents[1].inducing_points_variance
-
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        with _tf.name_scope("ApplyLinearTrendGP_predict"):
-            w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[:, None]
-            w_lin = _tf.sqrt(2 * (1 - w_gp ** 2))
+        scale = self.parameters["scale"].get_value()
 
-            if n_sim > 0:
-                lin_mu, lin_var, lin_sims, lin_exp_var = \
-                    self.parents[0].predict(x, x_var, n_sim, seed)
-                gp_mu, gp_var, gp_sims, gp_exp_var = \
-                    self.parents[1].predict(x, x_var, n_sim, seed)
+        if n_sim > 0:
+            mu, var, sims, exp_var, influence = \
+                self.parent.predict(x, x_var, n_sim, seed)
 
-                mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
-                var = w_gp**2 * gp_var + w_lin**2 * lin_var
-                exp_var = w_gp ** 2 * gp_exp_var + w_lin ** 2 * lin_exp_var
-                sims = w_gp[:, :, None] * gp_sims \
-                       + w_lin[:, :, None] * lin_sims
+            mu = mu * _tf.sqrt(scale[:, None, None])
+            sims = sims * _tf.sqrt(scale[:, None, None])
+            var = var * scale[:, None]
+            exp_var = exp_var * scale[:, None]
+            influence = influence * scale[:, None]
 
-                return mu, var, sims, exp_var
-
-            else:
-                lin_mu, lin_var = \
-                    self.parents[0].predict(x, x_var, n_sim, seed)
-                gp_mu, gp_var = \
-                    self.parents[1].predict(x, x_var, n_sim, seed)
-
-                mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
-                var = w_gp ** 2 * gp_var + w_lin ** 2 * lin_var
-
-                return mu, var
+            return mu, var, sims, exp_var, influence
+        else:
+            mu, var = self.parent.predict(x, x_var, n_sim, seed)
+            mu = mu * _tf.sqrt(scale[:, None, None])
+            var = var * scale[:, None]
+            return mu, var
 
     def predict_directions(self, x, dir_x, step=1e-3):
-        with _tf.name_scope("ApplyLinearTrendGP_predict_dir"):
-            w_gp = _tf.sqrt(self.parameters["gp_weight"].get_value())[:, None]
-            w_lin = _tf.sqrt(2 * (1 - w_gp ** 2))
+        scale = self.parameters["scale"].get_value()
 
-            lin_mu, lin_var, lin_exp_var = \
-                self.parents[0].predict_directions(x, dir_x, step)
-            gp_mu, gp_var, gp_exp_var = \
-                self.parents[1].predict_directions(x, dir_x, step)
+        mu, var, exp_var = self.parent.predict_directions(x, dir_x, step)
 
-            mu = w_gp[:, :, None] * gp_mu + w_lin[:, :, None] * lin_mu
-            var = w_gp ** 2 * gp_var + w_lin ** 2 * lin_var
-            exp_var = w_gp ** 2 * gp_exp_var + w_lin ** 2 * lin_exp_var
+        mu = mu * _tf.sqrt(scale[:, None, None])
+        var = var * scale[:, None]
+        exp_var = exp_var * scale[:, None]
 
-            return mu, var, exp_var
+        return mu, var, exp_var
 
 
 class CopyGP(_FunctionalLatentVariable):
@@ -1370,6 +1314,8 @@ class CopyGP(_FunctionalLatentVariable):
             teacher_gp.parent.inducing_points, _tf.float64)
         self.teacher_inducing_points_variance = _tf.constant(
             teacher_gp.parent.inducing_points_variance, _tf.float64)
+        self.teacher_cov_inv = _tf.constant(
+            teacher_gp.cov_inv, _tf.float64)
         self.teacher_smooth_inv = _tf.constant(
             teacher_gp.cov_smooth_inv, _tf.float64)
         self.teacher_alpha = _tf.constant(teacher_gp.alpha, _tf.float64)
@@ -1425,6 +1371,10 @@ class CopyGP(_FunctionalLatentVariable):
                 axis=2, keepdims=False)
             var = _tf.maximum(1.0 - explained_var, 0.0)
 
+            influence = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.teacher_cov_inv) * cov_cross,
+                axis=2, keepdims=False)
+
             if n_sim > 0:
                 rnd = _tf.random.stateless_normal(
                     shape=[self.size, self.root.n_ip, n_sim],
@@ -1433,7 +1383,7 @@ class CopyGP(_FunctionalLatentVariable):
                 sims = _tf.matmul(
                     cov_cross, _tf.matmul(self.teacher_chol_r, rnd)) + mu
 
-                return mu, var, sims, explained_var
+                return mu, var, sims, explained_var, influence
 
             else:
                 return mu, var
@@ -1616,6 +1566,10 @@ class GPWithGradient(_FunctionalLatentVariable):
                 axis=2, keepdims=False)
             var = _tf.maximum(1.0 - explained_var, 0.0)
 
+            influence = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.cov_inv) * cov_cross,
+                axis=2, keepdims=False)
+
             if n_sim > 0:
                 rnd = _tf.random.stateless_normal(
                     shape=[self.size, self.root.n_ip * (self.root.size + 1),
@@ -1624,7 +1578,7 @@ class GPWithGradient(_FunctionalLatentVariable):
                 )
                 sims = _tf.matmul(cov_cross, _tf.matmul(self.chol_r, rnd)) + mu
 
-                return mu, var, sims, explained_var
+                return mu, var, sims, explained_var, influence
 
             else:
                 return mu, var
@@ -1877,14 +1831,16 @@ class RadialTrend(_FunctionalLatentVariable):
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         if n_sim > 0:
-            mu, var, sims, exp_var = self.parent.predict(x, x_var, n_sim, seed)
+            mu, var, sims, exp_var, influence = \
+                self.parent.predict(x, x_var, n_sim, seed)
 
             mu = self.compute_trend(mu[:, :, 0])[:, :, None]
             var = _tf.zeros_like(mu[:, :, 0])
             sims = _tf.tile(mu, [1, 1, n_sim])
             exp_var = _tf.zeros_like(mu[:, :, 0])
+            influence = _tf.zeros_like(mu[:, :, 0])
 
-            return mu, var, sims, exp_var
+            return mu, var, sims, exp_var, influence
         else:
             mu, var = self.parent.predict(x, x_var, n_sim, seed)
             mu = self.compute_trend(mu[:, :, 0])[:, :, None]
@@ -2021,146 +1977,9 @@ class GPWalk(_FunctionalLatentVariable):
         )
         sims = mu + rnd * _tf.sqrt(var[:, :, None])
 
-        return mu, var, sims, explained_var
+        influence = _tf.zeros_like(var)
 
-# class GPWalk(_FunctionalLatentVariable):
-#     def __init__(self, parent, step=0.01, n_steps=10):
-#         super().__init__(parent)
-#
-#         if parent.size != 1:
-#             raise ValueError("parent node have size=1")
-#
-#         self.walker = parent.parent
-#         self.field = parent
-#         self._size = self.walker.size
-#
-#         self.step = step
-#         self.n_steps = n_steps
-#
-#         self._add_parameter(
-#             "amp",
-#             _gpr.PositiveParameter(1, 0.01, 100)
-#         )
-#
-#     def propagate(self, x, x_var=None):
-#         walker_mu, walker_var = self.walker.propagate(x, x_var)
-#         # field_mu, field_var = self.field.propagate(x, x_var)
-#
-#         amp = self.parameters["amp"].get_value()
-#
-#         for _ in range(self.n_steps):
-#             cov_cross = self.field.covariance_matrix_gradient(
-#                 walker_mu, self.walker.inducing_points,
-#                 walker_var, self.walker.inducing_points_variance)
-#
-#             field_mu = _tf.matmul(cov_cross, self.field.alpha)[:, :, 0]
-#             field_mu = _tf.transpose(field_mu)
-#
-#             x_dir = field_mu / _tf.math.reduce_euclidean_norm(
-#                 field_mu, axis=1, keepdims=True)
-#
-#             point_var = self.field.gradient_variance(
-#                 walker_mu, x_dir, walker_var)
-#             explained_var = _tf.reduce_sum(
-#                 _tf.matmul(cov_cross, self.field.cov_smooth_inv) * cov_cross,
-#                 axis=2, keepdims=False)
-#             field_var = _tf.maximum(point_var - explained_var, 0.0)
-#             field_var = _tf.transpose(field_var)
-#
-#             walker_mu = walker_mu + self.step * field_mu * amp
-#             walker_var = walker_var + self.step * field_var * amp ** 2
-#
-#         return walker_mu, walker_var
-#
-#     def refresh(self, jitter=1e-9):
-#         self.field.refresh(jitter)
-#         self.inducing_points, self.inducing_points_variance = self.propagate(
-#             *self.root.get_root_inducing_points()
-#         )
-#
-#     def kl_divergence(self):
-#         return _tf.constant(0.0, _tf.float64)
-#
-#     def compute_path(self, x, x_var=None):
-#         walker_mu, walker_var = self.walker.propagate(x, x_var)
-#         # field_mu, field_var = self.field.propagate(x, x_var)
-#
-#         amp = self.parameters["amp"].get_value()
-#
-#         all_mu = [walker_mu]
-#         all_var = [walker_var]
-#         for _ in range(self.n_steps):
-#             cov_cross = self.field.covariance_matrix_gradient(
-#                 walker_mu, self.walker.inducing_points,
-#                 walker_var, self.walker.inducing_points_variance)
-#
-#             field_mu = _tf.matmul(cov_cross, self.field.alpha)[:, :, 0]
-#             field_mu = _tf.transpose(field_mu)
-#
-#             x_dir = field_mu / _tf.math.reduce_euclidean_norm(
-#                 field_mu, axis=1, keepdims=True)
-#
-#             point_var = self.field.gradient_variance(
-#                 walker_mu, x_dir, walker_var)
-#             explained_var = _tf.reduce_sum(
-#                 _tf.matmul(cov_cross, self.field.cov_smooth_inv) * cov_cross,
-#                 axis=2, keepdims=False)
-#             field_var = _tf.maximum(point_var - explained_var, 0.0)
-#             field_var = _tf.transpose(field_var)
-#
-#             walker_mu = walker_mu + self.step * field_mu * amp
-#             walker_var = walker_var + self.step * field_var * amp ** 2
-#
-#             all_mu.append(walker_mu)
-#             all_var.append(walker_var)
-#         all_mu = _tf.stack(all_mu, axis=0)
-#         all_var = _tf.stack(all_var, axis=0)
-#
-#         return all_mu, all_var
-#
-#     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-#         mu, var = self.propagate(x, x_var)
-#         mu = _tf.transpose(mu)[:, :, None]
-#         var = _tf.transpose(var)
-#
-#         if n_sim < 1:
-#             return mu, var
-#
-#         explained_var = _tf.zeros_like(var)
-#
-#         # samples are coherent among data points
-#         rnd = _tf.random.stateless_normal(
-#             shape=[self.size, 1, n_sim],
-#             seed=seed, dtype=_tf.float64
-#         )
-#         sims = mu + rnd * _tf.sqrt(var[:, :, None])
-#
-#         return mu, var, sims, explained_var
-#
-#     def propagate_gradient(self, x, x_var=None):
-#         walker_mu, walker_var = self.walker.propagate(x, x_var)
-#
-#         amp = self.parameters["amp"].get_value()
-#
-#         cov_cross = self.field.covariance_matrix_gradient(
-#             walker_mu, self.walker.inducing_points,
-#             walker_var, self.walker.inducing_points_variance)
-#
-#         field_mu = _tf.matmul(cov_cross, self.field.alpha)[:, :, 0]
-#         field_mu = _tf.transpose(field_mu)
-#
-#         x_dir = field_mu / _tf.math.reduce_euclidean_norm(
-#             field_mu, axis=1, keepdims=True)
-#
-#         point_var = self.field.gradient_variance(
-#             walker_mu, x_dir, walker_var)
-#         explained_var = _tf.reduce_sum(
-#             _tf.matmul(cov_cross, self.field.cov_smooth_inv) * cov_cross,
-#             axis=2, keepdims=False)
-#         field_var = _tf.maximum(point_var - explained_var, 0.0)
-#         field_var = _tf.transpose(field_var)
-#
-#         return field_mu * amp, field_var * amp ** 2
+        return mu, var, sims, explained_var, influence
 
 
 class GaussianInput(_RootLatentVariable):
@@ -2214,139 +2033,88 @@ class GaussianInput(_RootLatentVariable):
         x_var = _tf.transpose(x_var)
         if n_sim > 0:
             sims = _tf.tile(x[:, :, None], [1, 1, n_sim])
-            return x[:, :, None], x_var, sims, _tf.zeros_like(x_var)
+            return x[:, :, None], x_var, sims, \
+                   _tf.zeros_like(x_var), _tf.zeros_like(x_var)
         else:
             return x[:, :, None], x_var
 
 
-class Refine(_Operation):
-    def __init__(self, *latent_variables):
-        super().__init__(*latent_variables)
-        sizes = [p.size for p in self.parents]
-        if not all(s == sizes[0] for s in sizes):
-            raise ValueError("all parents must have the same size")
-
-        self._size = sizes[0]
-
-    def refresh(self, jitter=1e-9):
-        for lat in self.parents:
-            lat.refresh(jitter)
-
+class RefinerExperts(ProductOfExperts):
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         all_mu = []
         all_var = []
         all_sims = []
         all_explained_var = []
+        all_influence = []
+
+        eff_n_sim = _np.maximum(n_sim, 1)
+
+        for i, p in enumerate(self.parents):
+            mu, var, sims, explained_var, influence = p.predict(
+                x, x_var, eff_n_sim, [seed[0] + i, seed[1]])
+            all_mu.append(mu)
+            all_var.append(var)
+            all_sims.append(sims)
+            all_explained_var.append(explained_var)
+            all_influence.append(influence)
+
+        all_mu = _tf.stack(all_mu, axis=0)
+        all_var = _tf.stack(all_var, axis=0)
+        all_sims = _tf.stack(all_sims, axis=0)
+        all_explained_var = _tf.stack(all_explained_var, axis=0)
+        all_influence = _tf.stack(all_influence, axis=0)
+
+        # cum_mu = _tf.math.cumsum(all_mu, axis=0)
+        # all_sims = all_sims - all_mu + cum_mu
+
+        all_sims = all_sims - all_mu
+
+        weights = (all_explained_var / (all_var + 1e-6)) + 1e-6
+        weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
+
+        # prec = (1 / (all_var + 1e-6)) + 1e-6
+        # weights = prec / _tf.reduce_sum(prec, axis=0, keepdims=True)
+
+        w_mu = _tf.reduce_sum(all_mu, axis=0)
+        # w_mu = _tf.reduce_sum(weights[:, :, :, None] * all_mu, axis=0)
+        w_var = _tf.reduce_sum(weights * all_var, axis=0)
+        # w_var = 1 / _tf.reduce_sum(prec, axis=0)
+        w_sims = _tf.reduce_sum(weights[:, :, :, None] * all_sims, axis=0)
+        w_explained_var = _tf.reduce_sum(
+            weights * all_explained_var, axis=0)
+        w_influence = _tf.reduce_sum(weights * all_influence, axis=0)
+
+        w_sims = w_sims + w_mu
 
         if n_sim > 0:
-            for i, v in enumerate(self.parents):
-                mu, var, sims, explained_var = v.predict(
-                    x, x_var, n_sim, [seed[0] + i, seed[1]])
-                all_mu.append(mu)
-                all_var.append(var)
-                all_sims.append(sims)
-                all_explained_var.append(explained_var)
-
-            all_mu = _tf.stack(all_mu, axis=-1)
-            all_var = _tf.stack(all_var, axis=-1)
-            all_sims = _tf.stack(all_sims, axis=-1)
-            all_explained_var = _tf.stack(all_explained_var, axis=-1)
-
-            pure_sims = (all_sims - all_mu) / _tf.sqrt(all_var[:, :, None, :])
-            total_var = all_var + all_explained_var
-            frac_var = all_explained_var / total_var
-
-            final_var = all_var[:, :, 0]
-            final_sims = pure_sims[:, :, :, 0] \
-                         * _tf.sqrt(all_var[:, :, None, 0])
-
-            for i, v in enumerate(self.parents):
-                if i > 0:
-                    final_var = (total_var[:, :, i] + final_var) \
-                                * frac_var[:, :, i]
-                    final_sims = final_sims + pure_sims[:, :, :, i] \
-                                 * _tf.sqrt(final_var[:, :, None])
-            final_explained_var = final_var / frac_var[:, :, -1] \
-                                  * (1 - frac_var[:, :, -1])
-
-            total_mu = _tf.reduce_sum(all_mu, axis=-1)
-            final_sims = final_sims + total_mu
-
-            return total_mu, final_var, final_sims, final_explained_var
-
-            # all_mu = _tf.reduce_sum(all_mu, axis=-1)
-            # all_sims = _tf.reduce_sum(all_sims, axis=-1)
-            #
-            # total_var = _tf.reduce_mean(all_var, axis=-1) \
-            #             + _tf.reduce_mean(all_explained_var, axis=-1)
-            # all_var = _tf.reduce_prod(all_var, axis=-1)
-            # all_explained_var = total_var - all_var
-
-            # return all_mu, all_var, all_sims, all_explained_var
-
+            return w_mu, w_var, w_sims, w_explained_var, w_influence
         else:
-            for i, v in enumerate(self.parents):
-                mu, var = v.predict(
-                    x, x_var, n_sim, [seed[0] + i, seed[1]])
-                all_mu.append(mu)
-                all_var.append(var)
+            return w_mu, w_var
 
-            all_mu = _tf.stack(all_mu, axis=-1)
-            all_var = _tf.stack(all_var, axis=-1)
-            all_explained_var = _tf.stack(all_explained_var, axis=-1)
-
-            total_var = all_var + all_explained_var
-            frac_var = all_explained_var / total_var
-
-            final_var = all_var[0, :, :]
-
-            for i, v in enumerate(self.parents):
-                if i > 0:
-                    final_var = (total_var[i, :, :] + final_var) \
-                                * frac_var[i, :, :]
-
-            total_mu = _tf.reduce_sum(all_mu, axis=-1)
-
-            return total_mu, final_var
-
-            # all_mu = _tf.stack(all_mu, axis=-1)
-            # all_var = _tf.stack(all_var, axis=-1)
-            #
-            # all_mu = _tf.reduce_sum(all_mu, axis=-1)
-            # all_var = _tf.reduce_prod(all_var, axis=-1)
-
-            # return all_mu, all_var
-
-    def predict_directions(self, x, dir_x, jitter=1e-9):
-        ## ATUALIZAR
+    def predict_directions(self, x, dir_x, step=1e-3):
         all_mu = []
         all_var = []
         all_explained_var = []
 
-        for i, v in enumerate(self.parents):
-            mu, var, explained_var = v.predict_directions(x, dir_x, jitter)
+        for i, p in enumerate(self.parents):
+            mu, var, explained_var = p.predict_directions(x, dir_x, step)
             all_mu.append(mu)
             all_var.append(var)
             all_explained_var.append(explained_var)
 
-        all_mu = _tf.stack(all_mu, axis=-1)
-        all_var = _tf.stack(all_var, axis=-1)
-        all_explained_var = _tf.stack(all_explained_var, axis=-1)
+        all_mu = _tf.stack(all_mu, axis=0)
+        all_var = _tf.stack(all_var, axis=0)
+        all_explained_var = _tf.stack(all_explained_var, axis=0)
 
-        all_mu = _tf.reduce_sum(all_mu, axis=-1)
+        weights = (all_explained_var / (all_var + 1e-6))
+        weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
 
-        total_var = _tf.reduce_mean(all_var, axis=-1) \
-                    + _tf.reduce_mean(all_explained_var, axis=-1)
-        all_var = _tf.reduce_prod(all_var, axis=-1)
-        all_explained_var = total_var - all_var
+        # prec = (1 / (all_var + 1e-6)) + 1e-6
+        # weights = prec / _tf.reduce_sum(prec, axis=0, keepdims=True)
 
-        return all_mu, all_var, all_explained_var
+        w_mu = _tf.reduce_sum(all_mu, axis=0)
+        w_var = _tf.reduce_sum(weights * all_var, axis=0)
+        # w_var = 1 / _tf.reduce_sum(prec, axis=0)
+        w_explained_var = _tf.reduce_sum(weights * all_explained_var, axis=0)
 
-    def propagate(self, x, x_var=None):
-        mu, var = self.predict(x, x_var, n_sim=0)
-        mu = _tf.transpose(mu[:, :, 0])
-        var = _tf.transpose(var)
-        return mu, var
-
-    def kl_divergence(self):
-        return _tf.constant(0.0, _tf.float64)
+        return w_mu, w_var, w_explained_var

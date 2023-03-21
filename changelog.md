@@ -1,3 +1,13 @@
+## version 0.3.3
+* Improvements and optimizations
+* Heteroscedastic likelihoods
+* A likelihood for conformable layers
+* A likelihood for limited time-aware implicit modeling
+* Ability to use a random field to move data points
+* Ellipsoidal trends
+* Limited support for faults
+* (Experimental) multiscale modeling (refinement with increasingly denser inducing point sets)
+
 ## version 0.3.2
 * Tensorized latent variable removed for now (back to the old chalkboard).
 * Full deep GP implementation.

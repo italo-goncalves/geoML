@@ -98,6 +98,12 @@ class Parametric(object):
         value, shape, position, k_min_val, k_max_val = parameters
         self.update_parameters(value, shape, position)
 
+    def get_unfixed_variables(self):
+        unique_params = list(set(self._all_parameters))
+        model_variables = [pr.variable for pr in unique_params
+                           if not pr.fixed]
+        return model_variables
+
 
 class RealParameter(object):
     """

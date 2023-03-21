@@ -86,12 +86,34 @@ class Isotropic(_Transform):
             return x / r
     
     def set_limits(self, data):
+        base_range = data.diagonal / (data.n_data ** (1/data.n_dim))
+
+        # self.parameters["range"].set_limits(
+        #     min_val=data.diagonal / 1000,
+        #     max_val=data.diagonal / 2)
+
         self.parameters["range"].set_limits(
-            min_val=data.diagonal / 1000,
-            max_val=data.diagonal * 2)
+            min_val=base_range * 2,
+            max_val=data.diagonal / 2)
 
 
-class Anisotropy2D(_Transform):
+class _Ellipsoidal(_Transform):
+    def __init__(self):
+        super().__init__()
+        self._anis = None
+        self._anis_inv = None
+
+    @property
+    def anis(self):
+        return self._anis
+
+    def __call__(self, x):
+        with _tf.name_scope("Ellipsoidal_transform"):
+            self.refresh()
+            return _tf.matmul(x, self._anis_inv)
+
+
+class Anisotropy2D(_Ellipsoidal):
     """Anisotropy in two dimensions"""
     def __init__(self, maxrange=1.0, minrange_fct=1, azimuth=0):
         """
@@ -114,9 +136,6 @@ class Anisotropy2D(_Transform):
                             _gpr.RealParameter(minrange_fct, 0.05, 1))
         self._add_parameter("azimuth",
                             _gpr.CircularParameter(azimuth, 0, 180))
-
-        self._anis = None
-        self._anis_inv = None
 
     def refresh(self):
         with _tf.name_scope("Anisotropy2D_refresh"):
@@ -141,19 +160,14 @@ class Anisotropy2D(_Transform):
             # anisotropy matrix
             self._anis = _tf.transpose(_tf.matmul(rot, sc))
             self._anis_inv = _tf.linalg.inv(self._anis)
-
-    def __call__(self, x):
-        with _tf.name_scope("Anisotropy2D_transform"):
-            self.refresh()
-            return _tf.matmul(x, self._anis_inv)
     
     def set_limits(self, data):
         self.parameters["maxrange"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal * 2)
+            max_val=data.diagonal / 2)
 
 
-class Anisotropy2DMath(_Transform):
+class Anisotropy2DMath(_Ellipsoidal):
     """Anisotropy in two dimensions"""
 
     def __init__(self, range_x=1.0, range_y=1.0, theta=0):
@@ -174,9 +188,6 @@ class Anisotropy2DMath(_Transform):
                             _gpr.PositiveParameter(range_y, 0.1, 10000))
         self._add_parameter("theta",
                             _gpr.CircularParameter(theta, 0, 360))
-
-        self._anis = None
-        self._anis_inv = None
 
     def refresh(self):
         with _tf.name_scope("Anisotropy2DMath_refresh"):
@@ -200,21 +211,56 @@ class Anisotropy2DMath(_Transform):
             self._anis = _tf.transpose(anis)
             self._anis_inv = _tf.linalg.inv(self._anis)
 
-    def __call__(self, x):
-        with _tf.name_scope("Anisotropy2D_transform"):
-            self.refresh()
-            return _tf.matmul(x, self._anis_inv)
+    def set_limits(self, data):
+        base_range = data.diagonal / (data.n_data ** (1 / data.n_dim))
+
+        self.parameters["range_x"].set_limits(
+            min_val=base_range * 2,
+            max_val=data.diagonal / 2)
+        self.parameters["range_y"].set_limits(
+            min_val=base_range * 2,
+            max_val=data.diagonal / 2)
+
+
+class Anisotropy2DDynamic(_Ellipsoidal):
+    def __init__(self, n_directions=9):
+        super().__init__()
+        self._base_transforms = []
+        for i in range(n_directions):
+            tr = Anisotropy2DMath(theta=i * 90 / n_directions)
+            tr.parameters["theta"].fix()
+            self._base_transforms.append(self._register(tr))
+
+        rnd = _np.random.normal(size=(n_directions, 1))
+        rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
+        self._add_parameter(
+            "weights",
+            _gpr.UnitColumnNormParameter(
+                rnd, - _np.ones_like(rnd), _np.ones_like(rnd)
+            )
+        )
+
+    def refresh(self):
+        with _tf.name_scope("Anisotropy2DDynamic_refresh"):
+            for tr in self._base_transforms:
+                tr.refresh()
+
+            # anisotropy matrix
+            w = self.parameters["weights"].get_value()[:, :, None]
+            anis = _tf.stack([tr.anis for tr in self._base_transforms],
+                             axis=0)
+
+            self._anis = _tf.reduce_sum(anis * w, axis=0)
+            self._anis_inv = _tf.linalg.inv(self._anis)
 
     def set_limits(self, data):
-        self.parameters["range_x"].set_limits(
-            min_val=data.diagonal / 100,
-            max_val=data.diagonal * 2)
-        self.parameters["range_y"].set_limits(
-            min_val=data.diagonal / 100,
-            max_val=data.diagonal * 2)
+        for tr in self._base_transforms:
+            tr.set_limits(data)
+            tr.parameters["range_x"].set_value(data.diagonal / 10)
+            tr.parameters["range_y"].set_value(data.diagonal / 10)
 
 
-class Anisotropy3D(_Transform):
+class Anisotropy3D(_Ellipsoidal):
     """Anisotropy in two dimensions"""
     def __init__(self, maxrange=1.0, midrange_fct=1, minrange_fct=1,
                  azimuth=0, dip=0, rake=0):
@@ -250,9 +296,6 @@ class Anisotropy3D(_Transform):
                             _gpr.RealParameter(dip, 0, 90))
         self._add_parameter("rake",
                             _gpr.RealParameter(rake, -90, 90))
-
-        self._anis = None
-        self._anis_inv = None
 
     def refresh(self):
         with _tf.name_scope("Anisotropy3D_refresh"):
@@ -297,18 +340,13 @@ class Anisotropy3D(_Transform):
             self._anis = _tf.transpose(anis)
             self._anis_inv = _tf.linalg.inv(self._anis)
     
-    def __call__(self, x):
-        with _tf.name_scope("Anisotropy3D_transform"):
-            self.refresh()
-            return _tf.matmul(x, self._anis_inv)
-    
     def set_limits(self, data):
         self.parameters["maxrange"].set_limits(
             min_val=data.diagonal / 1000,
-            max_val=data.diagonal * 2)
+            max_val=data.diagonal / 2)
 
 
-class Anisotropy3DMath(_Transform):
+class Anisotropy3DMath(_Ellipsoidal):
     """Anisotropy in two dimensions"""
 
     def __init__(self, range_x=1.0, range_y=1.0, range_z=1.0,
@@ -336,9 +374,6 @@ class Anisotropy3DMath(_Transform):
                             _gpr.CircularParameter(theta_y, 0, 360))
         self._add_parameter("theta_z",
                             _gpr.CircularParameter(theta_z, 0, 360))
-
-        self._anis = None
-        self._anis_inv = None
 
     def refresh(self):
         with _tf.name_scope("Anisotropy3DMath_refresh"):
@@ -376,21 +411,63 @@ class Anisotropy3DMath(_Transform):
             self._anis = _tf.transpose(anis)
             self._anis_inv = _tf.linalg.inv(self._anis)
 
-    def __call__(self, x):
-        with _tf.name_scope("Anisotropy3D_transform"):
-            self.refresh()
-            return _tf.matmul(x, self._anis_inv)
-
     def set_limits(self, data):
         self.parameters["range_x"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal * 2)
+            max_val=data.diagonal / 2)
         self.parameters["range_y"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal * 2)
+            max_val=data.diagonal / 2)
         self.parameters["range_z"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal * 2)
+            max_val=data.diagonal / 2)
+
+
+class Anisotropy3DDynamic(_Ellipsoidal):
+    def __init__(self, n_directions_per_axis=3):
+        super().__init__()
+        self._base_transforms = []
+        for i in range(n_directions_per_axis):
+            for j in range(n_directions_per_axis):
+                for k in range(n_directions_per_axis):
+                    tr = Anisotropy3DMath(
+                        theta_x=i * 90 / n_directions_per_axis,
+                        theta_y=j * 90 / n_directions_per_axis,
+                        theta_z=k * 90 / n_directions_per_axis
+                    )
+                    tr.parameters["theta_x"].fix()
+                    tr.parameters["theta_y"].fix()
+                    tr.parameters["theta_z"].fix()
+                    self._base_transforms.append(self._register(tr))
+
+        rnd = _np.random.normal(size=(n_directions_per_axis**3, 1))
+        rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
+        self._add_parameter(
+            "weights",
+            _gpr.UnitColumnNormParameter(
+                rnd, - _np.ones_like(rnd), _np.ones_like(rnd)
+            )
+        )
+
+    def refresh(self):
+        with _tf.name_scope("Anisotropy3DDynamic_refresh"):
+            for tr in self._base_transforms:
+                tr.refresh()
+
+            # anisotropy matrix
+            w = self.parameters["weights"].get_value()[:, :, None]
+            anis = _tf.stack([tr.anis for tr in self._base_transforms],
+                             axis=0)
+
+            self._anis = _tf.reduce_sum(anis * w, axis=0)
+            self._anis_inv = _tf.linalg.inv(self._anis)
+
+    def set_limits(self, data):
+        for tr in self._base_transforms:
+            tr.set_limits(data)
+            tr.parameters["range_x"].set_value(data.diagonal / 10)
+            tr.parameters["range_y"].set_value(data.diagonal / 10)
+            tr.parameters["range_z"].set_value(data.diagonal / 10)
 
 
 class ProjectionTo1D(_Transform):
@@ -511,6 +588,46 @@ class Concatenate(ChainedTransform):
     def set_limits(self, data):
         for tr in self.transforms:
             tr.set_limits(data)
+
+
+class BellFault2D(_Transform):
+    def __init__(self, start, end):
+        super().__init__()
+        self.start = _np.array(start)
+        self.end = _np.array(end)
+        self.midpoint = 0.5 * (self.start + self.end)
+
+        r = _np.sqrt(_np.sum((start - end)**2))
+        self._add_parameter("range", _gpr.PositiveParameter(r/5, r/10, r*10))
+        self._add_parameter("amp", _gpr.PositiveParameter(r/5, r/20, r))
+
+    @staticmethod
+    def kernelize(x):
+        x = _tf.minimum(x, 1.0)
+        amp = 1 - 7*x**2 + 35/4*x**3 - 7/2*x**5 + 3/4*x**7
+        return amp
+
+    def __call__(self, x):
+        with _tf.name_scope("BellFault2D_transform"):
+            dif = self.end - self.midpoint
+            length = _np.sqrt(_np.sum(dif**2))
+
+            x_along = _tf.reduce_sum(
+                (x - self.midpoint[None, :]) * dif[None, :],
+                axis=1, keepdims=True) \
+                      * dif[None, :] / length ** 2
+            x_across = (x - self.midpoint[None, :]) - x_along
+
+            proj_along = _tf.math.reduce_euclidean_norm(x_along, axis=1) / length
+            proj_across = _tf.math.reduce_euclidean_norm(x_across, axis=1) / length
+
+            vector_prod = x_across[:, 0] * dif[1] - x_across[:, 1] * dif[0]
+            rng = self.parameters["range"].get_value()
+            sign = _tf.sign(vector_prod) * _tf.math.exp(- 3 * proj_across / rng)
+
+            amp = self.parameters["amp"].get_value()
+            out = self.kernelize(proj_along) * amp * sign
+            return out[:, None]
 
 
 class Sine(_Transform):
