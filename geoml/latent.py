@@ -13,6 +13,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import numpy as np
 
 import geoml.parameter as _gpr
 import geoml.tftools as _tftools
@@ -129,6 +130,21 @@ class _Operation(_LatentVariable):
     def set_parameter_limits(self, data):
         for p in self.parents:
             p.set_parameter_limits(data)
+
+
+class _GPNode(_FunctionalLatentVariable):
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("gp_prediction"):
+            x, x_var = self.parent.propagate(x, x_var)
+
+            if n_sim > 0:
+                return self.interpolate(x, x_var, n_sim, seed)
+
+            else:
+                return self.interpolate(x, x_var, n_sim=0)
+
+    def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        return NotImplementedError
 
 
 class BasicInput(_RootLatentVariable):
@@ -264,7 +280,7 @@ class Concatenate(_Operation):
             return mean, var
 
 
-class BasicGP(_FunctionalLatentVariable):
+class BasicGP(_GPNode):
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
                  fix_range=False):
         super().__init__(parent)
@@ -284,6 +300,10 @@ class BasicGP(_FunctionalLatentVariable):
         self.prior_cov_inv = None
         self.prior_cov_chol = None
 
+        self.fix_range = fix_range
+        self._set_parameters()
+
+    def _set_parameters(self):
         n_ip = self.root.n_ip
         self._add_parameter(
             "alpha_white",
@@ -310,7 +330,7 @@ class BasicGP(_FunctionalLatentVariable):
                 _np.ones([1, 1, self.parent.size]),
                 _np.ones([1, 1, self.parent.size]) * 1e-6,
                 _np.ones([1, 1, self.parent.size]) * 10,
-                fixed=fix_range
+                fixed=self.fix_range
             )
         )
 
@@ -337,7 +357,6 @@ class BasicGP(_FunctionalLatentVariable):
             det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
 
             norm = det_x * det_y / det_2
-            # norm = _tf.reduce_prod(ranges) / det_2
 
             # output
             cov = cov * norm
@@ -357,9 +376,9 @@ class BasicGP(_FunctionalLatentVariable):
             chol = _tf.linalg.cholesky(cov)
             cov_inv = _tf.linalg.cholesky_solve(chol, eye)
 
-            self.cov = cov  # _tf.tile(cov[None, :, :], [self.size, 1, 1])
-            self.cov_chol = chol  # = _tf.tile(chol[None, :, :], [self.size, 1, 1])
-            self.cov_inv = cov_inv  #_tf.tile(cov_inv[None, :, :], [self.size, 1, 1])
+            self.cov = cov
+            self.cov_chol = chol
+            self.cov_inv = cov_inv
 
             # posterior
             eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
@@ -375,15 +394,9 @@ class BasicGP(_FunctionalLatentVariable):
 
             # inducing points
             alpha_white = self.parameters["alpha_white"].get_value()
-            # pred_inputs = _tf.matmul(self.cov_chol, alpha_white)
             pred_inputs = _tf.einsum("ab,sbc->sac", self.cov_chol, alpha_white)
             self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
-            # self.alpha = _tf.matmul(self.cov_inv, pred_inputs)
             self.alpha = _tf.einsum("ab,sbc->sac", self.cov_inv, pred_inputs)
-            # pred_var = 1.0 - _tf.reduce_sum(
-            #         _tf.matmul(self.cov, self.cov_smooth_inv) * self.cov,
-            #         axis=2, keepdims=False
-            #     )
             pred_var = 1.0 - _tf.reduce_sum(
                 _tf.einsum("ab,sbc->sac", self.cov, self.cov_smooth_inv)
                 * self.cov[None, :, :],
@@ -391,10 +404,8 @@ class BasicGP(_FunctionalLatentVariable):
             )
             self.inducing_points_variance = _tf.transpose(pred_var)
 
-    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        with _tf.name_scope("basic_prediction"):
-            x, x_var = self.parent.propagate(x, x_var)
-
+    def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("basic_interpolation"):
             cov_cross = self.covariance_matrix(
                 x, self.parent.inducing_points,
                 x_var, self.parent.inducing_points_variance)
@@ -502,87 +513,6 @@ class BasicGP(_FunctionalLatentVariable):
             var = _tf.maximum(point_var - explained_var, 0.0)
 
             return mu, var, explained_var
-
-    def covariance_matrix_gradient(self, x, y, var_x=None, var_y=None,
-                                   step=1e-3):
-        with _tf.name_scope("basic_covariance_matrix_gradient"):
-            s = self.parent.size
-
-            base_dir = _tf.unstack(_tf.eye(s, dtype=_tf.float64), axis=0)
-
-            cov_mat = []
-            for i in range(s):
-                cov_1 = self.covariance_matrix(
-                    x + step * base_dir[i][None, :], y, var_x, var_y)
-                cov_2 = self.covariance_matrix(
-                    x - step * base_dir[i][None, :], y, var_x, var_y)
-                cov_mat.append((cov_1 - cov_2) / step)
-
-            return _tf.stack(cov_mat, axis=0)
-
-    def gradient_variance(self, x, dir_x, var_x=None, step=1e-3):
-        with _tf.name_scope("basic_gradient_variance"):
-            if var_x is None:
-                var_x = _tf.zeros_like(x)
-
-            mu_1 = x + dir_x * step
-            mu_2 = x - dir_x * step
-
-            ranges = self.parameters["ranges"].get_value()[0, :, :]
-            var_x = var_x + ranges ** 2
-
-            dif = mu_1 - mu_2
-            dist_sq = _tf.reduce_sum(dif ** 2 / var_x, axis=1, keepdims=True)
-
-            cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
-
-            # det_avg = _tf.reduce_prod(var_x, axis=1, keepdims=True) ** (1/2)
-            # det_1 = _tf.reduce_prod(var_x, axis=1, keepdims=True) ** (1/4)
-            # det_2 = _tf.reduce_prod(var_x, axis=1, keepdims=True) ** (1/4)
-            #
-            # # norm = _tf.reduce_prod(ranges) / det_avg
-            # norm = det_1 * det_2 / det_avg
-            # cov_step = cov_step * norm
-
-            point_var = 2 * (1.0 - cov_step) / step ** 2
-            point_var = _tf.tile(point_var, [1, self.size])
-            point_var = _tf.transpose(point_var)
-
-            return point_var
-
-    class GPGradient(_FunctionalLatentVariable):
-        def __init__(self, parent):
-            super().__init__(parent)
-            self._size = self.parent.size * self.root.size
-
-        def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-            dir_x = _tf.split(_tf.eye(self.root.size, dtype=_tf.float64),
-                              self.root.size)
-            grads, grads_var = [], []
-
-            for dir_i in dir_x:
-                g, gv = self.parent.predict_directions(x, dir_i)
-                grads.append(g)
-                grads_var.append(gv)
-
-            grads = _tf.concat(grads, axis=0)
-            grads_var = _tf.concat(grads_var, axis=0)
-            return grads, grads_var
-
-        def refresh(self, jitter=1e-9):
-            self.parent.refresh(jitter)
-            ip, ip_var, _ = self.parent.predict_directions(
-                self.root.inducing_points,
-                self.root.inducing_points_variance
-            )
-            self.inducing_points = _tf.transpose(ip[:, :, 0])
-            self.inducing_points_variance = _tf.transpose(ip_var)
-
-        def kl_divergence(self):
-            return _tf.constant(0.0, _tf.float64)
-
-    def gradient(self):
-        return self.GPGradient(self)
 
 
 class AdditiveGP(BasicGP):
@@ -833,7 +763,7 @@ class LinearCombination(_Operation):
         return all_mu, all_var, all_explained_var
 
     def propagate(self, x, x_var=None):
-        mu, var, _, _ = self.predict(x, x_var, n_sim=1)
+        mu, var, _, _, _ = self.predict(x, x_var, n_sim=1)
         mu = _tf.transpose(mu[:, :, 0])
         var = _tf.transpose(var)
         return mu, var
@@ -915,7 +845,7 @@ class ProductOfExperts(_Operation):
         weights = (all_explained_var / (all_var + 1e-6))
         weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
 
-        w_mu = _tf.reduce_sum(weights[:, :, None] * all_mu, axis=0)
+        w_mu = _tf.reduce_sum(weights[:, :, :, None] * all_mu, axis=0)
         w_var = _tf.reduce_sum(weights * all_var, axis=0)
         w_explained_var = _tf.reduce_sum(weights * all_explained_var, axis=0)
 
@@ -1301,456 +1231,6 @@ class Scale(_FunctionalLatentVariable):
         return mu, var, exp_var
 
 
-class CopyGP(_FunctionalLatentVariable):
-    def __init__(self, parent, teacher_gp):
-        super().__init__(parent)
-
-        self.teacher_gp = teacher_gp
-        self._size = teacher_gp.size
-
-        teacher_gp.refresh(1e-6)
-
-        self.teacher_inducing_points = _tf.constant(
-            teacher_gp.parent.inducing_points, _tf.float64)
-        self.teacher_inducing_points_variance = _tf.constant(
-            teacher_gp.parent.inducing_points_variance, _tf.float64)
-        self.teacher_cov_inv = _tf.constant(
-            teacher_gp.cov_inv, _tf.float64)
-        self.teacher_smooth_inv = _tf.constant(
-            teacher_gp.cov_smooth_inv, _tf.float64)
-        self.teacher_alpha = _tf.constant(teacher_gp.alpha, _tf.float64)
-        self.teacher_chol_r = _tf.constant(teacher_gp.chol_r, _tf.float64)
-
-    def refresh(self, jitter=1e-9):
-        with _tf.name_scope("copy_gp_refresh"):
-            self.parent.refresh(jitter)
-
-            cov = self.teacher_gp.covariance_matrix(
-                self.parent.inducing_points,
-                self.teacher_inducing_points,
-                self.teacher_inducing_points_variance,
-                self.teacher_inducing_points_variance)
-            cov = _tf.tile(cov[None, :, :], [self.size, 1, 1])
-
-            # inducing points
-            pred_inputs = _tf.matmul(cov, self.teacher_alpha)
-            self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
-            pred_var = 1.0 - _tf.reduce_sum(
-                    _tf.matmul(cov, self.teacher_smooth_inv) * cov,
-                    axis=2, keepdims=False
-                )
-            self.inducing_points_variance = _tf.transpose(pred_var)
-
-    def covariance_matrix(self, x, y, var_x=None, var_y=None):
-        return self.teacher_gp.covariance_matrix(x, y, var_x, var_y)
-
-    def covariance_matrix_d1(self, y, dir_y, step=1e-3):
-        return self.teacher_gp.covariance_matrix_d1(y, dir_y, step)
-
-    def point_variance_d2(self, x, dir_x, step=1e-3):
-        return self.teacher_gp.point_variance_d2(x, dir_x, step)
-
-    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        with _tf.name_scope("basic_prediction"):
-            x, x_var = self.parent.propagate(x, x_var)
-
-            # ranges = self.teacher_gp.parameters["ranges"].get_value()
-            # total_ranges = _tf.sqrt(ranges ** 2 + x_var)
-            # ip_ranges = _tf.sqrt(
-            #     ranges ** 2 + self.teacher_inducing_points_variance)
-
-            cov_cross = self.covariance_matrix(
-                x, self.teacher_inducing_points,
-                x_var, self.teacher_inducing_points_variance)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
-
-            mu = _tf.matmul(cov_cross, self.teacher_alpha)
-
-            explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.teacher_smooth_inv) * cov_cross,
-                axis=2, keepdims=False)
-            var = _tf.maximum(1.0 - explained_var, 0.0)
-
-            influence = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.teacher_cov_inv) * cov_cross,
-                axis=2, keepdims=False)
-
-            if n_sim > 0:
-                rnd = _tf.random.stateless_normal(
-                    shape=[self.size, self.root.n_ip, n_sim],
-                    seed=seed, dtype=_tf.float64
-                )
-                sims = _tf.matmul(
-                    cov_cross, _tf.matmul(self.teacher_chol_r, rnd)) + mu
-
-                return mu, var, sims, explained_var, influence
-
-            else:
-                return mu, var
-
-    def predict_directions(self, x, dir_x, step=1e-3):
-        with _tf.name_scope("basic_prediction_directions"):
-
-            cov_cross = self.covariance_matrix_d1(x, dir_x, step)
-            cov_cross = _tf.transpose(cov_cross)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
-
-            mu = _tf.matmul(cov_cross, self.teacher_alpha)
-
-            explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.teacher_smooth_inv) * cov_cross,
-                axis=2, keepdims=False)
-
-            point_var = self.point_variance_d2(x, dir_x, step)
-            var = _tf.maximum(point_var - explained_var, 0.0)
-
-            return mu, var, explained_var
-
-    def kl_divergence(self):
-        return _tf.constant(0.0, _tf.float64)
-
-
-class GPWithGradient(_FunctionalLatentVariable):
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian()):
-        super().__init__(parent)
-        self._size = size
-        self.kernel = self._register(kernel)
-
-        self.cov = None
-        self.cov_inv = None
-        self.cov_chol = None
-        self.cov_smooth = None
-        self.cov_smooth_chol = None
-        self.cov_smooth_inv = None
-        self.chol_r = None
-        self.alpha = None
-
-        self.prior_cov = None
-        self.prior_cov_inv = None
-        self.prior_cov_chol = None
-
-        n_ip = self.root.n_ip
-        root_dims = self.root.size + 1
-        self._add_parameter(
-            "alpha_white",
-            _gpr.RealParameter(
-                _np.random.normal(
-                    scale=1e-3,
-                    size=[self.size, n_ip * root_dims, 1]
-                ),
-                _np.zeros([self.size, n_ip * root_dims, 1]) - 10,
-                _np.zeros([self.size, n_ip * root_dims, 1]) + 10
-            ))
-        self._add_parameter(
-            "delta",
-            _gpr.PositiveParameter(
-                _np.ones([self.size, n_ip]),
-                _np.ones([self.size, n_ip]) * 1e-6,
-                _np.ones([self.size, n_ip]) * 1e4
-            ))
-
-        self._add_parameter(
-            "ranges",
-            _gpr.PositiveParameter(
-                _np.ones([1, 1, self.parent.size]),
-                _np.ones([1, 1, self.parent.size]) * 1e-6,
-                _np.ones([1, 1, self.parent.size]) * 10,
-                fixed=True
-            )
-        )
-
-    def covariance_matrix(self, x, y, var_x=None, var_y=None):
-        with _tf.name_scope("basic_covariance_matrix"):
-            ranges = self.parameters["ranges"].get_value()
-            if var_x is None:
-                var_x = _tf.zeros_like(x)
-            if var_y is None:
-                var_y = _tf.zeros_like(y)
-            var_x = var_x[:, None, :]
-            var_y = var_y[None, :, :]
-
-            # [n_data, n_data, n_dim]
-            dif = x[:, None, :] - y[None, :, :]
-
-            total_var = ranges**2 + (var_x + var_y) / 2
-            dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
-            cov = self.kernel.kernelize(dist)
-
-            # normalization
-            det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
-            det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
-            det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
-
-            norm = det_x * det_y / det_2
-            # norm = _tf.reduce_prod(ranges) / det_2
-
-            # output
-            cov = cov * norm
-            return cov
-
-    def refresh(self, jitter=1e-9):
-        with _tf.name_scope("basic_refresh"):
-            self.parent.refresh(jitter)
-
-            # prior
-            ip = self.parent.inducing_points
-            ip_var = self.parent.inducing_points_variance
-
-            ndim = _tf.shape(ip)[1]
-            n_data = _tf.shape(ip)[0]
-            base_dir = _tf.eye(ndim, dtype=_tf.float64)
-            ip_dir = _tf.tile(base_dir, [1, n_data])
-            ip_dir = _tf.reshape(ip_dir, [n_data * ndim, ndim])
-            ip_2 = _tf.tile(ip, [ndim, 1])
-            ip_var_2 = _tf.tile(ip_var, [ndim, 1])
-
-            eye = _tf.eye(n_data * (ndim + 1), dtype=_tf.float64)
-
-            base_cov = self.covariance_matrix(ip, ip, ip_var, ip_var)
-            cov_d1 = self.covariance_matrix_d1(ip_2, ip_dir, ip_var_2)
-            cov_d2 = self.covariance_matrix_d2(ip_2, ip_dir, ip_var_2)
-            cov = _tf.concat([
-                _tf.concat([base_cov, cov_d1], axis=1),
-                _tf.concat([_tf.transpose(cov_d1), cov_d2], axis=1)
-            ], axis=0)
-
-            cov = cov + eye * jitter
-            chol = _tf.linalg.cholesky(cov)
-            cov_inv = _tf.linalg.cholesky_solve(chol, eye)
-
-            self.cov = _tf.tile(cov[None, :, :], [self.size, 1, 1])
-            self.cov_chol = _tf.tile(chol[None, :, :], [self.size, 1, 1])
-            self.cov_inv = _tf.tile(cov_inv[None, :, :], [self.size, 1, 1])
-
-            # posterior
-            eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
-            delta = self.parameters["delta"].get_value()
-            delta = _tf.concat(
-                [delta, _tf.zeros([self.size, ndim * n_data], _tf.float64)],
-                axis=1)
-            delta_diag = _tf.linalg.diag(delta)
-            self.cov_smooth = self.cov + delta_diag
-            self.cov_smooth_chol = _tf.linalg.cholesky(
-                self.cov_smooth + eye * jitter)
-            self.cov_smooth_inv = _tf.linalg.cholesky_solve(
-                self.cov_smooth_chol, eye)
-            self.chol_r = _tf.linalg.cholesky(
-                self.cov_inv - self.cov_smooth_inv + eye * jitter)
-
-            # inducing points
-            alpha_white = self.parameters["alpha_white"].get_value()
-            pred_inputs = _tf.matmul(self.cov_chol, alpha_white)
-            self.inducing_points = _tf.transpose(pred_inputs[:, :n_data, 0])
-            self.alpha = _tf.matmul(self.cov_inv, pred_inputs)
-            pred_var = 1.0 - _tf.reduce_sum(
-                    _tf.matmul(self.cov, self.cov_smooth_inv) * self.cov,
-                    axis=2, keepdims=False
-                )
-            self.inducing_points_variance = _tf.transpose(pred_var[:, :n_data])
-
-    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        with _tf.name_scope("GPWithGradient_prediction"):
-            x_pr, x_pr_var = self.parent.propagate(x, x_var)
-
-            cov_1 = self.covariance_matrix(
-                x_pr, self.parent.inducing_points,
-                x_pr_var, self.parent.inducing_points_variance)
-            cov_2 = self.covariance_matrix_d1_rev(x, x_var)
-            cov_cross = _tf.concat([cov_1, cov_2], axis=1)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
-
-            mu = _tf.matmul(cov_cross, self.alpha)
-
-            explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.cov_smooth_inv) * cov_cross,
-                axis=2, keepdims=False)
-            var = _tf.maximum(1.0 - explained_var, 0.0)
-
-            influence = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.cov_inv) * cov_cross,
-                axis=2, keepdims=False)
-
-            if n_sim > 0:
-                rnd = _tf.random.stateless_normal(
-                    shape=[self.size, self.root.n_ip * (self.root.size + 1),
-                           n_sim],
-                    seed=seed, dtype=_tf.float64
-                )
-                sims = _tf.matmul(cov_cross, _tf.matmul(self.chol_r, rnd)) + mu
-
-                return mu, var, sims, explained_var, influence
-
-            else:
-                return mu, var
-
-    def kl_divergence(self):
-        with _tf.name_scope("basic_KL_divergence"):
-            delta = self.parameters["delta"].get_value()
-            alpha_white = self.parameters["alpha_white"].get_value()
-
-            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov)
-            fit = _tf.reduce_sum(alpha_white**2)
-            det_1 = 2 * _tf.reduce_sum(_tf.math.log(
-                _tf.linalg.diag_part(self.cov_smooth_chol)))
-            det_2 = _tf.reduce_sum(_tf.math.log(delta))
-            kl = 0.5 * (- tr + fit + det_1 - det_2)
-
-            return kl
-
-    def covariance_matrix_d1(self, y, dir_y, y_var=None, step=1e-3):
-        with _tf.name_scope("covariance_matrix_d1"):
-            x_pr = self.parent.inducing_points
-            x_var = self.parent.inducing_points_variance
-            y_pr_plus, y_var_plus = self.parent.propagate(
-                y + 0.5 * step * dir_y, y_var)
-            y_pr_minus, y_var_minus = self.parent.propagate(
-                y - 0.5 * step * dir_y, y_var)
-
-            cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_var, y_var_plus)
-            cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_var,
-                                           y_var_minus)
-
-            return (cov_1 - cov_2) / step
-
-    def covariance_matrix_d2(self, y, dir_y, y_var=None, step=1e-3):
-        """
-        Direction-direction covariance.
-
-        Covariance between a set of directions and inducing gradients.
-
-        Parameters
-        ----------
-        y_var
-        y
-        dir_y
-        step
-
-        Returns
-        -------
-
-        """
-        with _tf.name_scope("covariance_matrix_d2"):
-            ndim = _tf.shape(self.parent.inducing_points)[1]
-            n_data = _tf.shape(self.parent.inducing_points)[0]
-            eye = _tf.eye(ndim, dtype=_tf.float64)
-            ip_dir = _tf.tile(eye, [1, n_data])
-            ip_dir = _tf.reshape(ip_dir, [n_data * ndim, ndim])
-            ip = _tf.tile(self.parent.inducing_points, [ndim, 1])
-            ip_var = _tf.tile(self.parent.inducing_points_variance, [ndim, 1])
-
-            ip_plus, ip_var_plus = self.parent.propagate(
-                ip + 0.5 * step * ip_dir, ip_var)
-            ip_minus, ip_var_minus = self.parent.propagate(
-                ip - 0.5 * step * ip_dir, ip_var)
-
-            y_pr_plus, y_var_plus = self.parent.propagate(
-                y + 0.5 * step * dir_y, y_var)
-            y_pr_minus, y_var_minus = self.parent.propagate(
-                y - 0.5 * step * dir_y, y_var)
-
-            cov_1a = self.covariance_matrix(
-                y_pr_plus, ip_plus, y_var_plus, ip_var_plus)
-            cov_1b = self.covariance_matrix(
-                y_pr_minus, ip_plus, y_var_minus, ip_var_plus)
-            cov_1 = (cov_1a - cov_1b) / step
-
-            cov_2a = self.covariance_matrix(
-                y_pr_plus, ip_minus, y_var_plus, ip_var_minus)
-            cov_2b = self.covariance_matrix(
-                y_pr_minus, ip_minus, y_var_minus, ip_var_minus)
-            cov_2 = (cov_2a - cov_2b) / step
-
-            return (cov_1 - cov_2) / step
-
-    def point_variance_d2(self, x, dir_x, step=1e-3):
-        with _tf.name_scope("basic_point_variance_d2"):
-            mu_1, var_1 = self.parent.propagate(x + 0.5 * dir_x * step)
-            mu_2, var_2 = self.parent.propagate(x - 0.5 * dir_x * step)
-
-            ranges = self.parameters["ranges"].get_value()[0, :, :]
-            var_1 = var_1 + ranges ** 2
-            var_2 = var_2 + ranges ** 2
-
-            dif = mu_1 - mu_2
-            avg_var = 0.5 * (var_1 + var_2)
-            dist_sq = _tf.reduce_sum(dif ** 2 / avg_var, axis=1, keepdims=True)
-
-            cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
-
-            det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (1/2)
-            det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1/4)
-            det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1/4)
-
-            # norm = _tf.reduce_prod(ranges) / det_avg
-            norm = det_1 * det_2 / det_avg
-            cov_step = cov_step * norm
-
-            point_var = 2 * (1.0 - cov_step) / step ** 2
-            point_var = _tf.tile(point_var, [1, self.size])
-            point_var = _tf.transpose(point_var)
-
-            return point_var
-
-    def covariance_matrix_d1_rev(self, y, y_var=None, step=1e-3):
-        """
-        Point-direction covariance.
-
-        Covariance between a set of coordinates and inducing gradients.
-
-        Parameters
-        ----------
-        y_var
-        y
-        step
-
-        Returns
-        -------
-
-        """
-        with _tf.name_scope("covariance_matrix_d1_rev"):
-            ndim = _tf.shape(self.parent.inducing_points)[1]
-            n_data = _tf.shape(self.parent.inducing_points)[0]
-            eye = _tf.eye(ndim, dtype=_tf.float64)
-            ip_dir = _tf.tile(eye, [1, n_data])
-            ip_dir = _tf.reshape(ip_dir, [n_data * ndim, ndim])
-            ip = _tf.tile(self.parent.inducing_points, [ndim, 1])
-            ip_var = _tf.tile(self.parent.inducing_points_variance, [ndim, 1])
-
-            ip_plus, ip_var_plus = self.parent.propagate(
-                ip + 0.5 * step * ip_dir, ip_var)
-            ip_minus, ip_var_minus = self.parent.propagate(
-                ip - 0.5 * step * ip_dir, ip_var)
-
-            y, y_var = self.parent.propagate(y, y_var)
-
-            cov_1 = self.covariance_matrix(
-                y, ip_plus, y_var, ip_var_plus)
-            cov_2 = self.covariance_matrix(
-                y, ip_minus, y_var, ip_var_minus)
-
-            return (cov_1 - cov_2) / step
-
-    def predict_directions(self, x, dir_x, step=1e-3):
-        with _tf.name_scope("basic_prediction_directions"):
-
-            cov_1 = self.covariance_matrix_d1(x, dir_x, step=step)
-            cov_1 = _tf.transpose(cov_1)
-            cov_2 = self.covariance_matrix_d2(x, dir_x, step=step)
-            cov_cross = _tf.concat([cov_1, cov_2], axis=1)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
-
-            mu = _tf.matmul(cov_cross, self.alpha)
-
-            explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.cov_smooth_inv) * cov_cross,
-                axis=2, keepdims=False)
-
-            point_var = self.point_variance_d2(x, dir_x, step)
-            var = _tf.maximum(point_var - explained_var, 0.0)
-
-            return mu, var, explained_var
-
-
 class RadialTrend(_FunctionalLatentVariable):
     def __init__(self, parent, size=1):
         super().__init__(parent)
@@ -1880,23 +1360,13 @@ class GPWalk(_FunctionalLatentVariable):
 
     def propagate(self, x, x_var=None):
         walker_mu, walker_var = self.walker.propagate(x, x_var)
-        # field_mu, field_var = self.field.propagate(x, x_var)
 
         amp = self.parameters["amp"].get_value()
 
         for _ in range(self.n_steps):
-            cov_cross = self.field.covariance_matrix(
-                walker_mu, self.walker.inducing_points,
-                walker_var, self.walker.inducing_points_variance)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
-
-            field_mu = _tf.matmul(cov_cross, self.field.alpha)[:, :, 0]
-            field_mu = _tf.transpose(field_mu)
-
-            explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.field.cov_smooth_inv) * cov_cross,
-                axis=2, keepdims=False)
-            field_var = _tf.maximum(1.0 - explained_var, 0.0)
+            field_mu, field_var = self.field.interpolate(
+                walker_mu, walker_var, n_sim=0)
+            field_mu = _tf.transpose(field_mu[:, :, 0])
             field_var = _tf.transpose(field_var)
 
             walker_mu = walker_mu + self.step * field_mu * amp
@@ -1913,41 +1383,17 @@ class GPWalk(_FunctionalLatentVariable):
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
 
-        # rng = self.field.parameters["ranges"].get_value()[0, :, :]
-        # var = self.inducing_points_variance + rng**2
-        # w_var = self.walker.inducing_points_variance + rng ** 2
-        #
-        # tr = _tf.reduce_sum(w_var / var)
-        #
-        # dist = _tf.reduce_sum(
-        #     (self.walker.inducing_points - self.inducing_points)**2 / var)
-        #
-        # det = _tf.reduce_sum(_tf.math.log(var)) \
-        #       - _tf.reduce_sum(_tf.math.log(w_var))
-        #
-        # return tr + dist + det - self.root.n_ip
-
     def compute_path(self, x, x_var=None):
         walker_mu, walker_var = self.walker.propagate(x, x_var)
-        # field_mu, field_var = self.field.propagate(x, x_var)
 
         amp = self.parameters["amp"].get_value()
 
         all_mu = [walker_mu]
         all_var = [walker_var]
         for _ in range(self.n_steps):
-            cov_cross = self.field.covariance_matrix(
-                walker_mu, self.walker.inducing_points,
-                walker_var, self.walker.inducing_points_variance)
-            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
-
-            field_mu = _tf.matmul(cov_cross, self.field.alpha)[:, :, 0]
-            field_mu = _tf.transpose(field_mu)
-
-            explained_var = _tf.reduce_sum(
-                _tf.matmul(cov_cross, self.field.cov_smooth_inv) * cov_cross,
-                axis=2, keepdims=False)
-            field_var = _tf.maximum(1.0 - explained_var, 0.0)
+            field_mu, field_var = self.field.interpolate(
+                walker_mu, walker_var, n_sim=0)
+            field_mu = _tf.transpose(field_mu[:, :, 0])
             field_var = _tf.transpose(field_var)
 
             walker_mu = walker_mu + self.step * field_mu * amp
@@ -2067,16 +1513,27 @@ class RefinerExperts(ProductOfExperts):
         # cum_mu = _tf.math.cumsum(all_mu, axis=0)
         # all_sims = all_sims - all_mu + cum_mu
 
-        all_sims = all_sims - all_mu
+        total_var = all_var + all_explained_var
+        frac = all_var / total_var
+        cum_frac = _tf.math.cumprod(frac, axis=0) / frac[0, None, :, :]
 
-        weights = (all_explained_var / (all_var + 1e-6)) + 1e-6
+        all_var = all_var * cum_frac
+        all_explained_var = all_explained_var * cum_frac
+
+        all_sims = all_sims - all_mu
+        # all_sims = all_sims * _tf.sqrt(cum_frac[:, :, :, None])
+
+        # weights = (all_explained_var / (all_var + 1e-6)) + 1e-6
+        weights = (total_var[0, None, :, :] - all_var) / (all_var + 1e-6) + 1e-6
+        # weights = (all_explained_var / (all_var + 1e-6)) / cum_frac + 1e-6
+        # weights = (1 - cum_frac) / (cum_frac + 1e-6) + 1e-6
         weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
 
         # prec = (1 / (all_var + 1e-6)) + 1e-6
         # weights = prec / _tf.reduce_sum(prec, axis=0, keepdims=True)
 
-        w_mu = _tf.reduce_sum(all_mu, axis=0)
-        # w_mu = _tf.reduce_sum(weights[:, :, :, None] * all_mu, axis=0)
+        # w_mu = _tf.reduce_sum(all_mu, axis=0)
+        w_mu = _tf.reduce_sum(weights[:, :, :, None] * all_mu, axis=0)
         w_var = _tf.reduce_sum(weights * all_var, axis=0)
         # w_var = 1 / _tf.reduce_sum(prec, axis=0)
         w_sims = _tf.reduce_sum(weights[:, :, :, None] * all_sims, axis=0)
@@ -2118,3 +1575,931 @@ class RefinerExperts(ProductOfExperts):
         w_explained_var = _tf.reduce_sum(weights * all_explained_var, axis=0)
 
         return w_mu, w_var, w_explained_var
+
+
+class FastGP(_GPNode):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
+                 fix_range=False, rank=None):
+        super().__init__(parent)
+        self._size = size
+        self.kernel = self._register(kernel)
+
+        if rank is None:
+            rank = int(_np.ceil(self.root.n_ip / 5))
+        elif rank > self.root.n_ip:
+            raise ValueError("rank must be smaller than the number of "
+                             "inducing points")
+        self.rank = rank
+
+        self.cov = None
+        self.cov_chol = None
+        self.chol_inv = None
+        self.mat_r = None
+        self.chol_solve_r = None
+        self.alpha = None
+
+        self.fix_range = fix_range
+        self.rank = rank
+        self._set_parameters()
+
+    def _set_parameters(self):
+        n_ip = self.root.n_ip
+        self._add_parameter(
+            "alpha_white",
+            _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.size, n_ip, 1]
+                ),
+                # _np.ones([self.size, n_ip, 1])*0.1,
+                _np.zeros([self.size, n_ip, 1]) - 10,
+                _np.zeros([self.size, n_ip, 1]) + 10
+            ))
+        self._add_parameter(
+            "r_power",
+            _gpr.PositiveParameter(
+                _np.ones([self.size, n_ip, 1]) * 0.5,
+                _np.ones([self.size, n_ip, 1]) * 1e-6,
+                _np.ones([self.size, n_ip, 1])
+            ))
+        self._add_parameter(
+            "r_vecs",
+            _gpr.OrthonormalMatrix(
+                rows=n_ip,
+                cols=self.rank,
+                batch_shape=(self.size,)
+            )
+        )
+
+        self._add_parameter(
+            "ranges",
+            _gpr.PositiveParameter(
+                _np.ones([1, 1, self.parent.size]),
+                _np.ones([1, 1, self.parent.size]) * 1e-6,
+                _np.ones([1, 1, self.parent.size]) * 10,
+                fixed=self.fix_range
+            )
+        )
+
+    def covariance_matrix(self, x, y, var_x=None, var_y=None):
+        with _tf.name_scope("basic_covariance_matrix"):
+            ranges = self.parameters["ranges"].get_value()
+            if var_x is None:
+                var_x = _tf.zeros_like(x)
+            if var_y is None:
+                var_y = _tf.zeros_like(y)
+            var_x = var_x[:, None, :]
+            var_y = var_y[None, :, :]
+
+            # [n_data, n_data, n_dim]
+            dif = x[:, None, :] - y[None, :, :]
+
+            total_var = ranges**2 + (var_x + var_y) / 2
+            dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
+            cov = self.kernel.kernelize(dist)
+
+            # normalization
+            det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
+            det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
+            det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
+
+            norm = det_x * det_y / det_2
+
+            # output
+            cov = cov * norm
+            return cov
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("basic_refresh"):
+            self.parent.refresh(jitter)
+
+            # prior
+            ip = self.parent.inducing_points
+            ip_var = self.parent.inducing_points_variance
+
+            eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
+
+            cov = self.covariance_matrix(ip, ip, ip_var, ip_var) + eye * jitter
+            chol = _tf.linalg.cholesky(cov)
+            chol_inv = _tf.linalg.triangular_solve(chol, eye, adjoint=True)
+
+            self.cov = cov
+            self.cov_chol = chol
+            self.chol_inv = chol_inv
+
+            # posterior
+            r_vecs = self.parameters["r_vecs"].get_value()
+            r_power = self.parameters["r_power"].get_value()
+            self.mat_r = r_power * r_vecs
+            self.chol_solve_r = _tf.einsum("ab,sbc->sac", chol_inv, self.mat_r)
+
+            # inducing points
+            alpha_white = self.parameters["alpha_white"].get_value()
+            pred_inputs = _tf.einsum("ab,sbc->sac", self.cov_chol, alpha_white)
+            self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
+            self.alpha = _tf.einsum("ab,sbc->sac", chol_inv, alpha_white)
+            pred_var = 1.0 - _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", self.cov, self.chol_solve_r)**2,
+                axis=2, keepdims=False
+            )
+            self.inducing_points_variance = _tf.transpose(pred_var)
+
+    def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("fast_gp_interpolation"):
+            cov_cross = self.covariance_matrix(
+                x, self.parent.inducing_points,
+                x_var, self.parent.inducing_points_variance)
+
+            mu = _tf.einsum("ab,sbc->sac", cov_cross, self.alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", cov_cross, self.chol_solve_r)**2,
+                axis=2, keepdims=False)
+            var = _tf.maximum(1.0 - explained_var, 0.0)
+
+            influence = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.chol_inv)**2,
+                axis=1, keepdims=False)
+            influence = _tf.tile(influence[None, :], [self.size, 1])
+
+            if n_sim > 0:
+                rnd_1 = _tf.random.stateless_normal(
+                    shape=[self.size, self.root.n_ip, n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                rnd_2 = _tf.random.stateless_normal(
+                    shape=[self.size, self.rank, n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                sims = _tf.einsum(
+                    "ab,sbc->sac",
+                    _tf.matmul(cov_cross, self.chol_inv), rnd_1) \
+                       - _tf.einsum(
+                    "ab,sbr,src->sac", cov_cross, self.chol_solve_r, rnd_2) \
+                       + mu
+
+                return mu, var, sims, explained_var, influence
+
+            else:
+                return mu, var
+
+    def covariance_matrix_d1(self, y, dir_y, step=1e-3):
+        with _tf.name_scope("basic_covariance_matrix_d1"):
+            x_pr = self.parent.inducing_points
+            x_var = self.parent.inducing_points_variance
+            y_pr_plus, y_var_plus = self.parent.propagate(
+                y + 0.5 * step * dir_y)
+            y_pr_minus, y_var_minus = self.parent.propagate(
+                y - 0.5 * step * dir_y)
+
+            cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_var, y_var_plus)
+            cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_var,
+                                           y_var_minus)
+
+            return (cov_1 - cov_2) / step
+
+    def point_variance_d2(self, x, dir_x, step=1e-3):
+        with _tf.name_scope("basic_point_variance_d2"):
+            mu_1, var_1 = self.parent.propagate(x + 0.5 * dir_x * step)
+            mu_2, var_2 = self.parent.propagate(x - 0.5 * dir_x * step)
+
+            ranges = self.parameters["ranges"].get_value()[0, :, :]
+            var_1 = var_1 + ranges ** 2
+            var_2 = var_2 + ranges ** 2
+
+            dif = mu_1 - mu_2
+            avg_var = 0.5 * (var_1 + var_2)
+            dist_sq = _tf.reduce_sum(dif ** 2 / avg_var, axis=1, keepdims=True)
+
+            cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
+
+            det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (
+                        1 / 2)
+            det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1 / 4)
+            det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1 / 4)
+
+            # norm = _tf.reduce_prod(ranges) / det_avg
+            norm = det_1 * det_2 / det_avg
+            cov_step = cov_step * norm
+
+            point_var = 2 * (1.0 - cov_step) / step ** 2
+            point_var = _tf.tile(point_var, [1, self.size])
+            point_var = _tf.transpose(point_var)
+
+            return point_var
+
+    def predict_directions(self, x, dir_x, step=1e-3):
+        with _tf.name_scope("basic_prediction_directions"):
+            cov_cross = self.covariance_matrix_d1(x, dir_x, step)
+            cov_cross = _tf.transpose(cov_cross)
+
+            mu = _tf.einsum("ab,sbc->sac", cov_cross, self.alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", cov_cross, self.chol_solve_r)**2,
+                axis=2, keepdims=False)
+
+            point_var = self.point_variance_d2(x, dir_x, step)
+            var = _tf.maximum(point_var - explained_var, 0.0)
+
+            return mu, var, explained_var
+
+    def kl_divergence(self):
+        with _tf.name_scope("basic_KL_divergence"):
+            alpha_white = self.parameters["alpha_white"].get_value()
+            rtr = _tf.matmul(self.mat_r, self.mat_r, True, False)
+
+            eye = _tf.eye(self.rank, dtype=_tf.float64,
+                          batch_shape=(self.size,))
+            chol = _tf.linalg.cholesky(eye - rtr)
+
+            tr = _tf.reduce_sum(_tf.linalg.diag_part(rtr))
+            fit = _tf.reduce_sum(alpha_white**2)
+            det = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(chol)))
+            kl = 0.5 * (- tr + fit - det)
+
+            return kl
+
+
+class WeightSpaceGP(_GPNode):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
+                 fix_range=False, rank=None):
+        super().__init__(parent)
+        self._size = size
+        self.kernel = self._register(kernel)
+
+        if rank is None:
+            rank = int(_np.ceil(self.root.n_ip / 5))
+        elif rank > self.root.n_ip:
+            raise ValueError("rank must be smaller than the number of "
+                             "inducing points")
+        self.rank = rank
+
+        self.mat_r = None
+        self.proj = None
+
+        n_ip = self.root.n_ip
+        self._add_parameter(
+            "mean_weights",
+            _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.size, n_ip, 1]
+                ),
+                _np.zeros([self.size, n_ip, 1]) - 10,
+                _np.zeros([self.size, n_ip, 1]) + 10
+            ))
+        self._add_parameter(
+            "r_power",
+            _gpr.PositiveParameter(
+                # _np.ones([self.size, n_ip * 2, 1]) * 0.5,
+                _np.random.normal(
+                    scale=1e-1,
+                    loc=0.5,
+                    size=[self.size, n_ip, 1]
+                ),
+                _np.ones([self.size, n_ip, 1]) * 1e-6,
+                _np.ones([self.size, n_ip, 1]) - 1e-6
+            ))
+        self._add_parameter(
+            "r_vecs",
+            _gpr.OrthonormalMatrix(
+                rows=n_ip,
+                cols=rank,
+                batch_shape=(size,)
+            )
+        )
+        self._add_parameter(
+            "ranges",
+            _gpr.PositiveParameter(
+                _np.ones([1, 1, self.parent.size]),
+                _np.ones([1, 1, self.parent.size]) * 1e-3,
+                _np.ones([1, 1, self.parent.size]) * 10,
+                fixed=fix_range
+            )
+        )
+
+        # random_directions = _tf.random.normal(
+        #     [1, n_ip, self.parent.size], dtype=_tf.float64)
+        # norm = _tf.math.reduce_euclidean_norm(
+        #     random_directions, axis=2, keepdims=True) + 1e-6
+        # self.random_directions = random_directions / norm
+
+    def feature_matrix(self, x, y, var_x=None):
+        ranges = self.parameters["ranges"].get_value()
+        if var_x is None:
+            var_x = _tf.zeros_like(x)
+        var_x = var_x[:, None, :]
+
+        # [n_data, n_data, n_dim]
+        dif = x[:, None, :] - y[None, :, :]
+
+        total_var = (ranges ** 2 + var_x) / 2
+        dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=2))
+
+        mat = self.kernel.kernelize(dist)
+        norm = _tf.math.reduce_euclidean_norm(
+            mat, axis=1, keepdims=True) + 1e-6
+        mat = mat / norm
+        return mat
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("basic_refresh"):
+            self.parent.refresh(jitter)
+
+            f_mat = self.feature_matrix(
+                self.parent.inducing_points,
+                self.parent.inducing_points,
+                self.parent.inducing_points_variance
+            )
+            #
+            # eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
+            #
+            # cov = _tf.matmul(f_mat, f_mat, False, True)
+            # chol = _tf.linalg.cholesky(cov + eye * jitter)
+            # proj = _tf.matmul(
+            #     f_mat, _tf.linalg.cholesky_solve(chol, f_mat), True)
+            # self.proj = proj
+
+            # posterior
+            r_vecs = self.parameters["r_vecs"].get_value()
+            r_power = self.parameters["r_power"].get_value()
+            self.mat_r = r_power * r_vecs
+
+            # inducing points
+            mean_weights = self.parameters["mean_weights"].get_value()
+            pred_inputs = _tf.einsum("ab,sbc->sac", f_mat, mean_weights)
+            self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
+            pred_var = 1.0 - _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", f_mat, self.mat_r)**2,
+                axis=2, keepdims=False
+            )
+            self.inducing_points_variance = _tf.transpose(pred_var)
+
+    def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("weight_gp_interpolation"):
+            f_mat = self.feature_matrix(
+                x,
+                self.parent.inducing_points,
+                x_var
+            )
+
+            # f_mat = _tf.matmul(f_mat, self.proj)
+
+            mean_weights = self.parameters["mean_weights"].get_value()
+            mu = _tf.einsum("ab,sbc->sac", f_mat, mean_weights)
+
+            explained_var = _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", f_mat, self.mat_r)**2,
+                axis=2, keepdims=False)
+            var = _tf.maximum(1.0 - explained_var, 0.0)
+
+            influence = _tf.reduce_sum(
+                f_mat**2,
+                axis=1, keepdims=False)
+            influence = _tf.tile(influence[None, :], [self.size, 1])
+
+            if n_sim > 0:
+                rnd_1 = _tf.random.stateless_normal(
+                    shape=[self.size, self.root.n_ip, n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                rnd_2 = _tf.random.stateless_normal(
+                    shape=[self.size, self.rank, n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                sims = _tf.einsum("ab,sbc->sac", f_mat, rnd_1) \
+                       - _tf.einsum(
+                    "ab,sbr,src->sac", f_mat, self.mat_r, rnd_2) \
+                       + mu
+
+                return mu, var, sims, explained_var, influence
+
+            else:
+                return mu, var
+
+    def kl_divergence(self):
+        with _tf.name_scope("weight_GP_KL_divergence"):
+            mean_weights = self.parameters["mean_weights"].get_value()
+            rtr = _tf.matmul(self.mat_r, self.mat_r, True, False)
+
+            eye = _tf.eye(self.rank, dtype=_tf.float64,
+                          batch_shape=(self.size,))
+            chol = _tf.linalg.cholesky(eye - rtr + eye*1e-6)
+
+            tr = _tf.reduce_sum(_tf.linalg.diag_part(rtr))
+            fit = _tf.reduce_sum(mean_weights**2)
+            det = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(chol)))
+            kl = 0.5 * (- tr + fit - det)
+
+            return kl
+
+
+class GPWithGradient(_GPNode):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
+                 fix_range=False):
+        super().__init__(parent)
+        self._size = size
+        self.kernel = self._register(kernel)
+
+        self.cov = None
+        self.cov_inv = None
+        self.cov_chol = None
+        self.cov_smooth = None
+        self.cov_smooth_chol = None
+        self.cov_smooth_inv = None
+        self.chol_r = None
+        self.alpha = None
+
+        self.prior_cov = None
+        self.prior_cov_inv = None
+        self.prior_cov_chol = None
+
+        self.scale = None
+
+        n_ip = self.root.n_ip
+        root_dims = self.root.size + 1
+        self._add_parameter(
+            "alpha_white",
+            _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.size, n_ip * root_dims, 1]
+                ),
+                _np.zeros([self.size, n_ip * root_dims, 1]) - 10,
+                _np.zeros([self.size, n_ip * root_dims, 1]) + 10
+            ))
+        self._add_parameter(
+            "delta",
+            _gpr.PositiveParameter(
+                _np.ones([self.size, n_ip * root_dims]),
+                _np.ones([self.size, n_ip * root_dims]) * 1e-6,
+                _np.ones([self.size, n_ip * root_dims]) * 1e4
+            ))
+
+        self._add_parameter(
+            "ranges",
+            _gpr.PositiveParameter(
+                _np.ones([1, 1, self.parent.size]),
+                _np.ones([1, 1, self.parent.size]) * 1e-6,
+                _np.ones([1, 1, self.parent.size]) * 10,
+                fixed=fix_range
+            )
+        )
+
+    def covariance_matrix(self, x, y, var_x=None, var_y=None):
+        with _tf.name_scope("basic_covariance_matrix"):
+            ranges = self.parameters["ranges"].get_value()
+            if var_x is None:
+                var_x = _tf.zeros_like(x)
+            if var_y is None:
+                var_y = _tf.zeros_like(y)
+            var_x = var_x[:, None, :]
+            var_y = var_y[None, :, :]
+
+            # [n_data, n_data, n_dim]
+            dif = x[:, None, :] - y[None, :, :]
+
+            total_var = ranges**2 + (var_x + var_y) / 2
+            dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
+            cov = self.kernel.kernelize(dist)
+
+            # normalization
+            det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
+            det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
+            det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
+
+            norm = det_x * det_y / det_2
+            # norm = _tf.reduce_prod(ranges) / det_2
+
+            # output
+            cov = cov * norm
+            return cov
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("basic_refresh"):
+            self.parent.refresh(jitter)
+
+            # prior
+            ip = self.parent.inducing_points
+            ip_var = self.parent.inducing_points_variance
+
+            ndim = _tf.shape(ip)[1]
+            n_data = _tf.shape(ip)[0]
+            base_dir = _tf.eye(ndim, dtype=_tf.float64)
+            ip_dir = _tf.tile(base_dir, [1, n_data])
+            ip_dir = _tf.reshape(ip_dir, [n_data * ndim, ndim])
+            ip_2 = _tf.tile(ip, [ndim, 1])
+            ip_var_2 = _tf.tile(ip_var, [ndim, 1])
+
+            eye = _tf.eye(n_data * (ndim + 1), dtype=_tf.float64)
+
+            base_cov = self.covariance_matrix(ip, ip, ip_var, ip_var)
+            cov_d1 = self.covariance_matrix_d1(ip_2, ip_dir, ip_var_2)
+            cov_d2 = self.covariance_matrix_d2(ip_2, ip_dir, ip_var_2)
+            cov = _tf.concat([
+                _tf.concat([base_cov, cov_d1], axis=1),
+                _tf.concat([_tf.transpose(cov_d1), cov_d2], axis=1)
+            ], axis=0)
+
+            self.scale = _tf.sqrt(_tf.linalg.diag_part(cov))
+            cov = cov / self.scale[:, None] / self.scale[None, :]
+
+            chol = _tf.linalg.cholesky(cov + eye * jitter)
+            cov_inv = _tf.linalg.cholesky_solve(chol, eye)
+
+            self.cov = _tf.tile(cov[None, :, :], [self.size, 1, 1])
+            self.cov_chol = _tf.tile(chol[None, :, :], [self.size, 1, 1])
+            self.cov_inv = _tf.tile(cov_inv[None, :, :], [self.size, 1, 1])
+
+            # posterior
+            eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
+            delta = self.parameters["delta"].get_value()
+            # delta = _tf.concat(
+            #     [delta, _tf.zeros([self.size, ndim * n_data], _tf.float64)],
+            #     axis=1)
+            delta_diag = _tf.linalg.diag(delta)
+            self.cov_smooth = self.cov + delta_diag
+            self.cov_smooth_chol = _tf.linalg.cholesky(
+                self.cov_smooth + eye * jitter)
+            self.cov_smooth_inv = _tf.linalg.cholesky_solve(
+                self.cov_smooth_chol, eye)
+            self.chol_r = _tf.linalg.cholesky(
+                self.cov_inv - self.cov_smooth_inv + eye * jitter)
+
+            # inducing points
+            alpha_white = self.parameters["alpha_white"].get_value()
+            pred_inputs = _tf.matmul(self.cov_chol, alpha_white)
+            self.inducing_points = _tf.transpose(pred_inputs[:, :n_data, 0])
+            self.alpha = _tf.matmul(self.cov_inv, pred_inputs)
+            pred_var = 1.0 - _tf.reduce_sum(
+                    _tf.matmul(self.cov, self.cov_smooth_inv) * self.cov,
+                    axis=2, keepdims=False
+                )
+            self.inducing_points_variance = _tf.transpose(pred_var[:, :n_data])
+
+    def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("GPWithGradient_interpolation"):
+            cov_1 = self.covariance_matrix(
+                x, self.parent.inducing_points,
+                x_var, self.parent.inducing_points_variance)
+            cov_2 = self.covariance_matrix_d1_reversed(x, x_var)
+            cov_cross = _tf.concat([cov_1, cov_2], axis=1)
+            cov_cross = cov_cross / self.scale[None, :]
+            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
+
+            mu = _tf.matmul(cov_cross, self.alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.cov_smooth_inv) * cov_cross,
+                axis=2, keepdims=False)
+            var = _tf.maximum(1.0 - explained_var, 0.0)
+
+            influence = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.cov_inv) * cov_cross,
+                axis=2, keepdims=False)
+
+            if n_sim > 0:
+                rnd = _tf.random.stateless_normal(
+                    shape=[self.size, self.root.n_ip * (self.root.size + 1),
+                           n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                sims = _tf.matmul(cov_cross, _tf.matmul(self.chol_r, rnd)) + mu
+
+                return mu, var, sims, explained_var, influence
+
+            else:
+                return mu, var
+
+    def kl_divergence(self):
+        with _tf.name_scope("basic_KL_divergence"):
+            delta = self.parameters["delta"].get_value()
+            alpha_white = self.parameters["alpha_white"].get_value()
+
+            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov)
+            fit = _tf.reduce_sum(alpha_white**2)
+            det_1 = 2 * _tf.reduce_sum(_tf.math.log(
+                _tf.linalg.diag_part(self.cov_smooth_chol)))
+            det_2 = _tf.reduce_sum(_tf.math.log(delta))
+            det_3 = 2 * _tf.reduce_sum(_tf.math.log(self.scale))
+            kl = 0.5 * (- tr + fit + det_1 - det_2 - det_3)
+
+            return kl
+
+    def covariance_matrix_d1(self, y, dir_y, y_var=None, step=1e-3):
+        with _tf.name_scope("covariance_matrix_d1"):
+            x_pr = self.parent.inducing_points
+            x_var = self.parent.inducing_points_variance
+            y_pr_plus, y_var_plus = self.parent.propagate(
+                y + 0.5 * step * dir_y, y_var)
+            y_pr_minus, y_var_minus = self.parent.propagate(
+                y - 0.5 * step * dir_y, y_var)
+
+            cov_1 = self.covariance_matrix(x_pr, y_pr_plus, x_var, y_var_plus)
+            cov_2 = self.covariance_matrix(x_pr, y_pr_minus, x_var,
+                                           y_var_minus)
+
+            return (cov_1 - cov_2) / step
+
+    def covariance_matrix_d2(self, y, dir_y, y_var=None, step=1e-3):
+        """
+        Direction-direction covariance.
+
+        Covariance between a set of directions and inducing gradients.
+
+        Parameters
+        ----------
+        y_var
+        y
+        dir_y
+        step
+
+        Returns
+        -------
+
+        """
+        with _tf.name_scope("covariance_matrix_d2"):
+            ndim = _tf.shape(self.parent.inducing_points)[1]
+            n_data = _tf.shape(self.parent.inducing_points)[0]
+            eye = _tf.eye(ndim, dtype=_tf.float64)
+            ip_dir = _tf.tile(eye, [1, n_data])
+            ip_dir = _tf.reshape(ip_dir, [n_data * ndim, ndim])
+            ip = _tf.tile(self.parent.inducing_points, [ndim, 1])
+            ip_var = _tf.tile(self.parent.inducing_points_variance, [ndim, 1])
+
+            ip_plus, ip_var_plus = self.parent.propagate(
+                ip + 0.5 * step * ip_dir, ip_var)
+            ip_minus, ip_var_minus = self.parent.propagate(
+                ip - 0.5 * step * ip_dir, ip_var)
+
+            y_pr_plus, y_var_plus = self.parent.propagate(
+                y + 0.5 * step * dir_y, y_var)
+            y_pr_minus, y_var_minus = self.parent.propagate(
+                y - 0.5 * step * dir_y, y_var)
+
+            cov_1a = self.covariance_matrix(
+                y_pr_plus, ip_plus, y_var_plus, ip_var_plus)
+            cov_1b = self.covariance_matrix(
+                y_pr_minus, ip_plus, y_var_minus, ip_var_plus)
+            cov_1 = (cov_1a - cov_1b) / step
+
+            cov_2a = self.covariance_matrix(
+                y_pr_plus, ip_minus, y_var_plus, ip_var_minus)
+            cov_2b = self.covariance_matrix(
+                y_pr_minus, ip_minus, y_var_minus, ip_var_minus)
+            cov_2 = (cov_2a - cov_2b) / step
+
+            return (cov_1 - cov_2) / step
+
+    def point_variance_d2(self, x, dir_x, step=1e-3):
+        with _tf.name_scope("basic_point_variance_d2"):
+            mu_1, var_1 = self.parent.propagate(x + 0.5 * dir_x * step)
+            mu_2, var_2 = self.parent.propagate(x - 0.5 * dir_x * step)
+
+            ranges = self.parameters["ranges"].get_value()[0, :, :]
+            var_1 = var_1 + ranges ** 2
+            var_2 = var_2 + ranges ** 2
+
+            dif = mu_1 - mu_2
+            avg_var = 0.5 * (var_1 + var_2)
+            dist_sq = _tf.reduce_sum(dif ** 2 / avg_var, axis=1, keepdims=True)
+
+            cov_step = self.kernel.kernelize(_tf.sqrt(dist_sq))
+
+            det_avg = _tf.reduce_prod(avg_var, axis=1, keepdims=True) ** (1/2)
+            det_1 = _tf.reduce_prod(var_1, axis=1, keepdims=True) ** (1/4)
+            det_2 = _tf.reduce_prod(var_2, axis=1, keepdims=True) ** (1/4)
+
+            # norm = _tf.reduce_prod(ranges) / det_avg
+            norm = det_1 * det_2 / det_avg
+            cov_step = cov_step * norm
+
+            point_var = 2 * (1.0 - cov_step) / step ** 2
+            point_var = _tf.tile(point_var, [1, self.size])
+            point_var = _tf.transpose(point_var)
+
+            return point_var
+
+    def covariance_matrix_d1_reversed(self, y, y_var=None, step=1e-3):
+        """
+        Point-direction covariance.
+
+        Covariance between a set of coordinates and inducing gradients.
+
+        Parameters
+        ----------
+        y_var
+        y
+        step
+
+        Returns
+        -------
+
+        """
+        with _tf.name_scope("covariance_matrix_d1_reversed"):
+            ndim = _tf.shape(self.parent.inducing_points)[1]
+            n_data = _tf.shape(self.parent.inducing_points)[0]
+            eye = _tf.eye(ndim, dtype=_tf.float64)
+            ip_dir = _tf.tile(eye, [1, n_data])
+            ip_dir = _tf.reshape(ip_dir, [n_data * ndim, ndim])
+            ip = _tf.tile(self.parent.inducing_points, [ndim, 1])
+            ip_var = _tf.tile(self.parent.inducing_points_variance, [ndim, 1])
+
+            ip_plus, ip_var_plus = self.parent.propagate(
+                ip + 0.5 * step * ip_dir, ip_var)
+            ip_minus, ip_var_minus = self.parent.propagate(
+                ip - 0.5 * step * ip_dir, ip_var)
+
+            y, y_var = self.parent.propagate(y, y_var)
+
+            cov_1 = self.covariance_matrix(
+                y, ip_plus, y_var, ip_var_plus)
+            cov_2 = self.covariance_matrix(
+                y, ip_minus, y_var, ip_var_minus)
+
+            return (cov_1 - cov_2) / step
+
+    def predict_directions(self, x, dir_x, step=1e-3):
+        with _tf.name_scope("basic_prediction_directions"):
+
+            cov_1 = self.covariance_matrix_d1(x, dir_x, step=step)
+            cov_1 = _tf.transpose(cov_1)
+            cov_2 = self.covariance_matrix_d2(x, dir_x, step=step)
+            cov_cross = _tf.concat([cov_1, cov_2], axis=1)
+            cov_cross = _tf.tile(cov_cross[None, :, :], [self.size, 1, 1])
+
+            mu = _tf.matmul(cov_cross, self.alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.cov_smooth_inv) * cov_cross,
+                axis=2, keepdims=False)
+
+            point_var = self.point_variance_d2(x, dir_x, step)
+            var = _tf.maximum(point_var - explained_var, 0.0)
+
+            return mu, var, explained_var
+
+
+class MultiStructureGP(BasicGP):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False, n_structures=2):
+        self.n_structures = n_structures
+        super().__init__(parent, size, kernel, fix_range)
+
+    def _set_parameters(self):
+        n_ip = self.root.n_ip
+        self._add_parameter(
+            "alpha_white",
+            _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.size, n_ip, 1]
+                ),
+                # _np.ones([self.size, n_ip, 1])*0.1,
+                _np.zeros([self.size, n_ip, 1]) - 10,
+                _np.zeros([self.size, n_ip, 1]) + 10
+            ))
+        self._add_parameter(
+            "delta",
+            _gpr.PositiveParameter(
+                _np.ones([self.size, n_ip]),
+                _np.ones([self.size, n_ip]) * 1e-6,
+                _np.ones([self.size, n_ip]) * 1e2
+            ))
+        self._add_parameter(
+            "weights",
+            _gpr.CompositionalParameter(_np.ones([self.n_structures]) / self.n_structures)
+        )
+
+        for n in range(self.n_structures):
+            self._add_parameter(
+                f"ranges_{n}",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, self.parent.size]) / (n + 1),
+                    _np.ones([1, 1, self.parent.size]) * 1e-2,
+                    _np.ones([1, 1, self.parent.size]) * 10,
+                    fixed=self.fix_range
+                )
+            )
+
+    def covariance_matrix(self, x, y, var_x=None, var_y=None):
+        with _tf.name_scope("basic_covariance_matrix"):
+            weights = self.parameters["weights"].get_value()
+            cov_mats = []
+
+            if var_x is None:
+                var_x = _tf.zeros_like(x)
+            if var_y is None:
+                var_y = _tf.zeros_like(y)
+            var_x = var_x[:, None, :]
+            var_y = var_y[None, :, :]
+
+            # [n_data, n_data, n_dim]
+            dif = x[:, None, :] - y[None, :, :]
+
+            for n in range(self.n_structures):
+                ranges = self.parameters[f"ranges_{n}"].get_value()
+
+                total_var = ranges**2 + (var_x + var_y) / 2
+                dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
+                cov = self.kernel.kernelize(dist)
+
+                # normalization
+                det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
+                det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
+                det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
+
+                norm = det_x * det_y / det_2
+
+                # output
+                cov = cov * norm * weights[n]
+                cov_mats.append(cov)
+
+            cov = _tf.add_n(cov_mats)
+            return cov
+
+
+class MultiStructureFastGP(FastGP):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False, rank=None, n_structures=2):
+        self.n_structures = n_structures
+        super().__init__(parent, size, kernel, fix_range, rank=rank)
+
+    def _set_parameters(self):
+        n_ip = self.root.n_ip
+        self._add_parameter(
+            "alpha_white",
+            _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.size, n_ip, 1]
+                ),
+                # _np.ones([self.size, n_ip, 1])*0.1,
+                _np.zeros([self.size, n_ip, 1]) - 10,
+                _np.zeros([self.size, n_ip, 1]) + 10
+            ))
+        self._add_parameter(
+            "r_power",
+            _gpr.PositiveParameter(
+                _np.ones([self.size, n_ip, 1]) * 0.5,
+                _np.ones([self.size, n_ip, 1]) * 1e-6,
+                _np.ones([self.size, n_ip, 1])
+            ))
+        self._add_parameter(
+            "r_vecs",
+            _gpr.OrthonormalMatrix(
+                rows=n_ip,
+                cols=self.rank,
+                batch_shape=(self.size,)
+            )
+        )
+        self._add_parameter(
+            "weights",
+            _gpr.CompositionalParameter(_np.ones([self.n_structures]) / self.n_structures)
+        )
+
+        for n in range(self.n_structures):
+            self._add_parameter(
+                f"ranges_{n}",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, self.parent.size]) / (n + 1),
+                    _np.ones([1, 1, self.parent.size]) * 1e-6,
+                    _np.ones([1, 1, self.parent.size]) * 10,
+                    fixed=self.fix_range
+                )
+            )
+
+    def covariance_matrix(self, x, y, var_x=None, var_y=None):
+        with _tf.name_scope("covariance_matrix"):
+            weights = self.parameters["weights"].get_value()
+            cov_mats = []
+
+            if var_x is None:
+                var_x = _tf.zeros_like(x)
+            if var_y is None:
+                var_y = _tf.zeros_like(y)
+            var_x = var_x[:, None, :]
+            var_y = var_y[None, :, :]
+
+            # [n_data, n_data, n_dim]
+            dif = x[:, None, :] - y[None, :, :]
+
+            for n in range(self.n_structures):
+                ranges = self.parameters[f"ranges_{n}"].get_value()
+
+                total_var = ranges**2 + (var_x + var_y) / 2
+                dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=-1))
+                cov = self.kernel.kernelize(dist)
+
+                # normalization
+                det_x = _tf.reduce_prod(var_x + ranges**2, axis=-1) ** (1 / 4)
+                det_y = _tf.reduce_prod(var_y + ranges**2, axis=-1) ** (1 / 4)
+                det_2 = _tf.sqrt(_tf.reduce_prod(total_var, axis=-1))
+
+                norm = det_x * det_y / det_2
+
+                # output
+                cov = cov * norm * weights[n]
+                cov_mats.append(cov)
+
+            cov = _tf.add_n(cov_mats)
+            return cov

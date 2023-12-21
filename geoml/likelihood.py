@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+import numpy as np
 # import numpy as np
 from scipy.linalg import helmert as _helmert
 import copy as _copy
@@ -1069,6 +1069,9 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
                           prob_zero)
             )
 
+            # log_density_2 = _tf.math.log(- _tf.math.expm1(log_density))
+            # log_density = log_density - log_density_2 * 1e-4
+
         log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
 
         has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
@@ -1508,6 +1511,7 @@ class _CompositionalLikelihood(_Likelihood):
             n_basis = n_components - 1
         elif n_basis >= n_components:
             raise ValueError("n_basis must be smaller than n_components")
+        self.n_basis = n_basis
 
         super().__init__(n_basis)
         self.n_components = n_components
@@ -1591,8 +1595,6 @@ class _CompositionalLikelihood(_Likelihood):
         return out
 
     def initialize(self, y):
-        # basis = self.parameters["basis"].get_value()
-
         y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
 
         y_centered = y_ilr - _tf.reduce_mean(y_ilr, axis=0, keepdims=True)
@@ -1608,13 +1610,6 @@ class _CompositionalLikelihood(_Likelihood):
         for i, wp in enumerate(self.warpings):
             wp.initialize(y_ilr[:, i])
 
-        # y_wp = [wp.initialize(y_ilr[:, i])
-        #         for i, wp in enumerate(self.warpings)]
-        # y_wp = _tf.concat(y_wp, axis=1)
-
-        # cov_mat = _tf.matmul(y_wp, y_wp, True)
-        # vals, vecs = _tf.linalg.eigh(cov_mat)
-
 
 class CompositionalGaussian(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
@@ -1629,6 +1624,21 @@ class CompositionalGaussian(_CompositionalLikelihood):
 
     def _make_distribution(self, loc):
         return _tfd.Normal(loc, _tf.sqrt(self.parameters["noise"].get_value()))
+
+
+class CompositionalLaplace(_CompositionalLikelihood):
+    def __init__(self, n_components, n_basis=None, contrast_matrix=None,
+                 warping=_warp.Identity()):
+        super().__init__(n_components, n_basis, contrast_matrix, warping)
+        self._add_parameter(
+            "rate",
+            _gpr.PositiveParameter(
+                _np.ones([1, self.size, 1]) * 0.1,
+                _np.ones([1, self.size, 1]) * 1e-6,
+                _np.ones([1, self.size, 1]) * 10))
+
+    def _make_distribution(self, loc):
+        return _tfd.Laplace(loc, self.parameters["rate"].get_value())
 
 
 class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
@@ -1691,10 +1701,12 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
         self.tol = tol
         self.sharpness = sharpness
 
-        self._add_parameter(
-            "thresholds",
-            _gpr.CompositionalParameter(_np.ones([levels - 1]) / (levels - 1))
-        )
+        if levels > 1:
+            self._add_parameter(
+                "thresholds",
+                _gpr.CompositionalParameter(
+                    _np.ones([levels - 1]) / (levels - 1))
+            )
 
     def get_thresholds(self):
         thresholds = self.parameters["thresholds"].get_value()
@@ -1787,13 +1799,16 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
                     )
                 )
 
+        # log_density_2 = _tf.math.log(- _tf.math.expm1(log_density))
+        # log_density = log_density - log_density_2 #* 1e-2
+
         has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
 
-        weights = 2 - _tf.math.exp(log_density)
-        weights = weights / _tf.reduce_sum(weights * has_value) \
-                  * _tf.reduce_sum(has_value)
+        # weights = 2 - _tf.math.exp(log_density)
+        # weights = weights / _tf.reduce_sum(weights * has_value) \
+        #           * _tf.reduce_sum(has_value)
 
-        log_density = _tf.reduce_sum(log_density * has_value * weights)
+        log_density = _tf.reduce_sum(log_density * has_value) # * weights)
 
         return log_density * self.sharpness
 

@@ -94,7 +94,7 @@ class Isotropic(_Transform):
 
         self.parameters["range"].set_limits(
             min_val=base_range * 2,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
 
 
 class _Ellipsoidal(_Transform):
@@ -164,7 +164,7 @@ class Anisotropy2D(_Ellipsoidal):
     def set_limits(self, data):
         self.parameters["maxrange"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
 
 
 class Anisotropy2DMath(_Ellipsoidal):
@@ -216,10 +216,10 @@ class Anisotropy2DMath(_Ellipsoidal):
 
         self.parameters["range_x"].set_limits(
             min_val=base_range * 2,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
         self.parameters["range_y"].set_limits(
             min_val=base_range * 2,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
 
 
 class Anisotropy2DDynamic(_Ellipsoidal):
@@ -343,7 +343,7 @@ class Anisotropy3D(_Ellipsoidal):
     def set_limits(self, data):
         self.parameters["maxrange"].set_limits(
             min_val=data.diagonal / 1000,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
 
 
 class Anisotropy3DMath(_Ellipsoidal):
@@ -414,13 +414,13 @@ class Anisotropy3DMath(_Ellipsoidal):
     def set_limits(self, data):
         self.parameters["range_x"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
         self.parameters["range_y"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
         self.parameters["range_z"].set_limits(
             min_val=data.diagonal / 100,
-            max_val=data.diagonal / 2)
+            max_val=data.diagonal * 2)
 
 
 class Anisotropy3DDynamic(_Ellipsoidal):
@@ -460,7 +460,9 @@ class Anisotropy3DDynamic(_Ellipsoidal):
                              axis=0)
 
             self._anis = _tf.reduce_sum(anis * w, axis=0)
-            self._anis_inv = _tf.linalg.inv(self._anis)
+            self._anis_inv = _tf.linalg.inv(
+                self._anis + _tf.eye(3, dtype=_tf.float64) * 1e-9
+            )
 
     def set_limits(self, data):
         for tr in self._base_transforms:

@@ -50,6 +50,9 @@ class Parametric(object):
         self._all_parameters.extend(parametric.all_parameters)
         return parametric
 
+    def _set_parameters(self):
+        pass
+
     def get_parameter_values(self, complete=False):
         value = []
         shape = []

@@ -1,3 +1,6 @@
+## version 0.3.4
+* 
+
 ## version 0.3.3
 * Improvements and optimizations
 * Heteroscedastic likelihoods
@@ -15,7 +18,7 @@
 * Added likelihoods for compositional variables.
 * `kernels` module now has a specific object for covariance functions.
 * Implemented the ability to convert data objects to `pyvista`.
-* Implemented `Surface3D` data object.
+* Implemented `Surface3D` da[setup.py](setup.py)ta object.
 
 ## version 0.3.1
 * New autoregressive latent variable.

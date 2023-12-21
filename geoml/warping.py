@@ -292,6 +292,9 @@ class Softplus(_Warping):
 class Log(_Warping):
     """
     Log-scale warping.
+
+    Forward function: log
+    Backward function: exp
     """
     def __init__(self, shift=1e-6):
         """
@@ -372,3 +375,37 @@ class ChainedWarping(_Warping):
         for wp in self.warpings:
             x = wp.initialize(x)
         return x
+
+
+class Sigmoid(_Warping):
+    """
+    Sigmoid warping, for values constrained to the ]0, 1[ interval.
+
+    Forward function: inverse sigmoid
+    Backward function: sigmoid
+    """
+
+    def __init__(self, shift=1e-6):
+        """
+        Initializer for Sigmoid.
+
+        Parameters
+        ----------
+        shift : float
+            A positive value to ensure the data is constrained to the ]0, 1[ interval.
+        """
+        super().__init__()
+        if shift <= 0:
+            raise ValueError("shift must be positive")
+        self.shift = shift
+
+    def forward(self, x):
+        x = x * (1 - 2 * self.shift) + self.shift
+        return - _tf.math.log(1 / x - 1)
+
+    def backward(self, x):
+        return 1 / (1 + _tf.math.exp(-x))
+
+    def derivative(self, x):
+        x = x * (1 - 2 * self.shift) + self.shift
+        return 1 / (x - x**2)

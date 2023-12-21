@@ -238,7 +238,7 @@ class _Variable(object):
             self.coordinates = coordinates
 
             if dtype is None:
-                dtype = _np.float
+                dtype = float
 
             if values is None:
                 values = _np.array([_np.nan] * coordinates.n_data,
@@ -262,8 +262,9 @@ class _Variable(object):
             return self.values.__repr__()
 
         def __getitem__(self, item):
-            self.values = _np.array(self.values[item], ndmin=1)
-            return self
+            new_obj = _copy.deepcopy(self)
+            new_obj.values = _np.array(self.values[item], ndmin=1)
+            return new_obj
 
         def as_image(self):
             """
@@ -282,7 +283,7 @@ class _Variable(object):
                 raise ValueError("method only available for Grid2D data"
                                  "objects")
 
-            image = _np.reshape(self.values, #.astype(_np.float),
+            image = _np.reshape(self.values, #.astype(float),
                                 newshape=self.coordinates.grid_size,
                                 order="F")
             image = image.transpose()
@@ -301,7 +302,7 @@ class _Variable(object):
                 raise ValueError("method only available for Grid3D data"
                                  "objects")
 
-            cube = _np.reshape(self.values,  # .astype(_np.float),
+            cube = _np.reshape(self.values,  # .astype(float),
                                self.coordinates.grid_size, order="F")
             return cube
 
@@ -353,7 +354,7 @@ class _Variable(object):
                             " ".join(str(elem) for elem in line) + "\n")
 
         def fill_pyvista_cube(self, cube, label):
-            if self.values.dtype == _np.object:
+            if self.values.dtype == object:
                 if not all(self.values == ""):
                     cube.point_arrays[label] = self.as_cube() \
                         .transpose([2, 0, 1]).ravel()
@@ -362,7 +363,7 @@ class _Variable(object):
                     .transpose([2, 0, 1]).ravel()
 
         def fill_pyvista_points(self, points, label):
-            if self.values.dtype == _np.object:
+            if self.values.dtype == object:
                 if not all(self.values == ""):
                     points.point_arrays[label] = self.values
             elif not all(_np.isnan(self.values)):
@@ -1003,7 +1004,7 @@ class RockTypeVariable(CompositionalVariable):
         avg_vals = None
         if measurements_a is not None:
             vals_a = _np.zeros([n_data, n_cat])
-            vals_b = vals_a
+            vals_b = vals_a.copy()
             for i, label in enumerate(labels):
                 vals_a[measurements_a == label, i] = 1
                 vals_b[measurements_b == label, i] = 1
@@ -1014,24 +1015,24 @@ class RockTypeVariable(CompositionalVariable):
         # self._length *= 2
 
         self.predicted = self._Attribute(
-            coordinates, _np.array([""]*n_data), dtype=_np.object)
+            coordinates, _np.array([""]*n_data), dtype=object)
         self.entropy = self._Attribute(coordinates)
         self.uncertainty = self._Attribute(coordinates)
 
         if measurements_a is None:
             self.measurements_a = self._Attribute(
-                coordinates, _np.array([""] * n_data), dtype=_np.object)
+                coordinates, _np.array([""] * n_data), dtype=object)
             self.measurements_b = self._Attribute(
-                coordinates, _np.array([""] * n_data), dtype=_np.object)
+                coordinates, _np.array([""] * n_data), dtype=object)
             self.boundary = self._Attribute(
-                coordinates, [False]*n_data, dtype=_np.bool)
+                coordinates, [False]*n_data, dtype=bool)
         else:
             self.measurements_a = self._Attribute(
-                coordinates, measurements_a, dtype=_np.object)
+                coordinates, measurements_a, dtype=object)
             self.measurements_b = self._Attribute(
-                coordinates, measurements_b, dtype=_np.object)
+                coordinates, measurements_b, dtype=object)
             self.boundary = self._Attribute(
-                coordinates, measurements_a != measurements_b, dtype=_np.bool)
+                coordinates, measurements_a != measurements_b, dtype=bool)
 
     # def get_measurements(self):
     #     out = [self.components[label].measurements.values
@@ -1256,17 +1257,17 @@ class BinaryVariable(_Variable):
             coordinates, _np.array([_np.nan]*n_data))
         if measurements is None:
             self.measurements = self._Attribute(
-                coordinates, [""]*n_data, dtype=_np.object)
+                coordinates, [""]*n_data, dtype=object)
             self.weights = self._Attribute(coordinates)
         else:
             self.measurements = self._Attribute(
-                coordinates, measurements, dtype=_np.object)
+                coordinates, measurements, dtype=object)
             self.weights = self._Attribute(coordinates, _np.ones(n_data))
             self.indicator.values[measurements == labels[0]] = 1
             self.indicator.values[measurements == labels[1]] = 0
 
         self.predicted = self._Attribute(
-            coordinates, [""]*n_data, dtype=_np.object)
+            coordinates, [""]*n_data, dtype=object)
         self.probability = self._Attribute(coordinates, _np.zeros(n_data))
         self.entropy = self._Attribute(coordinates)
         self.uncertainty = self._Attribute(coordinates)
@@ -1532,7 +1533,7 @@ class _PointBased(_SpatialData):
         self.variables[name] = CategoricalVariable(
             name, self, labels, measurements)
 
-    def add_rock_type_variable(self, name, labels, measurements_a=None,
+    def add_rock_type_variable(self, name, labels=None, measurements_a=None,
                                measurements_b=None, ordered=False):
         if ordered:
             self.variables[name] = OrderedRockType(
@@ -1756,7 +1757,7 @@ class Grid1D(_GriddedData):
             end = start + (n - 1) * step
         else:
             step = (end - start) / (n - 1)
-        grid = _np.linspace(start, end, n, dtype=_np.float)
+        grid = _np.linspace(start, end, n, dtype=float)
 
         if label is None:
             label = "X"
@@ -1924,7 +1925,7 @@ class Grid2D(_GriddedData):
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
         coords = _np.array(list(_iter.product(grid_y, grid_x)),
-                           dtype=_np.float)[:, ::-1]
+                           dtype=float)[:, ::-1]
 
         if labels is None:
             labels = ["X", "Y"]
@@ -2110,7 +2111,7 @@ class Grid3D(_GriddedData):
         grid_y = _np.linspace(start[1], end[1], n[1])
         grid_z = _np.linspace(start[2], end[2], n[2])
         coords = _np.array(list(_iter.product(grid_z, grid_y, grid_x)),
-                           dtype=_np.float)[:, ::-1]
+                           dtype=float)[:, ::-1]
 
         if labels is None:
             labels = ["X", "Y", "Z"]
@@ -2357,7 +2358,7 @@ class DirectionalData(PointData):
                                      axis=0)
         new_obj._bounding_box, new_obj._diagonal = bounding_box(all_coords)
 
-        for name, var in self.variables.items():
+        for name, var in new_obj.variables.items():
             new_obj.variables[name] = var[item]
             new_obj.variables[name].set_coordinates(new_obj)
         return new_obj
@@ -2908,7 +2909,7 @@ def _blockdata(cls):
             list(_iter.product(
                 *[_np.arange(d) for d in self.discretization[::-1]]
             )),
-            dtype=_np.float)[:, ::-1]
+            dtype=float)[:, ::-1]
         sub_grid -= (_np.array(self.discretization)[None, :] - 1) / 2
         sub_grid *= _np.array(self.step_size)[None, :]
         sub_grid /= (_np.array(self.discretization)[None, :] + 1)

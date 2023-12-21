@@ -642,10 +642,20 @@ class VGPNetwork(_GPModel):
     def train_svi(self, epochs=100):
         model_variables = self.get_unfixed_variables()
 
+        if self.directional_data is not None:
+            x_dir = _tf.constant(
+                self.directional_data.coordinates,
+                _tf.float64),
+            directions = _tf.constant(
+                self.directional_data.directions, _tf.float64),
+            y_dir = _tf.constant(self.y_dir, _tf.float64),
+            has_value_directions = _tf.constant(
+                self.has_value_dir, _tf.float64),
+
         def loss(idx):
-            training_inputs = [
-                self.data.variables[v].training_input(idx)
-                for v in self.variables]
+            # training_inputs = [
+            #     self.data.variables[v].training_input(idx)
+            #     for v in self.variables]
 
             if self.directional_data is None:
                 return - self._training_elbo(
@@ -653,9 +663,11 @@ class VGPNetwork(_GPModel):
                                  _tf.float64),
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
+                    # training_inputs,
+                    [{} for v in self.variables],
                     x_var=_tf.constant(self.data.get_data_variance()[idx],
                                        _tf.float64),
+                    # local_x, local_y, local_hv, {}, local_x_var,
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -666,17 +678,20 @@ class VGPNetwork(_GPModel):
                                  _tf.float64),
                     _tf.constant(self.y[idx], _tf.float64),
                     _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
+                    # training_inputs,
+                    [{} for v in self.variables],
                     x_var=_tf.constant(self.data.get_data_variance()[idx],
                                        _tf.float64),
-                    x_dir=_tf.constant(
-                        self.directional_data.coordinates,
-                        _tf.float64),
-                    directions=_tf.constant(
-                        self.directional_data.directions, _tf.float64),
-                    y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    has_value_directions=_tf.constant(
-                        self.has_value_dir, _tf.float64),
+                    # local_x, local_y, local_hv, {}, local_x_var,
+                    x_dir=_tf.identity(x_dir),
+                    # directions=_tf.constant(
+                    #     self.directional_data.directions, _tf.float64),
+                    # y_dir=_tf.constant(self.y_dir, _tf.float64),
+                    # has_value_directions=_tf.constant(
+                    #     self.has_value_dir, _tf.float64),
+                    directions=_tf.identity(directions),
+                    y_dir=_tf.identity(y_dir),
+                    has_value_directions=_tf.identity(has_value_directions),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
                     seed=self.options.seed
@@ -692,6 +707,7 @@ class VGPNetwork(_GPModel):
 
             for batch in batches:
                 self.optimizer.minimize(
+                    # loss,
                     lambda: loss(shuffled[batch]),
                     model_variables)
 
@@ -795,9 +811,9 @@ class VGPNetwork(_GPModel):
             print("\n")
 
     def train_svi_experts(self, global_epochs=10, epochs_per_expert=10):
-        if not isinstance(self.latent_network, geoml.latent.Refine):
-            raise Exception("the last network node must be a"
-                            "Refine object")
+        if not isinstance(self.latent_network, geoml.latent.RefinerExperts):
+            raise Exception("the last network node must be a "
+                            "RefinerExperts object")
 
         unique_params = set(self._all_parameters)
         network_params = set(self.latent_network.all_parameters)
@@ -1488,13 +1504,16 @@ class VGPNetworkEnsemble(_EnsembleModel):
         self.models = [VGPNetwork(
             data=d,
             variables=variables,
-            # likelihoods=_copy.deepcopy(likelihoods),
-            likelihoods=lik,
+            likelihoods=_copy.deepcopy(likelihoods),
+            # likelihoods=lik,
             latent_network=l,
             directional_data=dd,
             options=options)
-            for d, l, dd, lik in zip(
-                data, latent_networks, directional_data, likelihoods)]
+            # for d, l, dd, lik in zip(
+            #     data, latent_networks, directional_data, likelihoods)
+            for d, l, dd in zip(
+                data, latent_networks, directional_data)
+        ]
         for model in self.models:
             self._register(model)
 

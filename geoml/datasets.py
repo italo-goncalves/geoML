@@ -162,7 +162,7 @@ def sunspot_number():
                         "n_obs", "definitive"],
                        axis="columns", inplace=True)
     # yearly = _data.Points1D(_np.arange(1700, yearly_df.shape[0] + 1700,
-    #                                    dtype=_np.float),
+    #                                    dtype=float),
     #                         yearly_df)
     yearly = _data.PointData(yearly_df, "year")
     yearly.add_continuous_variable("sn", yearly_df["sn"].values)
@@ -173,9 +173,9 @@ def sunspot_number():
     monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
                          "n_obs", "definitive"],
                         axis="columns", inplace=True)
-    monthly_df["idx"] = _np.arange(1, monthly_df.shape[0] + 1, dtype=_np.float)
+    monthly_df["idx"] = _np.arange(1, monthly_df.shape[0] + 1, dtype=float)
     # monthly = _data.Points1D(_np.arange(1, monthly_df.shape[0] + 1,
-    #                                     dtype=_np.float), monthly_df)
+    #                                     dtype=float), monthly_df)
     monthly = _data.PointData(monthly_df, "idx")
     monthly.add_continuous_variable("sn", monthly_df["sn"].values)
 
@@ -184,7 +184,7 @@ def sunspot_number():
     daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
                        "n_obs", "definitive"],
                       axis="columns", inplace=True)
-    daily_df["idx"] = _np.arange(1, daily_df.shape[0] + 1, dtype=_np.float)
+    daily_df["idx"] = _np.arange(1, daily_df.shape[0] + 1, dtype=float)
     daily = _data.PointData(daily_df, "idx")
     daily.add_continuous_variable("sn", daily_df["sn"].values)
 
