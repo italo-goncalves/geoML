@@ -3,7 +3,7 @@ __author__ = 'Ítalo Gomes Gonçalves'
 __all__ = ['transform', 'warping', 'data',
            'interpolation', 'tftools',
            'models', 'kernels', 'datasets',
-           'likelihood', 'latent', 'plotly']
+           'likelihood', 'latent', 'plotly', 'pyvista']
 
 # from . import interpolation
 # from . import parameter

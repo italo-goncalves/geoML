@@ -1,5 +1,5 @@
 ## version 0.3.4
-* 
+* Improved pyvista integration
 
 ## version 0.3.3
 * Improvements and optimizations

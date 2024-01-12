@@ -356,18 +356,18 @@ class _Variable(object):
         def fill_pyvista_cube(self, cube, label):
             if self.values.dtype == object:
                 if not all(self.values == ""):
-                    cube.point_arrays[label] = self.as_cube() \
+                    cube.point_data[label] = self.as_cube() \
                         .transpose([2, 0, 1]).ravel()
             elif not all(_np.isnan(self.values)):
-                cube.point_arrays[label] = self.as_cube() \
+                cube.point_data[label] = self.as_cube() \
                     .transpose([2, 0, 1]).ravel()
 
         def fill_pyvista_points(self, points, label):
             if self.values.dtype == object:
                 if not all(self.values == ""):
-                    points.point_arrays[label] = self.values
+                    points.point_data[label] = self.values
             elif not all(_np.isnan(self.values)):
-                points.point_arrays[label] = self.values
+                points.point_data[label] = self.values
 
         def draw_contour(self, value, **kwargs):
             """Creates plotly object with the contour at the specified value."""
@@ -2331,7 +2331,7 @@ class DirectionalData(PointData):
         all_coords = _np.concatenate([self._bounding_box.as_array(),
                                       self.directions],
                                      axis=0)
-        self._bounding_box, self._diagonal = bounding_box(all_coords)
+        self._bounding_box = BoundingBox.from_array(all_coords)
 
     def as_data_frame(self, full=False):
         """
@@ -2840,6 +2840,25 @@ class Section3D(PointData):
         super().__init__(df, coordinate_labels)
         self.grid_shape = [n_x, n_y]
 
+    def as_pyvista(self):
+        n_x, n_y = self.grid_shape
+        faces = []
+        for i in range(n_x - 1):
+            for j in range(n_y - 1):
+                p_1 = j * n_y + i
+                p_2 = p_1 + 1
+                p_3 = (j + 1) * n_y + i + 1
+                p_4 = p_3 - 1
+                faces.append([4, p_1, p_2, p_3, p_4])
+        faces = _np.stack(faces)
+
+        pv_surf = _pv.PolyData(self.coordinates, faces)
+
+        for var in self.variables.keys():
+            self.variables[var].fill_pyvista_points(pv_surf)
+
+        return pv_surf
+
 
 class Surface3D(_PointBased):
     def __init__(self, points, triangles, normals):
@@ -2886,6 +2905,19 @@ class Surface3D(_PointBased):
         triangles_df = pd.DataFrame(
             self.triangles, columns=["PointId1", "PointId2", "PointId3"])
         triangles_df.to_csv(triangles_filename + ".csv", index=False)
+
+    def as_pyvista(self):
+        faces = _np.concatenate(
+            [_np.full([self.triangles.shape[0], 1], 3, int), self.triangles],
+            axis=1
+        )
+
+        pv_surf = _pv.PolyData(self.coordinates, faces.ravel())
+
+        for var in self.variables.keys():
+            self.variables[var].fill_pyvista_points(pv_surf)
+
+        return pv_surf
 
 
 def _blockdata(cls):
