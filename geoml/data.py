@@ -2862,7 +2862,7 @@ class DrillholeData(_SpatialData):
             if df[col].dtype == 'object':
                 df[col] = df[col].str.normalize('NFKD')\
                     .str.encode('ascii', errors='ignore').str.decode('utf-8')
-            pv_dh.point_data[col] = df[col].values
+            pv_dh.cell_data[col] = df[col].values
 
         return pv_dh
 
