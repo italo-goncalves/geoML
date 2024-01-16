@@ -357,10 +357,10 @@ class _Variable(object):
             if self.values.dtype == object:
                 if not all(self.values == ""):
                     cube.point_data[label] = self.as_cube() \
-                        .transpose([2, 0, 1]).ravel()
+                        .transpose([2, 1, 0]).ravel()
             elif not all(_np.isnan(self.values)):
                 cube.point_data[label] = self.as_cube() \
-                    .transpose([2, 0, 1]).ravel()
+                    .transpose([2, 1, 0]).ravel()
 
         def fill_pyvista_points(self, points, label):
             if self.values.dtype == object:
@@ -368,6 +368,15 @@ class _Variable(object):
                     points.point_data[label] = self.values
             elif not all(_np.isnan(self.values)):
                 points.point_data[label] = self.values
+
+        def fill_pyvista_blocks(self, cube, label):
+            if self.values.dtype == object:
+                if not all(self.values == ""):
+                    cube.cell_data[label] = self.as_cube() \
+                        .transpose([2, 1, 0]).ravel()
+            elif not all(_np.isnan(self.values)):
+                cube.cell_data[label] = self.as_cube() \
+                    .transpose([2, 1, 0]).ravel()
 
         def draw_contour(self, value, **kwargs):
             """Creates plotly object with the contour at the specified value."""
@@ -666,6 +675,25 @@ class ContinuousVariable(_Variable):
             self.probabilities[q].fill_pyvista_points(
                 points, self.name + " - probability %f" % q)
 
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        self.measurements.fill_pyvista_blocks(cube, self.name)
+        self.latent_mean.fill_pyvista_blocks(
+            cube, self.name + " - latent mean")
+        self.latent_variance.fill_pyvista_blocks(
+            cube, self.name + " - latent variance")
+
+        for i, sim in enumerate(self.simulations):
+            sim.fill_pyvista_blocks(
+                cube, self.name + " - simulation %d" % i)
+
+        for p in self.quantiles.keys():
+            self.quantiles[p].fill_pyvista_blocks(
+                cube, self.name + " - quantile %f" % p)
+
+        for q in self.probabilities.keys():
+            self.probabilities[q].fill_pyvista_blocks(
+                cube, self.name + " - probability %f" % q)
+
 
 class _Component(_Variable):
     def __init__(self, name, coordinates, measurements=None):
@@ -777,6 +805,23 @@ class _Component(_Variable):
             sim.fill_pyvista_points(
                 points, label + " - simulation %d" % i)
 
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        label = prefix + " - " + self.name
+
+        self.measurements.fill_pyvista_blocks(cube, label)
+        self.indicator_mean.fill_pyvista_blocks(
+            cube, label + " - indicator mean")
+        self.indicator_variance.fill_pyvista_blocks(
+            cube, label + " - indicator variance")
+        self.indicator_predicted.fill_pyvista_blocks(
+            cube, label + " - indicator predicted")
+        self.probability.fill_pyvista_blocks(
+            cube, label + " - probability")
+
+        for i, sim in enumerate(self.simulations):
+            sim.fill_pyvista_blocks(
+                cube, label + " - simulation %d" % i)
+
 
 class CompositionalVariable(_Variable):
     def __init__(self, name, coordinates, labels, measurements=None):
@@ -874,6 +919,10 @@ class CompositionalVariable(_Variable):
     def fill_pyvista_points(self, points, prefix=None):
         for comp in self.labels:
             self.components[comp].fill_pyvista_points(points, self.name)
+
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        for comp in self.labels:
+            self.components[comp].fill_pyvista_blocks(cube, self.name)
 
 
 class _Category(_Variable):
@@ -981,6 +1030,24 @@ class _Category(_Variable):
         for i, sim in enumerate(self.simulations):
             sim.fill_pyvista_points(
                 points, label + " - simulation %d" % i)
+
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        label = prefix + " - " + self.name
+
+        self.indicator.fill_pyvista_blocks(
+            cube, label + " - indicator")
+        self.indicator_mean.fill_pyvista_blocks(
+            cube, label + " - indicator mean")
+        self.indicator_variance.fill_pyvista_blocks(
+            cube, label + " - indicator variance")
+        self.indicator_predicted.fill_pyvista_blocks(
+            cube, label + " - indicator predicted")
+        self.probability.fill_pyvista_blocks(
+            cube, label + " - probability")
+
+        for i, sim in enumerate(self.simulations):
+            sim.fill_pyvista_cube(
+                cube, label + " - simulation %d" % i)
 
 
 class RockTypeVariable(CompositionalVariable):
@@ -1151,6 +1218,21 @@ class RockTypeVariable(CompositionalVariable):
         for comp in self.labels:
             self.components[comp].fill_pyvista_points(points, self.name)
 
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        self.measurements_a.fill_pyvista_blocks(
+            cube, self.name + " - measurements_a")
+        self.measurements_b.fill_pyvista_blocks(
+            cube, self.name + " - measurements_b")
+        self.predicted.fill_pyvista_blocks(
+            cube, self.name + " - predicted")
+        self.entropy.fill_pyvista_blocks(
+            cube, self.name + " - entropy")
+        self.uncertainty.fill_pyvista_blocks(
+            cube, self.name + " - uncertainty")
+
+        for comp in self.labels:
+            self.components[comp].fill_pyvista_blocks(cube, self.name)
+
 
 class CategoricalVariable(RockTypeVariable):
     def __init__(self, name, coordinates, labels, measurements=None):
@@ -1181,6 +1263,19 @@ class CategoricalVariable(RockTypeVariable):
 
         for comp in self.labels:
             self.components[comp].fill_pyvista_points(points, self.name)
+
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        self.measurements_a.fill_pyvista_blocks(
+            cube, self.name + " - measurements")
+        self.predicted.fill_pyvista_blocks(
+            cube, self.name + " - predicted")
+        self.entropy.fill_pyvista_blocks(
+            cube, self.name + " - entropy")
+        self.uncertainty.fill_pyvista_blocks(
+            cube, self.name + " - uncertainty")
+
+        for comp in self.labels:
+            self.components[comp].fill_pyvista_blocks(cube, self.name)
 
 
 class OrderedRockType(RockTypeVariable):
@@ -1442,6 +1537,26 @@ class BinaryVariable(_Variable):
             sim.fill_pyvista_points(
                 points, self.name + " - simulation %d" % i)
 
+    def fill_pyvista_blocks(self, cube, prefix=None):
+        self.indicator.fill_pyvista_blocks(
+            cube, self.name + " - indicator")
+        self.latent_mean.fill_pyvista_blocks(
+            cube, self.name + " - latent mean")
+        self.latent_variance.fill_pyvista_blocks(
+            cube, self.name + " - latent variance")
+        self.predicted.fill_pyvista_blocks(
+            cube, self.name + " - predicted")
+        self.probability.fill_pyvista_blocks(
+            cube, self.name + " - probability")
+        self.entropy.fill_pyvista_blocks(
+            cube, self.name + " - entropy")
+        self.uncertainty.fill_pyvista_blocks(
+            cube, self.name + " - uncertainty")
+
+        for i, sim in enumerate(self.simulations):
+            sim.fill_pyvista_blocks(
+                cube, self.name + " - simulation %d" % i)
+
 
 class AnomalyVariable(BinaryVariable):
     def __init__(self, name, coordinates, label, measurements=None):
@@ -1701,7 +1816,7 @@ class _GriddedData(PointData):
         super().__init__(data, coordinates)
         self.grid = None
         self.grid_size = None
-        self.step_site = None
+        self.step_size = None
 
     def index_data(self, data):
         if data.n_dim != self.n_dim:
@@ -2262,7 +2377,11 @@ class Grid3D(_GriddedData):
                                    self.grid[0], self.grid[1], self.grid[2])
 
     def as_pyvista(self):
-        pv_grid = _pv.StructuredGrid(*_np.meshgrid(*self.grid))
+        pv_grid = _pv.ImageData(
+            dimensions=self.grid_size,
+            spacing=self.step_size,
+            origin=[ax[0] for ax in self.grid]
+        )
 
         for var in self.variables.keys():
             self.variables[var].fill_pyvista_cube(pv_grid)
@@ -2743,7 +2862,7 @@ class DrillholeData(_SpatialData):
             if df[col].dtype == 'object':
                 df[col] = df[col].str.normalize('NFKD')\
                     .str.encode('ascii', errors='ignore').str.decode('utf-8')
-            pv_dh.cell_arrays[col] = df[col].values
+            pv_dh.point_data[col] = df[col].values
 
         return pv_dh
 
@@ -2926,8 +3045,8 @@ def _blockdata(cls):
 
     old_init = cls.__init__
 
-    def new_init(self, start, n, step, discretization=None):
-        old_init(self, start, n, step)
+    def new_init(self, start, n, step=None, end=None, labels=None, discretization=None):
+        old_init(self, start=start, n=n, step=step, end=end, labels=labels)
         if discretization is None:
             discretization = [1] * self.n_dim
         self.discretization = discretization
@@ -2977,4 +3096,14 @@ class Blocks2D(Grid2D):
 
 @_blockdata
 class Blocks3D(Grid3D):
-    pass
+    def as_pyvista(self):
+        pv_blocks = _pv.ImageData(
+            dimensions=_np.array(self.grid_size) + 1,
+            spacing=self.step_size,
+            origin=_np.array([ax[0] for ax in self.grid]) - _np.array(self.step_size) / 2
+        )
+
+        for var in self.variables.keys():
+            self.variables[var].fill_pyvista_blocks(pv_blocks)
+
+        return pv_blocks

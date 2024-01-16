@@ -273,3 +273,11 @@ def numeric_section_3d(gridded_x, gridded_y, gridded_z, values, **kwargs):
            "surfacecolor": values}
     obj = _deep_update(obj, kwargs)
     return [obj]
+
+
+def mpl_to_plotly(cmap, level):
+    rgba = _np.array(cmap(level))
+    rgb = _np.round(rgba[:-1] * 255)
+    rgb = tuple(int(num) for num in rgb)
+    color_str = "rgb(%d,%d,%d)" % rgb
+    return color_str
