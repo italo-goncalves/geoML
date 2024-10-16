@@ -1463,7 +1463,7 @@ class BinaryVariable(_Variable):
             # uncertainty = uncertainty[:, 0]
             sims = sims[:, 0, :]
 
-        label_idx = _np.zeros(prob.shape, dtype=_np.int64)  # positive class
+        label_idx = _np.zeros(prob.shape, dtype=int)  # positive class
         label_idx[prob < 0.5] = 1  # negative class
 
         self.predicted.values[idx] = _np.array(self.labels)[label_idx]

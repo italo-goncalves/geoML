@@ -158,32 +158,29 @@ def sunspot_number():
     yearly_df = _pd.read_table(
         "http://sidc.be/silso/INFO/snytotcsv.php",
         sep=";", header=None)
-    yearly_df.set_axis(["year", "sn", "sn_std",
-                        "n_obs", "definitive"],
-                       axis="columns", inplace=True)
-    # yearly = _data.Points1D(_np.arange(1700, yearly_df.shape[0] + 1700,
-    #                                    dtype=float),
-    #                         yearly_df)
+    yearly_df = yearly_df.set_axis(["year", "sn", "sn_std",
+                                    "n_obs", "definitive"],
+                                   axis="columns")
+
     yearly = _data.PointData(yearly_df, "year")
     yearly.add_continuous_variable("sn", yearly_df["sn"].values)
 
     monthly_df = _pd.read_table(
         "http://sidc.oma.be/silso/INFO/snmtotcsv.php",
         sep=";", header=None)
-    monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
-                         "n_obs", "definitive"],
-                        axis="columns", inplace=True)
+    monthly_df = monthly_df.set_axis(["year", "month", "year_frac", "sn", "sn_std",
+                                      "n_obs", "definitive"],
+                                     axis="columns")
     monthly_df["idx"] = _np.arange(1, monthly_df.shape[0] + 1, dtype=float)
-    # monthly = _data.Points1D(_np.arange(1, monthly_df.shape[0] + 1,
-    #                                     dtype=float), monthly_df)
+
     monthly = _data.PointData(monthly_df, "idx")
     monthly.add_continuous_variable("sn", monthly_df["sn"].values)
 
     daily_df = _pd.read_table("http://sidc.oma.be/silso/INFO/sndtotcsv.php",
                               sep=";", header=None)
-    daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
-                       "n_obs", "definitive"],
-                      axis="columns", inplace=True)
+    daily_df = daily_df.set_axis(["year", "month", "day", "year_frac", "sn", "sn_std",
+                                  "n_obs", "definitive"],
+                                 axis="columns")
     daily_df["idx"] = _np.arange(1, daily_df.shape[0] + 1, dtype=float)
     daily = _data.PointData(daily_df, "idx")
     daily.add_continuous_variable("sn", daily_df["sn"].values)
@@ -238,24 +235,6 @@ def jura():
     elements = ["Cd", "Co", "Cr", "Cu", "Ni", "Pb", "Zn"]
 
     path = _os.path.dirname(__file__)
-    # file = _os.path.join(path, "sample_data/jura_sample.dat")
-    #
-    # raw_data = _pd.read_table(file, sep=" ", header=None,
-    #                           skiprows=13, engine="python",
-    #                           skipinitialspace=True)
-    # raw_data.columns = ["X", "Y", "Landuse", "Rock"] + elements
-    # raw_data["Landuse"] = raw_data["Landuse"].astype("str")
-    # raw_data["Rock"] = raw_data["Rock"].astype("str")
-    #
-    # landuse_labels = _np.unique(raw_data["Landuse"])
-    # rock_labels = _np.unique(raw_data["Rock"])
-    #
-    # jura_train = _data.PointData(raw_data, coordinates=["X", "Y"])
-    # jura_train.add_categorical_variable("Landuse", landuse_labels,
-    #                                     raw_data["Landuse"])
-    # jura_train.add_categorical_variable("Rock", rock_labels, raw_data["Rock"])
-    # for el in elements:
-    #     jura_train.add_continuous_variable(el, raw_data[el])
 
     file_a = _os.path.join(path, "sample_data/jura_train.csv")
 

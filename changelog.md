@@ -1,5 +1,7 @@
 ## version 0.3.4
 * Improved pyvista integration
+* Multiscale modeling did not work
+* Compatibility with TensorFlow v2.11
 
 ## version 0.3.3
 * Improvements and optimizations

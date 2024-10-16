@@ -561,12 +561,13 @@ class Linear(_FunctionalLatentVariable):
                 )
             )
         else:
+            rnd = _np.random.normal(size=(parent.size, self.size), scale=1e-4)
             self._add_parameter(
                 "weights",
                 _gpr.RealParameter(
-                    _np.ones([parent.size, self.size]),
-                    _np.zeros([parent.size, self.size]) - 15,
-                    _np.zeros([parent.size, self.size]) + 15
+                    _np.zeros([parent.size, self.size]) + rnd + 1/parent.size,
+                    _np.zeros([parent.size, self.size]) - 1,
+                    _np.zeros([parent.size, self.size]) + 1
                 )
             )
 
@@ -1485,98 +1486,6 @@ class GaussianInput(_RootLatentVariable):
             return x[:, :, None], x_var
 
 
-class RefinerExperts(ProductOfExperts):
-    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        all_mu = []
-        all_var = []
-        all_sims = []
-        all_explained_var = []
-        all_influence = []
-
-        eff_n_sim = _np.maximum(n_sim, 1)
-
-        for i, p in enumerate(self.parents):
-            mu, var, sims, explained_var, influence = p.predict(
-                x, x_var, eff_n_sim, [seed[0] + i, seed[1]])
-            all_mu.append(mu)
-            all_var.append(var)
-            all_sims.append(sims)
-            all_explained_var.append(explained_var)
-            all_influence.append(influence)
-
-        all_mu = _tf.stack(all_mu, axis=0)
-        all_var = _tf.stack(all_var, axis=0)
-        all_sims = _tf.stack(all_sims, axis=0)
-        all_explained_var = _tf.stack(all_explained_var, axis=0)
-        all_influence = _tf.stack(all_influence, axis=0)
-
-        # cum_mu = _tf.math.cumsum(all_mu, axis=0)
-        # all_sims = all_sims - all_mu + cum_mu
-
-        total_var = all_var + all_explained_var
-        frac = all_var / total_var
-        cum_frac = _tf.math.cumprod(frac, axis=0) / frac[0, None, :, :]
-
-        all_var = all_var * cum_frac
-        all_explained_var = all_explained_var * cum_frac
-
-        all_sims = all_sims - all_mu
-        # all_sims = all_sims * _tf.sqrt(cum_frac[:, :, :, None])
-
-        # weights = (all_explained_var / (all_var + 1e-6)) + 1e-6
-        weights = (total_var[0, None, :, :] - all_var) / (all_var + 1e-6) + 1e-6
-        # weights = (all_explained_var / (all_var + 1e-6)) / cum_frac + 1e-6
-        # weights = (1 - cum_frac) / (cum_frac + 1e-6) + 1e-6
-        weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
-
-        # prec = (1 / (all_var + 1e-6)) + 1e-6
-        # weights = prec / _tf.reduce_sum(prec, axis=0, keepdims=True)
-
-        # w_mu = _tf.reduce_sum(all_mu, axis=0)
-        w_mu = _tf.reduce_sum(weights[:, :, :, None] * all_mu, axis=0)
-        w_var = _tf.reduce_sum(weights * all_var, axis=0)
-        # w_var = 1 / _tf.reduce_sum(prec, axis=0)
-        w_sims = _tf.reduce_sum(weights[:, :, :, None] * all_sims, axis=0)
-        w_explained_var = _tf.reduce_sum(
-            weights * all_explained_var, axis=0)
-        w_influence = _tf.reduce_sum(weights * all_influence, axis=0)
-
-        w_sims = w_sims + w_mu
-
-        if n_sim > 0:
-            return w_mu, w_var, w_sims, w_explained_var, w_influence
-        else:
-            return w_mu, w_var
-
-    def predict_directions(self, x, dir_x, step=1e-3):
-        all_mu = []
-        all_var = []
-        all_explained_var = []
-
-        for i, p in enumerate(self.parents):
-            mu, var, explained_var = p.predict_directions(x, dir_x, step)
-            all_mu.append(mu)
-            all_var.append(var)
-            all_explained_var.append(explained_var)
-
-        all_mu = _tf.stack(all_mu, axis=0)
-        all_var = _tf.stack(all_var, axis=0)
-        all_explained_var = _tf.stack(all_explained_var, axis=0)
-
-        weights = (all_explained_var / (all_var + 1e-6))
-        weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
-
-        # prec = (1 / (all_var + 1e-6)) + 1e-6
-        # weights = prec / _tf.reduce_sum(prec, axis=0, keepdims=True)
-
-        w_mu = _tf.reduce_sum(all_mu, axis=0)
-        w_var = _tf.reduce_sum(weights * all_var, axis=0)
-        # w_var = 1 / _tf.reduce_sum(prec, axis=0)
-        w_explained_var = _tf.reduce_sum(weights * all_explained_var, axis=0)
-
-        return w_mu, w_var, w_explained_var
-
-
 class FastGP(_GPNode):
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
                  fix_range=False, rank=None):
@@ -1815,180 +1724,6 @@ class FastGP(_GPNode):
 
             tr = _tf.reduce_sum(_tf.linalg.diag_part(rtr))
             fit = _tf.reduce_sum(alpha_white**2)
-            det = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(chol)))
-            kl = 0.5 * (- tr + fit - det)
-
-            return kl
-
-
-class WeightSpaceGP(_GPNode):
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
-                 fix_range=False, rank=None):
-        super().__init__(parent)
-        self._size = size
-        self.kernel = self._register(kernel)
-
-        if rank is None:
-            rank = int(_np.ceil(self.root.n_ip / 5))
-        elif rank > self.root.n_ip:
-            raise ValueError("rank must be smaller than the number of "
-                             "inducing points")
-        self.rank = rank
-
-        self.mat_r = None
-        self.proj = None
-
-        n_ip = self.root.n_ip
-        self._add_parameter(
-            "mean_weights",
-            _gpr.RealParameter(
-                _np.random.normal(
-                    scale=1e-3,
-                    size=[self.size, n_ip, 1]
-                ),
-                _np.zeros([self.size, n_ip, 1]) - 10,
-                _np.zeros([self.size, n_ip, 1]) + 10
-            ))
-        self._add_parameter(
-            "r_power",
-            _gpr.PositiveParameter(
-                # _np.ones([self.size, n_ip * 2, 1]) * 0.5,
-                _np.random.normal(
-                    scale=1e-1,
-                    loc=0.5,
-                    size=[self.size, n_ip, 1]
-                ),
-                _np.ones([self.size, n_ip, 1]) * 1e-6,
-                _np.ones([self.size, n_ip, 1]) - 1e-6
-            ))
-        self._add_parameter(
-            "r_vecs",
-            _gpr.OrthonormalMatrix(
-                rows=n_ip,
-                cols=rank,
-                batch_shape=(size,)
-            )
-        )
-        self._add_parameter(
-            "ranges",
-            _gpr.PositiveParameter(
-                _np.ones([1, 1, self.parent.size]),
-                _np.ones([1, 1, self.parent.size]) * 1e-3,
-                _np.ones([1, 1, self.parent.size]) * 10,
-                fixed=fix_range
-            )
-        )
-
-        # random_directions = _tf.random.normal(
-        #     [1, n_ip, self.parent.size], dtype=_tf.float64)
-        # norm = _tf.math.reduce_euclidean_norm(
-        #     random_directions, axis=2, keepdims=True) + 1e-6
-        # self.random_directions = random_directions / norm
-
-    def feature_matrix(self, x, y, var_x=None):
-        ranges = self.parameters["ranges"].get_value()
-        if var_x is None:
-            var_x = _tf.zeros_like(x)
-        var_x = var_x[:, None, :]
-
-        # [n_data, n_data, n_dim]
-        dif = x[:, None, :] - y[None, :, :]
-
-        total_var = (ranges ** 2 + var_x) / 2
-        dist = _tf.sqrt(_tf.reduce_sum(dif ** 2 / total_var, axis=2))
-
-        mat = self.kernel.kernelize(dist)
-        norm = _tf.math.reduce_euclidean_norm(
-            mat, axis=1, keepdims=True) + 1e-6
-        mat = mat / norm
-        return mat
-
-    def refresh(self, jitter=1e-9):
-        with _tf.name_scope("basic_refresh"):
-            self.parent.refresh(jitter)
-
-            f_mat = self.feature_matrix(
-                self.parent.inducing_points,
-                self.parent.inducing_points,
-                self.parent.inducing_points_variance
-            )
-            #
-            # eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
-            #
-            # cov = _tf.matmul(f_mat, f_mat, False, True)
-            # chol = _tf.linalg.cholesky(cov + eye * jitter)
-            # proj = _tf.matmul(
-            #     f_mat, _tf.linalg.cholesky_solve(chol, f_mat), True)
-            # self.proj = proj
-
-            # posterior
-            r_vecs = self.parameters["r_vecs"].get_value()
-            r_power = self.parameters["r_power"].get_value()
-            self.mat_r = r_power * r_vecs
-
-            # inducing points
-            mean_weights = self.parameters["mean_weights"].get_value()
-            pred_inputs = _tf.einsum("ab,sbc->sac", f_mat, mean_weights)
-            self.inducing_points = _tf.transpose(pred_inputs[:, :, 0])
-            pred_var = 1.0 - _tf.reduce_sum(
-                _tf.einsum("ab,sbc->sac", f_mat, self.mat_r)**2,
-                axis=2, keepdims=False
-            )
-            self.inducing_points_variance = _tf.transpose(pred_var)
-
-    def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
-        with _tf.name_scope("weight_gp_interpolation"):
-            f_mat = self.feature_matrix(
-                x,
-                self.parent.inducing_points,
-                x_var
-            )
-
-            # f_mat = _tf.matmul(f_mat, self.proj)
-
-            mean_weights = self.parameters["mean_weights"].get_value()
-            mu = _tf.einsum("ab,sbc->sac", f_mat, mean_weights)
-
-            explained_var = _tf.reduce_sum(
-                _tf.einsum("ab,sbc->sac", f_mat, self.mat_r)**2,
-                axis=2, keepdims=False)
-            var = _tf.maximum(1.0 - explained_var, 0.0)
-
-            influence = _tf.reduce_sum(
-                f_mat**2,
-                axis=1, keepdims=False)
-            influence = _tf.tile(influence[None, :], [self.size, 1])
-
-            if n_sim > 0:
-                rnd_1 = _tf.random.stateless_normal(
-                    shape=[self.size, self.root.n_ip, n_sim],
-                    seed=seed, dtype=_tf.float64
-                )
-                rnd_2 = _tf.random.stateless_normal(
-                    shape=[self.size, self.rank, n_sim],
-                    seed=seed, dtype=_tf.float64
-                )
-                sims = _tf.einsum("ab,sbc->sac", f_mat, rnd_1) \
-                       - _tf.einsum(
-                    "ab,sbr,src->sac", f_mat, self.mat_r, rnd_2) \
-                       + mu
-
-                return mu, var, sims, explained_var, influence
-
-            else:
-                return mu, var
-
-    def kl_divergence(self):
-        with _tf.name_scope("weight_GP_KL_divergence"):
-            mean_weights = self.parameters["mean_weights"].get_value()
-            rtr = _tf.matmul(self.mat_r, self.mat_r, True, False)
-
-            eye = _tf.eye(self.rank, dtype=_tf.float64,
-                          batch_shape=(self.size,))
-            chol = _tf.linalg.cholesky(eye - rtr + eye*1e-6)
-
-            tr = _tf.reduce_sum(_tf.linalg.diag_part(rtr))
-            fit = _tf.reduce_sum(mean_weights**2)
             det = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(chol)))
             kl = 0.5 * (- tr + fit - det)
 
@@ -2503,3 +2238,4 @@ class MultiStructureFastGP(FastGP):
 
             cov = _tf.add_n(cov_mats)
             return cov
+

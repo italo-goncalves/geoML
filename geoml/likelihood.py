@@ -20,7 +20,7 @@ import copy as _copy
 
 import geoml.warping as _warp
 import geoml.parameter as _gpr
-# import geoml.tftools as _tftools
+import geoml.tftools as _tftools
 import geoml.interpolation as _gint
 
 import numpy as _np
@@ -1303,182 +1303,6 @@ class SequentialGaussianIndicator(CategoricalGaussianIndicator):
         return output
 
 
-# class CategoricalGaussianIndicatorMax(CategoricalGaussianIndicator):
-#     def log_lik(self, mu, var, y, has_value, is_boundary=None,
-#                 samples=None, *args, **kwargs):
-#         y = 2 * y - 1
-#
-#         dist_pos = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
-#         dist_neg = _tfd.Normal(-mu, _tf.sqrt(var + 1e-6))
-#
-#         # prob below -tol
-#         cdf_pos = dist_pos.log_cdf(- self.tol)
-#         cdf_neg = dist_neg.log_cdf(- self.tol)
-#
-#         cdf_pos = _tf.unstack(cdf_pos, axis=1)
-#         cdf_neg = _tf.unstack(cdf_neg, axis=1)
-#
-#         prob_neg = []
-#         for i in range(self.size):
-#             cdf = _tf.stack(
-#                 [cdf_pos[j] if j == i else cdf_neg[j]
-#                  for j in range(self.size)],
-#                 axis=1)
-#             prob_neg.append(_tf.reduce_sum(cdf, axis=1))
-#         prob_neg = _tf.stack(prob_neg, axis=1)
-#
-#         # prob above +tol
-#         cdf_pos = dist_pos.log_cdf(self.tol)
-#         cdf_neg = dist_neg.log_cdf(self.tol)
-#
-#         cdf_pos = _tf.unstack(cdf_pos, axis=1)
-#         cdf_neg = _tf.unstack(cdf_neg, axis=1)
-#
-#         prob_pos = []
-#         for i in range(self.size):
-#             cdf = _tf.stack(
-#                 [cdf_pos[j] if j == i else cdf_neg[j]
-#                  for j in range(self.size)],
-#                 axis=1)
-#             prob_pos.append(_tf.reduce_sum(cdf, axis=1))
-#         prob_pos = _tf.stack(prob_pos, axis=1)
-#         prob_pos = _tf.math.log(1.0 - _tf.math.exp(prob_pos) + 1e-6)
-#
-#         prob_zero = _tf.math.log(
-#             1.0 - _tf.math.exp(prob_pos) - _tf.math.exp(prob_neg) + 1e-6)
-#
-#         # log_density = _tf.where(
-#         #     _tf.less(y, - self.tol),
-#         #     prob_neg,
-#         #     _tf.where(_tf.greater(y, self.tol),
-#         #               prob_pos,
-#         #               prob_zero)
-#         # )
-#         log_density = _tf.where(
-#             _tf.greater(y, self.tol),
-#             prob_pos,
-#             _tf.where(_tf.less(y, - self.tol),
-#                       0.0,
-#                       prob_zero)
-#         )
-#
-#         log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
-#
-#         has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
-#         log_density = _tf.reduce_sum(log_density * has_value)
-#
-#         return log_density * self.sharpness
-#
-#     def predict(self, mu, var, sims, explained_var, *args, **kwargs):
-#         dist_pos = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
-#         dist_neg = _tfd.Normal(-mu, _tf.sqrt(var + 1e-6))
-#
-#         # probability of max(class i, not class j), j != i
-#         cdf_pos = dist_pos.log_cdf(0.0)
-#         cdf_neg = dist_neg.log_cdf(0.0)
-#
-#         cdf_pos = _tf.unstack(cdf_pos, axis=1)
-#         cdf_neg = _tf.unstack(cdf_neg, axis=1)
-#
-#         logits = []
-#         for i in range(self.size):
-#             cdf = _tf.stack(
-#                 [cdf_pos[j] if j == i else cdf_neg[j]
-#                  for j in range(self.size)],
-#                 axis=1)
-#             logits.append(_tf.reduce_sum(cdf, axis=1))
-#         logits = _tf.stack(logits, axis=1)
-#         logits = _tf.math.log(1.0 - _tf.math.exp(logits) + 1e-6)
-#         prob = _tf.nn.softmax(logits)
-#
-#         entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
-#             prob, var, explained_var
-#         )
-#
-#         output = {"mean": mu,
-#                   "variance": var,
-#                   "probability": prob,
-#                   "simulations": sims,
-#                   "entropy": entropy,
-#                   "uncertainty": uncertainty,
-#                   "indicators": ind_skew,
-#                   "weights": weights}
-#         return output
-
-
-class LowRankGaussianIndicator(_CategoricalLikelihood):
-    def __init__(self, n_components, rank=3):
-        super().__init__(rank)
-
-        # initialization in unit sphere
-        # _np.random.seed(rank)
-        coords = _np.random.normal(size=[rank, n_components])
-        coords = coords / _np.sqrt(_np.sum(coords ** 2, axis=0, keepdims=True))
-        # coords = _np.random.uniform(-3, 3, [rank, n_components])
-        self._add_parameter(
-            "coordinates",
-            _gpr.CenteredUnitColumnNormParameter(
-                coords,
-                _np.zeros([rank, n_components]) - 3,
-                _np.zeros([rank, n_components]) + 3
-            )
-            # _gpr.CenteredOrthonormalMatrix(n_components, rank)
-        )
-
-    def log_lik(self, mu, var, y, has_value, is_boundary=None,
-                samples=None, *args, **kwargs):
-        has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
-
-        coords = self.parameters["coordinates"].get_value()
-        # coords = _tf.transpose(coords)
-
-        # mu_w = _tf.reduce_sum(
-        #     mu[:, :, None] * y[:, None, :],
-        #     axis=2
-        # )
-        # var_w = _tf.reduce_sum(
-        #     var[:, :, None] * y[:, None, :]**2,
-        #     axis=2
-        # )
-
-        # dist = _tfd.Normal(mu[:, :, None], _tf.sqrt(var[:, :, None] + 1e-6))
-        # log_density = dist.log_prob(coords[None, :, :])
-        # log_density = _tf.reduce_sum(log_density, axis=1)  # [n, c]
-        # log_density = _tf.reduce_sum(y * log_density, axis=1, keepdims=True)
-
-        coords_w = _tf.reduce_sum(y[:, None, :] * coords[None, :, :], axis=2)
-
-        dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
-        log_density = dist.log_prob(coords_w)
-        log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
-
-        return _tf.reduce_sum(log_density * has_value)
-
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
-        coords = self.parameters["coordinates"].get_value()
-        # coords = _tf.transpose(coords)
-
-        dist = _tfd.Normal(mu[:, :, None], _tf.sqrt(var[:, :, None] + 1e-6))
-        log_density = dist.log_prob(coords[None, :, :])
-        log_density = _tf.reduce_sum(log_density, axis=1)  # [n, c]
-        prob = _tf.nn.softmax(log_density, axis=1)
-
-        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
-            prob, _tf.reduce_mean(var, axis=1, keepdims=True),
-            _tf.reduce_mean(explained_var, axis=1, keepdims=True)
-        )
-
-        output = {"mean": mu,
-                  "variance": var,
-                  "probability": prob,
-                  "simulations": sims,
-                  "entropy": entropy,
-                  "uncertainty": uncertainty,
-                  "indicators": ind_skew,
-                  "weights": weights}
-        return output
-
-
 class _CompositionalLikelihood(_Likelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
                  warping=_warp.Identity()):
@@ -1657,6 +1481,18 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
                 _np.ones([1, self.size, 1]),
                 _np.ones([1, self.size, 1]) * 1e-3,
                 _np.ones([1, self.size, 1]) * 1e3))
+        # self._add_parameter(
+        #     "epsilon",
+        #     _gpr.PositiveParameter(
+        #         _np.ones([1, 1, 1]) * 1e-3,
+        #         _np.ones([1, 1, 1]) * 1e-6,
+        #         _np.ones([1, 1, 1]) * 10))
+        # self._add_parameter(
+        #     "c_rate",
+        #     _gpr.PositiveParameter(
+        #         _np.ones([1, 1, 1]),
+        #         _np.ones([1, 1, 1]) * 1e-3,
+        #         _np.ones([1, 1, 1]) * 1e3))
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):

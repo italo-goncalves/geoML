@@ -338,7 +338,7 @@ class Anisotropy3D(_Ellipsoidal):
             # anisotropy matrix
             anis = _tf.matmul(_tf.matmul(_tf.matmul(rz, ry), rx), rng)
             self._anis = _tf.transpose(anis)
-            self._anis_inv = _tf.linalg.inv(self._anis)
+            self._anis_inv = _tf.linalg.inv(self._anis) # + _tf.eye(3, dtype=_tf.float64) * 1e-3)
     
     def set_limits(self, data):
         self.parameters["maxrange"].set_limits(
@@ -630,58 +630,3 @@ class BellFault2D(_Transform):
             amp = self.parameters["amp"].get_value()
             out = self.kernelize(proj_along) * amp * sign
             return out[:, None]
-
-
-class Sine(_Transform):
-    def __call__(self, x):
-        with _tf.name_scope("Sine_transform"):
-            return _tf.sin(2*_np.pi * x)
-
-
-class Linear(_Transform):
-    def __init__(self, dim_in, dim_out, bias=True):
-        w = _tf.random.normal([dim_in, dim_out], dtype=_tf.float64)
-        b = _tf.zeros([1, dim_out], dtype=_tf.float64)
-
-        self._add_parameter("weights", _gpr.RealParameter(
-                w, -1000 * _tf.ones_like(w), 1000 * _tf.ones_like(w)))
-        if bias:
-            self._add_parameter("bias",
-                                _gpr.RealParameter(b, b - 1000, b + 1000))
-        self.dim_in = dim_in
-        self.dim_out = dim_out
-        super().__init__()
-
-    def __call__(self, x):
-        with _tf.name_scope("Linear_transform"):
-            w = self.parameters["weights"].get_value()
-            b = self.parameters["bias"].get_value() \
-                if "bias" in self.parameters.keys() else 0.0
-            return _tf.matmul(x, w) + b
-
-
-class Normalize(_Transform):
-    def __call__(self, x):
-        return x / (_tf.math.reduce_euclidean_norm(
-            x, axis=1, keepdims=True) + 1e-6)
-
-
-class Swish(Linear):
-    def __call__(self, x):
-        with _tf.name_scope("Swish_transform"):
-            x = super().__call__(x)
-            return x * _tf.nn.sigmoid(x)
-
-
-class ReLU(Linear):
-    def __call__(self, x):
-        with _tf.name_scope("Swish_transform"):
-            x = super().__call__(x)
-            return _tf.nn.relu(x)
-
-
-class Tanh(Linear):
-    def __call__(self, x):
-        with _tf.name_scope("Tanh_transform"):
-            x = super().__call__(x)
-            return _tf.math.tanh(x)

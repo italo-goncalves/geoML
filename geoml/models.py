@@ -23,7 +23,7 @@ import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.likelihood as _lk
 import geoml.warping as _warp
-# import geoml.tftools as _tftools
+import geoml.tftools as _tftools
 import geoml
 
 import numpy as _np
@@ -92,6 +92,10 @@ class GP(_GPModel):
         if warping is None:
             warping = _warp.Identity()
         self.warping = self._register(warping)
+
+        keep = ~ _np.isnan(self.data.variables[self.variable].measurements.values)
+        if _np.sum(keep) > 0:
+            self.warping.initialize(self.data.variables[self.variable].measurements.values[keep])
 
         self.directional_data = directional_data
         self.use_trend = use_trend
@@ -385,7 +389,8 @@ class GP(_GPModel):
             return - self.log_likelihood(self.options.jitter)
 
         for i in range(max_iter):
-            self.optimizer.minimize(loss, model_variables)
+            # self.optimizer.minimize(loss, model_variables)
+            _tftools.training_step(self.optimizer, loss, model_variables)
 
             for pr in self._all_parameters:
                 pr.refresh()
@@ -504,8 +509,7 @@ class VGPNetwork(_GPModel):
     def _training_elbo(self, x, y, has_value, training_inputs,
                        x_dir=None, directions=None, y_dir=None,
                        has_value_directions=None, x_var=None,
-                       samples=20,
-                       seed=0, jitter=1e-6):
+                       samples=20, seed=0, jitter=1e-6):
         self.latent_network.refresh(jitter)
 
         # ELBO
@@ -521,7 +525,6 @@ class VGPNetwork(_GPModel):
         unique_nodes = self.latent_network.get_unique_parents()
         unique_nodes.append(self.latent_network)
         kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
-        elbo = elbo - kl
 
         self.elbo.assign(elbo)
         self.kl_div.assign(kl)
@@ -624,7 +627,8 @@ class VGPNetwork(_GPModel):
                     seed=self.options.seed)
 
         for i in range(max_iter):
-            self.optimizer.minimize(loss, model_variables)
+            # self.optimizer.minimize(loss, model_variables)
+            _tftools.training_step(self.optimizer, loss, model_variables)
 
             for pr in self._all_parameters:
                 pr.refresh()
@@ -706,10 +710,11 @@ class VGPNetwork(_GPModel):
             batches = self.options.batch_index(self.data.n_data)
 
             for batch in batches:
-                self.optimizer.minimize(
-                    # loss,
-                    lambda: loss(shuffled[batch]),
-                    model_variables)
+                # self.optimizer.minimize(
+                #     # loss,
+                #     lambda: loss(shuffled[batch]),
+                #     model_variables)
+                _tftools.training_step(self.optimizer, lambda: loss(shuffled[batch]), model_variables)
 
                 for pr in self._all_parameters:
                     pr.refresh()
@@ -724,303 +729,6 @@ class VGPNetwork(_GPModel):
 
         if self.options.verbose:
             print("\n")
-
-    def train_window(self, start, step_size, n_steps, epochs=10):
-        model_variables = self.get_unfixed_variables()
-
-        if not isinstance(start, (list, tuple)):
-            start = [start]
-        if not isinstance(step_size, (list, tuple)):
-            step_size = [step_size]
-        if not isinstance(n_steps, (list, tuple)):
-            n_steps = [n_steps]
-
-        positions = [np.arange(i)*s for i, s in zip(n_steps, step_size)]
-        combinations = _np.array(list(_iter.product(*positions)))
-        combinations = combinations + _np.array(start)[None, :]
-
-        # spatial index
-        spatial_index = []
-        for comb in combinations:
-            box = _data.BoundingBox(comb, comb + _np.array(step_size))
-            inside = box.contains_points(self.data.coordinates)
-            if np.any(inside):
-                spatial_index.append(_np.where(inside)[0])
-
-        def loss(idx):
-            training_inputs = [
-                self.data.variables[v].training_input(idx)
-                for v in self.variables]
-
-            if self.directional_data is None:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
-                                       _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed
-                )
-            else:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
-                                       _tf.float64),
-                    x_dir=_tf.constant(
-                        self.directional_data.coordinates,
-                        _tf.float64),
-                    directions=_tf.constant(
-                        self.directional_data.directions, _tf.float64),
-                    y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    has_value_directions=_tf.constant(
-                        self.has_value_dir, _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed
-                )
-
-        _np.random.seed(self.options.seed)
-        for i in range(epochs):
-            current_elbo = []
-
-            for batch in spatial_index:
-                self.optimizer.minimize(
-                    lambda: loss(batch),
-                    model_variables)
-
-                for pr in self._all_parameters:
-                    pr.refresh()
-
-                current_elbo.append(self.elbo.numpy())
-                self.training_log.append(current_elbo[-1])
-
-            total_elbo = _np.mean(current_elbo)
-            if self.options.verbose:
-                print("\rEpoch %s | ELBO: %s" %
-                      (str(i + 1), str(total_elbo)), end="")
-
-        if self.options.verbose:
-            print("\n")
-
-    def train_svi_experts(self, global_epochs=10, epochs_per_expert=10):
-        if not isinstance(self.latent_network, geoml.latent.RefinerExperts):
-            raise Exception("the last network node must be a "
-                            "RefinerExperts object")
-
-        unique_params = set(self._all_parameters)
-        network_params = set(self.latent_network.all_parameters)
-        other_params = unique_params.difference(network_params)
-        expert_params = []
-        expert_variables = []
-        for expert in self.latent_network.parents:
-            expert_p = list(other_params.union(set(expert.all_parameters)))
-            expert_variables.append([pr.variable for pr in expert_p
-                                     if not pr.fixed])
-            expert_params.append(expert_p)
-        # model_variables = [pr.variable for pr in unique_params
-        #                    if not pr.fixed]
-
-        def loss(idx):
-            training_inputs = [
-                self.data.variables[v].training_input(idx)
-                for v in self.variables]
-
-            if self.directional_data is None:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
-                                       _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed
-                )
-            else:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
-                                       _tf.float64),
-                    x_dir=_tf.constant(
-                        self.directional_data.coordinates,
-                        _tf.float64),
-                    directions=_tf.constant(
-                        self.directional_data.directions, _tf.float64),
-                    y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    has_value_directions=_tf.constant(
-                        self.has_value_dir, _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed
-                )
-
-        # spatial index
-        spatial_index = []
-        for expert in self.latent_network.parents:
-            box = expert.root.bounding_box
-            inside = box.contains_points(self.data.coordinates)
-            spatial_index.append(_np.where(inside)[0])
-
-        # main loop
-        _np.random.seed(self.options.seed)
-        for g in range(global_epochs):
-            for i, expert in enumerate(self.latent_network.parents):
-                n_data = len(spatial_index[i])
-
-                for j in range(epochs_per_expert):
-                    current_elbo = []
-
-                    shuffled = _np.random.choice(n_data, n_data, replace=False)
-                    batches = self.options.batch_index(n_data)
-
-                    for batch in batches:
-                        self.optimizer.minimize(
-                            lambda: loss(spatial_index[i][shuffled[batch]]),
-                            expert_variables[i])
-
-                        for pr in expert_params[i]:
-                            pr.refresh()
-
-                        current_elbo.append(self.elbo.numpy())
-                        self.training_log.append(current_elbo[-1])
-
-                    total_elbo = float(_np.mean(current_elbo))
-                    if self.options.verbose:
-                        print("\rEpoch %d | Expert %d | "
-                              "Expert epoch %d | ELBO: %f" %
-                              (g + 1, i + 1, j + 1, total_elbo), end="")
-
-        if self.options.verbose:
-            print("\n")
-
-    def train_random_search(self, max_iter=1000, step=0.01,
-                            simultaneous_prop=0.01, memory=0.5,
-                            patience=100, tol=0.1):
-        training_inputs = [self.data.variables[v].training_input()
-                           for v in self.variables]
-
-        value, shape, position, min_val, max_val = self.get_parameter_values()
-        amp = max_val - min_val
-        n_val = value.size
-        simultaneous_updates = int(n_val * simultaneous_prop)
-
-        def loss():
-            if self.directional_data is None:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates, _tf.float64),
-                    _tf.constant(self.y, _tf.float64),
-                    _tf.constant(self.has_value, _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance(),
-                                       _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed)
-            else:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates, _tf.float64),
-                    _tf.constant(self.y, _tf.float64),
-                    _tf.constant(self.has_value, _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance(),
-                                       _tf.float64),
-                    x_dir=_tf.constant(
-                        self.directional_data.coordinates,
-                        _tf.float64),
-                    directions=_tf.constant(
-                        self.directional_data.directions, _tf.float64),
-                    y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    has_value_directions=_tf.constant(
-                        self.has_value_dir, _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed)
-
-        loss()
-        current_elbo = self.elbo.numpy()
-        grad = _np.zeros_like(value)
-        grad_memory = _np.zeros_like(value)
-        base_value = value.copy()
-        stagnation = 0
-        num_resets = 0
-        i = 0
-        c = 0
-        n_success = 1
-        n_failure = 1
-        while i < max_iter:
-            c += 1
-            order = self.options.batch_index(len(value), simultaneous_updates)
-            for j in order:
-                i += 1
-                upd = _np.random.uniform(-step, step, len(j))
-                grad[j] += upd + grad_memory[j]
-
-                new_value = value.copy() + grad * amp
-                new_value = _np.minimum(new_value, max_val)
-                new_value = _np.maximum(new_value, min_val)
-                self.update_parameters(new_value, shape, position)
-                for pr in self._all_parameters:
-                    pr.refresh()
-
-                loss()
-                new_elbo = self.elbo.numpy()
-
-                dif = new_elbo - current_elbo
-                if dif > 0:
-                    if dif < tol:
-                        stagnation += 1
-                    else:
-                        stagnation = 0
-                        grad_memory[j] += grad[j] * memory * dif
-
-                    current_elbo = new_elbo
-                    value = new_value
-                    n_success += 1
-                else:
-                    stagnation += 1
-                    n_failure += 1
-                    prop = n_success / (n_failure + n_success)
-                    grad_memory[j] *= (1 - memory * prop)
-                    # grad_memory[j] += grad[j] * memory * dif
-
-                grad *= 0.0
-
-                self.training_log.append(current_elbo)
-
-                if stagnation > patience:
-                    # step *= 0.5
-                    patience *= 2
-                    tol *= 0.25
-                    simultaneous_prop *= 0.5
-                    simultaneous_updates = int(
-                        _np.ceil(n_val * simultaneous_prop))
-                    stagnation = 0
-                    num_resets += 1
-
-                if self.options.verbose:
-                    print(
-                        "\rCycle %s | Iteration %s | ELBO: %s | Resets: %s     " %
-                        (str(c + 1), str(i + 1), str(current_elbo), str(num_resets)),
-                        end=""
-                    )
-
-        if self.options.verbose:
-            print("\n")
-            # print("Proportion: %s" % str(prop))
 
     @_tf.function
     def predict_raw(self, x_new, variable_inputs, x_var=None,
@@ -1243,7 +951,8 @@ class StructuralField(_GPModel):
             return - self.log_likelihood(self.options.jitter)
 
         for i in range(max_iter):
-            self.optimizer.minimize(loss, model_variables)
+            # self.optimizer.minimize(loss, model_variables)
+            _tftools.training_step(self.optimizer, loss, model_variables)
 
             for pr in self._all_parameters:
                 pr.refresh()
@@ -1357,61 +1066,12 @@ class StructuralField(_GPModel):
 class _EnsembleModel(_GPModel):
     def __init__(self, options=GPOptions):
         super().__init__(options)
-        self.models = None
+        self.models = []
+        self.variable = None
 
     def set_learning_rate(self, rate):
         for model in self.models:
             model.set_learning_rate(rate)
-
-    @staticmethod
-    def combine(outputs):
-        raise NotImplementedError
-
-
-class GPEnsemble(_EnsembleModel):
-    def __init__(self, data, variable, covariance, warping=None, tangents=None,
-                 use_trend=False, options=GPOptions()):
-        super().__init__(options)
-        if not isinstance(data, (tuple, list)):
-            raise ValueError("data must be a list or tuple containing"
-                             "data objects")
-        if tangents is None:
-            tangents = [None for _ in data]
-        elif not isinstance(tangents, (tuple, list)):
-            raise ValueError("tangents must be a list or tuple containing"
-                             "data objects or None")
-
-        dims = set([d.n_dim for d in data])
-        if len(dims) != 1:
-            raise Exception("all data objects must have the same dimension")
-        self._n_dim = list(dims)[0]
-
-        self.models = [GP(
-            data=d,
-            variable=variable,
-            covariance=_copy.deepcopy(covariance),
-            warping=_copy.deepcopy(warping),
-            directional_data=t,
-            use_trend=use_trend,
-            options=options)
-            for d, t in zip(data, tangents)]
-        for model in self.models:
-            self._register(model)
-
-        self.variable = variable
-
-    def __repr__(self):
-        s = "Gaussian process ensemble\n\n" \
-            "Models: %d\n\n" % len(self.models)
-        s += "Variable: " + self.variable + "\n"
-        return s
-
-    def train(self, max_iter=1000):
-        for i, model in enumerate(self.models):
-            if self.options.verbose:
-                print("Training model %d of %d" % (i + 1, len(self.models)))
-
-            model.train(max_iter=max_iter)
 
     def predict(self, newdata):
         """
@@ -1463,7 +1123,7 @@ class GPEnsemble(_EnsembleModel):
         mu = _tf.reduce_sum(weights * mu, axis=1)
 
         var = _tf.stack([out["variance"] for out in outputs], axis=1)
-        var = _tf.reduce_sum(weights**2 * var, axis=1)
+        var = _tf.reduce_sum(weights ** 2 * var, axis=1)
 
         combined = {"mean": mu, "variance": var}
 
@@ -1478,6 +1138,52 @@ class GPEnsemble(_EnsembleModel):
             combined["quantiles"] = quant
 
         return combined
+
+
+class GPEnsemble(_EnsembleModel):
+    def __init__(self, data, variable, covariance, warping=None, tangents=None,
+                 use_trend=False, options=GPOptions()):
+        super().__init__(options)
+        if not isinstance(data, (tuple, list)):
+            raise ValueError("data must be a list or tuple containing"
+                             "data objects")
+        if tangents is None:
+            tangents = [None for _ in data]
+        elif not isinstance(tangents, (tuple, list)):
+            raise ValueError("tangents must be a list or tuple containing"
+                             "data objects or None")
+
+        dims = set([d.n_dim for d in data])
+        if len(dims) != 1:
+            raise Exception("all data objects must have the same dimension")
+        self._n_dim = list(dims)[0]
+
+        self.models = [GP(
+            data=d,
+            variable=variable,
+            covariance=_copy.deepcopy(covariance),
+            warping=_copy.deepcopy(warping),
+            directional_data=t,
+            use_trend=use_trend,
+            options=options)
+            for d, t in zip(data, tangents)]
+        for model in self.models:
+            self._register(model)
+
+        self.variable = variable
+
+    def __repr__(self):
+        s = "Gaussian process ensemble\n\n" \
+            "Models: %d\n\n" % len(self.models)
+        s += "Variable: " + self.variable + "\n"
+        return s
+
+    def train(self, max_iter=1000):
+        for i, model in enumerate(self.models):
+            if self.options.verbose:
+                print("Training model %d of %d" % (i + 1, len(self.models)))
+
+            model.train(max_iter=max_iter)
 
 
 class VGPNetworkEnsemble(_EnsembleModel):
@@ -1693,7 +1399,8 @@ class Normalizer(_GPModel):
             return -obj
 
         for i in range(max_iter):
-            self.optimizer.minimize(loss, model_variables)
+            # self.optimizer.minimize(loss, model_variables)
+            _tftools.training_step(self.optimizer, loss, model_variables)
 
             for pr in self._all_parameters:
                 pr.refresh()
@@ -1705,517 +1412,3 @@ class Normalizer(_GPModel):
                 print("\rIteration %s | Objective: %s" %
                       (str(i + 1), str(current_elbo)), end="")
 
-
-class VGPMultiscale(_GPModel):
-    def __init__(self, data, variables, likelihoods,
-                 latent_network_generators,  # list of functions
-                 search_blocks,  # list of block objects
-                 prediction_targets,  # list of data/grid objects
-                 directional_data=None,
-                 n_sims=50, minimum_data=10,
-                 options=GPOptions()):
-        super().__init__(options)
-        self._n_dim = data.n_dim
-
-        self.data = data
-        self.directional_data = directional_data
-        self.n_sims = n_sims
-        self.minimum_data = minimum_data
-
-        if not (isinstance(prediction_targets, (list, tuple))):
-            prediction_targets = [prediction_targets]
-        self.prediction_targets = prediction_targets
-
-        if not (isinstance(likelihoods, (list, tuple))):
-            likelihoods = [likelihoods]
-        self.likelihoods = likelihoods
-        self.lik_sizes = [lik.size for lik in likelihoods]
-
-        if not (isinstance(variables, (list, tuple))):
-            variables = [variables]
-        self.variables = variables
-        self.var_lengths = [data.variables[v].length for v in variables]
-
-        y, has_value = [], []
-        for v in self.variables:
-            y_v, h_v = data.variables[v].get_measurements()
-            y.append(y_v)
-            has_value.append(h_v)
-        self.y = _np.concatenate(y, axis=1)
-        self.has_value = _np.concatenate(has_value, axis=1)
-        self.total_data = _np.sum(self.has_value)
-
-        self.latent_network_generators = latent_network_generators
-        self.search_blocks = search_blocks
-
-        size = _np.sum(self.lik_sizes)
-        self.running_mean = _np.zeros([size, data.n_data, 1])
-        self.running_variance = _np.ones([size, data.n_data])
-        self.running_explained_variance = _np.zeros([size, data.n_data])
-        self.running_sims = _np.zeros([size, data.n_data, n_sims])
-
-        self.predicted_running_mean = [
-            _np.zeros([size, t.n_data, 1])
-            for t in prediction_targets
-        ]
-        self.predicted_running_variance = [
-            _np.ones([size, t.n_data])
-            for t in prediction_targets
-        ]
-        self.predicted_running_explained_variance = [
-            _np.zeros([size, t.n_data])
-            for t in prediction_targets
-        ]
-        self.predicted_running_sims = [
-            _np.zeros([size, t.n_data, n_sims])
-            for t in prediction_targets
-        ]
-
-        # intermediate tensors
-        self.elbo = _tf.Variable(_tf.constant(0.0, _tf.float64))
-        self.kl_div = _tf.Variable(_tf.constant(0.0, _tf.float64))
-        self.total_kl_div = 0.0
-
-        # training log
-        self.training_log = [
-            _np.empty(b.grid_size, _np.object)
-            for b in self.search_blocks
-        ]
-
-    @staticmethod
-    def refine(mu, var, sims, explained_var,
-               prev_mu, prev_var, prev_sims, prev_explained_var):
-        sims = sims - mu
-        prev_sims = prev_sims - prev_mu
-
-        w1 = explained_var / (var + 1e-6) + 1e-6
-        w2 = prev_explained_var / (prev_var + 1e-6) + 1e-6
-
-        new_mu = mu + prev_mu
-        new_var = (w1 * var + w2 * prev_var) / (w1 + w2)
-        new_exp_var = (w1 * explained_var + w2 * prev_explained_var) \
-                      / (w1 + w2)
-
-        w1, w2 = w1[:, :, None], w2[:, :, None]
-        new_sims = (w1 * sims + w2 * prev_sims) / (w1 + w2)
-        new_sims = new_sims + new_mu
-
-        return new_mu, new_var, new_sims, new_exp_var
-
-    @_tf.function
-    def _log_lik(self, x, y, has_value, training_inputs,
-                 prev_mu, prev_var, prev_sims, prev_exp_var, network,
-                 x_var=None, seed=0):
-        with _tf.name_scope("batched_elbo"):
-            # prediction
-            mu, var, sims, explained_var, influence = network.predict(
-                x, x_var=x_var, n_sim=self.n_sims, seed=[seed, 0])
-
-            mu, var, sims, _ = self.refine(
-                mu, var, sims, explained_var,
-                prev_mu, prev_var, prev_sims, prev_exp_var
-            )
-
-            mu = _tf.transpose(mu[:, :, 0])
-            var = _tf.transpose(var)
-            sims = _tf.transpose(sims, [1, 0, 2])
-
-            # likelihood
-            y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.lik_sizes, axis=1)
-            var = _tf.split(var, self.lik_sizes, axis=1)
-            hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.lik_sizes, axis=1)
-
-            elbo = _tf.constant(0.0, _tf.float64)
-            for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
-                    self.likelihoods, mu, var, y_s,
-                    hv, sims, training_inputs):
-                elbo = elbo + likelihood.log_lik(
-                    mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
-
-            # batch weight
-            batch_size = _tf.reduce_sum(has_value)
-            elbo = elbo * self.total_data / batch_size
-
-            return elbo
-
-    @_tf.function
-    def _training_elbo(self, x, y, has_value, training_inputs,
-                       prev_mu, prev_var, prev_sims, prev_exp_var, network,
-                       x_dir=None, directions=None, y_dir=None,
-                       has_value_directions=None, x_var=None,
-                       seed=0, jitter=1e-6):
-        network.refresh(jitter)
-
-        # ELBO
-        elbo = self._log_lik(x, y, has_value, training_inputs,
-                             prev_mu, prev_var, prev_sims, prev_exp_var,
-                             network, x_var=x_var, seed=seed)
-
-        # ELBO for directions
-        # if x_dir is not None:
-        #     elbo = elbo + self._log_lik_directions(
-        #         x_dir, directions, y_dir, has_value_directions)
-
-        # KL-divergence
-        unique_nodes = network.get_unique_parents()
-        unique_nodes.append(network)
-        kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
-        elbo = elbo - kl
-
-        self.elbo.assign(elbo)
-        self.kl_div.assign(kl)
-        return elbo
-
-    def _svi(self, data_index, network, epochs, learning_rate):
-        optimizer = _tf.keras.optimizers.Adam(
-            _tf.keras.optimizers.schedules.ExponentialDecay(
-                learning_rate, 1, 0.999),
-            amsgrad=True
-        )
-
-        model_variables = network.get_unfixed_variables()
-
-        def loss(idx):
-            training_inputs = [
-                self.data[data_index].variables[v].training_input(idx)
-                for v in self.variables]
-
-            if self.directional_data is None:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[data_index][idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[data_index][idx], _tf.float64),
-                    _tf.constant(self.has_value[data_index][idx], _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(
-                        self.data.get_data_variance()[data_index][idx],
-                        _tf.float64),
-                    jitter=self.options.jitter,
-                    seed=self.options.seed,
-                    network=network,
-                    prev_mu=_tf.constant(
-                        self.running_mean[:, data_index[idx], :],
-                        _tf.float64),
-                    prev_var=_tf.constant(
-                        self.running_variance[:, data_index[idx]],
-                        _tf.float64),
-                    prev_sims=_tf.constant(
-                        self.running_sims[:, data_index[idx], :],
-                        _tf.float64),
-                    prev_exp_var=_tf.constant(
-                        self.running_explained_variance[:, data_index[idx]],
-                        _tf.float64)
-                )
-            else:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
-                                       _tf.float64),
-                    x_dir=_tf.constant(
-                        self.directional_data.coordinates,
-                        _tf.float64),
-                    directions=_tf.constant(
-                        self.directional_data.directions, _tf.float64),
-                    # y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    # has_value_directions=_tf.constant(
-                    #     self.has_value_dir, _tf.float64),
-                    jitter=self.options.jitter,
-                    seed=self.options.seed,
-                    network=network,
-                    prev_mu=_tf.constant(
-                        self.running_mean[:, data_index[idx], :],
-                        _tf.float64),
-                    prev_var=_tf.constant(
-                        self.running_variance[:, data_index[idx]],
-                        _tf.float64),
-                    prev_sims=_tf.constant(
-                        self.running_sims[:, data_index[idx], :],
-                        _tf.float64),
-                    prev_exp_var=_tf.constant(
-                        self.running_explained_variance[:, data_index[idx]],
-                        _tf.float64)
-                )
-
-        _np.random.seed(self.options.seed)
-        training_log = []
-        for i in range(epochs):
-            current_elbo = []
-
-            shuffled = _np.random.choice(
-                len(data_index), len(data_index), replace=False)
-            batches = self.options.batch_index(len(data_index))
-
-            for batch in batches:
-                optimizer.minimize(
-                    lambda: loss(shuffled[batch]),
-                    model_variables)
-
-                for pr in self._all_parameters:
-                    pr.refresh()
-
-                current_elbo.append(self.elbo.numpy())
-                training_log.append(current_elbo[-1])
-
-            total_elbo = _np.mean(current_elbo) - self.total_kl_div
-            if self.options.verbose:
-                print("\rEpoch %s | ELBO: %s" %
-                      (str(i + 1), str(total_elbo)), end="")
-
-        if self.options.verbose:
-            print("\n")
-
-        self.total_kl_div += self.kl_div.numpy()
-        return _np.array(training_log)
-
-    def update_training_latent(self, data_index, network):
-        batches = self.options.batch_index(
-            len(data_index), self.options.prediction_batch_size)
-
-        for i, batch in enumerate(batches):
-            if self.options.verbose:
-                print("\rProcessing batch %s of %s             "
-                      % (str(i + 1), str(len(batches))), end="")
-
-            mu, var, sims, explained_var, _ = network.predict(
-                self.data.coordinates[data_index][batch],
-                n_sim=self.n_sims, seed=[self.options.seed, 0])
-
-            mu, var, sims, exp_var = self.refine(
-                mu, var, sims, explained_var,
-                self.running_mean[:, data_index[batch], :],
-                self.running_variance[:, data_index[batch]],
-                self.running_sims[:, data_index[batch], :],
-                self.running_explained_variance[:, data_index[batch]]
-            )
-
-            self.running_mean[:, data_index[batch], :] = mu.numpy()
-            self.running_variance[:, data_index[batch]] = var.numpy()
-            self.running_sims[:, data_index[batch], :] = sims.numpy()
-            self.running_explained_variance[:, data_index[batch]] = \
-                exp_var.numpy()
-
-        if self.options.verbose:
-            print("\n")
-
-    def update_target_latent(self, data_index, network, target_idx):
-        batches = self.options.batch_index(
-            len(data_index), self.options.prediction_batch_size)
-
-        for i, batch in enumerate(batches):
-            if self.options.verbose:
-                print("\rProcessing batch %s of %s             "
-                      % (str(i + 1), str(len(batches))), end="")
-
-            mu, var, sims, explained_var, _ = network.predict(
-                self.prediction_targets[target_idx]
-                    .coordinates[data_index][batch],
-                n_sim=self.n_sims, seed=[self.options.seed, 0])
-
-            mu, var, sims, exp_var = self.refine(
-                mu, var, sims, explained_var,
-                self.predicted_running_mean[target_idx]
-                [:, data_index[batch], :],
-                self.predicted_running_variance[target_idx]
-                [:, data_index[batch]],
-                self.predicted_running_sims[target_idx]
-                [:, data_index[batch], :],
-                self.predicted_running_explained_variance[target_idx]
-                [:, data_index[batch]]
-            )
-
-            self.predicted_running_mean[target_idx] \
-                [:, data_index[batch], :] = mu.numpy()
-            self.predicted_running_variance[target_idx] \
-                [:, data_index[batch]] = var.numpy()
-            self.predicted_running_sims[target_idx] \
-                [:, data_index[batch], :] = sims.numpy()
-            self.predicted_running_explained_variance[target_idx] \
-                [:, data_index[batch]] = exp_var.numpy()
-
-        if self.options.verbose:
-            print("\n")
-
-    def predict_from_latent(self, target,
-                            latent_mean, latent_variance,
-                            latent_sims, latent_explained_variance):
-        # managing variables
-        variable_inputs = []
-        for v in self.variables:
-            if v not in target.variables.keys():
-                self.data.variables[v].copy_to(target)
-            target.variables[v].allocate_simulations(self.n_sims)
-            variable_inputs.append(self.data.variables[v].prediction_input())
-
-        batches = self.options.batch_index(
-            target.n_data, self.options.prediction_batch_size)
-
-        @_tf.function
-        def predict_raw(pred_mu, pred_var, pred_sim, pred_exp_var):
-            pred_mu = _tf.transpose(pred_mu[:, :, 0])
-            pred_var = _tf.transpose(pred_var)
-            pred_sim = _tf.transpose(pred_sim, [1, 0, 2])
-            pred_exp_var = _tf.transpose(pred_exp_var)
-
-            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
-            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
-            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
-
-            # likelihood
-            out = []
-            for mu, var, sim, exp_var, lik, v_inp in zip(
-                    pred_mu, pred_var, pred_sim, pred_exp_var,
-                    self.likelihoods, variable_inputs):
-                out.append(lik.predict(mu, var, sim, exp_var, **v_inp))
-
-            return out
-
-        for i, batch in enumerate(batches):
-            if self.options.verbose:
-                print("\rProcessing batch %s of %s             "
-                      % (str(i + 1), str(len(batches))), end="")
-
-            output = predict_raw(
-                _tf.constant(latent_mean[:, batch, :], _tf.float64),
-                _tf.constant(latent_variance[:, batch], _tf.float64),
-                _tf.constant(latent_sims[:, batch, :], _tf.float64),
-                _tf.constant(latent_explained_variance[:, batch], _tf.float64)
-            )
-
-            # writing result
-            for v, upd in zip(self.variables, output):
-                target.variables[v].update(batch, **upd)
-
-        if self.options.verbose:
-            print("\n")
-
-    def train_level(self, level, epochs, learning_rate):
-        if self.options.verbose:
-            print("Scale level %d/%d" % (level + 1, len(self.search_blocks)))
-
-        train_block_index = self.search_blocks[level].index_data(self.data)
-        target_block_index = [
-            self.search_blocks[level].index_data(t)
-            for t in self.prediction_targets
-        ]
-
-        grid_index = _np.array(
-            list(_iter.product(
-                *[_np.arange(n)
-                  for n in self.search_blocks[level].grid_size[::-1]]
-            ))
-        )[:, ::-1]
-
-        for combination in grid_index:
-            s = "Looping through block " \
-              + "-".join([str(i + 1) for i in combination]) \
-              + " of " \
-              + "-".join([str(i) for i in self.search_blocks[level].grid_size])
-            if self.options.verbose:
-                print(s)
-
-            # selecting data
-            # neighborhood_index = _np.array(
-            #     list(_iter.product(
-            #         *[[i - 1, i, i + 1]
-            #           for i in combination[::-1]]
-            #     ))
-            # )[:, ::-1]
-            # match = []
-            # for block_idx in neighborhood_index:
-            #     match_i = _np.stack([train_block_index[:, d] == block_idx[d]
-            #                         for d in range(self.n_dim)], axis=1)
-            #     match_i = _np.all(match_i, axis=1)
-            #     match.append(match_i)
-            # match = _np.stack(match, axis=-1)
-            # match = _np.any(match, axis=-1)
-
-            match = _np.stack([train_block_index[:, d] == combination[d]
-                               for d in range(self.n_dim)], axis=1)
-            match = _np.all(match, axis=1)
-            match = _np.where(match)[0]
-
-            if len(match) >= self.minimum_data:
-                # inducing points and local network
-                # inducing_points = self.search_blocks[level]\
-                #     .discretized_coordinates(combination)
-                # inducing_points = _data.PointData.from_array(inducing_points)
-                inducing_points = self.search_blocks[level] \
-                    .inducing_grid(combination)
-
-                network = self.latent_network_generators[level](inducing_points)
-
-                # training
-                training_log = self._svi(match, network, epochs, learning_rate)
-                self.training_log[level][_np.split(combination, self.n_dim)] \
-                    = [training_log]
-                network.refresh(self.options.jitter)
-
-                # # update latent variables
-                # if self.options.verbose:
-                #     print("Updating training latent variables...")
-                # self.update_training_latent(_np.arange(self.data.n_data), network)
-                #
-                # for t, target in enumerate(target_block_index):
-                #     if self.options.verbose:
-                #         print("Updating target latent variables...")
-                #     self.update_target_latent(
-                #         _np.arange(self.prediction_targets[t].n_data), network, t)
-
-                # update latent variables in neighborhood of block
-                neighborhood_index = _np.array(
-                    list(_iter.product(
-                        *[[i - 2, i - 1, i, i + 1, i + 2]
-                          for i in combination[::-1]]
-                    ))
-                )[:, ::-1]
-
-                for block_idx in neighborhood_index:
-                    match = _np.stack([train_block_index[:, d] == block_idx[d]
-                                       for d in range(self.n_dim)], axis=1)
-                    match = _np.all(match, axis=1)
-                    match = _np.where(match)[0]
-                    if len(match) > 0:
-                        if self.options.verbose:
-                            print("Updating training latent variables...")
-                        self.update_training_latent(match, network)
-
-                    for t, target in enumerate(target_block_index):
-                        match = _np.stack([target[:, d] == block_idx[d]
-                                           for d in range(self.n_dim)], axis=1)
-                        match = _np.all(match, axis=1)
-                        match = _np.where(match)[0]
-                        if len(match) > 0:
-                            if self.options.verbose:
-                                print("Updating target latent variables...")
-                            self.update_target_latent(match, network, t)
-
-    def train(self, epochs_per_pass=100, learning_rate=0.01):
-        if self.options.verbose:
-            print("Training...")
-        for i, b in enumerate(self.search_blocks):
-            self.train_level(i, epochs_per_pass, learning_rate)
-
-        if self.options.verbose:
-            print("Predicting on training data...")
-        self.predict_from_latent(
-            self.data, self.running_mean, self.running_variance,
-            self.running_sims, self.running_explained_variance
-        )
-
-        if self.options.verbose:
-            print("Predicting on targets...")
-        for i, t in enumerate(self.prediction_targets):
-            self.predict_from_latent(
-                t,
-                self.predicted_running_mean[i],
-                self.predicted_running_variance[i],
-                self.predicted_running_sims[i],
-                self.predicted_running_explained_variance[i]
-            )

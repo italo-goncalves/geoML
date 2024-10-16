@@ -65,6 +65,15 @@ def pairwise_dist_l1(mat_a, mat_b):
     return dist
 
 
+def training_step(optimizer, loss, variables):
+    # For some reason optimizer.minimize() is not present in TensorFlow v2.11 onwards
+    with _tf.GradientTape() as tape:
+        result = loss()
+
+    grads = tape.gradient(result, variables)
+    optimizer.apply_gradients(zip(grads, variables))
+
+
 @_tf.function
 def composition_close(matrix):
     """
@@ -690,7 +699,7 @@ def reshape_lower_traingular(vec):
     return mat
 
 
-def get_lower_traingular(mat):
+def get_lower_triangular(mat):
     size = _tf.shape(mat)[0]
 
     def tril_indices(s):
@@ -811,3 +820,36 @@ def masked_laplacian(x, mask, axis):
     i, lap = _tf.while_loop(cond_fn, loop_fn, (i, lap))
 
     return lap
+
+
+def sparsemax(z, axis=0):
+    """
+    Sparsemax function (Martins and Astudillo, 2016)
+
+    Projection of a point on the unit simplex.
+
+    Parameters
+    ----------
+    z : _tf.Tensor
+        Tensor containing the points to project.
+    axis : int
+        Axis on which to operate.
+
+    Returns
+    -------
+    p : _tf.Tensor
+        Tensor containing the projected points.
+    """
+    seq = _tf.cumsum(_tf.ones_like(z), axis=axis)
+
+    z_sort = _tf.sort(z, axis=axis, direction='DESCENDING')
+    z_add = 1.0 + seq * z_sort
+    z_cum = _tf.cumsum(z_sort, axis=axis)
+
+    ind = _tf.where(_tf.greater(z_add, z_cum), _tf.ones_like(z_cum), _tf.zeros_like(z_cum))
+    k = _tf.reduce_sum(ind, axis=axis, keepdims=True)
+    z_cum_k = _tf.reduce_sum(z_sort * ind, axis=axis, keepdims=True)
+
+    tau = (z_cum_k - 1) / k
+    p = _tf.nn.relu(z - tau)
+    return p
