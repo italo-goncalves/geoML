@@ -2852,8 +2852,7 @@ class DrillholeData(_SpatialData):
         drill_coords = _np.stack(drill_coords, axis=0)
         cell_links = _np.stack(cell_links, axis=0)
 
-        pv_dh = _pv.PolyData(drill_coords, lines=cell_links,
-                             n_lines=self.n_data)
+        pv_dh = _pv.PolyData(drill_coords, lines=cell_links)
 
         # scalars
         df = self.data.dropna(axis=1, how="all")
