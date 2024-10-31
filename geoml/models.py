@@ -526,9 +526,9 @@ class VGPNetwork(_GPModel):
         unique_nodes.append(self.latent_network)
         kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
 
-        self.elbo.assign(elbo)
+        self.elbo.assign(elbo - kl)
         self.kl_div.assign(kl)
-        return elbo
+        return elbo - kl
 
     @_tf.function
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,

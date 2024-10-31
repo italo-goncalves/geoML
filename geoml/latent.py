@@ -443,7 +443,7 @@ class BasicGP(_GPNode):
             delta = self.parameters["delta"].get_value()
             alpha_white = self.parameters["alpha_white"].get_value()
 
-            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov)
+            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov[None, :, :])
             fit = _tf.reduce_sum(alpha_white**2)
             det_1 = 2 * _tf.reduce_sum(_tf.math.log(
                 _tf.linalg.diag_part(self.cov_smooth_chol)))
