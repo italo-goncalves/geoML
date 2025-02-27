@@ -592,6 +592,29 @@ class Concatenate(ChainedTransform):
             tr.set_limits(data)
 
 
+class RandomProjections(_Transform):
+    def __init__(self, n_dim, n_directions, seed=1234):
+        super().__init__()
+        self.n_directions = n_directions
+        self.n_dim = n_dim
+
+        if n_dim == 1:
+            raise ValueError("Invalid n_dim: must be 2 or greater")
+
+        if n_dim == 2:
+            angles = _np.linspace(0, _np.pi, n_directions + 1)[:-1]
+            projections = _np.stack([_np.cos(angles), _np.sin(angles)], axis=1)
+            self.projections = _tf.constant(projections.T, _tf.float64)
+        else:
+            _np.random.seed(seed)
+            projections = _np.random.normal(size=[n_dim, n_directions])
+            norm = _np.sqrt(_np.sum(projections**2, axis=0, keepdims=True))
+            self.projections = _tf.constant(projections / norm, _tf.float64)
+
+    def __call__(self, x):
+        return _tf.matmul(x, self.projections)
+
+
 class BellFault2D(_Transform):
     def __init__(self, start, end):
         super().__init__()

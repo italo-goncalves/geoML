@@ -1,3 +1,8 @@
+## version 0.3.5
+* Support for rotated 3D grids
+* Simulations now have the option to include the likelihood variance
+* Improvements and bug fixes
+
 ## version 0.3.4
 * Improved pyvista integration
 * Multiscale modeling did not work

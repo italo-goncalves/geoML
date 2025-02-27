@@ -327,8 +327,12 @@ class _Variable(object):
             verts, faces, normals, values = _measure.marching_cubes(
                 cube, value, gradient_direction="ascent",
                 allow_degenerate=False, spacing=self.coordinates.step_size)
-            for i in range(3):
-                verts[:, i] += self.coordinates.grid[i][0]
+
+            mat = self.coordinates.rotation_matrix()
+
+            verts = _np.matmul(verts, mat) + self.coordinates.origin
+            normals = _np.matmul(normals, mat)
+
             # return verts, faces, normals, values
             return Surface3D(verts, faces, normals)
 
@@ -1235,8 +1239,8 @@ class RockTypeVariable(CompositionalVariable):
 
 
 class CategoricalVariable(RockTypeVariable):
-    def __init__(self, name, coordinates, labels, measurements=None):
-        super().__init__(name, coordinates, labels, measurements_a=measurements)
+    def __init__(self, name, coordinates, labels=None, measurements=None):
+        super().__init__(name, coordinates, labels=labels, measurements_a=measurements)
 
     def fill_pyvista_cube(self, cube, prefix=None):
         self.measurements_a.fill_pyvista_cube(
@@ -1817,6 +1821,7 @@ class _GriddedData(PointData):
         self.grid = None
         self.grid_size = None
         self.step_size = None
+        self.origin = None
 
     def index_data(self, data):
         if data.n_dim != self.n_dim:
@@ -1830,6 +1835,12 @@ class _GriddedData(PointData):
         ]
 
         return _np.stack(cell_id, axis=1)
+
+    def as_data_frame(self, **kwargs):
+        df = super().as_data_frame(**kwargs)
+        for i, s in enumerate(self.coordinate_labels):
+            df[f'_{s}'] = self.step_size[i]
+        return df
 
 
 class Grid1D(_GriddedData):
@@ -1882,6 +1893,7 @@ class Grid1D(_GriddedData):
         self.step_size = [step]
         self.grid = [grid]
         self.grid_size = [int(n)]
+        self.origin = start
 
     def aggregate_categorical(self, data, variable):
         data = data.subset_region(self.bounding_box.min[0],
@@ -2050,6 +2062,7 @@ class Grid2D(_GriddedData):
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y]
         self.grid_size = [int(num) for num in n]
+        self.origin = start
 
     def aggregate_categorical(self, data, variable):
         data = data.subset_region(self.bounding_box.min[0],
@@ -2236,6 +2249,7 @@ class Grid3D(_GriddedData):
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = [int(num) for num in n]
+        self.origin = start
 
     def aggregate_categorical(self, data, variable):
         data = data.subset_region(self.bounding_box.min[0],
@@ -2380,13 +2394,16 @@ class Grid3D(_GriddedData):
         pv_grid = _pv.ImageData(
             dimensions=self.grid_size,
             spacing=self.step_size,
-            origin=[ax[0] for ax in self.grid]
+            origin=self.origin
         )
 
         for var in self.variables.keys():
             self.variables[var].fill_pyvista_cube(pv_grid)
 
         return pv_grid
+
+    def rotation_matrix(self):
+        return _np.eye(3)
 
 
 class GridND(_GriddedData):
@@ -3106,3 +3123,91 @@ class Blocks3D(Grid3D):
             self.variables[var].fill_pyvista_blocks(pv_blocks)
 
         return pv_blocks
+
+
+def rotation_matrix(azimuth, dip, rake):
+    # conversion to radians
+    azimuth = azimuth * (_np.pi / 180)
+    dip = dip * (_np.pi / 180)
+    rake = rake * (_np.pi / 180)
+
+    # conversion to mathematical coordinates
+    dip = - dip
+
+    # rotation matrix
+    # x and y axes are switched
+    # rotation over z is with sign reversed
+    rx = _np.stack([_np.cos(rake), 0, _np.sin(rake),
+                    0, 1, 0,
+                    -_np.sin(rake), 0, _np.cos(rake)], -1)
+    rx = _np.reshape(rx, [3, 3])
+    ry = _np.stack([1, 0, 0,
+                    0, _np.cos(dip), -_np.sin(dip),
+                    0, _np.sin(dip), _np.cos(dip)], -1)
+    ry = _np.reshape(ry, [3, 3])
+    rz = _np.stack([_np.cos(azimuth), _np.sin(azimuth), 0,
+                    -_np.sin(azimuth), _np.cos(azimuth), 0,
+                    0, 0, 1], -1)
+    rz = _np.reshape(rz, [3, 3])
+
+    rot = _np.matmul(_np.matmul(rz, ry), rx)
+    return rot.T
+
+
+def rotate(data, origin, azimuth=0.0, dip=0.0, rake=0.0, reverse=False):
+    mat = rotation_matrix(azimuth, dip, rake)
+    if reverse:
+        mat = mat.T
+
+    origin = _np.array(origin)
+    if origin.shape != (1, 3):
+        origin = _np.squeeze(origin)[None, :]
+
+    data = _copy.deepcopy(data)
+    data.coordinates = _np.matmul(data.coordinates - origin, mat) + origin
+    return data
+
+
+class RotatedGrid3D(Grid3D):
+    def __init__(self, start, n, step, azimuth=0.0, dip=0.0, rake=0.0, labels=None):
+        self.azimuth = azimuth
+        self.dip = dip
+        self.rake = rake
+        super().__init__(start, n, step=step, labels=labels)
+
+        rotated = self.rotate(self)
+        self.coordinates = rotated.coordinates
+
+    def rotate(self, other):
+        return rotate(other, self.origin, self.azimuth, self.dip, self.rake)
+
+    def rotation_matrix(self):
+        return rotation_matrix(self.azimuth, self.dip, self.rake)
+
+    def index_data(self, data):
+        return super().index_data(self.rotate(data))
+
+    def aggregate_categorical(self, data, variable):
+        super().aggregate_categorical(self.rotate(data), variable)
+
+    def aggregate_binary(self, data, variable):
+        super().aggregate_binary(self.rotate(data), variable)
+
+    def aggregate_numeric(self, data, variable):
+        super().aggregate_numeric(self.rotate(data), variable)
+
+    def make_interpolator(self, coordinates):
+        raise NotImplementedError
+
+    def as_pyvista(self):
+        pv_grid = super().as_pyvista()
+
+        mat = rotation_matrix(self.azimuth, self.dip, self.rake)
+        transf = _np.eye(4)
+        transf[:3, :3] = mat.T
+
+        pv_grid = pv_grid.translate(- self.origin)
+        pv_grid = pv_grid.transform(transf)
+        pv_grid = pv_grid.translate(self.origin)
+
+        return pv_grid

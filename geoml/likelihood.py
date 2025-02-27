@@ -133,7 +133,7 @@ class _Likelihood(_gpr.Parametric):
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
         raise NotImplementedError
 
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+    def predict(self, mu, var, sims, explained_var, include_noise=True, *args, **kwargs):
         raise NotImplementedError
 
     def log_lik_from_samples(self, samples, y, has_value, *args, **kwargs):
@@ -196,7 +196,7 @@ class _ContinuousLikelihood(_Likelihood):
 
         return lik
 
-    def predict(self, mu, var, sims, explained_var, *args, quantiles=None,
+    def predict(self, mu, var, sims, explained_var, *args, include_noise=True, quantiles=None,
                 probabilities=None, **kwargs):
         vals = _tf.expand_dims(_ROOTS_64, axis=0)
         vals = _tf.sqrt(2 * var) * vals + mu  # [n_data, n_vals]
@@ -211,6 +211,11 @@ class _ContinuousLikelihood(_Likelihood):
         lik_var = distribution.variance()
         weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
         # weights = weights**2
+
+        sims = sims[:, 0, :]
+        if include_noise:
+            s = _tf.shape(sims)
+            sims = sims + self.white_noise(s, seed=1234)
 
         out = {"mean": _tf.squeeze(mu),
                "variance": _tf.squeeze(var),
@@ -426,7 +431,7 @@ class EpsilonInsensitive(_ContinuousLikelihood):
         epsilon = self.parameters["epsilon"].get_value()
         c_rate = self.parameters["c_rate"].get_value()
 
-        val_1 = _tf.math.exp(c_rate * (x - epsilon)) / c_rate
+        val_1 = _tf.math.exp(c_rate * (x + epsilon)) / c_rate
         val_2 = 1 / c_rate + x - epsilon
         val_3 = 2 * epsilon + 2 / c_rate \
                 * (1 - 0.5 * _tf.math.exp(- c_rate * (x - epsilon)))
@@ -437,6 +442,22 @@ class EpsilonInsensitive(_ContinuousLikelihood):
         prob = prob * 0.5 / (epsilon + 1 / c_rate)
         return prob
 
+    def inv_cdf(self, p):
+        epsilon = self.parameters["epsilon"].get_value()
+        c_rate = self.parameters["c_rate"].get_value()
+
+        area = 2 * (epsilon + 1 / c_rate)
+        p_1 = (1 / c_rate) / area
+        p_2 = p_1 + 2 * epsilon / area
+
+        val_1 = _tf.math.log(area * c_rate * p) / c_rate - epsilon
+        val_2 = area * p - 1 / c_rate - epsilon
+        val_3 = epsilon - _tf.math.log(2 - c_rate * (area * p - 2 * epsilon)) / c_rate
+
+        x = _tf.where(_tf.greater(p, p_1), val_2, val_1)
+        x = _tf.where(_tf.greater(p, p_2), val_3, x)
+        return x
+
     def variance(self):
         e = self.parameters["epsilon"].get_value()
         c = self.parameters["c_rate"].get_value()
@@ -444,6 +465,11 @@ class EpsilonInsensitive(_ContinuousLikelihood):
         n = 3 * c * e * (c * e + 2) + 6 + (c * e) ** 3
         d = 3 * c ** 2 * (c * e + 1)
         return n / d
+
+    def white_noise(self, shape, seed):
+        rnd = _tf.random.uniform(shape, minval=0.0, maxval=1.0, seed=seed, dtype=_tf.float64)
+        sample = self.inv_cdf(rnd)
+        return sample
 
     def predict(self, mu, var, sims, explained_var, *args, quantiles=None,
                 probabilities=None, **kwargs):
@@ -1358,6 +1384,13 @@ class _CompositionalLikelihood(_Likelihood):
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
 
+    def white_noise(self, shape, seed):
+        n_data = shape[0]
+        n_samples = shape[2]
+        dist = self._make_distribution(_tf.zeros(n_data, _tf.float64))
+        sample = dist.sample(n_samples, seed=seed)  # [n_var, n_data, n_samples] ?
+        return _tf.transpose(sample, [1, 0, 2])
+
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
         basis = self.parameters["basis"].get_value()
@@ -1386,7 +1419,7 @@ class _CompositionalLikelihood(_Likelihood):
         return lik
 
     def predict(self, mu, var, sims, explained_var,
-                *args, quantiles=None, **kwargs):
+                *args, quantiles=None, include_noise=True, **kwargs):
         basis = self.parameters["basis"].get_value()
         rotated_contrast = _tf.matmul(basis, self.contrast, True)
 
@@ -1395,24 +1428,28 @@ class _CompositionalLikelihood(_Likelihood):
         var = _tf.matmul(var, rotated_contrast ** 2)
         explained_var = _tf.matmul(explained_var, rotated_contrast ** 2)
 
+        if include_noise:
+            sims = sims + self.white_noise(_tf.shape(sims), seed=1234)
+
         # backward warping
         sims = _tf.split(sims, self.size, axis=1)
         sims = [wp.backward(s[:, 0, :]) for wp, s in zip(self.warpings, sims)]
         sims = _tf.stack(sims, axis=1)
 
         # reverse ilr
-        sims = _tf.einsum("nij,ik->nkj", sims, rotated_contrast)
-        sims = _tf.nn.softmax(sims, axis=1)
+        sims_clr = _tf.einsum("nij,ik->nkj", sims, rotated_contrast)
+        sims_simplex = _tf.nn.softmax(sims_clr, axis=1)
 
         # average composition
-        prob = _tf.reduce_mean(sims, axis=2)
+        avg = _tf.reduce_mean(sims_clr, axis=2)
+        prob = _tf.nn.softmax(avg, axis=1)
 
         weights = _tf.reduce_sum(explained_var, axis=1) \
                   / (_tf.reduce_sum(var, axis=1) + 1e-6)
 
         out = {"mean": mu,
                "variance": var,
-               "simulations": sims,
+               "simulations": sims_simplex,
                "probability": prob,
                "weights": weights}
 
@@ -1437,14 +1474,22 @@ class _CompositionalLikelihood(_Likelihood):
 
 class CompositionalGaussian(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 warping=_warp.Identity()):
+                 tie_components=True, warping=_warp.Center()):
         super().__init__(n_components, n_basis, contrast_matrix, warping)
-        self._add_parameter(
-            "noise",
-            _gpr.PositiveParameter(
-                _np.ones([1, self.size, 1]) * 0.1,
-                _np.ones([1, self.size, 1]) * 1e-6,
-                _np.ones([1, self.size, 1]) * 10))
+        if tie_components:
+            self._add_parameter(
+                "noise",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, 1]) * 0.1,
+                    _np.ones([1, 1, 1]) * 1e-6,
+                    _np.ones([1, 1, 1]) * 10))
+        else:
+            self._add_parameter(
+                "noise",
+                _gpr.PositiveParameter(
+                    _np.ones([1, self.size, 1]) * 0.1,
+                    _np.ones([1, self.size, 1]) * 1e-6,
+                    _np.ones([1, self.size, 1]) * 10))
 
     def _make_distribution(self, loc):
         return _tfd.Normal(loc, _tf.sqrt(self.parameters["noise"].get_value()))
@@ -1452,14 +1497,22 @@ class CompositionalGaussian(_CompositionalLikelihood):
 
 class CompositionalLaplace(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 warping=_warp.Identity()):
+                 tie_components=True, warping=_warp.Center()):
         super().__init__(n_components, n_basis, contrast_matrix, warping)
-        self._add_parameter(
-            "rate",
-            _gpr.PositiveParameter(
-                _np.ones([1, self.size, 1]) * 0.1,
-                _np.ones([1, self.size, 1]) * 1e-6,
-                _np.ones([1, self.size, 1]) * 10))
+        if tie_components:
+            self._add_parameter(
+                "rate",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, 1]) * 0.1,
+                    _np.ones([1, 1, 1]) * 1e-6,
+                    _np.ones([1, 1, 1]) * 10))
+        else:
+            self._add_parameter(
+                "rate",
+                _gpr.PositiveParameter(
+                    _np.ones([1, self.size, 1]) * 0.1,
+                    _np.ones([1, self.size, 1]) * 1e-6,
+                    _np.ones([1, self.size, 1]) * 10))
 
     def _make_distribution(self, loc):
         return _tfd.Laplace(loc, self.parameters["rate"].get_value())
@@ -1467,32 +1520,34 @@ class CompositionalLaplace(_CompositionalLikelihood):
 
 class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 warping=_warp.Identity()):
+                 tie_components=True, warping=_warp.Center()):
         super().__init__(n_components, n_basis, contrast_matrix, warping)
-        self._add_parameter(
-            "epsilon",
-            _gpr.PositiveParameter(
-                _np.ones([1, self.size, 1]) * 1e-3,
-                _np.ones([1, self.size, 1]) * 1e-6,
-                _np.ones([1, self.size, 1]) * 10))
-        self._add_parameter(
-            "c_rate",
-            _gpr.PositiveParameter(
-                _np.ones([1, self.size, 1]),
-                _np.ones([1, self.size, 1]) * 1e-3,
-                _np.ones([1, self.size, 1]) * 1e3))
-        # self._add_parameter(
-        #     "epsilon",
-        #     _gpr.PositiveParameter(
-        #         _np.ones([1, 1, 1]) * 1e-3,
-        #         _np.ones([1, 1, 1]) * 1e-6,
-        #         _np.ones([1, 1, 1]) * 10))
-        # self._add_parameter(
-        #     "c_rate",
-        #     _gpr.PositiveParameter(
-        #         _np.ones([1, 1, 1]),
-        #         _np.ones([1, 1, 1]) * 1e-3,
-        #         _np.ones([1, 1, 1]) * 1e3))
+        if tie_components:
+            self._add_parameter(
+                "epsilon",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, 1]) * 1e-3,
+                    _np.ones([1, 1, 1]) * 1e-6,
+                    _np.ones([1, 1, 1]) * 10))
+            self._add_parameter(
+                "c_rate",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, 1]),
+                    _np.ones([1, 1, 1]) * 1e-3,
+                    _np.ones([1, 1, 1]) * 1e3))
+        else:
+            self._add_parameter(
+                "epsilon",
+                _gpr.PositiveParameter(
+                    _np.ones([1, self.size, 1]) * 1e-3,
+                    _np.ones([1, self.size, 1]) * 1e-6,
+                    _np.ones([1, self.size, 1]) * 10))
+            self._add_parameter(
+                "c_rate",
+                _gpr.PositiveParameter(
+                    _np.ones([1, self.size, 1]),
+                    _np.ones([1, self.size, 1]) * 1e-3,
+                    _np.ones([1, self.size, 1]) * 1e3))
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
@@ -1528,6 +1583,29 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
         lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
 
         return lik
+
+    def inv_cdf(self, p):
+        epsilon = self.parameters["epsilon"].get_value()
+        c_rate = self.parameters["c_rate"].get_value()
+
+        area = 2 * (epsilon + 1 / c_rate)
+        # p_1 = (1/c_rate - 2*epsilon) / area
+        # p_2 = (1/c_rate) / area
+        p_1 = (1 / c_rate) / area
+        p_2 = p_1 + 2 * epsilon / area
+
+        val_1 = _tf.math.log(area * c_rate * p) / c_rate - epsilon
+        val_2 = area * p - 1 / c_rate - epsilon
+        val_3 = epsilon - _tf.math.log(2 - c_rate * (area * p - 2 * epsilon)) / c_rate
+
+        x = _tf.where(_tf.greater(p, p_1), val_2, val_1)
+        x = _tf.where(_tf.greater(p, p_2), val_3, x)
+        return x
+
+    def white_noise(self, shape, seed):
+        rnd = _tf.random.uniform(shape, minval=0.0, maxval=1.0, seed=seed, dtype=_tf.float64)
+        sample = self.inv_cdf(rnd)
+        return sample
 
 
 class OrderedGaussianIndicator(_CategoricalLikelihood):

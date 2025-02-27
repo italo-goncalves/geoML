@@ -244,6 +244,48 @@ class ZScore(_Warping):
         return super().initialize(x)
 
 
+class Center(_Warping):
+    """
+    A Warping that simply centers the data.
+    """
+
+    def __init__(self, mean=None):
+        """
+        Initializer for Center.
+
+        Parameters
+        ----------
+        mean : double
+            The desired mean of the data.
+
+        The mean can be computed from the data (if omitted) or specified.
+        """
+        super().__init__()
+        self._add_parameter("mean", _gpr.RealParameter(0, -1e9, 1e9))
+        if mean is not None:
+            self.parameters["mean"].set_value(mean)
+
+    def forward(self, x):
+        mean = self.parameters["mean"].get_value()
+        x = _tftools.ensure_rank_2(x)
+        return x - mean
+
+    def backward(self, x):
+        mean = self.parameters["mean"].get_value()
+        x = _tftools.ensure_rank_2(x)
+        return x + mean
+
+    def derivative(self, x):
+        x = _tftools.ensure_rank_2(x)
+        return _tf.ones_like(x)
+
+    def initialize(self, x):
+        mean = _np.mean(x)
+        self.parameters["mean"].set_value(mean)
+        self.parameters["mean"].set_limits(mean - 3, mean + 3)
+        return super().initialize(x)
+
+
 class Softplus(_Warping):
     """
     Transforms the data using the inverse of the softplus function. 

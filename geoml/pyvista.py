@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as _np
+import numpy as np
 import pandas as _pd
 import pyvista as _pv
 
@@ -56,3 +57,18 @@ def structure_discs(coordinates, dip, azimuth, size=1, **kwargs):
         )
 
     return discs, strike_tubes, dip_tubes
+
+
+def camera_orbit(center, radius, height=None, n=20):
+    center = np.squeeze(center)
+    if len(center) != 3:
+        raise ValueError(f'Center must have 3 coordinates. Found {len(center)}.')
+
+    if height is None:
+        height = center[2]
+
+    ang = np.arange(n) / n * 2 * np.pi
+    xyz = np.stack([np.cos(ang) * radius, np.sin(ang) * radius, np.full([n], 0.0)], axis=1)
+    xyz = xyz + center[None, :]
+    xyz[:, 2] = height
+    return _pv.PolyData(xyz)

@@ -282,7 +282,7 @@ class Concatenate(_Operation):
 
 class BasicGP(_GPNode):
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
-                 fix_range=False):
+                 fix_range=False, isotropic=False):
         super().__init__(parent)
         self._size = size
         self.kernel = self._register(kernel)
@@ -301,6 +301,7 @@ class BasicGP(_GPNode):
         self.prior_cov_chol = None
 
         self.fix_range = fix_range
+        self.isotropic = isotropic
         self._set_parameters()
 
     def _set_parameters(self):
@@ -324,15 +325,26 @@ class BasicGP(_GPNode):
                 _np.ones([self.size, n_ip]) * 1e2
             ))
 
-        self._add_parameter(
-            "ranges",
-            _gpr.PositiveParameter(
-                _np.ones([1, 1, self.parent.size]),
-                _np.ones([1, 1, self.parent.size]) * 1e-6,
-                _np.ones([1, 1, self.parent.size]) * 10,
-                fixed=self.fix_range
+        if self.isotropic:
+            self._add_parameter(
+                "ranges",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, 1]),
+                    _np.ones([1, 1, 1]) * 1e-6,
+                    _np.ones([1, 1, 1]) * 10,
+                    fixed=self.fix_range
+                )
             )
-        )
+        else:
+            self._add_parameter(
+                "ranges",
+                _gpr.PositiveParameter(
+                    _np.ones([1, 1, self.parent.size]),
+                    _np.ones([1, 1, self.parent.size]) * 1e-6,
+                    _np.ones([1, 1, self.parent.size]) * 10,
+                    fixed=self.fix_range
+                )
+            )
 
     def covariance_matrix(self, x, y, var_x=None, var_y=None):
         with _tf.name_scope("basic_covariance_matrix"):

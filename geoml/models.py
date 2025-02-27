@@ -732,7 +732,7 @@ class VGPNetwork(_GPModel):
 
     @_tf.function
     def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, jitter=1e-6):
+                    n_sim=1, seed=0, jitter=1e-6, include_noise=True):
         self.latent_network.refresh(jitter)
 
         with _tf.name_scope("Prediction"):
@@ -755,10 +755,10 @@ class VGPNetwork(_GPModel):
             for mu, var, sim, exp_var, lik, v_inp in zip(
                     pred_mu, pred_var, pred_sim, pred_exp_var,
                     self.likelihoods, variable_inputs):
-                output.append(lik.predict(mu, var, sim, exp_var, **v_inp))
+                output.append(lik.predict(mu, var, sim, exp_var, include_noise=include_noise, **v_inp))
             return output
 
-    def predict(self, newdata, n_sim=20):
+    def predict(self, newdata, n_sim=20, include_noise=True):
         """
         Makes a prediction on the specified coordinates.
 
@@ -769,6 +769,8 @@ class VGPNetwork(_GPModel):
             The object's variables are updated.
         n_sim : int
             Number of predictive samples to draw.
+        include_noise : bool
+            If the likelihood should be sampled and added to the simulations.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
@@ -794,7 +796,8 @@ class VGPNetwork(_GPModel):
                 x_var=x_var,
                 seed=self.options.seed,
                 n_sim=n_sim,
-                jitter=self.options.jitter
+                jitter=self.options.jitter,
+                include_noise=include_noise
             )
             return out
 
@@ -1412,3 +1415,58 @@ class Normalizer(_GPModel):
                 print("\rIteration %s | Objective: %s" %
                       (str(i + 1), str(current_elbo)), end="")
 
+
+# class ProjectedVGP(VGPNetwork):
+#     @_tf.function
+#     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
+#                  samples=20, seed=0):
+#         with _tf.name_scope("batched_elbo"):
+#             # prediction
+#             sims = self.latent_network.predict(x, n_sim=samples, seed=[seed, 0])
+#
+#             mu = sims[:, :, 0]  # dummy
+#             var = sims[:, :, 0]**2  # dummy
+#
+#             # likelihood
+#             y_s = _tf.split(y, self.var_lengths, axis=1)
+#             mu = _tf.split(mu, self.lik_sizes, axis=1)
+#             var = _tf.split(var, self.lik_sizes, axis=1)
+#             hv = _tf.split(has_value, self.var_lengths, axis=1)
+#             sims = _tf.split(sims, self.lik_sizes, axis=1)
+#
+#             elbo = _tf.constant(0.0, _tf.float64)
+#             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
+#                     self.likelihoods, mu, var, y_s,
+#                     hv, sims, training_inputs):
+#                 elbo = elbo + likelihood.log_lik(
+#                     mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
+#
+#             # batch weight
+#             batch_size = _tf.reduce_sum(has_value)
+#             elbo = elbo * self.total_data / batch_size
+#
+#             return elbo
+#
+#     @_tf.function
+#     def predict_raw(self, x_new, variable_inputs, x_var=None,
+#                     n_sim=1, seed=0, jitter=1e-6):
+#         self.latent_network.refresh(jitter)
+#
+#         with _tf.name_scope("Prediction"):
+#             pred_sim = self.latent_network.predict(x_new, n_sim=n_sim, seed=[seed, 0])
+#
+#             pred_mu = pred_sim[:, :, 0]  # dummy
+#             pred_var = pred_sim[:, :, 0]**2  # dummy
+#             pred_exp_var = pred_var   # dummy
+#
+#             pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
+#             pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
+#             pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
+#             pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+#
+#             output = []
+#             for mu, var, sim, exp_var, lik, v_inp in zip(
+#                     pred_mu, pred_var, pred_sim, pred_exp_var,
+#                     self.likelihoods, variable_inputs):
+#                 output.append(lik.predict(mu, var, sim, exp_var, **v_inp))
+#             return output
