@@ -1389,7 +1389,7 @@ class _CompositionalLikelihood(_Likelihood):
         n_samples = shape[2]
         dist = self._make_distribution(_tf.zeros(n_data, _tf.float64))
         sample = dist.sample(n_samples, seed=seed)  # [n_var, n_data, n_samples] ?
-        return _tf.transpose(sample, [1, 0, 2])
+        return _tf.transpose(sample, [2, 0, 1])
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
@@ -1440,9 +1440,12 @@ class _CompositionalLikelihood(_Likelihood):
         sims_clr = _tf.einsum("nij,ik->nkj", sims, rotated_contrast)
         sims_simplex = _tf.nn.softmax(sims_clr, axis=1)
 
-        # average composition
-        avg = _tf.reduce_mean(sims_clr, axis=2)
-        prob = _tf.nn.softmax(avg, axis=1)
+        # average composition (euclidean)
+        # avg = _tf.reduce_mean(sims_clr, axis=2)
+        # prob = _tf.nn.softmax(avg, axis=1)
+
+        # average composition (simplex)
+        prob = _tf.reduce_mean(sims_simplex, axis=2)
 
         weights = _tf.reduce_sum(explained_var, axis=1) \
                   / (_tf.reduce_sum(var, axis=1) + 1e-6)
@@ -1492,7 +1495,7 @@ class CompositionalGaussian(_CompositionalLikelihood):
                     _np.ones([1, self.size, 1]) * 10))
 
     def _make_distribution(self, loc):
-        return _tfd.Normal(loc, _tf.sqrt(self.parameters["noise"].get_value()))
+        return _tfd.Normal(loc, _tf.sqrt(self.parameters["noise"].get_value()[0, :, :]))
 
 
 class CompositionalLaplace(_CompositionalLikelihood):
@@ -1515,7 +1518,7 @@ class CompositionalLaplace(_CompositionalLikelihood):
                     _np.ones([1, self.size, 1]) * 10))
 
     def _make_distribution(self, loc):
-        return _tfd.Laplace(loc, self.parameters["rate"].get_value())
+        return _tfd.Laplace(loc, self.parameters["rate"].get_value()[0, :, :])
 
 
 class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
