@@ -367,7 +367,7 @@ class Scale(ZScore):
     def __init__(self, scale):
         super().__init__(mean=-1e-3, std=scale)
         self.parameters["mean"].fix()
-        
+
     def initialize(self, x):
         return self.forward(x)
 
