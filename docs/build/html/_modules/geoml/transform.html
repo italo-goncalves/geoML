@@ -1,0 +1,857 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>geoml.transform &mdash; geoML 0.3.5 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=ba50482b"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            geoML
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">geoML</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">geoml.transform</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for geoml.transform</h1><div class="highlight"><pre>
+<span></span><span class="c1"># geoML - machine learning models for geospatial data</span>
+<span class="c1"># Copyright (C) 2019  Ítalo Gomes Gonçalves</span>
+<span class="c1">#</span>
+<span class="c1"># This program is free software: you can redistribute it and/or modify</span>
+<span class="c1"># it under the terms of the GNU General Public License as published by</span>
+<span class="c1"># the Free Software Foundation, either version 3 of the License, or</span>
+<span class="c1"># (at your option) any later version.</span>
+<span class="c1">#</span>
+<span class="c1"># This program is distributed in the hope that it will be useful,</span>
+<span class="c1"># but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="c1"># MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the</span>
+<span class="c1"># GNU General Public License for more details.</span>
+<span class="c1">#</span>
+<span class="c1"># You should have received a copy of the GNU General Public License</span>
+<span class="c1"># along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.</span>
+
+<span class="c1"># __all__ = [&quot;Identity&quot;,</span>
+<span class="c1">#            &quot;Isotropic&quot;,</span>
+<span class="c1">#            &quot;Anisotropy2D&quot;,</span>
+<span class="c1">#            &quot;Anisotropy3D&quot;,</span>
+<span class="c1">#            &quot;ProjectionTo1D&quot;,</span>
+<span class="c1">#            &quot;AnisotropyARD&quot;,</span>
+<span class="c1">#            &quot;ChainedTransform&quot;,</span>
+<span class="c1">#            &quot;SelectVariables&quot;]</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.parameter</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_gpr</span>
+<span class="c1"># import geoml.interpolation as _gint</span>
+<span class="c1"># import geoml.tftools as _tftools</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tensorflow</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_tf</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_Transform</span><span class="p">(</span><span class="n">_gpr</span><span class="o">.</span><span class="n">Parametric</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;An abstract class for variable transformations&quot;&quot;&quot;</span>
+        
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">pass</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">pass</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">pretty_print</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">depth</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="n">depth</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">parameter</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="n">name</span> <span class="o">+</span> <span class="s2">&quot;: &quot;</span> \
+                 <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">parameter</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">())</span>
+            <span class="k">if</span> <span class="n">parameter</span><span class="o">.</span><span class="n">fixed</span><span class="p">:</span>
+                <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (fixed)&quot;</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="k">return</span> <span class="n">s</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pretty_print</span><span class="p">()</span>
+
+
+<div class="viewcode-block" id="Identity">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Identity">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Identity</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The identity transformation&quot;&quot;&quot;</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Identity_transform&quot;</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">x</span></div>
+
+
+
+<div class="viewcode-block" id="Isotropic">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Isotropic">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Isotropic</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Isotropic range&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">r</span><span class="o">=</span><span class="mf">1.0</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for Isotropic.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        r : double</span>
+<span class="sd">            The range. Must be positive.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">r</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+    
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Isotropic_transform&quot;</span><span class="p">):</span>
+            <span class="n">r</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">x</span> <span class="o">/</span> <span class="n">r</span>
+    
+<div class="viewcode-block" id="Isotropic.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Isotropic.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="n">base_range</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">n_data</span> <span class="o">**</span> <span class="p">(</span><span class="mi">1</span><span class="o">/</span><span class="n">data</span><span class="o">.</span><span class="n">n_dim</span><span class="p">))</span>
+
+        <span class="c1"># self.parameters[&quot;range&quot;].set_limits(</span>
+        <span class="c1">#     min_val=data.diagonal / 1000,</span>
+        <span class="c1">#     max_val=data.diagonal / 2)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">base_range</span> <span class="o">*</span> <span class="mi">2</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span></div>
+</div>
+
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_Ellipsoidal</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">anis</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Ellipsoidal_transform&quot;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">refresh</span><span class="p">()</span>
+            <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="Anisotropy2D">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2D">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Anisotropy2D</span><span class="p">(</span><span class="n">_Ellipsoidal</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Anisotropy in two dimensions&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">maxrange</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">minrange_fct</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">azimuth</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Builds an anisotropy matrix, to be multiplied by a coordinate matrix</span>
+<span class="sd">        from the right.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        azimuth : double</span>
+<span class="sd">            Defined clockwise from north, and is aligned with maxrange.</span>
+<span class="sd">        maxrange : double</span>
+<span class="sd">            The maximum range. Must be positive.</span>
+<span class="sd">        minrange_fct : double</span>
+<span class="sd">            matrix multiple of maxrange, contained in the [0,1) interval.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;maxrange&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">maxrange</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;minrange_fct&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span><span class="n">minrange_fct</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;azimuth&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">CircularParameter</span><span class="p">(</span><span class="n">azimuth</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">180</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Anisotropy2D.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2D.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Anisotropy2D_refresh&quot;</span><span class="p">):</span>
+            <span class="n">azimuth</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;azimuth&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">maxrange</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;maxrange&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">minrange</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;minrange_fct&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span> <span class="o">*</span> <span class="n">maxrange</span>
+
+            <span class="c1"># conversion to radians</span>
+            <span class="n">azimuth</span> <span class="o">=</span> <span class="n">azimuth</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+
+            <span class="c1"># conversion to mathematical coordinates</span>
+            <span class="n">azimuth</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">2</span> <span class="o">-</span> <span class="n">azimuth</span>
+
+            <span class="c1"># rotation matrix</span>
+            <span class="n">rot</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span> <span class="o">-</span><span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span>
+                             <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">azimuth</span><span class="p">)],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="n">rot</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">rot</span><span class="p">,</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">])</span>
+
+            <span class="c1"># scaling matrix</span>
+            <span class="n">sc</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">maxrange</span><span class="p">,</span> <span class="n">minrange</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">))</span>
+
+            <span class="c1"># anisotropy matrix</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">rot</span><span class="p">,</span> <span class="n">sc</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_anis</span><span class="p">)</span></div>
+
+    
+<div class="viewcode-block" id="Anisotropy2D.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2D.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;maxrange&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">100</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Anisotropy2DMath">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2DMath">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Anisotropy2DMath</span><span class="p">(</span><span class="n">_Ellipsoidal</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Anisotropy in two dimensions&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">range_x</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">range_y</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">theta</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Anisotropy matrix in mathematical parametrization.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        range_x, range_y : double</span>
+<span class="sd">            The ellipsoid semi-length in each direction. Must be positive.</span>
+<span class="sd">        theta : double</span>
+<span class="sd">            The rotation angle in degrees.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range_x&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">range_x</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range_y&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">range_y</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;theta&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">CircularParameter</span><span class="p">(</span><span class="n">theta</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">360</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Anisotropy2DMath.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2DMath.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Anisotropy2DMath_refresh&quot;</span><span class="p">):</span>
+            <span class="n">range_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">range_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">theta</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="c1"># conversion to radians</span>
+            <span class="n">theta</span> <span class="o">=</span> <span class="n">theta</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+
+            <span class="c1"># rotation matrix</span>
+            <span class="n">rz</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta</span><span class="p">),</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta</span><span class="p">),</span>
+                            <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta</span><span class="p">)],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">rz</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">rz</span><span class="p">,</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">])</span>
+
+            <span class="n">rng</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span>
+                <span class="p">[</span><span class="n">range_x</span><span class="p">,</span> <span class="n">range_y</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+
+            <span class="c1"># anisotropy matrix</span>
+            <span class="n">anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">rz</span><span class="p">,</span> <span class="n">rng</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">anis</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_anis</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Anisotropy2DMath.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2DMath.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="n">base_range</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">n_data</span> <span class="o">**</span> <span class="p">(</span><span class="mi">1</span> <span class="o">/</span> <span class="n">data</span><span class="o">.</span><span class="n">n_dim</span><span class="p">))</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">base_range</span> <span class="o">*</span> <span class="mi">2</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">base_range</span> <span class="o">*</span> <span class="mi">2</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Anisotropy2DDynamic">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2DDynamic">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Anisotropy2DDynamic</span><span class="p">(</span><span class="n">_Ellipsoidal</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_directions</span><span class="o">=</span><span class="mi">9</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_directions</span><span class="p">):</span>
+            <span class="n">tr</span> <span class="o">=</span> <span class="n">Anisotropy2DMath</span><span class="p">(</span><span class="n">theta</span><span class="o">=</span><span class="n">i</span> <span class="o">*</span> <span class="mi">90</span> <span class="o">/</span> <span class="n">n_directions</span><span class="p">)</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">tr</span><span class="p">))</span>
+
+        <span class="n">rnd</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="p">(</span><span class="n">n_directions</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">rnd</span> <span class="o">=</span> <span class="n">rnd</span> <span class="o">/</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">rnd</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;weights&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">UnitColumnNormParameter</span><span class="p">(</span>
+                <span class="n">rnd</span><span class="p">,</span> <span class="o">-</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">rnd</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">rnd</span><span class="p">)</span>
+            <span class="p">)</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="Anisotropy2DDynamic.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2DDynamic.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Anisotropy2DDynamic_refresh&quot;</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="p">:</span>
+                <span class="n">tr</span><span class="o">.</span><span class="n">refresh</span><span class="p">()</span>
+
+            <span class="c1"># anisotropy matrix</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="n">anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">tr</span><span class="o">.</span><span class="n">anis</span> <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="p">],</span>
+                             <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">anis</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_anis</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Anisotropy2DDynamic.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy2DDynamic.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="p">:</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">10</span><span class="p">)</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">10</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Anisotropy3D">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3D">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Anisotropy3D</span><span class="p">(</span><span class="n">_Ellipsoidal</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Anisotropy in two dimensions&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">maxrange</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">midrange_fct</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">minrange_fct</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+                 <span class="n">azimuth</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">dip</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">rake</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Builds an anisotropy matrix, to be multiplied by a coordinate matrix</span>
+<span class="sd">        from the right.</span>
+<span class="sd">        </span>
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        maxrange : double</span>
+<span class="sd">            The maximum range. Must be positive.</span>
+<span class="sd">        midrange_fct : double</span>
+<span class="sd">            A multiple of maxrange, contained in the [0,1) interval.</span>
+<span class="sd">        minrange_fct : double</span>
+<span class="sd">            A multiple of midrange, contained in the [0,1) interval.</span>
+<span class="sd">        azimuth : double</span>
+<span class="sd">            Defined clockwise from north, and is aligned with maxrange.</span>
+<span class="sd">        dip : double</span>
+<span class="sd">            Dip angle, from 0 to 90 degrees.</span>
+<span class="sd">        rake : double</span>
+<span class="sd">            Rake angle, from -90 to 90 degrees.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;maxrange&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">maxrange</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;midrange_fct&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span><span class="n">midrange_fct</span><span class="p">,</span> <span class="mf">0.05</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;minrange_fct&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span><span class="n">minrange_fct</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;azimuth&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">CircularParameter</span><span class="p">(</span><span class="n">azimuth</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">360</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;dip&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span><span class="n">dip</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">90</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;rake&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span><span class="n">rake</span><span class="p">,</span> <span class="o">-</span><span class="mi">90</span><span class="p">,</span> <span class="mi">90</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Anisotropy3D.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3D.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Anisotropy3D_refresh&quot;</span><span class="p">):</span>
+            <span class="n">azimuth</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;azimuth&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">dip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;dip&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">rake</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;rake&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">maxrange</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;maxrange&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">midrange</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">multiply</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;midrange_fct&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">(),</span> <span class="n">maxrange</span><span class="p">)</span>
+            <span class="n">minrange</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">multiply</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;minrange_fct&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">(),</span> <span class="n">midrange</span><span class="p">)</span>
+
+            <span class="c1"># conversion to radians</span>
+            <span class="n">azimuth</span> <span class="o">=</span> <span class="n">azimuth</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+            <span class="n">dip</span> <span class="o">=</span> <span class="n">dip</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+            <span class="n">rake</span> <span class="o">=</span> <span class="n">rake</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+
+            <span class="c1"># conversion to mathematical coordinates</span>
+            <span class="n">dip</span> <span class="o">=</span> <span class="o">-</span> <span class="n">dip</span>
+            <span class="c1"># azimuth = _np.pi / 2 - azimuth</span>
+            <span class="n">rng</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span>
+                <span class="p">[</span><span class="n">midrange</span><span class="p">,</span> <span class="n">maxrange</span><span class="p">,</span> <span class="n">minrange</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+
+            <span class="c1"># rotation matrix</span>
+            <span class="c1"># x and y axes are switched</span>
+            <span class="c1"># rotation over z is with sign reversed</span>
+            <span class="n">rx</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">rake</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">rake</span><span class="p">),</span>
+                             <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+                             <span class="o">-</span><span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">rake</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">rake</span><span class="p">)],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">rx</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">rx</span><span class="p">,</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+            <span class="n">ry</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+                             <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">dip</span><span class="p">),</span> <span class="o">-</span><span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">dip</span><span class="p">),</span>
+                             <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">dip</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">dip</span><span class="p">)],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">ry</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">ry</span><span class="p">,</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+            <span class="n">rz</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span>
+                             <span class="o">-</span><span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">azimuth</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span>
+                             <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">rz</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">rz</span><span class="p">,</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+
+            <span class="c1"># anisotropy matrix</span>
+            <span class="n">anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">rz</span><span class="p">,</span> <span class="n">ry</span><span class="p">),</span> <span class="n">rx</span><span class="p">),</span> <span class="n">rng</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">anis</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_anis</span><span class="p">)</span> <span class="c1"># + _tf.eye(3, dtype=_tf.float64) * 1e-3)</span></div>
+
+    
+<div class="viewcode-block" id="Anisotropy3D.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3D.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;maxrange&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">1000</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Anisotropy3DMath">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3DMath">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Anisotropy3DMath</span><span class="p">(</span><span class="n">_Ellipsoidal</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Anisotropy in two dimensions&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">range_x</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">range_y</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">range_z</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span>
+                 <span class="n">theta_x</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">theta_y</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">theta_z</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Anisotropy matrix in mathematical parametrization.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        range_x, range_y, range_z : double</span>
+<span class="sd">            The ellipsoid semi-length in each direction. Must be positive.</span>
+<span class="sd">        theta_x, theta_y, theta_z : double</span>
+<span class="sd">            The rotation angles in degrees.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range_x&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">range_x</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range_y&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">range_y</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range_z&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">range_z</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mi">10000</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;theta_x&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">CircularParameter</span><span class="p">(</span><span class="n">theta_x</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">360</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;theta_y&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">CircularParameter</span><span class="p">(</span><span class="n">theta_y</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">360</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;theta_z&quot;</span><span class="p">,</span>
+                            <span class="n">_gpr</span><span class="o">.</span><span class="n">CircularParameter</span><span class="p">(</span><span class="n">theta_z</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">360</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Anisotropy3DMath.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3DMath.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Anisotropy3DMath_refresh&quot;</span><span class="p">):</span>
+            <span class="n">range_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">range_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">range_z</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_z&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">theta_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">theta_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">theta_z</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta_z&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="c1"># conversion to radians</span>
+            <span class="n">theta_x</span> <span class="o">=</span> <span class="n">theta_x</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+            <span class="n">theta_y</span> <span class="o">=</span> <span class="n">theta_y</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+            <span class="n">theta_z</span> <span class="o">=</span> <span class="n">theta_z</span> <span class="o">*</span> <span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">180</span><span class="p">)</span>
+
+            <span class="c1"># rotation matrix</span>
+            <span class="n">rx</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+                            <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta_x</span><span class="p">),</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta_x</span><span class="p">),</span>
+                            <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta_x</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta_x</span><span class="p">)],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">rx</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">rx</span><span class="p">,</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+            <span class="n">ry</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta_y</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta_y</span><span class="p">),</span>
+                            <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+                            <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta_y</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta_y</span><span class="p">)],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">ry</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">ry</span><span class="p">,</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+            <span class="n">rz</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta_z</span><span class="p">),</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta_z</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span>
+                            <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">theta_z</span><span class="p">),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">theta_z</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span>
+                            <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">rz</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">rz</span><span class="p">,</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">])</span>
+
+            <span class="n">rng</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span>
+                <span class="p">[</span><span class="n">range_x</span><span class="p">,</span> <span class="n">range_y</span><span class="p">,</span> <span class="n">range_z</span><span class="p">],</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+
+            <span class="c1"># anisotropy matrix</span>
+            <span class="n">anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">rz</span><span class="p">,</span> <span class="n">ry</span><span class="p">),</span> <span class="n">rx</span><span class="p">),</span> <span class="n">rng</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">anis</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_anis</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Anisotropy3DMath.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3DMath.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">100</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">100</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_z&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">100</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Anisotropy3DDynamic">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3DDynamic">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Anisotropy3DDynamic</span><span class="p">(</span><span class="n">_Ellipsoidal</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_directions_per_axis</span><span class="o">=</span><span class="mi">3</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_directions_per_axis</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_directions_per_axis</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_directions_per_axis</span><span class="p">):</span>
+                    <span class="n">tr</span> <span class="o">=</span> <span class="n">Anisotropy3DMath</span><span class="p">(</span>
+                        <span class="n">theta_x</span><span class="o">=</span><span class="n">i</span> <span class="o">*</span> <span class="mi">90</span> <span class="o">/</span> <span class="n">n_directions_per_axis</span><span class="p">,</span>
+                        <span class="n">theta_y</span><span class="o">=</span><span class="n">j</span> <span class="o">*</span> <span class="mi">90</span> <span class="o">/</span> <span class="n">n_directions_per_axis</span><span class="p">,</span>
+                        <span class="n">theta_z</span><span class="o">=</span><span class="n">k</span> <span class="o">*</span> <span class="mi">90</span> <span class="o">/</span> <span class="n">n_directions_per_axis</span>
+                    <span class="p">)</span>
+                    <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+                    <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+                    <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;theta_z&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">tr</span><span class="p">))</span>
+
+        <span class="n">rnd</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="p">(</span><span class="n">n_directions_per_axis</span><span class="o">**</span><span class="mi">3</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">rnd</span> <span class="o">=</span> <span class="n">rnd</span> <span class="o">/</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">rnd</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;weights&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">UnitColumnNormParameter</span><span class="p">(</span>
+                <span class="n">rnd</span><span class="p">,</span> <span class="o">-</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">rnd</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">rnd</span><span class="p">)</span>
+            <span class="p">)</span>
+        <span class="p">)</span>
+
+<div class="viewcode-block" id="Anisotropy3DDynamic.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3DDynamic.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Anisotropy3DDynamic_refresh&quot;</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="p">:</span>
+                <span class="n">tr</span><span class="o">.</span><span class="n">refresh</span><span class="p">()</span>
+
+            <span class="c1"># anisotropy matrix</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="n">anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">tr</span><span class="o">.</span><span class="n">anis</span> <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="p">],</span>
+                             <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">anis</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_anis_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_anis</span> <span class="o">+</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span> <span class="o">*</span> <span class="mf">1e-9</span>
+            <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Anisotropy3DDynamic.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Anisotropy3DDynamic.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_base_transforms</span><span class="p">:</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_x&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">10</span><span class="p">)</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_y&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">10</span><span class="p">)</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range_z&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">diagonal</span> <span class="o">/</span> <span class="mi">10</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="ProjectionTo1D">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.ProjectionTo1D">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ProjectionTo1D</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Projection of high-dimensional data to a line.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_dim</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for ProjectionTo1D.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        n_dim : int</span>
+<span class="sd">            The number of dimensions. May be greater than 3 when used in</span>
+<span class="sd">            conjunction with a space-expanding transform.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;directions&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+            <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">n_dim</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">n_dim</span><span class="p">)</span> <span class="o">*</span> <span class="mf">0.001</span><span class="p">,</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">n_dim</span><span class="p">)))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;ProjectionTo1D_transform&quot;</span><span class="p">):</span>
+            <span class="n">vector</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;directions&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">(),</span>
+                                     <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">vector</span> <span class="o">=</span> <span class="n">vector</span> <span class="o">/</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">reduce_euclidean_norm</span><span class="p">(</span><span class="n">vector</span><span class="p">)</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">vector</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">x</span></div>
+
+
+
+<div class="viewcode-block" id="AnisotropyARD">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.AnisotropyARD">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">AnisotropyARD</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Automatic Relevance Detection&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_dim</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for Isotropic.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        n_dim : int</span>
+<span class="sd">            The number of dimensions.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;ranges&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+            <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">n_dim</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">n_dim</span><span class="p">)</span><span class="o">*</span><span class="mf">0.001</span><span class="p">,</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">n_dim</span><span class="p">)</span><span class="o">*</span><span class="mi">1000</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;ARD_transform&quot;</span><span class="p">):</span>
+            <span class="n">ranges</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;ranges&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">(),</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="n">x_tr</span> <span class="o">=</span> <span class="n">x</span> <span class="o">/</span> <span class="n">ranges</span>
+        <span class="k">return</span> <span class="n">x_tr</span>
+
+<div class="viewcode-block" id="AnisotropyARD.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.AnisotropyARD.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="n">box</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">bounding_box</span><span class="o">.</span><span class="n">as_array</span><span class="p">()</span>
+        <span class="n">dif</span> <span class="o">=</span> <span class="n">box</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="n">box</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="p">:]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;ranges&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span>
+            <span class="n">min_val</span><span class="o">=</span><span class="n">dif</span> <span class="o">/</span> <span class="mi">100</span><span class="p">,</span>
+            <span class="n">max_val</span><span class="o">=</span><span class="n">dif</span> <span class="o">*</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;ranges&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">(</span><span class="n">dif</span><span class="o">/</span><span class="mi">10</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="ChainedTransform">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.ChainedTransform">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ChainedTransform</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">transforms</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span> <span class="o">=</span> <span class="n">transforms</span>
+        <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="n">transforms</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">tr</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span><span class="p">:</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="n">tr</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">x</span>
+
+<div class="viewcode-block" id="ChainedTransform.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.ChainedTransform.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="SelectVariables">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.SelectVariables">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">SelectVariables</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">index</span> <span class="o">=</span> <span class="n">index</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">index</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">rank</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cond</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">equal</span><span class="p">(</span><span class="n">r</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+                     <span class="k">lambda</span><span class="p">:</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+                     <span class="k">lambda</span><span class="p">:</span> <span class="n">x</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">x</span></div>
+
+
+
+<div class="viewcode-block" id="NormalizeWithBoundingBox">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.NormalizeWithBoundingBox">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">NormalizeWithBoundingBox</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">box</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">box</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">box</span><span class="o">.</span><span class="n">as_array</span><span class="p">(),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;NormalizeWithBoundingBox_transform&quot;</span><span class="p">):</span>
+            <span class="n">coords_min</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">box</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="p">:],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="n">coords_dif</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">box</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">box</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="p">:],</span>
+                                         <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="k">return</span> <span class="mi">6</span><span class="o">*</span><span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="n">coords_min</span><span class="p">)</span><span class="o">/</span><span class="n">coords_dif</span> <span class="o">-</span> <span class="mi">3</span></div>
+
+
+
+<div class="viewcode-block" id="Periodic">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Periodic">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Periodic</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Periodic_transform&quot;</span><span class="p">):</span>
+            <span class="n">features</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">x</span><span class="p">),</span>
+                                   <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">x</span><span class="p">)],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">features</span></div>
+
+
+
+<div class="viewcode-block" id="Concatenate">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Concatenate">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Concatenate</span><span class="p">(</span><span class="n">ChainedTransform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">transformed</span> <span class="o">=</span> <span class="p">[</span><span class="n">tr</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span><span class="n">transformed</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Concatenate.set_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.Concatenate.set_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span><span class="p">:</span>
+            <span class="n">tr</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="RandomProjections">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.RandomProjections">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">RandomProjections</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_dim</span><span class="p">,</span> <span class="n">n_directions</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">1234</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_directions</span> <span class="o">=</span> <span class="n">n_directions</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_dim</span> <span class="o">=</span> <span class="n">n_dim</span>
+
+        <span class="k">if</span> <span class="n">n_dim</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Invalid n_dim: must be 2 or greater&quot;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">n_dim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+            <span class="n">angles</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span><span class="p">,</span> <span class="n">n_directions</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+            <span class="n">projections</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">_np</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">angles</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">angles</span><span class="p">)],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">projections</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">projections</span><span class="o">.</span><span class="n">T</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+            <span class="n">projections</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="p">[</span><span class="n">n_dim</span><span class="p">,</span> <span class="n">n_directions</span><span class="p">])</span>
+            <span class="n">norm</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">projections</span><span class="o">**</span><span class="mi">2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">projections</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">projections</span> <span class="o">/</span> <span class="n">norm</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">projections</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="BellFault2D">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.BellFault2D">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">BellFault2D</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">start</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">end</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">end</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">midpoint</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">end</span><span class="p">)</span>
+
+        <span class="n">r</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">sum</span><span class="p">((</span><span class="n">start</span> <span class="o">-</span> <span class="n">end</span><span class="p">)</span><span class="o">**</span><span class="mi">2</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;range&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">r</span><span class="o">/</span><span class="mi">5</span><span class="p">,</span> <span class="n">r</span><span class="o">/</span><span class="mi">10</span><span class="p">,</span> <span class="n">r</span><span class="o">*</span><span class="mi">10</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;amp&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">r</span><span class="o">/</span><span class="mi">5</span><span class="p">,</span> <span class="n">r</span><span class="o">/</span><span class="mi">20</span><span class="p">,</span> <span class="n">r</span><span class="p">))</span>
+
+<div class="viewcode-block" id="BellFault2D.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.transform.BellFault2D.kernelize">[docs]</a>
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="n">x</span><span class="p">):</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">minimum</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>
+        <span class="n">amp</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">-</span> <span class="mi">7</span><span class="o">*</span><span class="n">x</span><span class="o">**</span><span class="mi">2</span> <span class="o">+</span> <span class="mi">35</span><span class="o">/</span><span class="mi">4</span><span class="o">*</span><span class="n">x</span><span class="o">**</span><span class="mi">3</span> <span class="o">-</span> <span class="mi">7</span><span class="o">/</span><span class="mi">2</span><span class="o">*</span><span class="n">x</span><span class="o">**</span><span class="mi">5</span> <span class="o">+</span> <span class="mi">3</span><span class="o">/</span><span class="mi">4</span><span class="o">*</span><span class="n">x</span><span class="o">**</span><span class="mi">7</span>
+        <span class="k">return</span> <span class="n">amp</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;BellFault2D_transform&quot;</span><span class="p">):</span>
+            <span class="n">dif</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">end</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">midpoint</span>
+            <span class="n">length</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">dif</span><span class="o">**</span><span class="mi">2</span><span class="p">))</span>
+
+            <span class="n">x_along</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span>
+                <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">midpoint</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">*</span> <span class="n">dif</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:],</span>
+                <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> \
+                      <span class="o">*</span> <span class="n">dif</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">/</span> <span class="n">length</span> <span class="o">**</span> <span class="mi">2</span>
+            <span class="n">x_across</span> <span class="o">=</span> <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">midpoint</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">-</span> <span class="n">x_along</span>
+
+            <span class="n">proj_along</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">reduce_euclidean_norm</span><span class="p">(</span><span class="n">x_along</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">length</span>
+            <span class="n">proj_across</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">reduce_euclidean_norm</span><span class="p">(</span><span class="n">x_across</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">length</span>
+
+            <span class="n">vector_prod</span> <span class="o">=</span> <span class="n">x_across</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">dif</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">x_across</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">dif</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="n">rng</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;range&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">sign</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sign</span><span class="p">(</span><span class="n">vector_prod</span><span class="p">)</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span> <span class="mi">3</span> <span class="o">*</span> <span class="n">proj_across</span> <span class="o">/</span> <span class="n">rng</span><span class="p">)</span>
+
+            <span class="n">amp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amp&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">out</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernelize</span><span class="p">(</span><span class="n">proj_along</span><span class="p">)</span> <span class="o">*</span> <span class="n">amp</span> <span class="o">*</span> <span class="n">sign</span>
+            <span class="k">return</span> <span class="n">out</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">]</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Ítalo Gomes Gonçalves.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

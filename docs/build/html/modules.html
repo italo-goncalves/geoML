@@ -1,0 +1,789 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>geoml &mdash; geoML 0.3.5 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=ba50482b"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="geoml package" href="geoml.html" />
+    <link rel="prev" title="geoML documentation" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            geoML
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">geoml</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html">geoml package</a></li>
+<li class="toctree-l2"><a class="reference internal" href="setup.html">setup module</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">geoML</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">geoml</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/modules.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="geoml">
+<h1>geoml<a class="headerlink" href="#geoml" title="Link to this heading"></a></h1>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="geoml.html">geoml package</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#submodules">Submodules</a></li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.data">geoml.data module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.DirectionalData"><code class="docutils literal notranslate"><span class="pre">DirectionalData</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DirectionalData.as_data_frame"><code class="docutils literal notranslate"><span class="pre">DirectionalData.as_data_frame()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DirectionalData.from_azimuth"><code class="docutils literal notranslate"><span class="pre">DirectionalData.from_azimuth()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DirectionalData.from_azimuth_and_dip"><code class="docutils literal notranslate"><span class="pre">DirectionalData.from_azimuth_and_dip()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DirectionalData.from_normals"><code class="docutils literal notranslate"><span class="pre">DirectionalData.from_normals()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DirectionalData.from_planes"><code class="docutils literal notranslate"><span class="pre">DirectionalData.from_planes()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData"><code class="docutils literal notranslate"><span class="pre">DrillholeData</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.data"><code class="docutils literal notranslate"><span class="pre">DrillholeData.data</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.lengths"><code class="docutils literal notranslate"><span class="pre">DrillholeData.lengths</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.as_classification_input"><code class="docutils literal notranslate"><span class="pre">DrillholeData.as_classification_input()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.as_data_frame"><code class="docutils literal notranslate"><span class="pre">DrillholeData.as_data_frame()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.as_pyvista"><code class="docutils literal notranslate"><span class="pre">DrillholeData.as_pyvista()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.draw_categorical"><code class="docutils literal notranslate"><span class="pre">DrillholeData.draw_categorical()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.draw_numeric"><code class="docutils literal notranslate"><span class="pre">DrillholeData.draw_numeric()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.get_contacts"><code class="docutils literal notranslate"><span class="pre">DrillholeData.get_contacts()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.merge_segments"><code class="docutils literal notranslate"><span class="pre">DrillholeData.merge_segments()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.segment_fixed"><code class="docutils literal notranslate"><span class="pre">DrillholeData.segment_fixed()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.DrillholeData.segment_relative"><code class="docutils literal notranslate"><span class="pre">DrillholeData.segment_relative()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.Grid1D"><code class="docutils literal notranslate"><span class="pre">Grid1D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid1D.step_size"><code class="docutils literal notranslate"><span class="pre">Grid1D.step_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid1D.grid"><code class="docutils literal notranslate"><span class="pre">Grid1D.grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid1D.grid_size"><code class="docutils literal notranslate"><span class="pre">Grid1D.grid_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid1D.aggregate_binary"><code class="docutils literal notranslate"><span class="pre">Grid1D.aggregate_binary()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid1D.aggregate_categorical"><code class="docutils literal notranslate"><span class="pre">Grid1D.aggregate_categorical()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid1D.aggregate_numeric"><code class="docutils literal notranslate"><span class="pre">Grid1D.aggregate_numeric()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.Grid2D"><code class="docutils literal notranslate"><span class="pre">Grid2D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid2D.step_size"><code class="docutils literal notranslate"><span class="pre">Grid2D.step_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid2D.grid"><code class="docutils literal notranslate"><span class="pre">Grid2D.grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid2D.grid_size"><code class="docutils literal notranslate"><span class="pre">Grid2D.grid_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid2D.aggregate_binary"><code class="docutils literal notranslate"><span class="pre">Grid2D.aggregate_binary()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid2D.aggregate_categorical"><code class="docutils literal notranslate"><span class="pre">Grid2D.aggregate_categorical()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid2D.aggregate_numeric"><code class="docutils literal notranslate"><span class="pre">Grid2D.aggregate_numeric()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.Grid3D"><code class="docutils literal notranslate"><span class="pre">Grid3D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.step_size"><code class="docutils literal notranslate"><span class="pre">Grid3D.step_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.grid"><code class="docutils literal notranslate"><span class="pre">Grid3D.grid</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.grid_size"><code class="docutils literal notranslate"><span class="pre">Grid3D.grid_size</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.aggregate_binary"><code class="docutils literal notranslate"><span class="pre">Grid3D.aggregate_binary()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.aggregate_categorical"><code class="docutils literal notranslate"><span class="pre">Grid3D.aggregate_categorical()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.aggregate_numeric"><code class="docutils literal notranslate"><span class="pre">Grid3D.aggregate_numeric()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.as_pyvista"><code class="docutils literal notranslate"><span class="pre">Grid3D.as_pyvista()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.make_interpolator"><code class="docutils literal notranslate"><span class="pre">Grid3D.make_interpolator()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.Grid3D.rotation_matrix"><code class="docutils literal notranslate"><span class="pre">Grid3D.rotation_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.PointData"><code class="docutils literal notranslate"><span class="pre">PointData</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.PointData.as_data_frame"><code class="docutils literal notranslate"><span class="pre">PointData.as_data_frame()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.PointData.as_pyvista"><code class="docutils literal notranslate"><span class="pre">PointData.as_pyvista()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.PointData.from_array"><code class="docutils literal notranslate"><span class="pre">PointData.from_array()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.data.PointData.subset_region"><code class="docutils literal notranslate"><span class="pre">PointData.subset_region()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.batch_index"><code class="docutils literal notranslate"><span class="pre">batch_index()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.data.export_planes"><code class="docutils literal notranslate"><span class="pre">export_planes()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.datasets">geoml.datasets module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.andrade"><code class="docutils literal notranslate"><span class="pre">andrade()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.ararangua"><code class="docutils literal notranslate"><span class="pre">ararangua()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.arctic_lake"><code class="docutils literal notranslate"><span class="pre">arctic_lake()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.example_fold"><code class="docutils literal notranslate"><span class="pre">example_fold()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.jura"><code class="docutils literal notranslate"><span class="pre">jura()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.sunspot_number"><code class="docutils literal notranslate"><span class="pre">sunspot_number()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.datasets.walker"><code class="docutils literal notranslate"><span class="pre">walker()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.interpolation">geoml.interpolation module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv1D"><code class="docutils literal notranslate"><span class="pre">CubicConv1D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv1D.make_interpolation_matrix"><code class="docutils literal notranslate"><span class="pre">CubicConv1D.make_interpolation_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv2DFull"><code class="docutils literal notranslate"><span class="pre">CubicConv2DFull</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv2DFull.make_interpolation_matrix"><code class="docutils literal notranslate"><span class="pre">CubicConv2DFull.make_interpolation_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv2DSeparable"><code class="docutils literal notranslate"><span class="pre">CubicConv2DSeparable</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv2DSeparable.make_interpolation_matrix"><code class="docutils literal notranslate"><span class="pre">CubicConv2DSeparable.make_interpolation_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv3DSeparable"><code class="docutils literal notranslate"><span class="pre">CubicConv3DSeparable</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConv3DSeparable.make_interpolation_matrix"><code class="docutils literal notranslate"><span class="pre">CubicConv3DSeparable.make_interpolation_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConvND"><code class="docutils literal notranslate"><span class="pre">CubicConvND</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicConvND.make_interpolation_matrix"><code class="docutils literal notranslate"><span class="pre">CubicConvND.make_interpolation_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicSpline"><code class="docutils literal notranslate"><span class="pre">CubicSpline</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicSpline.interpolate"><code class="docutils literal notranslate"><span class="pre">CubicSpline.interpolate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.interpolation.CubicSpline.interpolate_d1"><code class="docutils literal notranslate"><span class="pre">CubicSpline.interpolate_d1()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.interpolation.MonotonicCubicSpline"><code class="docutils literal notranslate"><span class="pre">MonotonicCubicSpline</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.kernels">geoml.kernels module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Constant"><code class="docutils literal notranslate"><span class="pre">Constant</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Constant.implicit_matmul"><code class="docutils literal notranslate"><span class="pre">Constant.implicit_matmul()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Constant.kernelize"><code class="docutils literal notranslate"><span class="pre">Constant.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Cosine"><code class="docutils literal notranslate"><span class="pre">Cosine</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Cosine.kernelize"><code class="docutils literal notranslate"><span class="pre">Cosine.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Cubic"><code class="docutils literal notranslate"><span class="pre">Cubic</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Cubic.kernelize"><code class="docutils literal notranslate"><span class="pre">Cubic.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Exponential"><code class="docutils literal notranslate"><span class="pre">Exponential</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Exponential.kernelize"><code class="docutils literal notranslate"><span class="pre">Exponential.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Gaussian"><code class="docutils literal notranslate"><span class="pre">Gaussian</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Gaussian.kernelize"><code class="docutils literal notranslate"><span class="pre">Gaussian.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Linear"><code class="docutils literal notranslate"><span class="pre">Linear</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Linear.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">Linear.covariance_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Linear.feature_matrix"><code class="docutils literal notranslate"><span class="pre">Linear.feature_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Linear.implicit_matmul"><code class="docutils literal notranslate"><span class="pre">Linear.implicit_matmul()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Linear.point_variance"><code class="docutils literal notranslate"><span class="pre">Linear.point_variance()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Matern32"><code class="docutils literal notranslate"><span class="pre">Matern32</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Matern32.kernelize"><code class="docutils literal notranslate"><span class="pre">Matern32.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Matern52"><code class="docutils literal notranslate"><span class="pre">Matern52</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Matern52.kernelize"><code class="docutils literal notranslate"><span class="pre">Matern52.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Product"><code class="docutils literal notranslate"><span class="pre">Product</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Scale"><code class="docutils literal notranslate"><span class="pre">Scale</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Scale.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">Scale.covariance_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Scale.point_variance"><code class="docutils literal notranslate"><span class="pre">Scale.point_variance()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Spherical"><code class="docutils literal notranslate"><span class="pre">Spherical</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.kernels.Spherical.kernelize"><code class="docutils literal notranslate"><span class="pre">Spherical.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.kernels.Sum"><code class="docutils literal notranslate"><span class="pre">Sum</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.latent">geoml.latent module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Add"><code class="docutils literal notranslate"><span class="pre">Add</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Add.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Add.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Add.predict"><code class="docutils literal notranslate"><span class="pre">Add.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Add.predict_directions"><code class="docutils literal notranslate"><span class="pre">Add.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Add.propagate"><code class="docutils literal notranslate"><span class="pre">Add.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Add.refresh"><code class="docutils literal notranslate"><span class="pre">Add.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.AdditiveGP"><code class="docutils literal notranslate"><span class="pre">AdditiveGP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.AdditiveGP.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">AdditiveGP.covariance_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP"><code class="docutils literal notranslate"><span class="pre">BasicGP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">BasicGP.covariance_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.covariance_matrix_d1"><code class="docutils literal notranslate"><span class="pre">BasicGP.covariance_matrix_d1()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.interpolate"><code class="docutils literal notranslate"><span class="pre">BasicGP.interpolate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.kl_divergence"><code class="docutils literal notranslate"><span class="pre">BasicGP.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.point_variance_d2"><code class="docutils literal notranslate"><span class="pre">BasicGP.point_variance_d2()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.predict_directions"><code class="docutils literal notranslate"><span class="pre">BasicGP.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicGP.refresh"><code class="docutils literal notranslate"><span class="pre">BasicGP.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput"><code class="docutils literal notranslate"><span class="pre">BasicInput</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.get_root_inducing_points"><code class="docutils literal notranslate"><span class="pre">BasicInput.get_root_inducing_points()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.kl_divergence"><code class="docutils literal notranslate"><span class="pre">BasicInput.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.predict"><code class="docutils literal notranslate"><span class="pre">BasicInput.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.predict_directions"><code class="docutils literal notranslate"><span class="pre">BasicInput.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.propagate"><code class="docutils literal notranslate"><span class="pre">BasicInput.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.refresh"><code class="docutils literal notranslate"><span class="pre">BasicInput.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.BasicInput.set_parameter_limits"><code class="docutils literal notranslate"><span class="pre">BasicInput.set_parameter_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Bias"><code class="docutils literal notranslate"><span class="pre">Bias</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Bias.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Bias.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Bias.predict"><code class="docutils literal notranslate"><span class="pre">Bias.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Bias.predict_directions"><code class="docutils literal notranslate"><span class="pre">Bias.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Bias.refresh"><code class="docutils literal notranslate"><span class="pre">Bias.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Concatenate"><code class="docutils literal notranslate"><span class="pre">Concatenate</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Concatenate.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Concatenate.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Concatenate.predict"><code class="docutils literal notranslate"><span class="pre">Concatenate.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Concatenate.propagate"><code class="docutils literal notranslate"><span class="pre">Concatenate.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Concatenate.refresh"><code class="docutils literal notranslate"><span class="pre">Concatenate.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Exponentiation"><code class="docutils literal notranslate"><span class="pre">Exponentiation</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Exponentiation.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Exponentiation.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Exponentiation.predict"><code class="docutils literal notranslate"><span class="pre">Exponentiation.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Exponentiation.predict_directions"><code class="docutils literal notranslate"><span class="pre">Exponentiation.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Exponentiation.refresh"><code class="docutils literal notranslate"><span class="pre">Exponentiation.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.FastGP"><code class="docutils literal notranslate"><span class="pre">FastGP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">FastGP.covariance_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.covariance_matrix_d1"><code class="docutils literal notranslate"><span class="pre">FastGP.covariance_matrix_d1()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.interpolate"><code class="docutils literal notranslate"><span class="pre">FastGP.interpolate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.kl_divergence"><code class="docutils literal notranslate"><span class="pre">FastGP.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.point_variance_d2"><code class="docutils literal notranslate"><span class="pre">FastGP.point_variance_d2()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.predict_directions"><code class="docutils literal notranslate"><span class="pre">FastGP.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.FastGP.refresh"><code class="docutils literal notranslate"><span class="pre">FastGP.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.GPWalk"><code class="docutils literal notranslate"><span class="pre">GPWalk</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWalk.compute_path"><code class="docutils literal notranslate"><span class="pre">GPWalk.compute_path()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWalk.kl_divergence"><code class="docutils literal notranslate"><span class="pre">GPWalk.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWalk.predict"><code class="docutils literal notranslate"><span class="pre">GPWalk.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWalk.propagate"><code class="docutils literal notranslate"><span class="pre">GPWalk.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWalk.refresh"><code class="docutils literal notranslate"><span class="pre">GPWalk.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient"><code class="docutils literal notranslate"><span class="pre">GPWithGradient</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.covariance_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.covariance_matrix_d1"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.covariance_matrix_d1()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.covariance_matrix_d1_reversed"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.covariance_matrix_d1_reversed()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.covariance_matrix_d2"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.covariance_matrix_d2()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.interpolate"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.interpolate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.kl_divergence"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.point_variance_d2"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.point_variance_d2()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.predict_directions"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GPWithGradient.refresh"><code class="docutils literal notranslate"><span class="pre">GPWithGradient.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.GaussianInput"><code class="docutils literal notranslate"><span class="pre">GaussianInput</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GaussianInput.get_root_inducing_points"><code class="docutils literal notranslate"><span class="pre">GaussianInput.get_root_inducing_points()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GaussianInput.kl_divergence"><code class="docutils literal notranslate"><span class="pre">GaussianInput.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GaussianInput.predict"><code class="docutils literal notranslate"><span class="pre">GaussianInput.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GaussianInput.propagate"><code class="docutils literal notranslate"><span class="pre">GaussianInput.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.GaussianInput.refresh"><code class="docutils literal notranslate"><span class="pre">GaussianInput.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Linear"><code class="docutils literal notranslate"><span class="pre">Linear</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Linear.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Linear.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Linear.predict"><code class="docutils literal notranslate"><span class="pre">Linear.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Linear.predict_directions"><code class="docutils literal notranslate"><span class="pre">Linear.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Linear.refresh"><code class="docutils literal notranslate"><span class="pre">Linear.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.LinearCombination"><code class="docutils literal notranslate"><span class="pre">LinearCombination</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.LinearCombination.kl_divergence"><code class="docutils literal notranslate"><span class="pre">LinearCombination.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.LinearCombination.predict"><code class="docutils literal notranslate"><span class="pre">LinearCombination.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.LinearCombination.predict_directions"><code class="docutils literal notranslate"><span class="pre">LinearCombination.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.LinearCombination.propagate"><code class="docutils literal notranslate"><span class="pre">LinearCombination.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.LinearCombination.refresh"><code class="docutils literal notranslate"><span class="pre">LinearCombination.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.MultiStructureFastGP"><code class="docutils literal notranslate"><span class="pre">MultiStructureFastGP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.MultiStructureFastGP.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">MultiStructureFastGP.covariance_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.MultiStructureGP"><code class="docutils literal notranslate"><span class="pre">MultiStructureGP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.MultiStructureGP.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">MultiStructureGP.covariance_matrix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Multiply"><code class="docutils literal notranslate"><span class="pre">Multiply</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Multiply.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Multiply.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Multiply.predict"><code class="docutils literal notranslate"><span class="pre">Multiply.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Multiply.predict_directions"><code class="docutils literal notranslate"><span class="pre">Multiply.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Multiply.refresh"><code class="docutils literal notranslate"><span class="pre">Multiply.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.ProductOfExperts"><code class="docutils literal notranslate"><span class="pre">ProductOfExperts</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.ProductOfExperts.kl_divergence"><code class="docutils literal notranslate"><span class="pre">ProductOfExperts.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.ProductOfExperts.predict"><code class="docutils literal notranslate"><span class="pre">ProductOfExperts.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.ProductOfExperts.predict_directions"><code class="docutils literal notranslate"><span class="pre">ProductOfExperts.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.ProductOfExperts.refresh"><code class="docutils literal notranslate"><span class="pre">ProductOfExperts.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend"><code class="docutils literal notranslate"><span class="pre">RadialTrend</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend.compute_trend"><code class="docutils literal notranslate"><span class="pre">RadialTrend.compute_trend()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend.compute_trend_gradient"><code class="docutils literal notranslate"><span class="pre">RadialTrend.compute_trend_gradient()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend.kl_divergence"><code class="docutils literal notranslate"><span class="pre">RadialTrend.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend.predict"><code class="docutils literal notranslate"><span class="pre">RadialTrend.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend.predict_directions"><code class="docutils literal notranslate"><span class="pre">RadialTrend.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.RadialTrend.refresh"><code class="docutils literal notranslate"><span class="pre">RadialTrend.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.Scale"><code class="docutils literal notranslate"><span class="pre">Scale</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Scale.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Scale.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Scale.predict"><code class="docutils literal notranslate"><span class="pre">Scale.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Scale.predict_directions"><code class="docutils literal notranslate"><span class="pre">Scale.predict_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.Scale.refresh"><code class="docutils literal notranslate"><span class="pre">Scale.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.latent.SelectInput"><code class="docutils literal notranslate"><span class="pre">SelectInput</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.SelectInput.kl_divergence"><code class="docutils literal notranslate"><span class="pre">SelectInput.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.SelectInput.predict"><code class="docutils literal notranslate"><span class="pre">SelectInput.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.SelectInput.propagate"><code class="docutils literal notranslate"><span class="pre">SelectInput.propagate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.latent.SelectInput.refresh"><code class="docutils literal notranslate"><span class="pre">SelectInput.refresh()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.likelihood">geoml.likelihood module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.Bernoulli"><code class="docutils literal notranslate"><span class="pre">Bernoulli</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Bernoulli.log_lik"><code class="docutils literal notranslate"><span class="pre">Bernoulli.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Bernoulli.one_class"><code class="docutils literal notranslate"><span class="pre">Bernoulli.one_class()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Bernoulli.predict"><code class="docutils literal notranslate"><span class="pre">Bernoulli.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.BernoulliMaximumMargin"><code class="docutils literal notranslate"><span class="pre">BernoulliMaximumMargin</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.BernoulliMaximumMargin.cdf"><code class="docutils literal notranslate"><span class="pre">BernoulliMaximumMargin.cdf()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.BernoulliMaximumMargin.log_lik"><code class="docutils literal notranslate"><span class="pre">BernoulliMaximumMargin.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.BernoulliMaximumMargin.predict"><code class="docutils literal notranslate"><span class="pre">BernoulliMaximumMargin.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.Beta"><code class="docutils literal notranslate"><span class="pre">Beta</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.CategoricalGaussianIndicator"><code class="docutils literal notranslate"><span class="pre">CategoricalGaussianIndicator</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.CategoricalGaussianIndicator.log_lik"><code class="docutils literal notranslate"><span class="pre">CategoricalGaussianIndicator.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.CategoricalGaussianIndicator.predict"><code class="docutils literal notranslate"><span class="pre">CategoricalGaussianIndicator.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.CompositionalEpsilonInsensitive"><code class="docutils literal notranslate"><span class="pre">CompositionalEpsilonInsensitive</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.CompositionalEpsilonInsensitive.inv_cdf"><code class="docutils literal notranslate"><span class="pre">CompositionalEpsilonInsensitive.inv_cdf()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.CompositionalEpsilonInsensitive.log_lik"><code class="docutils literal notranslate"><span class="pre">CompositionalEpsilonInsensitive.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.CompositionalEpsilonInsensitive.white_noise"><code class="docutils literal notranslate"><span class="pre">CompositionalEpsilonInsensitive.white_noise()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.CompositionalGaussian"><code class="docutils literal notranslate"><span class="pre">CompositionalGaussian</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.CompositionalLaplace"><code class="docutils literal notranslate"><span class="pre">CompositionalLaplace</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive.cdf"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive.cdf()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive.inv_cdf"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive.inv_cdf()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive.log_lik"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive.predict"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive.variance"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive.variance()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.EpsilonInsensitive.white_noise"><code class="docutils literal notranslate"><span class="pre">EpsilonInsensitive.white_noise()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.Gamma"><code class="docutils literal notranslate"><span class="pre">Gamma</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.Gaussian"><code class="docutils literal notranslate"><span class="pre">Gaussian</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.GradientIndicator"><code class="docutils literal notranslate"><span class="pre">GradientIndicator</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.GradientIndicator.log_lik"><code class="docutils literal notranslate"><span class="pre">GradientIndicator.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.GradientIndicator.predict"><code class="docutils literal notranslate"><span class="pre">GradientIndicator.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.HeteroscedasticGaussian"><code class="docutils literal notranslate"><span class="pre">HeteroscedasticGaussian</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.HeteroscedasticGaussian.log_lik"><code class="docutils literal notranslate"><span class="pre">HeteroscedasticGaussian.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.HeteroscedasticGaussian.predict"><code class="docutils literal notranslate"><span class="pre">HeteroscedasticGaussian.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.HeteroscedasticLaplace"><code class="docutils literal notranslate"><span class="pre">HeteroscedasticLaplace</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.Huber"><code class="docutils literal notranslate"><span class="pre">Huber</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Huber.cdf"><code class="docutils literal notranslate"><span class="pre">Huber.cdf()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Huber.log_lik"><code class="docutils literal notranslate"><span class="pre">Huber.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Huber.predict"><code class="docutils literal notranslate"><span class="pre">Huber.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.Huber.variance"><code class="docutils literal notranslate"><span class="pre">Huber.variance()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.Laplace"><code class="docutils literal notranslate"><span class="pre">Laplace</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.OrderedGaussianIndicator"><code class="docutils literal notranslate"><span class="pre">OrderedGaussianIndicator</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.OrderedGaussianIndicator.get_thresholds"><code class="docutils literal notranslate"><span class="pre">OrderedGaussianIndicator.get_thresholds()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.OrderedGaussianIndicator.log_lik"><code class="docutils literal notranslate"><span class="pre">OrderedGaussianIndicator.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.OrderedGaussianIndicator.predict"><code class="docutils literal notranslate"><span class="pre">OrderedGaussianIndicator.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.SequentialGaussianIndicator"><code class="docutils literal notranslate"><span class="pre">SequentialGaussianIndicator</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.SequentialGaussianIndicator.log_lik"><code class="docutils literal notranslate"><span class="pre">SequentialGaussianIndicator.log_lik()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.likelihood.SequentialGaussianIndicator.predict"><code class="docutils literal notranslate"><span class="pre">SequentialGaussianIndicator.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.likelihood.StudentT"><code class="docutils literal notranslate"><span class="pre">StudentT</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.models">geoml.models module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.models.GP"><code class="docutils literal notranslate"><span class="pre">GP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GP.log_likelihood"><code class="docutils literal notranslate"><span class="pre">GP.log_likelihood()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GP.predict"><code class="docutils literal notranslate"><span class="pre">GP.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GP.predict_raw"><code class="docutils literal notranslate"><span class="pre">GP.predict_raw()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GP.refresh"><code class="docutils literal notranslate"><span class="pre">GP.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GP.set_learning_rate"><code class="docutils literal notranslate"><span class="pre">GP.set_learning_rate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GP.train"><code class="docutils literal notranslate"><span class="pre">GP.train()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.models.GPEnsemble"><code class="docutils literal notranslate"><span class="pre">GPEnsemble</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.GPEnsemble.train"><code class="docutils literal notranslate"><span class="pre">GPEnsemble.train()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.models.GPOptions"><code class="docutils literal notranslate"><span class="pre">GPOptions</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.models.StructuralField"><code class="docutils literal notranslate"><span class="pre">StructuralField</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.log_likelihood"><code class="docutils literal notranslate"><span class="pre">StructuralField.log_likelihood()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.predict"><code class="docutils literal notranslate"><span class="pre">StructuralField.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.predict_raw"><code class="docutils literal notranslate"><span class="pre">StructuralField.predict_raw()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.predict_raw_directions"><code class="docutils literal notranslate"><span class="pre">StructuralField.predict_raw_directions()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.refresh"><code class="docutils literal notranslate"><span class="pre">StructuralField.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.set_learning_rate"><code class="docutils literal notranslate"><span class="pre">StructuralField.set_learning_rate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.StructuralField.train"><code class="docutils literal notranslate"><span class="pre">StructuralField.train()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.models.VGPNetwork"><code class="docutils literal notranslate"><span class="pre">VGPNetwork</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetwork.predict"><code class="docutils literal notranslate"><span class="pre">VGPNetwork.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetwork.predict_raw"><code class="docutils literal notranslate"><span class="pre">VGPNetwork.predict_raw()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetwork.set_learning_rate"><code class="docutils literal notranslate"><span class="pre">VGPNetwork.set_learning_rate()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetwork.train_full"><code class="docutils literal notranslate"><span class="pre">VGPNetwork.train_full()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetwork.train_svi"><code class="docutils literal notranslate"><span class="pre">VGPNetwork.train_svi()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.models.VGPNetworkEnsemble"><code class="docutils literal notranslate"><span class="pre">VGPNetworkEnsemble</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetworkEnsemble.combine"><code class="docutils literal notranslate"><span class="pre">VGPNetworkEnsemble.combine()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetworkEnsemble.predict"><code class="docutils literal notranslate"><span class="pre">VGPNetworkEnsemble.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetworkEnsemble.train_full"><code class="docutils literal notranslate"><span class="pre">VGPNetworkEnsemble.train_full()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.models.VGPNetworkEnsemble.train_svi"><code class="docutils literal notranslate"><span class="pre">VGPNetworkEnsemble.train_svi()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.parameter">geoml.parameter module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.CenteredOrthonormalMatrix"><code class="docutils literal notranslate"><span class="pre">CenteredOrthonormalMatrix</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.CenteredOrthonormalMatrix.refresh"><code class="docutils literal notranslate"><span class="pre">CenteredOrthonormalMatrix.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.CenteredUnitColumnNormParameter"><code class="docutils literal notranslate"><span class="pre">CenteredUnitColumnNormParameter</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.CenteredUnitColumnNormParameter.refresh"><code class="docutils literal notranslate"><span class="pre">CenteredUnitColumnNormParameter.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.CircularParameter"><code class="docutils literal notranslate"><span class="pre">CircularParameter</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.CircularParameter.refresh"><code class="docutils literal notranslate"><span class="pre">CircularParameter.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.CompositionalParameter"><code class="docutils literal notranslate"><span class="pre">CompositionalParameter</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.OrthonormalMatrix"><code class="docutils literal notranslate"><span class="pre">OrthonormalMatrix</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.OrthonormalMatrix.refresh"><code class="docutils literal notranslate"><span class="pre">OrthonormalMatrix.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric"><code class="docutils literal notranslate"><span class="pre">Parametric</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.all_parameters"><code class="docutils literal notranslate"><span class="pre">Parametric.all_parameters</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.get_parameter_values"><code class="docutils literal notranslate"><span class="pre">Parametric.get_parameter_values()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.get_unfixed_variables"><code class="docutils literal notranslate"><span class="pre">Parametric.get_unfixed_variables()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.load_state"><code class="docutils literal notranslate"><span class="pre">Parametric.load_state()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.pretty_print"><code class="docutils literal notranslate"><span class="pre">Parametric.pretty_print()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.save_state"><code class="docutils literal notranslate"><span class="pre">Parametric.save_state()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.Parametric.update_parameters"><code class="docutils literal notranslate"><span class="pre">Parametric.update_parameters()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.PositiveParameter"><code class="docutils literal notranslate"><span class="pre">PositiveParameter</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter"><code class="docutils literal notranslate"><span class="pre">RealParameter</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.fix"><code class="docutils literal notranslate"><span class="pre">RealParameter.fix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.get_value"><code class="docutils literal notranslate"><span class="pre">RealParameter.get_value()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.randomize"><code class="docutils literal notranslate"><span class="pre">RealParameter.randomize()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.refresh"><code class="docutils literal notranslate"><span class="pre">RealParameter.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.set_limits"><code class="docutils literal notranslate"><span class="pre">RealParameter.set_limits()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.set_value"><code class="docutils literal notranslate"><span class="pre">RealParameter.set_value()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.RealParameter.unfix"><code class="docutils literal notranslate"><span class="pre">RealParameter.unfix()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.UnitColumnNormParameter"><code class="docutils literal notranslate"><span class="pre">UnitColumnNormParameter</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.parameter.UnitColumnNormParameter.refresh"><code class="docutils literal notranslate"><span class="pre">UnitColumnNormParameter.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.parameter.UnitColumnSumParameter"><code class="docutils literal notranslate"><span class="pre">UnitColumnSumParameter</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.plotly">geoml.plotly module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.arrows_3d"><code class="docutils literal notranslate"><span class="pre">arrows_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.aspect_ratio_2d"><code class="docutils literal notranslate"><span class="pre">aspect_ratio_2d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.aspect_ratio_3d"><code class="docutils literal notranslate"><span class="pre">aspect_ratio_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.bounding_box_3d"><code class="docutils literal notranslate"><span class="pre">bounding_box_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.categorical_points_3d"><code class="docutils literal notranslate"><span class="pre">categorical_points_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.isosurface"><code class="docutils literal notranslate"><span class="pre">isosurface()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.mpl_to_plotly"><code class="docutils literal notranslate"><span class="pre">mpl_to_plotly()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.numeric_points_3d"><code class="docutils literal notranslate"><span class="pre">numeric_points_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.numeric_section_3d"><code class="docutils literal notranslate"><span class="pre">numeric_section_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.planes_3d"><code class="docutils literal notranslate"><span class="pre">planes_3d()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.plotly.segments_3d"><code class="docutils literal notranslate"><span class="pre">segments_3d()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.projnet">geoml.projnet module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.BasicProjectedGP"><code class="docutils literal notranslate"><span class="pre">BasicProjectedGP</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.BasicProjectedGP.covariance_matrix"><code class="docutils literal notranslate"><span class="pre">BasicProjectedGP.covariance_matrix()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.BasicProjectedGP.kl_divergence"><code class="docutils literal notranslate"><span class="pre">BasicProjectedGP.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.BasicProjectedGP.predict"><code class="docutils literal notranslate"><span class="pre">BasicProjectedGP.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.BasicProjectedGP.refresh"><code class="docutils literal notranslate"><span class="pre">BasicProjectedGP.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.Concatenate"><code class="docutils literal notranslate"><span class="pre">Concatenate</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Concatenate.predict"><code class="docutils literal notranslate"><span class="pre">Concatenate.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Concatenate.refresh"><code class="docutils literal notranslate"><span class="pre">Concatenate.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.Exponentiation"><code class="docutils literal notranslate"><span class="pre">Exponentiation</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Exponentiation.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Exponentiation.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Exponentiation.predict"><code class="docutils literal notranslate"><span class="pre">Exponentiation.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.Linear"><code class="docutils literal notranslate"><span class="pre">Linear</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Linear.kl_divergence"><code class="docutils literal notranslate"><span class="pre">Linear.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Linear.predict"><code class="docutils literal notranslate"><span class="pre">Linear.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.Multiply"><code class="docutils literal notranslate"><span class="pre">Multiply</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Multiply.predict"><code class="docutils literal notranslate"><span class="pre">Multiply.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.Multiply.refresh"><code class="docutils literal notranslate"><span class="pre">Multiply.refresh()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.ProjectedInput"><code class="docutils literal notranslate"><span class="pre">ProjectedInput</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.ProjectedInput.kl_divergence"><code class="docutils literal notranslate"><span class="pre">ProjectedInput.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.ProjectedInput.predict"><code class="docutils literal notranslate"><span class="pre">ProjectedInput.predict()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.ProjectedInput.refresh"><code class="docutils literal notranslate"><span class="pre">ProjectedInput.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.ProjectedInput.set_parameter_limits"><code class="docutils literal notranslate"><span class="pre">ProjectedInput.set_parameter_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.SelectInput"><code class="docutils literal notranslate"><span class="pre">SelectInput</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.SelectInput.kl_divergence"><code class="docutils literal notranslate"><span class="pre">SelectInput.kl_divergence()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.SelectInput.predict"><code class="docutils literal notranslate"><span class="pre">SelectInput.predict()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern0"><code class="docutils literal notranslate"><span class="pre">VFFMatern0</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern0.refresh"><code class="docutils literal notranslate"><span class="pre">VFFMatern0.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern0.spectrum"><code class="docutils literal notranslate"><span class="pre">VFFMatern0.spectrum()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern1"><code class="docutils literal notranslate"><span class="pre">VFFMatern1</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern1.refresh"><code class="docutils literal notranslate"><span class="pre">VFFMatern1.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern1.spectrum"><code class="docutils literal notranslate"><span class="pre">VFFMatern1.spectrum()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern2"><code class="docutils literal notranslate"><span class="pre">VFFMatern2</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern2.refresh"><code class="docutils literal notranslate"><span class="pre">VFFMatern2.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.projnet.VFFMatern2.spectrum"><code class="docutils literal notranslate"><span class="pre">VFFMatern2.spectrum()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.pyvista">geoml.pyvista module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.pyvista.camera_orbit"><code class="docutils literal notranslate"><span class="pre">camera_orbit()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.pyvista.structure_discs"><code class="docutils literal notranslate"><span class="pre">structure_discs()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.tftools">geoml.tftools module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.composition_close"><code class="docutils literal notranslate"><span class="pre">composition_close()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.conjugate_gradient"><code class="docutils literal notranslate"><span class="pre">conjugate_gradient()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.conjugate_gradient_block"><code class="docutils literal notranslate"><span class="pre">conjugate_gradient_block()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.determinant_lanczos"><code class="docutils literal notranslate"><span class="pre">determinant_lanczos()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.ensure_rank_2"><code class="docutils literal notranslate"><span class="pre">ensure_rank_2()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.get_lower_triangular"><code class="docutils literal notranslate"><span class="pre">get_lower_triangular()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.grid_laplacian"><code class="docutils literal notranslate"><span class="pre">grid_laplacian()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.highest_value_probability"><code class="docutils literal notranslate"><span class="pre">highest_value_probability()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.lanczos"><code class="docutils literal notranslate"><span class="pre">lanczos()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.lanczos_gp_solve"><code class="docutils literal notranslate"><span class="pre">lanczos_gp_solve()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.masked_laplacian"><code class="docutils literal notranslate"><span class="pre">masked_laplacian()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.pairwise_dist"><code class="docutils literal notranslate"><span class="pre">pairwise_dist()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.pairwise_dist_l1"><code class="docutils literal notranslate"><span class="pre">pairwise_dist_l1()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.prod_n"><code class="docutils literal notranslate"><span class="pre">prod_n()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.repeat_vector"><code class="docutils literal notranslate"><span class="pre">repeat_vector()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.reshape_lower_traingular"><code class="docutils literal notranslate"><span class="pre">reshape_lower_traingular()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.sparse_kronecker_by_rows"><code class="docutils literal notranslate"><span class="pre">sparse_kronecker_by_rows()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.sparsemax"><code class="docutils literal notranslate"><span class="pre">sparsemax()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.training_step"><code class="docutils literal notranslate"><span class="pre">training_step()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.tftools.zero_nans"><code class="docutils literal notranslate"><span class="pre">zero_nans()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.transform">geoml.transform module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2D"><code class="docutils literal notranslate"><span class="pre">Anisotropy2D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2D.refresh"><code class="docutils literal notranslate"><span class="pre">Anisotropy2D.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2D.set_limits"><code class="docutils literal notranslate"><span class="pre">Anisotropy2D.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2DDynamic"><code class="docutils literal notranslate"><span class="pre">Anisotropy2DDynamic</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2DDynamic.refresh"><code class="docutils literal notranslate"><span class="pre">Anisotropy2DDynamic.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2DDynamic.set_limits"><code class="docutils literal notranslate"><span class="pre">Anisotropy2DDynamic.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2DMath"><code class="docutils literal notranslate"><span class="pre">Anisotropy2DMath</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2DMath.refresh"><code class="docutils literal notranslate"><span class="pre">Anisotropy2DMath.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy2DMath.set_limits"><code class="docutils literal notranslate"><span class="pre">Anisotropy2DMath.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3D"><code class="docutils literal notranslate"><span class="pre">Anisotropy3D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3D.refresh"><code class="docutils literal notranslate"><span class="pre">Anisotropy3D.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3D.set_limits"><code class="docutils literal notranslate"><span class="pre">Anisotropy3D.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3DDynamic"><code class="docutils literal notranslate"><span class="pre">Anisotropy3DDynamic</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3DDynamic.refresh"><code class="docutils literal notranslate"><span class="pre">Anisotropy3DDynamic.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3DDynamic.set_limits"><code class="docutils literal notranslate"><span class="pre">Anisotropy3DDynamic.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3DMath"><code class="docutils literal notranslate"><span class="pre">Anisotropy3DMath</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3DMath.refresh"><code class="docutils literal notranslate"><span class="pre">Anisotropy3DMath.refresh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Anisotropy3DMath.set_limits"><code class="docutils literal notranslate"><span class="pre">Anisotropy3DMath.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.AnisotropyARD"><code class="docutils literal notranslate"><span class="pre">AnisotropyARD</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.AnisotropyARD.set_limits"><code class="docutils literal notranslate"><span class="pre">AnisotropyARD.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.BellFault2D"><code class="docutils literal notranslate"><span class="pre">BellFault2D</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.BellFault2D.kernelize"><code class="docutils literal notranslate"><span class="pre">BellFault2D.kernelize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.ChainedTransform"><code class="docutils literal notranslate"><span class="pre">ChainedTransform</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.ChainedTransform.set_limits"><code class="docutils literal notranslate"><span class="pre">ChainedTransform.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Concatenate"><code class="docutils literal notranslate"><span class="pre">Concatenate</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Concatenate.set_limits"><code class="docutils literal notranslate"><span class="pre">Concatenate.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Identity"><code class="docutils literal notranslate"><span class="pre">Identity</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Isotropic"><code class="docutils literal notranslate"><span class="pre">Isotropic</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.transform.Isotropic.set_limits"><code class="docutils literal notranslate"><span class="pre">Isotropic.set_limits()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.NormalizeWithBoundingBox"><code class="docutils literal notranslate"><span class="pre">NormalizeWithBoundingBox</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.Periodic"><code class="docutils literal notranslate"><span class="pre">Periodic</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.ProjectionTo1D"><code class="docutils literal notranslate"><span class="pre">ProjectionTo1D</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.RandomProjections"><code class="docutils literal notranslate"><span class="pre">RandomProjections</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.transform.SelectVariables"><code class="docutils literal notranslate"><span class="pre">SelectVariables</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml.warping">geoml.warping module</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.warping.ChainedWarping"><code class="docutils literal notranslate"><span class="pre">ChainedWarping</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ChainedWarping.backward"><code class="docutils literal notranslate"><span class="pre">ChainedWarping.backward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ChainedWarping.derivative"><code class="docutils literal notranslate"><span class="pre">ChainedWarping.derivative()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ChainedWarping.forward"><code class="docutils literal notranslate"><span class="pre">ChainedWarping.forward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ChainedWarping.initialize"><code class="docutils literal notranslate"><span class="pre">ChainedWarping.initialize()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.warping.Identity"><code class="docutils literal notranslate"><span class="pre">Identity</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Identity.backward"><code class="docutils literal notranslate"><span class="pre">Identity.backward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Identity.derivative"><code class="docutils literal notranslate"><span class="pre">Identity.derivative()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Identity.forward"><code class="docutils literal notranslate"><span class="pre">Identity.forward()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.warping.Log"><code class="docutils literal notranslate"><span class="pre">Log</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Log.backward"><code class="docutils literal notranslate"><span class="pre">Log.backward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Log.derivative"><code class="docutils literal notranslate"><span class="pre">Log.derivative()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Log.forward"><code class="docutils literal notranslate"><span class="pre">Log.forward()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.warping.Softplus"><code class="docutils literal notranslate"><span class="pre">Softplus</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Softplus.backward"><code class="docutils literal notranslate"><span class="pre">Softplus.backward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Softplus.derivative"><code class="docutils literal notranslate"><span class="pre">Softplus.derivative()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Softplus.forward"><code class="docutils literal notranslate"><span class="pre">Softplus.forward()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.warping.Spline"><code class="docutils literal notranslate"><span class="pre">Spline</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Spline.n_knots"><code class="docutils literal notranslate"><span class="pre">Spline.n_knots</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Spline.backward"><code class="docutils literal notranslate"><span class="pre">Spline.backward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Spline.derivative"><code class="docutils literal notranslate"><span class="pre">Spline.derivative()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.Spline.forward"><code class="docutils literal notranslate"><span class="pre">Spline.forward()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="geoml.html#geoml.warping.ZScore"><code class="docutils literal notranslate"><span class="pre">ZScore</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ZScore.backward"><code class="docutils literal notranslate"><span class="pre">ZScore.backward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ZScore.derivative"><code class="docutils literal notranslate"><span class="pre">ZScore.derivative()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ZScore.forward"><code class="docutils literal notranslate"><span class="pre">ZScore.forward()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="geoml.html#geoml.warping.ZScore.initialize"><code class="docutils literal notranslate"><span class="pre">ZScore.initialize()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="geoml.html#module-geoml">Module contents</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="setup.html">setup module</a></li>
+</ul>
+</div>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="geoML documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="geoml.html" class="btn btn-neutral float-right" title="geoml package" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Ítalo Gomes Gonçalves.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

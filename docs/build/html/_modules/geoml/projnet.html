@@ -1,0 +1,923 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>geoml.projnet &mdash; geoML 0.3.5 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=ba50482b"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            geoML
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">geoML</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">geoml.projnet</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for geoml.projnet</h1><div class="highlight"><pre>
+<span></span><span class="c1"># geoML - machine learning models for geospatial data</span>
+<span class="c1"># Copyright (C) 2024  Ítalo Gomes Gonçalves</span>
+<span class="c1">#</span>
+<span class="c1"># This program is free software: you can redistribute it and/or modify</span>
+<span class="c1"># it under the terms of the GNU General Public License as published by</span>
+<span class="c1"># the Free Software Foundation, either version 3 of the License, or</span>
+<span class="c1"># (at your option) any later version.</span>
+<span class="c1">#</span>
+<span class="c1"># This program is distributed in the hope that it will be useful,</span>
+<span class="c1"># but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="c1"># MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the</span>
+<span class="c1"># GNU General Public License for more details.</span>
+<span class="c1">#</span>
+<span class="c1"># You should have received a copy of the GNU General Public License</span>
+<span class="c1"># along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.parameter</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_gpr</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.tftools</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_tftools</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.kernels</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_kr</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.transform</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_tr</span>
+<span class="c1"># import geoml.interpolation as _gint</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.data</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_data</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tensorflow</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_tf</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_ProjectedLatentVariable</span><span class="p">(</span><span class="n">_gpr</span><span class="o">.</span><span class="n">Parametric</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">children</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">min</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="k">return</span> <span class="n">s</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">size</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_parameter_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict_directions</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_RootProjectedVariable</span><span class="p">(</span><span class="n">_ProjectedLatentVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="bp">self</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_FunctionalProjectedVariable</span><span class="p">(</span><span class="n">_ProjectedLatentVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parent</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="n">parent</span><span class="o">.</span><span class="n">children</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">root</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="p">]</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">get_unique_parents</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_parameter_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">set_parameter_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_Operation</span><span class="p">(</span><span class="n">_ProjectedLatentVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parents</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">latent_variables</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">latent_variables</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">root</span>
+        <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="n">latent_variables</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">lat</span><span class="p">)</span>
+            <span class="n">lat</span><span class="o">.</span><span class="n">children</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">all_parents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
+            <span class="n">all_parents</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">get_unique_parents</span><span class="p">())</span>
+        <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">all_parents</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_parameter_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
+            <span class="n">p</span><span class="o">.</span><span class="n">set_parameter_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="ProjectedInput">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.ProjectedInput">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ProjectedInput</span><span class="p">(</span><span class="n">_RootProjectedVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">inducing_points</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="n">_tr</span><span class="o">.</span><span class="n">Identity</span><span class="p">(),</span>
+                 <span class="n">fix_transform</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">min</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="n">size</span><span class="p">])</span> <span class="o">-</span> <span class="mi">5</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="n">size</span><span class="p">])</span> <span class="o">+</span> <span class="mi">5</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">transform</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">transform</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">fix_transform</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="n">all_parameters</span><span class="p">:</span>
+                <span class="n">p</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">=</span> <span class="n">inducing_points</span>
+
+<div class="viewcode-block" id="ProjectedInput.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.ProjectedInput.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="n">refresh</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="ProjectedInput.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.ProjectedInput.kl_divergence">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="ProjectedInput.set_parameter_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.ProjectedInput.set_parameter_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_parameter_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="ProjectedInput.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.ProjectedInput.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="n">x_tr</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">x_tr</span><span class="p">[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">])</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Concatenate">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Concatenate">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Concatenate</span><span class="p">(</span><span class="n">_Operation</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">([</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">latent_variables</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">root</span>
+        <span class="c1"># self.min = _tf.concat([lat.min for lat in self.parents])</span>
+        <span class="c1"># self.max = _tf.concat([lat.max for lat in self.parents])</span>
+
+<div class="viewcode-block" id="Concatenate.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Concatenate.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
+            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Concatenate.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Concatenate.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="n">pred</span> <span class="o">=</span> <span class="p">[</span><span class="n">lat</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span><span class="n">pred</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="BasicProjectedGP">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.BasicProjectedGP">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">BasicProjectedGP</span><span class="p">(</span><span class="n">_FunctionalProjectedVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">kernel</span><span class="o">=</span><span class="n">_kr</span><span class="o">.</span><span class="n">Gaussian</span><span class="p">(),</span>
+                 <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">isotropic</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">kernel</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">isotropic</span> <span class="o">=</span> <span class="n">isotropic</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_chol</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">alpha</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">prior_cov</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">prior_cov_inv</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">prior_cov_chol</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span> <span class="o">=</span> <span class="n">fix_range</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_parameters</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">min</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">-</span> <span class="mi">5</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">+</span> <span class="mi">5</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_set_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">n_ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;alpha_white&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span>
+                    <span class="n">scale</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">,</span>
+                    <span class="n">size</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">]</span>
+                <span class="p">),</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">-</span> <span class="mi">10</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">+</span> <span class="mi">10</span>
+            <span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;delta&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">]),</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e2</span>
+            <span class="p">))</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">isotropic</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+                <span class="s2">&quot;ranges&quot;</span><span class="p">,</span>
+                <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">]),</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="mi">10</span><span class="p">,</span>
+                    <span class="n">fixed</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+                <span class="s2">&quot;ranges&quot;</span><span class="p">,</span>
+                <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">]),</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="mi">10</span><span class="p">,</span>
+                    <span class="n">fixed</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+
+<div class="viewcode-block" id="BasicProjectedGP.covariance_matrix">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.BasicProjectedGP.covariance_matrix">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;basic_covariance_matrix&quot;</span><span class="p">):</span>
+            <span class="n">ranges</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;ranges&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="c1"># [n_data, n_data, n_dim, n_sims]</span>
+            <span class="n">dif</span> <span class="o">=</span> <span class="n">x</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">-</span> <span class="n">y</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="p">:]</span>
+            <span class="n">dist</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">dif</span><span class="p">)</span> <span class="o">/</span> <span class="n">ranges</span>
+            <span class="n">cov</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span><span class="o">.</span><span class="n">kernelize</span><span class="p">(</span><span class="n">dist</span><span class="p">)</span>
+            <span class="n">cov</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_mean</span><span class="p">(</span><span class="n">cov</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+
+            <span class="c1"># [n_dim, n_data, n_data]</span>
+            <span class="n">cov</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">cov</span><span class="p">,</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+            <span class="k">return</span> <span class="n">cov</span></div>
+
+
+<div class="viewcode-block" id="BasicProjectedGP.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.BasicProjectedGP.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;basic_refresh&quot;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+
+            <span class="c1"># prior</span>
+            <span class="n">ip</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">min</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">max</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span>
+            <span class="p">)[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">ip</span>
+
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">eye</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:],</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+            <span class="n">cov</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">ip</span><span class="p">,</span> <span class="n">ip</span><span class="p">)</span> <span class="o">+</span> <span class="n">eye</span> <span class="o">*</span> <span class="n">jitter</span>
+            <span class="n">chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span><span class="n">cov</span><span class="p">)</span>
+            <span class="n">cov_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky_solve</span><span class="p">(</span><span class="n">chol</span><span class="p">,</span> <span class="n">eye</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov</span> <span class="o">=</span> <span class="n">cov</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_chol</span> <span class="o">=</span> <span class="n">chol</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span> <span class="o">=</span> <span class="n">cov_inv</span>
+
+            <span class="c1"># posterior</span>
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">eye</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="n">delta</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;delta&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">delta_diag</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">delta</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">+</span> <span class="n">delta_diag</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth</span> <span class="o">+</span> <span class="n">eye</span> <span class="o">*</span> <span class="n">jitter</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky_solve</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span><span class="p">,</span> <span class="n">eye</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">+</span> <span class="n">eye</span> <span class="o">*</span> <span class="n">jitter</span><span class="p">)</span>
+
+            <span class="n">alpha_white</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;alpha_white&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>  <span class="c1"># [n_dim, size, n_ip, 1]</span>
+            <span class="n">pred_inputs</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dmp,dsmi-&gt;dspi&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_chol</span><span class="p">,</span> <span class="n">alpha_white</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">alpha</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dmp,dsmi-&gt;dspi&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span><span class="p">,</span> <span class="n">pred_inputs</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="BasicProjectedGP.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.BasicProjectedGP.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;basic_prediction&quot;</span><span class="p">):</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span>
+
+            <span class="c1"># [n_dim, n_data, n_ip]</span>
+            <span class="n">cov_cross</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span><span class="p">)</span>
+
+            <span class="n">mu</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dnm,dsmi-&gt;dnsi&quot;</span><span class="p">,</span> <span class="n">cov_cross</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">alpha</span><span class="p">)</span>
+
+            <span class="n">rnd</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">stateless_normal</span><span class="p">(</span>
+                <span class="n">shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">],</span>
+                <span class="n">seed</span><span class="o">=</span><span class="n">seed</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span>
+            <span class="p">)</span>
+            <span class="n">sims</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dnm,dsmp,dspi-&gt;dnsi&quot;</span><span class="p">,</span> <span class="n">cov_cross</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span><span class="p">,</span> <span class="n">rnd</span><span class="p">)</span> <span class="o">+</span> <span class="n">mu</span>
+
+            <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">sims</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span> <span class="o">/</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="BasicProjectedGP.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.BasicProjectedGP.kl_divergence">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;basic_KL_divergence&quot;</span><span class="p">):</span>
+            <span class="n">delta</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;delta&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">alpha_white</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;alpha_white&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="n">tr</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:])</span>
+            <span class="n">fit</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">alpha_white</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span>
+            <span class="n">det_1</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag_part</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span><span class="p">)))</span>
+            <span class="n">det_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">delta</span><span class="p">))</span>
+            <span class="n">kl</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="o">-</span> <span class="n">tr</span> <span class="o">+</span> <span class="n">fit</span> <span class="o">+</span> <span class="n">det_1</span> <span class="o">-</span> <span class="n">det_2</span><span class="p">)</span>
+
+            <span class="c1"># ranges = self.parameters[&quot;ranges&quot;].get_value()</span>
+            <span class="c1"># rng_prob = _tf.reduce_sum(_tf.math.log(ranges)**2)</span>
+
+            <span class="k">return</span> <span class="n">kl</span> <span class="c1">#- rng_prob</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="SelectInput">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.SelectInput">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">SelectInput</span><span class="p">(</span><span class="n">_FunctionalProjectedVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">columns</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">columns</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">columns</span><span class="p">)</span>
+
+<div class="viewcode-block" id="SelectInput.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.SelectInput.kl_divergence">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="SelectInput.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.SelectInput.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">columns</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">x</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Linear">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Linear">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Linear</span><span class="p">(</span><span class="n">_FunctionalProjectedVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">unit_norm</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
+
+        <span class="k">if</span> <span class="n">unit_norm</span><span class="p">:</span>
+            <span class="n">rnd</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">))</span>
+            <span class="n">rnd</span> <span class="o">=</span> <span class="n">rnd</span> <span class="o">/</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">rnd</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+                <span class="s2">&quot;weights&quot;</span><span class="p">,</span>
+                <span class="n">_gpr</span><span class="o">.</span><span class="n">UnitColumnNormParameter</span><span class="p">(</span>
+                    <span class="n">rnd</span><span class="p">,</span> <span class="o">-</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">rnd</span><span class="p">),</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">rnd</span><span class="p">)</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">rnd</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">),</span> <span class="n">scale</span><span class="o">=</span><span class="mf">1e-4</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+                <span class="s2">&quot;weights&quot;</span><span class="p">,</span>
+                <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">+</span> <span class="n">rnd</span> <span class="o">+</span> <span class="mi">1</span><span class="o">/</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">+</span> <span class="mi">1</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+
+        <span class="c1"># binary classification</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span> <span class="o">==</span> <span class="mi">2</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">]])</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+
+<div class="viewcode-block" id="Linear.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Linear.kl_divergence">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Linear.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Linear.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="n">weights</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+        <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span>
+        <span class="n">pred</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;axb,xy-&gt;ayb&quot;</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">weights</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">pred</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Exponentiation">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Exponentiation">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Exponentiation</span><span class="p">(</span><span class="n">_FunctionalProjectedVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="c1"># self._add_parameter(&quot;amp_mean&quot;, _gpr.RealParameter(0, -5, 5))</span>
+        <span class="c1"># self._add_parameter(</span>
+        <span class="c1">#     &quot;amp_scale&quot;, _gpr.PositiveParameter(0.25, 0.01, 10))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">size</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">min</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">min</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">max</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Exponentiation.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Exponentiation.kl_divergence">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Exponentiation.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Exponentiation.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;exponentiation_prediction&quot;</span><span class="p">):</span>
+            <span class="c1"># amp_mean = self.parameters[&quot;amp_mean&quot;].get_value()</span>
+            <span class="c1"># amp_scale = self.parameters[&quot;amp_scale&quot;].get_value()</span>
+
+            <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span>
+
+            <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Multiply">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Multiply">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Multiply</span><span class="p">(</span><span class="n">_Operation</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
+        <span class="n">sizes</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="n">s</span> <span class="o">==</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">sizes</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;all parents must have the same size&quot;</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+<div class="viewcode-block" id="Multiply.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Multiply.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
+            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Multiply.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.Multiply.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="n">all_pred</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">):</span>
+            <span class="n">x_i</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="p">[</span><span class="n">seed</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="n">seed</span><span class="p">[</span><span class="mi">1</span><span class="p">]])</span>
+            <span class="n">all_pred</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">x_i</span><span class="p">)</span>
+
+        <span class="n">all_pred</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span><span class="n">all_pred</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_prod</span><span class="p">(</span><span class="n">all_pred</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span></div>
+</div>
+
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_VariationalFourierFeatures</span><span class="p">(</span><span class="n">_FunctionalProjectedVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">isotropic</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">isotropic</span> <span class="o">=</span> <span class="n">isotropic</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chol</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span> <span class="o">=</span> <span class="n">fix_range</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_parameters</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">min</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span><span class="p">])</span> <span class="o">-</span> <span class="mi">5</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span><span class="p">])</span> <span class="o">+</span> <span class="mi">5</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">harm_cos</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">harm_sin</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
+
+        <span class="n">dif</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">max</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">min</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lower</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">min</span> <span class="o">-</span> <span class="n">dif</span> <span class="o">/</span> <span class="mi">2</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">upper</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">max</span> <span class="o">+</span> <span class="n">dif</span> <span class="o">/</span> <span class="mi">2</span>
+
+        <span class="c1"># [n_ip, n_dim]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">freq_cos</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">harm_cos</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">harm_sin</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_set_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">n_ip</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;mean&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span>
+                    <span class="n">scale</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">,</span>
+                    <span class="n">size</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">]</span>
+                <span class="p">),</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">-</span> <span class="mi">100</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">+</span> <span class="mi">100</span>
+            <span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;delta&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e3</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e12</span>
+            <span class="p">))</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">isotropic</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+                <span class="s2">&quot;ranges&quot;</span><span class="p">,</span>
+                <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">]),</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="mi">10</span><span class="p">,</span>
+                    <span class="n">fixed</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+                <span class="s2">&quot;ranges&quot;</span><span class="p">,</span>
+                <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">]),</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                    <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">*</span> <span class="mi">10</span><span class="p">,</span>
+                    <span class="n">fixed</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">fourier_features</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">features</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+            <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_cos</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">*</span> <span class="p">(</span><span class="n">x</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">])),</span>
+            <span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">*</span> <span class="p">(</span><span class="n">x</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]))</span>
+        <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>  <span class="c1"># [n_data, n_ip, n_dim, n_sims]</span>
+        <span class="n">features</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_mean</span><span class="p">(</span><span class="n">features</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">features</span><span class="p">,</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frequencies</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;VFF_prediction&quot;</span><span class="p">):</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span>
+
+            <span class="c1"># [n_dim, n_data, n_ip]</span>
+            <span class="n">cov_cross</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">fourier_features</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+            <span class="n">mean</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;mean&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">prod</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol</span><span class="p">)</span>
+            <span class="n">m_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">prod</span><span class="p">,</span> <span class="n">mean</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+            <span class="n">m_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">prod</span><span class="p">,</span> <span class="n">m_1</span><span class="p">)</span>
+            <span class="n">m_2</span> <span class="o">=</span> <span class="n">mean</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="n">mu</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dnm,dsmi-&gt;dnsi&quot;</span><span class="p">,</span> <span class="n">cov_cross</span><span class="p">,</span> <span class="n">m_2</span> <span class="o">-</span> <span class="n">m_1</span><span class="p">)</span>
+
+            <span class="c1"># mean = self.parameters[&#39;mean&#39;].get_value()</span>
+            <span class="c1"># k_12 = _tf.concat([</span>
+            <span class="c1">#     _tf.linalg.diag(_tf.sqrt(self.diag)),</span>
+            <span class="c1">#     _tf.tile(self.mat_b, [self.parent.size, 1, 1, 1])</span>
+            <span class="c1"># ], axis=3)</span>
+            <span class="c1"># prod = _tf.matmul(k_12, mean)</span>
+            <span class="c1"># m_1 = _tf.matmul(self.diag_b, self.chol)</span>
+            <span class="c1"># m_1 = _tf.matmul(m_1, prod, True)</span>
+            <span class="c1"># m_1 = _tf.matmul(m_1, m_1)</span>
+            <span class="c1"># m_2 = prod / self.diag[:, :, :, None]</span>
+            <span class="c1"># mu = _tf.einsum(&quot;dnm,dsmi-&gt;dnsi&quot;, cov_cross, m_2 - m_1)</span>
+
+            <span class="n">n_ip</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span>
+            <span class="n">rnd_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">stateless_normal</span><span class="p">(</span>
+                <span class="n">shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">],</span>
+                <span class="n">seed</span><span class="o">=</span><span class="p">[</span><span class="n">seed</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">seed</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mi">1</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span>
+            <span class="p">)</span>
+            <span class="n">rnd_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">stateless_normal</span><span class="p">(</span>
+                <span class="n">shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">],</span>
+                <span class="n">seed</span><span class="o">=</span><span class="p">[</span><span class="n">seed</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">seed</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mi">2</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span>
+            <span class="p">)</span>
+            <span class="n">rnd_3</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">stateless_normal</span><span class="p">(</span>
+                <span class="n">shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">],</span>
+                <span class="n">seed</span><span class="o">=</span><span class="p">[</span><span class="n">seed</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">seed</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mi">3</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span>
+            <span class="p">)</span>
+
+            <span class="n">sims_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mi">1</span><span class="o">/</span><span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">-</span> <span class="mi">1</span><span class="o">/</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span><span class="p">)[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">*</span> <span class="n">rnd_1</span>
+            <span class="n">sims_2</span> <span class="o">=</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dsmc,dsci-&gt;dsmi&quot;</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol</span><span class="p">),</span> <span class="n">rnd_2</span><span class="p">)</span>
+            <span class="n">sims_3</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dsmc,dsci-&gt;dsmi&quot;</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol</span><span class="p">),</span> <span class="n">rnd_3</span><span class="p">)</span>
+            <span class="n">sims</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;dnm,dsmi-&gt;dnsi&quot;</span><span class="p">,</span> <span class="n">cov_cross</span><span class="p">,</span> <span class="n">sims_1</span> <span class="o">+</span> <span class="n">sims_2</span> <span class="o">+</span> <span class="n">sims_3</span><span class="p">)</span> <span class="o">+</span> <span class="n">mu</span>
+
+            <span class="c1"># sims = _tf.einsum(&quot;dnm,dsmi-&gt;dnsi&quot;, cov_cross, _tf.matmul(self.chol_r, rnd_1)) + mu</span>
+
+            <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">sims</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span> <span class="o">/</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">mean</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;mean&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+        <span class="n">prod_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol</span><span class="p">)</span>
+        <span class="n">prod_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">prod_1</span><span class="p">,</span> <span class="n">mean</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+        <span class="n">prod_3</span> <span class="o">=</span> <span class="n">mean</span><span class="o">**</span><span class="mi">2</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+        <span class="n">fit</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">prod_3</span><span class="p">)</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">prod_2</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span>
+        <span class="c1"># fit = _tf.reduce_sum(mean**2)</span>
+
+        <span class="n">det_1</span> <span class="o">=</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;delta&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()))</span>
+        <span class="n">det_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span><span class="p">))</span>
+
+        <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">,</span> <span class="n">batch_shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span>
+        <span class="n">prod_4</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+        <span class="n">chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span><span class="n">eye</span> <span class="o">+</span> <span class="n">prod_4</span><span class="p">)</span>
+        <span class="n">det_3</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag_part</span><span class="p">(</span><span class="n">chol</span><span class="p">)))</span>
+
+        <span class="n">tr_1</span> <span class="o">=</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span><span class="p">)</span>
+        <span class="n">tr_2</span> <span class="o">=</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag_part</span><span class="p">(</span><span class="n">prod_4</span><span class="p">))</span>
+
+        <span class="n">prod_5</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">])</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol</span><span class="p">)</span>
+        <span class="n">tr_3</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">prod_5</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span>
+
+        <span class="n">prod_6</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">prod_4</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chol</span><span class="p">)</span>
+        <span class="n">tr_4</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">prod_6</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span>
+
+        <span class="n">kl</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="n">fit</span> <span class="o">+</span> <span class="n">det_1</span> <span class="o">+</span> <span class="n">det_2</span> <span class="o">+</span> <span class="n">det_3</span> <span class="o">+</span> <span class="n">tr_1</span> <span class="o">+</span> <span class="n">tr_2</span> <span class="o">+</span> <span class="n">tr_3</span> <span class="o">+</span> <span class="n">tr_4</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">kl</span>
+
+
+<div class="viewcode-block" id="VFFMatern0">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern0">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">VFFMatern0</span><span class="p">(</span><span class="n">_VariationalFourierFeatures</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">isotropic</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">fix_range</span><span class="p">,</span> <span class="n">isotropic</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span> <span class="o">=</span> <span class="mi">1</span>
+
+<div class="viewcode-block" id="VFFMatern0.spectrum">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern0.spectrum">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frequencies</span><span class="p">):</span>
+        <span class="n">lbd</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;ranges&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+        <span class="k">return</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">lbd</span> <span class="o">/</span> <span class="p">(</span><span class="n">lbd</span><span class="o">**</span><span class="mi">2</span> <span class="o">+</span> <span class="n">frequencies</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="VFFMatern0.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern0.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;VFF_refresh&quot;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+
+            <span class="n">spectrum_cos</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_cos</span><span class="p">)</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="n">w</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*=</span> <span class="mi">2</span>
+            <span class="n">spectrum_cos</span> <span class="o">=</span> <span class="n">spectrum_cos</span> <span class="o">*</span> <span class="n">w</span>
+            <span class="n">spectrum_sin</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span><span class="p">)</span>
+
+            <span class="c1"># [n_dim, size, n_ip]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">spectrum_cos</span><span class="p">,</span> <span class="n">spectrum_sin</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">))[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;delta&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="n">beta</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]),</span> <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">n_ip</span><span class="p">])</span>
+            <span class="p">]),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">=</span> <span class="n">beta</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>  <span class="c1"># [n_dim, size, n_ip, n_col]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">,</span> <span class="n">batch_shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span>
+            <span class="n">mat</span> <span class="o">=</span> <span class="n">eye</span> <span class="o">+</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">mat</span><span class="p">,</span> <span class="n">eye</span><span class="p">))</span>  <span class="c1"># [n_dim, size, n_col, n_col]</span></div>
+</div>
+
+
+            <span class="c1"># prod_1 = _tf.matmul(self.diag_b, self.chol)</span>
+            <span class="c1"># prod_2 = _tf.matmul(self.diag_b_post, self.chol)</span>
+            <span class="c1"># mat_r = _tf.linalg.diag(1 / self.diag) \</span>
+            <span class="c1">#     - _tf.matmul(prod_1, prod_1, False, True) \</span>
+            <span class="c1">#     - _tf.linalg.diag(1 / self.diag_posterior) \</span>
+            <span class="c1">#     + _tf.matmul(prod_2, prod_2, False, True)</span>
+            <span class="c1"># self.chol_r = _tf.linalg.cholesky(mat_r)</span>
+
+
+<div class="viewcode-block" id="VFFMatern1">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern1">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">VFFMatern1</span><span class="p">(</span><span class="n">_VariationalFourierFeatures</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">isotropic</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">fix_range</span><span class="p">,</span> <span class="n">isotropic</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span> <span class="o">=</span> <span class="mi">2</span>
+
+<div class="viewcode-block" id="VFFMatern1.spectrum">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern1.spectrum">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frequencies</span><span class="p">):</span>
+        <span class="n">lbd</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;ranges&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+        <span class="k">return</span> <span class="mi">4</span> <span class="o">*</span> <span class="n">lbd</span><span class="o">**</span><span class="mi">3</span> <span class="o">/</span> <span class="p">(</span><span class="n">lbd</span><span class="o">**</span><span class="mi">2</span> <span class="o">+</span> <span class="n">frequencies</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span><span class="o">**</span><span class="mi">2</span></div>
+
+
+<div class="viewcode-block" id="VFFMatern1.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern1.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;VFF_refresh&quot;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+
+            <span class="n">spectrum_cos</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_cos</span><span class="p">)</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="n">w</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*=</span> <span class="mi">2</span>
+            <span class="n">spectrum_cos</span> <span class="o">=</span> <span class="n">spectrum_cos</span> <span class="o">*</span> <span class="n">w</span>
+            <span class="n">spectrum_sin</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span><span class="p">)</span>
+
+            <span class="c1"># [n_dim, size, n_ip]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">spectrum_cos</span><span class="p">,</span> <span class="n">spectrum_sin</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">))[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;delta&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="n">beta_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]),</span> <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">n_ip</span><span class="p">])</span>
+            <span class="p">]),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+            <span class="n">beta_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">beta_1</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">],</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+            <span class="n">lbd</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;ranges&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">())</span>
+            <span class="n">beta_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">beta_1</span><span class="p">)[:,</span> <span class="p">:,</span> <span class="p">:(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">),</span> <span class="p">:],</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span><span class="p">)[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="n">lbd</span><span class="p">[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">beta_1</span><span class="p">,</span> <span class="n">beta_2</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>  <span class="c1"># [n_dim, size, n_ip, n_col]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">,</span> <span class="n">batch_shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span>
+            <span class="n">mat</span> <span class="o">=</span> <span class="n">eye</span> <span class="o">+</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">mat</span><span class="p">,</span> <span class="n">eye</span><span class="p">))</span>  <span class="c1"># [n_dim, size, n_col, n_col]</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="VFFMatern2">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern2">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">VFFMatern2</span><span class="p">(</span><span class="n">_VariationalFourierFeatures</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">isotropic</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">fix_range</span><span class="p">,</span> <span class="n">isotropic</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span> <span class="o">=</span> <span class="mi">3</span>
+
+<div class="viewcode-block" id="VFFMatern2.spectrum">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern2.spectrum">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frequencies</span><span class="p">):</span>
+        <span class="n">lbd</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;ranges&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+        <span class="k">return</span> <span class="mi">16</span><span class="o">/</span><span class="mi">3</span> <span class="o">*</span> <span class="n">lbd</span><span class="o">**</span><span class="mi">5</span> <span class="o">/</span> <span class="p">(</span><span class="n">lbd</span><span class="o">**</span><span class="mi">2</span> <span class="o">+</span> <span class="n">frequencies</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span><span class="o">**</span><span class="mi">3</span></div>
+
+
+<div class="viewcode-block" id="VFFMatern2.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.projnet.VFFMatern2.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;VFF_refresh&quot;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+
+            <span class="n">spectrum_cos</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_cos</span><span class="p">)</span>
+            <span class="n">w</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="n">w</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*=</span> <span class="mi">2</span>
+            <span class="n">spectrum_cos</span> <span class="o">=</span> <span class="n">spectrum_cos</span> <span class="o">*</span> <span class="n">w</span>
+            <span class="n">spectrum_sin</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">upper</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">lower</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:])</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectrum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span><span class="p">)</span>
+
+            <span class="c1"># [n_dim, size, n_ip]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">spectrum_cos</span><span class="p">,</span> <span class="n">spectrum_sin</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">))[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;delta&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="n">beta_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]),</span> <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">n_ip</span><span class="p">])</span>
+            <span class="p">]),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+            <span class="n">beta_1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">beta_1</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">],</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+            <span class="n">lbd</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s1">&#39;ranges&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">())</span>
+            <span class="n">beta_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+                <span class="mi">3</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_cos</span><span class="p">)[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="n">lbd</span><span class="p">[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">],</span>
+                             <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span><span class="o">**</span><span class="mi">2</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">beta_1</span><span class="p">)[:,</span> <span class="p">:,</span> <span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span><span class="p">,</span> <span class="p">:]</span>
+            <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+
+            <span class="n">beta_3</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">beta_1</span><span class="p">)[:,</span> <span class="p">:,</span> <span class="p">:(</span><span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="mi">1</span><span class="p">),</span> <span class="p">:],</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">freq_sin</span><span class="p">)[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="n">lbd</span><span class="p">[:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">beta_1</span><span class="p">,</span> <span class="n">beta_2</span><span class="p">,</span> <span class="n">beta_3</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>  <span class="c1"># [n_dim, size, n_ip, n_col]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">diag_b_post</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">diag_posterior</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:,</span> <span class="kc">None</span><span class="p">]</span>
+
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_columns</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">,</span> <span class="n">batch_shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span>
+            <span class="n">mat</span> <span class="o">=</span> <span class="n">eye</span> <span class="o">+</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">mat_b</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">mat</span><span class="p">,</span> <span class="n">eye</span><span class="p">))</span>  <span class="c1"># [n_dim, size, n_col, n_col]</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Ítalo Gomes Gonçalves.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

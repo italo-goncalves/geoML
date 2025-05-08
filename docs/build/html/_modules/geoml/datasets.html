@@ -1,0 +1,412 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>geoml.datasets &mdash; geoML 0.3.5 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=ba50482b"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            geoML
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">geoML</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">geoml.datasets</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for geoml.datasets</h1><div class="highlight"><pre>
+<span></span><span class="c1"># geoML - machine learning models for geospatial data</span>
+<span class="c1"># Copyright (C) 2020  Ítalo Gomes Gonçalves</span>
+<span class="c1">#</span>
+<span class="c1"># This program is free software: you can redistribute it and/or modify</span>
+<span class="c1"># it under the terms of the GNU General Public License as published by</span>
+<span class="c1"># the Free Software Foundation, either version 3 of the License, or</span>
+<span class="c1"># (at your option) any later version.</span>
+<span class="c1">#</span>
+<span class="c1"># This program is distributed in the hope that it will be useful,</span>
+<span class="c1"># but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="c1"># MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the</span>
+<span class="c1"># GNU General Public License for more details.</span>
+<span class="c1">#</span>
+<span class="c1"># You should have received a copy of the GNU General Public License</span>
+<span class="c1"># along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_pd</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_np</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.data</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_data</span>
+
+
+<div class="viewcode-block" id="walker">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.walker">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">walker</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Walker lake dataset.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    walker_point : geoml.data.PointData</span>
+<span class="sd">        Dataset with 470 samples.</span>
+<span class="sd">    walker_grid : geoml.data.Grid2D</span>
+<span class="sd">        Full data.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+    <span class="n">path_walker</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/walker.dat&quot;</span><span class="p">)</span>
+    <span class="n">path_walker_ex</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/walker_ex.dat&quot;</span><span class="p">)</span>
+
+    <span class="n">walker_sample</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_table</span><span class="p">(</span><span class="n">path_walker</span><span class="p">,</span> <span class="n">na_values</span><span class="o">=-</span><span class="mi">999</span><span class="p">)</span> <span class="o">*</span> <span class="mf">1.0</span>
+    <span class="n">walker_ex</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_table</span><span class="p">(</span><span class="n">path_walker_ex</span><span class="p">,</span> <span class="n">sep</span><span class="o">=</span><span class="s2">&quot;,&quot;</span><span class="p">)</span>
+
+    <span class="n">walker_point</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">walker_sample</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;Y&quot;</span><span class="p">])</span>
+    <span class="n">walker_point</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;V&quot;</span><span class="p">,</span> <span class="n">walker_sample</span><span class="p">[</span><span class="s2">&quot;V&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+    <span class="n">walker_point</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;U&quot;</span><span class="p">,</span> <span class="n">walker_sample</span><span class="p">[</span><span class="s2">&quot;U&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="n">walker_grid</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">Grid2D</span><span class="p">(</span><span class="n">start</span><span class="o">=</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="n">n</span><span class="o">=</span><span class="p">[</span><span class="mi">260</span><span class="p">,</span> <span class="mi">300</span><span class="p">],</span> <span class="n">step</span><span class="o">=</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+    <span class="n">walker_grid</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;V&quot;</span><span class="p">,</span> <span class="n">walker_ex</span><span class="p">[</span><span class="s2">&quot;V&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+    <span class="n">walker_grid</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;U&quot;</span><span class="p">,</span> <span class="n">walker_ex</span><span class="p">[</span><span class="s2">&quot;U&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">walker_point</span><span class="p">,</span> <span class="n">walker_grid</span></div>
+
+
+
+<div class="viewcode-block" id="ararangua">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.ararangua">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">ararangua</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Drillhole data from Araranguá town, Brazil.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ara_dh : geoml.data.DrillholeData</span>
+<span class="sd">        A dataset with 13 drillholes.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+    <span class="n">file</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/Araranguá.xlsx&quot;</span><span class="p">)</span>
+
+    <span class="n">ara_lito</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_excel</span><span class="p">(</span><span class="n">file</span><span class="p">,</span> <span class="n">sheet_name</span><span class="o">=</span><span class="s2">&quot;Lito&quot;</span><span class="p">)</span>
+    <span class="n">ara_collar</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_excel</span><span class="p">(</span><span class="n">file</span><span class="p">,</span> <span class="n">sheet_name</span><span class="o">=</span><span class="s2">&quot;Collar&quot;</span><span class="p">)</span>
+
+    <span class="n">ara_dh</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">DrillholeData</span><span class="p">(</span><span class="n">ara_collar</span><span class="p">,</span>
+                                 <span class="n">ara_lito</span><span class="p">,</span>
+                                 <span class="n">holeid</span><span class="o">=</span><span class="s2">&quot;Hole ID&quot;</span><span class="p">,</span>
+                                 <span class="n">fr</span><span class="o">=</span><span class="s2">&quot;From&quot;</span><span class="p">,</span>
+                                 <span class="n">to</span><span class="o">=</span><span class="s2">&quot;To&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ara_dh</span></div>
+
+
+
+<div class="viewcode-block" id="example_fold">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.example_fold">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">example_fold</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Example directional data.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    point : geoml.data.PointData</span>
+<span class="sd">        Some coordinates with two rock labels.</span>
+<span class="sd">    dirs : geoml.data.DirectionalData</span>
+<span class="sd">        Structural measurements_a representing a fold.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">ex_point</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span>
+        <span class="p">{</span><span class="s2">&quot;X&quot;</span><span class="p">:</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span>
+            <span class="c1"># rock a</span>
+            <span class="mi">25</span><span class="p">,</span> <span class="mi">40</span><span class="p">,</span> <span class="mi">60</span><span class="p">,</span> <span class="mi">85</span><span class="p">,</span> <span class="mi">89</span><span class="p">,</span> <span class="mi">76</span><span class="p">,</span> <span class="mi">66</span><span class="p">,</span> <span class="mi">74</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">31</span><span class="p">,</span> <span class="mi">21</span><span class="p">,</span> <span class="mi">25</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span>
+            <span class="c1"># rock b</span>
+            <span class="mi">5</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">45</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">55</span><span class="p">,</span> <span class="mi">75</span><span class="p">,</span> <span class="mi">90</span><span class="p">,</span> <span class="mi">91</span><span class="p">,</span> <span class="mi">74</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span>
+            <span class="mi">76</span><span class="p">,</span> <span class="mi">66</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">29</span><span class="p">,</span> <span class="mi">19</span><span class="p">,</span> <span class="mi">14</span><span class="p">,</span> <span class="mi">25</span><span class="p">,</span>
+            <span class="c1"># boundary</span>
+            <span class="mi">15</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">65</span><span class="p">,</span> <span class="mi">75</span><span class="p">,</span> <span class="mi">90</span><span class="p">,</span> <span class="mi">25</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">65</span><span class="p">,</span> <span class="mi">75</span><span class="p">,</span>
+        <span class="p">]),</span>
+         <span class="s2">&quot;Y&quot;</span><span class="p">:</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span>
+             <span class="c1"># rock a</span>
+             <span class="mi">25</span><span class="p">,</span> <span class="mi">60</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">15</span><span class="p">,</span> <span class="mi">19</span><span class="p">,</span> <span class="mi">11</span><span class="p">,</span> <span class="mi">21</span><span class="p">,</span> <span class="mi">49</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">51</span><span class="p">,</span> <span class="mi">84</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">34</span><span class="p">,</span> <span class="mi">11</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">45</span><span class="p">,</span>
+             <span class="c1"># rock b</span>
+             <span class="mi">50</span><span class="p">,</span> <span class="mi">80</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">75</span><span class="p">,</span> <span class="mi">90</span><span class="p">,</span> <span class="mi">21</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">19</span><span class="p">,</span>
+             <span class="mi">51</span><span class="p">,</span> <span class="mi">66</span><span class="p">,</span> <span class="mi">49</span><span class="p">,</span> <span class="mi">86</span><span class="p">,</span> <span class="mi">66</span><span class="p">,</span> <span class="mi">36</span><span class="p">,</span> <span class="mi">14</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span>
+             <span class="c1"># boundary</span>
+             <span class="mi">15</span><span class="p">,</span> <span class="mi">35</span><span class="p">,</span> <span class="mi">65</span><span class="p">,</span> <span class="mi">85</span><span class="p">,</span> <span class="mi">65</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span>
+         <span class="p">]),</span>
+         <span class="s2">&quot;rock&quot;</span><span class="p">:</span> <span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span><span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="mi">16</span><span class="p">),</span>
+                                  <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;b&quot;</span><span class="p">,</span> <span class="mi">18</span><span class="p">),</span>
+                                  <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;boundary&quot;</span><span class="p">,</span> <span class="mi">11</span><span class="p">)])})</span>
+    <span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_1&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span>
+        <span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="mi">16</span><span class="p">),</span>
+         <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;b&quot;</span><span class="p">,</span> <span class="mi">18</span><span class="p">),</span>
+         <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="mi">11</span><span class="p">)])</span>
+    <span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_2&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span>
+        <span class="p">[</span><span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="mi">16</span><span class="p">),</span>
+         <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;b&quot;</span><span class="p">,</span> <span class="mi">18</span><span class="p">),</span>
+         <span class="n">_np</span><span class="o">.</span><span class="n">repeat</span><span class="p">(</span><span class="s2">&quot;b&quot;</span><span class="p">,</span> <span class="mi">11</span><span class="p">)])</span>
+
+    <span class="n">ex_dir</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span>
+        <span class="p">{</span><span class="s2">&quot;X&quot;</span><span class="p">:</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mi">40</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">70</span><span class="p">,</span> <span class="mi">90</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">]),</span>
+         <span class="s2">&quot;Y&quot;</span><span class="p">:</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mi">40</span><span class="p">,</span> <span class="mi">85</span><span class="p">,</span> <span class="mi">70</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">60</span><span class="p">,</span> <span class="mi">10</span><span class="p">]),</span>
+         <span class="s2">&quot;strike&quot;</span><span class="p">:</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mi">30</span><span class="p">,</span> <span class="mi">90</span><span class="p">,</span> <span class="mi">145</span><span class="p">,</span> <span class="mi">145</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">30</span><span class="p">,</span> <span class="mi">30</span><span class="p">])})</span>
+    <span class="n">ex_dir</span><span class="p">[</span><span class="s2">&quot;azimuth&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">ex_dir</span><span class="p">[</span><span class="s2">&quot;strike&quot;</span><span class="p">]</span> <span class="o">-</span> <span class="mi">90</span>
+
+    <span class="n">point</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">ex_point</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;Y&quot;</span><span class="p">])</span>
+    <span class="n">point</span><span class="o">.</span><span class="n">add_rock_type_variable</span><span class="p">(</span><span class="s2">&quot;rock&quot;</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="s2">&quot;b&quot;</span><span class="p">],</span>
+                                 <span class="n">measurements_a</span><span class="o">=</span><span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_1&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">,</span>
+                                 <span class="n">measurements_b</span><span class="o">=</span><span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_2&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="n">vals</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">ex_point</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="n">vals</span><span class="p">[</span><span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_1&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;b&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+    <span class="n">vals</span><span class="p">[</span><span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_1&quot;</span><span class="p">]</span> <span class="o">!=</span> <span class="n">ex_point</span><span class="p">[</span><span class="s2">&quot;label_2&quot;</span><span class="p">]]</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">point</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;rock_num&quot;</span><span class="p">,</span> <span class="n">vals</span><span class="p">)</span>
+
+    <span class="n">dirs</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">DirectionalData</span><span class="o">.</span><span class="n">from_azimuth</span><span class="p">(</span>
+        <span class="n">ex_dir</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;Y&quot;</span><span class="p">],</span> <span class="s2">&quot;strike&quot;</span>
+    <span class="p">)</span>
+
+    <span class="n">normals</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">DirectionalData</span><span class="o">.</span><span class="n">from_azimuth</span><span class="p">(</span>
+        <span class="n">ex_dir</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;Y&quot;</span><span class="p">],</span> <span class="s2">&quot;azimuth&quot;</span>
+    <span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">point</span><span class="p">,</span> <span class="n">dirs</span><span class="p">,</span> <span class="n">normals</span></div>
+
+
+
+<div class="viewcode-block" id="sunspot_number">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.sunspot_number">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">sunspot_number</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Sunspot number data.</span>
+
+<span class="sd">    This data is downloaded from the Royal Observatory of Belgium</span>
+<span class="sd">    SILSO website (http://sidc.be/silso/home), and is distributed under</span>
+<span class="sd">    the CC BY-NC4.0 license (https://goo.gl/PXrLYd).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    out - dict</span>
+<span class="sd">        Dict containing the processed and original data.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">yearly_df</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_table</span><span class="p">(</span>
+        <span class="s2">&quot;http://sidc.be/silso/INFO/snytotcsv.php&quot;</span><span class="p">,</span>
+        <span class="n">sep</span><span class="o">=</span><span class="s2">&quot;;&quot;</span><span class="p">,</span> <span class="n">header</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+    <span class="n">yearly_df</span> <span class="o">=</span> <span class="n">yearly_df</span><span class="o">.</span><span class="n">set_axis</span><span class="p">([</span><span class="s2">&quot;year&quot;</span><span class="p">,</span> <span class="s2">&quot;sn&quot;</span><span class="p">,</span> <span class="s2">&quot;sn_std&quot;</span><span class="p">,</span>
+                                    <span class="s2">&quot;n_obs&quot;</span><span class="p">,</span> <span class="s2">&quot;definitive&quot;</span><span class="p">],</span>
+                                   <span class="n">axis</span><span class="o">=</span><span class="s2">&quot;columns&quot;</span><span class="p">)</span>
+
+    <span class="n">yearly</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">yearly_df</span><span class="p">,</span> <span class="s2">&quot;year&quot;</span><span class="p">)</span>
+    <span class="n">yearly</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;sn&quot;</span><span class="p">,</span> <span class="n">yearly_df</span><span class="p">[</span><span class="s2">&quot;sn&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="n">monthly_df</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_table</span><span class="p">(</span>
+        <span class="s2">&quot;http://sidc.oma.be/silso/INFO/snmtotcsv.php&quot;</span><span class="p">,</span>
+        <span class="n">sep</span><span class="o">=</span><span class="s2">&quot;;&quot;</span><span class="p">,</span> <span class="n">header</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+    <span class="n">monthly_df</span> <span class="o">=</span> <span class="n">monthly_df</span><span class="o">.</span><span class="n">set_axis</span><span class="p">([</span><span class="s2">&quot;year&quot;</span><span class="p">,</span> <span class="s2">&quot;month&quot;</span><span class="p">,</span> <span class="s2">&quot;year_frac&quot;</span><span class="p">,</span> <span class="s2">&quot;sn&quot;</span><span class="p">,</span> <span class="s2">&quot;sn_std&quot;</span><span class="p">,</span>
+                                      <span class="s2">&quot;n_obs&quot;</span><span class="p">,</span> <span class="s2">&quot;definitive&quot;</span><span class="p">],</span>
+                                     <span class="n">axis</span><span class="o">=</span><span class="s2">&quot;columns&quot;</span><span class="p">)</span>
+    <span class="n">monthly_df</span><span class="p">[</span><span class="s2">&quot;idx&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">monthly_df</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+
+    <span class="n">monthly</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">monthly_df</span><span class="p">,</span> <span class="s2">&quot;idx&quot;</span><span class="p">)</span>
+    <span class="n">monthly</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;sn&quot;</span><span class="p">,</span> <span class="n">monthly_df</span><span class="p">[</span><span class="s2">&quot;sn&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="n">daily_df</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_table</span><span class="p">(</span><span class="s2">&quot;http://sidc.oma.be/silso/INFO/sndtotcsv.php&quot;</span><span class="p">,</span>
+                              <span class="n">sep</span><span class="o">=</span><span class="s2">&quot;;&quot;</span><span class="p">,</span> <span class="n">header</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+    <span class="n">daily_df</span> <span class="o">=</span> <span class="n">daily_df</span><span class="o">.</span><span class="n">set_axis</span><span class="p">([</span><span class="s2">&quot;year&quot;</span><span class="p">,</span> <span class="s2">&quot;month&quot;</span><span class="p">,</span> <span class="s2">&quot;day&quot;</span><span class="p">,</span> <span class="s2">&quot;year_frac&quot;</span><span class="p">,</span> <span class="s2">&quot;sn&quot;</span><span class="p">,</span> <span class="s2">&quot;sn_std&quot;</span><span class="p">,</span>
+                                  <span class="s2">&quot;n_obs&quot;</span><span class="p">,</span> <span class="s2">&quot;definitive&quot;</span><span class="p">],</span>
+                                 <span class="n">axis</span><span class="o">=</span><span class="s2">&quot;columns&quot;</span><span class="p">)</span>
+    <span class="n">daily_df</span><span class="p">[</span><span class="s2">&quot;idx&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">daily_df</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span>
+    <span class="n">daily</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">daily_df</span><span class="p">,</span> <span class="s2">&quot;idx&quot;</span><span class="p">)</span>
+    <span class="n">daily</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="s2">&quot;sn&quot;</span><span class="p">,</span> <span class="n">daily_df</span><span class="p">[</span><span class="s2">&quot;sn&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="n">out</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;points&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;yearly&quot;</span><span class="p">:</span> <span class="n">yearly</span><span class="p">,</span>
+                      <span class="s2">&quot;monthly&quot;</span><span class="p">:</span> <span class="n">monthly</span><span class="p">,</span>
+                      <span class="s2">&quot;daily&quot;</span><span class="p">:</span> <span class="n">daily</span><span class="p">},</span>
+           <span class="s2">&quot;data_frames&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;yearly&quot;</span><span class="p">:</span> <span class="n">yearly_df</span><span class="p">,</span>
+                           <span class="s2">&quot;monthly&quot;</span><span class="p">:</span> <span class="n">monthly_df</span><span class="p">,</span>
+                           <span class="s2">&quot;daily&quot;</span><span class="p">:</span> <span class="n">daily_df</span><span class="p">}}</span>
+
+    <span class="k">return</span> <span class="n">out</span></div>
+
+
+
+<div class="viewcode-block" id="andrade">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.andrade">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">andrade</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Structural measurements in Cerro do Andrade, Caçapava do Sul, Brazil.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    planes : geoml.data.DirectionalData</span>
+<span class="sd">        Directions parallel to the foliation planes.</span>
+<span class="sd">    normals : geoml.data.DirectionalData</span>
+<span class="sd">        Normals to the foliation planes.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+    <span class="n">file</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/andrade.txt&quot;</span><span class="p">)</span>
+
+    <span class="n">raw_data</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_table</span><span class="p">(</span><span class="n">file</span><span class="p">,</span> <span class="n">sep</span><span class="o">=</span><span class="s2">&quot;,&quot;</span><span class="p">)</span>
+
+    <span class="n">planes</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">DirectionalData</span><span class="o">.</span><span class="n">from_planes</span><span class="p">(</span>
+        <span class="n">raw_data</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;Y&quot;</span><span class="p">,</span> <span class="s2">&quot;Z&quot;</span><span class="p">],</span> <span class="s2">&quot;azimuth&quot;</span><span class="p">,</span> <span class="s2">&quot;dip&quot;</span>
+    <span class="p">)</span>
+    <span class="n">normals</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">DirectionalData</span><span class="o">.</span><span class="n">from_normals</span><span class="p">(</span>
+        <span class="n">raw_data</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;Y&quot;</span><span class="p">,</span> <span class="s2">&quot;Z&quot;</span><span class="p">],</span> <span class="s2">&quot;azimuth&quot;</span><span class="p">,</span> <span class="s2">&quot;dip&quot;</span>
+    <span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">planes</span><span class="p">,</span> <span class="n">normals</span><span class="p">,</span> <span class="n">raw_data</span></div>
+
+
+
+<div class="viewcode-block" id="jura">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.jura">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">jura</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Jura mountains dataset (Goovaerts, 1997).</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    jura_train : geoml.data.PointData</span>
+<span class="sd">        Training data (2 categorical variables and 7 continuous).</span>
+<span class="sd">    jura_val : geoml.data.PointData</span>
+<span class="sd">        Validation data (2 categorical variables and 7 continuous).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">elements</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Cd&quot;</span><span class="p">,</span> <span class="s2">&quot;Co&quot;</span><span class="p">,</span> <span class="s2">&quot;Cr&quot;</span><span class="p">,</span> <span class="s2">&quot;Cu&quot;</span><span class="p">,</span> <span class="s2">&quot;Ni&quot;</span><span class="p">,</span> <span class="s2">&quot;Pb&quot;</span><span class="p">,</span> <span class="s2">&quot;Zn&quot;</span><span class="p">]</span>
+
+    <span class="n">path</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+
+    <span class="n">file_a</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/jura_train.csv&quot;</span><span class="p">)</span>
+
+    <span class="n">train_df</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">file_a</span><span class="p">)</span>
+
+    <span class="n">landuse_labels</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">train_df</span><span class="p">[</span><span class="s2">&quot;Landuse&quot;</span><span class="p">])</span>
+    <span class="n">rock_labels</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">train_df</span><span class="p">[</span><span class="s2">&quot;Rock&quot;</span><span class="p">])</span>
+
+    <span class="n">jura_train</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">train_df</span><span class="p">,</span> <span class="n">coordinates</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Xloc&quot;</span><span class="p">,</span> <span class="s2">&quot;Yloc&quot;</span><span class="p">])</span>
+    <span class="n">jura_train</span><span class="o">.</span><span class="n">add_categorical_variable</span><span class="p">(</span><span class="s2">&quot;Landuse&quot;</span><span class="p">,</span> <span class="n">landuse_labels</span><span class="p">,</span>
+                                        <span class="n">train_df</span><span class="p">[</span><span class="s2">&quot;Landuse&quot;</span><span class="p">])</span>
+    <span class="n">jura_train</span><span class="o">.</span><span class="n">add_categorical_variable</span><span class="p">(</span><span class="s2">&quot;Rock&quot;</span><span class="p">,</span> <span class="n">rock_labels</span><span class="p">,</span> <span class="n">train_df</span><span class="p">[</span><span class="s2">&quot;Rock&quot;</span><span class="p">])</span>
+    <span class="k">for</span> <span class="n">el</span> <span class="ow">in</span> <span class="n">elements</span><span class="p">:</span>
+        <span class="n">jura_train</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="n">el</span><span class="p">,</span> <span class="n">train_df</span><span class="p">[</span><span class="n">el</span><span class="p">])</span>
+
+    <span class="n">file_b</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/jura_val.csv&quot;</span><span class="p">)</span>
+
+    <span class="n">val_df</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">file_b</span><span class="p">)</span>
+
+    <span class="n">jura_val</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">val_df</span><span class="p">,</span> <span class="n">coordinates</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Xloc&quot;</span><span class="p">,</span> <span class="s2">&quot;Yloc&quot;</span><span class="p">])</span>
+    <span class="n">jura_val</span><span class="o">.</span><span class="n">add_categorical_variable</span><span class="p">(</span><span class="s2">&quot;Landuse&quot;</span><span class="p">,</span> <span class="n">landuse_labels</span><span class="p">,</span>
+                                      <span class="n">val_df</span><span class="p">[</span><span class="s2">&quot;Landuse&quot;</span><span class="p">])</span>
+    <span class="n">jura_val</span><span class="o">.</span><span class="n">add_categorical_variable</span><span class="p">(</span><span class="s2">&quot;Rock&quot;</span><span class="p">,</span> <span class="n">rock_labels</span><span class="p">,</span> <span class="n">val_df</span><span class="p">[</span><span class="s2">&quot;Rock&quot;</span><span class="p">])</span>
+    <span class="k">for</span> <span class="n">el</span> <span class="ow">in</span> <span class="n">elements</span><span class="p">:</span>
+        <span class="n">jura_val</span><span class="o">.</span><span class="n">add_continuous_variable</span><span class="p">(</span><span class="n">el</span><span class="p">,</span> <span class="n">val_df</span><span class="p">[</span><span class="n">el</span><span class="p">])</span>
+
+    <span class="k">return</span> <span class="n">jura_train</span><span class="p">,</span> <span class="n">jura_val</span></div>
+
+
+
+<div class="viewcode-block" id="arctic_lake">
+<a class="viewcode-back" href="../../geoml.html#geoml.datasets.arctic_lake">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">arctic_lake</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    A compositional dataset.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    arctic_lake_data : geoml.data.PointData</span>
+
+<span class="sd">    References</span>
+<span class="sd">    ----------</span>
+<span class="sd">    Pawlowsky-Glahn, V., Egozcue, J. J., &amp; Tolosana-Delgado, R. (2015).</span>
+<span class="sd">    Modeling and Analysis of Compositional Data. John Wiley &amp; Sons.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+    <span class="n">file</span> <span class="o">=</span> <span class="n">_os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;sample_data/Arctic_lake.csv&quot;</span><span class="p">)</span>
+
+    <span class="n">raw_data</span> <span class="o">=</span> <span class="n">_pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">file</span><span class="p">)</span>
+
+    <span class="n">arctic_lake_data</span> <span class="o">=</span> <span class="n">_data</span><span class="o">.</span><span class="n">PointData</span><span class="p">(</span><span class="n">raw_data</span><span class="p">,</span> <span class="p">[</span><span class="s2">&quot;Depth (m)&quot;</span><span class="p">])</span>
+    <span class="n">arctic_lake_data</span><span class="o">.</span><span class="n">add_compositional_variable</span><span class="p">(</span>
+        <span class="s2">&quot;comp&quot;</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;Sand&#39;</span><span class="p">,</span> <span class="s1">&#39;Silt&#39;</span><span class="p">,</span> <span class="s1">&#39;Clay&#39;</span><span class="p">],</span>
+        <span class="n">measurements</span><span class="o">=</span><span class="n">raw_data</span><span class="o">.</span><span class="n">values</span><span class="p">[:,</span> <span class="p">:</span><span class="mi">3</span><span class="p">]</span> <span class="o">/</span> <span class="mi">100</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">arctic_lake_data</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Ítalo Gomes Gonçalves.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

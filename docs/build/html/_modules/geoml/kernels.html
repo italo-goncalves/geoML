@@ -1,0 +1,758 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>geoml.kernels &mdash; geoML 0.3.5 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=ba50482b"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            geoML
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">geoML</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">geoml.kernels</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for geoml.kernels</h1><div class="highlight"><pre>
+<span></span><span class="c1"># geoML - machine learning models for geospatial data</span>
+<span class="c1"># Copyright (C) 2019  Ítalo Gomes Gonçalves</span>
+<span class="c1">#</span>
+<span class="c1"># This program is free software: you can redistribute it and/or modify</span>
+<span class="c1"># it under the terms of the GNU General Public License as published by</span>
+<span class="c1"># the Free Software Foundation, either version 3 of the License, or</span>
+<span class="c1"># (at your option) any later version.</span>
+<span class="c1">#</span>
+<span class="c1"># This program is distributed in the hope that it will be useful,</span>
+<span class="c1"># but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="c1"># MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the</span>
+<span class="c1"># GNU General Public License for more details.</span>
+<span class="c1">#</span>
+<span class="c1"># You should have received a copy of the GNU General Public License</span>
+<span class="c1"># along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.</span>
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Gaussian&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Spherical&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Exponential&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Cubic&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Constant&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Linear&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Cosine&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Sum&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Product&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Matern32&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Matern52&quot;</span><span class="p">,</span>
+           <span class="s2">&quot;Scale&quot;</span><span class="p">]</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.parameter</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_gpr</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">geoml.transform</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_gt</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">geoml.tftools</span><span class="w"> </span><span class="kn">import</span> <span class="n">pairwise_dist</span> <span class="k">as</span> <span class="n">_pairwise_dist</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">geoml.tftools</span><span class="w"> </span><span class="kn">import</span> <span class="n">pairwise_dist_l1</span> <span class="k">as</span> <span class="n">_pairwise_dist_l1</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">geoml.tftools</span><span class="w"> </span><span class="kn">import</span> <span class="n">prod_n</span> <span class="k">as</span> <span class="n">_prod_n</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">tensorflow</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_tf</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_np</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_Kernel</span><span class="p">(</span><span class="n">_gpr</span><span class="o">.</span><span class="n">Parametric</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">has_compact_support</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="bp">NotImplemented</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">implicit_matmul</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">coordinates</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Implicit matrix-vector multiplication.</span>
+
+<span class="sd">        Returns a function that multiplies the kernel&#39;s covariance matrix</span>
+<span class="sd">        (defined at the given coordinates) with a vector efficiently.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">raise</span> <span class="bp">NotImplemented</span>
+
+
+<div class="viewcode-block" id="Gaussian">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Gaussian">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Gaussian</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Gaussian kernel&quot;&quot;&quot;</span>
+<div class="viewcode-block" id="Gaussian.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Gaussian.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">3</span> <span class="o">*</span> <span class="n">x</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Spherical">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Spherical">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Spherical</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Spherical kernel&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">epsilon</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span> <span class="o">=</span> <span class="n">epsilon</span>  <span class="c1"># required to be able to compute gradients</span>
+
+<div class="viewcode-block" id="Spherical.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Spherical.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">-</span> <span class="mf">1.5</span> <span class="o">*</span> <span class="n">d</span> <span class="o">+</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">pow</span><span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">less</span><span class="p">(</span><span class="n">d</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">),</span> <span class="n">k</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">k</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">k</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Exponential">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Exponential">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Exponential</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Exponential kernel&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">epsilon</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span> <span class="o">=</span> <span class="n">epsilon</span>  <span class="c1"># required to be able to compute gradients</span>
+
+<div class="viewcode-block" id="Exponential.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Exponential.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">3</span> <span class="o">*</span> <span class="n">d</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Cubic">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Cubic">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Cubic</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Cubic kernel&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="kc">True</span>
+
+<div class="viewcode-block" id="Cubic.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Cubic.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">-</span> <span class="mi">7</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">pow</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span> <span class="o">+</span> <span class="mi">35</span> <span class="o">/</span> <span class="mi">4</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">pow</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> \
+            <span class="o">-</span> <span class="mi">7</span> <span class="o">/</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">pow</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span> <span class="o">+</span> <span class="mi">3</span> <span class="o">/</span> <span class="mi">4</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">pow</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mi">7</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">less</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">),</span> <span class="n">k</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">k</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">k</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Constant">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Constant">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Constant</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Constant kernel&quot;&quot;&quot;</span>
+<div class="viewcode-block" id="Constant.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Constant.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Constant.implicit_matmul">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Constant.implicit_matmul">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">implicit_matmul</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">coordinates</span><span class="p">):</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">matmul_fn</span><span class="p">(</span><span class="n">vector</span><span class="p">):</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">vector</span><span class="p">)</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">vector</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">result</span>
+
+        <span class="k">return</span> <span class="n">matmul_fn</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Cosine">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Cosine">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Cosine</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Cosine kernel&quot;&quot;&quot;</span>
+<div class="viewcode-block" id="Cosine.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Cosine.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">x</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Matern32">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Matern32">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Matern32</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<div class="viewcode-block" id="Matern32.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Matern32.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="mi">5</span><span class="o">*</span><span class="n">x</span><span class="p">)</span><span class="o">*</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">5</span><span class="o">*</span><span class="n">x</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Matern52">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Matern52">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Matern52</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+<div class="viewcode-block" id="Matern52.kernelize">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Matern52.kernelize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="mi">6</span><span class="o">*</span><span class="n">x</span> <span class="o">+</span> <span class="mi">12</span><span class="o">*</span><span class="n">x</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span><span class="o">*</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">6</span><span class="o">*</span><span class="n">x</span><span class="p">)</span></div>
+</div>
+
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">RationalQuadratic</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">scale</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;scale&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="n">scale</span><span class="p">,</span> <span class="mf">1e-3</span><span class="p">,</span> <span class="mi">100</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">alpha</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;scale&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+        <span class="n">cov</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="mi">3</span> <span class="o">*</span> <span class="n">x</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">/</span> <span class="n">alpha</span><span class="p">)</span> <span class="o">**</span> <span class="p">(</span><span class="o">-</span><span class="n">alpha</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">cov</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_RadialBasisFunction</span><span class="p">(</span><span class="n">_Kernel</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">max_distance</span><span class="p">,</span> <span class="n">epsilon</span><span class="o">=</span><span class="mf">1e-12</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span> <span class="o">=</span> <span class="n">max_distance</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span> <span class="o">=</span> <span class="n">epsilon</span>  <span class="c1"># required to be able to compute gradients</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">RBF3D</span><span class="p">(</span><span class="n">_RadialBasisFunction</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;RBF 3D&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">d</span><span class="o">**</span><span class="mi">3</span> <span class="o">+</span> <span class="mi">3</span> <span class="o">*</span> <span class="n">d</span><span class="o">**</span><span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span><span class="o">**</span><span class="mi">3</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">k</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span><span class="o">**</span><span class="mi">3</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">RBF2D</span><span class="p">(</span><span class="n">_RadialBasisFunction</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Thin plate spline RBF (2D)&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">d</span><span class="p">)</span> <span class="o">*</span> <span class="n">d</span> <span class="o">**</span> <span class="mi">2</span> \
+            <span class="o">-</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="mi">2</span><span class="o">*</span><span class="n">_np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span><span class="p">))</span> <span class="o">*</span> <span class="n">d</span><span class="o">**</span><span class="mi">2</span> \
+            <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span><span class="o">**</span><span class="mi">2</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">k</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span> <span class="o">**</span> <span class="mi">2</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">RBF1D</span><span class="p">(</span><span class="n">_RadialBasisFunction</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Cubic RBF (1D)&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kernelize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">x</span> <span class="o">**</span> <span class="mi">2</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">epsilon</span><span class="p">)</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="mi">2</span><span class="o">*</span><span class="n">d</span><span class="o">**</span><span class="mi">3</span> <span class="o">-</span> <span class="mi">3</span> <span class="o">*</span> <span class="n">d</span><span class="o">**</span><span class="mi">2</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span><span class="o">**</span><span class="mi">3</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">k</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_distance</span> <span class="o">**</span> <span class="mi">3</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_AbstractCovariance</span><span class="p">(</span><span class="n">_gpr</span><span class="o">.</span><span class="n">Parametric</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Abstract covariance function class&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">has_compact_support</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Computes point-point covariance matrix between x and y tensors.&quot;&quot;&quot;</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix_d1</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Computes point-direction covariance matrix between x and y tensors.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># if step is None:</span>
+        <span class="n">step</span> <span class="o">=</span> <span class="mf">1e-3</span>
+
+        <span class="n">min_coords</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_min</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">-</span> <span class="n">min_coords</span>
+        <span class="n">y</span> <span class="o">=</span> <span class="n">y</span> <span class="o">-</span> <span class="n">min_coords</span>
+
+        <span class="n">k1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">+</span> <span class="mf">0.5</span><span class="o">*</span><span class="n">step</span><span class="o">*</span><span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+        <span class="n">k2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">-</span> <span class="mf">0.5</span><span class="o">*</span><span class="n">step</span><span class="o">*</span><span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">k1</span> <span class="o">-</span> <span class="n">k2</span><span class="p">)</span><span class="o">/</span><span class="n">step</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix_d2</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Computes direction-direction covariance matrix between x and y tensors.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># if step is None:</span>
+        <span class="n">step</span> <span class="o">=</span> <span class="mf">1e-3</span>
+
+        <span class="n">min_coords</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_min</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">-</span> <span class="n">min_coords</span>
+        <span class="n">y</span> <span class="o">=</span> <span class="n">y</span> <span class="o">-</span> <span class="n">min_coords</span>
+
+        <span class="n">k1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">x</span> <span class="o">+</span> <span class="mf">0.5</span><span class="o">*</span><span class="n">step</span><span class="o">*</span><span class="n">dir_x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span>
+                                       <span class="n">l1_distance</span><span class="p">)</span>
+        <span class="n">k2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="mf">0.5</span><span class="o">*</span><span class="n">step</span><span class="o">*</span><span class="n">dir_x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span>
+                                       <span class="n">l1_distance</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">k1</span> <span class="o">-</span> <span class="n">k2</span><span class="p">)</span> <span class="o">/</span> <span class="n">step</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">point_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Computes the data points&#39; self variance (covariance between the point</span>
+<span class="sd">        and itself).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">self_covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">self_covariance_matrix_d2</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">point_variance_d2</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">step</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">step</span> <span class="o">=</span> <span class="mf">1e-3</span>
+
+        <span class="n">min_coords</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_min</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">-</span> <span class="n">min_coords</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">loop_fn</span><span class="p">(</span><span class="n">elems</span><span class="p">):</span>
+            <span class="n">y</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span><span class="n">elems</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">dir_y</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">expand_dims</span><span class="p">(</span><span class="n">elems</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="n">y</span> <span class="o">+</span> <span class="n">dir_y</span><span class="o">*</span><span class="n">step</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
+
+        <span class="n">cov_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">map_fn</span><span class="p">(</span><span class="n">loop_fn</span><span class="p">,</span> <span class="p">[</span><span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">,</span>
+                           <span class="n">parallel_iterations</span><span class="o">=</span><span class="mi">1000</span><span class="p">)</span>
+        <span class="n">cov_0</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">point_variance</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="n">cov_0</span> <span class="o">-</span> <span class="n">cov_2</span><span class="p">)</span> <span class="o">/</span> <span class="n">step</span><span class="o">**</span><span class="mi">2</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">implicit_matmul</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">coordinates</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Implicit matrix-vector multiplication.</span>
+
+<span class="sd">        Returns a function that multiplies the kernel&#39;s covariance matrix</span>
+<span class="sd">        (defined at the given coordinates) with a vector efficiently.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">sparse_covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Sparse covariance matrix.</span>
+
+<span class="sd">        The kernel must have compact support in order to build a sparse matrix.</span>
+<span class="sd">        The shorter the kernel range relative to the spatial region, the higher</span>
+<span class="sd">        the matrix&#39;s sparsity.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_compact_support</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">AssertionError</span><span class="p">(</span><span class="s2">&quot;kernel must have compact support&quot;</span><span class="p">)</span>
+
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;sparse_covariance_matrix&quot;</span><span class="p">):</span>
+            <span class="n">cov_mat</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+            <span class="n">cov_mat</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sparse</span><span class="o">.</span><span class="n">from_dense</span><span class="p">(</span><span class="n">cov_mat</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">cov_mat</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">self_full_directional_covariance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">ndim</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">x</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">n_data</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">x</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">ndim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="n">directions</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">eye</span><span class="p">,</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="n">n_data</span><span class="p">])</span>
+        <span class="n">directions</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">directions</span><span class="p">,</span> <span class="p">[</span><span class="n">n_data</span> <span class="o">*</span> <span class="n">ndim</span><span class="p">,</span> <span class="n">ndim</span><span class="p">])</span>
+        <span class="n">x_tile</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="p">[</span><span class="n">ndim</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+        <span class="n">cov_d0</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">self_covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+        <span class="n">cov_d1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x_tile</span><span class="p">,</span> <span class="n">directions</span><span class="p">)</span>
+        <span class="n">cov_d2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">self_covariance_matrix_d2</span><span class="p">(</span><span class="n">x_tile</span><span class="p">,</span> <span class="n">directions</span><span class="p">)</span>
+
+        <span class="n">full_cov</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">cov_d0</span><span class="p">,</span> <span class="n">cov_d1</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span>
+             <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">cov_d1</span><span class="p">),</span> <span class="n">cov_d2</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)],</span>
+            <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">full_cov</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">full_directional_covariance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">base</span><span class="p">):</span>
+        <span class="n">ndim</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">x</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">n_base</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">base</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">ndim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="n">directions</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">eye</span><span class="p">,</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="n">n_base</span><span class="p">])</span>
+        <span class="n">directions</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">directions</span><span class="p">,</span> <span class="p">[</span><span class="n">n_base</span> <span class="o">*</span> <span class="n">ndim</span><span class="p">,</span> <span class="n">ndim</span><span class="p">])</span>
+
+        <span class="n">cov_d0</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">base</span><span class="p">)</span>
+
+        <span class="n">base</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="p">[</span><span class="n">ndim</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+        <span class="n">cov_d1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">base</span><span class="p">,</span> <span class="n">directions</span><span class="p">)</span>
+
+        <span class="n">full_cov</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">cov_d0</span><span class="p">,</span> <span class="n">cov_d1</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">full_cov</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">full_directional_covariance_d1</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">directions</span><span class="p">,</span> <span class="n">base</span><span class="p">):</span>
+        <span class="n">ndim</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">x</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">n_base</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">base</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="n">ndim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="n">base_directions</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">eye</span><span class="p">,</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="n">n_base</span><span class="p">])</span>
+        <span class="n">base_directions</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">base_directions</span><span class="p">,</span> <span class="p">[</span><span class="n">n_base</span> <span class="o">*</span> <span class="n">ndim</span><span class="p">,</span> <span class="n">ndim</span><span class="p">])</span>
+
+        <span class="n">cov_d1</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">directions</span><span class="p">))</span>
+
+        <span class="n">base</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">base</span><span class="p">,</span> <span class="p">[</span><span class="n">ndim</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+        <span class="n">cov_d2</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance_matrix_d2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">base</span><span class="p">,</span> <span class="n">directions</span><span class="p">,</span> <span class="n">base_directions</span><span class="p">)</span>
+
+        <span class="n">full_cov</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">cov_d1</span><span class="p">,</span> <span class="n">cov_d2</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">full_cov</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Covariance</span><span class="p">(</span><span class="n">_AbstractCovariance</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Covariance that acts on actual coordinates&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">kernel</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="n">_gt</span><span class="o">.</span><span class="n">Identity</span><span class="p">()):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">kernel</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transform</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">transform</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span><span class="o">.</span><span class="n">has_compact_support</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">+</span> <span class="s2">&quot;_cov&quot;</span><span class="p">):</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+            <span class="n">y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">y</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">l1_distance</span><span class="p">:</span>
+                <span class="n">d</span> <span class="o">=</span> <span class="n">_pairwise_dist_l1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">d</span> <span class="o">=</span> <span class="n">_pairwise_dist</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+            <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span><span class="o">.</span><span class="n">kernelize</span><span class="p">(</span><span class="n">d</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">point_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Kernel_point_var&quot;</span><span class="p">):</span>
+            <span class="n">v</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">shape</span><span class="p">(</span><span class="n">x</span><span class="p">)[</span><span class="mi">0</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">v</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">pretty_print</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">depth</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_compact_support</span><span class="p">:</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (compact)&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="n">depth</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">parameter</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="n">name</span> <span class="o">+</span> <span class="s2">&quot;: &quot;</span> \
+                 <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">parameter</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">())</span>
+            <span class="k">if</span> <span class="n">parameter</span><span class="o">.</span><span class="n">fixed</span><span class="p">:</span>
+                <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (fixed)&quot;</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="n">pretty_print</span><span class="p">(</span><span class="n">depth</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">s</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">implicit_matmul</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">coordinates</span><span class="p">):</span>
+        <span class="n">cov_mat</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">self_covariance_matrix</span><span class="p">(</span><span class="n">coordinates</span><span class="p">)</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">matmul_fn</span><span class="p">(</span><span class="n">vector</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">cov_mat</span><span class="p">,</span> <span class="n">vector</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">matmul_fn</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">feature_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">()</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_NodeCovariance</span><span class="p">(</span><span class="n">_AbstractCovariance</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;A covariance operation on another covariance&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">components</span> <span class="o">=</span> <span class="n">args</span>
+        <span class="k">for</span> <span class="n">arg</span> <span class="ow">in</span> <span class="n">args</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">arg</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_operation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arg_list</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">kernel</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+             <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix_d1</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">kernel</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+             <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix_d2</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">kernel</span><span class="o">.</span><span class="n">covariance_matrix_d2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">dir_y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+             <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">point_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="n">v</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">kernel</span><span class="o">.</span><span class="n">point_variance</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">v</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">self_covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">kernel</span><span class="o">.</span><span class="n">self_covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+             <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">self_covariance_matrix_d2</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">kernel</span><span class="o">.</span><span class="n">self_covariance_matrix_d2</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span>
+             <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">pretty_print</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">depth</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_compact_support</span><span class="p">:</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (compact)&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">parameter</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="n">name</span> <span class="o">+</span> <span class="s2">&quot;: &quot;</span> \
+                 <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">parameter</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">())</span>
+            <span class="k">if</span> <span class="n">parameter</span><span class="o">.</span><span class="n">fixed</span><span class="p">:</span>
+                <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (fixed)&quot;</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">:</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="n">kernel</span><span class="o">.</span><span class="n">pretty_print</span><span class="p">(</span><span class="n">depth</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">s</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">comp</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">:</span>
+            <span class="n">comp</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">implicit_matmul</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">coordinates</span><span class="p">,</span>
+                        <span class="n">points_to_honor</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">funs</span> <span class="o">=</span> <span class="p">[</span><span class="n">comp</span><span class="o">.</span><span class="n">implicit_matmul</span><span class="p">(</span><span class="n">coordinates</span><span class="p">,</span> <span class="n">points_to_honor</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">comp</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">]</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">matmul_fn</span><span class="p">(</span><span class="n">vector</span><span class="p">):</span>
+            <span class="n">results</span> <span class="o">=</span> <span class="p">[</span><span class="n">fun</span><span class="p">(</span><span class="n">vector</span><span class="p">)</span> <span class="k">for</span> <span class="n">fun</span> <span class="ow">in</span> <span class="n">funs</span><span class="p">]</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_operation</span><span class="p">(</span><span class="n">results</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">matmul_fn</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_WrapperCovariance</span><span class="p">(</span><span class="n">_AbstractCovariance</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">base_covariance</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">base_covariance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">base_covariance</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_covariance</span><span class="o">.</span><span class="n">has_compact_support</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">pretty_print</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">depth</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_compact_support</span><span class="p">:</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (compact)&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="n">depth</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">parameter</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;  &quot;</span> <span class="o">*</span> <span class="n">depth</span> <span class="o">+</span> <span class="n">name</span> <span class="o">+</span> <span class="s2">&quot;: &quot;</span> \
+                 <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">parameter</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">())</span>
+            <span class="k">if</span> <span class="n">parameter</span><span class="o">.</span><span class="n">fixed</span><span class="p">:</span>
+                <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot; (fixed)&quot;</span>
+            <span class="n">s</span> <span class="o">+=</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_covariance</span><span class="o">.</span><span class="n">pretty_print</span><span class="p">(</span><span class="n">depth</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">s</span>
+
+
+<div class="viewcode-block" id="Linear">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Linear">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Linear</span><span class="p">(</span><span class="n">_AbstractCovariance</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Linear covariance&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="n">_gt</span><span class="o">.</span><span class="n">Identity</span><span class="p">()):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">transform</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">transform</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Linear.covariance_matrix">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Linear.covariance_matrix">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Linear_cov&quot;</span><span class="p">):</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+            <span class="n">y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">y</span><span class="p">)</span>
+            <span class="n">k</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">k</span></div>
+
+
+<div class="viewcode-block" id="Linear.point_variance">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Linear.point_variance">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">point_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Linear_point_var&quot;</span><span class="p">):</span>
+            <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+            <span class="n">v</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">pow</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">v</span></div>
+
+
+<div class="viewcode-block" id="Linear.implicit_matmul">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Linear.implicit_matmul">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">implicit_matmul</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">coordinates</span><span class="p">):</span>
+        <span class="k">def</span><span class="w"> </span><span class="nf">matmul_fn</span><span class="p">(</span><span class="n">vector</span><span class="p">):</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">coordinates</span><span class="p">,</span> <span class="n">vector</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">coordinates</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">result</span>
+
+        <span class="k">return</span> <span class="n">matmul_fn</span></div>
+
+
+<div class="viewcode-block" id="Linear.feature_matrix">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Linear.feature_matrix">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">feature_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="Sum">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Sum">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Sum</span><span class="p">(</span><span class="n">_NodeCovariance</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Kernel sum&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">):</span>
+        <span class="n">n_comp</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">args</span><span class="p">)</span>
+        <span class="n">v</span> <span class="o">=</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">CompositionalParameter</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="n">n_comp</span><span class="p">],</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">/</span><span class="n">n_comp</span><span class="p">)</span>
+
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;variance&quot;</span><span class="p">:</span> <span class="n">v</span><span class="p">}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_all_parameters</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">v</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="nb">all</span><span class="p">([</span><span class="n">kernel</span><span class="o">.</span><span class="n">has_compact_support</span>
+                                         <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="n">args</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_operation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arg_list</span><span class="p">):</span>
+        <span class="n">k</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">arg_list</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">comp</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">arg_list</span><span class="p">):</span>
+            <span class="n">k</span> <span class="o">=</span> <span class="n">k</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;variance&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="n">comp</span>
+        <span class="k">return</span> <span class="n">k</span></div>
+
+
+
+<div class="viewcode-block" id="Product">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Product">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Product</span><span class="p">(</span><span class="n">_NodeCovariance</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Kernel product&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_has_compact_support</span> <span class="o">=</span> <span class="nb">any</span><span class="p">([</span><span class="n">kernel</span><span class="o">.</span><span class="n">has_compact_support</span>
+                                         <span class="k">for</span> <span class="n">kernel</span> <span class="ow">in</span> <span class="n">args</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_operation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">arg_list</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">_prod_n</span><span class="p">(</span><span class="n">arg_list</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="Scale">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Scale">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Scale</span><span class="p">(</span><span class="n">_WrapperCovariance</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Kernel scaling&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">base_covariance</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">base_covariance</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;amplitude&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="mf">1.0</span><span class="p">,</span> <span class="mf">1e-4</span><span class="p">,</span> <span class="mf">1e4</span><span class="p">))</span>
+
+<div class="viewcode-block" id="Scale.covariance_matrix">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Scale.covariance_matrix">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amplitude&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span> \
+               <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_covariance</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">l1_distance</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Scale.point_variance">
+<a class="viewcode-back" href="../../geoml.html#geoml.kernels.Scale.point_variance">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">point_variance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amplitude&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span> \
+               <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_covariance</span><span class="o">.</span><span class="n">point_variance</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Ítalo Gomes Gonçalves.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

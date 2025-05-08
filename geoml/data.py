@@ -739,7 +739,7 @@ class _Component(_Variable):
             sim.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
-                      simulations=False):
+                      simulations=False, **kwargs):
         df = _pd.DataFrame({})
 
         if probability:
