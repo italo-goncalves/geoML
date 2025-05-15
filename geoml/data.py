@@ -1694,7 +1694,7 @@ class PointData(_PointBased):
             coordinates = [coordinates]
 
         self.coordinate_labels = coordinates
-        self.coordinates = _np.array(data.loc[:, coordinates], ndmin=2)
+        self.coordinates = _np.array(data.loc[:, coordinates], ndmin=2, dtype=float)
 
         self._n_dim = self.coordinates.shape[1]
         self._n_data = self.coordinates.shape[0]

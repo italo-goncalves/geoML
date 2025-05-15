@@ -2251,3 +2251,190 @@ class MultiStructureFastGP(FastGP):
             cov = _tf.add_n(cov_mats)
             return cov
 
+
+class GradientConstrainedInput(_RootLatentVariable):
+    def __init__(self, inducing_points, directional_data,
+                 covariance, size=1, fix_covariance=False):
+        super().__init__()
+
+        # Root node setup
+        self._size = size
+        self.root_size = inducing_points.n_dim
+        self.bounding_box = inducing_points.bounding_box
+
+        self.covariance = self._register(covariance)
+        self.covariance.set_limits(inducing_points)
+        if fix_covariance:
+            for p in self.covariance.all_parameters:
+                p.fix()
+
+        self.base_inducing_points = _tf.constant(
+            _np.unique(
+                _np.concatenate([inducing_points.coordinates, directional_data.coordinates]),
+                axis=0
+            ),
+            dtype=_tf.float64
+        )
+        self.n_ip = int(self.base_inducing_points.shape[0])
+
+        self.directional_data = directional_data
+        self.n_dir = self.directional_data.n_data
+
+        # GP setup
+        self.scale = None
+        self.cov = None
+        self.cov_inv = None
+        self.cov_chol = None
+        self.cov_smooth = None
+        self.cov_smooth_chol = None
+        self.cov_smooth_inv = None
+        self.chol_r = None
+        self.alpha = None
+
+        self.prior_cov = None
+        self.prior_cov_inv = None
+        self.prior_cov_chol = None
+
+        self._set_parameters()
+
+    def _set_parameters(self):
+        n_ip = self.n_ip
+        self._add_parameter(
+            "mean",
+            _gpr.RealParameter(
+                _np.random.normal(
+                    scale=1e-3,
+                    size=[self.size, n_ip, 1]
+                ),
+                # _np.ones([self.size, n_ip, 1])*0.1,
+                _np.zeros([self.size, n_ip, 1]) - 10,
+                _np.zeros([self.size, n_ip, 1]) + 10
+            ))
+        self._add_parameter(
+            "delta",
+            _gpr.PositiveParameter(
+                _np.ones([self.size, n_ip]) * 0.01,
+                _np.ones([self.size, n_ip]) * 1e-6,
+                _np.ones([self.size, n_ip]) * 1e2
+            ))
+
+    def get_root_inducing_points(self):
+        ip = self.base_inducing_points
+        return ip, _tf.zeros_like(ip)
+
+    def refresh(self, jitter=1e-9):
+        with _tf.name_scope("constrained_input_refresh"):
+            # constrained prior
+            ip = self.base_inducing_points
+            dir_coords = _tf.constant(self.directional_data.coordinates, _tf.float64)
+            dirs = _tf.constant(self.directional_data.directions, _tf.float64)
+
+            base_cov = self.covariance.self_covariance_matrix(ip)
+            cross_cov = self.covariance.covariance_matrix_d1(ip, dir_coords, dirs)
+            dir_cov = self.covariance.self_covariance_matrix_d2(dir_coords, dirs)
+
+            full_cov = _tf.concat([
+                _tf.concat([base_cov, cross_cov], axis=1),
+                _tf.concat([_tf.transpose(cross_cov), dir_cov], axis=1)
+            ], axis=0)
+            self.scale = _tf.sqrt(_tf.linalg.diag_part(full_cov))
+            full_cov = full_cov / self.scale[:, None] / self.scale[None, :]
+
+            eye = _tf.eye(self.n_ip + self.n_dir, dtype=_tf.float64)
+
+            cov = full_cov + eye * jitter
+            chol = _tf.linalg.cholesky(cov)
+            cov_inv = _tf.linalg.cholesky_solve(chol, eye)
+
+            self.cov = cov
+            self.cov_chol = chol
+            self.cov_inv = cov_inv
+
+            # posterior
+            eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
+            delta = self.parameters["delta"].get_value()
+            delta = _tf.concat([
+                delta, _tf.zeros([self.size, self.n_dir], dtype=_tf.float64)
+            ], axis=1)
+            delta_diag = _tf.linalg.diag(delta)
+            self.cov_smooth = self.cov[None, :, :] + delta_diag
+            self.cov_smooth_chol = _tf.linalg.cholesky(
+                self.cov_smooth + eye * jitter)
+            self.cov_smooth_inv = _tf.linalg.cholesky_solve(
+                self.cov_smooth_chol, eye)
+            self.chol_r = _tf.linalg.cholesky(
+                self.cov_inv[None, :, :] - self.cov_smooth_inv + eye * jitter)
+
+            # inducing points
+            mean = self.parameters["mean"].get_value()
+            mean = _tf.concat([mean, _tf.zeros([self.size, self.n_dir, 1], dtype=_tf.float64)], axis=1)
+            self.inducing_points = _tf.transpose(mean[:, :self.n_ip, 0])
+            self.alpha = _tf.einsum("ab,sbc->sac", self.cov_inv, mean)
+
+            pred_var = 1.0 - _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", self.cov, self.cov_smooth_inv)
+                * self.cov[None, :, :],
+                axis=2, keepdims=False
+            )
+            self.inducing_points_variance = _tf.transpose(pred_var)[:, :self.n_ip]
+
+    def propagate(self, x, x_var=None):
+        mu, var = self.predict(x, x_var, n_sim=0)
+        mu = _tf.transpose(mu[:, :, 0])
+        var = _tf.transpose(var)
+        return mu, var
+
+    def kl_divergence(self):
+        with _tf.name_scope("constrained_KL_divergence"):
+            delta = self.parameters["delta"].get_value()
+            mean = self.parameters["mean"].get_value()
+
+            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov[None, :, :])
+            fit = _tf.reduce_sum(mean * self.alpha[:, :self.n_ip, :])
+            det_1 = 2 * _tf.reduce_sum(_tf.math.log(
+                _tf.linalg.diag_part(self.cov_smooth_chol)))
+            det_2 = _tf.reduce_sum(_tf.math.log(delta))
+            kl = 0.5 * (- tr + fit + det_1 - det_2)
+
+            return kl
+
+    def set_parameter_limits(self, data):
+        self.covariance.set_limits(data)
+
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        with _tf.name_scope("constrained_root_prediction"):
+            cov_cross = _tf.concat([
+                self.covariance.covariance_matrix(x, self.base_inducing_points),
+                self.covariance.covariance_matrix_d1(
+                    x, self.directional_data.coordinates, self.directional_data.directions
+                )
+            ], axis=1)
+            cov_cross = cov_cross / self.scale[None, :]
+
+            mu = _tf.einsum("ab,sbc->sac", cov_cross, self.alpha)
+
+            explained_var = _tf.reduce_sum(
+                _tf.einsum("ab,sbc->sac", cov_cross, self.cov_smooth_inv)
+                * cov_cross[None, :, :],
+                axis=2, keepdims=False)
+            var = _tf.maximum(1.0 - explained_var, 0.0)
+
+            influence = _tf.reduce_sum(
+                _tf.matmul(cov_cross, self.cov_inv) * cov_cross,
+                axis=1, keepdims=False)
+            influence = _tf.tile(influence[None, :], [self.size, 1])
+
+            if n_sim > 0:
+                rnd = _tf.random.stateless_normal(
+                    shape=[self.size, self.n_ip + self.n_dir, n_sim],
+                    seed=seed, dtype=_tf.float64
+                )
+                sims = _tf.einsum(
+                    "ab,sbc->sac",
+                    cov_cross,
+                    _tf.matmul(self.chol_r, rnd)) + mu
+
+                return mu, var, sims, explained_var, influence
+
+            else:
+                return mu, var

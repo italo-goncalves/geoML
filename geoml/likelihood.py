@@ -1384,12 +1384,20 @@ class _CompositionalLikelihood(_Likelihood):
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
 
-    def white_noise(self, shape, seed):
-        n_data = shape[0]
+    def white_noise(self, shape, seed, coherent_noise=False, **kwargs):
+        n_data = shape[0] if not coherent_noise else 1
+        n_var = shape[1]
         n_samples = shape[2]
-        dist = self._make_distribution(_tf.zeros(n_data, _tf.float64))
-        sample = dist.sample(n_samples, seed=seed)  # [n_var, n_data, n_samples] ?
-        return _tf.transpose(sample, [2, 0, 1])
+
+        dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
+
+        if coherent_noise:
+            rnd = _tf.random.stateless_uniform([n_data, n_var, n_samples], seed=[seed, 0], dtype=_tf.float64)
+        else:
+            rnd = _tf.random.uniform([n_data, n_var, n_samples], seed=seed, dtype=_tf.float64)
+            
+        sample = dist.quantile(rnd)
+        return sample
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
@@ -1419,7 +1427,8 @@ class _CompositionalLikelihood(_Likelihood):
         return lik
 
     def predict(self, mu, var, sims, explained_var,
-                *args, quantiles=None, include_noise=True, **kwargs):
+                *args, quantiles=None, include_noise=True,
+                **kwargs):
         basis = self.parameters["basis"].get_value()
         rotated_contrast = _tf.matmul(basis, self.contrast, True)
 
@@ -1429,30 +1438,40 @@ class _CompositionalLikelihood(_Likelihood):
         explained_var = _tf.matmul(explained_var, rotated_contrast ** 2)
 
         if include_noise:
-            sims = sims + self.white_noise(_tf.shape(sims), seed=1234)
+            coherent_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=True)
+            rough_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=False)
+        else:
+            coherent_sims = sims
+            rough_sims = sims
 
-        # backward warping
-        sims = _tf.split(sims, self.size, axis=1)
-        sims = [wp.backward(s[:, 0, :]) for wp, s in zip(self.warpings, sims)]
-        sims = _tf.stack(sims, axis=1)
+        def reverse_comp(x):
+            # backward warping
+            x = _tf.split(x, self.size, axis=1)
+            x = [wp.backward(s[:, 0, :]) for wp, s in zip(self.warpings, x)]
+            x = _tf.stack(x, axis=1)
 
-        # reverse ilr
-        sims_clr = _tf.einsum("nij,ik->nkj", sims, rotated_contrast)
-        sims_simplex = _tf.nn.softmax(sims_clr, axis=1)
+            # reverse ilr
+            sims_clr = _tf.einsum("nij,ik->nkj", x, rotated_contrast)
+            sims_simplex = _tf.nn.softmax(sims_clr, axis=1)
+
+            return sims_simplex
+
+        coherent_sims = reverse_comp(coherent_sims)
+        rough_sims = reverse_comp(rough_sims)
 
         # average composition (euclidean)
         # avg = _tf.reduce_mean(sims_clr, axis=2)
         # prob = _tf.nn.softmax(avg, axis=1)
 
         # average composition (simplex)
-        prob = _tf.reduce_mean(sims_simplex, axis=2)
+        prob = _tf.reduce_mean(coherent_sims, axis=2)
 
         weights = _tf.reduce_sum(explained_var, axis=1) \
                   / (_tf.reduce_sum(var, axis=1) + 1e-6)
 
         out = {"mean": mu,
                "variance": var,
-               "simulations": sims_simplex,
+               "simulations": rough_sims,
                "probability": prob,
                "weights": weights}
 
@@ -1605,8 +1624,12 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
         x = _tf.where(_tf.greater(p, p_2), val_3, x)
         return x
 
-    def white_noise(self, shape, seed):
-        rnd = _tf.random.uniform(shape, minval=0.0, maxval=1.0, seed=seed, dtype=_tf.float64)
+    def white_noise(self, shape, seed, coherent_noise=False, **kwargs):
+        if coherent_noise:
+            rnd = _tf.random.stateless_uniform([1, shape[2]], minval=0.0, maxval=1.0, seed=[seed, 0], dtype=_tf.float64)
+        else:
+            rnd = _tf.random.uniform(shape, minval=0.0, maxval=1.0, seed=seed, dtype=_tf.float64)
+
         sample = self.inv_cdf(rnd)
         return sample
 
