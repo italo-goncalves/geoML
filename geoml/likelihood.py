@@ -219,7 +219,7 @@ class _ContinuousLikelihood(_Likelihood):
 
         out = {"mean": _tf.squeeze(mu),
                "variance": _tf.squeeze(var),
-               "simulations": self.warping.backward(sims[:, 0, :]),
+               "simulations": self.warping.backward(sims),
                "weights": _tf.squeeze(weights),
                }
 
