@@ -26,15 +26,36 @@ import numpy as _np
 import tensorflow as _tf
 
 
+class NodeIncompatibilityError(Exception):
+    """Exception raised for incompatibilities between a node and its parents/children."""
+    pass
+
+
+class BrokenPropagationError(NodeIncompatibilityError):
+    """Exception raised when inducing points can't be propagated through nodes."""
+    pass
+
+
+class SizeIncompatibilityError(NodeIncompatibilityError):
+    """Exception raised for incompatibilities in the number of latent variables in nodes."""
+    pass
+
+
 class _LatentVariable(_gpr.Parametric):
     def __init__(self):
         super().__init__()
         self._size = 0
+
+        # These attributes must be defined by subclasses. The `root` is a reference to the object's root
+        # traced along the tree. Nodes whose parents have different inducing point sets do not have a
+        # traceable root.
         self.children = []
         self.root = None
+        self.propagates_inducing_points = None
+
+        # These are TensorFlow attributes, defined at graph execution time
         self.inducing_points = None
         self.inducing_points_variance = None
-        # self._is_deterministic = []
 
     def __repr__(self):
         s = self.__class__.__name__ + "\n"
@@ -84,6 +105,7 @@ class _RootLatentVariable(_LatentVariable):
     def __init__(self):
         super().__init__()
         self.root = self
+        self.propagates_inducing_points = True
 
     def get_unique_parents(self):
         return []
@@ -98,6 +120,7 @@ class _FunctionalLatentVariable(_LatentVariable):
         self.parent = self._register(parent)
         parent.children.append(self)
         self.root = parent.root
+        self.propagates_inducing_points = self.parent.propagates_inducing_points
 
     def get_unique_parents(self):
         return [self.parent] + self.parent.get_unique_parents()
@@ -111,15 +134,22 @@ class _FunctionalLatentVariable(_LatentVariable):
     def set_parameter_limits(self, data):
         self.parent.set_parameter_limits(data)
 
+    def refresh(self, jitter=1e-9):
+        self.parent.refresh(jitter)
+
 
 class _Operation(_LatentVariable):
     def __init__(self, *latent_variables):
         super().__init__()
         self.parents = list(latent_variables)
-        self.root = latent_variables[0].root
-        for lat in latent_variables:
-            self._register(lat)
-            lat.children.append(self)
+
+        self.same_root = all(node is latent_variables[0] for node in latent_variables)
+        if self.same_root:
+            self.root = latent_variables[0].root
+
+        for node in latent_variables:
+            self._register(node)
+            node.children.append(self)
 
     def get_unique_parents(self):
         all_parents = self.parents.copy()
@@ -133,6 +163,11 @@ class _Operation(_LatentVariable):
 
 
 class _GPNode(_FunctionalLatentVariable):
+    def __init__(self, parent):
+        super().__init__(parent)
+        if not self.propagates_inducing_points:
+            raise BrokenPropagationError('GP nodes require their parent to propagate inducing points.')
+
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         with _tf.name_scope("gp_prediction"):
             x, x_var = self.parent.propagate(x, x_var)
@@ -219,11 +254,10 @@ class BasicInput(_RootLatentVariable):
         return mu[:, :, None], _tf.zeros_like(mu), _tf.zeros_like(mu)
 
 
-class Concatenate(_Operation):
+class Stack(_Operation):
     def __init__(self, *latent_variables):
         super().__init__(*latent_variables)
         self._size = sum([p.size for p in self.parents])
-        self.root = latent_variables[0].root
 
     def propagate(self, x, x_var=None):
         means, variances = [], []
@@ -239,13 +273,6 @@ class Concatenate(_Operation):
     def refresh(self, jitter=1e-9):
         for lat in self.parents:
             lat.refresh(jitter)
-        if all([lat.inducing_points is not None for lat in self.parents]):
-            self.inducing_points = _tf.concat(
-                [lat.inducing_points for lat in self.parents],
-                axis=1)
-            self.inducing_points_variance = _tf.concat(
-                [lat.inducing_points_variance for lat in self.parents],
-                axis=1)
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
@@ -278,6 +305,23 @@ class Concatenate(_Operation):
             mean = _tf.concat(means, axis=0)
             var = _tf.concat(variances, axis=0)
             return mean, var
+
+
+class Concatenate(Stack):
+    def __init__(self, *latent_variables):
+        super().__init__(*latent_variables)
+        if self.same_root:
+            self.propagates_inducing_points = True
+
+    def refresh(self, jitter=1e-9):
+        for lat in self.parents:
+            lat.refresh(jitter)
+        self.inducing_points = _tf.concat(
+            [lat.inducing_points for lat in self.parents],
+            axis=1)
+        self.inducing_points_variance = _tf.concat(
+            [lat.inducing_points_variance for lat in self.parents],
+            axis=1)
 
 
 class BasicGP(_GPNode):
@@ -593,7 +637,7 @@ class Linear(_FunctionalLatentVariable):
 
         self.parent.refresh(jitter)
 
-        if self.parent.inducing_points is not None:
+        if self.propagates_inducing_points:
             ip = self.parent.inducing_points
             ip_var = self.parent.inducing_points_variance
 
@@ -652,12 +696,14 @@ class SelectInput(_FunctionalLatentVariable):
 
     def refresh(self, jitter=1e-9):
         self.parent.refresh(jitter)
-        self.inducing_points = _tf.gather(
-            self.parent.inducing_points,
-            self.columns, axis=1)
-        self.inducing_points_variance = _tf.gather(
-            self.parent.inducing_points_variance,
-            self.columns, axis=1)
+
+        if self.propagates_inducing_points:
+            self.inducing_points = _tf.gather(
+                self.parent.inducing_points,
+                self.columns, axis=1)
+            self.inducing_points_variance = _tf.gather(
+                self.parent.inducing_points_variance,
+                self.columns, axis=1)
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
@@ -683,7 +729,9 @@ class LinearCombination(_Operation):
         super().__init__(*latent_variables)
         sizes = [p.size for p in self.parents]
         if not all(s == sizes[0] for s in sizes):
-            raise ValueError("all parents must have the same size")
+            raise SizeIncompatibilityError(
+                f"All parents must have the same size. Found {sizes}."
+            )
 
         self._size = sizes[0]
 
@@ -707,7 +755,7 @@ class LinearCombination(_Operation):
         for lat in self.parents:
             lat.refresh(jitter)
 
-        if all([lat.inducing_points is not None for lat in self.parents]):
+        if self.propagates_inducing_points:
             weights = self.parameters["weights"].get_value()[:, None, None]
             ip = _tf.stack([lat.inducing_points for lat in self.parents],
                            axis=0)
@@ -793,9 +841,12 @@ class ProductOfExperts(_Operation):
         super().__init__(*latent_variables)
         sizes = [p.size for p in self.parents]
         if not all(s == sizes[0] for s in sizes):
-            raise ValueError("all parents must have the same size")
+            raise SizeIncompatibilityError(
+                f"All parents must have the same size. Found {sizes}."
+            )
 
         self._size = sizes[0]
+        self.propagates_inducing_points = False
 
     def refresh(self, jitter=1e-9):
         for lat in self.parents:
@@ -875,25 +926,26 @@ class Exponentiation(_FunctionalLatentVariable):
         self._add_parameter(
             "amp_scale", _gpr.PositiveParameter(0.25, 0.01, 10))
         self._size = parent.size
+        self.propagates_inducing_points = False
 
-    def refresh(self, jitter=1e-9):
-        amp_mean = self.parameters["amp_mean"].get_value()
-        amp_scale = self.parameters["amp_scale"].get_value()
+    # def refresh(self, jitter=1e-9):
+        # amp_mean = self.parameters["amp_mean"].get_value()
+        # amp_scale = self.parameters["amp_scale"].get_value()
 
-        self.parent.refresh(jitter)
+        # self.parent.refresh(jitter)
 
-        if self.parent.inducing_points is not None:
-            ip = self.parent.inducing_points
-            ip_var = self.parent.inducing_points_variance
-
-            ip = ip * _tf.sqrt(amp_scale) + amp_mean
-            ip_var = ip_var * amp_scale
-
-            amp_mu = _tf.exp(ip) * (1 + 0.5 * ip_var)
-            amp_var = _tf.exp(2 * ip) * ip_var * (1 + ip_var)
-
-            self.inducing_points = amp_mu
-            self.inducing_points_variance = amp_var
+        # if self.parent.inducing_points is not None:
+        #     ip = self.parent.inducing_points
+        #     ip_var = self.parent.inducing_points_variance
+        #
+        #     ip = ip * _tf.sqrt(amp_scale) + amp_mean
+        #     ip_var = ip_var * amp_scale
+        #
+        #     amp_mu = _tf.exp(ip) * (1 + 0.5 * ip_var)
+        #     amp_var = _tf.exp(2 * ip) * ip_var * (1 + ip_var)
+        #
+        #     self.inducing_points = amp_mu
+        #     self.inducing_points_variance = amp_var
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
@@ -932,36 +984,18 @@ class Exponentiation(_FunctionalLatentVariable):
 
                 return amp_mu, amp_var
 
-    def predict_directions(self, x, dir_x, step=1e-3):
-        with _tf.name_scope("exponentiation_prediction"):
-            amp_mean = self.parameters["amp_mean"].get_value()
-            amp_scale = self.parameters["amp_scale"].get_value()
-
-            mu, var, explained_var = self.parent.predict_directions(
-                x, dir_x, step)
-
-            mu = mu * _tf.sqrt(amp_scale) + amp_mean
-            var = var * amp_scale
-            explained_var = explained_var * amp_scale
-
-            amp_mu = _tf.exp(mu) * (1 + 0.5 * var)
-            amp_var = _tf.exp(2 * mu) * var * (1 + var)
-            amp_explained_var = _tf.exp(2 * mu) \
-                                * (var + explained_var) \
-                                * (1 + var + explained_var) \
-                                - amp_var
-
-            return amp_mu, amp_var, amp_explained_var
-
 
 class Multiply(_Operation):
     def __init__(self, *latent_variables):
         super().__init__(*latent_variables)
         sizes = [p.size for p in self.parents]
         if not all(s == sizes[0] for s in sizes):
-            raise ValueError("all parents must have the same size")
+            raise SizeIncompatibilityError(
+                f"All parents must have the same size. Found {sizes}."
+            )
 
         self._size = sizes[0]
+        self.propagates_inducing_points = False
 
     def refresh(self, jitter=1e-9):
         for lat in self.parents:
@@ -1040,25 +1074,28 @@ class Add(_Operation):
         super().__init__(*latent_variables)
         sizes = [p.size for p in self.parents]
         if not all(s == sizes[0] for s in sizes):
-            raise ValueError("all parents must have the same size")
+            raise SizeIncompatibilityError(
+                f"All parents must have the same size. Found {sizes}."
+            )
 
         self._size = sizes[0]
+        self.propagates_inducing_points = self.same_root and all([p.propagates_inducing_points for p in self.parents])
 
     def refresh(self, jitter=1e-9):
         for lat in self.parents:
             lat.refresh(jitter)
 
-        # if all([lat.inducing_points is not None for lat in self.parents]):
-        #     ip = _tf.stack([lat.inducing_points for lat in self.parents],
-        #                    axis=0)
-        #     ip = _tf.reduce_sum(ip, axis=0)
-        #
-        #     ip_var = _tf.stack(
-        #         [lat.inducing_points_variance for lat in self.parents], axis=0)
-        #     ip_var = _tf.reduce_sum(ip_var, axis=0)
-        #
-        #     self.inducing_points = ip
-        #     self.inducing_points_variance = ip_var
+        if self.propagates_inducing_points:
+            ip = _tf.stack([lat.inducing_points for lat in self.parents],
+                           axis=0)
+            ip = _tf.reduce_sum(ip, axis=0)
+
+            ip_var = _tf.stack(
+                [lat.inducing_points_variance for lat in self.parents], axis=0)
+            ip_var = _tf.reduce_sum(ip_var, axis=0)
+
+            self.inducing_points = ip
+            self.inducing_points_variance = ip_var
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         all_mu = []
@@ -1156,7 +1193,7 @@ class Bias(_FunctionalLatentVariable):
 
         self.parent.refresh(jitter)
 
-        if self.parent.inducing_points is not None:
+        if self.propagates_inducing_points:
             self.inducing_points = self.parent.inducing_points + bias
             self.inducing_points_variance = \
                 self.parent.inducing_points_variance
@@ -1203,7 +1240,7 @@ class Scale(_FunctionalLatentVariable):
 
         self.parent.refresh(jitter)
 
-        if self.parent.inducing_points is not None:
+        if self.propagates_inducing_points:
             self.inducing_points = self.parent.inducing_points \
                                    * _tf.sqrt(scale)
             self.inducing_points_variance = \
@@ -1311,7 +1348,7 @@ class RadialTrend(_FunctionalLatentVariable):
     def refresh(self, jitter=1e-9):
         self.parent.refresh(jitter)
 
-        if self.parent.inducing_points is not None:
+        if propagates_inducing_points:
             ip = self.parent.inducing_points
             ip_var = self.parent.inducing_points_variance
 
@@ -1356,8 +1393,9 @@ class GPWalk(_FunctionalLatentVariable):
         super().__init__(parent)
 
         if parent.size != parent.parent.size:
-            raise ValueError("parent node must have the same size as "
-                             "its own parent")
+            raise SizeIncompatibilityError(
+                f"Parent node must have the same size as its own parent. Found {parent.size} and {parent.parent.size}."
+            )
 
         self.walker = parent.parent
         self.field = parent

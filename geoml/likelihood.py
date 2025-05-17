@@ -1395,7 +1395,7 @@ class _CompositionalLikelihood(_Likelihood):
             rnd = _tf.random.stateless_uniform([n_data, n_var, n_samples], seed=[seed, 0], dtype=_tf.float64)
         else:
             rnd = _tf.random.uniform([n_data, n_var, n_samples], seed=seed, dtype=_tf.float64)
-            
+
         sample = dist.quantile(rnd)
         return sample
 
