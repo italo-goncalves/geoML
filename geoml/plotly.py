@@ -25,7 +25,7 @@ def _deep_update(d, u):
     update-value-of-a-nested-dictionary-of-varying-depth
     """
     for k, v in u.items():
-        if isinstance(v, _collections.Mapping):
+        if isinstance(v, _collections.abc.Mapping):
             d[k] = _deep_update(d.get(k, {}), v)
         else:
             d[k] = v

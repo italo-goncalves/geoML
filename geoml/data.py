@@ -2836,7 +2836,7 @@ class DrillholeData(_SpatialData):
             measurements_b=new_data[by + "_b"].values)
         return new_obj
 
-    def as_classification_input(self, by, interval=5):
+    def as_classification_input(self, by, interval=5, label_order=None):
         """
         Returns a PointData object in a format suitable for use as input to
         a classification model.
@@ -2853,7 +2853,8 @@ class DrillholeData(_SpatialData):
 
         new_obj = PointData(new_data, self.coordinate_labels)
         new_obj.add_rock_type_variable(
-            by, points.variables[by].labels,
+            by,
+            labels=label_order if label_order is not None else points.variables[by].labels,
             measurements_a=new_data[by + "_a"].values,
             measurements_b=new_data[by + "_b"].values)
         return new_obj

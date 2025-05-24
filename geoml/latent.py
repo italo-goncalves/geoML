@@ -2338,7 +2338,7 @@ class GradientConstrainedInput(_RootLatentVariable):
     def _set_parameters(self):
         n_ip = self.n_ip
         self._add_parameter(
-            "mean",
+            "alpha_white",
             _gpr.RealParameter(
                 _np.random.normal(
                     scale=1e-3,
@@ -2372,8 +2372,8 @@ class GradientConstrainedInput(_RootLatentVariable):
             dir_cov = self.covariance.self_covariance_matrix_d2(dir_coords, dirs)
 
             full_cov = _tf.concat([
-                _tf.concat([base_cov, cross_cov], axis=1),
-                _tf.concat([_tf.transpose(cross_cov), dir_cov], axis=1)
+                _tf.concat([dir_cov, _tf.transpose(cross_cov)], axis=1),
+                _tf.concat([cross_cov, base_cov], axis=1),
             ], axis=0)
             self.scale = _tf.sqrt(_tf.linalg.diag_part(full_cov))
             full_cov = full_cov / self.scale[:, None] / self.scale[None, :]
@@ -2392,7 +2392,7 @@ class GradientConstrainedInput(_RootLatentVariable):
             eye = _tf.tile(eye[None, :, :], [self.size, 1, 1])
             delta = self.parameters["delta"].get_value()
             delta = _tf.concat([
-                delta, _tf.zeros([self.size, self.n_dir], dtype=_tf.float64)
+                _tf.zeros([self.size, self.n_dir], dtype=_tf.float64), delta
             ], axis=1)
             delta_diag = _tf.linalg.diag(delta)
             self.cov_smooth = self.cov[None, :, :] + delta_diag
@@ -2404,9 +2404,10 @@ class GradientConstrainedInput(_RootLatentVariable):
                 self.cov_inv[None, :, :] - self.cov_smooth_inv + eye * jitter)
 
             # inducing points
-            mean = self.parameters["mean"].get_value()
-            mean = _tf.concat([mean, _tf.zeros([self.size, self.n_dir, 1], dtype=_tf.float64)], axis=1)
-            self.inducing_points = _tf.transpose(mean[:, :self.n_ip, 0])
+            alpha_white = self.parameters["alpha_white"].get_value()
+            alpha_white = _tf.concat([_tf.zeros([self.size, self.n_dir, 1], dtype=_tf.float64), alpha_white], axis=1)
+            mean = _tf.matmul(chol, alpha_white)
+            self.inducing_points = _tf.transpose(mean[:, self.n_dir:, 0])
             self.alpha = _tf.einsum("ab,sbc->sac", self.cov_inv, mean)
 
             pred_var = 1.0 - _tf.reduce_sum(
@@ -2414,7 +2415,7 @@ class GradientConstrainedInput(_RootLatentVariable):
                 * self.cov[None, :, :],
                 axis=2, keepdims=False
             )
-            self.inducing_points_variance = _tf.transpose(pred_var)[:, :self.n_ip]
+            self.inducing_points_variance = _tf.transpose(pred_var[:, self.n_dir:])
 
     def propagate(self, x, x_var=None):
         mu, var = self.predict(x, x_var, n_sim=0)
@@ -2425,10 +2426,12 @@ class GradientConstrainedInput(_RootLatentVariable):
     def kl_divergence(self):
         with _tf.name_scope("constrained_KL_divergence"):
             delta = self.parameters["delta"].get_value()
-            mean = self.parameters["mean"].get_value()
+            # mean = self.parameters["mean"].get_value()
+            alpha_white = self.parameters["alpha_white"].get_value()
 
             tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov[None, :, :])
-            fit = _tf.reduce_sum(mean * self.alpha[:, :self.n_ip, :])
+            # fit = _tf.reduce_sum(mean * self.alpha[:, :self.n_ip, :])
+            fit = _tf.reduce_sum(alpha_white**2)
             det_1 = 2 * _tf.reduce_sum(_tf.math.log(
                 _tf.linalg.diag_part(self.cov_smooth_chol)))
             det_2 = _tf.reduce_sum(_tf.math.log(delta))
@@ -2442,10 +2445,10 @@ class GradientConstrainedInput(_RootLatentVariable):
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         with _tf.name_scope("constrained_root_prediction"):
             cov_cross = _tf.concat([
-                self.covariance.covariance_matrix(x, self.base_inducing_points),
                 self.covariance.covariance_matrix_d1(
                     x, self.directional_data.coordinates, self.directional_data.directions
-                )
+                ),
+                self.covariance.covariance_matrix(x, self.base_inducing_points)
             ], axis=1)
             cov_cross = cov_cross / self.scale[None, :]
 
