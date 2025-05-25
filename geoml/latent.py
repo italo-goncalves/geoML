@@ -143,7 +143,7 @@ class _Operation(_LatentVariable):
         super().__init__()
         self.parents = list(latent_variables)
 
-        self.same_root = all(node is latent_variables[0] for node in latent_variables)
+        self.same_root = all(node.root is latent_variables[0].root for node in latent_variables)
         if self.same_root:
             self.root = latent_variables[0].root
 
@@ -734,6 +734,7 @@ class LinearCombination(_Operation):
             )
 
         self._size = sizes[0]
+        self.propagates_inducing_points = self.same_root and all([p.propagates_inducing_points for p in self.parents])
 
         if unit_variance:
             self._add_parameter(
