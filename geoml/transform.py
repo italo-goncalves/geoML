@@ -532,7 +532,20 @@ class AnisotropyARD(_Transform):
 
 
 class ChainedTransform(_Transform):
+    """
+    Chained transform.
+
+    This object allows multiple transforms to be called sequentially. Useful for complex transformations.
+    """
     def __init__(self, *transforms):
+        """
+        Chained transform.
+
+        Parameters
+        ----------
+        transforms
+            Transformes to chain.
+        """
         super().__init__()
         self.transforms = transforms
         for tr in transforms:
@@ -548,7 +561,20 @@ class ChainedTransform(_Transform):
 
 
 class SelectVariables(_Transform):
+    """
+    Variable selection.
+
+    Returns the specified columns of the input, discarding the others.
+    """
     def __init__(self, index):
+        """
+        Variable selection.
+
+        Parameters
+        ----------
+        index : list
+            Indices of variables to select.
+        """
         super().__init__()
         self.index = index
 
@@ -562,7 +588,21 @@ class SelectVariables(_Transform):
 
 
 class NormalizeWithBoundingBox(_Transform):
+    """
+    Normalization with a bounding box.
+
+    Uses a `BoundingBox` object as guide to normalize the data. All columns will be contained in the [-3, 3] interval.
+
+    """
     def __init__(self, box):
+        """
+        Normalization with a bounding box.
+
+        Parameters
+        ----------
+        box
+            The bounding box to use as reference for normalization.
+        """
         super().__init__()
         self.box = _tf.constant(box.as_array(), _tf.float64)
 
@@ -575,6 +615,12 @@ class NormalizeWithBoundingBox(_Transform):
 
 
 class Periodic(_Transform):
+    """
+    Periodic transform.
+
+    Returns sines and cosines doubling the number of columns in the data. The periods can be specified by
+    chaining an `Anisotropy*` transform with this one.
+    """
     def __call__(self, x):
         with _tf.name_scope("Periodic_transform"):
             features = _tf.concat([_tf.sin(2.0 * _np.pi * x),
@@ -583,6 +629,11 @@ class Periodic(_Transform):
 
 
 class Concatenate(ChainedTransform):
+    """
+    Concatenation of transforms.
+
+    Consolidates a list of inputs into a single one.
+    """
     def __call__(self, x):
         transformed = [tr.__call__(x) for tr in self.transforms]
         return _tf.concat(transformed, axis=1)
@@ -616,7 +667,21 @@ class RandomProjections(_Transform):
 
 
 class BellFault2D(_Transform):
+    """Fault simulation."""
     def __init__(self, start, end):
+        """
+        Fault simulation.
+
+        Creates a discontinuity in space, returning an additional coordinate that can be used to artificially
+        repel points on opposite sides of a line.
+
+        Parameters
+        ----------
+        start : array-like
+            Starting point of fault.
+        end : array-like
+            Endpoint of fault.
+        """
         super().__init__()
         self.start = _np.array(start)
         self.end = _np.array(end)

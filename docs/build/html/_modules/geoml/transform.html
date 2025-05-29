@@ -39,7 +39,8 @@
   </form>
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
-              <ul>
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
 <li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
 </ul>
 
@@ -676,7 +677,20 @@
 <div class="viewcode-block" id="ChainedTransform">
 <a class="viewcode-back" href="../../geoml.html#geoml.transform.ChainedTransform">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">ChainedTransform</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Chained transform.</span>
+
+<span class="sd">    This object allows multiple transforms to be called sequentially. Useful for complex transformations.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">transforms</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Chained transform.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        transforms</span>
+<span class="sd">            Transformes to chain.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span> <span class="o">=</span> <span class="n">transforms</span>
         <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="n">transforms</span><span class="p">:</span>
@@ -698,7 +712,20 @@
 <div class="viewcode-block" id="SelectVariables">
 <a class="viewcode-back" href="../../geoml.html#geoml.transform.SelectVariables">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">SelectVariables</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Variable selection.</span>
+
+<span class="sd">    Returns the specified columns of the input, discarding the others.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Variable selection.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        index : list</span>
+<span class="sd">            Indices of variables to select.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">index</span> <span class="o">=</span> <span class="n">index</span>
 
@@ -715,7 +742,21 @@
 <div class="viewcode-block" id="NormalizeWithBoundingBox">
 <a class="viewcode-back" href="../../geoml.html#geoml.transform.NormalizeWithBoundingBox">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">NormalizeWithBoundingBox</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Normalization with a bounding box.</span>
+
+<span class="sd">    Uses a `BoundingBox` object as guide to normalize the data. All columns will be contained in the [-3, 3] interval.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">box</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Normalization with a bounding box.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        box</span>
+<span class="sd">            The bounding box to use as reference for normalization.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">box</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">box</span><span class="o">.</span><span class="n">as_array</span><span class="p">(),</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
 
@@ -731,6 +772,12 @@
 <div class="viewcode-block" id="Periodic">
 <a class="viewcode-back" href="../../geoml.html#geoml.transform.Periodic">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Periodic</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Periodic transform.</span>
+
+<span class="sd">    Returns sines and cosines doubling the number of columns in the data. The periods can be specified by</span>
+<span class="sd">    chaining an `Anisotropy*` transform with this one.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;Periodic_transform&quot;</span><span class="p">):</span>
             <span class="n">features</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">_np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">x</span><span class="p">),</span>
@@ -742,6 +789,11 @@
 <div class="viewcode-block" id="Concatenate">
 <a class="viewcode-back" href="../../geoml.html#geoml.transform.Concatenate">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Concatenate</span><span class="p">(</span><span class="n">ChainedTransform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Concatenation of transforms.</span>
+
+<span class="sd">    Consolidates a list of inputs into a single one.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
         <span class="n">transformed</span> <span class="o">=</span> <span class="p">[</span><span class="n">tr</span><span class="o">.</span><span class="fm">__call__</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">tr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">transforms</span><span class="p">]</span>
         <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span><span class="n">transformed</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
@@ -784,7 +836,21 @@
 <div class="viewcode-block" id="BellFault2D">
 <a class="viewcode-back" href="../../geoml.html#geoml.transform.BellFault2D">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">BellFault2D</span><span class="p">(</span><span class="n">_Transform</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fault simulation.&quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Fault simulation.</span>
+
+<span class="sd">        Creates a discontinuity in space, returning an additional coordinate that can be used to artificially</span>
+<span class="sd">        repel points on opposite sides of a line.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        start : array-like</span>
+<span class="sd">            Starting point of fault.</span>
+<span class="sd">        end : array-like</span>
+<span class="sd">            Endpoint of fault.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">start</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">end</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">end</span><span class="p">)</span>

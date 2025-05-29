@@ -39,7 +39,8 @@
   </form>
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
-              <ul>
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
 <li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
 </ul>
 
@@ -207,7 +208,7 @@
 <span class="sd">    back.</span>
 
 <span class="sd">    The spline is assumed to work with normalized (z-score) values. It is</span>
-<span class="sd">    centered at the origin and the arms span up to +/- 5 in each axis. Its main</span>
+<span class="sd">    centered at the origin and the arms span up to +/- 5 units. Its main</span>
 <span class="sd">    use is to transform an asymmetric distribution to one closer to a Gaussian.</span>
 
 <span class="sd">    Attributes</span>
@@ -362,12 +363,12 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Initializer for Center.</span>
 
+<span class="sd">        The mean can be computed from the data (if omitted) or specified.</span>
+
 <span class="sd">        Parameters</span>
 <span class="sd">        ----------</span>
 <span class="sd">        mean : double</span>
 <span class="sd">            The desired mean of the data.</span>
-
-<span class="sd">        The mean can be computed from the data (if omitted) or specified.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span><span class="s2">&quot;mean&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="o">-</span><span class="mf">1e9</span><span class="p">,</span> <span class="mf">1e9</span><span class="p">))</span>

@@ -39,7 +39,8 @@
   </form>
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
-              <ul>
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
 <li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
 </ul>
 
@@ -126,11 +127,31 @@
 <a class="viewcode-back" href="../../geoml.html#geoml.models.GPOptions">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">GPOptions</span><span class="p">(</span><span class="n">_ModelOptions</span><span class="p">):</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">verbose</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">prediction_batch_size</span><span class="o">=</span><span class="mi">20000</span><span class="p">,</span>
-                 <span class="n">seed</span><span class="o">=</span><span class="mi">1234</span><span class="p">,</span> <span class="n">add_noise</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">,</span>
+                 <span class="n">seed</span><span class="o">=</span><span class="mi">1234</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">,</span>
                  <span class="n">training_batch_size</span><span class="o">=</span><span class="mi">2000</span><span class="p">,</span> <span class="n">training_samples</span><span class="o">=</span><span class="mi">20</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Configuration of Gaussian process models.</span>
+
+<span class="sd">        This object can be passed on to models based on the Gaussian process in order to</span>
+<span class="sd">        control their behavior.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        verbose</span>
+<span class="sd">            Whether to show the training process on screen.</span>
+<span class="sd">        prediction_batch_size : int</span>
+<span class="sd">            Batch size for prediction/inference.</span>
+<span class="sd">        seed : int</span>
+<span class="sd">            Seed to control random number generation.</span>
+<span class="sd">        jitter : float</span>
+<span class="sd">            Small value added to covariance matrices for numerical stability.</span>
+<span class="sd">        training_batch_size : int</span>
+<span class="sd">            Number of data points per batch during training.</span>
+<span class="sd">        training_samples : int</span>
+<span class="sd">            Number of Monte Carlo samples to be drawn when training requires it.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">verbose</span><span class="p">,</span> <span class="n">prediction_batch_size</span><span class="p">,</span>
                          <span class="n">training_batch_size</span><span class="p">,</span> <span class="n">seed</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">add_noise</span> <span class="o">=</span> <span class="n">add_noise</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">jitter</span> <span class="o">=</span> <span class="n">jitter</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">training_samples</span> <span class="o">=</span> <span class="n">training_samples</span></div>
 
@@ -147,6 +168,17 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">n_dim</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_n_dim</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_learning_rate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">rate</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Resets the model&#39;s optimizer with the provided learning rate. Will erase the optimizer&#39;s memory.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        rate : float</span>
+<span class="sd">            The learning rate to use.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span>
+
 
 <div class="viewcode-block" id="GP">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.GP">[docs]</a>
@@ -157,6 +189,32 @@
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">variable</span><span class="p">,</span> <span class="n">covariance</span><span class="p">,</span> <span class="n">warping</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                  <span class="n">directional_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">interpolation</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
                  <span class="n">use_trend</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="n">GPOptions</span><span class="p">()):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Basic Gaussian process model.</span>
+
+<span class="sd">        This model is based on the standard Gaussian process for a single output variable. It supports warping</span>
+<span class="sd">        for non-Gaussian variables and directional data as gradients of the modelled field, but not both simultaneously.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        data</span>
+<span class="sd">            A `PointData` object from the ´data´ module.</span>
+<span class="sd">        variable : str</span>
+<span class="sd">            The name of the variable to be modelled. Must be a continuous variable.</span>
+<span class="sd">        covariance</span>
+<span class="sd">            The covariance function to build the covariance matrices.</span>
+<span class="sd">        warping</span>
+<span class="sd">            An object from the `warping` module. If None, the data is assumed to have zero mean and unit variance.</span>
+<span class="sd">        directional_data</span>
+<span class="sd">            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient</span>
+<span class="sd">            of the modelled field.</span>
+<span class="sd">        interpolation : bool</span>
+<span class="sd">            If `True`, will assume that the data is noiseless and try to honor the data points.</span>
+<span class="sd">        use_trend : bool</span>
+<span class="sd">            If `True`, will model a linear trend in the data in addition to the GP.</span>
+<span class="sd">        options : GPOptions</span>
+<span class="sd">            Additional configurations.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">options</span><span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">data</span>
@@ -227,6 +285,16 @@
 <div class="viewcode-block" id="GP.refresh">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.GP.refresh">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Updates the model&#39;s internal state.</span>
+
+<span class="sd">        If called within TensorFlow&#39;s eager mode, will allow inspection of the internal tensors.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        jitter : float</span>
+<span class="sd">            Small value added to the covariance matrices for numerical stability.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">keep</span> <span class="o">=</span> <span class="o">~</span> <span class="n">_np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">variables</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">variable</span><span class="p">]</span><span class="o">.</span><span class="n">measurements</span><span class="o">.</span><span class="n">values</span><span class="p">)</span>
 
@@ -315,6 +383,14 @@
 <a class="viewcode-back" href="../../geoml.html#geoml.models.GP.log_likelihood">[docs]</a>
     <span class="nd">@_tf</span><span class="o">.</span><span class="n">function</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">log_likelihood</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Computes the model&#39;s log-likelihood with the current parameters.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        jitter : float</span>
+<span class="sd">            Small value added to the covariance matrices for numerical stability.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
         <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;GP_log_likelihood&quot;</span><span class="p">):</span>
@@ -442,7 +518,7 @@
 <span class="sd">        ----------</span>
 <span class="sd">        newdata :</span>
 <span class="sd">            A reference to a spatial points object of compatible dimension.</span>
-<span class="sd">            The object&#39;s variables are updated.</span>
+<span class="sd">            The object&#39;s variables will be updated.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">n_dim</span> <span class="o">!=</span> <span class="n">newdata</span><span class="o">.</span><span class="n">n_dim</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;dimension of newdata is incompatible with model&quot;</span><span class="p">)</span>
@@ -474,6 +550,18 @@
 <div class="viewcode-block" id="GP.train">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.GP.train">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">train</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">1000</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Model training.</span>
+
+<span class="sd">        The standard GP does not support batches of data, allways using the full data instead. This is feasible for</span>
+<span class="sd">        up to a few thousand data points.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        max_iter : int</span>
+<span class="sd">            The number of iterations to train.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
         <span class="n">model_variables</span> <span class="o">=</span> <span class="p">[</span><span class="n">pr</span><span class="o">.</span><span class="n">variable</span> <span class="k">for</span> <span class="n">pr</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_all_parameters</span>
                            <span class="k">if</span> <span class="ow">not</span> <span class="n">pr</span><span class="o">.</span><span class="n">fixed</span><span class="p">]</span>
 
@@ -503,11 +591,33 @@
 <div class="viewcode-block" id="VGPNetwork">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.VGPNetwork">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">VGPNetwork</span><span class="p">(</span><span class="n">_GPModel</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Vanilla VGP&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Variational Gaussian process network.&quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">variables</span><span class="p">,</span> <span class="n">likelihoods</span><span class="p">,</span>
                  <span class="n">latent_network</span><span class="p">,</span>
                  <span class="n">directional_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                  <span class="n">options</span><span class="o">=</span><span class="n">GPOptions</span><span class="p">()):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Variational Gaussian process network.</span>
+
+<span class="sd">        This is the heart of the `geoml` package, a generalization of the standard GP. It supports variables of any</span>
+<span class="sd">        kind and flexible structures through the latent variable network.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        data</span>
+<span class="sd">            A `PointData` object from the ´data´ module.</span>
+<span class="sd">        variables</span>
+<span class="sd">            The name of a variable to model, or a list of names.</span>
+<span class="sd">        likelihoods</span>
+<span class="sd">            A `likelihood` object or a list matching the length of `variables`.</span>
+<span class="sd">        latent_network</span>
+<span class="sd">            An object from the `latent` module.</span>
+<span class="sd">        directional_data</span>
+<span class="sd">            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient</span>
+<span class="sd">            of the modelled field.</span>
+<span class="sd">        options : GPOptions</span>
+<span class="sd">            Additional configurations.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">options</span><span class="o">=</span><span class="n">options</span><span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">data</span>
@@ -690,6 +800,17 @@
 <div class="viewcode-block" id="VGPNetwork.train_full">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.VGPNetwork.train_full">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">train_full</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">1000</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Model training.</span>
+
+<span class="sd">        The VGP will be trained using all data at once. Only feasible for relatively small datasets, depending of</span>
+<span class="sd">        te size of the latent network. For larger datasets, use the `train_svi` method.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        max_iter : int</span>
+<span class="sd">            The number of iterations to train.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">training_inputs</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">variables</span><span class="p">[</span><span class="n">v</span><span class="p">]</span><span class="o">.</span><span class="n">training_input</span><span class="p">()</span>
                            <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">variables</span><span class="p">]</span>
 
@@ -748,6 +869,16 @@
 <div class="viewcode-block" id="VGPNetwork.train_svi">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.VGPNetwork.train_svi">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">train_svi</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">epochs</span><span class="o">=</span><span class="mi">100</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Stochastic Variational Inference training.</span>
+
+<span class="sd">        The model will be trained in batches according to the `options` object.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        epochs : int</span>
+<span class="sd">            Number of epochs to train.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">model_variables</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_unfixed_variables</span><span class="p">()</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
@@ -876,7 +1007,7 @@
 <span class="sd">        ----------</span>
 <span class="sd">        newdata :</span>
 <span class="sd">            A reference to a spatial points object of compatible dimension.</span>
-<span class="sd">            The object&#39;s variables are updated.</span>
+<span class="sd">            The object&#39;s variables will be updated.</span>
 <span class="sd">        n_sim : int</span>
 <span class="sd">            Number of predictive samples to draw.</span>
 <span class="sd">        include_noise : bool</span>
@@ -934,7 +1065,7 @@
 <div class="viewcode-block" id="StructuralField">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.StructuralField">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">StructuralField</span><span class="p">(</span><span class="n">_GPModel</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Structural field modeling based on gradient data&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Structural field modeling based on gradient data.&quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tangents</span><span class="p">,</span> <span class="n">covariance</span><span class="p">,</span> <span class="n">normals</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">mean_vector</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                  <span class="n">options</span><span class="o">=</span><span class="n">GPOptions</span><span class="p">()):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">options</span><span class="o">=</span><span class="n">options</span><span class="p">)</span>
@@ -1282,16 +1413,42 @@
 <div class="viewcode-block" id="GPEnsemble">
 <a class="viewcode-back" href="../../geoml.html#geoml.models.GPEnsemble">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">GPEnsemble</span><span class="p">(</span><span class="n">_EnsembleModel</span><span class="p">):</span>
-    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">variable</span><span class="p">,</span> <span class="n">covariance</span><span class="p">,</span> <span class="n">warping</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">tangents</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;An ensemble of Gaussian processes.&quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">variable</span><span class="p">,</span> <span class="n">covariance</span><span class="p">,</span> <span class="n">warping</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">directional_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                  <span class="n">use_trend</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="n">GPOptions</span><span class="p">()):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        An ensemble of Gaussian processes.</span>
+
+<span class="sd">        This model combines independent GPs into a consolidated prediction using the Product of Experts approach.</span>
+<span class="sd">        It is preferable to divide the data spatially instead of randomly, so that each expert can focus on a</span>
+<span class="sd">        specific region of the space.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        data</span>
+<span class="sd">            A list or tuple of `PointData` objects.</span>
+<span class="sd">        variable : str</span>
+<span class="sd">            The name of the variable to be modelled. Must be present in all data objects.</span>
+<span class="sd">        covariance</span>
+<span class="sd">            The covariance function to build the covariance matrices.</span>
+<span class="sd">        warping</span>
+<span class="sd">            An object from the `warping` module. If None, the data is assumed to have zero mean and unit variance.</span>
+<span class="sd">        directional_data</span>
+<span class="sd">            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient</span>
+<span class="sd">            of the modelled field.</span>
+<span class="sd">        use_trend : bool</span>
+<span class="sd">            If `True`, will model a linear trend in the data in addition to the GP.</span>
+<span class="sd">        options : GPOptions</span>
+<span class="sd">            Additional configurations.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">options</span><span class="p">)</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="p">(</span><span class="nb">tuple</span><span class="p">,</span> <span class="nb">list</span><span class="p">)):</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;data must be a list or tuple containing&quot;</span>
                              <span class="s2">&quot;data objects&quot;</span><span class="p">)</span>
-        <span class="k">if</span> <span class="n">tangents</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">tangents</span> <span class="o">=</span> <span class="p">[</span><span class="kc">None</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]</span>
-        <span class="k">elif</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tangents</span><span class="p">,</span> <span class="p">(</span><span class="nb">tuple</span><span class="p">,</span> <span class="nb">list</span><span class="p">)):</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;tangents must be a list or tuple containing&quot;</span>
+        <span class="k">if</span> <span class="n">directional_data</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">directional_data</span> <span class="o">=</span> <span class="p">[</span><span class="kc">None</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]</span>
+        <span class="k">elif</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">directional_data</span><span class="p">,</span> <span class="p">(</span><span class="nb">tuple</span><span class="p">,</span> <span class="nb">list</span><span class="p">)):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;directional_data must be a list or tuple containing&quot;</span>
                              <span class="s2">&quot;data objects or None&quot;</span><span class="p">)</span>
 
         <span class="n">dims</span> <span class="o">=</span> <span class="nb">set</span><span class="p">([</span><span class="n">d</span><span class="o">.</span><span class="n">n_dim</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="n">data</span><span class="p">])</span>
@@ -1304,10 +1461,10 @@
             <span class="n">variable</span><span class="o">=</span><span class="n">variable</span><span class="p">,</span>
             <span class="n">covariance</span><span class="o">=</span><span class="n">_copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">covariance</span><span class="p">),</span>
             <span class="n">warping</span><span class="o">=</span><span class="n">_copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">warping</span><span class="p">),</span>
-            <span class="n">directional_data</span><span class="o">=</span><span class="n">t</span><span class="p">,</span>
+            <span class="n">directional_data</span><span class="o">=</span><span class="n">dd</span><span class="p">,</span>
             <span class="n">use_trend</span><span class="o">=</span><span class="n">use_trend</span><span class="p">,</span>
             <span class="n">options</span><span class="o">=</span><span class="n">options</span><span class="p">)</span>
-            <span class="k">for</span> <span class="n">d</span><span class="p">,</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">tangents</span><span class="p">)]</span>
+            <span class="k">for</span> <span class="n">d</span><span class="p">,</span> <span class="n">dd</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">directional_data</span><span class="p">)]</span>
         <span class="k">for</span> <span class="n">model</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">models</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
 
@@ -1518,7 +1675,21 @@
 
 
 <span class="k">class</span><span class="w"> </span><span class="nc">Normalizer</span><span class="p">(</span><span class="n">_GPModel</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Trainable data normalizer.&quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">warping</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="n">GPOptions</span><span class="p">()):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Trainable data normalizer.</span>
+
+<span class="sd">        This model will fit a `warping` object to a data vector, allowing its transformation to a Gaussian</span>
+<span class="sd">        distribution with zero mean and unit variance.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        warping</span>
+<span class="sd">            An object from the `warping` module.</span>
+<span class="sd">        options : GPOptions</span>
+<span class="sd">            Additional configurations.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">options</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">warping</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">warping</span><span class="p">)</span>
 
@@ -1531,6 +1702,16 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">objective</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">Variable</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">))</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">normalize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">250</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Model training.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        x : array-like</span>
+<span class="sd">            The data vector to train on.</span>
+<span class="sd">        max_iter : int</span>
+<span class="sd">            The number of iterations to run.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">all_parameters</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
             <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span><span class="s2">&quot;No trainable parameters.&quot;</span><span class="p">)</span>
             <span class="k">return</span> <span class="kc">None</span>

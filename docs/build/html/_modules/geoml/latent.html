@@ -39,7 +39,8 @@
   </form>
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
-              <ul>
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
 <li class="toctree-l1"><a class="reference internal" href="../../modules.html">geoml</a></li>
 </ul>
 
@@ -96,15 +97,45 @@
 <span class="kn">import</span><span class="w"> </span><span class="nn">tensorflow</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_tf</span>
 
 
+<div class="viewcode-block" id="NodeIncompatibilityError">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.NodeIncompatibilityError">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">NodeIncompatibilityError</span><span class="p">(</span><span class="ne">Exception</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Exception raised for incompatibilities between a node and its parents/children.&quot;&quot;&quot;</span>
+    <span class="k">pass</span></div>
+
+
+
+<div class="viewcode-block" id="BrokenPropagationError">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.BrokenPropagationError">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">BrokenPropagationError</span><span class="p">(</span><span class="n">NodeIncompatibilityError</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Exception raised when inducing points can&#39;t be propagated through nodes.&quot;&quot;&quot;</span>
+    <span class="k">pass</span></div>
+
+
+
+<div class="viewcode-block" id="SizeIncompatibilityError">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.SizeIncompatibilityError">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">SizeIncompatibilityError</span><span class="p">(</span><span class="n">NodeIncompatibilityError</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Exception raised for incompatibilities in the number of latent variables in nodes.&quot;&quot;&quot;</span>
+    <span class="k">pass</span></div>
+
+
+
 <span class="k">class</span><span class="w"> </span><span class="nc">_LatentVariable</span><span class="p">(</span><span class="n">_gpr</span><span class="o">.</span><span class="n">Parametric</span><span class="p">):</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="mi">0</span>
+
+        <span class="c1"># These attributes must be defined by subclasses. The `root` is a reference to the object&#39;s root</span>
+        <span class="c1"># traced along the tree. Nodes whose parents have different inducing point sets do not have a</span>
+        <span class="c1"># traceable root.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">children</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="c1"># These are TensorFlow attributes, defined at graph execution time</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="c1"># self._is_deterministic = []</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="n">s</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span>
@@ -122,12 +153,50 @@
         <span class="k">pass</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Updates the model&#39;s internal state.</span>
+
+<span class="sd">        If called within TensorFlow&#39;s eager mode, will allow inspection of the internal tensors.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        jitter : float</span>
+<span class="sd">            Small value added to the covariance matrices for numerical stability.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">pass</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">raise</span> <span class="ne">NotImplementedError</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Prediction on the previous node&#39;s latent variables. If `n_sim=0` only the mean and variance are returned.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        x : Tensor</span>
+<span class="sd">            Mean of the input.</span>
+<span class="sd">        x_var : Tensor</span>
+<span class="sd">            Variance of the input.</span>
+<span class="sd">        n_sim : int</span>
+<span class="sd">            Number of simulations to draw.</span>
+<span class="sd">        seed : tuple</span>
+<span class="sd">            A set of two seeds for the random number generator.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        mu</span>
+<span class="sd">            Mean of the output.</span>
+<span class="sd">        var</span>
+<span class="sd">            Variance of the output.</span>
+<span class="sd">        sims</span>
+<span class="sd">            A set of simulations generated from the predictive distribution.</span>
+<span class="sd">        explained_var</span>
+<span class="sd">            Amount of variance &quot;explained away&quot; by conditioning on the inducing points.</span>
+<span class="sd">        influence</span>
+<span class="sd">            Fraction of the full variance that the model is able to sustain at a given position. Increases closer to</span>
+<span class="sd">            the inducing points.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">raise</span> <span class="ne">NotImplementedError</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">predict_directions</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">):</span>
@@ -137,6 +206,23 @@
         <span class="k">raise</span> <span class="ne">NotImplementedError</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">propagate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Propagates mean and variance to the next node.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        x : Tensor</span>
+<span class="sd">            Mean of the input.</span>
+<span class="sd">        x_var : Tensor</span>
+<span class="sd">            Variance of the input.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        mu</span>
+<span class="sd">            Mean of the output.</span>
+<span class="sd">        var</span>
+<span class="sd">            Variance of the output.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">raise</span> <span class="ne">NotImplementedError</span>
 
     <span class="nd">@staticmethod</span>
@@ -151,9 +237,15 @@
 
 
 <span class="k">class</span><span class="w"> </span><span class="nc">_RootLatentVariable</span><span class="p">(</span><span class="n">_LatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Root latent variable.</span>
+
+<span class="sd">    A root latent variable node processes an input, passing it along to other nodes as a Gaussian random variable.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="bp">self</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="kc">True</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">return</span> <span class="p">[]</span>
@@ -163,11 +255,27 @@
 
 
 <span class="k">class</span><span class="w"> </span><span class="nc">_FunctionalLatentVariable</span><span class="p">(</span><span class="n">_LatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Functional latent variable.</span>
+
+<span class="sd">    A functional latent variable node applies a function to its input, returning a new random variable</span>
+<span class="sd">    that may or not be Gaussian.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for _FunctionalLatentVariable.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="n">parent</span><span class="o">.</span><span class="n">children</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">root</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">propagates_inducing_points</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">return</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="p">]</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">get_unique_parents</span><span class="p">()</span>
@@ -181,15 +289,28 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">set_parameter_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">set_parameter_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+
 
 <span class="k">class</span><span class="w"> </span><span class="nc">_Operation</span><span class="p">(</span><span class="n">_LatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Operation node.</span>
+
+<span class="sd">    An operation node combines multiple latent variables in some form (sum, linear combination, concatenation, etc.).</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">parents</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">latent_variables</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">latent_variables</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">root</span>
-        <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="n">latent_variables</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">lat</span><span class="p">)</span>
-            <span class="n">lat</span><span class="o">.</span><span class="n">children</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">same_root</span> <span class="o">=</span> <span class="nb">all</span><span class="p">(</span><span class="n">node</span><span class="o">.</span><span class="n">root</span> <span class="ow">is</span> <span class="n">latent_variables</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">root</span> <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="n">latent_variables</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">same_root</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">latent_variables</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">root</span>
+
+        <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="n">latent_variables</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">node</span><span class="p">)</span>
+            <span class="n">node</span><span class="o">.</span><span class="n">children</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_unique_parents</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="n">all_parents</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
@@ -203,7 +324,40 @@
 
 
 <span class="k">class</span><span class="w"> </span><span class="nc">_GPNode</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="n">BrokenPropagationError</span><span class="p">(</span><span class="s1">&#39;GP nodes require their parent to propagate inducing points.&#39;</span><span class="p">)</span>
+
     <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Prediction on the previous node&#39;s latent variables. If `n_sim=0` only the mean and variance are returned.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        x : Tensor</span>
+<span class="sd">            Mean of the input.</span>
+<span class="sd">        x_var : Tensor</span>
+<span class="sd">            Variance of the input.</span>
+<span class="sd">        n_sim : int</span>
+<span class="sd">            Number of simulations to draw.</span>
+<span class="sd">        seed : tuple</span>
+<span class="sd">            A set of two seeds for the random number generator.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        mu</span>
+<span class="sd">            Mean of the output.</span>
+<span class="sd">        var</span>
+<span class="sd">            Variance of the output.</span>
+<span class="sd">        sims</span>
+<span class="sd">            A set of simulations generated from the predictive distribution.</span>
+<span class="sd">        explained_var</span>
+<span class="sd">            Amount of variance &quot;explained away&quot; by conditioning on the inducing points.</span>
+<span class="sd">        influence</span>
+<span class="sd">            Fraction of the full variance that the model is able to sustain at a given position. Increases closer to</span>
+<span class="sd">            the inducing points.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;gp_prediction&quot;</span><span class="p">):</span>
             <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">propagate</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="p">)</span>
 
@@ -220,9 +374,35 @@
 <div class="viewcode-block" id="BasicInput">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.BasicInput">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">BasicInput</span><span class="p">(</span><span class="n">_RootLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Basic input node.</span>
+
+<span class="sd">    Converts a deterministic input (usually spatial coordinates) into Gaussian latent variables with zero variance,</span>
+<span class="sd">    after applying a transform for normalization. Also defines the inducing points that will be propagated to other</span>
+<span class="sd">    nodes.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="BasicInput.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.BasicInput.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">inducing_points</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="n">_tr</span><span class="o">.</span><span class="n">Identity</span><span class="p">(),</span>
                  <span class="n">fix_inducing_points</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">fix_transform</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
                  <span class="n">center</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for BasicInput.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        inducing_points</span>
+<span class="sd">            A `PointData` object.</span>
+<span class="sd">        transform</span>
+<span class="sd">            An object from the `transform` module for normalization.</span>
+<span class="sd">        fix_inducing_points : bool</span>
+<span class="sd">            Whether to fix the inducing points positions.</span>
+<span class="sd">        fix_transform : bool</span>
+<span class="sd">            Whether to fix the transform parameters to prevent them from changing during training.</span>
+<span class="sd">        center : bool</span>
+<span class="sd">            Whether to center the data, based on the inducing points&#39; bounding box.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
         <span class="n">test_point</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span> <span class="n">inducing_points</span><span class="o">.</span><span class="n">n_dim</span><span class="p">])</span>
         <span class="n">test_point</span> <span class="o">=</span> <span class="n">transform</span><span class="p">(</span><span class="n">test_point</span><span class="p">)</span>
@@ -251,7 +431,8 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">center</span> <span class="o">=</span> <span class="n">_np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">transform</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">bounding_box</span><span class="o">.</span><span class="n">max</span><span class="p">))</span>
         <span class="k">if</span> <span class="n">center</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">center</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="n">transform</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">bounding_box</span><span class="o">.</span><span class="n">min</span><span class="p">)</span>
-                                 <span class="o">+</span> <span class="n">transform</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">bounding_box</span><span class="o">.</span><span class="n">max</span><span class="p">))</span>
+                                 <span class="o">+</span> <span class="n">transform</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">bounding_box</span><span class="o">.</span><span class="n">max</span><span class="p">))</span></div>
+
 
 <div class="viewcode-block" id="BasicInput.get_root_inducing_points">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.BasicInput.get_root_inducing_points">[docs]</a>
@@ -313,16 +494,20 @@
 
 
 
-<div class="viewcode-block" id="Concatenate">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate">[docs]</a>
-<span class="k">class</span><span class="w"> </span><span class="nc">Concatenate</span><span class="p">(</span><span class="n">_Operation</span><span class="p">):</span>
+<div class="viewcode-block" id="Stack">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Stack">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Stack</span><span class="p">(</span><span class="n">_Operation</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Latent variable stacking.</span>
+
+<span class="sd">    Consolidates a list of latent variables into a single object.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">([</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">])</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">root</span> <span class="o">=</span> <span class="n">latent_variables</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">root</span>
 
-<div class="viewcode-block" id="Concatenate.propagate">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate.propagate">[docs]</a>
+<div class="viewcode-block" id="Stack.propagate">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Stack.propagate">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">propagate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
         <span class="n">means</span><span class="p">,</span> <span class="n">variances</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[]</span>
         <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
@@ -335,28 +520,21 @@
         <span class="k">return</span> <span class="n">mean</span><span class="p">,</span> <span class="n">var</span></div>
 
 
-<div class="viewcode-block" id="Concatenate.refresh">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate.refresh">[docs]</a>
+<div class="viewcode-block" id="Stack.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Stack.refresh">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
         <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
-            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
-        <span class="k">if</span> <span class="nb">all</span><span class="p">([</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]):</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span>
-                <span class="p">[</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span>
-                <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span>
-                <span class="p">[</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span>
-                <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div>
+            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span></div>
 
 
-<div class="viewcode-block" id="Concatenate.kl_divergence">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate.kl_divergence">[docs]</a>
+<div class="viewcode-block" id="Stack.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Stack.kl_divergence">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">return</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span></div>
 
 
-<div class="viewcode-block" id="Concatenate.predict">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate.predict">[docs]</a>
+<div class="viewcode-block" id="Stack.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Stack.predict">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
         <span class="k">if</span> <span class="n">n_sim</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
             <span class="n">means</span><span class="p">,</span> <span class="n">variances</span><span class="p">,</span> <span class="n">sims</span><span class="p">,</span> <span class="n">exp_vars</span><span class="p">,</span> <span class="n">influences</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">[],</span> <span class="p">[],</span> <span class="p">[],</span> <span class="p">[]</span>
@@ -389,11 +567,65 @@
 
 
 
+<div class="viewcode-block" id="Concatenate">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Concatenate</span><span class="p">(</span><span class="n">Stack</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Latent variable concatenation.</span>
+
+<span class="sd">    Consolidates a list of latent variables into a single object. This operation requires all its parent nodes to</span>
+<span class="sd">    be able to propagate inducing points.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">same_root</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="kc">True</span>
+
+<div class="viewcode-block" id="Concatenate.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Concatenate.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
+            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span>
+            <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span>
+            <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div>
+</div>
+
+
+
 <div class="viewcode-block" id="BasicGP">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.BasicGP">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">BasicGP</span><span class="p">(</span><span class="n">_GPNode</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Standard Gaussian process node.</span>
+
+<span class="sd">    In this module, GP nodes are able to work with inputs that may be</span>
+<span class="sd">    Gaussian, having an associated variance. This variance is integrated by considering it as a squared range and</span>
+<span class="sd">    applying the non-stationary covariance.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="BasicGP.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.BasicGP.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">kernel</span><span class="o">=</span><span class="n">_kr</span><span class="o">.</span><span class="n">Gaussian</span><span class="p">(),</span>
                  <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">isotropic</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for BasicGP.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node.</span>
+<span class="sd">        size</span>
+<span class="sd">            Number of output latent variables</span>
+<span class="sd">        kernel</span>
+<span class="sd">            The kernel to use for the covariance matrices.</span>
+<span class="sd">        fix_range : bool</span>
+<span class="sd">            Whether to force a unit range for all input dimensions.</span>
+<span class="sd">        isotropic : bool</span>
+<span class="sd">            If `True`, forces the same range for all input dimensions.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">kernel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">kernel</span><span class="p">)</span>
@@ -413,7 +645,8 @@
 
         <span class="bp">self</span><span class="o">.</span><span class="n">fix_range</span> <span class="o">=</span> <span class="n">fix_range</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">isotropic</span> <span class="o">=</span> <span class="n">isotropic</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_set_parameters</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_parameters</span><span class="p">()</span></div>
+
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_set_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="n">n_ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span>
@@ -663,6 +896,12 @@
 <div class="viewcode-block" id="AdditiveGP">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.AdditiveGP">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">AdditiveGP</span><span class="p">(</span><span class="n">BasicGP</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Additive GP node.</span>
+
+<span class="sd">    This node is similar to the `BasicGP`, with the difference that is covariance matrices are computed separately for</span>
+<span class="sd">    each input dimension and then averaged. It makes more sense to use it on high-dimensional non-spatial inputs.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
 <div class="viewcode-block" id="AdditiveGP.covariance_matrix">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.AdditiveGP.covariance_matrix">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">covariance_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">var_x</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">var_y</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
@@ -700,7 +939,29 @@
 <div class="viewcode-block" id="Linear">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Linear">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Linear</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Linear node.</span>
+
+<span class="sd">    This node outputs one or more linear combinations of the inputs. Its role in a network depends on its position.</span>
+<span class="sd">    Close to a root node it induces rotation in the coordinates. At the end it induces correlations between the</span>
+<span class="sd">    outputs, and in the middle it can serve as an information bottleneck.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="Linear.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.Linear.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">unit_norm</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for Linear.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node</span>
+<span class="sd">        size</span>
+<span class="sd">            Number of output latent variables.</span>
+<span class="sd">        unit_norm : bool</span>
+<span class="sd">            Whether the weights should form a unit norm vector. If `False` the weights will be constrained to the</span>
+<span class="sd">            [-1, 1] interval.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
 
@@ -727,7 +988,8 @@
         <span class="c1"># binary classification</span>
         <span class="k">if</span> <span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span> <span class="o">==</span> <span class="mi">2</span><span class="p">):</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">set_value</span><span class="p">([[</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">]])</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span></div>
+
 
 <div class="viewcode-block" id="Linear.refresh">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Linear.refresh">[docs]</a>
@@ -736,7 +998,7 @@
 
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
             <span class="n">ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span>
             <span class="n">ip_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points_variance</span>
 
@@ -795,10 +1057,28 @@
 <div class="viewcode-block" id="SelectInput">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.SelectInput">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">SelectInput</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Variable selection.</span>
+
+<span class="sd">    Returns the specified columns of the input, discarding the others.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="SelectInput.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.SelectInput.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">columns</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for SelectInput.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node.</span>
+<span class="sd">        columns : list</span>
+<span class="sd">            List of indices to retain.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">columns</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">columns</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">columns</span><span class="p">)</span></div>
+
 
 <div class="viewcode-block" id="SelectInput.propagate">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.SelectInput.propagate">[docs]</a>
@@ -813,12 +1093,14 @@
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.SelectInput.refresh">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span><span class="p">,</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">columns</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points_variance</span><span class="p">,</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">columns</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">columns</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points_variance</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">columns</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div>
 
 
 <div class="viewcode-block" id="SelectInput.kl_divergence">
@@ -850,13 +1132,33 @@
 <div class="viewcode-block" id="LinearCombination">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.LinearCombination">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">LinearCombination</span><span class="p">(</span><span class="n">_Operation</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Linear combination.</span>
+
+<span class="sd">    This node combines the inputs linearly with positive weights.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="LinearCombination.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.LinearCombination.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">,</span> <span class="n">unit_variance</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for LinearCombination.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        latent_variables</span>
+<span class="sd">            Nodes to combine. They must all have the same number of variables.</span>
+<span class="sd">        unit_variance : bool</span>
+<span class="sd">            If `True`, constrains the weights to unit sum to control the variance of the output.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
         <span class="n">sizes</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="n">s</span> <span class="o">==</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">sizes</span><span class="p">):</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;all parents must have the same size&quot;</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="n">SizeIncompatibilityError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;All parents must have the same size. Found </span><span class="si">{</span><span class="n">sizes</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">same_root</span> <span class="ow">and</span> <span class="nb">all</span><span class="p">([</span><span class="n">p</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">])</span>
 
         <span class="k">if</span> <span class="n">unit_variance</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
@@ -872,7 +1174,8 @@
                     <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">latent_variables</span><span class="p">))</span> <span class="o">*</span> <span class="mf">0.01</span><span class="p">,</span>
                     <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">latent_variables</span><span class="p">))</span> <span class="o">*</span> <span class="mi">100</span>
                 <span class="p">)</span>
-            <span class="p">)</span>
+            <span class="p">)</span></div>
+
 
 <div class="viewcode-block" id="LinearCombination.refresh">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.LinearCombination.refresh">[docs]</a>
@@ -880,7 +1183,7 @@
         <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
             <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
-        <span class="k">if</span> <span class="nb">all</span><span class="p">([</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
             <span class="n">weights</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;weights&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">]</span>
             <span class="n">ip</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span>
                            <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
@@ -978,13 +1281,39 @@
 <div class="viewcode-block" id="ProductOfExperts">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.ProductOfExperts">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">ProductOfExperts</span><span class="p">(</span><span class="n">_Operation</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Product of Experts.</span>
+
+<span class="sd">    The Product of Experts combines latent variables from different nodes with weights inversely proportional to</span>
+<span class="sd">    the local variance. It is more useful when combining the outputs of smaller networks with different set of</span>
+<span class="sd">    inducing points, allowing each one to focus on a region of space.</span>
+
+<span class="sd">    This node treats its parents independently. Means and variances will be &quot;stiched&quot; smoothly, but individual</span>
+<span class="sd">    simulations may exhibit artifacts.</span>
+
+<span class="sd">    This node is not capable of propagating inducing points.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="ProductOfExperts.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.ProductOfExperts.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">latent_variables</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for ProductOfExperts.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        latent_variables</span>
+<span class="sd">            Parent nodes to combine.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
         <span class="n">sizes</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="n">s</span> <span class="o">==</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">sizes</span><span class="p">):</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;all parents must have the same size&quot;</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="n">SizeIncompatibilityError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;All parents must have the same size. Found </span><span class="si">{</span><span class="n">sizes</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="kc">False</span></div>
+
 
 <div class="viewcode-block" id="ProductOfExperts.refresh">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.ProductOfExperts.refresh">[docs]</a>
@@ -1079,28 +1408,26 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
             <span class="s2">&quot;amp_scale&quot;</span><span class="p">,</span> <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="mf">0.25</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mi">10</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="kc">False</span>
 
-<div class="viewcode-block" id="Exponentiation.refresh">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Exponentiation.refresh">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
-        <span class="n">amp_mean</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amp_mean&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
-        <span class="n">amp_scale</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amp_scale&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+    <span class="c1"># def refresh(self, jitter=1e-9):</span>
+        <span class="c1"># amp_mean = self.parameters[&quot;amp_mean&quot;].get_value()</span>
+        <span class="c1"># amp_scale = self.parameters[&quot;amp_scale&quot;].get_value()</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
+        <span class="c1"># self.parent.refresh(jitter)</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span>
-            <span class="n">ip_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points_variance</span>
-
-            <span class="n">ip</span> <span class="o">=</span> <span class="n">ip</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">amp_scale</span><span class="p">)</span> <span class="o">+</span> <span class="n">amp_mean</span>
-            <span class="n">ip_var</span> <span class="o">=</span> <span class="n">ip_var</span> <span class="o">*</span> <span class="n">amp_scale</span>
-
-            <span class="n">amp_mu</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">ip</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">ip_var</span><span class="p">)</span>
-            <span class="n">amp_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">ip</span><span class="p">)</span> <span class="o">*</span> <span class="n">ip_var</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">ip_var</span><span class="p">)</span>
-
-            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">amp_mu</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">amp_var</span></div>
-
+        <span class="c1"># if self.parent.inducing_points is not None:</span>
+        <span class="c1">#     ip = self.parent.inducing_points</span>
+        <span class="c1">#     ip_var = self.parent.inducing_points_variance</span>
+        <span class="c1">#</span>
+        <span class="c1">#     ip = ip * _tf.sqrt(amp_scale) + amp_mean</span>
+        <span class="c1">#     ip_var = ip_var * amp_scale</span>
+        <span class="c1">#</span>
+        <span class="c1">#     amp_mu = _tf.exp(ip) * (1 + 0.5 * ip_var)</span>
+        <span class="c1">#     amp_var = _tf.exp(2 * ip) * ip_var * (1 + ip_var)</span>
+        <span class="c1">#</span>
+        <span class="c1">#     self.inducing_points = amp_mu</span>
+        <span class="c1">#     self.inducing_points_variance = amp_var</span>
 
 <div class="viewcode-block" id="Exponentiation.kl_divergence">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Exponentiation.kl_divergence">[docs]</a>
@@ -1143,30 +1470,6 @@
                 <span class="n">amp_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">mu</span><span class="p">)</span> <span class="o">*</span> <span class="n">var</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">var</span><span class="p">)</span>
 
                 <span class="k">return</span> <span class="n">amp_mu</span><span class="p">,</span> <span class="n">amp_var</span></div>
-
-
-<div class="viewcode-block" id="Exponentiation.predict_directions">
-<a class="viewcode-back" href="../../geoml.html#geoml.latent.Exponentiation.predict_directions">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">predict_directions</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">):</span>
-        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;exponentiation_prediction&quot;</span><span class="p">):</span>
-            <span class="n">amp_mean</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amp_mean&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
-            <span class="n">amp_scale</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;amp_scale&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
-
-            <span class="n">mu</span><span class="p">,</span> <span class="n">var</span><span class="p">,</span> <span class="n">explained_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">predict_directions</span><span class="p">(</span>
-                <span class="n">x</span><span class="p">,</span> <span class="n">dir_x</span><span class="p">,</span> <span class="n">step</span><span class="p">)</span>
-
-            <span class="n">mu</span> <span class="o">=</span> <span class="n">mu</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">amp_scale</span><span class="p">)</span> <span class="o">+</span> <span class="n">amp_mean</span>
-            <span class="n">var</span> <span class="o">=</span> <span class="n">var</span> <span class="o">*</span> <span class="n">amp_scale</span>
-            <span class="n">explained_var</span> <span class="o">=</span> <span class="n">explained_var</span> <span class="o">*</span> <span class="n">amp_scale</span>
-
-            <span class="n">amp_mu</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">mu</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">var</span><span class="p">)</span>
-            <span class="n">amp_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">mu</span><span class="p">)</span> <span class="o">*</span> <span class="n">var</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">var</span><span class="p">)</span>
-            <span class="n">amp_explained_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">mu</span><span class="p">)</span> \
-                                <span class="o">*</span> <span class="p">(</span><span class="n">var</span> <span class="o">+</span> <span class="n">explained_var</span><span class="p">)</span> \
-                                <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">var</span> <span class="o">+</span> <span class="n">explained_var</span><span class="p">)</span> \
-                                <span class="o">-</span> <span class="n">amp_var</span>
-
-            <span class="k">return</span> <span class="n">amp_mu</span><span class="p">,</span> <span class="n">amp_var</span><span class="p">,</span> <span class="n">amp_explained_var</span></div>
 </div>
 
 
@@ -1178,9 +1481,12 @@
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
         <span class="n">sizes</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="n">s</span> <span class="o">==</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">sizes</span><span class="p">):</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;all parents must have the same size&quot;</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="n">SizeIncompatibilityError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;All parents must have the same size. Found </span><span class="si">{</span><span class="n">sizes</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="kc">False</span>
 
 <div class="viewcode-block" id="Multiply.refresh">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Multiply.refresh">[docs]</a>
@@ -1274,28 +1580,31 @@
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">latent_variables</span><span class="p">)</span>
         <span class="n">sizes</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="o">.</span><span class="n">size</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">]</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">(</span><span class="n">s</span> <span class="o">==</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">sizes</span><span class="p">):</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;all parents must have the same size&quot;</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="n">SizeIncompatibilityError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;All parents must have the same size. Found </span><span class="si">{</span><span class="n">sizes</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">sizes</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">same_root</span> <span class="ow">and</span> <span class="nb">all</span><span class="p">([</span><span class="n">p</span><span class="o">.</span><span class="n">propagates_inducing_points</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">])</span>
 
 <div class="viewcode-block" id="Add.refresh">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Add.refresh">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
         <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">:</span>
-            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span></div>
+            <span class="n">lat</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
+            <span class="n">ip</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span>
+                           <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="n">ip</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">ip</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
 
-        <span class="c1"># if all([lat.inducing_points is not None for lat in self.parents]):</span>
-        <span class="c1">#     ip = _tf.stack([lat.inducing_points for lat in self.parents],</span>
-        <span class="c1">#                    axis=0)</span>
-        <span class="c1">#     ip = _tf.reduce_sum(ip, axis=0)</span>
-        <span class="c1">#</span>
-        <span class="c1">#     ip_var = _tf.stack(</span>
-        <span class="c1">#         [lat.inducing_points_variance for lat in self.parents], axis=0)</span>
-        <span class="c1">#     ip_var = _tf.reduce_sum(ip_var, axis=0)</span>
-        <span class="c1">#</span>
-        <span class="c1">#     self.inducing_points = ip</span>
-        <span class="c1">#     self.inducing_points_variance = ip_var</span>
+            <span class="n">ip_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span>
+                <span class="p">[</span><span class="n">lat</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="k">for</span> <span class="n">lat</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">parents</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="n">ip_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">ip_var</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">ip</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">ip_var</span></div>
+
 
 <div class="viewcode-block" id="Add.predict">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Add.predict">[docs]</a>
@@ -1390,6 +1699,11 @@
 <div class="viewcode-block" id="Bias">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Bias">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Bias</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Bias</span>
+
+<span class="sd">    Adds a deterministic constant to its input.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">scale</span><span class="o">=</span><span class="mi">5</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">size</span>
@@ -1410,7 +1724,7 @@
 
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">+</span> <span class="n">bias</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> \
                 <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points_variance</span></div>
@@ -1452,6 +1766,11 @@
 <div class="viewcode-block" id="Scale">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.Scale">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Scale</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Scale.</span>
+
+<span class="sd">    Multiplies its input by a constant. The variance is multiplied by the square of the same value.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">):</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">size</span>
@@ -1472,7 +1791,7 @@
 
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> \
                                    <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">scale</span><span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> \
@@ -1527,7 +1846,28 @@
 <div class="viewcode-block" id="RadialTrend">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.RadialTrend">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">RadialTrend</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Radial trend.</span>
+
+<span class="sd">    This node outputs a (hyper)spherical deterministic function, positive on the inside and negative on the outside.</span>
+<span class="sd">    It can be made ellipsoidal or with a more complex shape depending on its parent nodes. Its main use is for</span>
+<span class="sd">    implicit geological modelling.</span>
+
+<span class="sd">    It will ignore the variance of its inputs.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="RadialTrend.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.RadialTrend.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for RadialTrend.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node.</span>
+<span class="sd">        size : int</span>
+<span class="sd">            Number of output functions to generate.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
 
@@ -1546,7 +1886,8 @@
                 <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">-</span> <span class="mi">5</span><span class="p">,</span>
                 <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">])</span> <span class="o">+</span> <span class="mi">5</span>
             <span class="p">)</span>
-        <span class="p">)</span>
+        <span class="p">)</span></div>
+
 
 <div class="viewcode-block" id="RadialTrend.compute_trend">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.RadialTrend.compute_trend">[docs]</a>
@@ -1601,7 +1942,7 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">jitter</span><span class="p">)</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">propagates_inducing_points</span><span class="p">:</span>
             <span class="n">ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points</span>
             <span class="n">ip_var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">inducing_points_variance</span>
 
@@ -1655,12 +1996,42 @@
 <div class="viewcode-block" id="GPWalk">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.GPWalk">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">GPWalk</span><span class="p">(</span><span class="n">_FunctionalLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Stochastic Differential Equation.</span>
+
+<span class="sd">    This node uses the vector field defined by its parent to move points in space. After each step the field is</span>
+<span class="sd">    reevaluated and the point&#39;s mean, variance, and direction is updated. It is very effective to learn non-stationary</span>
+<span class="sd">    patterns, but it is computationally expensive.</span>
+
+<span class="sd">    The node&#39;s parent (a GP) defines the vector field and the parent&#39;s parent contains the coordinates that will be</span>
+<span class="sd">    moved. Both must have the same size.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="GPWalk.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GPWalk.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mf">0.01</span><span class="p">,</span> <span class="n">n_steps</span><span class="o">=</span><span class="mi">10</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for GPWalk.</span>
+
+<span class="sd">        In principle the `step` argument does not need to be changed, as the underlying GP tends to adjust its</span>
+<span class="sd">        amplitude to take larger or smaller steps in practice. A higher `n_steps` allows the model to have finer control</span>
+<span class="sd">        of the points&#39; trajectories at a higher computational cost.  `n_steps=5` seems to be the minimum possible</span>
+<span class="sd">        for practical purposes.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node. Must be a GP variant.</span>
+<span class="sd">        step : float</span>
+<span class="sd">            Size of the step at each iteration.</span>
+<span class="sd">        n_steps : int</span>
+<span class="sd">            Number of steps.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">parent</span><span class="o">.</span><span class="n">size</span> <span class="o">!=</span> <span class="n">parent</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;parent node must have the same size as &quot;</span>
-                             <span class="s2">&quot;its own parent&quot;</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="n">SizeIncompatibilityError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Parent node must have the same size as its own parent. Found </span><span class="si">{</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="si">}</span><span class="s2"> and </span><span class="si">{</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">size</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">walker</span> <span class="o">=</span> <span class="n">parent</span><span class="o">.</span><span class="n">parent</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">field</span> <span class="o">=</span> <span class="n">parent</span>
@@ -1672,7 +2043,8 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
             <span class="s2">&quot;amp&quot;</span><span class="p">,</span>
             <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mi">100</span><span class="p">)</span>
-        <span class="p">)</span>
+        <span class="p">)</span></div>
+
 
 <div class="viewcode-block" id="GPWalk.propagate">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.GPWalk.propagate">[docs]</a>
@@ -2482,9 +2854,35 @@
 <div class="viewcode-block" id="MultiStructureGP">
 <a class="viewcode-back" href="../../geoml.html#geoml.latent.MultiStructureGP">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">MultiStructureGP</span><span class="p">(</span><span class="n">BasicGP</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Gaussian process with multiple structures.</span>
+
+<span class="sd">    A linear combination of multiple kernels with (possibly) different ranges. The difference between using this node</span>
+<span class="sd">    and applying a linear combination externally is that here the combination is at the kernel level instead of the</span>
+<span class="sd">    latent variable level.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="MultiStructureGP.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.MultiStructureGP.__init__">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">kernel</span><span class="o">=</span><span class="n">_kr</span><span class="o">.</span><span class="n">Gaussian</span><span class="p">(),</span> <span class="n">fix_range</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">n_structures</span><span class="o">=</span><span class="mi">2</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for MultiStructureGP.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        parent</span>
+<span class="sd">            Parent node.</span>
+<span class="sd">        size : int</span>
+<span class="sd">            Number of output functions.</span>
+<span class="sd">        kernel</span>
+<span class="sd">            The kernel to use for the covariance matrices.</span>
+<span class="sd">        fix_range : bool</span>
+<span class="sd">            Whether to force a unit range for all input dimensions.</span>
+<span class="sd">        n_structures : int</span>
+<span class="sd">            Number of kernels to combine (minimum 2).</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">n_structures</span> <span class="o">=</span> <span class="n">n_structures</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">kernel</span><span class="p">,</span> <span class="n">fix_range</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">kernel</span><span class="p">,</span> <span class="n">fix_range</span><span class="p">)</span></div>
+
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_set_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="n">n_ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">root</span><span class="o">.</span><span class="n">n_ip</span>
@@ -2653,6 +3051,245 @@
             <span class="k">return</span> <span class="n">cov</span></div>
 </div>
 
+
+
+<div class="viewcode-block" id="GradientConstrainedInput">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">GradientConstrainedInput</span><span class="p">(</span><span class="n">_RootLatentVariable</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Inputs constrained by structural data.</span>
+
+<span class="sd">    This node uses a set of directional data to constrain the output&#39;s gradient. The output GP is considered to have</span>
+<span class="sd">    zero gradient in the specified directions, flowing only in the orthogonal direction.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+<div class="viewcode-block" id="GradientConstrainedInput.__init__">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.__init__">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">inducing_points</span><span class="p">,</span> <span class="n">directional_data</span><span class="p">,</span>
+                 <span class="n">covariance</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">fix_covariance</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Initializer for GradientConstrainedInput.</span>
+
+<span class="sd">        The locations of the provided `directional_data` will be added to the inducing points set to better constrain</span>
+<span class="sd">        the output.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        inducing_points</span>
+<span class="sd">            A `PointData` object.</span>
+<span class="sd">        directional_data</span>
+<span class="sd">            A `DirectionalData` object to constrain the output.</span>
+<span class="sd">        covariance</span>
+<span class="sd">            A covariance object, containing a kernel and transform.</span>
+<span class="sd">        size : int</span>
+<span class="sd">            Number of output variables.</span>
+<span class="sd">        fix_covariance : bool</span>
+<span class="sd">            Whether to fix the covariance&#39;s parameters during training.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">()</span>
+
+        <span class="c1"># Root node setup</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">root_size</span> <span class="o">=</span> <span class="n">inducing_points</span><span class="o">.</span><span class="n">n_dim</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">bounding_box</span> <span class="o">=</span> <span class="n">inducing_points</span><span class="o">.</span><span class="n">bounding_box</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_register</span><span class="p">(</span><span class="n">covariance</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">inducing_points</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">fix_covariance</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">all_parameters</span><span class="p">:</span>
+                <span class="n">p</span><span class="o">.</span><span class="n">fix</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">base_inducing_points</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span>
+            <span class="n">_np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span><span class="n">inducing_points</span><span class="o">.</span><span class="n">coordinates</span><span class="p">,</span> <span class="n">directional_data</span><span class="o">.</span><span class="n">coordinates</span><span class="p">]),</span>
+                <span class="n">axis</span><span class="o">=</span><span class="mi">0</span>
+            <span class="p">),</span>
+            <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">base_inducing_points</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span> <span class="o">=</span> <span class="n">directional_data</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span><span class="o">.</span><span class="n">n_data</span>
+
+        <span class="c1"># GP setup</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scale</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_chol</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">alpha</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">prior_cov</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">prior_cov_inv</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">prior_cov_chol</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_parameters</span><span class="p">()</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_set_parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">n_ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_ip</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;alpha_white&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">RealParameter</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">normal</span><span class="p">(</span>
+                    <span class="n">scale</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">,</span>
+                    <span class="n">size</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">]</span>
+                <span class="p">),</span>
+                <span class="c1"># _np.ones([self.size, n_ip, 1])*0.1,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">-</span> <span class="mi">10</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">+</span> <span class="mi">10</span>
+            <span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_add_parameter</span><span class="p">(</span>
+            <span class="s2">&quot;delta&quot;</span><span class="p">,</span>
+            <span class="n">_gpr</span><span class="o">.</span><span class="n">PositiveParameter</span><span class="p">(</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">0.01</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e-6</span><span class="p">,</span>
+                <span class="n">_np</span><span class="o">.</span><span class="n">ones</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="n">n_ip</span><span class="p">])</span> <span class="o">*</span> <span class="mf">1e2</span>
+            <span class="p">))</span>
+
+<div class="viewcode-block" id="GradientConstrainedInput.get_root_inducing_points">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.get_root_inducing_points">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_root_inducing_points</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_inducing_points</span>
+        <span class="k">return</span> <span class="n">ip</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">ip</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="GradientConstrainedInput.refresh">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.refresh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">refresh</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">jitter</span><span class="o">=</span><span class="mf">1e-9</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;constrained_input_refresh&quot;</span><span class="p">):</span>
+            <span class="c1"># constrained prior</span>
+            <span class="n">ip</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_inducing_points</span>
+            <span class="n">dir_coords</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span><span class="o">.</span><span class="n">coordinates</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+            <span class="n">dirs</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span><span class="o">.</span><span class="n">directions</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+            <span class="n">base_cov</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">self_covariance_matrix</span><span class="p">(</span><span class="n">ip</span><span class="p">)</span>
+            <span class="n">cross_cov</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span><span class="n">ip</span><span class="p">,</span> <span class="n">dir_coords</span><span class="p">,</span> <span class="n">dirs</span><span class="p">)</span>
+            <span class="n">dir_cov</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">self_covariance_matrix_d2</span><span class="p">(</span><span class="n">dir_coords</span><span class="p">,</span> <span class="n">dirs</span><span class="p">)</span>
+
+            <span class="n">full_cov</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">dir_cov</span><span class="p">,</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">cross_cov</span><span class="p">)],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">cross_cov</span><span class="p">,</span> <span class="n">base_cov</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span>
+            <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">scale</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag_part</span><span class="p">(</span><span class="n">full_cov</span><span class="p">))</span>
+            <span class="n">full_cov</span> <span class="o">=</span> <span class="n">full_cov</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">scale</span><span class="p">[:,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">scale</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">eye</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+
+            <span class="n">cov</span> <span class="o">=</span> <span class="n">full_cov</span> <span class="o">+</span> <span class="n">eye</span> <span class="o">*</span> <span class="n">jitter</span>
+            <span class="n">chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span><span class="n">cov</span><span class="p">)</span>
+            <span class="n">cov_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky_solve</span><span class="p">(</span><span class="n">chol</span><span class="p">,</span> <span class="n">eye</span><span class="p">)</span>
+
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov</span> <span class="o">=</span> <span class="n">cov</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_chol</span> <span class="o">=</span> <span class="n">chol</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span> <span class="o">=</span> <span class="n">cov_inv</span>
+
+            <span class="c1"># posterior</span>
+            <span class="n">eye</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">eye</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:],</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+            <span class="n">delta</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;delta&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">delta</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">),</span> <span class="n">delta</span>
+            <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">delta_diag</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">delta</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">+</span> <span class="n">delta_diag</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth</span> <span class="o">+</span> <span class="n">eye</span> <span class="o">*</span> <span class="n">jitter</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky_solve</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span><span class="p">,</span> <span class="n">eye</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">cholesky</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:]</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">+</span> <span class="n">eye</span> <span class="o">*</span> <span class="n">jitter</span><span class="p">)</span>
+
+            <span class="c1"># inducing points</span>
+            <span class="n">alpha_white</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;alpha_white&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="n">alpha_white</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">_tf</span><span class="o">.</span><span class="n">zeros</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span><span class="p">),</span> <span class="n">alpha_white</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">mean</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">chol</span><span class="p">,</span> <span class="n">alpha_white</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">mean</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span><span class="p">:,</span> <span class="mi">0</span><span class="p">])</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">alpha</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ab,sbc-&gt;sac&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span><span class="p">,</span> <span class="n">mean</span><span class="p">)</span>
+
+            <span class="n">pred_var</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ab,sbc-&gt;sac&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span><span class="p">)</span>
+                <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:],</span>
+                <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">False</span>
+            <span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">inducing_points_variance</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">pred_var</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span><span class="p">:])</span></div>
+
+
+<div class="viewcode-block" id="GradientConstrainedInput.propagate">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.propagate">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">propagate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="n">mu</span><span class="p">,</span> <span class="n">var</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">mu</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">mu</span><span class="p">[:,</span> <span class="p">:,</span> <span class="mi">0</span><span class="p">])</span>
+        <span class="n">var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">mu</span><span class="p">,</span> <span class="n">var</span></div>
+
+
+<div class="viewcode-block" id="GradientConstrainedInput.kl_divergence">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.kl_divergence">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">kl_divergence</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;constrained_KL_divergence&quot;</span><span class="p">):</span>
+            <span class="n">delta</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;delta&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+            <span class="c1"># mean = self.parameters[&quot;mean&quot;].get_value()</span>
+            <span class="n">alpha_white</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;alpha_white&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get_value</span><span class="p">()</span>
+
+            <span class="n">tr</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:])</span>
+            <span class="c1"># fit = _tf.reduce_sum(mean * self.alpha[:, :self.n_ip, :])</span>
+            <span class="n">fit</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">alpha_white</span><span class="o">**</span><span class="mi">2</span><span class="p">)</span>
+            <span class="n">det_1</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">diag_part</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_chol</span><span class="p">)))</span>
+            <span class="n">det_2</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span><span class="n">_tf</span><span class="o">.</span><span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">delta</span><span class="p">))</span>
+            <span class="n">kl</span> <span class="o">=</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="o">-</span> <span class="n">tr</span> <span class="o">+</span> <span class="n">fit</span> <span class="o">+</span> <span class="n">det_1</span> <span class="o">-</span> <span class="n">det_2</span><span class="p">)</span>
+
+            <span class="k">return</span> <span class="n">kl</span></div>
+
+
+<div class="viewcode-block" id="GradientConstrainedInput.set_parameter_limits">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.set_parameter_limits">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_parameter_limits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">set_limits</span><span class="p">(</span><span class="n">data</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="GradientConstrainedInput.predict">
+<a class="viewcode-back" href="../../geoml.html#geoml.latent.GradientConstrainedInput.predict">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">x_var</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_sim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
+        <span class="k">with</span> <span class="n">_tf</span><span class="o">.</span><span class="n">name_scope</span><span class="p">(</span><span class="s2">&quot;constrained_root_prediction&quot;</span><span class="p">):</span>
+            <span class="n">cov_cross</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">covariance_matrix_d1</span><span class="p">(</span>
+                    <span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span><span class="o">.</span><span class="n">coordinates</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">directional_data</span><span class="o">.</span><span class="n">directions</span>
+                <span class="p">),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">covariance_matrix</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">base_inducing_points</span><span class="p">)</span>
+            <span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">cov_cross</span> <span class="o">=</span> <span class="n">cov_cross</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">scale</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+
+            <span class="n">mu</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ab,sbc-&gt;sac&quot;</span><span class="p">,</span> <span class="n">cov_cross</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">alpha</span><span class="p">)</span>
+
+            <span class="n">explained_var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span><span class="s2">&quot;ab,sbc-&gt;sac&quot;</span><span class="p">,</span> <span class="n">cov_cross</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_smooth_inv</span><span class="p">)</span>
+                <span class="o">*</span> <span class="n">cov_cross</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:],</span>
+                <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+            <span class="n">var</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="mf">1.0</span> <span class="o">-</span> <span class="n">explained_var</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>
+
+            <span class="n">influence</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">reduce_sum</span><span class="p">(</span>
+                <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="n">cov_cross</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cov_inv</span><span class="p">)</span> <span class="o">*</span> <span class="n">cov_cross</span><span class="p">,</span>
+                <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+            <span class="n">influence</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">tile</span><span class="p">(</span><span class="n">influence</span><span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:],</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="mi">1</span><span class="p">])</span>
+
+            <span class="k">if</span> <span class="n">n_sim</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">rnd</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">stateless_normal</span><span class="p">(</span>
+                    <span class="n">shape</span><span class="o">=</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_ip</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">n_dir</span><span class="p">,</span> <span class="n">n_sim</span><span class="p">],</span>
+                    <span class="n">seed</span><span class="o">=</span><span class="n">seed</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">_tf</span><span class="o">.</span><span class="n">float64</span>
+                <span class="p">)</span>
+                <span class="n">sims</span> <span class="o">=</span> <span class="n">_tf</span><span class="o">.</span><span class="n">einsum</span><span class="p">(</span>
+                    <span class="s2">&quot;ab,sbc-&gt;sac&quot;</span><span class="p">,</span>
+                    <span class="n">cov_cross</span><span class="p">,</span>
+                    <span class="n">_tf</span><span class="o">.</span><span class="n">matmul</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">chol_r</span><span class="p">,</span> <span class="n">rnd</span><span class="p">))</span> <span class="o">+</span> <span class="n">mu</span>
+
+                <span class="k">return</span> <span class="n">mu</span><span class="p">,</span> <span class="n">var</span><span class="p">,</span> <span class="n">sims</span><span class="p">,</span> <span class="n">explained_var</span><span class="p">,</span> <span class="n">influence</span>
+
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">mu</span><span class="p">,</span> <span class="n">var</span></div>
+</div>
 
 </pre></div>
 

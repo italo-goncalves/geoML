@@ -125,16 +125,19 @@ class Cosine(_Kernel):
 
 
 class Matern32(_Kernel):
+    """Once differentiable Matérn kernel."""
     def kernelize(self, x):
         return (1 + 5*x)*_tf.math.exp(-5*x)
 
 
 class Matern52(_Kernel):
+    """Twice differentiable Matérn kernel."""
     def kernelize(self, x):
         return (1 + 6*x + 12*x**2)*_tf.math.exp(-6*x)
 
 
 class RationalQuadratic(_Kernel):
+    """Rational quadratic (a.k.a. Cauchy) kernel."""
     def __init__(self, scale=1):
         super().__init__()
         self._add_parameter("scale", _gpr.PositiveParameter(scale, 1e-3, 100))
@@ -145,40 +148,40 @@ class RationalQuadratic(_Kernel):
         return cov
 
 
-class _RadialBasisFunction(_Kernel):
-    def __init__(self, max_distance, epsilon=1e-12):
-        super().__init__()
-        self.max_distance = max_distance
-        self.epsilon = epsilon  # required to be able to compute gradients
-
-
-class RBF3D(_RadialBasisFunction):
-    """RBF 3D"""
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 2 * d**3 + 3 * d**2 * self.max_distance + self.max_distance**3
-        k = k / self.max_distance**3
-        return k
-
-
-class RBF2D(_RadialBasisFunction):
-    """Thin plate spline RBF (2D)"""
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 2 * _tf.math.log(d) * d ** 2 \
-            - (1 + 2*_np.log(self.max_distance)) * d**2 \
-            + self.max_distance**2
-        k = k / self.max_distance ** 2
-        return k
-
-
-class RBF1D(_RadialBasisFunction):
-    """Cubic RBF (1D)"""
-    def kernelize(self, x):
-        d = _tf.sqrt(x ** 2 + self.epsilon)
-        k = 2*d**3 - 3 * d**2 * self.max_distance + self.max_distance**3
-        k = k / self.max_distance ** 3
-        return k
+# class _RadialBasisFunction(_Kernel):
+#     def __init__(self, max_distance, epsilon=1e-12):
+#         super().__init__()
+#         self.max_distance = max_distance
+#         self.epsilon = epsilon  # required to be able to compute gradients
+#
+#
+# class RBF3D(_RadialBasisFunction):
+#     """RBF 3D"""
+#     def kernelize(self, x):
+#         d = _tf.sqrt(x ** 2 + self.epsilon)
+#         k = 2 * d**3 + 3 * d**2 * self.max_distance + self.max_distance**3
+#         k = k / self.max_distance**3
+#         return k
+#
+#
+# class RBF2D(_RadialBasisFunction):
+#     """Thin plate spline RBF (2D)"""
+#     def kernelize(self, x):
+#         d = _tf.sqrt(x ** 2 + self.epsilon)
+#         k = 2 * _tf.math.log(d) * d ** 2 \
+#             - (1 + 2*_np.log(self.max_distance)) * d**2 \
+#             + self.max_distance**2
+#         k = k / self.max_distance ** 2
+#         return k
+#
+#
+# class RBF1D(_RadialBasisFunction):
+#     """Cubic RBF (1D)"""
+#     def kernelize(self, x):
+#         d = _tf.sqrt(x ** 2 + self.epsilon)
+#         k = 2*d**3 - 3 * d**2 * self.max_distance + self.max_distance**3
+#         k = k / self.max_distance ** 3
+#         return k
 
 
 class _AbstractCovariance(_gpr.Parametric):
@@ -192,11 +195,11 @@ class _AbstractCovariance(_gpr.Parametric):
     def has_compact_support(self):
         return self._has_compact_support
 
-    def covariance_matrix(self, x, y, l1_distance=False):
+    def covariance_matrix(self, x, y):
         """Computes point-point covariance matrix between x and y tensors."""
         raise NotImplementedError()
 
-    def covariance_matrix_d1(self, x, y, dir_y, l1_distance=False):
+    def covariance_matrix_d1(self, x, y, dir_y):
         """
         Computes point-direction covariance matrix between x and y tensors.
         """
@@ -207,11 +210,11 @@ class _AbstractCovariance(_gpr.Parametric):
         x = x - min_coords
         y = y - min_coords
 
-        k1 = self.covariance_matrix(x, y + 0.5*step*dir_y, l1_distance)
-        k2 = self.covariance_matrix(x, y - 0.5*step*dir_y, l1_distance)
+        k1 = self.covariance_matrix(x, y + 0.5*step*dir_y)
+        k2 = self.covariance_matrix(x, y - 0.5*step*dir_y)
         return (k1 - k2)/step
 
-    def covariance_matrix_d2(self, x, y, dir_x, dir_y, l1_distance=False):
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
         """
         Computes direction-direction covariance matrix between x and y tensors.
         """
@@ -222,10 +225,8 @@ class _AbstractCovariance(_gpr.Parametric):
         x = x - min_coords
         y = y - min_coords
 
-        k1 = self.covariance_matrix_d1(x + 0.5*step*dir_x, y, dir_y,
-                                       l1_distance)
-        k2 = self.covariance_matrix_d1(x - 0.5*step*dir_x, y, dir_y,
-                                       l1_distance)
+        k1 = self.covariance_matrix_d1(x + 0.5*step*dir_x, y, dir_y)
+        k2 = self.covariance_matrix_d1(x - 0.5*step*dir_x, y, dir_y)
         return (k1 - k2) / step
 
     def point_variance(self, x):
@@ -235,11 +236,11 @@ class _AbstractCovariance(_gpr.Parametric):
         """
         raise NotImplementedError()
 
-    def self_covariance_matrix(self, x, l1_distance=False):
-        return self.covariance_matrix(x, x, l1_distance)
+    def self_covariance_matrix(self, x):
+        return self.covariance_matrix(x, x)
 
-    def self_covariance_matrix_d2(self, x, dir_x, l1_distance=False):
-        return self.covariance_matrix_d2(x, x, dir_x, dir_x, l1_distance)
+    def self_covariance_matrix_d2(self, x, dir_x):
+        return self.covariance_matrix_d2(x, x, dir_x, dir_x)
 
     def point_variance_d2(self, x, dir_x, step=None):
         if step is None:
@@ -338,22 +339,29 @@ class _AbstractCovariance(_gpr.Parametric):
 
 
 class Covariance(_AbstractCovariance):
-    """Covariance that acts on actual coordinates"""
+    """Covariance function."""
 
     def __init__(self, kernel, transform=_gt.Identity()):
+        """
+        Initializer for Covariance.
+
+        Parameters
+        ----------
+        kernel
+            A kernel object.
+        transform
+            An object from the `transform` module.
+        """
         super().__init__()
         self.kernel = self._register(kernel)
         self.transform = self._register(transform)
         self._has_compact_support = self.kernel.has_compact_support
 
-    def covariance_matrix(self, x, y, l1_distance=False):
+    def covariance_matrix(self, x, y):
         with _tf.name_scope(self.__class__.__name__ + "_cov"):
             x = self.transform.__call__(x)
             y = self.transform.__call__(y)
-            if l1_distance:
-                d = _pairwise_dist_l1(x, y)
-            else:
-                d = _pairwise_dist(x, y)
+            d = _pairwise_dist(x, y)
             k = self.kernel.kernelize(d)
         return k
 
@@ -405,23 +413,23 @@ class _NodeCovariance(_AbstractCovariance):
     def _operation(self, arg_list):
         raise NotImplementedError
 
-    def covariance_matrix(self, x, y, l1_distance=False):
+    def covariance_matrix(self, x, y):
         k = self._operation(
-            [kernel.covariance_matrix(x, y, l1_distance)
+            [kernel.covariance_matrix(x, y)
              for kernel in self.components]
         )
         return k
 
-    def covariance_matrix_d1(self, x, y, dir_y, l1_distance=False):
+    def covariance_matrix_d1(self, x, y, dir_y):
         k = self._operation(
-            [kernel.covariance_matrix_d1(x, y, dir_y, l1_distance)
+            [kernel.covariance_matrix_d1(x, y, dir_y)
              for kernel in self.components]
         )
         return k
 
-    def covariance_matrix_d2(self, x, y, dir_x, dir_y, l1_distance=False):
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
         k = self._operation(
-            [kernel.covariance_matrix_d2(x, y, dir_x, dir_y, l1_distance)
+            [kernel.covariance_matrix_d2(x, y, dir_x, dir_y)
              for kernel in self.components]
         )
         return k
@@ -432,16 +440,16 @@ class _NodeCovariance(_AbstractCovariance):
         )
         return v
 
-    def self_covariance_matrix(self, x, l1_distance=False):
+    def self_covariance_matrix(self, x):
         k = self._operation(
-            [kernel.self_covariance_matrix(x, l1_distance)
+            [kernel.self_covariance_matrix(x)
              for kernel in self.components]
         )
         return k
 
-    def self_covariance_matrix_d2(self, x, dir_x, l1_distance=False):
+    def self_covariance_matrix_d2(self, x, dir_x):
         k = self._operation(
-            [kernel.self_covariance_matrix_d2(x, dir_x, l1_distance)
+            [kernel.self_covariance_matrix_d2(x, dir_x)
              for kernel in self.components]
         )
         return k
@@ -507,7 +515,7 @@ class Linear(_AbstractCovariance):
         super().__init__()
         self.transform = self._register(transform)
 
-    def covariance_matrix(self, x, y, l1_distance=False):
+    def covariance_matrix(self, x, y):
         with _tf.name_scope("Linear_cov"):
             x = self.transform.__call__(x)
             y = self.transform.__call__(y)
@@ -535,6 +543,14 @@ class Linear(_AbstractCovariance):
 class Sum(_NodeCovariance):
     """Kernel sum"""
     def __init__(self, *args):
+        """
+        Kernel sum.
+
+        Parameters
+        ----------
+        args
+            Kernels to compute the sum.
+        """
         n_comp = len(args)
         v = _gpr.CompositionalParameter(_tf.ones([n_comp], _tf.float64)/n_comp)
 
@@ -554,6 +570,14 @@ class Sum(_NodeCovariance):
 class Product(_NodeCovariance):
     """Kernel product"""
     def __init__(self, *args):
+        """
+        Kernel product.
+
+        Parameters
+        ----------
+        args
+            Kernels to compute the product.
+        """
         super().__init__(*args)
         self._has_compact_support = any([kernel.has_compact_support
                                          for kernel in args])
@@ -563,14 +587,18 @@ class Product(_NodeCovariance):
 
 
 class Scale(_WrapperCovariance):
-    """Kernel scaling"""
+    """
+    Kernel scaling.
+
+    Add a parameter allowing for non-unit variance.
+    """
     def __init__(self, base_covariance):
         super().__init__(base_covariance)
         self._add_parameter("amplitude", _gpr.PositiveParameter(1.0, 1e-4, 1e4))
 
-    def covariance_matrix(self, x, y, l1_distance=False):
+    def covariance_matrix(self, x, y):
         return self.parameters["amplitude"].get_value() \
-               * self.base_covariance.covariance_matrix(x, y, l1_distance)
+               * self.base_covariance.covariance_matrix(x, y)
 
     def point_variance(self, x):
         return self.parameters["amplitude"].get_value() \

@@ -73,12 +73,50 @@ class _LatentVariable(_gpr.Parametric):
         pass
 
     def refresh(self, jitter=1e-9):
+        """
+        Updates the model's internal state.
+
+        If called within TensorFlow's eager mode, will allow inspection of the internal tensors.
+
+        Parameters
+        ----------
+        jitter : float
+            Small value added to the covariance matrices for numerical stability.
+        """
         pass
 
     def get_unique_parents(self):
         raise NotImplementedError
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        """
+        Prediction on the previous node's latent variables. If `n_sim=0` only the mean and variance are returned.
+
+        Parameters
+        ----------
+        x : Tensor
+            Mean of the input.
+        x_var : Tensor
+            Variance of the input.
+        n_sim : int
+            Number of simulations to draw.
+        seed : tuple
+            A set of two seeds for the random number generator.
+
+        Returns
+        -------
+        mu
+            Mean of the output.
+        var
+            Variance of the output.
+        sims
+            A set of simulations generated from the predictive distribution.
+        explained_var
+            Amount of variance "explained away" by conditioning on the inducing points.
+        influence
+            Fraction of the full variance that the model is able to sustain at a given position. Increases closer to
+            the inducing points.
+        """
         raise NotImplementedError
 
     def predict_directions(self, x, dir_x, step=1e-3):
@@ -88,6 +126,23 @@ class _LatentVariable(_gpr.Parametric):
         raise NotImplementedError
 
     def propagate(self, x, x_var=None):
+        """
+        Propagates mean and variance to the next node.
+
+        Parameters
+        ----------
+        x : Tensor
+            Mean of the input.
+        x_var : Tensor
+            Variance of the input.
+
+        Returns
+        -------
+        mu
+            Mean of the output.
+        var
+            Variance of the output.
+        """
         raise NotImplementedError
 
     @staticmethod
@@ -102,6 +157,11 @@ class _LatentVariable(_gpr.Parametric):
 
 
 class _RootLatentVariable(_LatentVariable):
+    """
+    Root latent variable.
+
+    A root latent variable node processes an input, passing it along to other nodes as a Gaussian random variable.
+    """
     def __init__(self):
         super().__init__()
         self.root = self
@@ -115,7 +175,22 @@ class _RootLatentVariable(_LatentVariable):
 
 
 class _FunctionalLatentVariable(_LatentVariable):
+    """
+    Functional latent variable.
+
+    A functional latent variable node applies a function to its input, returning a new random variable
+    that may or not be Gaussian.
+
+    """
     def __init__(self, parent):
+        """
+        Initializer for _FunctionalLatentVariable.
+
+        Parameters
+        ----------
+        parent
+            Parent node.
+        """
         super().__init__()
         self.parent = self._register(parent)
         parent.children.append(self)
@@ -139,6 +214,12 @@ class _FunctionalLatentVariable(_LatentVariable):
 
 
 class _Operation(_LatentVariable):
+    """
+    Operation node.
+
+    An operation node combines multiple latent variables in some form (sum, linear combination, concatenation, etc.).
+
+    """
     def __init__(self, *latent_variables):
         super().__init__()
         self.parents = list(latent_variables)
@@ -169,6 +250,34 @@ class _GPNode(_FunctionalLatentVariable):
             raise BrokenPropagationError('GP nodes require their parent to propagate inducing points.')
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        """
+        Prediction on the previous node's latent variables. If `n_sim=0` only the mean and variance are returned.
+
+        Parameters
+        ----------
+        x : Tensor
+            Mean of the input.
+        x_var : Tensor
+            Variance of the input.
+        n_sim : int
+            Number of simulations to draw.
+        seed : tuple
+            A set of two seeds for the random number generator.
+
+        Returns
+        -------
+        mu
+            Mean of the output.
+        var
+            Variance of the output.
+        sims
+            A set of simulations generated from the predictive distribution.
+        explained_var
+            Amount of variance "explained away" by conditioning on the inducing points.
+        influence
+            Fraction of the full variance that the model is able to sustain at a given position. Increases closer to
+            the inducing points.
+        """
         with _tf.name_scope("gp_prediction"):
             x, x_var = self.parent.propagate(x, x_var)
 
@@ -183,9 +292,33 @@ class _GPNode(_FunctionalLatentVariable):
 
 
 class BasicInput(_RootLatentVariable):
+    """
+    Basic input node.
+
+    Converts a deterministic input (usually spatial coordinates) into Gaussian latent variables with zero variance,
+    after applying a transform for normalization. Also defines the inducing points that will be propagated to other
+    nodes.
+
+    """
     def __init__(self, inducing_points, transform=_tr.Identity(),
                  fix_inducing_points=True, fix_transform=False,
                  center=False):
+        """
+        Initializer for BasicInput.
+
+        Parameters
+        ----------
+        inducing_points
+            A `PointData` object.
+        transform
+            An object from the `transform` module for normalization.
+        fix_inducing_points : bool
+            Whether to fix the inducing points positions.
+        fix_transform : bool
+            Whether to fix the transform parameters to prevent them from changing during training.
+        center : bool
+            Whether to center the data, based on the inducing points' bounding box.
+        """
         super().__init__()
         test_point = _np.ones([1, inducing_points.n_dim])
         test_point = transform(test_point)
@@ -255,6 +388,11 @@ class BasicInput(_RootLatentVariable):
 
 
 class Stack(_Operation):
+    """
+    Latent variable stacking.
+
+    Consolidates a list of latent variables into a single object.
+    """
     def __init__(self, *latent_variables):
         super().__init__(*latent_variables)
         self._size = sum([p.size for p in self.parents])
@@ -308,6 +446,12 @@ class Stack(_Operation):
 
 
 class Concatenate(Stack):
+    """
+    Latent variable concatenation.
+
+    Consolidates a list of latent variables into a single object. This operation requires all its parent nodes to
+    be able to propagate inducing points.
+    """
     def __init__(self, *latent_variables):
         super().__init__(*latent_variables)
         if self.same_root:
@@ -325,8 +469,31 @@ class Concatenate(Stack):
 
 
 class BasicGP(_GPNode):
+    """
+    Standard Gaussian process node.
+
+    In this module, GP nodes are able to work with inputs that may be
+    Gaussian, having an associated variance. This variance is integrated by considering it as a squared range and
+    applying the non-stationary covariance.
+    """
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
                  fix_range=False, isotropic=False):
+        """
+        Initializer for BasicGP.
+
+        Parameters
+        ----------
+        parent
+            Parent node.
+        size
+            Number of output latent variables
+        kernel
+            The kernel to use for the covariance matrices.
+        fix_range : bool
+            Whether to force a unit range for all input dimensions.
+        isotropic : bool
+            If `True`, forces the same range for all input dimensions.
+        """
         super().__init__(parent)
         self._size = size
         self.kernel = self._register(kernel)
@@ -572,6 +739,12 @@ class BasicGP(_GPNode):
 
 
 class AdditiveGP(BasicGP):
+    """
+    Additive GP node.
+
+    This node is similar to the `BasicGP`, with the difference that is covariance matrices are computed separately for
+    each input dimension and then averaged. It makes more sense to use it on high-dimensional non-spatial inputs.
+    """
     def covariance_matrix(self, x, y, var_x=None, var_y=None):
         with _tf.name_scope("basic_covariance_matrix"):
             ranges = self.parameters["ranges"].get_value()
@@ -603,7 +776,27 @@ class AdditiveGP(BasicGP):
 
 
 class Linear(_FunctionalLatentVariable):
+    """
+    Linear node.
+
+    This node outputs one or more linear combinations of the inputs. Its role in a network depends on its position.
+    Close to a root node it induces rotation in the coordinates. At the end it induces correlations between the
+    outputs, and in the middle it can serve as an information bottleneck.
+    """
     def __init__(self, parent, size=1, unit_norm=True):
+        """
+        Initializer for Linear.
+
+        Parameters
+        ----------
+        parent
+            Parent node
+        size
+            Number of output latent variables.
+        unit_norm : bool
+            Whether the weights should form a unit norm vector. If `False` the weights will be constrained to the
+            [-1, 1] interval.
+        """
         super().__init__(parent)
         self._size = size
 
@@ -683,7 +876,22 @@ class Linear(_FunctionalLatentVariable):
 
 
 class SelectInput(_FunctionalLatentVariable):
+    """
+    Variable selection.
+
+    Returns the specified columns of the input, discarding the others.
+    """
     def __init__(self, parent, columns):
+        """
+        Initializer for SelectInput.
+
+        Parameters
+        ----------
+        parent
+            Parent node.
+        columns : list
+            List of indices to retain.
+        """
         super().__init__(parent)
         self.columns = _tf.constant(columns)
         self._size = len(columns)
@@ -725,7 +933,22 @@ class SelectInput(_FunctionalLatentVariable):
 
 
 class LinearCombination(_Operation):
+    """
+    Linear combination.
+
+    This node combines the inputs linearly with positive weights.
+    """
     def __init__(self, *latent_variables, unit_variance=True):
+        """
+        Initializer for LinearCombination.
+
+        Parameters
+        ----------
+        latent_variables
+            Nodes to combine. They must all have the same number of variables.
+        unit_variance : bool
+            If `True`, constrains the weights to unit sum to control the variance of the output.
+        """
         super().__init__(*latent_variables)
         sizes = [p.size for p in self.parents]
         if not all(s == sizes[0] for s in sizes):
@@ -838,7 +1061,27 @@ class LinearCombination(_Operation):
 
 
 class ProductOfExperts(_Operation):
+    """
+    Product of Experts.
+
+    The Product of Experts combines latent variables from different nodes with weights inversely proportional to
+    the local variance. It is more useful when combining the outputs of smaller networks with different set of
+    inducing points, allowing each one to focus on a region of space.
+
+    This node treats its parents independently. Means and variances will be "stiched" smoothly, but individual
+    simulations may exhibit artifacts.
+
+    This node is not capable of propagating inducing points.
+    """
     def __init__(self, *latent_variables):
+        """
+        Initializer for ProductOfExperts.
+
+        Parameters
+        ----------
+        latent_variables
+            Parent nodes to combine.
+        """
         super().__init__(*latent_variables)
         sizes = [p.size for p in self.parents]
         if not all(s == sizes[0] for s in sizes):
@@ -1176,6 +1419,11 @@ class Add(_Operation):
 
 
 class Bias(_FunctionalLatentVariable):
+    """
+    Bias
+
+    Adds a deterministic constant to its input.
+    """
     def __init__(self, parent, scale=5):
         super().__init__(parent)
         self._size = parent.size
@@ -1223,6 +1471,11 @@ class Bias(_FunctionalLatentVariable):
 
 
 class Scale(_FunctionalLatentVariable):
+    """
+    Scale.
+
+    Multiplies its input by a constant. The variance is multiplied by the square of the same value.
+    """
     def __init__(self, parent):
         super().__init__(parent)
         self._size = parent.size
@@ -1283,7 +1536,26 @@ class Scale(_FunctionalLatentVariable):
 
 
 class RadialTrend(_FunctionalLatentVariable):
+    """
+    Radial trend.
+
+    This node outputs a (hyper)spherical deterministic function, positive on the inside and negative on the outside.
+    It can be made ellipsoidal or with a more complex shape depending on its parent nodes. Its main use is for
+    implicit geological modelling.
+
+    It will ignore the variance of its inputs.
+    """
     def __init__(self, parent, size=1):
+        """
+        Initializer for RadialTrend.
+
+        Parameters
+        ----------
+        parent
+            Parent node.
+        size : int
+            Number of output functions to generate.
+        """
         super().__init__(parent)
         self._size = size
 
@@ -1349,7 +1621,7 @@ class RadialTrend(_FunctionalLatentVariable):
     def refresh(self, jitter=1e-9):
         self.parent.refresh(jitter)
 
-        if propagates_inducing_points:
+        if self.propagates_inducing_points:
             ip = self.parent.inducing_points
             ip_var = self.parent.inducing_points_variance
 
@@ -1390,7 +1662,34 @@ class RadialTrend(_FunctionalLatentVariable):
 
 
 class GPWalk(_FunctionalLatentVariable):
+    """
+    Stochastic Differential Equation.
+
+    This node uses the vector field defined by its parent to move points in space. After each step the field is
+    reevaluated and the point's mean, variance, and direction is updated. It is very effective to learn non-stationary
+    patterns, but it is computationally expensive.
+
+    The node's parent (a GP) defines the vector field and the parent's parent contains the coordinates that will be
+    moved. Both must have the same size.
+    """
     def __init__(self, parent, step=0.01, n_steps=10):
+        """
+        Initializer for GPWalk.
+
+        In principle the `step` argument does not need to be changed, as the underlying GP tends to adjust its
+        amplitude to take larger or smaller steps in practice. A higher `n_steps` allows the model to have finer control
+        of the points' trajectories at a higher computational cost.  `n_steps=5` seems to be the minimum possible
+        for practical purposes.
+
+        Parameters
+        ----------
+        parent
+            Parent node. Must be a GP variant.
+        step : float
+            Size of the step at each iteration.
+        n_steps : int
+            Number of steps.
+        """
         super().__init__(parent)
 
         if parent.size != parent.parent.size:
@@ -2128,7 +2427,30 @@ class GPWithGradient(_GPNode):
 
 
 class MultiStructureGP(BasicGP):
+    """
+    Gaussian process with multiple structures.
+
+    A linear combination of multiple kernels with (possibly) different ranges. The difference between using this node
+    and applying a linear combination externally is that here the combination is at the kernel level instead of the
+    latent variable level.
+    """
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False, n_structures=2):
+        """
+        Initializer for MultiStructureGP.
+
+        Parameters
+        ----------
+        parent
+            Parent node.
+        size : int
+            Number of output functions.
+        kernel
+            The kernel to use for the covariance matrices.
+        fix_range : bool
+            Whether to force a unit range for all input dimensions.
+        n_structures : int
+            Number of kernels to combine (minimum 2).
+        """
         self.n_structures = n_structures
         super().__init__(parent, size, kernel, fix_range)
 
@@ -2292,8 +2614,33 @@ class MultiStructureFastGP(FastGP):
 
 
 class GradientConstrainedInput(_RootLatentVariable):
+    """
+    Inputs constrained by structural data.
+
+    This node uses a set of directional data to constrain the output's gradient. The output GP is considered to have
+    zero gradient in the specified directions, flowing only in the orthogonal direction.
+    """
     def __init__(self, inducing_points, directional_data,
                  covariance, size=1, fix_covariance=False):
+        """
+        Initializer for GradientConstrainedInput.
+
+        The locations of the provided `directional_data` will be added to the inducing points set to better constrain
+        the output.
+
+        Parameters
+        ----------
+        inducing_points
+            A `PointData` object.
+        directional_data
+            A `DirectionalData` object to constrain the output.
+        covariance
+            A covariance object, containing a kernel and transform.
+        size : int
+            Number of output variables.
+        fix_covariance : bool
+            Whether to fix the covariance's parameters during training.
+        """
         super().__init__()
 
         # Root node setup

@@ -123,7 +123,7 @@ class Spline(_Warping):
     back.
 
     The spline is assumed to work with normalized (z-score) values. It is
-    centered at the origin and the arms span up to +/- 5 in each axis. Its main
+    centered at the origin and the arms span up to +/- 5 units. Its main
     use is to transform an asymmetric distribution to one closer to a Gaussian.
 
     Attributes
@@ -253,12 +253,12 @@ class Center(_Warping):
         """
         Initializer for Center.
 
+        The mean can be computed from the data (if omitted) or specified.
+
         Parameters
         ----------
         mean : double
             The desired mean of the data.
-
-        The mean can be computed from the data (if omitted) or specified.
         """
         super().__init__()
         self._add_parameter("mean", _gpr.RealParameter(0, -1e9, 1e9))

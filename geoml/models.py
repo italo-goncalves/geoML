@@ -54,11 +54,31 @@ class _ModelOptions:
 
 class GPOptions(_ModelOptions):
     def __init__(self, verbose=True, prediction_batch_size=20000,
-                 seed=1234, add_noise=False, jitter=1e-9,
+                 seed=1234, jitter=1e-9,
                  training_batch_size=2000, training_samples=20):
+        """
+        Configuration of Gaussian process models.
+
+        This object can be passed on to models based on the Gaussian process in order to
+        control their behavior.
+
+        Parameters
+        ----------
+        verbose
+            Whether to show the training process on screen.
+        prediction_batch_size : int
+            Batch size for prediction/inference.
+        seed : int
+            Seed to control random number generation.
+        jitter : float
+            Small value added to covariance matrices for numerical stability.
+        training_batch_size : int
+            Number of data points per batch during training.
+        training_samples : int
+            Number of Monte Carlo samples to be drawn when training requires it.
+        """
         super().__init__(verbose, prediction_batch_size,
                          training_batch_size, seed)
-        self.add_noise = add_noise
         self.jitter = jitter
         self.training_samples = training_samples
 
@@ -74,6 +94,17 @@ class _GPModel(_gpr.Parametric):
     def n_dim(self):
         return self._n_dim
 
+    def set_learning_rate(self, rate):
+        """
+        Resets the model's optimizer with the provided learning rate. Will erase the optimizer's memory.
+
+        Parameters
+        ----------
+        rate : float
+            The learning rate to use.
+        """
+        raise NotImplementedError
+
 
 class GP(_GPModel):
     """
@@ -82,6 +113,32 @@ class GP(_GPModel):
     def __init__(self, data, variable, covariance, warping=None,
                  directional_data=None, interpolation=False,
                  use_trend=False, options=GPOptions()):
+        """
+        Basic Gaussian process model.
+
+        This model is based on the standard Gaussian process for a single output variable. It supports warping
+        for non-Gaussian variables and directional data as gradients of the modelled field, but not both simultaneously.
+
+        Parameters
+        ----------
+        data
+            A `PointData` object from the ´data´ module.
+        variable : str
+            The name of the variable to be modelled. Must be a continuous variable.
+        covariance
+            The covariance function to build the covariance matrices.
+        warping
+            An object from the `warping` module. If None, the data is assumed to have zero mean and unit variance.
+        directional_data
+            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient
+            of the modelled field.
+        interpolation : bool
+            If `True`, will assume that the data is noiseless and try to honor the data points.
+        use_trend : bool
+            If `True`, will model a linear trend in the data in addition to the GP.
+        options : GPOptions
+            Additional configurations.
+        """
         super().__init__(options)
 
         self.data = data
@@ -147,6 +204,16 @@ class GP(_GPModel):
         )
 
     def refresh(self, jitter=1e-9):
+        """
+        Updates the model's internal state.
+
+        If called within TensorFlow's eager mode, will allow inspection of the internal tensors.
+
+        Parameters
+        ----------
+        jitter : float
+            Small value added to the covariance matrices for numerical stability.
+        """
         keep = ~ _np.isnan(
             self.data.variables[self.variable].measurements.values)
 
@@ -232,6 +299,14 @@ class GP(_GPModel):
 
     @_tf.function
     def log_likelihood(self, jitter=1e-9):
+        """
+        Computes the model's log-likelihood with the current parameters.
+
+        Parameters
+        ----------
+        jitter : float
+            Small value added to the covariance matrices for numerical stability.
+        """
         self.refresh(jitter)
 
         with _tf.name_scope("GP_log_likelihood"):
@@ -353,7 +428,7 @@ class GP(_GPModel):
         ----------
         newdata :
             A reference to a spatial points object of compatible dimension.
-            The object's variables are updated.
+            The object's variables will be updated.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
@@ -382,6 +457,18 @@ class GP(_GPModel):
             print("\n")
 
     def train(self, max_iter=1000):
+        """
+        Model training.
+
+        The standard GP does not support batches of data, allways using the full data instead. This is feasible for
+        up to a few thousand data points.
+
+        Parameters
+        ----------
+        max_iter : int
+            The number of iterations to train.
+        """
+
         model_variables = [pr.variable for pr in self._all_parameters
                            if not pr.fixed]
 
@@ -407,11 +494,33 @@ class GP(_GPModel):
 
 
 class VGPNetwork(_GPModel):
-    """Vanilla VGP"""
+    """Variational Gaussian process network."""
     def __init__(self, data, variables, likelihoods,
                  latent_network,
                  directional_data=None,
                  options=GPOptions()):
+        """
+        Variational Gaussian process network.
+
+        This is the heart of the `geoml` package, a generalization of the standard GP. It supports variables of any
+        kind and flexible structures through the latent variable network.
+
+        Parameters
+        ----------
+        data
+            A `PointData` object from the ´data´ module.
+        variables
+            The name of a variable to model, or a list of names.
+        likelihoods
+            A `likelihood` object or a list matching the length of `variables`.
+        latent_network
+            An object from the `latent` module.
+        directional_data
+            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient
+            of the modelled field.
+        options : GPOptions
+            Additional configurations.
+        """
         super().__init__(options=options)
 
         self.data = data
@@ -589,6 +698,17 @@ class VGPNetwork(_GPModel):
             return elbo
 
     def train_full(self, max_iter=1000):
+        """
+        Model training.
+
+        The VGP will be trained using all data at once. Only feasible for relatively small datasets, depending of
+        te size of the latent network. For larger datasets, use the `train_svi` method.
+
+        Parameters
+        ----------
+        max_iter : int
+            The number of iterations to train.
+        """
         training_inputs = [self.data.variables[v].training_input()
                            for v in self.variables]
 
@@ -644,6 +764,16 @@ class VGPNetwork(_GPModel):
             print("\n")
 
     def train_svi(self, epochs=100):
+        """
+        Stochastic Variational Inference training.
+
+        The model will be trained in batches according to the `options` object.
+
+        Parameters
+        ----------
+        epochs : int
+            Number of epochs to train.
+        """
         model_variables = self.get_unfixed_variables()
 
         if self.directional_data is not None:
@@ -766,7 +896,7 @@ class VGPNetwork(_GPModel):
         ----------
         newdata :
             A reference to a spatial points object of compatible dimension.
-            The object's variables are updated.
+            The object's variables will be updated.
         n_sim : int
             Number of predictive samples to draw.
         include_noise : bool
@@ -820,7 +950,7 @@ class VGPNetwork(_GPModel):
 
 
 class StructuralField(_GPModel):
-    """Structural field modeling based on gradient data"""
+    """Structural field modeling based on gradient data."""
     def __init__(self, tangents, covariance, normals=None, mean_vector=None,
                  options=GPOptions()):
         super().__init__(options=options)
@@ -1144,16 +1274,42 @@ class _EnsembleModel(_GPModel):
 
 
 class GPEnsemble(_EnsembleModel):
-    def __init__(self, data, variable, covariance, warping=None, tangents=None,
+    """An ensemble of Gaussian processes."""
+    def __init__(self, data, variable, covariance, warping=None, directional_data=None,
                  use_trend=False, options=GPOptions()):
+        """
+        An ensemble of Gaussian processes.
+
+        This model combines independent GPs into a consolidated prediction using the Product of Experts approach.
+        It is preferable to divide the data spatially instead of randomly, so that each expert can focus on a
+        specific region of the space.
+
+        Parameters
+        ----------
+        data
+            A list or tuple of `PointData` objects.
+        variable : str
+            The name of the variable to be modelled. Must be present in all data objects.
+        covariance
+            The covariance function to build the covariance matrices.
+        warping
+            An object from the `warping` module. If None, the data is assumed to have zero mean and unit variance.
+        directional_data
+            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient
+            of the modelled field.
+        use_trend : bool
+            If `True`, will model a linear trend in the data in addition to the GP.
+        options : GPOptions
+            Additional configurations.
+        """
         super().__init__(options)
         if not isinstance(data, (tuple, list)):
             raise ValueError("data must be a list or tuple containing"
                              "data objects")
-        if tangents is None:
-            tangents = [None for _ in data]
-        elif not isinstance(tangents, (tuple, list)):
-            raise ValueError("tangents must be a list or tuple containing"
+        if directional_data is None:
+            directional_data = [None for _ in data]
+        elif not isinstance(directional_data, (tuple, list)):
+            raise ValueError("directional_data must be a list or tuple containing"
                              "data objects or None")
 
         dims = set([d.n_dim for d in data])
@@ -1166,10 +1322,10 @@ class GPEnsemble(_EnsembleModel):
             variable=variable,
             covariance=_copy.deepcopy(covariance),
             warping=_copy.deepcopy(warping),
-            directional_data=t,
+            directional_data=dd,
             use_trend=use_trend,
             options=options)
-            for d, t in zip(data, tangents)]
+            for d, dd in zip(data, directional_data)]
         for model in self.models:
             self._register(model)
 
@@ -1361,7 +1517,21 @@ class VGPNetworkEnsemble(_EnsembleModel):
 
 
 class Normalizer(_GPModel):
+    """Trainable data normalizer."""
     def __init__(self, warping, options=GPOptions()):
+        """
+        Trainable data normalizer.
+
+        This model will fit a `warping` object to a data vector, allowing its transformation to a Gaussian
+        distribution with zero mean and unit variance.
+
+        Parameters
+        ----------
+        warping
+            An object from the `warping` module.
+        options : GPOptions
+            Additional configurations.
+        """
         super().__init__(options)
         self.warping = self._register(warping)
 
@@ -1374,6 +1544,16 @@ class Normalizer(_GPModel):
         self.objective = _tf.Variable(_tf.constant(0.0, _tf.float64))
 
     def normalize(self, x, max_iter=250):
+        """
+        Model training.
+
+        Parameters
+        ----------
+        x : array-like
+            The data vector to train on.
+        max_iter : int
+            The number of iterations to run.
+        """
         if len(self.all_parameters) == 0:
             warnings.warn("No trainable parameters.")
             return None

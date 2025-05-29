@@ -302,7 +302,7 @@ class Gaussian(_ContinuousLikelihood):
 
 class Laplace(_ContinuousLikelihood):
     """
-    Laplace likelihood.
+    Laplace's likelihood.
 
     Equivalent to a linear error model. The latent variable maps to the mean,
     while the distribution's scale factor is a parameter.
@@ -543,7 +543,7 @@ class EpsilonInsensitive(_ContinuousLikelihood):
 
 class Huber(_ContinuousLikelihood):
     """
-    Huber likelihood.
+    Huber's likelihood.
 
     Based on the Huber loss.
     """
@@ -837,7 +837,7 @@ class HeteroscedasticLaplace(HeteroscedasticGaussian):
 class Bernoulli(_Likelihood):
     def __init__(self, shift=0, sharpness=1):
         """
-        Bernoulli likelihood.
+        Bernoulli's likelihood.
 
         Used for binary categorical variables.
 
@@ -1011,14 +1011,17 @@ class _CategoricalLikelihood(_Likelihood):
 
 
 class CategoricalGaussianIndicator(_CategoricalLikelihood):
+    """
+    Gaussian likelihood for indicator variables.
+
+    Assumes mutually exclusive categories (i.e. no geological rules),
+    leading to maximum entropy far from the data points. Is capable of
+    dealing with boundary data.
+    """
     def __init__(self, n_components, tol=1e-3, sharpness=1,
                  use_monte_carlo=False):
         """
-        Gaussian likelihood for indicator variables.
-
-        Assumes mutually exclusive categories (i.e. no geological rules),
-        leading to maximum entropy far from the data points. Is capable of
-        dealing with boundary data.
+        Initializer for CategoricalGaussianIndicator.
 
         Parameters
         ----------
@@ -1144,8 +1147,16 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
 
 
 class SequentialGaussianIndicator(CategoricalGaussianIndicator):
-    # def __init__(self, n_components, tol=1e-3, sharpness=1):
-    #     super().__init__(n_components - 1, tol, sharpness)
+    """
+    Gaussian likelihood for indicator variables with geological rules.
+
+    Assumes a priority order among categories, so that a point at which a higher priority category is positive will
+    automatically be negative for the lower priority ones. This allows the modelling of intrusions by giving a high
+    priority to the intruding rock, and depositions by giving a low priority to the deposited layer, making it
+    conform to the geometry of the rocks below it.
+
+    The priority is defined by the order of the labels in the data object, from lowest to highest.
+    """
 
     def log_lik(self, mu, var, y, has_value, is_boundary=None,
                 samples=None, *args, **kwargs):
@@ -1330,19 +1341,22 @@ class SequentialGaussianIndicator(CategoricalGaussianIndicator):
 
 
 class _CompositionalLikelihood(_Likelihood):
+    """
+    Compositional likelihood.
+
+    Used to model compositional variables (i.e. multiple variables which
+    are constrained to unit sum). Assumes the data sums to 1. Requires up
+    to `N-1` latent variables for `N` components. Due to the non-linear
+    constraint, employs Monte Carlo for back-transforming the results.
+
+    A good contrast matrix can improve the modeling results. See the
+    compositional data literature for how to build one. Good contrasts
+    often involve major vs minor elements, oxides vs sulfides, etc.
+    """
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
                  warping=_warp.Identity()):
         """
-        Compositional likelihood.
-
-        Used to model compositional variables (i.e. multiple variables which
-        are constrained to unit sum). Assumes the data sums to 1. Requires up
-        to `N-1` latent variables for `N` components. Due to the non-linear
-        constraint, employs Monte Carlo for training.
-
-        A good contrast matrix can improve the modeling results. See the
-        compositional data literature for how to build one. Good contrasts
-        often involve major vs minor elements, oxides vs sulfides, etc.
+        Initializer for _CompositionalLikelihood.
 
         Parameters
         ----------
@@ -1635,7 +1649,27 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
 
 
 class OrderedGaussianIndicator(_CategoricalLikelihood):
+    """
+    Gaussian likelihood for indicator variables of conformable layers.
+
+    By assuming conformable layers, it is possible to model multiple categories with a single variable. The
+    thresholds that define the contacts are determined during training. It is useful to add a linear trend to the
+    network's output.
+    """
     def __init__(self, levels, tol=1e-6, sharpness=1):
+        """
+        Initializer for OrderedGaussianIndicator.
+
+        Parameters
+        ----------
+        levels : int
+            Number of conformable surfaces, one less than the number of rock layers.
+        tol : double
+            Normal score tolerance for boundary data.
+        sharpness : int
+            Data augmentation. The weight of the data is multiplied by this
+            factor. Results in sharper transitions between categories.
+        """
         super().__init__(1)
         self.levels = levels
         self.tol = tol
