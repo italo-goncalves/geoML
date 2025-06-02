@@ -46,6 +46,8 @@ The following notebooks demonstrate the capabilities of the package (if one
 
 ## Learning materials
 * [geoML short course](https://drive.google.com/drive/folders/1LGtZx_v7kZ0MmjrszVkHu3qzeGa4fT-b?usp=sharing)
+* [Notebook 01](https://colab.research.google.com/drive/1_LS-tem6ATRi62inKvZVOPJRJPjlzGxO?usp=sharing)
+* [Notebook 02](https://colab.research.google.com/drive/1dq19BU-vgsQAlAyx2gZjiGTPM-d2Oh26?usp=sharing)
 
 ## References
 
