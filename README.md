@@ -45,9 +45,16 @@ The following notebooks demonstrate the capabilities of the package (if one
 
 
 ## Learning materials
-* [geoML short course](https://drive.google.com/drive/folders/1LGtZx_v7kZ0MmjrszVkHu3qzeGa4fT-b?usp=sharing)
+* [geoML short course presentation](https://1drv.ms/p/c/4a4617b38edb43d3/ERKF7Z9DUQNPon_oZGSxclwB_rneluFp9bAhep6lpbtP6g?e=stGHkW)
 * [Notebook 01](https://colab.research.google.com/drive/1_LS-tem6ATRi62inKvZVOPJRJPjlzGxO?usp=sharing)
 * [Notebook 02](https://colab.research.google.com/drive/1dq19BU-vgsQAlAyx2gZjiGTPM-d2Oh26?usp=sharing)
+* [Notebook 03](https://colab.research.google.com/drive/136aCKd9df39S4PmShZ0KIbfmQjaRWkP_?usp=sharing)
+* [Notebook 04](https://colab.research.google.com/drive/1ZqeQhbrbVHKEVJgwLQT2jY8AmZR6ENhd?usp=drive_link)
+* [Notebook 05](https://colab.research.google.com/drive/1mKcRF_Kme6ac-nNzj6dON_updZk01LAS?usp=drive_link)
+* [Notebook 06](https://colab.research.google.com/drive/1SUNlzThWzg5sbj5sK878WOkgVILdRLjV?usp=drive_link)
+* [Notebook 07](https://colab.research.google.com/drive/1kWvsTAfVMs_K4eHwImJDlPnDUt9k3kZd?usp=sharing)
+* [Notebook 08](https://colab.research.google.com/drive/1HotYLXScQT-J-aqBMrvI_vR2UOyIWn2o?usp=drive_link)
+* [Notebook 09](https://colab.research.google.com/drive/1oxFsdAvouiJSmsiDhs4vh-DsWGvaAUMm?usp=drive_link)
 
 ## References
 
