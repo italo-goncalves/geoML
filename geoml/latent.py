@@ -1708,11 +1708,16 @@ class GPWalk(_FunctionalLatentVariable):
             "amp",
             _gpr.PositiveParameter(1, 0.01, 100)
         )
+        self._add_parameter(
+            "precision",
+            _gpr.PositiveParameter(0.1, 0.01, 100)
+        )
 
     def propagate(self, x, x_var=None):
         walker_mu, walker_var = self.walker.propagate(x, x_var)
 
         amp = self.parameters["amp"].get_value()
+        prec = self.parameters["precision"].get_value()
 
         for _ in range(self.n_steps):
             field_mu, field_var = self.field.interpolate(
@@ -1723,6 +1728,9 @@ class GPWalk(_FunctionalLatentVariable):
             walker_mu = walker_mu + self.step * field_mu * amp
             walker_var = walker_var + self.step * field_var * amp ** 2
 
+            # Kalman filtering
+            walker_var = walker_var / (prec + 1)
+
         return walker_mu, walker_var
 
     def refresh(self, jitter=1e-9):
@@ -1732,12 +1740,27 @@ class GPWalk(_FunctionalLatentVariable):
         )
 
     def kl_divergence(self):
-        return _tf.constant(0.0, _tf.float64)
+        # return _tf.constant(0.0, _tf.float64)
+        mu_1 = self.parent.parent.inducing_points
+        var_1 = self.parent.parent.inducing_points_variance + 0.01
+
+        mu_2 = self.inducing_points
+        var_2 = self.inducing_points_variance
+
+        # kl = 0.5 * _tf.reduce_sum(
+        #     var_2 / var_1
+        #     - self.root.n_ip
+        #     + (mu_2 - mu_1)**2 / var_1
+        #     + _tf.math.log(var_1 / var_2)
+        # )
+        kl = 0.5 * _tf.reduce_sum((mu_2 - mu_1) ** 2 / var_2)
+        return kl
 
     def compute_path(self, x, x_var=None):
         walker_mu, walker_var = self.walker.propagate(x, x_var)
 
         amp = self.parameters["amp"].get_value()
+        prec = self.parameters["precision"].get_value()
 
         all_mu = [walker_mu]
         all_var = [walker_var]
@@ -1749,6 +1772,7 @@ class GPWalk(_FunctionalLatentVariable):
 
             walker_mu = walker_mu + self.step * field_mu * amp
             walker_var = walker_var + self.step * field_var * amp ** 2
+            walker_var = walker_var / (prec + 1)
 
             all_mu.append(walker_mu)
             all_var.append(walker_var)

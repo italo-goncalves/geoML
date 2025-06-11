@@ -1146,7 +1146,7 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         return output
 
 
-class SequentialGaussianIndicator(CategoricalGaussianIndicator):
+class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
     """
     Gaussian likelihood for indicator variables with geological rules.
 
@@ -1652,7 +1652,7 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
     """
     Gaussian likelihood for indicator variables of conformable layers.
 
-    By assuming conformable layers, it is possible to model multiple categories with a single variable. The
+    By assuming conformable layers, it is possible to model multiple categories with a single latent variable. The
     thresholds that define the contacts are determined during training. It is useful to add a linear trend to the
     network's output.
     """
