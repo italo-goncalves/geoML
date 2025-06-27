@@ -1391,6 +1391,7 @@ class _CompositionalLikelihood(_Likelihood):
             raise ValueError("invalid shape for contrast_matrix; "
                              "shape must be (n_components - 1, n_components)")
         self.contrast = _tf.constant(contrast_matrix, _tf.float64)
+        # self.mask = 1 - _tf.constant(contrast_matrix == 0, _tf.float64)
 
         self.warpings = [self._register(_copy.deepcopy(warping))
                          for _ in range(n_basis)]
@@ -1418,8 +1419,8 @@ class _CompositionalLikelihood(_Likelihood):
         basis = self.parameters["basis"].get_value()
 
         y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
-        y_ilr = _tf.matmul(y_ilr, basis)
-        y_split = _tf.split(y_ilr, self.size, axis=1)
+        y_white = _tf.matmul(y_ilr, basis)
+        y_split = _tf.split(y_white, self.size, axis=1)
 
         y_warped = _tf.concat(
             [wp.forward(z) for wp, z in zip(self.warpings, y_split)],
@@ -1434,9 +1435,12 @@ class _CompositionalLikelihood(_Likelihood):
         log_density = _tf.math.reduce_mean(
             log_density, axis=2, keepdims=False)
 
+        # not allowing partial missing
         has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
-
         lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
+
+        # allowing partial missing
+        # missing_contrast = _tf.matmul(1 - has_value, self.mask)
 
         return lik
 

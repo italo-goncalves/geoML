@@ -21,6 +21,7 @@ __all__ = ["PointData",
            "batch_index",
            "export_planes"]
 
+import numpy as np
 import pandas as pd
 import tensorflow as _tf
 import pandas as _pd
@@ -539,7 +540,7 @@ class ContinuousVariable(_Variable):
 
     def as_data_frame(self, measurements=True, latent=True,
                       simulations=True, quantiles=True,
-                      probabilities=True, **kwargs):
+                      probability=True, **kwargs):
         """
         Converts the object to a DataFrame.
 
@@ -550,10 +551,10 @@ class ContinuousVariable(_Variable):
         latent : bool
             Whether to include the latent Gaussian variable.
         simulations : bool
-            Whether to include the latent Gaussian variable.
+            Whether to include the simulations.
         quantiles : bool
             Whether to include the quantiles.
-        probabilities : bool
+        probability : bool
             Whether to include the probabilities.
         kwargs : dict
             Ignored.
@@ -581,7 +582,7 @@ class ContinuousVariable(_Variable):
                 for key, val in self.quantiles.items():
                     df[self.name + "_q" + str(key)] = val.values
 
-        if probabilities:
+        if probability:
             if len(self.probabilities) > 0:
                 for key, val in self.probabilities.items():
                     df[self.name + "_p" + str(key)] = val.values
@@ -738,18 +739,23 @@ class _Component(_Variable):
         for sim in self.simulations:
             sim.coordinates = coordinates
 
-    def as_data_frame(self, probability=True, predictions=True,
-                      simulations=False, **kwargs):
+    def as_data_frame(self, measurements=True, probability=True, predictions=True,
+                      latent=True, simulations=True, **kwargs):
         df = _pd.DataFrame({})
+
+        if measurements:
+            df[self.name] = self.measurements.values
 
         if probability:
             df[self.name + "_probability"] = self.probability.values
             df[self.name + "_indicator"] = self.measurements.values
 
-        if predictions:
+        if latent:
             df[self.name + "_indicator_mean"] = self.indicator_mean.values
             df[self.name + "_indicator_variance"] = \
                 self.indicator_variance.values
+
+        if predictions:
             df[self.name + "_indicator_predicted"] = \
                 self.indicator_predicted.values
 
@@ -824,7 +830,7 @@ class _Component(_Variable):
 
         for i, sim in enumerate(self.simulations):
             sim.fill_pyvista_blocks(
-                cube, label + " - simulation %d" % i)
+                cube, f'{label} - simulation {i}')
 
 
 class CompositionalVariable(_Variable):
@@ -842,8 +848,10 @@ class CompositionalVariable(_Variable):
                 measurements[:, i] if measurements is not None else None)
 
     def get_measurements(self):
+        # not allowing partial missing data
         out = [self.components[label].measurements.values
                for label in self.labels]
+
         out = _np.stack(out, axis=1)
         total = _np.sum(out, axis=1, keepdims=True)
         total = _np.where(_np.abs(total - 1) < 1e-10, 1.0, _np.nan)
@@ -851,8 +859,17 @@ class CompositionalVariable(_Variable):
 
         has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
         has_value = _np.tile(has_value, [1, self.length])
-        out[_np.isnan(out)] = 0
+        # out[_np.isnan(out)] = 1
+        out = np.where(has_value == 0.0, 1.0, out)
         return out, has_value
+
+        # allowing partial missing data
+        # out = [self.components[label].measurements.values
+        #        for label in self.labels]
+        # out = _np.stack(out, axis=1)
+        # has_value = ~ _np.isnan(out)
+        # out[_np.isnan(out)] = 1
+        # return out, has_value
 
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
@@ -965,17 +982,19 @@ class _Category(_Variable):
             sim.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
-                      simulations=False):
+                      latent=True, simulations=True):
         df = _pd.DataFrame({})
 
         if probability:
             df[self.name + "_probability"] = self.probability.values
             df[self.name + "_indicator"] = self.indicator.values
 
-        if predictions:
+        if latent:
             df[self.name + "_indicator_mean"] = self.indicator_mean.values
             df[self.name + "_indicator_variance"] = \
                 self.indicator_variance.values
+
+        if predictions:
             df[self.name + "_indicator_predicted"] = \
                 self.indicator_predicted.values
 
@@ -1149,10 +1168,12 @@ class RockTypeVariable(CompositionalVariable):
 
         return new_obj
 
-    def as_data_frame(self, probability=True, predictions=True, **kwargs):
+    def as_data_frame(self, measurements=True, probability=True, predictions=True, **kwargs):
         df = super().as_data_frame(probability, predictions, **kwargs)
-        df[self.name + "_a"] = self.measurements_a.values
-        df[self.name + "_b"] = self.measurements_b.values
+
+        if measurements:
+            df[self.name + "_a"] = self.measurements_a.values
+            df[self.name + "_b"] = self.measurements_b.values
 
         if predictions:
             df[self.name + "_predicted"] = self.predicted.values
@@ -1342,15 +1363,21 @@ class OrderedRockType(RockTypeVariable):
 
 
 class BinaryVariable(_Variable):
-    def __init__(self, name, coordinates, labels, measurements=None):
+    def __init__(self, name, coordinates, labels=None, measurements=None):
         super().__init__(name, coordinates)
         n_data = coordinates.n_data
+
+        if labels is None:
+            if measurements is None:
+                raise Exception("either the labels or measurements"
+                                "must be provided")
+            cat = _pd.Categorical(measurements)
+            labels = cat.categories.values
 
         self.labels = labels
         self._length = 1
         if len(labels) != 2:
-            raise ValueError("there must be exactly 2 labels - found %d"
-                             % len(labels))
+            raise ValueError(f"There must be exactly 2 labels - found {len(labels)}.")
 
         self.indicator = self._Attribute(
             coordinates, _np.array([_np.nan]*n_data))
@@ -1428,7 +1455,7 @@ class BinaryVariable(_Variable):
             sim.coordinates = coordinates
 
     def as_data_frame(self, measurements=True, latent=True,
-                      predictions=True, simulations=False):
+                      predictions=True, simulations=True):
         df = _pd.DataFrame({})
 
         if measurements:
@@ -1644,16 +1671,65 @@ class _PointBased(_SpatialData):
     def add_continuous_variable(self, name, measurements=None,
                                 quantiles=None,
                                 probabilities=(0.025, 0.5, 0.975)):
+        """
+        Adds a continuous variable to this point set.
+
+        Parameters
+        ----------
+        name : str
+            Variable name.
+        measurements : array-like
+            The variable values. Its length must correspond to the number of data locations.
+        quantiles : tuple
+            Specific values to compute probabilities when predicting this variable.
+        probabilities : tuple
+            A set of probabilities in the ]0, 1[ interval to compute the corresponding quantiles when predicting
+            this variable.
+        """
         self.variables[name] = ContinuousVariable(
             name, self, measurements, quantiles=quantiles,
             probabilities=probabilities)
 
-    def add_categorical_variable(self, name, labels, measurements=None):
+    def add_categorical_variable(self, name, labels=None, measurements=None):
+        """
+        Adds a categorical variable to this point set.
+
+        Parameters
+        ----------
+        name : str
+            Variable name.
+        labels : tuple
+            The category labels. If None, they are determined from the measurements.
+        measurements : array-like
+            The variable values. Its length must correspond to the number of data locations.
+        """
         self.variables[name] = CategoricalVariable(
             name, self, labels, measurements)
 
     def add_rock_type_variable(self, name, labels=None, measurements_a=None,
                                measurements_b=None, ordered=False):
+        """
+        Adds a rock type variable to this point set.
+
+        This type of variable uses two labels for each data point. If `measurements_a` is different from
+        `measurements_b`, the point is considered to lie in the contact between rock types. If they are equal, the
+        point is considered inside a rock type.
+
+        Parameters
+        ----------
+        name : str
+            Variable name.
+        labels : tuple
+            The category labels. If `None`, they are determined from the measurements.
+        measurements_a : array-like
+            The variable values. Its length must correspond to the number of data locations.
+        measurements_b : array-like
+            The variable values. Its length must correspond to the number of data locations. If `None`, its default
+            value is the same as `measurements_a`.
+        ordered : bool
+            If `True`, the labels are considered to indicate sequential, conformable rock layers. Otherwise they
+            are considered independent.
+        """
         if ordered:
             self.variables[name] = OrderedRockType(
                 name, self, labels, measurements_a, measurements_b)
@@ -1661,13 +1737,52 @@ class _PointBased(_SpatialData):
             self.variables[name] = RockTypeVariable(
                 name, self, labels, measurements_a, measurements_b)
 
-    def add_binary_variable(self, name, labels, measurements=None):
+    def add_binary_variable(self, name, labels=None, measurements=None):
+        """
+        Adds a binary variable to this point set.
+
+        Parameters
+        ----------
+        name : str
+            Variable name.
+        labels : tuple
+            The category labels. If `None`, they are determined from the measurements.
+        measurements : array-like
+            The variable values. Its length must correspond to the number of data locations.
+        """
         self.variables[name] = BinaryVariable(name, self, labels, measurements)
 
     def add_anomaly_variable(self, name, label, measurements=None):
+        """
+        Adds an anomaly variable to this point set.
+
+        An anomaly is a type of binary variable that only has the positive label.
+
+        Parameters
+        ----------
+        name : str
+            Variable name.
+        label : str
+            The positive class label.
+        measurements : array-like
+            The variable values. Its length must correspond to the number of data locations.
+        """
         self.variables[name] = AnomalyVariable(name, self, label, measurements)
 
     def add_compositional_variable(self, name, labels, measurements=None):
+        """
+        Adds a compositional variable to this data set.
+
+        Parameters
+        ----------
+        name : str
+            Variable name.
+        labels : tuple
+            The labels for each part in the composition.
+        measurements : array-like
+            A rank 2 matrix containing the compositions. It is assumed to be strictly positive and its rows must
+            add to 1.
+        """
         self.variables[name] = CompositionalVariable(
             name, self, labels, measurements)
 
@@ -1707,6 +1822,15 @@ class PointData(_PointBased):
     def as_data_frame(self, **kwargs):
         """
         Conversion of a spatial object to a data frame.
+
+        The following kwargs can be used to control the kind of information to include in the DataFrame. They all
+        default to `True`.
+        - `measurements`: the raw measurements used to create each variable.
+        - `latent`: predicted latent variables mean and variance.
+        - `predictions`: predicted labels and support information like entropy and uncertainty.
+        - `quantiles`: values corresponding to probability thresholds, when applicable.
+        - `probability`: predicted probabilities.
+        - `simulations`: samples from the predictive distribution.
         """
         df = [_pd.DataFrame(self.coordinates,
                             columns=self.coordinate_labels)]
