@@ -42,6 +42,7 @@ The following notebooks demonstrate the capabilities of the package (if one
 * [Jura](https://colab.research.google.com/drive/1v7Us_ljM5zwkLy6IIKfOjREazZSLepjU?usp=sharing)
 * [Compositional data](https://colab.research.google.com/drive/14bvDkre3UNxXywUWq2QEs6Q4w-gd30Mb?usp=sharing)
 * [Gold modeling with auxiliary variables](https://colab.research.google.com/drive/16OFpI1a-V-Wfsgkw_jhlh2NXGFwuHZ0C?usp=sharing)
+* [Dealing with faults (experimental)](https://colab.research.google.com/drive/1O_EsFy6bGbUIpzYySafUYrscUcbmTUHc?usp=sharing)
 
 
 ## Learning materials

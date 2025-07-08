@@ -1042,64 +1042,68 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         y = 2 * y - 1
 
         if self._use_monte_carlo:
-            # pos = _tf.where(
-            #     _tf.greater(samples, self.tol),
-            #     _tf.ones_like(samples),
-            #     _tf.zeros_like(samples)
-            # )
-            # neg = _tf.where(
-            #     _tf.less(samples, - self.tol),
-            #     _tf.ones_like(samples),
-            #     _tf.zeros_like(samples)
-            # )
-            #
-            # prob_pos = _tf.reduce_mean(pos, axis=-1)
-            # prob_neg = _tf.reduce_mean(neg, axis=-1)
-            # prob_zero = 1 - prob_neg - prob_pos
-            #
-            # prob_pos = _tf.math.log(prob_pos + 1e-6)
-            # prob_neg = _tf.math.log(prob_neg + 1e-6)
-            # prob_zero = _tf.math.log(prob_zero + 1e-6)
+            mu = _tf.reduce_mean(samples, axis=2)
+            var = _tf.math.reduce_variance(samples, axis=2)
 
-            dist = _tfd.Normal(samples, 1.0)  #self.tol)
-            prob_neg = dist.log_cdf(- self.tol)
-            prob_zero = _tf.math.log(
-                dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
-            prob_pos = dist.log_survival_function(self.tol)
+        # if self._use_monte_carlo:
+        #     # pos = _tf.where(
+        #     #     _tf.greater(samples, self.tol),
+        #     #     _tf.ones_like(samples),
+        #     #     _tf.zeros_like(samples)
+        #     # )
+        #     # neg = _tf.where(
+        #     #     _tf.less(samples, - self.tol),
+        #     #     _tf.ones_like(samples),
+        #     #     _tf.zeros_like(samples)
+        #     # )
+        #     #
+        #     # prob_pos = _tf.reduce_mean(pos, axis=-1)
+        #     # prob_neg = _tf.reduce_mean(neg, axis=-1)
+        #     # prob_zero = 1 - prob_neg - prob_pos
+        #     #
+        #     # prob_pos = _tf.math.log(prob_pos + 1e-6)
+        #     # prob_neg = _tf.math.log(prob_neg + 1e-6)
+        #     # prob_zero = _tf.math.log(prob_zero + 1e-6)
+        #
+        #     dist = _tfd.Normal(samples, 1.0)  #self.tol)
+        #     prob_neg = dist.log_cdf(- self.tol)
+        #     prob_zero = _tf.math.log(
+        #         dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
+        #     prob_pos = dist.log_survival_function(self.tol)
+        #
+        #     # prob_neg = _tf.reduce_mean(prob_neg, axis=-1)
+        #     # prob_pos = _tf.reduce_mean(prob_pos, axis=-1)
+        #     # prob_zero = _tf.reduce_mean(prob_zero, axis=-1)
+        #
+        #     n_sim = _tf.shape(samples)[2]
+        #     y = _tf.tile(y[:, :, None], [1, 1, n_sim])
+        #
+        #     log_density = _tf.where(
+        #         _tf.less(y, - self.tol),
+        #         prob_neg,
+        #         _tf.where(_tf.greater(y, self.tol),
+        #                   prob_pos,
+        #                   prob_zero)
+        #     )
+        #     log_density = _tf.reduce_mean(log_density, axis=2)
 
-            # prob_neg = _tf.reduce_mean(prob_neg, axis=-1)
-            # prob_pos = _tf.reduce_mean(prob_pos, axis=-1)
-            # prob_zero = _tf.reduce_mean(prob_zero, axis=-1)
+        # else:
+        dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
+        prob_neg = dist.log_cdf(- self.tol)
+        prob_zero = _tf.math.log(
+            dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
+        prob_pos = dist.log_survival_function(self.tol)
 
-            n_sim = _tf.shape(samples)[2]
-            y = _tf.tile(y[:, :, None], [1, 1, n_sim])
+        log_density = _tf.where(
+            _tf.less(y, - self.tol),
+            prob_neg,
+            _tf.where(_tf.greater(y, self.tol),
+                      prob_pos,
+                      prob_zero)
+        )
 
-            log_density = _tf.where(
-                _tf.less(y, - self.tol),
-                prob_neg,
-                _tf.where(_tf.greater(y, self.tol),
-                          prob_pos,
-                          prob_zero)
-            )
-            log_density = _tf.reduce_mean(log_density, axis=2)
-
-        else:
-            dist = _tfd.Normal(mu, _tf.sqrt(var + 1e-6))
-            prob_neg = dist.log_cdf(- self.tol)
-            prob_zero = _tf.math.log(
-                dist.cdf(self.tol) - dist.cdf(- self.tol) + 1e-6)
-            prob_pos = dist.log_survival_function(self.tol)
-
-            log_density = _tf.where(
-                _tf.less(y, - self.tol),
-                prob_neg,
-                _tf.where(_tf.greater(y, self.tol),
-                          prob_pos,
-                          prob_zero)
-            )
-
-            # log_density_2 = _tf.math.log(- _tf.math.expm1(log_density))
-            # log_density = log_density - log_density_2 * 1e-4
+        # log_density_2 = _tf.math.log(- _tf.math.expm1(log_density))
+        # log_density = log_density - log_density_2 * 1e-4
 
         log_density = _tf.reduce_sum(log_density, axis=1, keepdims=True)
 
