@@ -59,9 +59,14 @@ The following notebooks demonstrate the capabilities of the package (if one
 
 ## References
 
-* [2020 - Sunspot Cycle Prediction Using Warped Gaussian Process Regression}](https://www.sciencedirect.com/science/article/pii/S0273117719308026)
+* [2020 - Sunspot Cycle Prediction Using Warped Gaussian Process Regression](https://www.sciencedirect.com/science/article/pii/S0273117719308026)
 * [2021 - A machine learning model for structural trend fields](https://doi.org/10.1016/j.cageo.2021.104715)
 * [2022 - Learning spatial patterns with variational Gaussian processes: Regression](https://doi.org/10.1016/j.cageo.2022.105056)
 * [2023 - Variational Gaussian processes for implicit geological modeling](https://linkinghub.elsevier.com/retrieve/pii/S0098300423000274)
 * [2024 - Moho depth model of South America from a machine learning approach](https://www.sciencedirect.com/science/article/abs/pii/S0895981124003377)
 * [2025 - Uncertainty Propagation in Deep Gaussian Process Networks (open access)](https://link.springer.com/10.1007/s11004-025-10187-4)
+
+## External links
+* [Gaussian process book](https://gaussianprocess.org/gpml/)
+* [A Visual Exploration of Gaussian Processes](https://distill.pub/2019/visual-exploration-gaussian-processes/)
+* [Interactive Gaussian Process Visualization](https://www.infinitecuriosity.org/vizgp/)
