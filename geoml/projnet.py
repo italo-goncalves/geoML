@@ -25,7 +25,7 @@ import numpy as _np
 import tensorflow as _tf
 
 
-def uniform_directions(n, dim, n_iter=1000):
+def uniform_directions(n, dim, n_iter=100):
     if dim < 2:
         raise ValueError("Invalid dim: must be 2 or greater.")
     if dim == 2:
@@ -33,20 +33,45 @@ def uniform_directions(n, dim, n_iter=1000):
         vectors = _np.stack([_np.cos(angles), _np.sin(angles)], axis=1)
         return vectors
 
+    # vectors = _np.random.normal(size=[n, dim])
+    # vectors /= _np.sqrt(_np.sum(vectors**2, axis=1, keepdims=True))
+    #
+    # for i in range(n_iter):
+    #     dif = vectors[:, None, :] - vectors[None, :, :]
+    #     dist_sq = _np.sum(dif**2, axis=2, keepdims=True) + 0.01
+    #
+    #     dif /= _np.sqrt(dist_sq)
+    #     force = dim * _np.sum(dif / dist_sq, axis=1)
+    #
+    #     vectors += force
+    #     vectors /= _np.sqrt(_np.sum(vectors**2, axis=1, keepdims=True))
+    #
+    # return vectors
+
+    mask = _np.ones([n, n])
+    mask = mask - _np.eye(n)
+    mask = _tf.constant(mask, _tf.float64)
+
     vectors = _np.random.normal(size=[n, dim])
-    vectors /= _np.sqrt(_np.sum(vectors**2, axis=1, keepdims=True))
+    vectors = _tf.Variable(vectors, dtype=_tf.float64)
+    vectors.assign(vectors / _tf.math.reduce_euclidean_norm(vectors, axis=1, keepdims=True))
 
-    for i in range(n_iter):
-        dif = vectors[:, None, :] - vectors[None, :, :]
-        dist_sq = _np.sum(dif**2, axis=2, keepdims=True) + 0.01
+    def loss():
+        dist = _tftools.pairwise_dist(vectors, vectors) + 1e-6
+        return _tf.reduce_sum(mask / dist ** 2)
 
-        dif /= _np.sqrt(dist_sq)
-        force = dim * _np.sum(dif / dist_sq, axis=1)
+    opt = _tf.keras.optimizers.Adam(1e-2)
 
-        vectors += force
-        vectors /= _np.sqrt(_np.sum(vectors**2, axis=1, keepdims=True))
+    for _ in range(n_iter):
+        with _tf.GradientTape() as gt:
+            l_i = loss()
 
-    return vectors
+        grads = gt.gradient(l_i, vectors)
+
+        opt.apply_gradients(zip([grads], [vectors]))
+        vectors.assign(vectors / _tf.math.reduce_euclidean_norm(vectors, axis=1, keepdims=True))
+
+    return vectors.numpy()
 
 
 class _ProjectedLatentVariable(_gpr.Parametric):
@@ -182,12 +207,13 @@ class Concatenate(_Operation):
 
 class BasicProjectedGP(_FunctionalProjectedVariable):
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
-                 fix_range=False, isotropic=False, n_directions=30):
+                 fix_range=False, #isotropic=False,
+                 n_directions=30):
         super().__init__(parent)
 
         self._size = size
         self.kernel = self._register(kernel)
-        self.isotropic = isotropic
+        # self.isotropic = isotropic
 
         self.cov = None
         self.cov_inv = None
@@ -198,12 +224,19 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
         self.chol_r = None
         self.alpha = None
 
+        self.angular_cov = None
+        self.angular_chol = None
+        self.angular_inv = None
+
         self.prior_cov = None
         self.prior_cov_inv = None
         self.prior_cov_chol = None
 
         self.projections = uniform_directions(n_directions, parent.size)
         self.n_directions = n_directions
+        self.dot = _np.matmul(self.projections, self.projections.T)
+        self.dot = _np.minimum(self.dot, 1.0)
+        self.dot = _np.maximum(self.dot, -1.0)
 
         self.fix_range = fix_range
         self._set_parameters()
@@ -231,39 +264,92 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
                 _np.ones([self.n_directions, self.size, n_ip]) * 1e-6,
                 _np.ones([self.n_directions, self.size, n_ip]) * 1e2
             ))
+            # _gpr.PositiveParameter(
+            #     _np.ones([1, self.size, n_ip]),
+            #     _np.ones([1, self.size, n_ip]) * 1e-6,
+            #     _np.ones([1, self.size, n_ip]) * 1e2
+            # ))
+            # _gpr.PositiveParameter(
+            #     _np.ones([1, self.size, 1]),
+            #     _np.ones([1, self.size, 1]) * 1e-6,
+            #     _np.ones([1, self.size, 1]) * 1e2
+            # ))
 
-        if self.isotropic:
-            self._add_parameter(
-                "ranges",
-                _gpr.PositiveParameter(
-                    _np.ones([1, 1, 1, 1]),
-                    _np.ones([1, 1, 1, 1]) * 1e-6,
-                    _np.ones([1, 1, 1, 1]) * 10,
-                    fixed=self.fix_range
-                )
+        # if self.isotropic:
+        #     self._add_parameter(
+        #         "ranges",
+        #         _gpr.PositiveParameter(
+        #             _np.ones([1, 1, 1, 1]),
+        #             _np.ones([1, 1, 1, 1]) * 1e-6,
+        #             _np.ones([1, 1, 1, 1]) * 10,
+        #             fixed=self.fix_range
+        #         )
+        #     )
+        # else:
+        #     self._add_parameter(
+        #         "ranges",
+        #         _gpr.PositiveParameter(
+        #             _np.ones([1, 1, self.n_directions, 1]),
+        #             _np.ones([1, 1, self.n_directions, 1]) * 1e-6,
+        #             _np.ones([1, 1, self.n_directions, 1]) * 10,
+        #             fixed=self.fix_range
+        #         )
+        #     )
+        self._add_parameter(
+            "range",
+            _gpr.PositiveParameter(
+                _np.ones([1, 1]),
+                _np.ones([1, 1]) * 0.01,
+                _np.ones([1, 1]) * 10,
+                fixed=self.fix_range
             )
-        else:
-            self._add_parameter(
-                "ranges",
-                _gpr.PositiveParameter(
-                    _np.ones([1, 1, self.n_directions, 1]),
-                    _np.ones([1, 1, self.n_directions, 1]) * 1e-6,
-                    _np.ones([1, 1, self.n_directions, 1]) * 10,
-                    fixed=self.fix_range
-                )
+        )
+
+        self._add_parameter(
+            "angular_range",
+            _gpr.PositiveParameter(
+                _np.ones([1, 1]) * 0.1,
+                _np.ones([1, 1]) * 0.01,
+                _np.ones([1, 1]) * 10,
+                fixed=self.fix_range
             )
+        )
 
-    def covariance_matrix(self, x, y):
-        with _tf.name_scope("basic_covariance_matrix"):
-            ranges = self.parameters["ranges"].get_value()
+    def cross_covariance_matrix(self, x):
+        with _tf.name_scope("projected_covariance_matrix"):
+            # ranges = self.parameters["ranges"].get_value()
 
-            # [n_data, n_data, n_dim, n_sims]
-            dif = x[:, None, :, :] - y[None, :, :, :]
-            dist = _tf.math.abs(dif) / ranges
+            # # # [n_data, n_data, n_dim, n_sims]
+            # dif = x[:, None, :, :] - y[None, :, :, :]
+            # dist = _tf.math.abs(dif) / ranges
+            # cov = self.kernel.kernelize(dist)
+            # cov = _tf.reduce_mean(cov, axis=3)
+            # #
+            # # # [n_dim, n_data, n_data]
+            # cov = _tf.transpose(cov, [2, 0, 1])
+
+            # [n_data, n_data, n_dim, n_sims, n_sims]
+            # dif = x[:, None, :, :, None] - y[None, :, :, None, :]
+            # dist = _tf.math.abs(dif) / ranges
+            # cov = self.kernel.kernelize(dist)
+            # cov = _tf.reduce_mean(cov, axis=3)
+            # cov = _tf.reduce_mean(cov, axis=3)
+
+            # [n_dim, n_data, n_data]
+            # cov = _tf.transpose(cov, [2, 0, 1])
+
+            range = self.parameters["range"].get_value()
+
+            x = _tf.einsum('abc,db->adc', x, self.projections)  # [n_data, n_proj, n_sim]
+
+            # # [n_data, n_ip, n_dim, n_sims]
+            dif = x[:, None, :, 0, None] - self.inducing_points[None, :, None, None]
+            # dif = x[:, None, :, :] - self.inducing_points[None, :, None, None]
+            dist = _tf.math.abs(dif) / range
             cov = self.kernel.kernelize(dist)
             cov = _tf.reduce_mean(cov, axis=3)
 
-            # [n_dim, n_data, n_data]
+            # # [n_dim, n_data, n_ip]
             cov = _tf.transpose(cov, [2, 0, 1])
 
             return cov
@@ -273,17 +359,25 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
             self.parent.refresh(jitter)
 
             # prior
-            ip = _tf.linspace(
-                _tf.reduce_sum(self.parent.min[None, :] * self.projections, axis=1),
-                _tf.reduce_sum(self.parent.max[None, :] * self.projections, axis=1),
-                self.root.n_ip
-            )[:, :, None]
+            # ip = _tf.linspace(
+            #     _tf.reduce_sum(self.parent.min[None, :] * self.projections, axis=1),
+            #     _tf.reduce_sum(self.parent.max[None, :] * self.projections, axis=1),
+            #     self.root.n_ip
+            # )[:, :, None]
+            ip_min = _tf.reduce_min(self.parent.min[None, :] * self.projections)
+            ip_max = _tf.reduce_max(self.parent.max[None, :] * self.projections)
+            ip = _tf.linspace(ip_min, ip_max, self.root.n_ip)
             self.inducing_points = ip
 
+            range = self.parameters["range"].get_value()
+            dist = _tf.math.abs(ip[:, None] - ip[None, :]) / range
             eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
-            eye = _tf.tile(eye[None, :, :], [self.n_directions, 1, 1])
+            cov = self.kernel.kernelize(dist) + eye * jitter  # [n_ip, n_ip]
 
-            cov = self.covariance_matrix(ip, ip) + eye * jitter
+            # eye = _tf.eye(self.root.n_ip, dtype=_tf.float64)
+            # eye = _tf.tile(eye[None, :, :], [self.n_directions, 1, 1])
+
+            # cov = self.covariance_matrix(ip, ip) + eye * jitter
             chol = _tf.linalg.cholesky(cov)
             cov_inv = _tf.linalg.cholesky_solve(chol, eye)
 
@@ -291,57 +385,84 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
             self.cov_chol = chol
             self.cov_inv = cov_inv
 
-            # posterior
-            eye = _tf.tile(eye[:, None, :, :], [1, self.size, 1, 1])
-            delta = self.parameters["delta"].get_value()
+            # posterior cov
+            eye = _tf.tile(eye[None, None, :, :], [self.n_directions, self.size, 1, 1])
+            delta = self.parameters["delta"].get_value()  # [n_proj, size, n_ip]
+            # delta = _tf.tile(delta, [self.n_directions, 1, self.root.n_ip])
             delta_diag = _tf.linalg.diag(delta)
-            self.cov_smooth = self.cov[:, None, :, :] + delta_diag
+            self.cov_smooth = self.cov[None, None, :, :] + delta_diag
             self.cov_smooth_chol = _tf.linalg.cholesky(
                 self.cov_smooth + eye * jitter)
             self.cov_smooth_inv = _tf.linalg.cholesky_solve(
                 self.cov_smooth_chol, eye)
             self.chol_r = _tf.linalg.cholesky(
-                self.cov_inv[:, None, :, :] - self.cov_smooth_inv + eye * jitter)
+                self.cov_inv[None, None, :, :] - self.cov_smooth_inv + eye * jitter)  # [n_proj, size, n_ip, n_ip]
 
-            alpha_white = self.parameters["alpha_white"].get_value()  # [n_dim, size, n_ip, 1]
-            pred_inputs = _tf.einsum("dmp,dsmi->dspi", self.cov_chol, alpha_white)
-            self.alpha = _tf.einsum("dmp,dsmi->dspi", self.cov_inv, pred_inputs)
+            # angular_cov
+            ang_rng = self.parameters['angular_range'].get_value()
+            ang_eye = _tf.eye(self.n_directions, dtype=_tf.float64)
+            self.angular_cov = _tf.math.exp(- (1 - self.dot) / ang_rng)  # [n_proj, n_proj]
+            self.angular_chol = _tf.linalg.cholesky(self.angular_cov + ang_eye * jitter)
+            self.angular_inv = _tf.linalg.cholesky_solve(self.angular_chol, ang_eye)
+
+            # posterior mean
+            alpha_white = self.parameters["alpha_white"].get_value()  # [n_proj, size, n_ip, 1]
+            pred_inputs = _tf.einsum("mp,dsmi->dspi", self.cov_chol, alpha_white)
+            self.alpha = _tf.einsum("mp,dsmi->dspi", self.cov_inv, pred_inputs)
 
     def predict(self, x, n_sim=1, seed=(0, 0)):
         with _tf.name_scope("basic_prediction"):
             x = self.parent.predict(x, n_sim, seed)
 
-            x = _tf.einsum('abc,db->adc', x, self.projections)
+            # x = _tf.einsum('abc,db->adc', x, self.projections)
 
             # [n_dim, n_data, n_ip]
-            cov_cross = self.covariance_matrix(x, self.inducing_points)
+            cov_cross = self.cross_covariance_matrix(x)
 
-            mu = _tf.einsum("dnm,dsmi->dnsi", cov_cross, self.alpha)
+            mu = _tf.einsum("dnm,dsmi->dnsi", cov_cross, self.alpha)  # [n_dim, n_data, size, 1]
+
+            # explained_var = _tf.reduce_sum(
+            #     _tf.einsum("dnm,dsmp->dnsp", cov_cross, self.cov_smooth_inv) * cov_cross[:, :, None, :],
+            #     axis=-1
+            # )  # [n_dim, n_data, size]
+            # var = _tf.maximum(1.0 - explained_var, 0.0)
+            # std = _tf.sqrt(var)
+            #
+            # avg_var = _tf.reduce_mean(var, axis=0)
+            # avg_std = _tf.sqrt(avg_var)
 
             rnd = _tf.random.stateless_normal(
                 shape=[self.n_directions, self.size, self.root.n_ip, n_sim],
                 seed=seed, dtype=_tf.float64
             )
             sims = _tf.einsum("dnm,dsmp,dspi->dnsi", cov_cross, self.chol_r, rnd) + mu
+            # sims = _tf.einsum("dnm,dmp,dspi->dnsi", cov_cross, _tf.matmul(self.cov_inv, self.cov_chol), rnd) + mu
+
+            # sims = _tf.einsum("dnm,dsmp,dspi->dnsi", cov_cross, self.chol_r, rnd)  # [n_dim, n_data, size, n_sim]
+            # norm_sims = sims / std[:, :, :, None]
+            # avg_sims = _tf.reduce_sum(norm_sims, axis=0) / _np.sqrt(self.n_directions) * avg_std[:, :, None]
+            #
+            # avg_mu = _tf.reduce_sum(mu, axis=0) / _np.sqrt(self.n_directions)
+            #
+            # return avg_sims + avg_mu
 
             return _tf.reduce_sum(sims, axis=0) / _np.sqrt(self.n_directions)
 
     def kl_divergence(self):
         with _tf.name_scope("basic_KL_divergence"):
             delta = self.parameters["delta"].get_value()
+            # delta = _tf.tile(delta, [self.n_directions, 1, self.root.n_ip])
             alpha_white = self.parameters["alpha_white"].get_value()
 
-            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov[:, None, :, :])
+            tr = _tf.reduce_sum(self.cov_smooth_inv * self.cov[None, None, :, :])
             fit = _tf.reduce_sum(alpha_white**2)
             det_1 = 2 * _tf.reduce_sum(_tf.math.log(
                 _tf.linalg.diag_part(self.cov_smooth_chol)))
             det_2 = _tf.reduce_sum(_tf.math.log(delta))
+
             kl = 0.5 * (- tr + fit + det_1 - det_2)
 
-            # ranges = self.parameters["ranges"].get_value()
-            # rng_prob = _tf.reduce_sum(_tf.math.log(ranges)**2)
-
-            return kl #- rng_prob
+            return kl
 
 
 class SelectInput(_FunctionalProjectedVariable):
@@ -434,6 +555,9 @@ class Multiply(_Operation):
 
         self._size = sizes[0]
 
+        self.min = _tf.reduce_prod(_tf.stack([p.min for p in self.parents], axis=0), axis=0)
+        self.max = _tf.reduce_prod(_tf.stack([p.max for p in self.parents], axis=0), axis=0)
+
     def refresh(self, jitter=1e-9):
         for lat in self.parents:
             lat.refresh(jitter)
@@ -448,6 +572,99 @@ class Multiply(_Operation):
         all_pred = _tf.stack(all_pred, axis=0)
 
         return _tf.reduce_prod(all_pred, axis=0)
+
+
+class Add(_Operation):
+    def __init__(self, *latent_variables):
+        super().__init__(*latent_variables)
+        sizes = [p.size for p in self.parents]
+        if not all(s == sizes[0] for s in sizes):
+            raise ValueError("all parents must have the same size")
+
+        self._size = sizes[0]
+
+        self.min = _tf.reduce_sum(_tf.stack([p.min for p in self.parents], axis=0), axis=0)
+        self.max = _tf.reduce_sum(_tf.stack([p.max for p in self.parents], axis=0), axis=0)
+
+    def refresh(self, jitter=1e-9):
+        for lat in self.parents:
+            lat.refresh(jitter)
+
+    def predict(self, x, n_sim=1, seed=(0, 0)):
+        all_pred = []
+
+        for i, v in enumerate(self.parents):
+            x_i = v.predict(x, n_sim, [seed[0] + i, seed[1]])
+            all_pred.append(x_i)
+
+        all_pred = _tf.stack(all_pred, axis=0)
+
+        return _tf.reduce_sum(all_pred, axis=0)
+
+
+class LinearCombination(_Operation):
+    """
+    Linear combination.
+
+    This node combines the inputs linearly with positive weights.
+    """
+    def __init__(self, *latent_variables, unit_variance=True):
+        """
+        Initializer for LinearCombination.
+
+        Parameters
+        ----------
+        latent_variables
+            Nodes to combine. They must all have the same number of variables.
+        unit_variance : bool
+            If `True`, constrains the weights to unit sum to control the variance of the output.
+        """
+        super().__init__(*latent_variables)
+        sizes = [p.size for p in self.parents]
+        if not all(s == sizes[0] for s in sizes):
+            raise SizeIncompatibilityError(
+                f"All parents must have the same size. Found {sizes}."
+            )
+
+        self._size = sizes[0]
+
+        if unit_variance:
+            self._add_parameter(
+                "weights",
+                _gpr.CompositionalParameter(
+                    _np.ones(len(latent_variables)) / len(latent_variables))
+            )
+        else:
+            self._add_parameter(
+                "weights",
+                _gpr.PositiveParameter(
+                    _np.ones(len(latent_variables)) / len(latent_variables),
+                    _np.ones(len(latent_variables)) * 0.01,
+                    _np.ones(len(latent_variables)) * 100
+                )
+            )
+
+    def refresh(self, jitter=1e-9):
+        for lat in self.parents:
+            lat.refresh(jitter)
+
+    def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
+        weights = self.parameters["weights"].get_value()
+
+        all_pred = []
+
+        for i, v in enumerate(self.parents):
+            x_i = v.predict(x, n_sim, [seed[0] + i, seed[1]])
+            all_pred.append(x_i)
+
+        all_pred = _tf.stack(all_pred, axis=-1)
+
+        all_pred = _tf.reduce_sum(all_pred * weights, axis=-1)
+
+        return all_pred
+
+    def kl_divergence(self):
+        return _tf.constant(0.0, _tf.float64)
 
 
 class _VariationalFourierFeatures(_FunctionalProjectedVariable):

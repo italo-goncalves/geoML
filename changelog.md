@@ -2,6 +2,7 @@
 * Support for rotated 3D grids
 * Simulations now have the option to include the likelihood variance
 * Improvements and bug fixes
+* Product of Experts is now the default for GP latent variables
 
 ## version 0.3.4
 * Improved pyvista integration

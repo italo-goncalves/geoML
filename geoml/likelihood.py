@@ -147,7 +147,7 @@ class _Likelihood(_gpr.Parametric):
 
 
 class _ContinuousLikelihood(_Likelihood):
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
+    def __init__(self, warping=_warp.ZScore(), use_monte_carlo=False, sharpness=1):
         """
         Initializer for continuous likelihoods.
 
@@ -164,6 +164,7 @@ class _ContinuousLikelihood(_Likelihood):
         super().__init__(1, use_monte_carlo)
         self.warping = self._register(warping)
         self._spline = _gint.MonotonicCubicSpline()
+        self.sharpness = sharpness
 
     def initialize(self, y):
         self.warping.initialize(y)
@@ -194,7 +195,7 @@ class _ContinuousLikelihood(_Likelihood):
 
         lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
 
-        return lik
+        return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, *args, include_noise=True, quantiles=None,
                 probabilities=None, **kwargs):
@@ -292,8 +293,8 @@ class Gaussian(_ContinuousLikelihood):
     Equivalent to a squared error model. The latent variable maps to the mean,
     while the noise variance is a parameter.
     """
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(warping, use_monte_carlo)
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False, sharpness=1):
+        super().__init__(warping, use_monte_carlo, sharpness)
         self._add_parameter("noise", _gpr.PositiveParameter(0.1, 1e-12, 10))
 
     def _make_distribution(self, loc):
@@ -307,8 +308,8 @@ class Laplace(_ContinuousLikelihood):
     Equivalent to a linear error model. The latent variable maps to the mean,
     while the distribution's scale factor is a parameter.
     """
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(warping, use_monte_carlo)
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False, sharpness=1):
+        super().__init__(warping, use_monte_carlo, sharpness)
         self._add_parameter("scale", _gpr.PositiveParameter(0.1, 1e-9, 10))
 
     def _make_distribution(self, loc):
@@ -323,8 +324,8 @@ class Gamma(_ContinuousLikelihood):
     parameter and then mapped to the distribution's shape. The rate parameter
     is fixed at 1.0.
     """
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(warping, use_monte_carlo)
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False, sharpness=1):
+        super().__init__(warping, use_monte_carlo, sharpness)
         self._add_parameter("mean_alpha", _gpr.RealParameter(0, -3, 3))
 
     def _make_distribution(self, loc):
@@ -334,8 +335,8 @@ class Gamma(_ContinuousLikelihood):
 
 
 class Beta(_ContinuousLikelihood):
-    def __init__(self, concentration=1, use_monte_carlo=False):
-        super().__init__(use_monte_carlo=use_monte_carlo)
+    def __init__(self, concentration=1, use_monte_carlo=False, sharpness=1):
+        super().__init__(use_monte_carlo=use_monte_carlo, sharpness=sharpness)
         self._add_parameter("concentration", _gpr.PositiveParameter(
             concentration, 1e-3, 10, fixed=False))
 
@@ -357,8 +358,8 @@ class StudentT(_ContinuousLikelihood):
     A heavy-tailed distribution. The latent variable maps to the mean,
     while the scale and degrees of freedom are parameters.
     """
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(warping, use_monte_carlo)
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False, sharpness=1):
+        super().__init__(warping, use_monte_carlo, sharpness)
         self._add_parameter("scale", _gpr.PositiveParameter(0.1, 1e-9, 10))
         self._add_parameter("df", _gpr.PositiveParameter(5.0, 2.01, 50.0))
 
@@ -377,8 +378,8 @@ class EpsilonInsensitive(_ContinuousLikelihood):
     below which error are not penalized. Can be used to obtain a model similar
     to the Support Vector Machine.
     """
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(warping, use_monte_carlo)
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False, sharpness=1):
+        super().__init__(warping, use_monte_carlo, sharpness)
         self._add_parameter("epsilon", _gpr.PositiveParameter(0.001, 1e-9, 10))
         self._add_parameter("c_rate", _gpr.PositiveParameter(1, 1e-3, 1e3))
 
@@ -425,7 +426,7 @@ class EpsilonInsensitive(_ContinuousLikelihood):
         lik = _tf.reduce_sum(
             (log_density + log_derivative) * has_value)
 
-        return lik
+        return lik * self.sharpness
 
     def cdf(self, x):
         epsilon = self.parameters["epsilon"].get_value()
@@ -547,8 +548,8 @@ class Huber(_ContinuousLikelihood):
 
     Based on the Huber loss.
     """
-    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False):
-        super().__init__(warping, use_monte_carlo)
+    def __init__(self, warping=_warp.Identity(), use_monte_carlo=False, sharpness=1):
+        super().__init__(warping, use_monte_carlo, sharpness)
         self._add_parameter("threshold", _gpr.PositiveParameter(3, 1e-2, 10))
         self._add_parameter("std", _gpr.PositiveParameter(0.1, 1e-3, 1))
 
@@ -596,7 +597,7 @@ class Huber(_ContinuousLikelihood):
         lik = _tf.reduce_sum(
             (log_density + log_derivative) * has_value)
 
-        return lik
+        return lik * self.sharpness
 
     def cdf(self, x):
         thr = self.parameters["threshold"].get_value()
@@ -1358,7 +1359,7 @@ class _CompositionalLikelihood(_Likelihood):
     often involve major vs minor elements, oxides vs sulfides, etc.
     """
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 warping=_warp.Identity()):
+                 warping=_warp.Identity(), sharpness=1):
         """
         Initializer for _CompositionalLikelihood.
 
@@ -1375,6 +1376,10 @@ class _CompositionalLikelihood(_Likelihood):
             A warping object to be applied to each contrast, trained
             independently.
         """
+        self.sharpness = sharpness
+        self.clr_mean = None
+        self.clr_basis = None
+
         if n_basis is None:
             n_basis = n_components - 1
         elif n_basis >= n_components:
@@ -1384,17 +1389,17 @@ class _CompositionalLikelihood(_Likelihood):
         super().__init__(n_basis)
         self.n_components = n_components
 
-        self._add_parameter(
-            "basis",
-            _gpr.OrthonormalMatrix(n_components - 1, n_basis)
-        )
+        # self._add_parameter(
+        #     "basis",
+        #     _gpr.OrthonormalMatrix(n_components - 1, n_basis)
+        # )
 
-        if contrast_matrix is None:
-            contrast_matrix = _helmert(n_components)
-        elif contrast_matrix.shape != (n_components - 1, n_components):
-            raise ValueError("invalid shape for contrast_matrix; "
-                             "shape must be (n_components - 1, n_components)")
-        self.contrast = _tf.constant(contrast_matrix, _tf.float64)
+        # if contrast_matrix is None:
+        #     contrast_matrix = _helmert(n_components)
+        # elif contrast_matrix.shape != (n_components - 1, n_components):
+        #     raise ValueError("invalid shape for contrast_matrix; "
+        #                      "shape must be (n_components - 1, n_components)")
+        # self.contrast = _tf.constant(contrast_matrix, _tf.float64)
         # self.mask = 1 - _tf.constant(contrast_matrix == 0, _tf.float64)
 
         self.warpings = [self._register(_copy.deepcopy(warping))
@@ -1420,10 +1425,13 @@ class _CompositionalLikelihood(_Likelihood):
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
-        basis = self.parameters["basis"].get_value()
+        # basis = self.parameters["basis"].get_value()
 
-        y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
-        y_white = _tf.matmul(y_ilr, basis)
+        # y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
+        # y_white = _tf.matmul(y_ilr, basis)
+
+        y_clr = _tf.math.log(y) - _tf.reduce_mean(_tf.math.log(y), axis=1, keepdims=True)
+        y_white = _tf.matmul(y_clr - self.clr_mean, self.clr_basis)#[:, :self.size]
         y_split = _tf.split(y_white, self.size, axis=1)
 
         y_warped = _tf.concat(
@@ -1446,18 +1454,21 @@ class _CompositionalLikelihood(_Likelihood):
         # allowing partial missing
         # missing_contrast = _tf.matmul(1 - has_value, self.mask)
 
-        return lik
+        return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var,
                 *args, quantiles=None, include_noise=True,
                 **kwargs):
-        basis = self.parameters["basis"].get_value()
-        rotated_contrast = _tf.matmul(basis, self.contrast, True)
+        # basis = self.parameters["basis"].get_value()
+        # rotated_contrast = _tf.matmul(basis, self.contrast, True)
 
         # ignores warping, used only for calculating weights
-        mu = _tf.matmul(mu, rotated_contrast)
-        var = _tf.matmul(var, rotated_contrast ** 2)
-        explained_var = _tf.matmul(explained_var, rotated_contrast ** 2)
+        # mu = _tf.matmul(mu, rotated_contrast)
+        # var = _tf.matmul(var, rotated_contrast ** 2)
+        # explained_var = _tf.matmul(explained_var, rotated_contrast ** 2)
+        mu = _tf.matmul(mu, self.clr_basis, False, True) + self.clr_mean
+        var = _tf.matmul(var, self.clr_basis ** 2, False, True)
+        explained_var = _tf.matmul(explained_var, self.clr_basis ** 2, False, True)
 
         if include_noise:
             coherent_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=True)
@@ -1472,9 +1483,11 @@ class _CompositionalLikelihood(_Likelihood):
             x = [wp.backward(s[:, 0, :]) for wp, s in zip(self.warpings, x)]
             x = _tf.stack(x, axis=1)
 
-            # reverse ilr
-            sims_clr = _tf.einsum("nij,ik->nkj", x, rotated_contrast)
+            # reverse clr
+            sims_clr = _tf.einsum("nij,ki->nkj", x, self.clr_basis) + self.clr_mean[:, :, None]
             sims_simplex = _tf.nn.softmax(sims_clr, axis=1)
+            # sims_clr = _tf.einsum("nij,ik->nkj", x, rotated_contrast)
+            # sims_simplex = _tf.nn.softmax(sims_clr, axis=1)
 
             return sims_simplex
 
@@ -1500,26 +1513,41 @@ class _CompositionalLikelihood(_Likelihood):
         return out
 
     def initialize(self, y):
-        y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
+        # y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
+        #
+        # y_centered = y_ilr - _tf.reduce_mean(y_ilr, axis=0, keepdims=True)
 
-        y_centered = y_ilr - _tf.reduce_mean(y_ilr, axis=0, keepdims=True)
+        y_clr = _tf.math.log(y) - _tf.reduce_mean(_tf.math.log(y), axis=1, keepdims=True)
+        self.clr_mean = _tf.reduce_mean(y_clr, axis=0, keepdims=True)
+
+        y_centered = y_clr - self.clr_mean
+
         cov_mat = _tf.matmul(y_centered, y_centered, True)
         vals, vecs = _tf.linalg.eigh(cov_mat)
         vecs = vecs[:, ::-1][:, :self.size]
 
-        self.parameters["basis"].set_value(vecs.numpy())
-        self.parameters["basis"].fix()
+        self.clr_basis = vecs
 
-        y_ilr = _tf.matmul(y_ilr, vecs)
+        y_pcs = _tf.matmul(y_centered, vecs)
+
+
+
+        # self.parameters["basis"].set_value(vecs.numpy())
+        # self.parameters["basis"].fix()
+        #
+        # y_ilr = _tf.matmul(y_ilr, vecs)
+
+        # for i, wp in enumerate(self.warpings):
+        #     wp.initialize(y_ilr[:, i])
 
         for i, wp in enumerate(self.warpings):
-            wp.initialize(y_ilr[:, i])
+            wp.initialize(y_pcs[:, i])
 
 
 class CompositionalGaussian(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 tie_components=True, warping=_warp.Center()):
-        super().__init__(n_components, n_basis, contrast_matrix, warping)
+                 tie_components=False, warping=_warp.Center(), sharpness=1):
+        super().__init__(n_components, n_basis, contrast_matrix, warping, sharpness=sharpness)
         if tie_components:
             self._add_parameter(
                 "noise",
@@ -1541,8 +1569,8 @@ class CompositionalGaussian(_CompositionalLikelihood):
 
 class CompositionalLaplace(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 tie_components=True, warping=_warp.Center()):
-        super().__init__(n_components, n_basis, contrast_matrix, warping)
+                 tie_components=False, warping=_warp.Center(), sharpness=1):
+        super().__init__(n_components, n_basis, contrast_matrix, warping, sharpness=sharpness)
         if tie_components:
             self._add_parameter(
                 "rate",
@@ -1564,8 +1592,8 @@ class CompositionalLaplace(_CompositionalLikelihood):
 
 class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
     def __init__(self, n_components, n_basis=None, contrast_matrix=None,
-                 tie_components=True, warping=_warp.Center()):
-        super().__init__(n_components, n_basis, contrast_matrix, warping)
+                 tie_components=False, warping=_warp.Center(), sharpness=1):
+        super().__init__(n_components, n_basis, contrast_matrix, warping, sharpness=sharpness)
         if tie_components:
             self._add_parameter(
                 "epsilon",
@@ -1595,11 +1623,15 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
-        basis = self.parameters["basis"].get_value()
+        # basis = self.parameters["basis"].get_value()
+        #
+        # y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
+        # y_ilr = _tf.matmul(y_ilr, basis)
+        # y_split = _tf.split(y_ilr, self.size, axis=1)
 
-        y_ilr = _tf.matmul(_tf.math.log(y), self.contrast, False, True)
-        y_ilr = _tf.matmul(y_ilr, basis)
-        y_split = _tf.split(y_ilr, self.size, axis=1)
+        y_clr = _tf.math.log(y) - _tf.reduce_mean(_tf.math.log(y), axis=1, keepdims=True)
+        y_white = _tf.matmul(y_clr - self.clr_mean, self.clr_basis)  # [:, :self.size]
+        y_split = _tf.split(y_white, self.size, axis=1)
 
         y_warped = _tf.concat(
             [wp.forward(z) for wp, z in zip(self.warpings, y_split)],
@@ -1626,7 +1658,7 @@ class CompositionalEpsilonInsensitive(_CompositionalLikelihood):
 
         lik = _tf.reduce_sum((log_density + log_derivative) * has_value)
 
-        return lik
+        return lik * self.sharpness
 
     def inv_cdf(self, p):
         epsilon = self.parameters["epsilon"].get_value()

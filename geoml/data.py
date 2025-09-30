@@ -19,7 +19,9 @@ __all__ = ["PointData",
            "DirectionalData",
            "DrillholeData",
            "batch_index",
-           "export_planes"]
+           "export_planes",
+           "RotatedGrid3D", "Section3D", "Surface3D",
+           "Blocks1D", "Blocks2D", "Blocks3D"]
 
 import numpy as np
 import pandas as pd
@@ -35,6 +37,7 @@ from skimage import measure as _measure
 
 import geoml.interpolation as _gint
 import geoml.plotly as _py
+import geoml.tftools as _tftools
 
 
 def bounding_box(points):
@@ -1610,6 +1613,7 @@ class _SpatialData(object):
         self._n_data = None
         self._diagonal = None
         self.variables = {}
+        self.metadata = None
 
     def __repr__(self):
         return self.__str__()
@@ -1819,12 +1823,15 @@ class PointData(_PointBased):
             self._bounding_box = BoundingBox.from_array(
                 _np.zeros([2, self.n_dim]))
 
-    def as_data_frame(self, **kwargs):
+        self.metadata = _pd.DataFrame(_np.empty([self.n_data, 0]))
+
+    def as_data_frame(self, metadata=True, **kwargs):
         """
         Conversion of a spatial object to a data frame.
 
         The following kwargs can be used to control the kind of information to include in the DataFrame. They all
         default to `True`.
+        - `metadata`: miscellaneous information about each data point.
         - `measurements`: the raw measurements used to create each variable.
         - `latent`: predicted latent variables mean and variance.
         - `predictions`: predicted labels and support information like entropy and uncertainty.
@@ -1837,6 +1844,8 @@ class PointData(_PointBased):
         for variable in self.variables.values():
             df.append(variable.as_data_frame(**kwargs))
         df = _pd.concat(df, axis=1)
+        if metadata:
+            df = _pd.concat([self.metadata, df], axis=1)
         return df
 
     @classmethod
@@ -1856,6 +1865,7 @@ class PointData(_PointBased):
         self_copy = _copy.deepcopy(self)
         new_obj = PointData.from_array(self_copy.coordinates[item])
         new_obj.coordinate_labels = self_copy.coordinate_labels
+        new_obj.metadata = self_copy.metadata.iloc[item].reset_index(drop=True)
         for name, var in self_copy.variables.items():
             new_obj.variables[name] = var[item]
             new_obj.variables[name].set_coordinates(new_obj)
@@ -1911,6 +1921,99 @@ class PointData(_PointBased):
             self.variables[var].fill_pyvista_points(pv_points)
 
         return pv_points
+
+    def spatial_k_fold(self, test_data, k=5, bins=50):
+        # setup
+        test_dist = _tftools.pairwise_dist(self.coordinates, test_data.coordinates).numpy()
+        data_dist = _tftools.pairwise_dist(self.coordinates, self.coordinates)
+
+        dist_bins = _np.linspace(0, _np.max(test_dist), bins)
+
+        # test_dist = _np.ravel(test_dist)
+        test_hist = _np.histogram(_np.ravel(test_dist), dist_bins)[0]
+        test_ecdf = _np.cumsum(test_hist) / _np.sum(test_hist)
+
+        data_hist = _np.histogram(_np.ravel(data_dist), dist_bins)[0]
+        data_ecdf = _np.cumsum(data_hist) / _np.sum(data_hist)
+
+        point_hist = _np.stack(
+            [_np.histogram(line, dist_bins)[0] for line in data_dist]
+        )
+        point_ecdf = _np.cumsum(point_hist, axis=1) / _np.sum(point_hist, axis=1, keepdims=True)
+
+        # optimization
+        weights = _tf.Variable(_np.random.normal(scale=0.0001, size=[self.n_data, k]))
+        mask = _tf.Variable(_np.random.normal(loc=-3, scale=0.0001, size=[self.n_data, 1]))
+
+        def get_fold_ecdf():
+            w = _tf.nn.softmax(weights, axis=1)
+            m = _tf.nn.sigmoid(mask)
+
+            total_weight = _tf.reduce_sum(w * (1 - m), axis=0)
+            total_m = _tf.reduce_sum(1 - m)
+
+            # total_weight = _tf.reduce_sum(w, axis=0)
+
+            fold_ecdf = _tf.stack(
+                [_tf.reduce_sum((1 - w[:, i, None]) * point_ecdf * (1 - m), axis=0) / (total_m - total_weight[i]) for i
+                 in range(k)],
+                axis=1
+            )
+            # fold_ecdf = _tf.stack(
+            #     [_tf.reduce_sum((1 - w[:, i, None]) * point_ecdf, axis=0) / (self.n_data - total_weight[i])
+            #      for i in range(k)],
+            #     axis=1
+            # )
+
+            return fold_ecdf
+
+        def loss():
+            fold_ecdf = get_fold_ecdf()
+
+            w_dist = _tf.reduce_sum(_tf.math.abs(fold_ecdf - test_ecdf[:, None])) / k
+
+            w = _tf.nn.softmax(weights, axis=1)
+            entropy = - _tf.reduce_mean(_tf.reduce_sum(w * _tf.math.log(w + 1e-6), axis=1)) * 0.1
+
+            m = _tf.nn.sigmoid(mask)
+
+            avg_weight = _tf.reduce_sum(w * (1 - m), axis=0) / _tf.reduce_sum(1 - m)
+            # avg_weight = _tf.reduce_sum(w, axis=0)
+            penalty = _tf.reduce_sum(avg_weight ** 2) + _tf.reduce_mean(m ** 2)
+
+            # entropy_2 = - _tf.reduce_sum(avg_weight * _tf.math.log(avg_weight + 1e-6))
+            # penalty = - entropy_2 + _tf.reduce_mean(m ** 2)
+
+            # silhouette
+            avg_dist_in_cluster = _tf.matmul(data_dist**2, weights) / _tf.reduce_sum(weights, axis=0, keepdims=True)
+            avg_dist_out_cluster = _tf.matmul(data_dist**2, 1 - weights) / _tf.reduce_sum(1 - weights, axis=0, keepdims=True)
+            silhouette = (avg_dist_out_cluster - avg_dist_in_cluster) / _tf.maximum(avg_dist_in_cluster, avg_dist_out_cluster)
+            avg_s = _tf.reduce_sum(_tf.reduce_sum(silhouette * weights, axis=1, keepdims=True) * (1 - m)) / _tf.reduce_sum(1 - m)
+
+            return w_dist + entropy + penalty - avg_s * 0.1
+
+        optimizer = _tf.keras.optimizers.Adam(1e-3)
+
+        n_iter = 1000
+        history = []
+        for _ in range(n_iter):
+            _tftools.training_step(optimizer, loss, [weights, mask])
+            history.append(loss().numpy())
+
+        # output
+        final_w = _tf.nn.softmax(weights, axis=1).numpy()
+        final_mask = _tf.nn.sigmoid(mask).numpy()
+        total_weight = _np.sum(final_w * (1 - final_mask), axis=0)
+        # total_weight = _np.sum(final_w, axis=0)
+        final_folds = _np.argmax(final_w, axis=1)
+
+        final_ecdf = get_fold_ecdf().numpy()
+
+        self.metadata['spatial_fold'] = final_folds
+        self.metadata['sample_weight'] = 1 - final_mask
+        n_points = _np.array([_np.sum(self.metadata['spatial_fold'] == i) for i in range(k)])
+
+        return history, n_points, dist_bins[:-1], test_ecdf, final_ecdf
 
 
 class GaussianData(PointData):

@@ -56,8 +56,8 @@ def pairwise_dist(mat_a, mat_b):
                      _tf.TensorSpec(shape=[None, None], dtype=_tf.float64)])
 def pairwise_dist_l1(mat_a, mat_b):
     """
-    Computes L1 pairwise distances between each elements of matrix and
-    each elements of mat_b.
+    Computes L1 pairwise distances between each element of matrix and
+    each element of mat_b.
     """
     with _tf.name_scope('pairwise_dist_l1'):
         dif = mat_a[:, None, :] - mat_b[None, :, :]
