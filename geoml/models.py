@@ -147,7 +147,7 @@ class GP(_GPModel):
         self.covariance.set_limits(data)
 
         if warping is None:
-            warping = _warp.Identity()
+            warping = _warp.ZScore(1)
         self.warping = self._register(warping)
 
         keep = ~ _np.isnan(self.data.variables[self.variable].measurements.values)
