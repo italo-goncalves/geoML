@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="/images/geoML logo horizontal.png" width="100%">
+  <img src="/geoml/images/geoML logo horizontal.png" width="100%">
 </p>
 
 
@@ -11,7 +11,7 @@ Conventional modelling approaches are very labour-intensive, subjective, and har
 
 <p align="center">
   <video width="100%" controls>
-        <source src="images/walker_movie.mp4" type="video/mp4">
+        <source src="/geoml/images/walker_movie.mp4" type="video/mp4">
   </video>
 </p>
 
