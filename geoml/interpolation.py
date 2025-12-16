@@ -50,7 +50,8 @@ class _Interpolator:
                        for d in range(self.n_dim)]
         interpolated = _tf.stack([mat.matmul(values) for mat in interp_mats],
                                  axis=2)
-        return _tf.reduce_sum(interpolated * directions[:, None, :], axis=2)
+        # return _tf.reduce_sum(interpolated * directions[:, None, :], axis=2)
+        return _tf.reduce_sum(interpolated * directions[None, :, :], axis=2)
 
     @staticmethod
     def cubic_conv_1d(x, xnew, derivative=-1):
@@ -780,7 +781,7 @@ class CubicConv2DFull(_Interpolator):
 #     return mat_x.outer_product(mat_yz)
 
 
-class CubicSpline(object):
+class _CubicSpline(object):
     """
     Cubic splines.
     """
@@ -805,56 +806,56 @@ class CubicSpline(object):
     @staticmethod
     def _h1(x, x1, x2):
         h = x2 - x1
-        return CubicSpline._phi((x2 - x) / h)
+        return _CubicSpline._phi((x2 - x) / h)
 
     @staticmethod
     def _h1_d1(x, x1, x2):
         h = x2 - x1
-        return CubicSpline._phi_d1((x2 - x) / h) * (-1 / h)
+        return _CubicSpline._phi_d1((x2 - x) / h) * (-1 / h)
 
     @staticmethod
     def _h2(x, x1, x2):
         h = x2 - x1
-        return CubicSpline._phi((x - x1) / h)
+        return _CubicSpline._phi((x - x1) / h)
 
     @staticmethod
     def _h2_d1(x, x1, x2):
         h = x2 - x1
-        return CubicSpline._phi_d1((x - x1) / h) / h
+        return _CubicSpline._phi_d1((x - x1) / h) / h
 
     @staticmethod
     def _h3(x, x1, x2):
         h = x2 - x1
-        return - h * CubicSpline._psi((x2 - x) / h)
+        return - h * _CubicSpline._psi((x2 - x) / h)
 
     @staticmethod
     def _h3_d1(x, x1, x2):
         h = x2 - x1
-        return CubicSpline._psi_d1((x2 - x) / h)
+        return _CubicSpline._psi_d1((x2 - x) / h)
 
     @staticmethod
     def _h4(x, x1, x2):
         h = x2 - x1
-        return h * CubicSpline._psi((x - x1) / h)
+        return h * _CubicSpline._psi((x - x1) / h)
 
     @staticmethod
     def _h4_d1(x, x1, x2):
         h = x2 - x1
-        return CubicSpline._psi_d1((x - x1) / h)
+        return _CubicSpline._psi_d1((x - x1) / h)
 
-    @staticmethod
-    def _poly(x, x1, x2, f1, f2, d1, d2):
-        return f1 * CubicSpline._h1(x, x1, x2) \
-               + f2 * CubicSpline._h2(x, x1, x2) \
-               + d1 * CubicSpline._h3(x, x1, x2) \
-               + d2 * CubicSpline._h4(x, x1, x2)
-
-    @staticmethod
-    def _poly_d1(x, x1, x2, f1, f2, d1, d2):
-        return f1 * CubicSpline._h1_d1(x, x1, x2) \
-               + f2 * CubicSpline._h2_d1(x, x1, x2) \
-               + d1 * CubicSpline._h3_d1(x, x1, x2) \
-               + d2 * CubicSpline._h4_d1(x, x1, x2)
+    # @staticmethod
+    # def _poly(x, x1, x2, f1, f2, d1, d2):
+    #     return f1 * CubicSpline._h1(x, x1, x2) \
+    #            + f2 * CubicSpline._h2(x, x1, x2) \
+    #            + d1 * CubicSpline._h3(x, x1, x2) \
+    #            + d2 * CubicSpline._h4(x, x1, x2)
+    #
+    # @staticmethod
+    # def _poly_d1(x, x1, x2, f1, f2, d1, d2):
+    #     return f1 * CubicSpline._h1_d1(x, x1, x2) \
+    #            + f2 * CubicSpline._h2_d1(x, x1, x2) \
+    #            + d1 * CubicSpline._h3_d1(x, x1, x2) \
+    #            + d2 * CubicSpline._h4_d1(x, x1, x2)
 
     def _get_derivative(self, x, y):
         with _tf.name_scope("cubic_interpolation_find_derivative"):
@@ -868,99 +869,99 @@ class CubicSpline(object):
             ], axis=0)
             return d
 
-    def interpolate(self, x, y, xnew):
+class CubicSpline(_CubicSpline):
+    def interpolate(self, x, y, xnew, grad=False):
+        """
+        Optimized cubic spline interpolation.
+
+        Args:
+            x: [N, B] tensor of knot x-coordinates. Must be sorted.
+            y: [N, B] tensor of knot y-coordinates.
+            xnew: [M, B] tensor of new x-coordinates to interpolate at.
+            grad: bool, if True, returns the derivative dy/dx at xnew.
+        """
         with _tf.name_scope("cubic_interpolation"):
-            # x, y, xnew = [knots, batch]
-            x = _tftools.ensure_rank_2(x)
-            y = _tftools.ensure_rank_2(y)
-            xnew = _tftools.ensure_rank_2(xnew)
-
+            # 1. Get derivatives at knots (unchanged)
             d = self._get_derivative(x, y)
 
-            n_knots = _tf.shape(x)[0]
+            # 2. Pad data to handle extrapolation
+            # We pad with a large value (1e6) to ensure searchsorted
+            # works correctly, and extrapolate linearly using the end-point
+            # derivatives.
+            x_left = _tf.concat([x[:1] - 1e6, x], axis=0)
+            x_right = _tf.concat([x, x[-1:] + 1e6], axis=0)
+            y_left = _tf.concat([y[:1] - 1e6 * d[:1], y], axis=0)
+            y_right = _tf.concat([y, y[-1:] + 1e6 * d[-1:]], axis=0)
+            d_left = _tf.concat([d[:1], d], axis=0)
+            d_right = _tf.concat([d, d[-1:]], axis=0)
 
-            x_ex = x[:, None, :]
-            y_ex = y[:, None, :]
-            d_ex = d[:, None, :]
-            xnew_ex = xnew[None, :, :]
+            # 3. Find intervals using tf.searchsorted (THE KEY OPTIMIZATION)
+            # Transpose inputs to be [B, N] for searchsorted
+            # x_bins: [B, N+1], v_search: [B, M]
+            x_bins = _tf.transpose(x_left, [1, 0])
+            v_search = _tf.transpose(xnew, [1, 0])
 
-            idx = _tf.range(n_knots - 1)
+            # Find the index 'i' such that x_bins[i-1] <= v_search < x_bins[i]
+            # indices: [B, M]
+            indices = _tf.searchsorted(x_bins, v_search, side='right')
 
-            all_interp = _tf.concat([
-                y[0] + d[0] * (xnew_ex - x[0]),
-                CubicSpline._poly(
-                    xnew_ex,
-                    _tf.gather(x_ex, idx),
-                    _tf.gather(x_ex, idx + 1),
-                    _tf.gather(y_ex, idx),
-                    _tf.gather(y_ex, idx + 1),
-                    _tf.gather(d_ex, idx),
-                    _tf.gather(d_ex, idx + 1)),
-                y[-1] + d[-1] * (xnew_ex - x[-1])
-            ], axis=0)
+            # We want the 'left' index, so subtract 1
+            # Clamp at 0 to avoid -1 index
+            indices = _tf.maximum(1, indices) - 1
 
-            le = _tf.less_equal(x_ex, xnew_ex)
-            pos = _tf.reduce_sum(_tf.cast(le, _tf.int32), axis=0)
+            # 4. Gather data for left/right points (THE 2ND OPTIMIZATION)
+            x_left_T = _tf.transpose(x_left, [1, 0])
+            y_left_T = _tf.transpose(y_left, [1, 0])
+            d_left_T = _tf.transpose(d_left, [1, 0])
 
-            idx_1 = _tf.range(_tf.shape(xnew)[0])
-            idx_2 = _tf.range(_tf.shape(xnew)[1])
-            idx_1, idx_2 = _tf.meshgrid(idx_1, idx_2)
-            idx_1 = _tf.reshape(idx_1, [-1, 1])
-            idx_2 = _tf.reshape(idx_2, [-1, 1])
-            pos = _tf.reshape(_tf.transpose(pos), [-1, 1])
-            pos = _tf.concat([pos, idx_1, idx_2], axis=1)
-            ynew = _tf.gather_nd(all_interp, pos)
-            ynew = _tf.reshape(ynew, _tf.shape(xnew)[::-1])
-            ynew = _tf.transpose(ynew)
+            x_right_T = _tf.transpose(x_right, [1, 0])
+            y_right_T = _tf.transpose(y_right, [1, 0])
+            d_right_T = _tf.transpose(d_right, [1, 0])
+
+            # Gather using [B, M] indices from [B, N+1] params.
+            # batch_dims=1 is now correct, as shape[0] (B) matches.
+            # Resulting shapes are [B, M]
+            x_l_T = _tf.gather(x_left_T, indices, batch_dims=1)
+            y_l_T = _tf.gather(y_left_T, indices, batch_dims=1)
+            d_l_T = _tf.gather(d_left_T, indices, batch_dims=1)
+
+            x_r_T = _tf.gather(x_right_T, indices, batch_dims=1)
+            y_r_T = _tf.gather(y_right_T, indices, batch_dims=1)
+            d_r_T = _tf.gather(d_right_T, indices, batch_dims=1)
+
+            # Transpose results from [B, M] back to [M, B]
+            x_l = _tf.transpose(x_l_T, [1, 0])
+            y_l = _tf.transpose(y_l_T, [1, 0])
+            d_l = _tf.transpose(d_l_T, [1, 0])
+
+            x_r = _tf.transpose(x_r_T, [1, 0])
+            y_r = _tf.transpose(y_r_T, [1, 0])
+            d_r = _tf.transpose(d_r_T, [1, 0])
+
+            # 5. Compute polynomial (THE 3RD OPTIMIZATION)
+            # Calculate h and t *once*.
+            h = x_r - x_l
+            safe_h = h + 1e-6
+            t = (xnew - x_l) / safe_h
+
+            if grad:
+                # Calculate derivative dy/dx = (dy/dt) * (dt/dx)
+                t_d1 = 1.0 / safe_h  # dt/dx
+
+                # dy/dx = (1/h) * [-f1*phi'(1-t) + f2*phi'(t)] + d1*psi'(1-t) + d2*psi'(t)
+                ynew = t_d1 * (-y_l * self._phi_d1(1.0 - t) + y_r * self._phi_d1(t)) + \
+                       (d_l * self._psi_d1(1.0 - t) + d_r * self._psi_d1(t))
+            else:
+                # Calculate value
+                # y = f1*phi(1-t) + f2*phi(t) + d1*(-h*psi(1-t)) + d2*(h*psi(t))
+                ynew = y_l * self._phi(1.0 - t) + y_r * self._phi(t) + \
+                       d_l * (-h * self._psi(1.0 - t)) + d_r * (h * self._psi(t))
 
         return ynew
 
+    # @_tf.function
     def interpolate_d1(self, x, y, xnew):
-        with _tf.name_scope("cubic_interpolation_d1"):
-            # x, y, xnew = [knots, batch]
-            x = _tftools.ensure_rank_2(x)
-            y = _tftools.ensure_rank_2(y)
-            xnew = _tftools.ensure_rank_2(xnew)
-
-            d = self._get_derivative(x, y)
-
-            n_knots = _tf.shape(x)[0]
-
-            x_ex = x[:, None, :]
-            y_ex = y[:, None, :]
-            d_ex = d[:, None, :]
-            xnew_ex = xnew[None, :, :]
-
-            idx = _tf.range(n_knots - 1)
-
-            all_interp = _tf.concat([
-                d[0] * _tf.ones_like(xnew_ex),
-                CubicSpline._poly_d1(
-                    xnew_ex,
-                    _tf.gather(x_ex, idx),
-                    _tf.gather(x_ex, idx + 1),
-                    _tf.gather(y_ex, idx),
-                    _tf.gather(y_ex, idx + 1),
-                    _tf.gather(d_ex, idx),
-                    _tf.gather(d_ex, idx + 1)),
-                d[-1] * _tf.ones_like(xnew_ex)
-            ], axis=0)
-
-            le = _tf.less_equal(x_ex, xnew_ex)
-            pos = _tf.reduce_sum(_tf.cast(le, _tf.int32), axis=0)
-
-            idx_1 = _tf.range(_tf.shape(xnew)[0])
-            idx_2 = _tf.range(_tf.shape(xnew)[1])
-            idx_1, idx_2 = _tf.meshgrid(idx_1, idx_2)
-            idx_1 = _tf.reshape(idx_1, [-1, 1])
-            idx_2 = _tf.reshape(idx_2, [-1, 1])
-            pos = _tf.reshape(_tf.transpose(pos), [-1, 1])
-            pos = _tf.concat([pos, idx_1, idx_2], axis=1)
-            ynew = _tf.gather_nd(all_interp, pos)
-            ynew = _tf.reshape(ynew, _tf.shape(xnew)[::-1])
-            ynew = _tf.transpose(ynew)
-
-        return ynew
+        return self.interpolate(x, y, xnew, grad=True)
 
 
 class MonotonicCubicSpline(CubicSpline):
@@ -971,10 +972,10 @@ class MonotonicCubicSpline(CubicSpline):
     def _get_derivative(self, x, y):
         with _tf.name_scope("monotonic_interpolation_find_derivative"):
             w = x[1:, :] - x[:-1, :]
-            s = (y[1:, :] - y[:-1, :]) / (w + 1e-12)
+            s = (y[1:, :] - y[:-1, :]) / (w + 1e-6)
 
             p = (s[:-1, :] * w[1:, :] + s[1:, :] * w[:-1, :]) \
-                / (w[1:, :] + w[:-1, :] + 1e-12)
+                / (w[1:, :] + w[:-1, :] + 1e-6)
             s_max = 2 * _tf.reduce_min(_tf.stack([s[:-1, :], s[1:, :]], axis=0),
                                        axis=0)
 
@@ -984,3 +985,80 @@ class MonotonicCubicSpline(CubicSpline):
                             d,
                             _tf.expand_dims(s[-1, :], axis=0)], axis=0)
             return d
+
+
+class StatefulCubicSpline(_CubicSpline):
+    """
+    Stateful Cubic Spline.
+
+    Use this class when your knots (x, y) are constants.
+    It pre-computes derivatives and padded tensors in __init__
+    for extremely fast interpolation.
+    """
+
+    def __init__(self, x, y):
+        with _tf.name_scope("stateful_spline_init"):
+            # 1. Compute and store derivatives *once*
+            self.d = self._get_derivative(x, y)
+
+            # 2. Compute and store all padded/transposed tensors *once*
+            self.x_left = _tf.concat([x[:1] - 1e6, x], axis=0)
+            self.y_left = _tf.concat([y[:1] - 1e6 * self.d[:1], y], axis=0)
+            self.d_left = _tf.concat([self.d[:1], self.d], axis=0)
+            self.x_right = _tf.concat([x, x[-1:] + 1e6], axis=0)
+            self.y_right = _tf.concat([y, y[-1:] + 1e6 * self.d[-1:]], axis=0)
+            self.d_right = _tf.concat([self.d, self.d[-1:]], axis=0)
+
+            self.x_bins_T = _tf.transpose(self.x_left, [1, 0])
+            self.x_left_T = _tf.transpose(self.x_left, [1, 0])
+            self.y_left_T = _tf.transpose(self.y_left, [1, 0])
+            self.d_left_T = _tf.transpose(self.d_left, [1, 0])
+            self.x_right_T = _tf.transpose(self.x_right, [1, 0])
+            self.y_right_T = _tf.transpose(self.y_right, [1, 0])
+            self.d_right_T = _tf.transpose(self.d_right, [1, 0])
+
+    def interpolate(self, xnew, grad=False):
+        with _tf.name_scope("cubic_interpolate_stateful"):
+            # 1. Find intervals (uses pre-computed self.x_bins_T)
+            v_search = _tf.transpose(xnew, [1, 0])
+            indices = _tf.searchsorted(self.x_bins_T, v_search, side='right')
+            indices = _tf.maximum(1, indices) - 1
+
+            # 2. Gather data (uses pre-computed self.x_left_T, etc.)
+            x_l_T = _tf.gather(self.x_left_T, indices, batch_dims=1)
+            y_l_T = _tf.gather(self.y_left_T, indices, batch_dims=1)
+            d_l_T = _tf.gather(self.d_left_T, indices, batch_dims=1)
+            x_r_T = _tf.gather(self.x_right_T, indices, batch_dims=1)
+            y_r_T = _tf.gather(self.y_right_T, indices, batch_dims=1)
+            d_r_T = _tf.gather(self.d_right_T, indices, batch_dims=1)
+
+            # 3. Transpose results back to [M, B]
+            x_l = _tf.transpose(x_l_T, [1, 0])
+            y_l = _tf.transpose(y_l_T, [1, 0])
+            d_l = _tf.transpose(d_l_T, [1, 0])
+            x_r = _tf.transpose(x_r_T, [1, 0])
+            y_r = _tf.transpose(y_r_T, [1, 0])
+            d_r = _tf.transpose(d_r_T, [1, 0])
+
+            # 4. Compute polynomial (same logic)
+            h = x_r - x_l
+            safe_h = h + 1e-6
+            t = (xnew - x_l) / safe_h
+
+            if grad:
+                t_d1 = 1.0 / safe_h
+                ynew = t_d1 * (-y_l * self._phi_d1(1.0 - t) + y_r * self._phi_d1(t)) + \
+                       (d_l * self._psi_d1(1.0 - t) + d_r * self._psi_d1(t))
+            else:
+                ynew = y_l * self._phi(1.0 - t) + y_r * self._phi(t) + \
+                       d_l * (-h * self._psi(1.0 - t)) + d_r * (h * self._psi(t))
+        return ynew
+
+
+class StatefulMonotonicCubicSpline(StatefulCubicSpline, MonotonicCubicSpline):
+    """
+    Stateful Monotonic Spline.
+    Inherits the monotonic _get_derivative and the stateful __init__
+    and interpolate methods.
+    """
+    pass  # All logic is handled by multiple inheritance

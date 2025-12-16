@@ -1,3 +1,13 @@
+## version 0.4.0
+* Implemented multivariate data and likelihoods
+* Warpings are now multivariate
+* New warpings: `PCA`, `RobustPCA`, `Rotation`, and `ContinuousNormalizingFlow`
+* Streamlined code to deal with compositional data
+* Streamlined quantiles and percentiles computation, now directly from simulations
+* Added option to smooth data when converting it to data to image or cube format
+* Added convenience methods to compute model metrics
+
+
 ## version 0.3.5
 * Support for rotated 3D grids
 * Simulations now have the option to include the likelihood variance

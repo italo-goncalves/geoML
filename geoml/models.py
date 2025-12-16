@@ -152,7 +152,7 @@ class GP(_GPModel):
 
         keep = ~ _np.isnan(self.data.variables[self.variable].measurements.values)
         if _np.sum(keep) > 0:
-            self.warping.initialize(self.data.variables[self.variable].measurements.values[keep])
+            self.warping.initialize(self.data.variables[self.variable].measurements.values[keep, None])
 
         self.directional_data = directional_data
         self.use_trend = use_trend
@@ -183,6 +183,7 @@ class GP(_GPModel):
         self.y_dir = None
         self.directions = None
         self.y_warped = None
+        self.log_derivative = None
         self.trend = None
         self.mat_a_inv = None
         self.trend_chol = None
@@ -219,7 +220,7 @@ class GP(_GPModel):
 
         with _tf.name_scope("GP_refresh"):
             self.y = _tf.constant(self.data.variables[self.variable]
-                                  .measurements.values[keep],
+                                  .measurements.values[keep, None],
                                   _tf.float64)
             self.x = _tf.constant(self.data.coordinates[keep, :],
                                   _tf.float64)
@@ -247,9 +248,11 @@ class GP(_GPModel):
                     _tf.float64
                 )
                 self.y_warped = _tf.concat([
-                    self.warping.forward(self.y[:, None]),
+                    # self.warping.forward(self.y),
+                    self.y,
                     self.y_dir[:, None]
                 ], axis=0)
+                self.log_derivative = 0.0
 
                 eye = _tf.eye(_np.sum(keep) + self.directional_data.n_data,
                               dtype=_tf.float64)
@@ -259,7 +262,7 @@ class GP(_GPModel):
                 ], axis=0)
             else:
                 self.cov = self.covariance.self_covariance_matrix(self.x)
-                self.y_warped = self.warping.forward(self.y[:, None])
+                self.y_warped, self.log_derivative = self.warping.forward(self.y)
 
                 eye = _tf.eye(_np.sum(keep), dtype=_tf.float64)
                 noise = _tf.ones([_np.sum(keep)], _tf.float64)
@@ -318,8 +321,8 @@ class GP(_GPModel):
                     * _np.log(2 * _np.pi)
             log_lik = fit + det + const
 
-            y_derivative = self.warping.derivative(self.y)
-            log_lik = log_lik + _tf.reduce_sum(_tf.math.log(y_derivative))
+            # log_derivative = self.warping.log_derivative(self.y)
+            log_lik = log_lik + _tf.reduce_sum(self.log_derivative)
 
             if self.use_trend:
                 det_2 = _tf.reduce_sum(_tf.math.log(
@@ -336,8 +339,7 @@ class GP(_GPModel):
             return log_lik
 
     @_tf.function
-    def predict_raw(self, x_new, jitter=1e-9, quantiles=None,
-                    probabilities=None):
+    def predict_raw(self, x_new, jitter=1e-9, n_sim=50):
         self.refresh(jitter)
 
         with _tf.name_scope("Prediction"):
@@ -379,48 +381,61 @@ class GP(_GPModel):
             # weights
             weights = (explained_var / (noise + 1e-6)) ** 2
 
-            out = {"mean": _tf.squeeze(mu),
-                   "variance": _tf.squeeze(var),
-                   "weights": _tf.squeeze(weights)}
-
             # warping
-            distribution = _tfd.Normal(mu, _tf.sqrt(var))
+            # distribution = _tfd.Normal(mu, _tf.sqrt(var))
+            # sims = distribution.sample(50)
+            rnd = _tf.random.stateless_normal([1, n_sim], seed=[0, 0], dtype=_tf.float64)
+            sims = rnd * _tf.sqrt(var) + mu
 
-            def prob_fn(q):
-                p = distribution.cdf(self.warping.forward(q))
-                return p
+            sims = _tf.transpose(sims)
+            sims = _tf.map_fn(lambda x: self.warping.backward(x[:, None]), sims)
+            sims = _tf.transpose(sims, [1, 2, 0])
 
-            if quantiles is not None:
-                prob = _tf.map_fn(prob_fn, quantiles)
-                prob = _tf.transpose(prob)
+            avg_sim = _tf.reduce_mean(sims, axis=2)
 
-                # single point case
-                prob = _tf.cond(
-                    _tf.less(_tf.rank(prob), 2),
-                    lambda: _tf.expand_dims(prob, 0),
-                    lambda: prob)
+            out = {"mean": mu[:, 0],
+                   "variance": var[:, 0],
+                   "weights": _tf.squeeze(weights),
+                   "simulations": sims[:, 0, :],
+                   "average_sim": avg_sim[:, 0],
+                   }
 
-                out["probabilities"] = _tf.squeeze(prob)
-
-            def quant_fn(p):
-                q = self.warping.backward(distribution.quantile(p))
-                return q
-
-            if probabilities is not None:
-                quant = _tf.map_fn(quant_fn, probabilities)
-                quant = _tf.transpose(quant)
-
-                # single point case
-                quant = _tf.cond(
-                    _tf.less(_tf.rank(quant), 2),
-                    lambda: _tf.expand_dims(quant, 0),
-                    lambda: quant)
-
-                out["quantiles"] = _tf.squeeze(quant)
+            #
+            # def prob_fn(q):
+            #     p = distribution.cdf(self.warping.forward(q))
+            #     return p
+            #
+            # if quantiles is not None:
+            #     prob = _tf.map_fn(prob_fn, quantiles)
+            #     prob = _tf.transpose(prob)
+            #
+            #     # single point case
+            #     prob = _tf.cond(
+            #         _tf.less(_tf.rank(prob), 2),
+            #         lambda: _tf.expand_dims(prob, 0),
+            #         lambda: prob)
+            #
+            #     out["probabilities"] = _tf.squeeze(prob)
+            #
+            # def quant_fn(p):
+            #     q = self.warping.backward(distribution.quantile(p))
+            #     return q
+            #
+            # if probabilities is not None:
+            #     quant = _tf.map_fn(quant_fn, probabilities)
+            #     quant = _tf.transpose(quant)
+            #
+            #     # single point case
+            #     quant = _tf.cond(
+            #         _tf.less(_tf.rank(quant), 2),
+            #         lambda: _tf.expand_dims(quant, 0),
+            #         lambda: quant)
+            #
+            #     out["quantiles"] = _tf.squeeze(quant)
 
             return out
 
-    def predict(self, newdata):
+    def predict(self, newdata, n_sim=50):
         """
         Makes a prediction on the specified coordinates.
 
@@ -438,6 +453,7 @@ class GP(_GPModel):
         prediction_input = self.data.variables[self.variable].prediction_input()
 
         # prediction in batches
+        newdata.variables[self.variable].allocate_simulations(n_sim)
         batch_id = self.options.batch_index(newdata.n_data,
                                             self.options.prediction_batch_size)
         n_batches = len(batch_id)
@@ -1345,175 +1361,175 @@ class GPEnsemble(_EnsembleModel):
             model.train(max_iter=max_iter)
 
 
-class VGPNetworkEnsemble(_EnsembleModel):
-    def __init__(self, data, variables, likelihoods, latent_networks,
-                 directional_data=None, options=GPOptions()):
-        super().__init__(options)
-        if not isinstance(data, (tuple, list)):
-            raise ValueError("data must be a list or tuple containing"
-                             "data objects")
-        if not isinstance(latent_networks, (tuple, list)):
-            raise ValueError("latent_trees must be a list or tuple containing"
-                             "latent variable objects")
-        if directional_data is None:
-            directional_data = [None for _ in data]
-        elif not isinstance(directional_data, (tuple, list)):
-            raise ValueError("directional_data must be a list or tuple"
-                             "containing data objects or None")
-
-        dims = set([d.n_dim for d in data])
-        if len(dims) != 1:
-            raise Exception("all data objects must have the same dimension")
-        self._n_dim = list(dims)[0]
-
-        self.models = [VGPNetwork(
-            data=d,
-            variables=variables,
-            likelihoods=_copy.deepcopy(likelihoods),
-            # likelihoods=lik,
-            latent_network=l,
-            directional_data=dd,
-            options=options)
-            # for d, l, dd, lik in zip(
-            #     data, latent_networks, directional_data, likelihoods)
-            for d, l, dd in zip(
-                data, latent_networks, directional_data)
-        ]
-        for model in self.models:
-            self._register(model)
-
-        if not (isinstance(variables, (list, tuple))):
-            variables = [variables]
-        self.variables = variables
-
-    def __repr__(self):
-        s = "Gaussian process ensemble\n\n" \
-            "Models: %d\n\n" % len(self.models)
-        s += "Variables:\n "
-        for v, lik in zip(self.variables, self.models[0].likelihoods):
-            s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
-        return s
-
-    # def train_full(self, cycles=10, max_iter_per_model=100):
-    #     for c in range(cycles):
-    #         for i, model in enumerate(self.models):
-    #             if self.options.verbose:
-    #                 print("Cycle %d of %d - training model %d of %d" %
-    #                       (c + 1, cycles, i + 1, len(self.models)))
-    #
-    #             model.train_full(max_iter=max_iter_per_model)
-    #
-    # def train_svi(self, cycles=10, epochs_per_model=10):
-    #     for c in range(cycles):
-    #         for i, model in enumerate(self.models):
-    #             if self.options.verbose:
-    #                 print("Cycle %d of %d - training model %d of %d" %
-    #                       (c + 1, cycles, i + 1, len(self.models)))
-    #
-    #             model.train_svi(epochs=epochs_per_model)
-
-    def train_full(self, max_iter=1000):
-        for model in self.models:
-            model.train_full(max_iter)
-
-    def train_svi(self, epochs=100):
-        for model in self.models:
-            model.train_svi(epochs)
-
-    def predict(self, newdata, n_sim=20):
-        """
-        Makes a prediction on the specified coordinates.
-
-        Parameters
-        ----------
-        newdata :
-            A reference to a spatial points object of compatible dimension.
-            The object's variables are updated.
-        n_sim : int
-            Number of predictive samples to draw.
-        """
-        if self.n_dim != newdata.n_dim:
-            raise ValueError("dimension of newdata is incompatible with model")
-
-        # managing variables
-        variable_inputs = []
-        for v in self.variables:
-            if v not in newdata.variables.keys():
-                self.models[0].data.variables[v].copy_to(newdata)
-            newdata.variables[v].allocate_simulations(n_sim)
-            variable_inputs.append(
-                self.models[0].data.variables[v].prediction_input())
-
-        # prediction in batches
-        batch_id = self.options.batch_index(
-            newdata.n_data, batch_size=self.options.prediction_batch_size)
-        n_batches = len(batch_id)
-
-        def batch_pred(model, x):
-            out = model.predict_raw(
-                x,
-                variable_inputs,
-                seed=self.options.seed,
-                n_sim=n_sim,
-                jitter=self.options.jitter
-            )
-            return out
-
-        @_tf.function
-        def combined_pred(x):
-            outputs = [batch_pred(model, x) for model in self.models]
-            return self.combine(outputs)
-
-        for i, batch in enumerate(batch_id):
-            if self.options.verbose:
-                print("\rProcessing batch %s of %s       "
-                      % (str(i + 1), str(n_batches)), end="")
-
-            # outputs = [batch_pred(
-            #     model,
-            #     _tf.constant(newdata.coordinates[batch], _tf.float64))
-            #     for model in self.models]
-            #
-            # output = self.combine(outputs)
-
-            output = combined_pred(
-                _tf.constant(newdata.coordinates[batch], _tf.float64))
-
-            for v, upd in zip(self.variables, output):
-                newdata.variables[v].update(batch, **upd)
-
-        if self.options.verbose:
-            print("\n")
-
-    @_tf.function
-    def combine(self, outputs):
-        combined = [{} for _ in self.variables]
-        for i, variable in enumerate(self.variables):
-            var_keys = outputs[0][i].keys()
-
-            weights = _tf.stack([out[i]["weights"] for out in outputs], axis=1)
-            weights = weights + 1e-6
-            weights = weights / _tf.reduce_sum(weights, axis=1, keepdims=True)
-
-            for key in var_keys:
-                if key != "weights":
-                    tensor = _tf.stack([out[i][key] for out in outputs], axis=1)
-                    if "variance" in key:
-                        w = weights**2
-                    else:
-                        w = weights
-
-                    w = _tf.cond(_tf.greater_equal(_tf.rank(tensor), 3),
-                                 lambda: _tf.expand_dims(w, axis=-1),
-                                 lambda: w)
-                    w = _tf.cond(_tf.greater_equal(_tf.rank(tensor), 4),
-                                 lambda: _tf.expand_dims(w, axis=-1),
-                                 lambda: w)
-
-                    tensor = _tf.reduce_sum(w * tensor, axis=1)
-                    combined[i][key] = tensor
-
-        return combined
+# class VGPNetworkEnsemble(_EnsembleModel):
+#     def __init__(self, data, variables, likelihoods, latent_networks,
+#                  directional_data=None, options=GPOptions()):
+#         super().__init__(options)
+#         if not isinstance(data, (tuple, list)):
+#             raise ValueError("data must be a list or tuple containing"
+#                              "data objects")
+#         if not isinstance(latent_networks, (tuple, list)):
+#             raise ValueError("latent_trees must be a list or tuple containing"
+#                              "latent variable objects")
+#         if directional_data is None:
+#             directional_data = [None for _ in data]
+#         elif not isinstance(directional_data, (tuple, list)):
+#             raise ValueError("directional_data must be a list or tuple"
+#                              "containing data objects or None")
+#
+#         dims = set([d.n_dim for d in data])
+#         if len(dims) != 1:
+#             raise Exception("all data objects must have the same dimension")
+#         self._n_dim = list(dims)[0]
+#
+#         self.models = [VGPNetwork(
+#             data=d,
+#             variables=variables,
+#             likelihoods=_copy.deepcopy(likelihoods),
+#             # likelihoods=lik,
+#             latent_network=l,
+#             directional_data=dd,
+#             options=options)
+#             # for d, l, dd, lik in zip(
+#             #     data, latent_networks, directional_data, likelihoods)
+#             for d, l, dd in zip(
+#                 data, latent_networks, directional_data)
+#         ]
+#         for model in self.models:
+#             self._register(model)
+#
+#         if not (isinstance(variables, (list, tuple))):
+#             variables = [variables]
+#         self.variables = variables
+#
+#     def __repr__(self):
+#         s = "Gaussian process ensemble\n\n" \
+#             "Models: %d\n\n" % len(self.models)
+#         s += "Variables:\n "
+#         for v, lik in zip(self.variables, self.models[0].likelihoods):
+#             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
+#         return s
+#
+#     # def train_full(self, cycles=10, max_iter_per_model=100):
+#     #     for c in range(cycles):
+#     #         for i, model in enumerate(self.models):
+#     #             if self.options.verbose:
+#     #                 print("Cycle %d of %d - training model %d of %d" %
+#     #                       (c + 1, cycles, i + 1, len(self.models)))
+#     #
+#     #             model.train_full(max_iter=max_iter_per_model)
+#     #
+#     # def train_svi(self, cycles=10, epochs_per_model=10):
+#     #     for c in range(cycles):
+#     #         for i, model in enumerate(self.models):
+#     #             if self.options.verbose:
+#     #                 print("Cycle %d of %d - training model %d of %d" %
+#     #                       (c + 1, cycles, i + 1, len(self.models)))
+#     #
+#     #             model.train_svi(epochs=epochs_per_model)
+#
+#     def train_full(self, max_iter=1000):
+#         for model in self.models:
+#             model.train_full(max_iter)
+#
+#     def train_svi(self, epochs=100):
+#         for model in self.models:
+#             model.train_svi(epochs)
+#
+#     def predict(self, newdata, n_sim=20):
+#         """
+#         Makes a prediction on the specified coordinates.
+#
+#         Parameters
+#         ----------
+#         newdata :
+#             A reference to a spatial points object of compatible dimension.
+#             The object's variables are updated.
+#         n_sim : int
+#             Number of predictive samples to draw.
+#         """
+#         if self.n_dim != newdata.n_dim:
+#             raise ValueError("dimension of newdata is incompatible with model")
+#
+#         # managing variables
+#         variable_inputs = []
+#         for v in self.variables:
+#             if v not in newdata.variables.keys():
+#                 self.models[0].data.variables[v].copy_to(newdata)
+#             newdata.variables[v].allocate_simulations(n_sim)
+#             variable_inputs.append(
+#                 self.models[0].data.variables[v].prediction_input())
+#
+#         # prediction in batches
+#         batch_id = self.options.batch_index(
+#             newdata.n_data, batch_size=self.options.prediction_batch_size)
+#         n_batches = len(batch_id)
+#
+#         def batch_pred(model, x):
+#             out = model.predict_raw(
+#                 x,
+#                 variable_inputs,
+#                 seed=self.options.seed,
+#                 n_sim=n_sim,
+#                 jitter=self.options.jitter
+#             )
+#             return out
+#
+#         @_tf.function
+#         def combined_pred(x):
+#             outputs = [batch_pred(model, x) for model in self.models]
+#             return self.combine(outputs)
+#
+#         for i, batch in enumerate(batch_id):
+#             if self.options.verbose:
+#                 print("\rProcessing batch %s of %s       "
+#                       % (str(i + 1), str(n_batches)), end="")
+#
+#             # outputs = [batch_pred(
+#             #     model,
+#             #     _tf.constant(newdata.coordinates[batch], _tf.float64))
+#             #     for model in self.models]
+#             #
+#             # output = self.combine(outputs)
+#
+#             output = combined_pred(
+#                 _tf.constant(newdata.coordinates[batch], _tf.float64))
+#
+#             for v, upd in zip(self.variables, output):
+#                 newdata.variables[v].update(batch, **upd)
+#
+#         if self.options.verbose:
+#             print("\n")
+#
+#     @_tf.function
+#     def combine(self, outputs):
+#         combined = [{} for _ in self.variables]
+#         for i, variable in enumerate(self.variables):
+#             var_keys = outputs[0][i].keys()
+#
+#             weights = _tf.stack([out[i]["weights"] for out in outputs], axis=1)
+#             weights = weights + 1e-6
+#             weights = weights / _tf.reduce_sum(weights, axis=1, keepdims=True)
+#
+#             for key in var_keys:
+#                 if key != "weights":
+#                     tensor = _tf.stack([out[i][key] for out in outputs], axis=1)
+#                     if "variance" in key:
+#                         w = weights**2
+#                     else:
+#                         w = weights
+#
+#                     w = _tf.cond(_tf.greater_equal(_tf.rank(tensor), 3),
+#                                  lambda: _tf.expand_dims(w, axis=-1),
+#                                  lambda: w)
+#                     w = _tf.cond(_tf.greater_equal(_tf.rank(tensor), 4),
+#                                  lambda: _tf.expand_dims(w, axis=-1),
+#                                  lambda: w)
+#
+#                     tensor = _tf.reduce_sum(w * tensor, axis=1)
+#                     combined[i][key] = tensor
+#
+#         return combined
 
 
 class Normalizer(_GPModel):
@@ -1536,9 +1552,12 @@ class Normalizer(_GPModel):
         self.warping = self._register(warping)
 
         self.training_log = []
+        # self.optimizer = _tf.keras.optimizers.Nadam(
+        #     _tf.keras.optimizers.schedules.ExponentialDecay(1e-1, 1, 0.99),
+        # )
         self.optimizer = _tf.keras.optimizers.Adam(
-            _tf.keras.optimizers.schedules.ExponentialDecay(1e-1, 1, 0.99),
-            amsgrad=True
+            _tf.keras.optimizers.schedules.ExponentialDecay(1e-1, 1, 0.999),
+            amsgrad=True#, clipvalue=0.001
         )
 
         self.objective = _tf.Variable(_tf.constant(0.0, _tf.float64))
@@ -1568,15 +1587,15 @@ class Normalizer(_GPModel):
 
         def loss():
             x_warp = self.warping.forward(x)
-            mean = _tf.reduce_mean(x_warp)
-            var = _tf.math.reduce_variance(x_warp)
+            mean = _tf.reduce_mean(x_warp, axis=0, keepdims=True)
+            var = _tf.math.reduce_variance(x_warp, axis=0, keepdims=True)
             std = _tf.sqrt(var)
-            x_derivative = self.warping.derivative(x)
-            log_derivative = _tf.math.log(x_derivative)
+            log_derivative = self.warping.log_derivative(x)
 
-            kl = _tf.math.log(std) + (1 + mean ** 2) / (2 * var) - 0.5
-            density = _tf.reduce_mean(-x_warp**2 + log_derivative)
-            obj = density - kl
+            # kl = _tf.reduce_sum(_tf.math.log(std) + (1 + mean ** 2) / (2 * var) - 0.5)
+            kl = _tf.reduce_sum(var + mean**2 - 1 - _tf.math.log(var)) * 0.5
+            density = _tf.reduce_mean(_tf.reduce_sum(-x_warp**2 / 2, axis=1, keepdims=True) + log_derivative)
+            obj = density #- kl
 
             self.objective.assign(obj)
             return -obj

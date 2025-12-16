@@ -234,9 +234,9 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
 
         self.projections = uniform_directions(n_directions, parent.size)
         self.n_directions = n_directions
-        self.dot = _np.matmul(self.projections, self.projections.T)
-        self.dot = _np.minimum(self.dot, 1.0)
-        self.dot = _np.maximum(self.dot, -1.0)
+        # self.dot = _np.matmul(self.projections, self.projections.T)
+        # self.dot = _np.minimum(self.dot, 1.0)
+        # self.dot = _np.maximum(self.dot, -1.0)
 
         self.fix_range = fix_range
         self._set_parameters()
@@ -305,15 +305,15 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
             )
         )
 
-        self._add_parameter(
-            "angular_range",
-            _gpr.PositiveParameter(
-                _np.ones([1, 1]) * 0.1,
-                _np.ones([1, 1]) * 0.01,
-                _np.ones([1, 1]) * 10,
-                fixed=self.fix_range
-            )
-        )
+        # self._add_parameter(
+        #     "angular_range",
+        #     _gpr.PositiveParameter(
+        #         _np.ones([1, 1]) * 0.1,
+        #         _np.ones([1, 1]) * 0.01,
+        #         _np.ones([1, 1]) * 10,
+        #         fixed=self.fix_range
+        #     )
+        # )
 
     def cross_covariance_matrix(self, x):
         with _tf.name_scope("projected_covariance_matrix"):
@@ -399,11 +399,11 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
                 self.cov_inv[None, None, :, :] - self.cov_smooth_inv + eye * jitter)  # [n_proj, size, n_ip, n_ip]
 
             # angular_cov
-            ang_rng = self.parameters['angular_range'].get_value()
-            ang_eye = _tf.eye(self.n_directions, dtype=_tf.float64)
-            self.angular_cov = _tf.math.exp(- (1 - self.dot) / ang_rng)  # [n_proj, n_proj]
-            self.angular_chol = _tf.linalg.cholesky(self.angular_cov + ang_eye * jitter)
-            self.angular_inv = _tf.linalg.cholesky_solve(self.angular_chol, ang_eye)
+            # ang_rng = self.parameters['angular_range'].get_value()
+            # ang_eye = _tf.eye(self.n_directions, dtype=_tf.float64)
+            # self.angular_cov = _tf.math.exp(- (1 - self.dot) / ang_rng)  # [n_proj, n_proj]
+            # self.angular_chol = _tf.linalg.cholesky(self.angular_cov + ang_eye * jitter)
+            # self.angular_inv = _tf.linalg.cholesky_solve(self.angular_chol, ang_eye)
 
             # posterior mean
             alpha_white = self.parameters["alpha_white"].get_value()  # [n_proj, size, n_ip, 1]
@@ -700,7 +700,7 @@ class _VariationalFourierFeatures(_FunctionalProjectedVariable):
         self.lower = pmin - dif / 2
         self.upper = pmax + dif / 2
 
-        # [n_ip, n_dim]
+        # [n_ip, n_proj]
         self.freq_cos = 2 * _np.pi * self.harm_cos[:, None] / (self.upper[None, :] - self.lower[None, :])
         self.freq_sin = 2 * _np.pi * self.harm_sin[:, None] / (self.upper[None, :] - self.lower[None, :])
 

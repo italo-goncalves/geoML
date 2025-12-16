@@ -22,4 +22,4 @@ setup(name='geoml',
       zip_safe=False,
       install_requires=['scikit-image', 'pandas', 'numpy', 'pyvista',
                         'tensorflow', 'tensorflow-probability',
-                        'scipy'])
+                        'scipy', 'scikit-learn'])

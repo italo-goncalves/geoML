@@ -72,7 +72,7 @@ class _LatentVariable(_gpr.Parametric):
     def set_parameter_limits(self, data):
         pass
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         """
         Updates the model's internal state.
 
@@ -214,7 +214,7 @@ class _FunctionalLatentVariable(_LatentVariable):
     def set_parameter_limits(self, data):
         self.parent.set_parameter_limits(data)
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         self.parent.refresh(jitter)
 
 
@@ -338,7 +338,7 @@ class BasicInput(_RootLatentVariable):
             inducing_points = (inducing_points, )
         self._n_experts = len(inducing_points)
 
-        test_point = _np.ones([1, inducing_points[0].n_dim])
+        test_point = _np.ones([1, inducing_points[0].n_dim], dtype=_np.float64)
         test_point = transform(test_point)
         self._size = test_point.shape[1]
 
@@ -357,14 +357,14 @@ class BasicInput(_RootLatentVariable):
         self.base_inducing_points = tuple(_tf.constant(ip.coordinates, dtype=_tf.float64) for ip in inducing_points)
         self.inducing_points_variance = tuple(_tf.zeros([n, self.size], _tf.float64) for n in self.n_ip)
 
-        self.center = _np.zeros_like(transform(self.bounding_box.max))
+        self.center = _np.zeros_like(transform(self.bounding_box.max.astype(_np.float64)))
         if center:
             self.center = 0.5 * (self.bounding_box.min + self.bounding_box.max)
 
     def get_root_inducing_points(self):
         return self.base_inducing_points, self.inducing_points_variance
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_input_refresh"):
             self.transform.refresh()
             self.inducing_points = tuple(self.transform(ip - self.center) for ip in self.base_inducing_points)
@@ -418,7 +418,7 @@ class Stack(_Operation):
         var = _tf.concat(variances, axis=1)
         return mean, var
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
 
@@ -467,7 +467,7 @@ class Concatenate(Stack):
         if self.same_root:
             self.propagates_inducing_points = True
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
         self.inducing_points = tuple(_tf.concat(
@@ -597,7 +597,7 @@ class BasicGP(_GPNode):
             cov = cov * norm
             return cov
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_refresh"):
             self.parent.refresh(jitter)
 
@@ -900,7 +900,7 @@ class Linear(_FunctionalLatentVariable):
             self.parameters["weights"].set_value([[1, -1]])
             self.parameters["weights"].fix()
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         weights = self.parameters["weights"].get_value()
 
         self.parent.refresh(jitter)
@@ -977,7 +977,7 @@ class SelectInput(_FunctionalLatentVariable):
         var = _tf.gather(var, self.columns, axis=1)
         return mean, var
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         self.parent.refresh(jitter)
 
         if self.propagates_inducing_points:
@@ -1052,7 +1052,7 @@ class LinearCombination(_Operation):
                 )
             )
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
 
@@ -1103,7 +1103,7 @@ class LinearCombination(_Operation):
 
         return all_mu, all_var, all_sims, all_explained_var, all_influence
 
-    def predict_directions(self, x, dir_x, jitter=1e-9):
+    def predict_directions(self, x, dir_x, jitter=1e-6):
         all_mu = []
         all_var = []
         all_explained_var = []
@@ -1170,7 +1170,7 @@ class ProductOfExperts(_Operation):
         self._size = sizes[0]
         self.propagates_inducing_points = False
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
 
@@ -1250,7 +1250,7 @@ class Exponentiation(_FunctionalLatentVariable):
         self._size = parent.size
         self.propagates_inducing_points = False
 
-    # def refresh(self, jitter=1e-9):
+    # def refresh(self, jitter=1e-6):
         # amp_mean = self.parameters["amp_mean"].get_value()
         # amp_scale = self.parameters["amp_scale"].get_value()
 
@@ -1319,7 +1319,7 @@ class Multiply(_Operation):
         self._size = sizes[0]
         self.propagates_inducing_points = False
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
 
@@ -1360,7 +1360,7 @@ class Multiply(_Operation):
 
         return pred_mu, pred_var, pred_sims, pred_explained_var, pred_influence
 
-    # def predict_directions(self, x, dir_x, jitter=1e-9):
+    # def predict_directions(self, x, dir_x, jitter=1e-6):
     #     all_mu = []
     #     all_var = []
     #     all_explained_var = []
@@ -1403,7 +1403,7 @@ class Add(_Operation):
         self._size = sizes[0]
         self.propagates_inducing_points = self.same_root and all([p.propagates_inducing_points for p in self.parents])
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
 
@@ -1467,7 +1467,7 @@ class Add(_Operation):
 
             return all_mu, all_var
 
-    # def predict_directions(self, x, dir_x, jitter=1e-9):
+    # def predict_directions(self, x, dir_x, jitter=1e-6):
     #     all_mu = []
     #     all_var = []
     #     all_explained_var = []
@@ -1517,7 +1517,7 @@ class Bias(_FunctionalLatentVariable):
             )
         )
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         bias = self.parameters["bias"].get_value()[None, :]
 
         self.parent.refresh(jitter)
@@ -1568,7 +1568,7 @@ class Scale(_FunctionalLatentVariable):
             )
         )
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         scale = self.parameters["scale"].get_value()[None, :]
 
         self.parent.refresh(jitter)
@@ -1694,7 +1694,7 @@ class RadialTrend(_FunctionalLatentVariable):
 
         return _tf.transpose(trend, [1, 0, 2])
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         self.parent.refresh(jitter)
 
         if self.propagates_inducing_points:
@@ -1811,7 +1811,7 @@ class GPWalk(_FunctionalLatentVariable):
 
         return walker_mu, walker_var
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         self.field.refresh(jitter)
         # self.inducing_points, self.inducing_points_variance = self.propagate(
         #     *self.root.get_root_inducing_points()
@@ -1930,7 +1930,7 @@ class GPWalk(_FunctionalLatentVariable):
 #         ip_var = self.parameters["inducing_points_variance"].get_value()
 #         return ip, ip_var
 #
-#     def refresh(self, jitter=1e-9):
+#     def refresh(self, jitter=1e-6):
 #         with _tf.name_scope("basic_input_refresh"):
 #             self.inducing_points = \
 #                 self.parameters["inducing_points"].get_value() - self.center
@@ -2001,6 +2001,9 @@ class MultiStructureGP(BasicGP):
                     _np.ones([self.size, n]) * 1e-6,
                     _np.ones([self.size, n]) * 1e2
                 ))
+            self._add_parameter(
+                f"bias_{i}",
+                _gpr.RealParameter(0, -5, 5))
 
         self._add_parameter(
             "weights",
@@ -2167,7 +2170,7 @@ class GradientConstrainedInput(_RootLatentVariable):
     def get_root_inducing_points(self):
         return self.base_inducing_points, self.inducing_points_variance
 
-    def refresh(self, jitter=1e-9):
+    def refresh(self, jitter=1e-6):
         with _tf.name_scope("constrained_input_refresh"):
             # constrained prior
             # ip = self.base_inducing_points

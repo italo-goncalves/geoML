@@ -32,12 +32,32 @@ import copy as _copy
 import collections as _col
 import pyvista as _pv
 import itertools as _iter
+import sklearn.metrics as _skmetrics
+from astropy.coordinates.matrix_utilities import rotation_matrix
 
 from skimage import measure as _measure
+from skimage import filters as _filters
 
 import geoml.interpolation as _gint
 import geoml.plotly as _py
 import geoml.tftools as _tftools
+import geoml.metrics as _gmlmetrics
+import geoml.geometry as _gmt
+
+
+class NoDataError(Exception):
+    """Exception raised when a data object is empty."""
+    pass
+
+
+class NotGriddedDataError(Exception):
+    """Exception raised when expecting a gridded data object."""
+    pass
+
+
+class DimensionMismatchError(Exception):
+    """Exception raised when the dimensionality of objects does not match."""
+    pass
 
 
 def bounding_box(points):
@@ -91,7 +111,9 @@ class BoundingBox(object):
         self._n_dim = min_values.shape[1]
         self._min = min_values
         self._max = max_values
+        self._center = (max_values - min_values) / 2.0
         self._diagonal = _np.sqrt(_np.sum((max_values - min_values)**2))
+        self.labels = None
 
     @property
     def n_dim(self):
@@ -109,11 +131,22 @@ class BoundingBox(object):
     def max(self):
         return self._max
 
+    @property
+    def center(self):
+        return self._center
+
     def as_array(self):
         return _np.concatenate([self.min, self.max], axis=0)
 
+    def as_data_frame(self):
+        a = self.as_array()
+        df = _pd.DataFrame(a, index=['min', 'max'])
+        if self.labels:
+            df.columns = self.labels
+        return df
+
     def __repr__(self):
-        return self.as_array().__repr__()
+        return self.as_data_frame().__repr__()
 
     def overlaps_with(self, other):
         """
@@ -191,6 +224,7 @@ class _Variable(object):
         self.name = name
         self.coordinates = coordinates
         self._length = 1
+        self.metrics = None
 
     @property
     def length(self):
@@ -207,6 +241,12 @@ class _Variable(object):
         raise NotImplementedError
 
     def get_measurements(self):
+        raise NotImplementedError
+
+    def get_simulations(self):
+        raise NotImplementedError
+
+    def get_predictions(self):
         raise NotImplementedError
 
     def prediction_input(self):
@@ -233,6 +273,9 @@ class _Variable(object):
         raise NotImplementedError
 
     def fill_pyvista_points(self, points, prefix=None):
+        raise NotImplementedError
+
+    def compute_metrics(self, **kwargs):
         raise NotImplementedError
 
     class _Attribute(object):
@@ -270,13 +313,44 @@ class _Variable(object):
             new_obj.values = _np.array(self.values[item], ndmin=1)
             return new_obj
 
-        def as_image(self):
+        def as_series(self, sigma=None):
+            """
+            Reshapes the data in the form of a smoothed 1-dimensional series.
+
+            Arguments
+            ---------
+            sigma : scalar or array
+                Standard deviation of a Gaussian filter applied to the data, in grid steps.
+                Default is no filter.
+
+            Returns
+            -------
+            series : _np.array
+                A 1-dimensional array.
+            """
+            if not isinstance(self.coordinates, Grid1D):
+                raise ValueError("method only available for Grid1D data"
+                                 "objects")
+
+            series = self.values
+
+            if sigma is not None:
+                series = _filters.gaussian(series, sigma, preserve_range=True)
+            return series
+
+        def as_image(self, sigma=None):
             """
             Reshapes the data in the form of a matrix for plotting.
 
             The output can be used in plotting functions such as
             matplotlib's `imshow()`. If you use it, do not forget to set
             `origin="lower"`.
+
+            Arguments
+            ---------
+            sigma : scalar or array
+                Standard deviation of a Gaussian filter applied to the data, in grid steps.
+                Default is no filter.
 
             Returns
             -------
@@ -291,11 +365,20 @@ class _Variable(object):
                                 newshape=self.coordinates.grid_size,
                                 order="F")
             image = image.transpose()
+
+            if sigma is not None:
+                image = _filters.gaussian(image, sigma, preserve_range=True)
             return image
 
-        def as_cube(self):
+        def as_cube(self, sigma=None):
             """
             Returns a rank-3 array filled with the specified variable.
+
+            Arguments
+            ---------
+            sigma : scalar or array
+                Standard deviation of a Gaussian filter applied to the data, in grid steps.
+                Default is no filter.
 
             Returns
             -------
@@ -308,9 +391,24 @@ class _Variable(object):
 
             cube = _np.reshape(self.values,  # .astype(float),
                                self.coordinates.grid_size, order="F")
+            if sigma is not None:
+                cube = _filters.gaussian(cube, sigma, preserve_range=True)
             return cube
 
-        def get_contour(self, value):
+        def smooth(self, sigma):
+            if isinstance(self.coordinates, (Grid1D, Blocks1D)):
+                series = self.as_series(sigma=sigma)
+                self.values = series
+            elif isinstance(self.coordinates, (Grid2D, Blocks2D)):
+                image = self.as_image(sigma=sigma).T
+                self.values = image.ravel()
+            elif isinstance(self.coordinates, (Grid3D, Blocks3D, RotatedGrid3D)):
+                cube = self.as_cube(sigma=sigma).transpose([2, 1, 0])
+                self.values = cube.ravel()
+            else:
+                raise NotGriddedDataError("method only available for gridded data")
+
+        def get_contour(self, value, sigma=None):
             """
             Isosurface extraction.
 
@@ -321,13 +419,16 @@ class _Variable(object):
             ----------
             value : double
                 The value on which to calculate the isosurface.
+            sigma : scalar or array
+                Standard deviation of a Gaussian filter applied to the data before contouring.
+                Default is no filter.
 
             Returns
             -------
             surf : Surface3D
                 A `Surface3D` object.
             """
-            cube = self.as_cube()
+            cube = self.as_cube(sigma=sigma)
             verts, faces, normals, values = _measure.marching_cubes(
                 cube, value, gradient_direction="ascent",
                 allow_degenerate=False, spacing=self.coordinates.step_size)
@@ -341,8 +442,8 @@ class _Variable(object):
             return Surface3D(verts, faces, normals)
 
         def export_contour(self, value, filename, triangles=True,
-                           offset=None):
-            verts, faces, normals, values = self.get_contour(value)
+                           offset=None, sigma=None):
+            verts, faces, normals, values = self.get_contour(value, sigma=sigma)
 
             if offset is None:
                 offset = _np.zeros([1, 3])
@@ -361,13 +462,13 @@ class _Variable(object):
                         out_file.write(
                             " ".join(str(elem) for elem in line) + "\n")
 
-        def fill_pyvista_cube(self, cube, label):
+        def fill_pyvista_cube(self, cube, label, sigma=None):
             if self.values.dtype == object:
                 if not all(self.values == ""):
-                    cube.point_data[label] = self.as_cube() \
+                    cube.point_data[label] = self.as_cube(sigma=sigma) \
                         .transpose([2, 1, 0]).ravel()
             elif not all(_np.isnan(self.values)):
-                cube.point_data[label] = self.as_cube() \
+                cube.point_data[label] = self.as_cube(sigma=sigma) \
                     .transpose([2, 1, 0]).ravel()
 
         def fill_pyvista_points(self, points, label):
@@ -377,18 +478,18 @@ class _Variable(object):
             elif not all(_np.isnan(self.values)):
                 points.point_data[label] = self.values
 
-        def fill_pyvista_blocks(self, cube, label):
+        def fill_pyvista_blocks(self, cube, label, sigma=None):
             if self.values.dtype == object:
                 if not all(self.values == ""):
-                    cube.cell_data[label] = self.as_cube() \
+                    cube.cell_data[label] = self.as_cube(sigma=sigma) \
                         .transpose([2, 1, 0]).ravel()
             elif not all(_np.isnan(self.values)):
-                cube.cell_data[label] = self.as_cube() \
+                cube.cell_data[label] = self.as_cube(sigma=sigma) \
                     .transpose([2, 1, 0]).ravel()
 
-        def draw_contour(self, value, **kwargs):
+        def draw_contour(self, value, sigma=None, **kwargs):
             """Creates plotly object with the contour at the specified value."""
-            surf_obj = self.get_contour(value)
+            surf_obj = self.get_contour(value, sigma=sigma)
             return _py.isosurface(
                 surf_obj.coordinates, surf_obj.triangles, **kwargs)
 
@@ -455,8 +556,7 @@ class ContinuousVariable(_Variable):
         Cumulative distribution probabilities, indexed by the corresponding
         quantile.
     """
-    def __init__(self, name, coordinates, measurements=None,
-                 quantiles=None, probabilities=(0.025, 0.5, 0.975)):
+    def __init__(self, name, coordinates, measurements=None):
         super().__init__(name, coordinates)
 
         if measurements is None:
@@ -466,20 +566,25 @@ class ContinuousVariable(_Variable):
 
         self.latent_mean = self._Attribute(coordinates)
         self.latent_variance = self._Attribute(coordinates)
+        self.prediction = self._Attribute(coordinates)
 
         self.simulations = []
 
         self.quantiles = _col.OrderedDict()
-        self.reset_quantiles(probabilities)
-
         self.probabilities = _col.OrderedDict()
-        self.reset_probabilities(quantiles)
 
     def get_measurements(self):
         values = self.measurements.values.copy()[:, None]
         has_value = (~ _np.isnan(values)) * 1.0
         values[_np.isnan(values)] = 0
         return values, has_value
+
+    def get_simulations(self):
+        sims = _np.stack([s.values for s in self.simulations], axis=1)
+        return sims
+
+    def get_predictions(self):
+        return self.prediction.values
 
     def reset_quantiles(self, probabilities=None):
         """
@@ -489,12 +594,19 @@ class ContinuousVariable(_Variable):
         ----------
         probabilities : array
             An array of probabilities, ordered values from 0 to 1 (exclusive),
-            on which the models will compute the corresponding quantiles.
+            on which to compute the corresponding quantiles.
         """
+        if len(self.simulations) == 0:
+            raise NoDataError(f'No simulations available for variable {self.name}.')
+        sims = self.get_simulations()
+
         self.quantiles = _col.OrderedDict()
         if probabilities is not None:
             for p in probabilities:
-                self.quantiles[p] = self._Attribute(self.coordinates)
+                self.quantiles[p] = self._Attribute(
+                    self.coordinates,
+                    _np.quantile(sims, p, axis=1)
+                )
 
     def reset_probabilities(self, quantiles=None):
         """
@@ -503,52 +615,57 @@ class ContinuousVariable(_Variable):
         Parameters
         ----------
         quantiles : array
-            An array of quantiles, ordered values on which the models will
+            An array of quantiles, ordered values on which to
             compute the corresponding cumulative probabilities.
         """
+        if len(self.simulations) == 0:
+            raise NoDataError(f'No simulations available for variable {self.name}.')
+        sims = self.get_simulations()
+
         self.probabilities = _col.OrderedDict()
         if quantiles is not None:
             for q in quantiles:
-                self.probabilities[q] = self._Attribute(self.coordinates)
+                self.probabilities[q] = self._Attribute(
+                    self.coordinates,
+                    _np.percentile(sims, q, axis=1) / 100
+                )
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = ContinuousVariable(variable.name, coordinates,
-                                     quantiles=None, probabilities=None)
-        if len(variable.quantiles) > 0:
-            new_var.reset_quantiles(variable.quantiles.keys())
-        if len(variable.probabilities) > 0:
-            new_var.reset_probabilities(variable.probabilities.keys())
-
+        new_var = ContinuousVariable(variable.name, coordinates)
         return new_var
 
     def __getitem__(self, item):
-        # new_obj = _copy.deepcopy(self)
-        self.measurements = self.measurements[item]
-        self.latent_mean = self.latent_mean[item]
-        self.latent_variance = self.latent_variance[item]
+        new_obj = _copy.deepcopy(self)
+        new_obj.measurements = self.measurements[item]
+        new_obj.latent_mean = self.latent_mean[item]
+        new_obj.latent_variance = self.latent_variance[item]
+        new_obj.prediction = self.prediction[item]
 
         for i, sim in enumerate(self.simulations):
-            self.simulations[i] = sim[item]
+            new_obj.simulations[i] = sim[item]
 
         if len(self.quantiles) > 0:
             for key, val in self.quantiles.items():
-                self.quantiles[key] = val[item]
+                new_obj.quantiles[key] = val[item]
 
         if len(self.probabilities) > 0:
             for key, val in self.probabilities.items():
-                self.probabilities[key] = val[item]
+                new_obj.probabilities[key] = val[item]
 
-        return self
+        return new_obj
 
-    def as_data_frame(self, measurements=True, latent=True,
-                      simulations=True, quantiles=True,
+    def as_data_frame(self, measurements=True, predictions=True,
+                      latent=True,
+                      simulations=False, quantiles=True,
                       probability=True, **kwargs):
         """
         Converts the object to a DataFrame.
 
         Parameters
         ----------
+        predictions : bool
+            Whether to include the predictions.
         measurements : bool
             Whether to include the measurements.
         latent : bool
@@ -572,6 +689,9 @@ class ContinuousVariable(_Variable):
         if measurements:
             df[self.name] = self.measurements.values
 
+        if predictions:
+            df[self.name + "_prediction"] = self.prediction.values
+
         if latent:
             df[self.name + "_latent_mean"] = self.latent_mean.values
             df[self.name + "_latent_variance"] = self.latent_variance.values
@@ -592,37 +712,17 @@ class ContinuousVariable(_Variable):
 
         return df
 
-    def prediction_input(self):
-        d = {"quantiles": None, "probabilities": None}
-        if len(self.quantiles) > 0:
-            d["probabilities"] = _tf.constant(
-                [k for k in self.quantiles.keys()], _tf.float64)
-        if len(self.probabilities) > 0:
-            d["quantiles"] = _tf.constant(
-                [k for k in self.probabilities.keys()], _tf.float64)
-
-        return d
-
     def update(self, idx, **kwargs):
-        self.latent_mean.values[idx] = kwargs["mean"].numpy()
-        self.latent_variance.values[idx] = kwargs["variance"].numpy()
+        self.prediction.values[idx] = kwargs["average_sim"].numpy()
+
+        if "mean" in kwargs.keys():
+            self.latent_mean.values[idx] = kwargs["mean"].numpy()
+            self.latent_variance.values[idx] = kwargs["variance"].numpy()
 
         if "simulations" in kwargs.keys():
             sims = kwargs["simulations"].numpy()
             for s in range(sims.shape[1]):
                 self.simulations[s].values[idx] = sims[:, s]
-
-        if "quantiles" in kwargs.keys():
-            quant = kwargs["quantiles"].numpy()
-            prob_keys = self.quantiles.keys()
-            for i, p in zip(range(quant.shape[1]), prob_keys):
-                self.quantiles[p].values[idx] = quant[:, i]
-
-        if "probabilities" in kwargs.keys():
-            prob = kwargs["probabilities"].numpy()
-            quant_keys = self.probabilities.keys()
-            for i, q in zip(range(prob.shape[1]), quant_keys):
-                self.probabilities[q].values[idx] = prob[:, i]
 
     def allocate_simulations(self, n_sim):
         self.simulations = [self._Attribute(self.coordinates)
@@ -633,6 +733,7 @@ class ContinuousVariable(_Variable):
         self.measurements.coordinates = coordinates
         self.latent_mean.coordinates = coordinates
         self.latent_variance.coordinates = coordinates
+        self.prediction.coordinates = coordinates
 
         for sim in self.simulations:
             sim.coordinates = coordinates
@@ -645,122 +746,325 @@ class ContinuousVariable(_Variable):
             for q in self.probabilities.values():
                 q.coordinates = coordinates
 
-    def fill_pyvista_cube(self, cube, prefix=None):
-        self.measurements.fill_pyvista_cube(cube, self.name)
-        self.latent_mean.fill_pyvista_cube(
-            cube, self.name + " - latent mean")
-        self.latent_variance.fill_pyvista_cube(
-            cube, self.name + " - latent variance")
+    def fill_pyvista_cube(self, cube, prefix=None, sigma=None):
+        self.measurements.fill_pyvista_cube(cube, self.name, sigma=sigma)
+
+        if self.latent_mean:
+            self.latent_mean.fill_pyvista_cube(
+                cube, self.name + " - latent mean")
+        if self.latent_variance:
+            self.latent_variance.fill_pyvista_cube(
+                cube, self.name + " - latent variance")
+        self.prediction.fill_pyvista_cube(
+            cube, self.name + " - prediction", sigma=sigma)
 
         for i, sim in enumerate(self.simulations):
             sim.fill_pyvista_cube(
-                cube, self.name + " - simulation %d" % i)
+                cube, self.name + f" - simulation {i}"
+            )
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_cube(
-                cube, self.name + " - quantile %f" % p)
+                cube, self.name + f" - quantile {p}", sigma=sigma
+            )
 
         for q in self.probabilities.keys():
             self.probabilities[q].fill_pyvista_cube(
-                cube, self.name + " - probability %f" % q)
+                cube, self.name + f" - probability {q}", sigma=sigma
+            )
 
     def fill_pyvista_points(self, points, prefix=None):
         self.measurements.fill_pyvista_points(points, self.name)
-        self.latent_mean.fill_pyvista_points(
-            points, self.name + " - latent mean")
-        self.latent_variance.fill_pyvista_points(
-            points, self.name + " - latent variance")
+
+        if self.latent_mean:
+            self.latent_mean.fill_pyvista_points(
+                points, self.name + " - latent mean")
+        if self.latent_variance:
+            self.latent_variance.fill_pyvista_points(
+                points, self.name + " - latent variance")
+        self.prediction.fill_pyvista_points(
+            points, self.name + " - prediction")
 
         for i, sim in enumerate(self.simulations):
             sim.fill_pyvista_points(
-                points, self.name + " - simulation %d" % i)
+                points, self.name + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_points(
-                points, self.name + " - quantile %f" % p)
+                points, self.name + f" - quantile {p}")
 
         for q in self.probabilities.keys():
             self.probabilities[q].fill_pyvista_points(
-                points, self.name + " - probability %f" % q)
+                points, self.name + f" - probability {q}")
 
-    def fill_pyvista_blocks(self, cube, prefix=None):
-        self.measurements.fill_pyvista_blocks(cube, self.name)
-        self.latent_mean.fill_pyvista_blocks(
-            cube, self.name + " - latent mean")
-        self.latent_variance.fill_pyvista_blocks(
-            cube, self.name + " - latent variance")
+    def fill_pyvista_blocks(self, cube, prefix=None, sigma=None):
+        self.measurements.fill_pyvista_blocks(cube, self.name, sigma=sigma)
+
+        if self.latent_mean:
+            self.latent_mean.fill_pyvista_blocks(
+                cube, self.name + " - latent mean"
+            )
+        if self.latent_variance:
+            self.latent_variance.fill_pyvista_blocks(
+                cube, self.name + " - latent variance"
+            )
+        self.prediction.fill_pyvista_blocks(
+            cube, self.name + " - prediction", sigma=sigma
+        )
 
         for i, sim in enumerate(self.simulations):
             sim.fill_pyvista_blocks(
-                cube, self.name + " - simulation %d" % i)
+                cube, self.name + f" - simulation {i}"
+            )
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_blocks(
-                cube, self.name + " - quantile %f" % p)
+                cube, self.name + f" - quantile {p}", sigma=sigma
+            )
 
         for q in self.probabilities.keys():
             self.probabilities[q].fill_pyvista_blocks(
-                cube, self.name + " - probability %f" % q)
+                cube, self.name + f" - probability {q}", sigma=sigma
+            )
+
+    def compute_metrics(self, alpha=0.05):
+        y_true, has_value = self.get_measurements()
+        if _np.sum(has_value) == 0:
+            raise ValueError('No measurements available')
+
+        y_pred = self.prediction.values
+        sims = self.get_simulations()
+
+        has_value = has_value[:, 0]
+        y_true = y_true[has_value == 1]
+        y_pred = y_pred[has_value == 1]
+        sims = sims[has_value == 1]
+
+        metrics = {
+            'Root Mean Square Error (prediction)': _skmetrics.root_mean_squared_error(y_true, y_pred),
+            'Mean Absolute Error (prediction)': _skmetrics.mean_absolute_error(y_true, y_pred),
+            'Median Absolute Error (prediction)': _skmetrics.median_absolute_error(y_true, y_pred),
+            'Root Mean Square Error (simulations)': _skmetrics.root_mean_squared_error(
+                _np.broadcast_to(y_true, sims.shape), sims),
+            'Mean Absolute Error (simulations)': _skmetrics.mean_absolute_error(
+                _np.broadcast_to(y_true, sims.shape), sims),
+            'Median Absolute Error (simulations)': _skmetrics.median_absolute_error(
+                _np.broadcast_to(y_true, sims.shape), sims),
+        }
+
+        bias_2, variance = _gmlmetrics.bias_variance_decomposition(y_true, sims)
+        metrics['Bias squared (simulations)'] = bias_2
+        metrics['Variance (simulations)'] = variance
+
+        if not isinstance(alpha, (list, tuple)):
+            alpha = [alpha]
+        for a in alpha:
+            metrics[f'Interval score ({a})'] = _gmlmetrics.interval_score(y_true, sims, a)
+
+        self.metrics = _pd.Series(metrics, name=self.name)
+        return self.metrics
 
 
-class _Component(_Variable):
-    def __init__(self, name, coordinates, measurements=None):
+class VectorVariable(_Variable):
+    def __init__(self, name, coordinates, labels, measurements=None):
         super().__init__(name, coordinates)
-        n_data = coordinates.n_data
 
-        if measurements is None:
-            self.measurements = self._Attribute(coordinates)
-        else:
-            self.measurements = self._Attribute(coordinates, measurements)
+        self.labels = labels
+        self._length = len(labels)
 
-        self.probability = self._Attribute(coordinates, _np.zeros(n_data))
-        self.indicator_mean = self._Attribute(coordinates)
-        self.indicator_variance = self._Attribute(coordinates)
-        self.indicator_predicted = self._Attribute(coordinates)
-        self.simulations = []
+        self.components = {}
+        for i, label in enumerate(labels):
+            self.components[label] = ContinuousVariable(
+                label,
+                coordinates,
+                measurements[:, i] if measurements is not None else None,
+            )
+
+        self.uncertainty = self._Attribute(coordinates)
+
+    def get_measurements(self):
+        # not allowing partial missing data
+        out = [self.components[label].measurements.values
+               for label in self.labels]
+        out = _np.stack(out, axis=1)
+
+        has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
+        has_value = _np.tile(has_value, [1, self.length])
+        out = _np.where(has_value == 0.0, 1.0, out)
+        return out, has_value
+
+    def get_simulations(self):
+        sims = _np.stack([self.components[v].get_simulations() for v in self.labels], axis=2)
+        return sims
+
+    def get_predictions(self):
+        pred = _np.stack([self.components[v].get_predictions() for v in self.labels], axis=1)
+        return pred
+
+    def set_coordinates(self, coordinates):
+        self.coordinates = coordinates
+        for comp in self.components.values():
+            comp.set_coordinates(coordinates)
+        self.uncertainty.coordinates = coordinates
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        new_var = VectorVariable(
+            variable.name,
+            coordinates,
+            variable.labels,
+        )
+        return new_var
+
+    @classmethod
+    def from_data_frame(cls, name, coordinates, df, columns=None,
+                        *args, **kwargs):
+        new_var = VectorVariable(
+            name,
+            coordinates,
+            labels=columns,
+            measurements=df.loc[:, columns].values,
+        )
+        return new_var
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.probability = self.probability[item]
+
+        for name, comp in self.components.items():
+            new_obj.components[name] = comp[item]
+
+        new_obj.uncertainty = self.uncertainty[item]
+
+        return new_obj
+
+    def as_data_frame(self, measurements=True, predictions=True,
+                      simulations=False, quantiles=True,
+                      probability=True, **kwargs):
+        all_dfs = []
+        for key, val in self.components.items():
+            cat_df = val.as_data_frame(
+                measurements=measurements,
+                predictions=predictions,
+                simulations=simulations,
+                quantiles=quantiles,
+                probability=probability,
+                latent=False
+            )
+            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
+            all_dfs.append(cat_df)
+        all_dfs = _pd.concat(all_dfs, axis=1)
+
+        if predictions:
+            all_dfs[self.name + "_uncertainty"] = self.uncertainty.values
+
+        return all_dfs
+
+    def update(self, idx, **kwargs):
+        prediction = _tf.unstack(kwargs["average_sim"], axis=1)
+        simulations = _tf.unstack(kwargs["simulations"], axis=1)
+
+        for lb, p, s in zip(self.labels, prediction, simulations):
+            self.components[lb].update(idx, **{
+                "average_sim": p,
+                "simulations": s
+            })
+
+        self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
+
+    def allocate_simulations(self, n_sim):
+        for comp in self.labels:
+            self.components[comp].allocate_simulations(n_sim)
+
+    def reset_quantiles(self, probabilities=None):
+        for el in self.labels:
+            self.components[el].reset_quantiles(probabilities)
+
+    def reset_probabilities(self, quantiles=None):
+        for el in self.labels:
+            self.components[el].reset_probabilities(quantiles)
+
+    def fill_pyvista_cube(self, cube, prefix=None, sigma=None):
+        for comp in self.labels:
+            self.components[comp].fill_pyvista_cube(cube, self.name, sigma=sigma)
+        self.uncertainty.fill_pyvista_cube(cube, self.name, sigma=sigma)
+
+    def fill_pyvista_points(self, points, prefix=None):
+        for comp in self.labels:
+            self.components[comp].fill_pyvista_points(points, self.name)
+        self.uncertainty.fill_pyvista_points(points, self.name)
+
+    def fill_pyvista_blocks(self, cube, prefix=None, sigma=None):
+        for comp in self.labels:
+            self.components[comp].fill_pyvista_blocks(cube, self.name, sigma=sigma)
+        self.uncertainty.fill_pyvista_blocks(cube, self.name, sigma=sigma)
+
+    def compute_metrics(self, alpha=0.05):
+        metrics = [self.components[comp].compute_metrics(alpha) for comp in self.labels]
+        metrics = _pd.concat(metrics, axis=1)
+        metrics.columns = self.labels
+        self.metrics = metrics
+        return self.metrics
+
+
+class _Component(ContinuousVariable):
+    def __init__(self, name, coordinates, measurements=None):
+        super().__init__(name, coordinates, measurements)
+        self.latent_mean = None
+        self.latent_variance = None
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
         new_obj.measurements = self.measurements[item]
-        new_obj.indicator_mean = self.indicator_mean[item]
-        new_obj.indicator_variance = self.indicator_variance[item]
-        new_obj.indicator_predicted = self.indicator_predicted[item]
+        new_obj.prediction = self.prediction[item]
 
         for i, sim in enumerate(self.simulations):
             new_obj.simulations[i] = sim[item]
+
+        if len(self.quantiles) > 0:
+            for key, val in self.quantiles.items():
+                new_obj.quantiles[key] = val[item]
+
+        if len(self.probabilities) > 0:
+            for key, val in self.probabilities.items():
+                new_obj.probabilities[key] = val[item]
 
         return new_obj
 
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
-        self.probability.coordinates = coordinates
-        self.indicator_mean.coordinates = coordinates
-        self.indicator_variance.coordinates = coordinates
-        self.indicator_predicted.coordinates = coordinates
+        self.prediction.coordinates = coordinates
 
         for sim in self.simulations:
             sim.coordinates = coordinates
 
-    def as_data_frame(self, measurements=True, probability=True, predictions=True,
-                      latent=True, simulations=True, **kwargs):
+        if len(self.quantiles) > 0:
+            for p in self.quantiles.values():
+                p.coordinates = coordinates
+
+        if len(self.probabilities) > 0:
+            for q in self.probabilities.values():
+                q.coordinates = coordinates
+
+    def as_data_frame(self, measurements=True, predictions=True,
+                      simulations=False, quantiles=True, probability=True, **kwargs):
         df = _pd.DataFrame({})
 
         if measurements:
             df[self.name] = self.measurements.values
 
-        if probability:
-            df[self.name + "_probability"] = self.probability.values
-            df[self.name + "_indicator"] = self.measurements.values
-
-        if latent:
-            df[self.name + "_indicator_mean"] = self.indicator_mean.values
-            df[self.name + "_indicator_variance"] = \
-                self.indicator_variance.values
-
         if predictions:
-            df[self.name + "_indicator_predicted"] = \
-                self.indicator_predicted.values
+            df[self.name + "_prediction"] = \
+                self.prediction.values
+
+        if quantiles:
+            if len(self.quantiles) > 0:
+                for key, val in self.quantiles.items():
+                    df[self.name + "_q" + str(key)] = val.values
+
+        if probability:
+            if len(self.probabilities) > 0:
+                for key, val in self.probabilities.items():
+                    df[self.name + "_p" + str(key)] = val.values
 
         if simulations:
             for i, sim in enumerate(self.simulations):
@@ -769,12 +1073,7 @@ class _Component(_Variable):
         return df
 
     def update(self, idx, **kwargs):
-        self.indicator_mean.values[idx] = kwargs["mean"].numpy()
-        self.indicator_variance.values[idx] = kwargs["variance"].numpy()
-        self.probability.values[idx] = kwargs["probability"].numpy()
-
-        if "indicator" in kwargs:
-            self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
+        self.prediction.values[idx] = kwargs["prediction"].numpy()
 
         sims = kwargs["simulations"].numpy()
         for s in range(sims.shape[1]):
@@ -784,66 +1083,14 @@ class _Component(_Variable):
         self.simulations = [self._Attribute(self.coordinates)
                             for _ in range(n_sim)]
 
-    def fill_pyvista_cube(self, cube, prefix=None):
-        label = prefix + " - " + self.name
-
-        self.measurements.fill_pyvista_cube(cube, label)
-        self.indicator_mean.fill_pyvista_cube(
-            cube, label + " - indicator mean")
-        self.indicator_variance.fill_pyvista_cube(
-            cube, label + " - indicator variance")
-        self.indicator_predicted.fill_pyvista_cube(
-            cube, label + " - indicator predicted")
-        self.probability.fill_pyvista_cube(
-            cube, label + " - probability")
-
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_cube(
-                cube, label + " - simulation %d" % i)
-
-    def fill_pyvista_points(self, points, prefix=None):
-        label = prefix + " - " + self.name
-
-        self.measurements.fill_pyvista_points(points, label)
-        self.indicator_mean.fill_pyvista_points(
-            points, label + " - indicator mean")
-        self.indicator_variance.fill_pyvista_points(
-            points, label + " - indicator variance")
-        self.indicator_predicted.fill_pyvista_points(
-            points, label + " - indicator predicted")
-        self.probability.fill_pyvista_points(
-            points, label + " - probability")
-
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_points(
-                points, label + " - simulation %d" % i)
-
-    def fill_pyvista_blocks(self, cube, prefix=None):
-        label = prefix + " - " + self.name
-
-        self.measurements.fill_pyvista_blocks(cube, label)
-        self.indicator_mean.fill_pyvista_blocks(
-            cube, label + " - indicator mean")
-        self.indicator_variance.fill_pyvista_blocks(
-            cube, label + " - indicator variance")
-        self.indicator_predicted.fill_pyvista_blocks(
-            cube, label + " - indicator predicted")
-        self.probability.fill_pyvista_blocks(
-            cube, label + " - probability")
-
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_blocks(
-                cube, f'{label} - simulation {i}')
+    def get_simulations(self):
+        sims = _np.stack([s.values for s in self.simulations], axis=1)
+        return sims
 
 
-class CompositionalVariable(_Variable):
+class CompositionalVariable(VectorVariable):
     def __init__(self, name, coordinates, labels, measurements=None):
-        super().__init__(name, coordinates)
-
-        self.labels = labels
-        self._length = len(labels)
-
-        self.components = {}
+        super().__init__(name, coordinates, labels, measurements)
         for i, label in enumerate(labels):
             self.components[label] = _Component(
                 label,
@@ -861,9 +1108,9 @@ class CompositionalVariable(_Variable):
         out = out * total
 
         has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
-        has_value = _np.tile(has_value, [1, self.length])
+        has_value = _np.tile(has_value, [1, self.length]).astype(float)
         # out[_np.isnan(out)] = 1
-        out = np.where(has_value == 0.0, 1.0, out)
+        out = np.where(has_value == 0.0, 1.0, out).astype(float)
         return out, has_value
 
         # allowing partial missing data
@@ -873,11 +1120,6 @@ class CompositionalVariable(_Variable):
         # has_value = ~ _np.isnan(out)
         # out[_np.isnan(out)] = 1
         # return out, has_value
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        for comp in self.components.values():
-            comp.set_coordinates(coordinates)
 
     @classmethod
     def from_variable(cls, coordinates, variable):
@@ -895,67 +1137,63 @@ class CompositionalVariable(_Variable):
             measurements=df.loc[:, columns].values)
         return new_var
 
-    def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
-
-        for name, comp in self.components.items():
-            new_obj.components[name] = comp[item]
-
-        return new_obj
-
-    def as_data_frame(self, probability=True, predictions=True, **kwargs):
+    def as_data_frame(self, measurements=True, predictions=True,
+                      simulations=False, quantiles=True, probability=True, **kwargs):
         all_dfs = []
         for key, val in self.components.items():
             cat_df = val.as_data_frame(
-                probability=probability,
+                measurements=measurements,
                 predictions=predictions,
+                simulations=simulations,
+                quantiles=quantiles,
+                probability=probability,
                 **kwargs)
             cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
             all_dfs.append(cat_df)
         all_dfs = _pd.concat(all_dfs, axis=1)
 
+        if predictions:
+            all_dfs[self.name + "_uncertainty"] = self.uncertainty.values
+
         return all_dfs
 
     def update(self, idx, **kwargs):
-        mean = _tf.unstack(kwargs["mean"], axis=1)
-        variance = _tf.unstack(kwargs["variance"], axis=1)
-        probability = _tf.unstack(kwargs["probability"], axis=1)
+        prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
 
-        for lb, m, v, p, s in zip(
-                self.labels, mean, variance,
-                probability, simulations):
+        for lb, p, s in zip(
+                self.labels,
+                prediction, simulations):
             self.components[lb].update(idx, **{
-                "mean": m,
-                "variance": v,
-                "probability": p,
+                "prediction": p,
                 "simulations": s
             })
 
-    def allocate_simulations(self, n_sim):
-        for comp in self.labels:
-            self.components[comp].allocate_simulations(n_sim)
+        self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
-    def fill_pyvista_cube(self, cube, prefix=None):
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_cube(cube, self.name)
+    def compute_metrics(self, alpha=0.05):
+        metrics = [self.components[comp].compute_metrics(alpha) for comp in self.labels]
+        metrics = _pd.concat(metrics, axis=1)
+        metrics.columns = self.labels
 
-    def fill_pyvista_points(self, points, prefix=None):
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_points(points, self.name)
+        comp_true, has_value = self.get_measurements()
+        comp_pred = _np.stack([self.components[c].prediction.values for c in self.labels], axis=1)
+        comp_true = comp_true[has_value[:, 0] == 1]
+        comp_pred = comp_pred[has_value[:, 0] == 1]
+        ad = _gmlmetrics.aitchison_distance(comp_true, comp_pred)
+        metrics.loc['Aitchison distance', :] = ad
 
-    def fill_pyvista_blocks(self, cube, prefix=None):
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_blocks(cube, self.name)
+        self.metrics = metrics
+        return self.metrics
 
 
 class _Category(_Variable):
-    def __init__(self, name, coordinates):
+    def __init__(self, name, coordinates, indicator):
         super().__init__(name, coordinates)
         n_data = coordinates.n_data
 
         self.probability = self._Attribute(coordinates, _np.zeros(n_data))
-        self.indicator = self._Attribute(coordinates, - _np.ones(n_data))
+        self.indicator = self._Attribute(coordinates, indicator)
         self.indicator_mean = self._Attribute(coordinates)
         self.indicator_variance = self._Attribute(coordinates)
         self.indicator_predicted = self._Attribute(coordinates)
@@ -985,7 +1223,7 @@ class _Category(_Variable):
             sim.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
-                      latent=True, simulations=True):
+                      latent=True, simulations=False):
         df = _pd.DataFrame({})
 
         if probability:
@@ -1072,11 +1310,11 @@ class _Category(_Variable):
             cube, label + " - probability")
 
         for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_cube(
+            sim.fill_pyvista_blocks(
                 cube, label + " - simulation %d" % i)
 
 
-class RockTypeVariable(CompositionalVariable):
+class RockTypeVariable(_Variable):
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
                  measurements_b=None):
         if measurements_b is None:
@@ -1103,9 +1341,17 @@ class RockTypeVariable(CompositionalVariable):
                 vals_b[measurements_b == label, i] = 1
             avg_vals = 0.5 * (vals_a + vals_b)
 
-        super().__init__(name, coordinates,
-                         labels=labels, measurements=avg_vals)
-        # self._length *= 2
+        super().__init__(name, coordinates)
+        self.labels = labels
+        self._length = len(labels)
+
+        self.components = {}
+        for i, label in enumerate(labels):
+            self.components[label] = _Category(
+                label,
+                coordinates,
+                avg_vals[:, i] if avg_vals is not None else None,
+            )
 
         self.predicted = self._Attribute(
             coordinates, _np.array([""]*n_data), dtype=object)
@@ -1127,18 +1373,35 @@ class RockTypeVariable(CompositionalVariable):
             self.boundary = self._Attribute(
                 coordinates, measurements_a != measurements_b, dtype=bool)
 
-    # def get_measurements(self):
-    #     out = [self.components[label].measurements.values
-    #            for label in self.labels]
-    #     out = _np.stack(out, axis=1)
-    #     return _np.concatenate([out, out], axis=1)
-
     def set_coordinates(self, coordinates):
-        super().set_coordinates(coordinates)
+        self.coordinates = coordinates
+
+        for comp in self.components.values():
+            comp.set_coordinates(coordinates)
+
         self.predicted.coordinates = coordinates
         self.entropy.coordinates = coordinates
         self.uncertainty.coordinates = coordinates
         self.boundary.coordinates = coordinates
+
+    def get_measurements(self):
+        # not allowing partial missing data
+        out = [self.components[label].indicator.values
+               for label in self.labels]
+
+        out = _np.stack(out, axis=1)
+        total = _np.sum(out, axis=1, keepdims=True)
+        total = _np.where(_np.abs(total - 1) < 1e-10, 1.0, _np.nan)
+        out = out * total
+
+        has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
+        has_value = _np.tile(has_value, [1, self.length]).astype(float)
+        out = np.where(has_value == 0.0, 1.0, out).astype(float)
+        return out, has_value
+
+    def allocate_simulations(self, n_sim):
+        for comp in self.labels:
+            self.components[comp].allocate_simulations(n_sim)
 
     @classmethod
     def from_variable(cls, coordinates, variable):
@@ -1160,7 +1423,10 @@ class RockTypeVariable(CompositionalVariable):
         return new_var
 
     def __getitem__(self, item):
-        new_obj = super().__getitem__(item)
+        new_obj = _copy.deepcopy(self)
+
+        for name, comp in self.components.items():
+            new_obj.components[name] = comp[item]
 
         new_obj.predicted = self.predicted[item]
         new_obj.entropy = self.entropy[item]
@@ -1171,8 +1437,19 @@ class RockTypeVariable(CompositionalVariable):
 
         return new_obj
 
-    def as_data_frame(self, measurements=True, probability=True, predictions=True, **kwargs):
-        df = super().as_data_frame(probability, predictions, **kwargs)
+    def as_data_frame(self, measurements=True, probability=True, predictions=True,
+                      latent=True, simulations=False, **kwargs):
+        all_dfs = []
+        for key, val in self.components.items():
+            cat_df = val.as_data_frame(
+                predictions=predictions,
+                simulations=simulations,
+                latent=latent,
+                probability=probability,
+                **kwargs)
+            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
+            all_dfs.append(cat_df)
+        df = _pd.concat(all_dfs, axis=1)
 
         if measurements:
             df[self.name + "_a"] = self.measurements_a.values
@@ -1260,6 +1537,30 @@ class RockTypeVariable(CompositionalVariable):
 
         for comp in self.labels:
             self.components[comp].fill_pyvista_blocks(cube, self.name)
+
+    def compute_metrics(self, **kwargs):
+        y_pred = self.predicted.values
+        y_true_a = self.measurements_a.values
+        y_true_b = self.measurements_b.values
+
+        valid = y_true_a == y_true_b
+
+        y_pred = y_pred[valid]
+        y_true = y_true_a[valid]
+
+        series = []
+        for lab in self.labels:
+            yp = _np.where(y_pred == lab, 1, 0)
+            yt = _np.where(y_true == lab, 1, 0)
+            d = {
+                'Balanced accuracy': _skmetrics.balanced_accuracy_score(yt, yp),
+                'Jaccard': _skmetrics.jaccard_score(yt, yp),
+                'Matthews': _skmetrics.matthews_corrcoef(yt, yp),
+            }
+            series.append(_pd.Series(d, name=lab))
+
+        self.metrics = _pd.concat(series, axis=1)
+        return self.metrics
 
 
 class CategoricalVariable(RockTypeVariable):
@@ -1427,7 +1728,7 @@ class BinaryVariable(_Variable):
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.probability = self.probability[item]
+        new_obj.average = self.probability[item]
         new_obj.indicator = self.indicator[item]
         new_obj.latent_mean = self.latent_mean[item]
         new_obj.latent_variance = self.latent_variance[item]
@@ -1661,6 +1962,7 @@ class _PointBased(_SpatialData):
     def __init__(self):
         super().__init__()
         self.coordinates = None
+        self.coordinate_labels = None
 
     def __str__(self):
         s = "Object of class %s with %s data locations\n\n" \
@@ -1672,9 +1974,7 @@ class _PointBased(_SpatialData):
                 s += "    %s: %s\n" % (name, var.__class__.__name__)
         return s
 
-    def add_continuous_variable(self, name, measurements=None,
-                                quantiles=None,
-                                probabilities=(0.025, 0.5, 0.975)):
+    def add_continuous_variable(self, name, measurements=None):
         """
         Adds a continuous variable to this point set.
 
@@ -1690,9 +1990,13 @@ class _PointBased(_SpatialData):
             A set of probabilities in the ]0, 1[ interval to compute the corresponding quantiles when predicting
             this variable.
         """
-        self.variables[name] = ContinuousVariable(
-            name, self, measurements, quantiles=quantiles,
-            probabilities=probabilities)
+        # self.variables[name] = ContinuousVariable(
+        #     name, self, measurements, quantiles=quantiles,
+        #     probabilities=probabilities)
+        self.variables[name] = ContinuousVariable(name, self, measurements)
+
+    def add_vector_variable(self, name, labels=None, measurements=None):
+        self.variables[name] = VectorVariable(name, self, labels, measurements)
 
     def add_categorical_variable(self, name, labels=None, measurements=None):
         """
@@ -1923,6 +2227,7 @@ class PointData(_PointBased):
         return pv_points
 
     def spatial_k_fold(self, test_data, k=5, bins=50):
+        raise NotImplementedError("under development")
         # setup
         test_dist = _tftools.pairwise_dist(self.coordinates, test_data.coordinates).numpy()
         data_dist = _tftools.pairwise_dist(self.coordinates, self.coordinates)
@@ -2052,8 +2357,10 @@ class _GriddedData(PointData):
 
     def index_data(self, data):
         if data.n_dim != self.n_dim:
-            raise ValueError("Data dimension mismatch. Expected dimension %d"
-                             " and found %d." % (self.n_dim, data.n_dim))
+            raise DimensionMismatchError(
+                f"Data dimension mismatch. Expected dimension {self.n_dim}"
+                " and found {data.n_dim}."
+            )
 
         cell_id = [
             _np.ceil((data.coordinates[:, i] - self.grid[i][0]
@@ -2229,6 +2536,19 @@ class Grid1D(_GriddedData):
         self.variables[variable] = ContinuousVariable(
             variable, self, data_3["value"].values
         )
+
+    @classmethod
+    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+        if not isinstance(margin, (list, tuple)):
+            margin = (margin, margin)
+
+        dif = box.max[0, 0] - box.min[0, 0]
+        new_min = _np.round(box.min[0, 0] - dif * margin[0], rounding_decimals)
+        new_max = _np.round(box.max[0, 0] + dif * margin[1], rounding_decimals)
+        n = int(_np.ceil((new_max - new_min)/step)) + 1
+
+        label = box.labels[0] if box.labels else None
+        return Grid1D(start=new_min, n=n, step=step, label=label)
 
 
 class Grid2D(_GriddedData):
@@ -2413,6 +2733,21 @@ class Grid2D(_GriddedData):
         self.variables[variable] = ContinuousVariable(
             variable, self, data_3["value"].values
         )
+
+    @classmethod
+    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+        margin = _np.array(margin)
+        if margin.shape == ():
+            margin = _np.full([2, 2], margin)
+        elif margin.shape == (2,):
+            margin = _np.stack([margin]*2, axis=1)
+
+        dif = box.max - box.min
+        new_min = _np.round(box.min - dif * margin[0], rounding_decimals)
+        new_max = _np.round(box.max + dif * margin[1], rounding_decimals)
+        n = _np.ceil((new_max - new_min) / step).astype(int) + 1
+
+        return Grid2D(start=new_min[0], n=n[0], step=step, labels=box.labels)
 
 
 class Grid3D(_GriddedData):
@@ -2632,13 +2967,27 @@ class Grid3D(_GriddedData):
     def rotation_matrix(self):
         return _np.eye(3)
 
+    @classmethod
+    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+        margin = _np.array(margin)
+        if margin.shape == ():
+            margin = _np.full([2, 3], margin)
+        elif margin.shape == (2,):
+            margin = _np.stack([margin] * 3, axis=1)
+
+        dif = box.max - box.min
+        new_min = _np.round(box.min - dif * margin[0], rounding_decimals)
+        new_max = _np.round(box.max + dif * margin[1], rounding_decimals)
+        n = _np.ceil((new_max - new_min) / step).astype(int) + 1
+
+        return Grid3D(start=new_min[0], n=n[0], step=step, labels=box.labels)
+
 
 class GridND(_GriddedData):
     """
     Implicit grid in N dimensions.
     """
     def __init__(self, start, n, step=None, end=None, labels=None):
-        super().__init__()
         if (step is None) & (end is None):
             raise ValueError("one of step or end must be given")
         start = _np.array(start)
@@ -2651,11 +3000,21 @@ class GridND(_GriddedData):
             step = _np.array([(e - st) / (n_ - 1)
                               for st, e, n_ in zip(start, end, n)])
 
-        self.grid = []
+        grids = []
         for st, e, n_ in zip(start, end, n):
-            self.grid.append(_np.linspace(st, e, n_))
+            grids.append(_np.linspace(st, e, n_))
+
+        coords = _np.array(list(_iter.product(*grids[::-1])),
+                           dtype=float)[:, ::-1]
+
+        if labels is None:
+            labels = [f"X_{i}" for i in range(len(n))]
+        grid_df = _pd.DataFrame(coords, columns=labels)
+
+        super().__init__(grid_df, labels)
 
         self.step_size = step.tolist()
+        self.grid = grids
         self.grid_size = [int(num) for num in n]
         self.labels = labels
 
@@ -3182,19 +3541,20 @@ class Section3D(PointData):
         base_coords = _np.concatenate(
             [grid.coordinates, _np.zeros([grid.n_data, 1])], axis=1)
 
-        azimuth = azimuth * _np.pi / 180
-        dip = - dip * _np.pi / 180
-        ry = _np.reshape(_np.array(
-            [1, 0, 0,
-             0, _np.cos(dip), -_np.sin(dip),
-             0, _np.sin(dip), _np.cos(dip)]
-        ), [3, 3])
-        rz = _np.reshape(_np.array(
-            [_np.cos(azimuth), _np.sin(azimuth), 0,
-             -_np.sin(azimuth), _np.cos(azimuth), 0,
-             0, 0, 1]
-        ), [3, 3])
-        rotation_matrix = _np.matmul(rz, ry).T
+        # azimuth = azimuth * _np.pi / 180
+        # dip = - dip * _np.pi / 180
+        # ry = _np.reshape(_np.array(
+        #     [1, 0, 0,
+        #      0, _np.cos(dip), -_np.sin(dip),
+        #      0, _np.sin(dip), _np.cos(dip)]
+        # ), [3, 3])
+        # rz = _np.reshape(_np.array(
+        #     [_np.cos(azimuth), _np.sin(azimuth), 0,
+        #      -_np.sin(azimuth), _np.cos(azimuth), 0,
+        #      0, 0, 1]
+        # ), [3, 3])
+        # rotation_matrix = _np.matmul(rz, ry).T
+        rotation_matrix = _gmt.rotation_matrix(azimuth, dip)
 
         center = _np.array(center, ndmin=2)
         rotated_coords = _np.matmul(base_coords, rotation_matrix) + center
@@ -3353,37 +3713,8 @@ class Blocks3D(Grid3D):
         return pv_blocks
 
 
-def rotation_matrix(azimuth, dip, rake):
-    # conversion to radians
-    azimuth = azimuth * (_np.pi / 180)
-    dip = dip * (_np.pi / 180)
-    rake = rake * (_np.pi / 180)
-
-    # conversion to mathematical coordinates
-    dip = - dip
-
-    # rotation matrix
-    # x and y axes are switched
-    # rotation over z is with sign reversed
-    rx = _np.stack([_np.cos(rake), 0, _np.sin(rake),
-                    0, 1, 0,
-                    -_np.sin(rake), 0, _np.cos(rake)], -1)
-    rx = _np.reshape(rx, [3, 3])
-    ry = _np.stack([1, 0, 0,
-                    0, _np.cos(dip), -_np.sin(dip),
-                    0, _np.sin(dip), _np.cos(dip)], -1)
-    ry = _np.reshape(ry, [3, 3])
-    rz = _np.stack([_np.cos(azimuth), _np.sin(azimuth), 0,
-                    -_np.sin(azimuth), _np.cos(azimuth), 0,
-                    0, 0, 1], -1)
-    rz = _np.reshape(rz, [3, 3])
-
-    rot = _np.matmul(_np.matmul(rz, ry), rx)
-    return rot.T
-
-
 def rotate(data, origin, azimuth=0.0, dip=0.0, rake=0.0, reverse=False):
-    mat = rotation_matrix(azimuth, dip, rake)
+    mat = _gmt.rotation_matrix(azimuth, dip, rake)
     if reverse:
         mat = mat.T
 
@@ -3406,23 +3737,29 @@ class RotatedGrid3D(Grid3D):
         rotated = self.rotate(self)
         self.coordinates = rotated.coordinates
 
+        bbox, d = bounding_box(self.coordinates)
+        self._bounding_box = BoundingBox.from_array(bbox)
+
     def rotate(self, other):
         return rotate(other, self.origin, self.azimuth, self.dip, self.rake)
 
     def rotation_matrix(self):
-        return rotation_matrix(self.azimuth, self.dip, self.rake)
+        return _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
 
     def index_data(self, data):
         return super().index_data(self.rotate(data))
 
     def aggregate_categorical(self, data, variable):
-        super().aggregate_categorical(self.rotate(data), variable)
+        raise NotImplementedError
+        # super().aggregate_categorical(self.rotate(data), variable)
 
     def aggregate_binary(self, data, variable):
-        super().aggregate_binary(self.rotate(data), variable)
+        raise NotImplementedError
+        # super().aggregate_binary(self.rotate(data), variable)
 
     def aggregate_numeric(self, data, variable):
-        super().aggregate_numeric(self.rotate(data), variable)
+        raise NotImplementedError
+        # super().aggregate_numeric(self.rotate(data), variable)
 
     def make_interpolator(self, coordinates):
         raise NotImplementedError
@@ -3430,7 +3767,7 @@ class RotatedGrid3D(Grid3D):
     def as_pyvista(self):
         pv_grid = super().as_pyvista()
 
-        mat = rotation_matrix(self.azimuth, self.dip, self.rake)
+        mat = _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
         transf = _np.eye(4)
         transf[:3, :3] = mat.T
 
@@ -3439,3 +3776,39 @@ class RotatedGrid3D(Grid3D):
         pv_grid = pv_grid.translate(self.origin)
 
         return pv_grid
+
+    @classmethod
+    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+        return NotImplementedError
+
+    @classmethod
+    def from_points(cls, points, step, margin=0.1, rounding_decimals=0, labels=None):
+        if isinstance(points, _PointBased):
+            labels = points.coordinate_labels if labels is None else None
+            points = points.coordinates
+        if points.shape[1] != 3:
+            raise DimensionMismatchError('points must be 3-dimensional')
+        rotmat = _gmt.rotation_matrix_from_points(points)
+        az, dip, rake = _gmt.angles_from_rotation_matrix(rotmat)
+
+        center = _np.mean(points, axis=0, keepdims=True)
+
+        unrotated_points = _np.matmul(points - center, rotmat.T)
+        box, _ = bounding_box(unrotated_points)
+
+        margin = _np.array(margin)
+        if margin.shape == ():
+            margin = _np.full([2, 3], margin)
+        elif margin.shape == (2,):
+            margin = _np.stack([margin] * 3, axis=1)
+
+        dif = box[1] - box[0]
+        new_min = box[0] - dif * margin[0]
+        new_max = box[1] + dif * margin[1]
+        n = _np.ceil((new_max - new_min) / step).astype(int) + 1
+
+        origin = _np.squeeze(_np.matmul(new_min, rotmat) + center)
+        origin = _np.round(origin, rounding_decimals)
+
+        return RotatedGrid3D(start=origin, n=n, step=step, azimuth=az, dip=dip, rake=rake, labels=labels)
+

@@ -666,16 +666,16 @@ def highest_value_probability(mu, var, seed, n_samples=10000):
     n_data, n_values = sh[0], sh[1]
 
     rnd = _tf.random.stateless_normal([1, n_values, n_samples - n_values],
-                                      seed=[seed, 0], dtype=_tf.float32)
+                                      seed=[seed, 0], dtype=_tf.float64)
     samples = _tf.expand_dims(_tf.sqrt(var), 2)*rnd + _tf.expand_dims(mu, 2)
     max_ind = _tf.math.argmax(samples, axis=1)
 
     # def count_fn(i):
-    #     which = _tf.cast(_tf.equal(max_ind, i), _tf.float32)
+    #     which = _tf.cast(_tf.equal(max_ind, i), _tf.float64)
     #     return _tf.reduce_sum(which, axis=1) + 1.0
     #
     # counts = _tf.map_fn(count_fn, _tf.range(n_values, dtype=_tf.int64),
-    #                     dtype=_tf.float32)
+    #                     dtype=_tf.float64)
     # counts = _tf.transpose(counts)
 
     counts = _tf.math.bincount(
@@ -853,3 +853,25 @@ def sparsemax(z, axis=0):
     tau = (z_cum_k - 1) / k
     p = _tf.nn.relu(z - tau)
     return p
+
+
+def batched_dataset(y_data, batch_size, shuffle=True):
+    n_data = y_data.shape[0]
+    # 1. Create a dataset from the large y_data array
+    ds_data = _tf.data.Dataset.from_tensor_slices(y_data)
+
+    # 2. Create a dataset of the indices (0, 1, 2, ... n_data-1)
+    ds_indices = _tf.data.Dataset.range(n_data)
+
+    # 3. Zip them together
+    ds = _tf.data.Dataset.zip((ds_data, ds_indices))
+
+    # 4. Shuffle (buffer_size=n_data) and batch
+    if shuffle:
+        ds = ds.shuffle(n_data)
+    ds = ds.batch(batch_size)
+
+    # 5. Prefetch for performance
+    ds = ds.prefetch(_tf.data.AUTOTUNE)
+
+    return ds

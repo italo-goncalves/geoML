@@ -247,8 +247,9 @@ def jura():
     jura_train.add_categorical_variable("Landuse", landuse_labels,
                                         train_df["Landuse"])
     jura_train.add_categorical_variable("Rock", rock_labels, train_df["Rock"])
-    for el in elements:
-        jura_train.add_continuous_variable(el, train_df[el])
+    # for el in elements:
+    #     jura_train.add_continuous_variable(el, train_df[el])
+    jura_train.add_vector_variable('Elements', elements, train_df.loc[:, elements].values)
 
     file_b = _os.path.join(path, "sample_data/jura_val.csv")
 
@@ -258,8 +259,9 @@ def jura():
     jura_val.add_categorical_variable("Landuse", landuse_labels,
                                       val_df["Landuse"])
     jura_val.add_categorical_variable("Rock", rock_labels, val_df["Rock"])
-    for el in elements:
-        jura_val.add_continuous_variable(el, val_df[el])
+    # for el in elements:
+    #     jura_val.add_continuous_variable(el, val_df[el])
+    jura_val.add_vector_variable('Elements', elements, val_df.loc[:, elements].values)
 
     return jura_train, jura_val
 

@@ -1,5 +1,19 @@
-# geoML
-Spatial modeling using machine learning concepts.
+<p align="center">
+  <img src="/images/geoML logo horizontal.png" width="100%">
+</p>
+
+
+# Spatial modeling using machine learning concepts
+
+Geoscientific data is becoming increasingly larger and more complex. Multiple variables, structural constraints, etc. are becoming the norm rather than the exception.
+
+Conventional modelling approaches are very labour-intensive, subjective, and hard to reproduce. CAD-drawn orebodies, variograms, pre- and post-processing steps can result in workflows so complicated that even professionals can become lost within their own work. geoML is being designed to simplify geomodelling and empower the user with advanced machine larning tools that respect geology. 
+
+<p align="center">
+  <video width="100%" controls>
+        <source src="images/walker_movie.mp4" type="video/mp4">
+  </video>
+</p>
 
 This package contains machine learning models specialized in spatial interpolation and smoothing with calibrated confidence intervals. Current functionality includes:
 
@@ -23,9 +37,11 @@ pip install git+https://github.com/italo-goncalves/geoML
 ```
 
 Dependencies:
-* `scikit-image`
 * `pandas`
 * `numpy`
+* `scipy`
+* `scikit-image`
+* `scikit-learn`
 * `tensorflow`
 * `tensorflow-probability`
 * `pyvista` and `plotly` for 3D visualization
@@ -47,15 +63,15 @@ The following notebooks demonstrate the capabilities of the package (if one
 
 ## Learning materials
 * [geoML short course presentation](https://1drv.ms/p/c/4a4617b38edb43d3/ERKF7Z9DUQNPon_oZGSxclwB_rneluFp9bAhep6lpbtP6g?e=stGHkW)
-* [Notebook 01](https://colab.research.google.com/drive/1_LS-tem6ATRi62inKvZVOPJRJPjlzGxO?usp=sharing)
-* [Notebook 02](https://colab.research.google.com/drive/1dq19BU-vgsQAlAyx2gZjiGTPM-d2Oh26?usp=sharing)
-* [Notebook 03](https://colab.research.google.com/drive/136aCKd9df39S4PmShZ0KIbfmQjaRWkP_?usp=sharing)
-* [Notebook 04](https://colab.research.google.com/drive/1ZqeQhbrbVHKEVJgwLQT2jY8AmZR6ENhd?usp=drive_link)
-* [Notebook 05](https://colab.research.google.com/drive/1mKcRF_Kme6ac-nNzj6dON_updZk01LAS?usp=drive_link)
-* [Notebook 06](https://colab.research.google.com/drive/1SUNlzThWzg5sbj5sK878WOkgVILdRLjV?usp=drive_link)
-* [Notebook 07](https://colab.research.google.com/drive/1kWvsTAfVMs_K4eHwImJDlPnDUt9k3kZd?usp=sharing)
-* [Notebook 08](https://colab.research.google.com/drive/1HotYLXScQT-J-aqBMrvI_vR2UOyIWn2o?usp=drive_link)
-* [Notebook 09](https://colab.research.google.com/drive/1oxFsdAvouiJSmsiDhs4vh-DsWGvaAUMm?usp=drive_link)
+* [Notebook 01 - covariance functions](https://colab.research.google.com/drive/1_LS-tem6ATRi62inKvZVOPJRJPjlzGxO?usp=sharing)
+* [Notebook 02 - Gaussian process](https://colab.research.google.com/drive/1dq19BU-vgsQAlAyx2gZjiGTPM-d2Oh26?usp=sharing)
+* [Notebook 03 - 2D modelling with warping](https://colab.research.google.com/drive/136aCKd9df39S4PmShZ0KIbfmQjaRWkP_?usp=sharing)
+* [Notebook 04 - multivariate modelling](https://colab.research.google.com/drive/1ZqeQhbrbVHKEVJgwLQT2jY8AmZR6ENhd?usp=drive_link)
+* [Notebook 05 - implicit modelling](https://colab.research.google.com/drive/1mKcRF_Kme6ac-nNzj6dON_updZk01LAS?usp=drive_link)
+* [Notebook 06 - gradients](https://colab.research.google.com/drive/1SUNlzThWzg5sbj5sK878WOkgVILdRLjV?usp=drive_link)
+* [Notebook 07 - deep Gaussian process](https://colab.research.google.com/drive/1kWvsTAfVMs_K4eHwImJDlPnDUt9k3kZd?usp=sharing)
+* [Notebook 08 - multivariate non-stationary modelling](https://colab.research.google.com/drive/1HotYLXScQT-J-aqBMrvI_vR2UOyIWn2o?usp=drive_link)
+* [Notebook 09 - compositional data](https://colab.research.google.com/drive/1oxFsdAvouiJSmsiDhs4vh-DsWGvaAUMm?usp=drive_link)
 
 ## References
 
