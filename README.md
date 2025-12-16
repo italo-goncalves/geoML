@@ -10,9 +10,7 @@ Geoscientific data is becoming increasingly larger and more complex. Multiple va
 Conventional modelling approaches are very labour-intensive, subjective, and hard to reproduce. CAD-drawn orebodies, variograms, pre- and post-processing steps can result in workflows so complicated that even professionals can become lost within their own work. geoML is being designed to simplify geomodelling and empower the user with advanced machine larning tools that respect geology. 
 
 <p align="center">
-  <video width="100%" controls>
-        <source src="/geoml/images/walker_movie.mp4" type="video/mp4">
-  </video>
+  <img src="/geoml/images/walker_gif.gif" width="100%">
 </p>
 
 This package contains machine learning models specialized in spatial interpolation and smoothing with calibrated confidence intervals. Current functionality includes:
