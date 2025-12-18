@@ -357,7 +357,8 @@ class BasicInput(_RootLatentVariable):
         self.base_inducing_points = tuple(_tf.constant(ip.coordinates, dtype=_tf.float64) for ip in inducing_points)
         self.inducing_points_variance = tuple(_tf.zeros([n, self.size], _tf.float64) for n in self.n_ip)
 
-        self.center = _np.zeros_like(transform(self.bounding_box.max.astype(_np.float64)))
+        # self.center = _np.zeros_like(transform(self.bounding_box.max.astype(_np.float64)))
+        self.center = _np.zeros_like(self.bounding_box.max.astype(_np.float64))
         if center:
             self.center = 0.5 * (self.bounding_box.min + self.bounding_box.max)
 
