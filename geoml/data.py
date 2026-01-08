@@ -23,8 +23,7 @@ __all__ = ["PointData",
            "RotatedGrid3D", "Section3D", "Surface3D",
            "Blocks1D", "Blocks2D", "Blocks3D"]
 
-import numpy as np
-import pandas as pd
+
 import tensorflow as _tf
 import pandas as _pd
 import numpy as _np
@@ -33,7 +32,7 @@ import collections as _col
 import pyvista as _pv
 import itertools as _iter
 import sklearn.metrics as _skmetrics
-from astropy.coordinates.matrix_utilities import rotation_matrix
+# from astropy.coordinates.matrix_utilities import rotation_matrix
 
 from skimage import measure as _measure
 from skimage import filters as _filters
@@ -1110,7 +1109,7 @@ class CompositionalVariable(VectorVariable):
         has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
         has_value = _np.tile(has_value, [1, self.length]).astype(float)
         # out[_np.isnan(out)] = 1
-        out = np.where(has_value == 0.0, 1.0, out).astype(float)
+        out = _np.where(has_value == 0.0, 1.0, out).astype(float)
         return out, has_value
 
         # allowing partial missing data
@@ -1396,7 +1395,7 @@ class RockTypeVariable(_Variable):
 
         has_value = _np.all(~ _np.isnan(out), axis=1, keepdims=True) * 1.0
         has_value = _np.tile(has_value, [1, self.length]).astype(float)
-        out = np.where(has_value == 0.0, 1.0, out).astype(float)
+        out = _np.where(has_value == 0.0, 1.0, out).astype(float)
         return out, has_value
 
     def allocate_simulations(self, n_sim):
@@ -1984,11 +1983,6 @@ class _PointBased(_SpatialData):
             Variable name.
         measurements : array-like
             The variable values. Its length must correspond to the number of data locations.
-        quantiles : tuple
-            Specific values to compute probabilities when predicting this variable.
-        probabilities : tuple
-            A set of probabilities in the ]0, 1[ interval to compute the corresponding quantiles when predicting
-            this variable.
         """
         # self.variables[name] = ContinuousVariable(
         #     name, self, measurements, quantiles=quantiles,
@@ -3625,7 +3619,7 @@ class Surface3D(_PointBased):
         points_df["RL"] += offset[2]
         points_df.to_csv(points_filename + ".csv", index=False)
 
-        triangles_df = pd.DataFrame(
+        triangles_df = _pd.DataFrame(
             self.triangles, columns=["PointId1", "PointId2", "PointId3"])
         triangles_df.to_csv(triangles_filename + ".csv", index=False)
 

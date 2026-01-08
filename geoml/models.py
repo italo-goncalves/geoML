@@ -15,7 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 __all__ = ["GP", "GPEnsemble", "StructuralField", "GPOptions",
-           "VGPNetwork", "VGPNetworkEnsemble"]
+           "VGPNetwork"]
 
 import numpy as np
 
