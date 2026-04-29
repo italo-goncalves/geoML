@@ -737,7 +737,7 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y, _tf.float64),
                     _tf.constant(self.has_value, _tf.float64),
                     training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance(),
+                    x_var=_tf.constant(self.data.get_batched_variance()[0],
                                        _tf.float64),
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
@@ -748,7 +748,7 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.y, _tf.float64),
                     _tf.constant(self.has_value, _tf.float64),
                     training_inputs,
-                    x_var=_tf.constant(self.data.get_data_variance(),
+                    x_var=_tf.constant(self.data.get_batched_variance()[0],
                                        _tf.float64),
                     x_dir=_tf.constant(
                         self.directional_data.coordinates,
@@ -815,7 +815,7 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.has_value[idx], _tf.float64),
                     # training_inputs,
                     [{} for v in self.variables],
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                    x_var=_tf.constant(self.data.get_batched_variance(idx)[0],
                                        _tf.float64),
                     # local_x, local_y, local_hv, {}, local_x_var,
                     samples=self.options.training_samples,
@@ -830,7 +830,7 @@ class VGPNetwork(_GPModel):
                     _tf.constant(self.has_value[idx], _tf.float64),
                     # training_inputs,
                     [{} for v in self.variables],
-                    x_var=_tf.constant(self.data.get_data_variance()[idx],
+                    x_var=_tf.constant(self.data.get_batched_variance(idx)[0],
                                        _tf.float64),
                     # local_x, local_y, local_hv, {}, local_x_var,
                     x_dir=_tf.identity(x_dir),
@@ -878,7 +878,7 @@ class VGPNetwork(_GPModel):
 
     @_tf.function
     def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, jitter=1e-6, include_noise=True):
+                    n_sim=1, seed=0, jitter=1e-6, include_noise='delta', n_splits=None):
         self.latent_network.refresh(jitter)
 
         with _tf.name_scope("Prediction"):
@@ -901,10 +901,16 @@ class VGPNetwork(_GPModel):
             for mu, var, sim, exp_var, lik, v_inp in zip(
                     pred_mu, pred_var, pred_sim, pred_exp_var,
                     self.likelihoods, variable_inputs):
-                output.append(lik.predict(mu, var, sim, exp_var, include_noise=include_noise, **v_inp))
+                output.append(
+                    lik.predict(
+                        mu, var, sim, exp_var,
+                        include_noise=include_noise,
+                        n_splits=n_splits, **v_inp
+                    )
+                )
             return output
 
-    def predict(self, newdata, n_sim=20, include_noise=True):
+    def predict(self, newdata, n_sim=20, include_noise='delta'):
         """
         Makes a prediction on the specified coordinates.
 
@@ -915,8 +921,8 @@ class VGPNetwork(_GPModel):
             The object's variables will be updated.
         n_sim : int
             Number of predictive samples to draw.
-        include_noise : bool
-            If the likelihood should be sampled and added to the simulations.
+        include_noise : str
+            The method to handle the noise. Either 'delta' (default), 'monte_carlo', or None to predict without noise.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
@@ -935,7 +941,7 @@ class VGPNetwork(_GPModel):
         n_batches = len(batch_id)
 
         # @_tf.function
-        def batch_pred(x, x_var=None):
+        def batch_pred(x, x_var=None, n_splits=None):
             out = self.predict_raw(
                 x,
                 variable_inputs,
@@ -943,20 +949,25 @@ class VGPNetwork(_GPModel):
                 seed=self.options.seed,
                 n_sim=n_sim,
                 jitter=self.options.jitter,
-                include_noise=include_noise
+                include_noise=include_noise,
+                n_splits=n_splits
             )
             return out
 
-        data_var = newdata.get_data_variance()
-
+        self.latent_network.refresh()
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
                 print("\rProcessing batch %s of %s       "
                       % (str(i + 1), str(n_batches)), end="")
 
+            data_coords, splits = newdata.get_batched_coordinates(batch)
+            data_var, _ = newdata.get_batched_variance()
+
             output = batch_pred(
-                _tf.constant(newdata.coordinates[batch], _tf.float64),
-                _tf.constant(data_var[batch], _tf.float64))
+                _tf.constant(data_coords, _tf.float64),
+                _tf.constant(data_var[batch], _tf.float64),
+                n_splits=splits
+            )
 
             for v, upd in zip(self.variables, output):
                 newdata.variables[v].update(batch, **upd)

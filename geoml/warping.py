@@ -265,10 +265,14 @@ class ZScore(_Warping):
     def initialize(self, x):
         mean = _np.mean(x, axis=0)
         std = _np.std(x, axis=0)
-        self.parameters["mean"].set_value(mean)
-        self.parameters["std"].set_value(std)
-        self.parameters["mean"].set_limits(mean - 3*std, mean + 3*std)
-        self.parameters["std"].set_limits(std / 100, std * 10)
+
+        if not self.parameters["mean"].fixed:
+            self.parameters["mean"].set_value(mean)
+            self.parameters["mean"].set_limits(mean - 3 * std, mean + 3 * std)
+
+        if not self.parameters["std"].fixed:
+            self.parameters["std"].set_value(std)
+            self.parameters["std"].set_limits(std / 100, std * 10)
         return super().initialize(x)
 
 
@@ -293,7 +297,8 @@ class Center(ZScore):
 
     def initialize(self, x):
         mean = _np.mean(x, axis=0)
-        self.parameters["mean"].set_value(mean)
+        if not self.parameters["mean"].fixed:
+            self.parameters["mean"].set_value(mean)
         return super().initialize(x)
 
 
@@ -390,7 +395,8 @@ class Scale(ZScore):
 
     def initialize(self, x):
         sc = _np.max(x, axis=0) - _np.min(x, axis=0) + 1e-6
-        self.parameters["std"].set_value(sc)
+        if not self.parameters["std"].fixed:
+            self.parameters["std"].set_value(sc)
         x, _ = self.forward(x)
         return x
 
@@ -760,3 +766,39 @@ class Rotation(Identity):
         rot = self.parameters['rotation'].get_value()
         x = _tf.matmul(x, rot)
         return x
+
+
+class ScaledSimplex(Identity):
+    """
+    Compositional data transformation without log-ratios.
+
+    Accepts zeros.
+    """
+
+    def __init__(self, size):
+        super().__init__(size)
+        self.scale = None
+
+    def forward(self, x):
+        return x / self.scale, _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+
+    def backward(self, x):
+        x = x * self.scale
+        total = _tf.reduce_sum(x, axis=1, keepdims=True)
+        x = x + (1.0 - total) * self.scale
+
+        denom = _tf.where(_tf.less(x, 0.0), self.scale - x, 1.0)
+        shift = _tf.where(_tf.less(x, 0.0), -x / denom, 0.0)
+
+        max_s = _tf.reduce_max(shift, axis=1, keepdims=True)
+        x = (1.0 - max_s) * x + max_s * self.scale
+        x = _tf.maximum(x, 0.0)
+        return x
+
+    def initialize(self, x):
+        missing = _np.isnan(x)
+        complete = ~_np.any(missing, axis=1, keepdims=True)
+        x_new = _np.where(missing, 0, x) * complete
+        scale = _np.sum(x_new, axis=0, keepdims=True) / _np.sum(complete)
+        self.scale = _tf.constant(scale, _tf.float64)
+        return x_new / self.scale

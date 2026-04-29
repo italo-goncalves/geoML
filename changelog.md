@@ -1,3 +1,7 @@
+## version 0.4.1
+* Support for predictions over blocks with discretization
+* Delta method for change of support
+
 ## version 0.4.0
 * Implemented multivariate data and likelihoods
 * Warpings are now multivariate

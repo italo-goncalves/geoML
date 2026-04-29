@@ -1434,6 +1434,14 @@ class RockTypeVariable(_Variable):
         new_obj.measurements_a = self.measurements_a[item]
         new_obj.measurements_b = self.measurements_b[item]
 
+        # Resetting labels
+        cat_a = _pd.Categorical(new_obj.measurements_a.values)
+        cat_b = _pd.Categorical(new_obj.measurements_b.values)
+        labels = _pd.api.types.union_categoricals([cat_a, cat_b])
+        labels = labels.categories.values
+        new_obj.labels = labels
+        new_obj._length = len(labels)
+
         return new_obj
 
     def as_data_frame(self, measurements=True, probability=True, predictions=True,
@@ -2088,8 +2096,16 @@ class _PointBased(_SpatialData):
         self.variables[name] = CompositionalVariable(
             name, self, labels, measurements)
 
-    def get_data_variance(self):
-        return _np.zeros_like(self.coordinates)
+    def get_batched_coordinates(self, index=None):
+        if index is None:
+            index = _np.arange(self._n_data)
+
+        return self.coordinates[index], None
+
+    def get_batched_variance(self, index=None):
+        coords, agggregation = self.get_batched_coordinates(index)
+
+        return _np.zeros_like(coords), agggregation
 
 
 class PointData(_PointBased):
@@ -2337,7 +2353,7 @@ class GaussianData(PointData):
         df = _pd.concat([df, df_var], axis=1)
         return GaussianData(df, coordinate_labels, var_labels)
 
-    def get_data_variance(self):
+    def get_batched_variance(self):
         return self.variance
 
 
@@ -3661,7 +3677,7 @@ def _blockdata(cls):
             dtype=float)[:, ::-1]
         sub_grid -= (_np.array(self.discretization)[None, :] - 1) / 2
         sub_grid *= _np.array(self.step_size)[None, :]
-        sub_grid /= (_np.array(self.discretization)[None, :] + 1)
+        sub_grid /= _np.array(self.discretization)[None, :]
         self.sub_grid = sub_grid
 
     def discretized_coordinates(self, index):
@@ -3672,12 +3688,24 @@ def _blockdata(cls):
         center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
         grid = self.sub_grid
         discr = _np.array(self.discretization)[None, :]
-        grid = grid * (discr + 1) / (discr - 1) + center
+        # grid = grid * (discr + 1) / (discr - 1) + center
+        grid = grid * (discr + 2) / (discr + 1) + center
         return PointData.from_array(grid)
+
+    def get_batched_coordinates(self, index):
+        if index is None:
+            index = _np.arange(self._n_data)
+
+        centers = self.coordinates[index]
+        coords = _np.concatenate([self.sub_grid + c[None, :] for c in centers], axis=0)
+
+        splits = None if _np.prod(self.discretization) == 1 else len(index)
+        return coords, splits
 
     cls.__init__ = new_init
     cls.discretized_coordinates = discretized_coordinates
     cls.inducing_grid = inducing_grid
+    cls.get_batched_coordinates = get_batched_coordinates
 
     return cls
 

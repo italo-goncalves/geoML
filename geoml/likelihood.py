@@ -120,6 +120,14 @@ _WEIGHTS_64 = _tf.concat([_WEIGHTS_64[::-1], _WEIGHTS_64], axis=0)
 _WEIGHTS_64 = _WEIGHTS_64 / _tf.reduce_sum(_WEIGHTS_64)
 
 
+def _aggregate(x, n_splits=None, fun=_tf.reduce_mean):
+    if n_splits is None:
+        return x
+
+    agg = _tf.stack([fun(y, axis=0) for y in _tf.split(x, n_splits, axis=0)], axis=0)
+    return agg
+
+
 class _Likelihood(_gpr.Parametric):
     def __init__(self, size, use_monte_carlo=False):
         super().__init__()
@@ -195,16 +203,24 @@ class _ContinuousLikelihood(_Likelihood):
 
         return lik * self.sharpness
 
-    def predict(self, mu, var, sims, explained_var, *args, include_noise=True, quantiles=None,
-                probabilities=None, **kwargs):
+    def predict(self, mu, var, sims, explained_var, *args, include_noise=None, n_splits=None, **kwargs):
         # Simulations
-        if include_noise:
+        if include_noise == 'monte_carlo':
             s = _tf.shape(sims)
             sims = sims + self.white_noise(s, seed=1234)
+            sims = _tf.transpose(sims, [2, 0, 1])
+            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
+            sims = _tf.transpose(sims, [1, 2, 0])
+        elif include_noise == 'delta':
+            sims = self.integrate_noise(sims)
+        else:
+            sims = _tf.transpose(sims, [2, 0, 1])
+            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
+            sims = _tf.transpose(sims, [1, 2, 0])
 
-        sims = _tf.transpose(sims, [2, 0, 1])
-        sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
-        sims = _tf.transpose(sims, [1, 2, 0])
+        sims = _aggregate(sims, n_splits=n_splits)
+        mu = _aggregate(mu, n_splits=n_splits)
+        var = _aggregate(var, n_splits=n_splits)
 
         avg_sim = _tf.reduce_mean(sims, axis=2)
         out = {"mean": mu[:, 0],
@@ -231,6 +247,31 @@ class _ContinuousLikelihood(_Likelihood):
 
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
+
+    def integrate_noise(self, sims):
+
+        def curvature(s):
+            with _tf.GradientTape() as g:
+                g.watch(s)
+                with _tf.GradientTape() as gg:
+                    gg.watch(s)
+                    backtr = self.warping.backward(s)
+                dy_dx = gg.batch_jacobian(backtr, s)
+            d2y_dx2 = g.batch_jacobian(dy_dx, s)
+            return backtr, _tf.linalg.diag_part(d2y_dx2)
+
+        dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
+        variance = dist.variance()
+        variance = _tf.transpose(variance, [0, 2, 1])#[:, None, :, :]
+
+        sims = _tf.unstack(sims, axis=2)
+        y_approx = []
+        for s in sims:
+            backtr, curv = curvature(s)
+            # _tf.print(backtr.shape, curv.shape)
+            sec_order = _tf.reduce_sum(0.5 * curv * variance, axis=-1)
+            y_approx.append(backtr + sec_order)
+        return _tf.stack(y_approx, axis=-1)
 
 
 class Gaussian(_ContinuousLikelihood):
@@ -465,15 +506,28 @@ class _MultivariateLikelihood(_Likelihood):
         return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var,
-                *args, quantiles=None, include_noise=True,
+                *args, quantiles=None, include_noise=None, n_splits=None,
                 **kwargs):
 
-        if include_noise:
-            coherent_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=True)
-            rough_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=False)
+        # if include_noise:
+        #     coherent_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=True)
+        #     rough_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=False)
+        # else:
+        #     coherent_sims = sims
+        #     rough_sims = sims
+
+        if include_noise == 'monte_carlo':
+            s = _tf.shape(sims)
+            sims = sims + self.white_noise(s, seed=1234)
+            sims = _tf.transpose(sims, [2, 0, 1])
+            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
+            sims = _tf.transpose(sims, [1, 2, 0])
+        elif include_noise == 'delta':
+            sims = self.integrate_noise(sims)
         else:
-            coherent_sims = sims
-            rough_sims = sims
+            sims = _tf.transpose(sims, [2, 0, 1])
+            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
+            sims = _tf.transpose(sims, [1, 2, 0])
 
         # coherent_sims = _tf.stack([self.warping.backward(s) for s in _tf.unstack(coherent_sims, axis=2)], axis=2)
         # rough_sims = _tf.stack([self.warping.backward(s) for s in _tf.unstack(rough_sims, axis=2)], axis=2)
@@ -482,19 +536,22 @@ class _MultivariateLikelihood(_Likelihood):
         # coherent_sims = _tf.map_fn(lambda s: self.warping.backward(s), coherent_sims)
         # coherent_sims = _tf.transpose(coherent_sims, [1, 2, 0])
 
-        rough_sims = _tf.transpose(rough_sims, [2, 0, 1])
-        rough_sims = _tf.map_fn(lambda s: self.warping.backward(s), rough_sims)
-        rough_sims = _tf.transpose(rough_sims, [1, 2, 0])
+        # sims = _tf.transpose(sims, [2, 0, 1])
+        # sims = _tf.map_fn(lambda s: self.warping.backward(s), sims)
+        # sims = _tf.transpose(sims, [1, 2, 0])
+
+        sims = _aggregate(sims, n_splits)
 
         # mean and variance are also estimates
-        avg = _tf.reduce_mean(rough_sims, axis=2)
-        var = _tf.math.reduce_variance(rough_sims, axis=2)
+        avg = _tf.reduce_mean(sims, axis=2)
+        # empirical_var = _tf.math.reduce_variance(rough_sims, axis=2)
 
+        var = _aggregate(var, n_splits)
         uncertainty = _tf.reduce_mean(var, axis=1)
 
         out = {"mean": avg,
                "variance": var,
-               "simulations": rough_sims,
+               "simulations": sims,
                "average_sim": avg,
                "uncertainty": uncertainty
                }
@@ -503,6 +560,31 @@ class _MultivariateLikelihood(_Likelihood):
 
     def initialize(self, y):
         self.warping.initialize(y)
+
+    def integrate_noise(self, sims):
+
+        def curvature(s):
+            with _tf.GradientTape() as g:
+                g.watch(s)
+                with _tf.GradientTape() as gg:
+                    gg.watch(s)
+                    backtr = self.warping.backward(s)
+                dy_dx = gg.batch_jacobian(backtr, s)
+            d2y_dx2 = g.batch_jacobian(dy_dx, s)
+            return backtr, _tf.linalg.diag_part(d2y_dx2)
+
+        dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
+        variance = dist.variance()
+        variance = _tf.transpose(variance, [0, 2, 1])  # [:, None, :, :]
+
+        sims = _tf.unstack(sims, axis=2)
+        y_approx = []
+        for s in sims:
+            backtr, curv = curvature(s)
+            # _tf.print(backtr.shape, curv.shape)
+            sec_order = _tf.reduce_sum(0.5 * curv * variance, axis=-1)
+            y_approx.append(backtr + sec_order)
+        return _tf.stack(y_approx, axis=-1)
 
 
 class MultivariateGaussian(_MultivariateLikelihood):
@@ -627,7 +709,7 @@ class Bernoulli(_Likelihood):
 
         return lik * self.sharpness
 
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+    def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         vals = _tf.expand_dims(_ROOTS_64, axis=0)
         vals = _tf.sqrt(2 * var) * vals + mu  # [n_data, n_vals]
         w = _tf.expand_dims(_WEIGHTS_64, axis=0)
@@ -640,11 +722,17 @@ class Bernoulli(_Likelihood):
         prob = distribution.cdf(vals)
         prob = _tf.reduce_sum(prob * w, axis=1)
 
+        prob = _aggregate(prob, n_splits)
+        mu = _aggregate(mu, n_splits)
+        var = _aggregate(var, n_splits)
+        explained_var = _aggregate(explained_var, n_splits)
+
         entropy = (- prob * _tf.math.log(prob)
                    - (1 - prob) * _tf.math.log(1 - prob)) / _np.log(2)
         uncertainty = _tf.sqrt(_tf.squeeze(var) * entropy)
 
         prob_sims = distribution.cdf(sims)
+        prob_sims = _aggregate(prob_sims, n_splits)
 
         lik_var = prob * (1 - prob)
         weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
@@ -691,7 +779,7 @@ class BernoulliMaximumMargin(_Likelihood):
 
         return lik
 
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+    def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         vals = _tf.expand_dims(_ROOTS_64, axis=0)
         vals = _tf.sqrt(2 * var) * vals + mu  # [n_data, n_vals]
         w = _tf.expand_dims(_WEIGHTS_64, axis=0)
@@ -699,7 +787,16 @@ class BernoulliMaximumMargin(_Likelihood):
         prob = self.cdf(vals)
         prob = _tf.reduce_sum(prob * w, axis=1)
 
+        prob = _aggregate(prob, n_splits)
+        mu = _aggregate(mu, n_splits)
+        var = _aggregate(var, n_splits)
+
+        entropy = (- prob * _tf.math.log(prob)
+                   - (1 - prob) * _tf.math.log(1 - prob)) / _np.log(2)
+        uncertainty = _tf.sqrt(_tf.squeeze(var) * entropy)
+
         prob_sims = self.cdf(sims)
+        prob_sims = _aggregate(prob_sims, n_splits)
 
         lik_var = prob * (1 - prob)
         weights = _tf.squeeze(explained_var) / (lik_var + 1e-6)
@@ -709,6 +806,8 @@ class BernoulliMaximumMargin(_Likelihood):
                "variance": _tf.squeeze(var),
                "simulations": prob_sims[:, 0, :],
                "probability": prob,
+               "entropy": entropy,
+               "uncertainty": uncertainty,
                "weights": _tf.squeeze(weights)}
 
         return out
@@ -865,7 +964,7 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
 
         return log_density * self.sharpness
 
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+    def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         # n_cat = _tf.shape(mu)[1]
         # n_data = _tf.shape(mu)[0]
 
@@ -887,6 +986,12 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
 
         # prob = _tf.nn.softmax(log_prob_positive, axis=1)
         prob = _tf.nn.softmax(log_prob_final, axis=1)
+
+        prob = _aggregate(prob, n_splits)
+        mu = _aggregate(mu, n_splits)
+        var = _aggregate(var, n_splits)
+        explained_var = _aggregate(explained_var, n_splits)
+        sims = _aggregate(sims, n_splits)
 
         entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
             prob, var, explained_var
@@ -1018,7 +1123,7 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
 
         return log_density * self.sharpness
 
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+    def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         # n_data = _tf.shape(mu)[0]
         # mu = _tf.concat([
         #     _tf.ones([n_data, 1], _tf.float64),
@@ -1082,9 +1187,14 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
 
         prob = _tf.nn.softmax(log_prob_final, axis=1)
 
+        prob = _aggregate(prob, n_splits)
+
         entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
             prob, var, explained_var
         )
+
+        mu = _aggregate(mu, n_splits)
+        var = _aggregate(var, n_splits)
 
         output = {"mean": mu,
                   "variance": var,
@@ -1235,7 +1345,7 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
 
         return log_density * self.sharpness
 
-    def predict(self, mu, var, sims, explained_var, *args, **kwargs):
+    def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         mu = mu + (self.levels - 1) / 2
         # var = var * self.levels ** 2
         # explained_var = explained_var * self.levels ** 2
@@ -1255,6 +1365,8 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
             prob.append(dist.survival_function(self.levels - 1))
         prob = _tf.concat(prob, axis=1)
 
+        prob = _aggregate(prob, n_splits)
+
         entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
             prob, var, explained_var
         )
@@ -1262,6 +1374,9 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
         # if self.levels > 1:
         #     mu = mu - thresholds[None, :]
         #     sims = sims - thresholds[None, :, None]
+
+        mu = _aggregate(mu, n_splits)
+        var = _aggregate(var, n_splits)
 
         output = {"mean": _tf.tile(mu, [1, self.levels + 1]),
                   "variance": _tf.tile(var, [1, self.levels + 1]),
