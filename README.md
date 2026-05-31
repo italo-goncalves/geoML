@@ -41,7 +41,7 @@ Dependencies:
 * `scikit-image`
 * `scikit-learn`
 * `tensorflow`
-* `tensorflow-probability`[Beauvoir_G_Nwaila_Prep_V001.ipynb](..%2F..%2FProjetos%2FModelagem%20geol%F3gica%2F2025%20South%20Africa%20-%20Glen%2FIvana_2026_data_revised%2FBeauvoir_G_Nwaila_Prep_V001.ipynb)
+* `tensorflow-probability`
 * `pyvista` and `plotly` for 3D visualization
 
 ## Examples

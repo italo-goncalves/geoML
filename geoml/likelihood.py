@@ -169,7 +169,7 @@ class _ContinuousLikelihood(_Likelihood):
         """
         if warping is None:
             warping = _warp.ZScore(1)
-        super().__init__(warping.size_out, use_monte_carlo)
+        super().__init__(1, use_monte_carlo)
         self.warping = self._register(warping)
         # self._spline = _gint.MonotonicCubicSpline()
         self.sharpness = sharpness

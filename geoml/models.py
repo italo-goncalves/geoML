@@ -910,7 +910,7 @@ class VGPNetwork(_GPModel):
                 )
             return output
 
-    def predict(self, newdata, n_sim=20, include_noise='delta'):
+    def predict(self, newdata, n_sim=20, include_noise='monte_carlo'):
         """
         Makes a prediction on the specified coordinates.
 
@@ -922,7 +922,7 @@ class VGPNetwork(_GPModel):
         n_sim : int
             Number of predictive samples to draw.
         include_noise : str
-            The method to handle the noise. Either 'delta' (default), 'monte_carlo', or None to predict without noise.
+            The method to handle the noise. Either 'monte_carlo' (default), 'delta', or None to predict without noise.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")

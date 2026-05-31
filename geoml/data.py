@@ -868,6 +868,9 @@ class VectorVariable(_Variable):
     def __init__(self, name, coordinates, labels, measurements=None):
         super().__init__(name, coordinates)
 
+        if isinstance(measurements, _pd.DataFrame):
+            measurements = measurements.values
+
         self.labels = labels
         self._length = len(labels)
 
@@ -2401,7 +2404,7 @@ class Grid1D(_GriddedData):
         The number of points in grid.
     """
 
-    def __init__(self, start, n, step=None, end=None, label=None):
+    def __init__(self, start, n, step=None, end=None, labels=None):
         """
         Initializer for Grid1D.
 
@@ -2415,7 +2418,7 @@ class Grid1D(_GriddedData):
             Spacing between grid nodes.
         end :
             Last grid point.
-        label : str
+        labels : str
             The label for the coordinate.
 
 
@@ -2429,11 +2432,11 @@ class Grid1D(_GriddedData):
             step = (end - start) / (n - 1)
         grid = _np.linspace(start, end, n, dtype=float)
 
-        if label is None:
-            label = "X"
-        grid_df = _pd.DataFrame({label: grid})
+        if labels is None:
+            labels = "X"
+        grid_df = _pd.DataFrame({labels: grid})
 
-        super().__init__(grid_df, label)
+        super().__init__(grid_df, labels)
         self.step_size = [step]
         self.grid = [grid]
         self.grid_size = [int(n)]
@@ -2558,7 +2561,7 @@ class Grid1D(_GriddedData):
         n = int(_np.ceil((new_max - new_min)/step)) + 1
 
         label = box.labels[0] if box.labels else None
-        return Grid1D(start=new_min, n=n, step=step, label=label)
+        return Grid1D(start=new_min, n=n, step=step, labels=label)
 
 
 class Grid2D(_GriddedData):
