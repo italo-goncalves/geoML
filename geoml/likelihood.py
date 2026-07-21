@@ -124,7 +124,10 @@ def _aggregate(x, n_splits=None, fun=_tf.reduce_mean):
     if n_splits is None:
         return x
 
-    agg = _tf.stack([fun(y, axis=0) for y in _tf.split(x, n_splits, axis=0)], axis=0)
+    # agg = _tf.stack([fun(y, axis=0) for y in _tf.split(x, n_splits, axis=0)], axis=0)
+    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    agg = _tf.reshape(x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
+    agg = fun(agg, axis=1)
     return agg
 
 
@@ -472,8 +475,8 @@ class _MultivariateLikelihood(_Likelihood):
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
 
-    def white_noise(self, shape, seed, coherent_noise=False, **kwargs):
-        n_data = shape[0] if not coherent_noise else 1
+    def white_noise(self, shape, seed, coherent_noise=False, n_splits=1, **kwargs):
+        n_data = shape[0] if not coherent_noise else _tf.cast(shape[0] / n_splits, _tf.int32)
         n_var = shape[1]
         n_samples = shape[2]
 
@@ -485,6 +488,8 @@ class _MultivariateLikelihood(_Likelihood):
             rnd = _tf.random.uniform([n_data, n_var, n_samples], seed=seed, dtype=_tf.float64)
 
         sample = dist.quantile(rnd)
+        if coherent_noise:
+            sample = _tf.tile(sample, [n_splits, 1, 1])
         return sample
 
     def log_lik(self, mu, var, y, has_value, samples=None,
@@ -518,7 +523,10 @@ class _MultivariateLikelihood(_Likelihood):
 
         if include_noise == 'monte_carlo':
             s = _tf.shape(sims)
-            sims = sims + self.white_noise(s, seed=1234)
+            if n_splits:
+                sims = sims + self.white_noise(s, seed=1234, coherent_noise=True, n_splits=n_splits)
+            else:
+                sims = sims + self.white_noise(s, seed=1234)
             sims = _tf.transpose(sims, [2, 0, 1])
             sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
             sims = _tf.transpose(sims, [1, 2, 0])
