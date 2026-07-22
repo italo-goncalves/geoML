@@ -1,3 +1,22 @@
+## version 0.5.0
+* Memory-efficient data storage: variable arrays are now backed by NumPy in RAM
+or chunked Zarr on disk, chosen automatically by size, so large projects no
+longer need to hold every array in memory
+* Simulations are stored as a single `(n_data, n_sim)` array (a dedicated
+dimension) rather than a list of separate arrays
+* Containers can be persisted to and reloaded from a single Zarr store with
+`to_zarr()` / `open()`, covering all point-based containers and variable types
+* Quantiles and probabilities are computed lazily in a single pass over the
+simulations, without materializing them
+* `reset_probabilities()` is now the inverse of `reset_quantiles()`: it takes
+cutoff values and returns cumulative probabilities in (0, 1)
+* Fixed construction of `OrderedRockType` and rock-type/binary variables from
+string measurements
+* Fixed a bug where a parameter shared between components (e.g. a transform
+reused by several kernels) was counted more than once by `get_parameter_values`
+and `save_state`
+* New dependencies: `zarr`, `xarray`, `dask`
+
 ## version 0.4.1
 * Support for predictions over blocks with discretization
 * Delta method for change of support

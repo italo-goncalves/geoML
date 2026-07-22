@@ -31,6 +31,7 @@ class Parametric(object):
     def __init__(self):
         self.parameters = {}
         self._all_parameters = []
+        self._param_ids = set()  # identities already in _all_parameters
 
     def pretty_print(self, depth=0):
         raise NotImplementedError()
@@ -42,12 +43,22 @@ class Parametric(object):
     def all_parameters(self):
         return self._all_parameters
 
+    def _append_unique(self, parameter):
+        # A parameter shared between two children (e.g. a transform reused by
+        # several kernels) would otherwise appear more than once in the flat
+        # list, inflating get_parameter_values / save_state and the reported
+        # degrees of freedom. Keep each identity once.
+        if id(parameter) not in self._param_ids:
+            self._param_ids.add(id(parameter))
+            self._all_parameters.append(parameter)
+
     def _add_parameter(self, name, parameter):
         self.parameters[name] = parameter
-        self._all_parameters.append(parameter)
+        self._append_unique(parameter)
 
     def _register(self, parametric):
-        self._all_parameters.extend(parametric.all_parameters)
+        for parameter in parametric.all_parameters:
+            self._append_unique(parameter)
         return parametric
 
     def _set_parameters(self):
