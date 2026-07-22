@@ -2370,6 +2370,15 @@ class GradientConstrainedInput(_RootLatentVariable):
             # )
             # self.inducing_points_variance = _tf.transpose(pred_var[:, self.n_dir:])
 
+    def cache_prediction_state(self):
+        super().cache_prediction_state()
+        self.scale = self._cache_tuple("scale", self.scale)
+        self.alpha = self._cache_tuple("alpha", self.alpha)
+        self.cov_inv = self._cache_tuple("cov_inv", self.cov_inv)
+        self.cov_smooth_inv = self._cache_tuple(
+            "cov_smooth_inv", self.cov_smooth_inv)
+        self.chol_r = self._cache_tuple("chol_r", self.chol_r)
+
     def propagate(self, x, x_var=None):
         mu, var = self.predict(x, x_var, n_sim=0)
         mu = _tf.transpose(mu[:, :, 0])
