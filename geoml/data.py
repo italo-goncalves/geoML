@@ -43,6 +43,7 @@ import geoml.tftools as _tftools
 import geoml.metrics as _gmlmetrics
 import geoml.geometry as _gmt
 import geoml.storage as _storage
+import zarr as _zarr
 
 
 class NoDataError(Exception):
@@ -1977,6 +1978,43 @@ class _SpatialData(object):
             raise ValueError("bounding_box only available for 2- and "
                              "3-dimensional data objects")
 
+    def to_zarr(self, path):
+        """Persist this container to a single on-disk Zarr store.
+
+        Coordinates and every variable's arrays are written into one Zarr group
+        at ``path``, streamed chunk-by-chunk (never fully materialized), along
+        with the metadata needed to rebuild the container with :meth:`open`.
+        Grid families and plain ``PointData`` are supported as containers; only
+        plain ``ContinuousVariable``s are supported so far, other variable types
+        raise ``NotImplementedError``.
+        """
+        group = _zarr.open_group(path, mode="w")
+        meta = {"geoml_format": _GEOML_ZARR_FORMAT,
+                "container": _container_init_metadata(self),
+                "variables": {}}
+        if meta["container"]["class"] == "PointData":
+            _storage.ArrayStore.from_numpy(
+                self.coordinates).write_into(group, "_coordinates")
+        for name, var in self.variables.items():
+            meta["variables"][name] = _write_variable(group, var)
+        group.attrs["geoml"] = meta
+        return path
+
+    @classmethod
+    def open(cls, path):
+        """Rebuild a container previously saved with :meth:`to_zarr`.
+
+        The stored container type is honoured regardless of which class ``open``
+        is called on. Variable arrays are reopened on disk (read/write), so the
+        result can be inspected or predicted into again without recomputing.
+        """
+        group = _zarr.open_group(path, mode="r+")
+        meta = dict(group.attrs["geoml"])
+        container = _rebuild_container(meta["container"], group)
+        for vmeta in meta["variables"].values():
+            _rebuild_variable(container, group, vmeta)
+        return container
+
 
 class _PointBased(_SpatialData):
     """Abstract class for data objects based on points"""
@@ -3847,4 +3885,122 @@ class RotatedGrid3D(Grid3D):
         origin = _np.round(origin, rounding_decimals)
 
         return RotatedGrid3D(start=origin, n=n, step=step, azimuth=az, dip=dip, rake=rake, labels=labels)
+
+
+# --------------------------------------------------------------------------- #
+# Zarr persistence (see _SpatialData.to_zarr / _SpatialData.open)
+# --------------------------------------------------------------------------- #
+_GEOML_ZARR_FORMAT = 1
+
+
+def _container_init_metadata(container):
+    """JSON-able reconstruction info for a supported spatial container."""
+    if isinstance(container, (Grid1D, Grid2D, Grid3D, GridND)):
+        meta = {
+            "class": type(container).__name__,
+            "start": [float(axis[0]) for axis in container.grid],
+            "n": [int(x) for x in container.grid_size],
+            "step": [float(s) for s in _np.atleast_1d(container.step_size)],
+            "labels": [str(lb) for lb in container.coordinate_labels],
+        }
+        if isinstance(container, (Blocks1D, Blocks2D, Blocks3D)):
+            meta["discretization"] = [int(d) for d in container.discretization]
+        if isinstance(container, RotatedGrid3D):
+            meta["azimuth"] = float(container.azimuth)
+            meta["dip"] = float(container.dip)
+            meta["rake"] = float(container.rake)
+        return meta
+    if type(container) is PointData:
+        return {"class": "PointData",
+                "labels": [str(lb) for lb in container.coordinate_labels]}
+    raise NotImplementedError(
+        f"to_zarr does not yet support container type "
+        f"'{type(container).__name__}'")
+
+
+def _rebuild_container(meta, group):
+    cls_name = meta["class"]
+    if cls_name == "PointData":
+        coords = _np.asarray(_storage.ArrayStore.wrap_zarr(group["_coordinates"]))
+        return PointData.from_array(coords, meta["labels"])
+
+    classes = {"Grid1D": Grid1D, "Grid2D": Grid2D, "Grid3D": Grid3D,
+               "GridND": GridND, "Blocks1D": Blocks1D, "Blocks2D": Blocks2D,
+               "Blocks3D": Blocks3D, "RotatedGrid3D": RotatedGrid3D}
+    if cls_name not in classes:
+        raise NotImplementedError(
+            f"open does not support container type '{cls_name}'")
+
+    start, n, step = meta["start"], meta["n"], meta["step"]
+    if cls_name in ("Grid1D", "Blocks1D"):
+        # 1D grids take scalar start/n/step.
+        start, n, step = start[0], n[0], step[0]
+    kwargs = {"start": start, "n": n, "step": step, "labels": meta["labels"]}
+    if "discretization" in meta:
+        kwargs["discretization"] = meta["discretization"]
+    if cls_name == "RotatedGrid3D":
+        kwargs.update(azimuth=meta["azimuth"], dip=meta["dip"], rake=meta["rake"])
+    return classes[cls_name](**kwargs)
+
+
+def _write_variable(group, variable):
+    """Write a variable's arrays into ``group`` and return its metadata."""
+    if type(variable) is not ContinuousVariable:
+        raise NotImplementedError(
+            f"to_zarr does not yet support variable type "
+            f"'{type(variable).__name__}' (only ContinuousVariable)")
+
+    name = variable.name
+    vmeta = {"class": "ContinuousVariable", "name": name, "arrays": {}}
+    for role in ("measurements", "latent_mean", "latent_variance", "prediction"):
+        key = f"{name}/{role}"
+        getattr(variable, role).values.write_into(group, key)
+        vmeta["arrays"][role] = key
+
+    if variable.simulations is not None:
+        key = f"{name}/simulations"
+        variable.simulations.write_into(group, key)
+        vmeta["simulations"] = key
+    else:
+        vmeta["simulations"] = None
+
+    vmeta["quantiles"] = []
+    for p, attr in variable.quantiles.items():
+        key = f"{name}/quantile_{p}"
+        attr.values.write_into(group, key)
+        vmeta["quantiles"].append({"key": key, "p": float(p)})
+
+    vmeta["probabilities"] = []
+    for q, attr in variable.probabilities.items():
+        key = f"{name}/probability_{q}"
+        attr.values.write_into(group, key)
+        vmeta["probabilities"].append({"key": key, "q": float(q)})
+
+    return vmeta
+
+
+def _rebuild_variable(container, group, vmeta):
+    if vmeta["class"] != "ContinuousVariable":
+        raise NotImplementedError(
+            f"open does not support variable type '{vmeta['class']}'")
+
+    name = vmeta["name"]
+    container.add_continuous_variable(name)
+    var = container.variables[name]
+
+    for role, key in vmeta["arrays"].items():
+        getattr(var, role).values = _storage.ArrayStore.wrap_zarr(group[key])
+
+    if vmeta.get("simulations") is not None:
+        var.simulations = _storage.ArrayStore.wrap_zarr(group[vmeta["simulations"]])
+
+    for info in vmeta.get("quantiles", []):
+        attr = var._Attribute(container)
+        attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
+        var.quantiles[info["p"]] = attr
+
+    for info in vmeta.get("probabilities", []):
+        attr = var._Attribute(container)
+        attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
+        var.probabilities[info["q"]] = attr
 

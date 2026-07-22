@@ -151,6 +151,29 @@ class ArrayStore:
         return cls(_zarr.open_array(path, mode=mode), backend="zarr",
                    store_path=path)
 
+    @classmethod
+    def wrap_zarr(cls, zarr_array):
+        """Wrap an already-open Zarr array (e.g. a child of a reopened group)."""
+        return cls(zarr_array, backend="zarr",
+                   store_path=getattr(zarr_array, "store_path", None))
+
+    def write_into(self, group, name):
+        """Stream this store into a new array ``name`` of an open Zarr group.
+
+        The copy is chunk-by-chunk via dask, so a large on-disk source is never
+        fully materialized. Returns the created Zarr array.
+        """
+        if self._backend == "zarr":
+            chunks = self._array.chunks
+        else:
+            chunks = _leading_chunk(self.shape, self.dtype)
+        fill = _np.nan if _np.issubdtype(_np.dtype(self.dtype), _np.floating) else 0
+        target = group.create_array(
+            name=name, shape=self.shape, chunks=chunks,
+            dtype=_np.dtype(self.dtype), fill_value=fill)
+        _da.store(self.as_dask(), target, lock=False)
+        return target
+
     # ------------------------------------------------------------------ #
     # ndarray-compatible surface
     # ------------------------------------------------------------------ #
