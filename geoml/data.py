@@ -2117,17 +2117,14 @@ class _SpatialData(object):
         Coordinates and every variable's arrays are written into one Zarr group
         at ``path``, streamed chunk-by-chunk (never fully materialized), along
         with the metadata needed to rebuild the container with :meth:`open`.
-        Grid families and plain ``PointData`` are supported as containers; only
-        plain ``ContinuousVariable``s are supported so far, other variable types
-        raise ``NotImplementedError``.
+        All point-based containers and variable types are supported;
+        ``DrillholeData`` is not (it is raw input data, not a prediction
+        target).
         """
         group = _zarr.open_group(path, mode="w")
         meta = {"geoml_format": _GEOML_ZARR_FORMAT,
-                "container": _container_init_metadata(self),
+                "container": _write_container(group, self),
                 "variables": {}}
-        if meta["container"]["class"] == "PointData":
-            _storage.ArrayStore.from_numpy(
-                self.coordinates).write_into(group, "_coordinates")
         for name, var in self.variables.items():
             meta["variables"][name] = _write_variable(group, var)
         group.attrs["geoml"] = meta
@@ -4026,8 +4023,14 @@ class RotatedGrid3D(Grid3D):
 _GEOML_ZARR_FORMAT = 1
 
 
-def _container_init_metadata(container):
-    """JSON-able reconstruction info for a supported spatial container."""
+def _write_container(group, container):
+    """Write a container's auxiliary arrays into ``group`` and return its
+    JSON-able reconstruction metadata.
+
+    Grid families are rebuilt from their construction parameters; point-based
+    containers store their raw arrays. ``DrillholeData`` is not supported (it is
+    raw input data, not a prediction target).
+    """
     if isinstance(container, (Grid1D, Grid2D, Grid3D, GridND)):
         meta = {
             "class": type(container).__name__,
@@ -4043,9 +4046,39 @@ def _container_init_metadata(container):
             meta["dip"] = float(container.dip)
             meta["rake"] = float(container.rake)
         return meta
+
+    def write(name, array):
+        _storage.ArrayStore.from_numpy(_np.asarray(array)).write_into(
+            group, name)
+
     if type(container) is PointData:
+        write("_coordinates", container.coordinates)
         return {"class": "PointData",
                 "labels": [str(lb) for lb in container.coordinate_labels]}
+    if type(container) is GaussianData:
+        write("_coordinates", container.coordinates)
+        write("_variance", container.variance)
+        return {"class": "GaussianData",
+                "labels": [str(lb) for lb in container.coordinate_labels]}
+    if type(container) is DirectionalData:
+        write("_coordinates", container.coordinates)
+        write("_directions", container.directions)
+        return {"class": "DirectionalData",
+                "labels": [str(lb) for lb in container.coordinate_labels],
+                "direction_labels":
+                    [str(lb) for lb in container.direction_labels]}
+    if type(container) is Section3D:
+        # The construction parameters (center, azimuth, ...) are not kept on
+        # the instance, so the rotated coordinates are stored directly.
+        write("_coordinates", container.coordinates)
+        return {"class": "Section3D",
+                "labels": [str(lb) for lb in container.coordinate_labels],
+                "grid_shape": [int(x) for x in container.grid_shape]}
+    if type(container) is Surface3D:
+        write("_coordinates", container.coordinates)
+        write("_triangles", container.triangles)
+        write("_normals", container.normals)
+        return {"class": "Surface3D"}
     raise NotImplementedError(
         f"to_zarr does not yet support container type "
         f"'{type(container).__name__}'")
@@ -4053,9 +4086,36 @@ def _container_init_metadata(container):
 
 def _rebuild_container(meta, group):
     cls_name = meta["class"]
+
+    def read(name):
+        return _np.asarray(_storage.ArrayStore.wrap_zarr(group[name]))
+
     if cls_name == "PointData":
-        coords = _np.asarray(_storage.ArrayStore.wrap_zarr(group["_coordinates"]))
-        return PointData.from_array(coords, meta["labels"])
+        return PointData.from_array(read("_coordinates"), meta["labels"])
+    if cls_name == "GaussianData":
+        return GaussianData.from_array(
+            read("_coordinates"), read("_variance"), meta["labels"])
+    if cls_name == "DirectionalData":
+        labels = meta["labels"]
+        dir_labels = meta["direction_labels"]
+        df = _pd.concat([
+            _pd.DataFrame(read("_coordinates"), columns=labels),
+            _pd.DataFrame(read("_directions"), columns=dir_labels),
+        ], axis=1)
+        return DirectionalData(df, labels, dir_labels)
+    if cls_name == "Section3D":
+        # Bypass Section3D.__init__ (which needs the discarded construction
+        # parameters) and initialize the PointData layer directly.
+        section = Section3D.__new__(Section3D)
+        labels = meta["labels"]
+        PointData.__init__(
+            section, _pd.DataFrame(read("_coordinates"), columns=labels),
+            labels)
+        section.grid_shape = [int(x) for x in meta["grid_shape"]]
+        return section
+    if cls_name == "Surface3D":
+        return Surface3D(read("_coordinates"), read("_triangles"),
+                         read("_normals"))
 
     classes = {"Grid1D": Grid1D, "Grid2D": Grid2D, "Grid3D": Grid3D,
                "GridND": GridND, "Blocks1D": Blocks1D, "Blocks2D": Blocks2D,

@@ -113,6 +113,91 @@ def test_open_honours_stored_type_over_calling_class(tmp_path):
     assert isinstance(reloaded, geoml.data.Grid2D)
 
 
+def test_gaussian_data_roundtrip(tmp_path):
+    coords = np.random.uniform(0, 100, (12, 2))
+    variance = np.random.random((12, 2))
+    gauss = geoml.data.GaussianData.from_array(coords, variance, ["c0", "c1"])
+    gauss.add_continuous_variable("v", np.random.random(12))
+
+    path = str(tmp_path / "gauss.zarr")
+    gauss.to_zarr(path)
+    reloaded = geoml.data.PointData.open(path)
+
+    assert isinstance(reloaded, geoml.data.GaussianData)
+    assert np.allclose(reloaded.coordinates, gauss.coordinates)
+    assert np.allclose(reloaded.variance, variance)
+    assert np.allclose(
+        np.asarray(reloaded.variables["v"].measurements.values),
+        np.asarray(gauss.variables["v"].measurements.values))
+
+
+def test_directional_data_roundtrip_and_predict(tmp_path):
+    model, _ = _model_and_grid()
+    n = 15
+    df = pd.DataFrame({
+        "c0": np.random.uniform(0, 100, n),
+        "c1": np.random.uniform(0, 100, n),
+        "dx": np.ones(n), "dy": np.zeros(n)})
+    dirs = geoml.data.DirectionalData(df, ["c0", "c1"], ["dx", "dy"])
+    model.predict(dirs, n_sim=3)
+    mean = np.asarray(dirs.variables["v"].latent_mean.values).copy()
+
+    path = str(tmp_path / "dirs.zarr")
+    dirs.to_zarr(path)
+    reloaded = geoml.data.PointData.open(path)
+
+    assert isinstance(reloaded, geoml.data.DirectionalData)
+    assert reloaded.direction_labels == ["dx", "dy"]
+    assert np.allclose(reloaded.directions, dirs.directions)
+    assert np.allclose(
+        np.asarray(reloaded.variables["v"].latent_mean.values), mean)
+
+    model.predict(reloaded, n_sim=3)     # resume-predict must not raise
+    assert np.all(np.isfinite(
+        np.asarray(reloaded.variables["v"].latent_mean.values)))
+
+
+def test_section3d_roundtrip(tmp_path):
+    section = geoml.data.Section3D(
+        center=[50, 50, 50], azimuth=30, dip=20,
+        width=80, height=60, n_x=8, n_y=6)
+    section.add_continuous_variable("v")
+    section.variables["v"].prediction.values[:] = \
+        np.random.random(section.n_data)
+    pred = np.asarray(section.variables["v"].prediction.values).copy()
+
+    path = str(tmp_path / "section.zarr")
+    section.to_zarr(path)
+    reloaded = geoml.data.PointData.open(path)
+
+    assert isinstance(reloaded, geoml.data.Section3D)
+    assert reloaded.grid_shape == [8, 6]
+    assert np.allclose(reloaded.coordinates, section.coordinates)
+    assert np.allclose(
+        np.asarray(reloaded.variables["v"].prediction.values), pred)
+    reloaded.as_pyvista()                # grid_shape-dependent path works
+
+
+def test_surface3d_roundtrip(tmp_path):
+    points = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 1]])
+    triangles = np.array([[0, 1, 2], [1, 3, 2]])
+    normals = np.array([[0.0, 0, 1], [0, 0, 1]])
+    surf = geoml.data.Surface3D(points, triangles, normals)
+    surf.add_continuous_variable("v", np.random.random(4))
+
+    path = str(tmp_path / "surf.zarr")
+    surf.to_zarr(path)
+    reloaded = geoml.data.PointData.open(path)
+
+    assert isinstance(reloaded, geoml.data.Surface3D)
+    assert np.allclose(reloaded.coordinates, points)
+    assert np.array_equal(reloaded.triangles, triangles)
+    assert np.allclose(reloaded.normals, normals)
+    assert np.allclose(
+        np.asarray(reloaded.variables["v"].measurements.values),
+        np.asarray(surf.variables["v"].measurements.values))
+
+
 def test_unsupported_variable_type_raises(tmp_path):
     point = geoml.data.PointData(
         pd.DataFrame({"c0": [1.0, 2.0, 3.0], "c1": [3.0, 4.0, 5.0]}),
