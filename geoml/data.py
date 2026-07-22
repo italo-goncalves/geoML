@@ -279,6 +279,92 @@ class _Variable(object):
     def compute_metrics(self, **kwargs):
         raise NotImplementedError
 
+    # ------------------------------------------------------------------ #
+    # Zarr persistence (see _SpatialData.to_zarr / _SpatialData.open)
+    # ------------------------------------------------------------------ #
+    # Scalar ``_Attribute`` roles to persist; overridden per subclass.
+    _ZARR_ATTRS = ()
+    _ZARR_HAS_SIMS = False        # has a (n_data, n_sim) simulations store
+    _ZARR_HAS_QUANTILES = False   # has quantiles / probabilities dicts
+
+    def _save_attr(self, group, prefix, role):
+        """Write one ``_Attribute``'s store into ``group``; None-valued -> skip.
+
+        String/object attributes are stored as fixed-length unicode; everything
+        else is streamed as a numeric/bool Zarr array.
+        """
+        attr = getattr(self, role, None)
+        if attr is None:
+            return None
+        key = prefix + "/" + role
+        store = attr.values
+        if _np.dtype(store.dtype) == object:
+            unicode = _np.asarray(store).astype(str)
+            if unicode.dtype.itemsize == 0:
+                unicode = unicode.astype("<U1")
+            target = group.create_array(
+                name=key, shape=unicode.shape, chunks=unicode.shape,
+                dtype=unicode.dtype)
+            target[:] = unicode
+            return {"key": key, "encoding": "str"}
+        store.write_into(group, key)
+        return {"key": key, "encoding": "array"}
+
+    def _load_attr(self, group, info):
+        z = group[info["key"]]
+        if info["encoding"] == "str":
+            return _storage.ArrayStore.from_numpy(
+                _np.asarray(z[:]).astype(object))
+        return _storage.ArrayStore.wrap_zarr(z)
+
+    def _zarr_save(self, group, prefix):
+        meta = {"class": type(self).__name__, "name": self.name, "attrs": {}}
+        if hasattr(self, "labels"):
+            meta["labels"] = [str(x) for x in self.labels]
+        for role in self._ZARR_ATTRS:
+            info = self._save_attr(group, prefix, role)
+            if info is not None:
+                meta["attrs"][role] = info
+        if self._ZARR_HAS_SIMS and self.simulations is not None:
+            key = prefix + "/simulations"
+            self.simulations.write_into(group, key)
+            meta["simulations"] = key
+        if self._ZARR_HAS_QUANTILES:
+            meta["quantiles"] = []
+            for p, attr in self.quantiles.items():
+                key = prefix + "/quantile_" + str(p)
+                attr.values.write_into(group, key)
+                meta["quantiles"].append({"key": key, "p": float(p)})
+            meta["probabilities"] = []
+            for q, attr in self.probabilities.items():
+                key = prefix + "/probability_" + str(q)
+                attr.values.write_into(group, key)
+                meta["probabilities"].append({"key": key, "q": float(q)})
+        if getattr(self, "components", None):
+            meta["components"] = {}
+            for cname, comp in self.components.items():
+                meta["components"][cname] = comp._zarr_save(
+                    group, prefix + "/" + str(cname))
+        return meta
+
+    def _zarr_load(self, group, prefix, meta):
+        for role, info in meta.get("attrs", {}).items():
+            getattr(self, role).values = self._load_attr(group, info)
+        if meta.get("simulations") is not None:
+            self.simulations = _storage.ArrayStore.wrap_zarr(
+                group[meta["simulations"]])
+        for info in meta.get("quantiles", []):
+            attr = self._Attribute(self.coordinates)
+            attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
+            self.quantiles[info["p"]] = attr
+        for info in meta.get("probabilities", []):
+            attr = self._Attribute(self.coordinates)
+            attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
+            self.probabilities[info["q"]] = attr
+        for cname, cmeta in meta.get("components", {}).items():
+            self.components[cname]._zarr_load(
+                group, prefix + "/" + str(cname), cmeta)
+
     class _Attribute(object):
         """A specific sequence of variable values, tied to data locations."""
 
@@ -574,6 +660,10 @@ class ContinuousVariable(_Variable):
         Cumulative distribution probabilities, indexed by the corresponding
         quantile.
     """
+    _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance", "prediction")
+    _ZARR_HAS_SIMS = True
+    _ZARR_HAS_QUANTILES = True
+
     def __init__(self, name, coordinates, measurements=None):
         super().__init__(name, coordinates)
 
@@ -883,6 +973,8 @@ class ContinuousVariable(_Variable):
 
 
 class VectorVariable(_Variable):
+    _ZARR_ATTRS = ("uncertainty",)
+
     def __init__(self, name, coordinates, labels, measurements=None):
         super().__init__(name, coordinates)
 
@@ -1202,6 +1294,10 @@ class CompositionalVariable(VectorVariable):
 
 
 class _Category(_Variable):
+    _ZARR_ATTRS = ("probability", "indicator", "indicator_mean",
+                   "indicator_variance", "indicator_predicted")
+    _ZARR_HAS_SIMS = True
+
     def __init__(self, name, coordinates, indicator):
         super().__init__(name, coordinates)
         n_data = coordinates.n_data
@@ -1211,7 +1307,7 @@ class _Category(_Variable):
         self.indicator_mean = self._Attribute(coordinates)
         self.indicator_variance = self._Attribute(coordinates)
         self.indicator_predicted = self._Attribute(coordinates)
-        self.simulations = []
+        self.simulations = None
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
@@ -1221,8 +1317,9 @@ class _Category(_Variable):
         new_obj.indicator_variance = self.indicator_variance[item]
         new_obj.indicator_predicted = self.indicator_predicted[item]
 
-        for i, sim in enumerate(self.simulations):
-            new_obj.simulations[i].values = sim.values[item]
+        if self.simulations is not None:
+            new_obj.simulations = _storage.ArrayStore.from_numpy(
+                _np.asarray(self.simulations)[item])
 
         return new_obj
 
@@ -1232,9 +1329,6 @@ class _Category(_Variable):
         self.indicator_mean.coordinates = coordinates
         self.indicator_variance.coordinates = coordinates
         self.indicator_predicted.coordinates = coordinates
-
-        for sim in self.simulations:
-            sim.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
                       latent=True, simulations=False):
@@ -1253,9 +1347,9 @@ class _Category(_Variable):
             df[self.name + "_indicator_predicted"] = \
                 self.indicator_predicted.values
 
-        if simulations:
-            for i, sim in enumerate(self.simulations):
-                df[self.name + "_sim_" + str(i)] = sim.values
+        if simulations and self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                df[self.name + "_sim_" + str(i)] = self.simulations[:, i]
 
         return df
 
@@ -1265,13 +1359,11 @@ class _Category(_Variable):
         self.indicator_variance.values[idx] = kwargs["variance"].numpy()
         self.probability.values[idx] = kwargs["probability"].numpy()
 
-        sims = kwargs["simulations"].numpy()
-        for s in range(sims.shape[1]):
-            self.simulations[s].values[idx] = sims[:, s]
+        self.simulations[idx, :] = kwargs["simulations"].numpy()
 
     def allocate_simulations(self, n_sim):
-        self.simulations = [self._Attribute(self.coordinates)
-                            for _ in range(n_sim)]
+        self.simulations = _storage.ArrayStore.allocate(
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
 
     def fill_pyvista_cube(self, cube, prefix=None):
         label = prefix + " - " + self.name
@@ -1287,9 +1379,10 @@ class _Category(_Variable):
         self.probability.fill_pyvista_cube(
             cube, label + " - probability")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_cube(
-                cube, label + " - simulation %d" % i)
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_cube(cube, label + " - simulation %d" % i)
 
     def fill_pyvista_points(self, points, prefix=None):
         label = prefix + " - " + self.name
@@ -1305,9 +1398,10 @@ class _Category(_Variable):
         self.probability.fill_pyvista_points(
             points, label + " - probability")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_points(
-                points, label + " - simulation %d" % i)
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_points(points, label + " - simulation %d" % i)
 
     def fill_pyvista_blocks(self, cube, prefix=None):
         label = prefix + " - " + self.name
@@ -1323,12 +1417,16 @@ class _Category(_Variable):
         self.probability.fill_pyvista_blocks(
             cube, label + " - probability")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_blocks(
-                cube, label + " - simulation %d" % i)
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_blocks(cube, label + " - simulation %d" % i)
 
 
 class RockTypeVariable(_Variable):
+    _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
+                   "measurements_a", "measurements_b", "boundary")
+
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
                  measurements_b=None):
         if measurements_b is None:
@@ -1689,6 +1787,11 @@ class OrderedRockType(RockTypeVariable):
 
 
 class BinaryVariable(_Variable):
+    _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
+                   "probability", "entropy", "uncertainty",
+                   "latent_mean", "latent_variance")
+    _ZARR_HAS_SIMS = True
+
     def __init__(self, name, coordinates, labels=None, measurements=None):
         super().__init__(name, coordinates)
         n_data = coordinates.n_data
@@ -1727,7 +1830,7 @@ class BinaryVariable(_Variable):
         self.latent_mean = self._Attribute(coordinates)
         self.latent_variance = self._Attribute(coordinates)
 
-        self.simulations = []
+        self.simulations = None
 
         if measurements is not None:
             for label in labels:
@@ -1760,8 +1863,9 @@ class BinaryVariable(_Variable):
         new_obj.measurements = self.measurements[item]
         new_obj.weights = self.weights[item]
 
-        for i, sim in enumerate(self.simulations):
-            new_obj.simulations[i].values = sim.values[item]
+        if self.simulations is not None:
+            new_obj.simulations = _storage.ArrayStore.from_numpy(
+                _np.asarray(self.simulations)[item])
 
         return new_obj
 
@@ -1776,9 +1880,6 @@ class BinaryVariable(_Variable):
         self.uncertainty.coordinates = coordinates
         self.measurements.coordinates = coordinates
         self.weights.coordinates = coordinates
-
-        for sim in self.simulations:
-            sim.coordinates = coordinates
 
     def as_data_frame(self, measurements=True, latent=True,
                       predictions=True, simulations=True):
@@ -1798,9 +1899,9 @@ class BinaryVariable(_Variable):
             df[self.name + "_latent_mean"] = self.latent_mean.values
             df[self.name + "_latent_variance"] = self.latent_variance.values
 
-        if simulations:
-            for i, sim in enumerate(self.simulations):
-                df[self.name + "_sim_" + str(i)] = sim.values
+        if simulations and self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                df[self.name + "_sim_" + str(i)] = self.simulations[:, i]
 
         return df
 
@@ -1830,12 +1931,11 @@ class BinaryVariable(_Variable):
         self.uncertainty.values[idx] = uncertainty
         self.probability.values[idx] = prob
 
-        for s in range(sims.shape[1]):
-            self.simulations[s].values[idx] = sims[:, s]
+        self.simulations[idx, :] = sims
 
     def allocate_simulations(self, n_sim):
-        self.simulations = [self._Attribute(self.coordinates)
-                            for _ in range(n_sim)]
+        self.simulations = _storage.ArrayStore.allocate(
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, col, positive_class):
@@ -1870,9 +1970,10 @@ class BinaryVariable(_Variable):
         self.uncertainty.fill_pyvista_cube(
             cube, self.name + " - uncertainty")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_cube(
-                cube, self.name + " - simulation %d" % i)
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_cube(cube, self.name + " - simulation %d" % i)
 
     def fill_pyvista_points(self, points, prefix=None):
         self.indicator.fill_pyvista_points(
@@ -1890,9 +1991,10 @@ class BinaryVariable(_Variable):
         self.uncertainty.fill_pyvista_points(
             points, self.name + " - uncertainty")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_points(
-                points, self.name + " - simulation %d" % i)
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_points(points, self.name + " - simulation %d" % i)
 
     def fill_pyvista_blocks(self, cube, prefix=None):
         self.indicator.fill_pyvista_blocks(
@@ -1910,9 +2012,10 @@ class BinaryVariable(_Variable):
         self.uncertainty.fill_pyvista_blocks(
             cube, self.name + " - uncertainty")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_blocks(
-                cube, self.name + " - simulation %d" % i)
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_blocks(cube, self.name + " - simulation %d" % i)
 
 
 class AnomalyVariable(BinaryVariable):
@@ -3943,64 +4046,47 @@ def _rebuild_container(meta, group):
     return classes[cls_name](**kwargs)
 
 
+def _supported_top_variables():
+    """Top-level variable classes that ``to_zarr``/``open`` can round-trip.
+
+    ``OrderedRockType`` is excluded (its constructor needs measurements to build
+    the implicit values); the internal ``_Category``/``_Component`` are only
+    persisted recursively as components, never at the top level.
+    """
+    return (ContinuousVariable, VectorVariable, CompositionalVariable,
+            RockTypeVariable, CategoricalVariable, BinaryVariable,
+            AnomalyVariable)
+
+
 def _write_variable(group, variable):
-    """Write a variable's arrays into ``group`` and return its metadata."""
-    if type(variable) is not ContinuousVariable:
+    """Write a variable into ``group`` and return its reconstruction metadata."""
+    if type(variable) not in _supported_top_variables():
         raise NotImplementedError(
             f"to_zarr does not yet support variable type "
-            f"'{type(variable).__name__}' (only ContinuousVariable)")
-
-    name = variable.name
-    vmeta = {"class": "ContinuousVariable", "name": name, "arrays": {}}
-    for role in ("measurements", "latent_mean", "latent_variance", "prediction"):
-        key = f"{name}/{role}"
-        getattr(variable, role).values.write_into(group, key)
-        vmeta["arrays"][role] = key
-
-    if variable.simulations is not None:
-        key = f"{name}/simulations"
-        variable.simulations.write_into(group, key)
-        vmeta["simulations"] = key
-    else:
-        vmeta["simulations"] = None
-
-    vmeta["quantiles"] = []
-    for p, attr in variable.quantiles.items():
-        key = f"{name}/quantile_{p}"
-        attr.values.write_into(group, key)
-        vmeta["quantiles"].append({"key": key, "p": float(p)})
-
-    vmeta["probabilities"] = []
-    for q, attr in variable.probabilities.items():
-        key = f"{name}/probability_{q}"
-        attr.values.write_into(group, key)
-        vmeta["probabilities"].append({"key": key, "q": float(q)})
-
-    return vmeta
+            f"'{type(variable).__name__}'")
+    return variable._zarr_save(group, variable.name)
 
 
 def _rebuild_variable(container, group, vmeta):
-    if vmeta["class"] != "ContinuousVariable":
+    cls_name, name = vmeta["class"], vmeta["name"]
+    labels = vmeta.get("labels")
+    if cls_name == "ContinuousVariable":
+        container.add_continuous_variable(name)
+    elif cls_name == "VectorVariable":
+        container.add_vector_variable(name, labels=labels)
+    elif cls_name == "CompositionalVariable":
+        container.add_compositional_variable(name, labels=labels)
+    elif cls_name == "CategoricalVariable":
+        container.add_categorical_variable(name, labels=labels)
+    elif cls_name == "RockTypeVariable":
+        container.add_rock_type_variable(name, labels=labels)
+    elif cls_name == "BinaryVariable":
+        container.add_binary_variable(name, labels=labels)
+    elif cls_name == "AnomalyVariable":
+        container.add_anomaly_variable(name, label=labels[0])
+    else:
         raise NotImplementedError(
-            f"open does not support variable type '{vmeta['class']}'")
+            f"open does not support variable type '{cls_name}'")
 
-    name = vmeta["name"]
-    container.add_continuous_variable(name)
-    var = container.variables[name]
-
-    for role, key in vmeta["arrays"].items():
-        getattr(var, role).values = _storage.ArrayStore.wrap_zarr(group[key])
-
-    if vmeta.get("simulations") is not None:
-        var.simulations = _storage.ArrayStore.wrap_zarr(group[vmeta["simulations"]])
-
-    for info in vmeta.get("quantiles", []):
-        attr = var._Attribute(container)
-        attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-        var.quantiles[info["p"]] = attr
-
-    for info in vmeta.get("probabilities", []):
-        attr = var._Attribute(container)
-        attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-        var.probabilities[info["q"]] = attr
+    container.variables[name]._zarr_load(group, name, vmeta)
 

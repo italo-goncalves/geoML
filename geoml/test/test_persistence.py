@@ -117,7 +117,10 @@ def test_unsupported_variable_type_raises(tmp_path):
     point = geoml.data.PointData(
         pd.DataFrame({"c0": [1.0, 2.0, 3.0], "c1": [3.0, 4.0, 5.0]}),
         ["c0", "c1"])
-    point.add_vector_variable(
-        "vec", labels=["a", "b"], measurements=np.random.random((3, 2)))
+
+    class _Unsupported(geoml.data._Variable):
+        pass
+
+    point.variables["u"] = _Unsupported("u", point)
     with pytest.raises(NotImplementedError):
-        point.to_zarr(str(tmp_path / "vec.zarr"))
+        point.to_zarr(str(tmp_path / "u.zarr"))
