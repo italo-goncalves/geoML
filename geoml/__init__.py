@@ -13,6 +13,7 @@ __all__ = [
     'plotly',
     'probability',
     'pyvista',
+    'storage',
     'tftools',
     'transform',
     'warping',

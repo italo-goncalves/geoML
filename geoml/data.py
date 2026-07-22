@@ -42,6 +42,7 @@ import geoml.plotly as _py
 import geoml.tftools as _tftools
 import geoml.metrics as _gmlmetrics
 import geoml.geometry as _gmt
+import geoml.storage as _storage
 
 
 class NoDataError(Exception):
@@ -287,29 +288,46 @@ class _Variable(object):
                 dtype = float
 
             if values is None:
-                values = _np.array([_np.nan] * coordinates.n_data,
-                                   dtype=dtype)
-            values = _np.array(values, ndmin=1, dtype=dtype)
-            if len(values.shape) > 1:
-                values = _np.squeeze(values)
+                # Lazily allocated and NaN-filled; the backend (NumPy in RAM
+                # vs. chunked Zarr on disk) is chosen by size.
+                self._store = _storage.ArrayStore.allocate(
+                    (coordinates.n_data,), dtype=dtype, fill_value=_np.nan)
+            else:
+                values = _np.array(values, ndmin=1, dtype=dtype)
+                if len(values.shape) > 1:
+                    values = _np.squeeze(values)
 
-            if len(values.shape) != 1:
-                raise ValueError("Values must be 1-dimensional")
+                if len(values.shape) != 1:
+                    raise ValueError("Values must be 1-dimensional")
 
-            if len(values) != coordinates.n_data:
-                raise ValueError("Values and coordinates size mismatch")
+                if len(values) != coordinates.n_data:
+                    raise ValueError("Values and coordinates size mismatch")
 
-            self.values = values
+                self._store = _storage.ArrayStore.from_numpy(values)
+
+        @property
+        def values(self):
+            return self._store
+
+        @values.setter
+        def values(self, new):
+            # Region assignment (``attr.values[idx] = ...``) mutates the store
+            # in place and never reaches this setter; this handles whole
+            # replacement (``attr.values = array``).
+            if isinstance(new, _storage.ArrayStore):
+                self._store = new
+            else:
+                self._store = _storage.ArrayStore.from_numpy(_np.asarray(new))
 
         def __str__(self):
-            return self.values.__str__()
+            return self.values.__array__().__str__()
 
         def __repr__(self):
-            return self.values.__repr__()
+            return self.values.__array__().__repr__()
 
         def __getitem__(self, item):
             new_obj = _copy.deepcopy(self)
-            new_obj.values = _np.array(self.values[item], ndmin=1)
+            new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
             return new_obj
 
         def as_series(self, sigma=None):
@@ -567,7 +585,9 @@ class ContinuousVariable(_Variable):
         self.latent_variance = self._Attribute(coordinates)
         self.prediction = self._Attribute(coordinates)
 
-        self.simulations = []
+        # A single (n_data, n_sim) store (NumPy or Zarr by size); None until
+        # ``allocate_simulations`` is called.
+        self.simulations = None
 
         self.quantiles = _col.OrderedDict()
         self.probabilities = _col.OrderedDict()
@@ -579,8 +599,7 @@ class ContinuousVariable(_Variable):
         return values, has_value
 
     def get_simulations(self):
-        sims = _np.stack([s.values for s in self.simulations], axis=1)
-        return sims
+        return _np.asarray(self.simulations)
 
     def get_predictions(self):
         return self.prediction.values
@@ -595,7 +614,7 @@ class ContinuousVariable(_Variable):
             An array of probabilities, ordered values from 0 to 1 (exclusive),
             on which to compute the corresponding quantiles.
         """
-        if len(self.simulations) == 0:
+        if self.simulations is None:
             raise NoDataError(f'No simulations available for variable {self.name}.')
         sims = self.get_simulations()
 
@@ -617,7 +636,7 @@ class ContinuousVariable(_Variable):
             An array of quantiles, ordered values on which to
             compute the corresponding cumulative probabilities.
         """
-        if len(self.simulations) == 0:
+        if self.simulations is None:
             raise NoDataError(f'No simulations available for variable {self.name}.')
         sims = self.get_simulations()
 
@@ -641,8 +660,9 @@ class ContinuousVariable(_Variable):
         new_obj.latent_variance = self.latent_variance[item]
         new_obj.prediction = self.prediction[item]
 
-        for i, sim in enumerate(self.simulations):
-            new_obj.simulations[i] = sim[item]
+        if self.simulations is not None:
+            new_obj.simulations = _storage.ArrayStore.from_numpy(
+                _np.asarray(self.simulations)[item])
 
         if len(self.quantiles) > 0:
             for key, val in self.quantiles.items():
@@ -695,9 +715,9 @@ class ContinuousVariable(_Variable):
             df[self.name + "_latent_mean"] = self.latent_mean.values
             df[self.name + "_latent_variance"] = self.latent_variance.values
 
-        if simulations:
-            for i, sim in enumerate(self.simulations):
-                df[self.name + "_sim_" + str(i)] = sim.values
+        if simulations and self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                df[self.name + "_sim_" + str(i)] = self.simulations[:, i]
 
         if quantiles:
             if len(self.quantiles) > 0:
@@ -719,13 +739,12 @@ class ContinuousVariable(_Variable):
             self.latent_variance.values[idx] = kwargs["variance"].numpy()
 
         if "simulations" in kwargs.keys():
-            sims = kwargs["simulations"].numpy()
-            for s in range(sims.shape[1]):
-                self.simulations[s].values[idx] = sims[:, s]
+            # Whole (batch, n_sim) block written as one region into the store.
+            self.simulations[idx, :] = kwargs["simulations"].numpy()
 
     def allocate_simulations(self, n_sim):
-        self.simulations = [self._Attribute(self.coordinates)
-                            for _ in range(n_sim)]
+        self.simulations = _storage.ArrayStore.allocate(
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
 
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
@@ -733,9 +752,6 @@ class ContinuousVariable(_Variable):
         self.latent_mean.coordinates = coordinates
         self.latent_variance.coordinates = coordinates
         self.prediction.coordinates = coordinates
-
-        for sim in self.simulations:
-            sim.coordinates = coordinates
 
         if len(self.quantiles) > 0:
             for p in self.quantiles.values():
@@ -757,10 +773,10 @@ class ContinuousVariable(_Variable):
         self.prediction.fill_pyvista_cube(
             cube, self.name + " - prediction", sigma=sigma)
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_cube(
-                cube, self.name + f" - simulation {i}"
-            )
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_cube(cube, self.name + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_cube(
@@ -784,9 +800,10 @@ class ContinuousVariable(_Variable):
         self.prediction.fill_pyvista_points(
             points, self.name + " - prediction")
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_points(
-                points, self.name + f" - simulation {i}")
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_points(points, self.name + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_points(
@@ -811,10 +828,10 @@ class ContinuousVariable(_Variable):
             cube, self.name + " - prediction", sigma=sigma
         )
 
-        for i, sim in enumerate(self.simulations):
-            sim.fill_pyvista_blocks(
-                cube, self.name + f" - simulation {i}"
-            )
+        if self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                col = self._Attribute(self.coordinates, self.simulations[:, i])
+                col.fill_pyvista_blocks(cube, self.name + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_blocks(
@@ -1019,8 +1036,9 @@ class _Component(ContinuousVariable):
         new_obj.measurements = self.measurements[item]
         new_obj.prediction = self.prediction[item]
 
-        for i, sim in enumerate(self.simulations):
-            new_obj.simulations[i] = sim[item]
+        if self.simulations is not None:
+            new_obj.simulations = _storage.ArrayStore.from_numpy(
+                _np.asarray(self.simulations)[item])
 
         if len(self.quantiles) > 0:
             for key, val in self.quantiles.items():
@@ -1035,9 +1053,6 @@ class _Component(ContinuousVariable):
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
         self.prediction.coordinates = coordinates
-
-        for sim in self.simulations:
-            sim.coordinates = coordinates
 
         if len(self.quantiles) > 0:
             for p in self.quantiles.values():
@@ -1068,26 +1083,22 @@ class _Component(ContinuousVariable):
                 for key, val in self.probabilities.items():
                     df[self.name + "_p" + str(key)] = val.values
 
-        if simulations:
-            for i, sim in enumerate(self.simulations):
-                df[self.name + "_sim_" + str(i)] = sim.values
+        if simulations and self.simulations is not None:
+            for i in range(self.simulations.shape[1]):
+                df[self.name + "_sim_" + str(i)] = self.simulations[:, i]
 
         return df
 
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
-
-        sims = kwargs["simulations"].numpy()
-        for s in range(sims.shape[1]):
-            self.simulations[s].values[idx] = sims[:, s]
+        self.simulations[idx, :] = kwargs["simulations"].numpy()
 
     def allocate_simulations(self, n_sim):
-        self.simulations = [self._Attribute(self.coordinates)
-                            for _ in range(n_sim)]
+        self.simulations = _storage.ArrayStore.allocate(
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
 
     def get_simulations(self):
-        sims = _np.stack([s.values for s in self.simulations], axis=1)
-        return sims
+        return _np.asarray(self.simulations)
 
 
 class CompositionalVariable(VectorVariable):

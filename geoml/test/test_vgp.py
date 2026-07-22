@@ -99,6 +99,40 @@ def test_prediction_reflects_retraining():
     assert not np.allclose(before, after)
 
 
+def test_prediction_uses_zarr_backend(monkeypatch):
+    """Forcing the on-disk (Zarr) backend must give finite, batch-invariant
+    predictions identical to the in-RAM (NumPy) path.
+
+    Walker Lake is small enough to stay on NumPy, so we drop the size threshold
+    to route every attribute onto Zarr. This exercises the on-disk batched-write
+    path: contiguous-batch region writes into the ``prediction``/``latent_mean``
+    stores and the (n_data, n_sim) simulation store.
+    """
+    import geoml.storage as storage
+
+    # NumPy-backed reference (default threshold).
+    ref_model, ref_grid = build_model()
+    ref_model.train_full(max_iter=10)
+    ref_model.predict(ref_grid, n_sim=4)
+    numpy_mean = np.array(ref_grid.variables["V"].latent_mean.values, copy=True)
+
+    # Same model/data, but every attribute forced onto Zarr, predicted in
+    # several batches.
+    monkeypatch.setattr(storage, "DEFAULT_THRESHOLD", 0)
+    model, grid = build_model()
+    model.train_full(max_iter=10)
+    model.options.prediction_batch_size = 500
+    model.predict(grid, n_sim=4)
+
+    var = grid.variables["V"]
+    assert var.latent_mean.values.backend == "zarr"
+    assert var.simulations.backend == "zarr"
+
+    zarr_mean = np.array(var.latent_mean.values, copy=True)
+    assert np.all(np.isfinite(zarr_mean))
+    assert np.allclose(numpy_mean, zarr_mean, atol=1e-8)
+
+
 def build_gradient_constrained_model(seed=1234):
     """A network rooted at a GradientConstrainedInput (gradient/implicit path).
 
