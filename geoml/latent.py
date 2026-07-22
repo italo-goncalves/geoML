@@ -2160,11 +2160,6 @@ class GradientConstrainedInput(_RootLatentVariable):
             for p in self.covariance.all_parameters:
                 p.fix()
 
-        # self.n_ip = tuple(
-        #     ip.coordinates.shape[0] + d.coordinates.shape[0]
-        #     for ip, d in zip(inducing_points, directional_data)
-        # )
-        self.n_ip = tuple(ip.coordinates.shape[0] for ip in inducing_points)
         self.n_dir = tuple(d.n_data for d in directional_data)
         self.directional_data = directional_data
 
@@ -2174,6 +2169,11 @@ class GradientConstrainedInput(_RootLatentVariable):
                          )
             for ip, d in zip(inducing_points, directional_data)
         )
+
+        # The inducing set is the deduplicated union of the user inducing points
+        # and the directional-data locations, so n_ip must be derived from that
+        # base set (refresh sizes the covariance blocks off it).
+        self.n_ip = tuple(int(ip.shape[0]) for ip in self.base_inducing_points)
 
         self.inducing_points_variance = tuple(_tf.zeros([n, self.size], _tf.float64) for n in self.n_ip)
 

@@ -102,17 +102,15 @@ def test_prediction_reflects_retraining():
 def build_gradient_constrained_model(seed=1234):
     """A network rooted at a GradientConstrainedInput (gradient/implicit path).
 
-    The node requires the directional-data locations to be part of the inducing
-    set, so we merge them in.
+    The inducing grid deliberately does not contain the directional-data
+    locations; the node merges them into its (deduplicated) base set. This
+    construction used to crash until n_ip was derived from that base set.
     """
     import tensorflow as tf
     np.random.seed(seed)
     tf.random.set_seed(seed)
     point, dirs, _ = geoml.datasets.example_fold()
-    grid_ip = geoml.data.Grid2D(start=[10, 10], n=[8, 8], step=[11, 11])
-    ip_coords = np.unique(
-        np.concatenate([dirs.coordinates, grid_ip.coordinates], axis=0), axis=0)
-    ip = geoml.data.PointData.from_array(ip_coords)
+    ip = geoml.data.Grid2D(start=[10, 10], n=[8, 8], step=[11, 11])
     covariance = geoml.kernels.Covariance(
         geoml.kernels.Gaussian(), geoml.transform.Isotropic(30))
     root = geoml.latent.GradientConstrainedInput(ip, dirs, covariance, size=1)
