@@ -878,9 +878,10 @@ class VGPNetwork(_GPModel):
 
     @_tf.function
     def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, jitter=1e-6, include_noise='delta', n_splits=None):
-        self.latent_network.refresh(jitter)
-
+                    n_sim=1, seed=0, include_noise='delta', n_splits=None):
+        # The posterior is refreshed once by `predict` and snapshotted into
+        # Variables; this cached graph reads that state, so it is not recomputed
+        # per batch.
         with _tf.name_scope("Prediction"):
             pred_mu, pred_var, pred_sim, pred_exp_var, _ = \
                 self.latent_network.predict(
@@ -940,7 +941,6 @@ class VGPNetwork(_GPModel):
             newdata.n_data, batch_size=self.options.prediction_batch_size)
         n_batches = len(batch_id)
 
-        # @_tf.function
         def batch_pred(x, x_var=None, n_splits=None):
             out = self.predict_raw(
                 x,
@@ -948,13 +948,21 @@ class VGPNetwork(_GPModel):
                 x_var=x_var,
                 seed=self.options.seed,
                 n_sim=n_sim,
-                jitter=self.options.jitter,
                 include_noise=include_noise,
                 n_splits=n_splits
             )
             return out
 
-        self.latent_network.refresh()
+        # Refresh the posterior once (the parameters are fixed during
+        # prediction) and snapshot each node's state into Variables, so the
+        # cached `predict_raw` graph reads current values without recomputing the
+        # posterior (Cholesky factorizations, etc.) on every batch.
+        self.latent_network.refresh(self.options.jitter)
+        if hasattr(self.latent_network, "cache_prediction_state"):
+            nodes = set(self.latent_network.get_unique_parents())
+            nodes.add(self.latent_network)
+            for node in nodes:
+                node.cache_prediction_state()
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
                 print("\rProcessing batch %s of %s       "

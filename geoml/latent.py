@@ -57,6 +57,11 @@ class _LatentVariable(_gpr.Parametric):
         self.inducing_points = None
         self.inducing_points_variance = None
 
+        # Non-trainable Variables holding a snapshot of the prediction state, so
+        # a cached (tf.function) prediction graph reads current values instead of
+        # baking them in at tracing time. Keyed by name, created on first use.
+        self._state_vars = {}
+
     def __repr__(self):
         s = self.__class__.__name__ + "\n"
         return s
@@ -84,6 +89,42 @@ class _LatentVariable(_gpr.Parametric):
             Small value added to the covariance matrices for numerical stability.
         """
         pass
+
+    def _state_var(self, name, value):
+        """
+        Store `value` in a non-trainable, shapeless tf.Variable and return it.
+
+        The Variable is created on first use (the shape is unknown when the node
+        is built) and reassigned afterwards. A cached prediction graph that reads
+        the returned Variable sees the value written by the latest call, so the
+        posterior can be refreshed once per prediction rather than per batch.
+        """
+        var = self._state_vars.get(name)
+        if var is None:
+            var = _tf.Variable(value, shape=_tf.TensorShape(None),
+                               dtype=_tf.float64, trainable=False)
+            self._state_vars[name] = var
+        else:
+            var.assign(value)
+        return var
+
+    def _cache_tuple(self, name, values):
+        return tuple(self._state_var(name + "_" + str(i), v)
+                     for i, v in enumerate(values))
+
+    def cache_prediction_state(self):
+        """
+        Snapshot the propagated state into Variables (see `_state_var`).
+
+        Called once per prediction (after `refresh`) for every node in the
+        network. Subclasses holding additional prediction state extend this.
+        """
+        if self.inducing_points is not None:
+            self.inducing_points = self._cache_tuple(
+                "inducing_points", self.inducing_points)
+        if self.inducing_points_variance is not None:
+            self.inducing_points_variance = self._cache_tuple(
+                "inducing_points_variance", self.inducing_points_variance)
 
     def get_unique_parents(self):
         raise NotImplementedError
@@ -677,6 +718,14 @@ class BasicGP(_GPNode):
                 self.inducing_points_variance.append(
                     _tf.transpose(_tf.reduce_sum(pred_vars * weights, axis=0))
                 )
+
+    def cache_prediction_state(self):
+        super().cache_prediction_state()
+        self.alpha = self._cache_tuple("alpha", self.alpha)
+        self.cov_inv = self._cache_tuple("cov_inv", self.cov_inv)
+        self.cov_smooth_inv = self._cache_tuple(
+            "cov_smooth_inv", self.cov_smooth_inv)
+        self.chol_r = self._cache_tuple("chol_r", self.chol_r)
 
     def interpolate(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         with _tf.name_scope("basic_interpolation"):
