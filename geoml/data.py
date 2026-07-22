@@ -1429,6 +1429,14 @@ class RockTypeVariable(_Variable):
 
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
                  measurements_b=None):
+        # Coerce to numpy arrays: with plain Python lists the element-wise
+        # comparisons below (indicator building, boundary detection) would
+        # silently collapse to scalars.
+        if measurements_a is not None:
+            measurements_a = _np.asarray(measurements_a)
+        if measurements_b is not None:
+            measurements_b = _np.asarray(measurements_b)
+
         if measurements_b is None:
             measurements_b = measurements_a
 
@@ -1728,16 +1736,32 @@ class CategoricalVariable(RockTypeVariable):
 
 
 class OrderedRockType(RockTypeVariable):
+    _ZARR_ATTRS = RockTypeVariable._ZARR_ATTRS + ("implicit_values",)
+
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
                  measurements_b=None):
         super().__init__(name, coordinates, labels, measurements_a,
                          measurements_b)
         self._length = 1
 
+        if measurements_a is None:
+            # Labels-only construction (prediction targets, reloading from
+            # disk): no measured contacts, all implicit values missing.
+            self.implicit_values = self._Attribute(coordinates)
+            return
+
+        measurements_a = _np.asarray(measurements_a)
         if measurements_b is None:
             measurements_b = measurements_a
+        else:
+            measurements_b = _np.asarray(measurements_b)
 
-        implicit_values = -0.5 * _np.ones_like(measurements_a)
+        # Labels may have been derived from the measurements by the parent.
+        labels = self.labels
+
+        # Built as a float array from the start; the previous
+        # ``-0.5 * _np.ones_like(measurements_a)`` crashed on string inputs.
+        implicit_values = _np.full(len(measurements_a), -0.5)
         for i in range(len(labels[:-1])):
             implicit_values = _np.where(
                 (measurements_a == labels[i])
@@ -1795,6 +1819,12 @@ class BinaryVariable(_Variable):
     def __init__(self, name, coordinates, labels=None, measurements=None):
         super().__init__(name, coordinates)
         n_data = coordinates.n_data
+
+        # Coerce to a numpy array: with a plain Python list the element-wise
+        # comparisons below (indicator and weights) silently collapse to
+        # scalars and the indicators stay NaN.
+        if measurements is not None:
+            measurements = _np.asarray(measurements)
 
         if labels is None:
             if measurements is None:
@@ -4049,13 +4079,12 @@ def _rebuild_container(meta, group):
 def _supported_top_variables():
     """Top-level variable classes that ``to_zarr``/``open`` can round-trip.
 
-    ``OrderedRockType`` is excluded (its constructor needs measurements to build
-    the implicit values); the internal ``_Category``/``_Component`` are only
-    persisted recursively as components, never at the top level.
+    The internal ``_Category``/``_Component`` are only persisted recursively as
+    components, never at the top level.
     """
     return (ContinuousVariable, VectorVariable, CompositionalVariable,
-            RockTypeVariable, CategoricalVariable, BinaryVariable,
-            AnomalyVariable)
+            RockTypeVariable, CategoricalVariable, OrderedRockType,
+            BinaryVariable, AnomalyVariable)
 
 
 def _write_variable(group, variable):
@@ -4080,6 +4109,8 @@ def _rebuild_variable(container, group, vmeta):
         container.add_categorical_variable(name, labels=labels)
     elif cls_name == "RockTypeVariable":
         container.add_rock_type_variable(name, labels=labels)
+    elif cls_name == "OrderedRockType":
+        container.add_rock_type_variable(name, labels=labels, ordered=True)
     elif cls_name == "BinaryVariable":
         container.add_binary_variable(name, labels=labels)
     elif cls_name == "AnomalyVariable":

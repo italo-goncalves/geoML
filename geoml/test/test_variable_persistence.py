@@ -157,8 +157,88 @@ def test_anomaly_variable_roundtrip(tmp_path):
     assert np.allclose(np.asarray(rv.simulations), sims)
 
 
-# Note: OrderedRockType is intentionally not supported by to_zarr/open (its
-# constructor needs measurements to rebuild the implicit values). It also can't
-# be constructed from string measurements in the current code base
-# (`np.ones_like` on a string array), so it isn't exercised here. The
-# unsupported-type guard is covered in test_persistence.py.
+def test_rock_type_from_python_lists():
+    """Regression: list measurements used to collapse the element-wise
+    comparisons to scalars (boundary length 1 -> crash; silently wrong
+    indicators)."""
+    pt = _point()
+    meas_a = ["granite", "basalt", "granite", "basalt", "granite", "basalt"]
+    meas_b = ["granite", "granite", "granite", "basalt", "basalt", "basalt"]
+    pt.add_rock_type_variable("rock", measurements_a=meas_a,
+                              measurements_b=meas_b)
+    var = pt.variables["rock"]
+
+    boundary = np.asarray(var.boundary.values)
+    assert boundary.shape == (N,)
+    assert np.array_equal(
+        boundary, np.array(meas_a) != np.array(meas_b))
+
+    granite = np.asarray(var.components["granite"].indicator.values)
+    expected = 0.5 * ((np.array(meas_a) == "granite") * 1.0
+                      + (np.array(meas_b) == "granite") * 1.0)
+    assert np.allclose(granite, expected)
+
+
+def test_binary_from_python_lists():
+    """Regression: list measurements used to leave the indicator all-NaN
+    (scalar boolean index made the assignments no-ops)."""
+    pt = _point()
+    meas = ["ore", "waste", "ore", "waste", "ore", "waste"]
+    pt.add_binary_variable("ore", labels=["ore", "waste"], measurements=meas)
+    var = pt.variables["ore"]
+
+    indicator = np.asarray(var.indicator.values)
+    assert np.array_equal(indicator, np.array([1, 0, 1, 0, 1, 0], dtype=float))
+    assert not np.any(np.isnan(np.asarray(var.weights.values)))
+
+
+def test_ordered_rock_type_construction_from_strings():
+    """Regression: ``-0.5 * np.ones_like(measurements_a)`` crashed on string
+    measurements, making the class unconstructable in real use."""
+    pt = _point()
+    meas_a = ["low", "low", "mid", "mid", "high", "high"]
+    meas_b = ["low", "mid", "mid", "high", "high", "low"]
+    pt.add_rock_type_variable("seq", labels=["low", "mid", "high"],
+                              measurements_a=meas_a, measurements_b=meas_b,
+                              ordered=True)
+    var = pt.variables["seq"]
+
+    implicit = np.asarray(var.implicit_values.values)
+    # interiors at i -/+ 0.5, adjacent contacts at i; non-adjacent pairs keep
+    # the -0.5 default.
+    assert np.allclose(implicit, [-0.5, 0.0, 0.5, 1.0, 1.5, -0.5])
+
+    values, has_value = var.get_measurements()
+    assert values.shape == (N, 1)
+    assert np.all(has_value == 1.0)
+
+
+def test_ordered_rock_type_roundtrip(tmp_path):
+    pt = _point()
+    meas_a = ["low", "low", "mid", "mid", "high", "high"]
+    meas_b = ["low", "mid", "mid", "high", "high", "low"]
+    pt.add_rock_type_variable("seq", labels=["low", "mid", "high"],
+                              measurements_a=meas_a, measurements_b=meas_b,
+                              ordered=True)
+    var = pt.variables["seq"]
+    var.allocate_simulations(2)
+    var.predicted.values[:] = np.array(meas_a, dtype=object)
+    var.entropy.values[:] = np.random.random(N)
+    for lb in var.labels:
+        var.components[lb].simulations[:, :] = np.random.random((N, 2))
+
+    implicit = np.asarray(var.implicit_values.values).copy()
+    predicted = np.asarray(var.predicted.values).copy()
+    boundary = np.asarray(var.boundary.values).copy()
+    sims_mid = np.asarray(var.components["mid"].simulations).copy()
+
+    pt.to_zarr(str(tmp_path / "seq.zarr"))
+    r = geoml.data.PointData.open(str(tmp_path / "seq.zarr"))
+    rv = r.variables["seq"]
+
+    assert isinstance(rv, geoml.data.OrderedRockType)
+    assert list(rv.labels) == ["low", "mid", "high"]
+    assert np.allclose(np.asarray(rv.implicit_values.values), implicit)
+    assert np.array_equal(np.asarray(rv.predicted.values), predicted)
+    assert np.array_equal(np.asarray(rv.boundary.values), boundary)
+    assert np.allclose(np.asarray(rv.components["mid"].simulations), sims_mid)
