@@ -33,11 +33,12 @@ NumPy. This module is deliberately independent of ``data.py`` so it can be
 tested in isolation.
 """
 
-__all__ = ["ArrayStore", "DEFAULT_THRESHOLD"]
+__all__ = ["ArrayStore", "DEFAULT_THRESHOLD", "store_columns"]
 
 import os as _os
 import shutil as _shutil
 import tempfile as _tempfile
+import weakref as _weakref
 
 import numpy as _np
 import zarr as _zarr
@@ -76,6 +77,67 @@ def _use_zarr(shape, dtype, threshold):
     return nbytes > threshold
 
 
+class _ScratchGroup:
+    """An owner's consolidated scratch store.
+
+    One temporary directory holding a single Zarr group into which all of the
+    owner's large working arrays are allocated (instead of one temp directory
+    per array). The whole directory is removed when this object dies — which,
+    through the weak registry below, happens when the owning container is
+    garbage-collected. Arrays inside must not outlive their owner.
+    """
+
+    def __init__(self):
+        self._tempdir = _tempfile.mkdtemp(prefix="geoml_scratch_")
+        self.path = _os.path.join(self._tempdir, "scratch.zarr")
+        self._group = _zarr.open_group(self.path, mode="w")
+        self._count = 0
+
+    def create_array(self, shape, dtype, fill_value, chunks):
+        name = "a%d" % self._count
+        self._count += 1
+        return self._group.create_array(
+            name=name, shape=shape, chunks=chunks, dtype=dtype,
+            fill_value=fill_value)
+
+    def close(self):
+        self._group = None
+        if self._tempdir is not None and _os.path.isdir(self._tempdir):
+            _shutil.rmtree(self._tempdir, ignore_errors=True)
+            self._tempdir = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+# owner (e.g. a data container) -> its _ScratchGroup. Weak keys: when the owner
+# is collected the group is dropped and its directory deleted. Deep copies of
+# an owner are not in the registry (and their stores were materialized to
+# NumPy by ArrayStore.__deepcopy__), so no double-delete can occur.
+_scratch_groups = _weakref.WeakKeyDictionary()
+
+
+def _scratch_for(owner):
+    group = _scratch_groups.get(owner)
+    if group is None:
+        group = _ScratchGroup()
+        _scratch_groups[owner] = group
+    return group
+
+
+def store_columns(columns, stores):
+    """Write each column of a lazy 2-D dask array into its target store.
+
+    All columns are computed in a single chunk-by-chunk pass over the source;
+    targets may be NumPy- or Zarr-backed ``ArrayStore``s.
+    """
+    _da.store([columns[:, i] for i in range(columns.shape[1])],
+              [s._array for s in stores], lock=False)
+
+
 class ArrayStore:
     """A single array backed by NumPy (in RAM) or Zarr (on disk, chunked)."""
 
@@ -97,7 +159,7 @@ class ArrayStore:
 
     @classmethod
     def allocate(cls, shape, dtype=float, fill_value=_np.nan, chunks=None,
-                 backend="auto", store=None, threshold=None):
+                 backend="auto", store=None, threshold=None, owner=None):
         """Create a new, filled array.
 
         Parameters
@@ -112,10 +174,16 @@ class ArrayStore:
         backend : {"auto", "numpy", "zarr"}
             ``"auto"`` picks Zarr past ``threshold`` bytes, NumPy otherwise.
         store : str or zarr store, optional
-            Where a Zarr array lives. If omitted, a temporary directory is
-            created and cleaned up with this object.
+            Where a Zarr array lives. If omitted, a temporary location is
+            used (see ``owner``).
         threshold : int
             Size in bytes above which ``"auto"`` chooses Zarr.
+        owner : object, optional
+            Scratch-lifecycle owner (typically the data container). Temporary
+            Zarr arrays of the same owner are consolidated into one on-disk
+            store, deleted when the owner is garbage-collected. Without an
+            owner (and without ``store``) the array gets its own temporary
+            directory, cleaned up with this object.
         """
         shape = tuple(int(s) for s in _np.atleast_1d(shape))
         if threshold is None:
@@ -133,6 +201,12 @@ class ArrayStore:
 
         if chunks is None:
             chunks = _leading_chunk(shape, dtype)
+
+        if store is None and owner is not None:
+            scratch = _scratch_for(owner)
+            array = scratch.create_array(
+                shape, _np.dtype(dtype), fill_value, chunks)
+            return cls(array, backend="zarr", store_path=scratch.path)
 
         tempdir = None
         if store is None:
@@ -258,6 +332,41 @@ class ArrayStore:
     def as_xarray(self, dims=None, coords=None, name=None):
         """A labelled ``xarray.DataArray`` over this store (dask-backed)."""
         return _xr.DataArray(self.as_dask(), dims=dims, coords=coords, name=name)
+
+    def row_quantiles(self, qs):
+        """Lazy row-wise quantiles of a 2-D store.
+
+        Returns an uncomputed dask array of shape ``(n_rows, len(qs))``.
+        Because chunking splits only axis 0, every chunk holds complete rows,
+        so the quantiles are exact and the full store is never materialized.
+        """
+        darr = self.as_dask()
+        qs = _np.atleast_1d(qs).astype(float)
+
+        def block_quantiles(block):
+            return _np.quantile(block, qs, axis=1).T
+
+        return darr.map_blocks(
+            block_quantiles, dtype=_np.float64,
+            chunks=(darr.chunks[0], len(qs)))
+
+    def row_cdf(self, cutoffs):
+        """Lazy row-wise empirical CDF of a 2-D store.
+
+        For each cutoff, the fraction of columns (simulations) at or below it
+        — the inverse view of :meth:`row_quantiles`. Returns an uncomputed
+        dask array of shape ``(n_rows, len(cutoffs))`` with values in [0, 1].
+        """
+        darr = self.as_dask()
+        cutoffs = _np.atleast_1d(cutoffs).astype(float)
+
+        def block_cdf(block):
+            return _np.mean(
+                block[:, :, None] <= cutoffs[None, None, :], axis=1)
+
+        return darr.map_blocks(
+            block_cdf, dtype=_np.float64,
+            chunks=(darr.chunks[0], len(cutoffs)))
 
     # ------------------------------------------------------------------ #
     # backend info / lifecycle

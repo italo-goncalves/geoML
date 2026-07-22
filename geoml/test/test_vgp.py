@@ -133,6 +133,42 @@ def test_prediction_uses_zarr_backend(monkeypatch):
     assert np.allclose(numpy_mean, zarr_mean, atol=1e-8)
 
 
+def test_zarr_scratch_is_consolidated_and_quantiles_lazy(monkeypatch):
+    """With the on-disk backend, all of a container's working arrays must share
+    one scratch store, and reset_quantiles must match the eager computation
+    without materializing the simulations."""
+    import geoml.storage as storage
+    monkeypatch.setattr(storage, "DEFAULT_THRESHOLD", 0)
+
+    model, grid = build_model()
+    model.train_full(max_iter=10)
+    model.predict(grid, n_sim=8)
+    var = grid.variables["V"]
+
+    paths = {var.latent_mean.values.store_path,
+             var.latent_variance.values.store_path,
+             var.prediction.values.store_path,
+             var.simulations.store_path}
+    assert len(paths) == 1                          # one store per container
+
+    reference = np.quantile(
+        np.asarray(var.simulations), [0.25, 0.75], axis=1).T
+    var.reset_quantiles([0.25, 0.75])
+    got = np.stack([np.asarray(var.quantiles[p].values)
+                    for p in (0.25, 0.75)], axis=1)
+    assert np.allclose(got, reference)
+    assert var.quantiles[0.25].values.backend == "zarr"   # results spill too
+
+    # reset_probabilities is the inverse of reset_quantiles: a cutoff in the
+    # variable's units maps to the fraction of simulations at or below it.
+    sims = np.asarray(var.simulations)
+    cutoff = float(np.median(sims))
+    var.reset_probabilities([cutoff])
+    prob = np.asarray(var.probabilities[cutoff].values)
+    assert np.allclose(prob, np.mean(sims <= cutoff, axis=1))
+    assert np.all((prob >= 0.0) & (prob <= 1.0))
+
+
 def build_gradient_constrained_model(seed=1234):
     """A network rooted at a GradientConstrainedInput (gradient/implicit path).
 

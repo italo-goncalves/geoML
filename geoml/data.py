@@ -376,9 +376,11 @@ class _Variable(object):
 
             if values is None:
                 # Lazily allocated and NaN-filled; the backend (NumPy in RAM
-                # vs. chunked Zarr on disk) is chosen by size.
+                # vs. chunked Zarr on disk) is chosen by size. Large arrays of
+                # the same container share one consolidated scratch store.
                 self._store = _storage.ArrayStore.allocate(
-                    (coordinates.n_data,), dtype=dtype, fill_value=_np.nan)
+                    (coordinates.n_data,), dtype=dtype, fill_value=_np.nan,
+                    owner=coordinates)
             else:
                 values = _np.array(values, ndmin=1, dtype=dtype)
                 if len(values.shape) > 1:
@@ -707,15 +709,19 @@ class ContinuousVariable(_Variable):
         """
         if self.simulations is None:
             raise NoDataError(f'No simulations available for variable {self.name}.')
-        sims = self.get_simulations()
 
         self.quantiles = _col.OrderedDict()
         if probabilities is not None:
+            # All quantiles are computed lazily in a single chunk-by-chunk
+            # pass over the simulations; the (n_data, n_sim) array is never
+            # fully materialized.
+            columns = self.simulations.row_quantiles(probabilities)
+            targets = []
             for p in probabilities:
-                self.quantiles[p] = self._Attribute(
-                    self.coordinates,
-                    _np.quantile(sims, p, axis=1)
-                )
+                attr = self._Attribute(self.coordinates)
+                self.quantiles[p] = attr
+                targets.append(attr.values)
+            _storage.store_columns(columns, targets)
 
     def reset_probabilities(self, quantiles=None):
         """
@@ -724,20 +730,27 @@ class ContinuousVariable(_Variable):
         Parameters
         ----------
         quantiles : array
-            An array of quantiles, ordered values on which to
-            compute the corresponding cumulative probabilities.
+            An array of quantiles (cutoff values in the variable's units),
+            ordered, on which to compute the corresponding cumulative
+            probabilities in the (0, 1) interval.
         """
         if self.simulations is None:
             raise NoDataError(f'No simulations available for variable {self.name}.')
-        sims = self.get_simulations()
 
         self.probabilities = _col.OrderedDict()
         if quantiles is not None:
+            # Empirical CDF, the inverse of reset_quantiles: for each cutoff,
+            # the fraction of simulations at or below it, in (0, 1). Computed
+            # lazily in a single chunk-by-chunk pass. (The previous
+            # implementation misused np.percentile, treating the cutoff as a
+            # percent rank.)
+            columns = self.simulations.row_cdf(quantiles)
+            targets = []
             for q in quantiles:
-                self.probabilities[q] = self._Attribute(
-                    self.coordinates,
-                    _np.percentile(sims, q, axis=1) / 100
-                )
+                attr = self._Attribute(self.coordinates)
+                self.probabilities[q] = attr
+                targets.append(attr.values)
+            _storage.store_columns(columns, targets)
 
     @classmethod
     def from_variable(cls, coordinates, variable):
@@ -835,7 +848,8 @@ class ContinuousVariable(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            owner=self.coordinates)
 
     def set_coordinates(self, coordinates):
         self.coordinates = coordinates
@@ -1188,7 +1202,8 @@ class _Component(ContinuousVariable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            owner=self.coordinates)
 
     def get_simulations(self):
         return _np.asarray(self.simulations)
@@ -1363,7 +1378,8 @@ class _Category(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            owner=self.coordinates)
 
     def fill_pyvista_cube(self, cube, prefix=None):
         label = prefix + " - " + self.name
@@ -1965,7 +1981,8 @@ class BinaryVariable(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan)
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            owner=self.coordinates)
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, col, positive_class):

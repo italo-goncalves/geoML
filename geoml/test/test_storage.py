@@ -115,3 +115,88 @@ def test_temp_store_is_cleaned_up():
     assert path is not None and os.path.exists(path)
     store.close()
     assert not os.path.exists(path)
+
+
+def test_scratch_consolidation_and_cleanup():
+    """Arrays of the same owner share one scratch store, deleted with it."""
+    import gc
+    import os
+
+    class Owner:
+        pass
+
+    owner = Owner()
+    a = ArrayStore.allocate((50,), backend="zarr", owner=owner)
+    b = ArrayStore.allocate((50, 3), backend="zarr", owner=owner)
+
+    assert a.store_path == b.store_path            # one consolidated store
+    root = a.store_path
+    assert os.path.exists(root)
+
+    a[:] = 1.0
+    b[:] = 2.0
+    assert np.all(np.asarray(a) == 1.0)
+    assert np.all(np.asarray(b) == 2.0)
+
+    other = Owner()
+    c = ArrayStore.allocate((50,), backend="zarr", owner=other)
+    assert c.store_path != root                    # per-owner isolation
+
+    del a, b, owner
+    gc.collect()
+    assert not os.path.exists(root)                # gone with the owner
+    assert os.path.exists(c.store_path)            # other owner unaffected
+
+
+def test_row_quantiles_matches_numpy(tmp_path):
+    reference = np.random.random((40, 16))
+    sims = ArrayStore.allocate((40, 16), backend="zarr",
+                               store=str(tmp_path / "q.zarr"),
+                               chunks=(7, 16))     # multiple row-chunks
+    sims[:] = reference
+
+    got = sims.row_quantiles([0.1, 0.5, 0.9]).compute()
+    want = np.quantile(reference, [0.1, 0.5, 0.9], axis=1).T
+    assert got.shape == (40, 3)
+    assert np.allclose(got, want)
+
+
+def test_row_cdf_matches_numpy_and_inverts_quantiles(tmp_path):
+    reference = np.random.random((40, 16))
+    sims = ArrayStore.allocate((40, 16), backend="zarr",
+                               store=str(tmp_path / "cdf.zarr"),
+                               chunks=(7, 16))
+    sims[:] = reference
+
+    cutoffs = [0.25, 0.5, 0.75]
+    got = sims.row_cdf(cutoffs).compute()
+    want = np.stack([np.mean(reference <= c, axis=1) for c in cutoffs], axis=1)
+    assert got.shape == (40, 3)
+    assert np.allclose(got, want)
+    assert np.all((got >= 0.0) & (got <= 1.0))
+
+    # inverse relationship: at least a p-fraction of simulations lie at or
+    # below the p-quantile of each row
+    p = 0.5
+    q = sims.row_quantiles([p]).compute()[:, 0]
+    cdf_at_q = np.mean(reference <= q[:, None], axis=1)
+    assert np.all(cdf_at_q >= p)
+
+
+def test_store_columns_mixed_backends(tmp_path):
+    from geoml.storage import store_columns
+
+    reference = np.random.random((30, 8))
+    sims = ArrayStore.allocate((30, 8), backend="zarr",
+                               store=str(tmp_path / "src.zarr"))
+    sims[:] = reference
+
+    numpy_target = ArrayStore.allocate((30,), backend="numpy")
+    zarr_target = ArrayStore.allocate((30,), backend="zarr",
+                                      store=str(tmp_path / "tgt.zarr"))
+    columns = sims.row_quantiles([0.25, 0.75])
+    store_columns(columns, [numpy_target, zarr_target])
+
+    want = np.quantile(reference, [0.25, 0.75], axis=1).T
+    assert np.allclose(np.asarray(numpy_target), want[:, 0])
+    assert np.allclose(np.asarray(zarr_target), want[:, 1])
