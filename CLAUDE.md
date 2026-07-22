@@ -65,6 +65,60 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
 ---
+# Communication between LLM and user within code
+
+## Locked-code convention (MUST follow)
+
+Some code is user-maintained and must never be modified by Claude.
+
+- Block marker — never edit anything between these lines (not even formatting
+  or imports). Reading, calling, and wrapping the code is fine:
+
+  ```python
+  # === LOCKED: <owner/reason> ===
+  ...
+  # === END LOCKED ===
+  ```
+
+- File marker — the whole file is user-maintained (placed at the top, after
+  the module docstring):
+
+  ```python
+  # LOCKED FILE — user-maintained. Do not edit; propose changes instead.
+  ```
+
+Rules:
+1. Before editing ANY file, check it for `LOCKED` markers.
+2. If a locked region has a bug, or its interface doesn't fit, STOP and propose
+   the change to the user (diff or description) — never apply it directly.
+3. Renaming, moving, or deleting a locked file also requires asking first.
+4. Unmarked code is normal — edit as usual.
+
+## Notes-to-Claude convention
+
+Comments starting with `# CLAUDE:` are notes addressed to Claude:
+
+```python
+# CLAUDE: this expects NHWC float32 in [0,1]; write the adapter accordingly.
+# CLAUDE: is dropout=0.3 too high here? suggest, don't change.
+```
+
+Rules:
+1. When the user says "check my notes" (or similar), grep the repo for
+   `# CLAUDE:` and handle every hit.
+2. Act on notes found while reading a file, even if not explicitly told.
+3. After resolving a note, delete the comment (quote it in the reply so the
+   resolution is traceable). Notes ending with `(keep)` stay in place.
+4. A note inside a LOCKED region may be read and acted on, but the region
+   itself still must not be edited — including removing the note; ask instead.
+
+
+## Communicating changes
+
+1. After completing a coding task, give a small summary about the files and lines changed, as well as the functions, methods created, etc.
+2. Do not commit the changes immediately; allow the user the opportunity to open and IDE and see the changes.
+
+---
 
 # Project: geoML
 

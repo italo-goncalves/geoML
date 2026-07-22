@@ -2223,7 +2223,6 @@ class GradientConstrainedInput(_RootLatentVariable):
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("constrained_input_refresh"):
             # constrained prior
-            # ip = self.base_inducing_points
             dir_coords = [_tf.constant(d.coordinates, _tf.float64)
                           for d in self.directional_data]
             dirs = [_tf.constant(d.directions, _tf.float64)
@@ -2255,22 +2254,6 @@ class GradientConstrainedInput(_RootLatentVariable):
                 for mat, sc  in zip(full_cov, self.scale)
             )
 
-            # base_cov = self.covariance.self_covariance_matrix(ip)
-            # cross_cov = self.covariance.covariance_matrix_d1(ip, dir_coords, dirs)
-            # dir_cov = self.covariance.self_covariance_matrix_d2(dir_coords, dirs)
-            #
-            # full_cov = _tf.concat([
-            #     _tf.concat([dir_cov, _tf.transpose(cross_cov)], axis=1),
-            #     _tf.concat([cross_cov, base_cov], axis=1),
-            # ], axis=0)
-            # self.scale = _tf.sqrt(_tf.linalg.diag_part(full_cov))
-            # full_cov = full_cov / self.scale[:, None] / self.scale[None, :]
-
-            # eye = _tf.eye(self.n_ip + self.n_dir, dtype=_tf.float64)
-
-            # cov = full_cov + eye * jitter
-            # chol = _tf.linalg.cholesky(cov)
-            # cov_inv = _tf.linalg.cholesky_solve(chol, eye)
             eye = tuple(_tf.eye(n + d, dtype=_tf.float64) for n, d in zip(self.n_ip, self.n_dir))
             chol = tuple(_tf.linalg.cholesky(mat) for mat in full_cov)
             cov_inv = tuple(_tf.linalg.cholesky_solve(mat, e) for mat, e in zip(chol, eye))
@@ -2287,13 +2270,6 @@ class GradientConstrainedInput(_RootLatentVariable):
                 for n, d in zip(self.n_dir, delta)
             )
             delta_diag = tuple(_tf.linalg.diag(d) for d in delta)
-            # self.cov_smooth = self.cov[None, :, :] + delta_diag
-            # self.cov_smooth_chol = _tf.linalg.cholesky(
-            #     self.cov_smooth + eye * jitter)
-            # self.cov_smooth_inv = _tf.linalg.cholesky_solve(
-            #     self.cov_smooth_chol, eye)
-            # self.chol_r = _tf.linalg.cholesky(
-            #     self.cov_inv[None, :, :] - self.cov_smooth_inv + eye * jitter)
             self.cov_smooth = tuple(mat[None, :, :] + d for mat, d in zip(self.cov, delta_diag))
             self.cov_smooth_chol = tuple(
                 _tf.linalg.cholesky(mat + e * jitter)
@@ -2334,8 +2310,6 @@ class GradientConstrainedInput(_RootLatentVariable):
                 pred_vars = []
                 for j in range(self.n_experts):
                     ip_j = self.base_inducing_points[j]
-                    # ipv_j = self.parent.inducing_points_variance[j]
-                    # cov = self.covariance_matrix(ip_i, ip_j, ipv_i, ipv_j)
                     cov_aa = self.covariance.covariance_matrix_d2(
                         dir_coords[i], dir_coords[j], dirs[i], dirs[j]
                     )
@@ -2363,12 +2337,6 @@ class GradientConstrainedInput(_RootLatentVariable):
                     _tf.transpose(_tf.reduce_sum(pred_vars * weights, axis=0))
                 )
 
-            # pred_var = 1.0 - _tf.reduce_sum(
-            #     _tf.einsum("ab,sbc->sac", self.cov, self.cov_smooth_inv)
-            #     * self.cov[None, :, :],
-            #     axis=2, keepdims=False
-            # )
-            # self.inducing_points_variance = _tf.transpose(pred_var[:, self.n_dir:])
 
     def cache_prediction_state(self):
         super().cache_prediction_state()
