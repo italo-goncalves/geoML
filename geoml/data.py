@@ -43,6 +43,8 @@ import geoml.tftools as _tftools
 import geoml.metrics as _gmlmetrics
 import geoml.geometry as _gmt
 import geoml.storage as _storage
+
+import dask.array as _da
 import zarr as _zarr
 
 
@@ -2309,10 +2311,28 @@ class _PointBased(_SpatialData):
 
         return self.coordinates[index], None
 
-    def get_batched_variance(self, index=None):
-        coords, agggregation = self.get_batched_coordinates(index)
+    def _batch_rows(self, index=None):
+        """Rows and aggregation that ``get_batched_coordinates`` yields here.
 
-        return _np.zeros_like(coords), agggregation
+        Kept apart from the coordinates themselves so that
+        ``get_batched_variance`` can match their shape without generating them.
+        """
+        if index is None:
+            return self._n_data, None
+        index = _np.asarray(index)
+        n = int(_np.count_nonzero(index)) if index.dtype == bool else index.size
+        return n, None
+
+    def get_batched_variance(self, index=None):
+        """Variance of the input locations, mirroring get_batched_coordinates.
+
+        Zero unless the object was built with an explicit variance — see
+        `GaussianData`. Only the requested batch is built: deriving the zeros
+        from the coordinates would cost O(n_data) on every batch, which
+        dominates prediction on large objects.
+        """
+        rows, aggregation = self._batch_rows(index)
+        return _np.zeros([rows, self._n_dim]), aggregation
 
 
 class PointData(_PointBased):
@@ -2333,13 +2353,30 @@ class PointData(_PointBased):
         if isinstance(coordinates, str):
             coordinates = [coordinates]
 
-        self.coordinate_labels = coordinates
-        self.coordinates = _np.array(data.loc[:, coordinates], ndmin=2, dtype=float)
+        self._init_coordinates(
+            _np.array(data.loc[:, coordinates], ndmin=2, dtype=float),
+            coordinates)
 
-        self._n_dim = self.coordinates.shape[1]
-        self._n_data = self.coordinates.shape[0]
+    def _init_coordinates(self, coordinates, labels):
+        """Sets up the coordinate store and everything derived from it.
+
+        `coordinates` may be a plain array or an existing `ArrayStore`. Arrays
+        larger than the storage threshold are spilled to Zarr, so a large point
+        cloud need not stay in memory once this object owns it.
+        """
+        self.coordinate_labels = list(labels)
+        if isinstance(coordinates, _storage.ArrayStore):
+            self.coordinates = coordinates
+        else:
+            self.coordinates = _storage.ArrayStore.from_values(
+                _np.array(coordinates, ndmin=2, dtype=float), owner=self)
+
+        self._n_data, self._n_dim = self.coordinates.shape
         if self._n_data > 0:
-            self._bounding_box = BoundingBox.from_array(self.coordinates)
+            # chunk-by-chunk, so an on-disk store is never fully materialized
+            darr = self.coordinates.as_dask()
+            lo, hi = _da.compute(darr.min(axis=0), darr.max(axis=0))
+            self._bounding_box = BoundingBox(lo, hi)
         else:
             self._bounding_box = BoundingBox.from_array(
                 _np.zeros([2, self.n_dim]))
@@ -2360,7 +2397,7 @@ class PointData(_PointBased):
         - `probability`: predicted probabilities.
         - `simulations`: samples from the predictive distribution.
         """
-        df = [_pd.DataFrame(self.coordinates,
+        df = [_pd.DataFrame(_np.asarray(self.coordinates),
                             columns=self.coordinate_labels)]
         for variable in self.variables.values():
             df.append(variable.as_data_frame(**kwargs))
@@ -2369,23 +2406,32 @@ class PointData(_PointBased):
             df = _pd.concat([self.metadata, df], axis=1)
         return df
 
+    @staticmethod
+    def default_coordinate_labels(n_dim):
+        if n_dim <= 3:
+            return ["X", "Y", "Z"][0:n_dim]
+        return ["V" + str(i) for i in range(n_dim)]
+
     @classmethod
     def from_array(cls, coordinates, coordinate_labels=None):
-        df = _pd.DataFrame(coordinates)
-        if coordinate_labels is not None:
-            df.columns = coordinate_labels
-        else:
-            n_dim = coordinates.shape[1]
-            if n_dim <= 3:
-                df.columns = ["X", "Y", "Z"][0:n_dim]
-            else:
-                df.columns = ["V" + str(i) for i in range(n_dim)]
-        return PointData(df, df.columns)
+        if coordinate_labels is None:
+            coordinate_labels = PointData.default_coordinate_labels(
+                coordinates.shape[1])
+        # The coordinates go straight into the store: routing them through a
+        # DataFrame would materialize a full copy of a large point cloud.
+        new_obj = PointData.__new__(PointData)
+        _PointBased.__init__(new_obj)
+        new_obj._init_coordinates(coordinates, coordinate_labels)
+        return new_obj
+
+    def _subset_coordinates(self, item):
+        """A container of this class holding only the rows in `item`."""
+        return PointData.from_array(self.coordinates[item],
+                                    self.coordinate_labels)
 
     def __getitem__(self, item):
         self_copy = _copy.deepcopy(self)
-        new_obj = PointData.from_array(self_copy.coordinates[item])
-        new_obj.coordinate_labels = self_copy.coordinate_labels
+        new_obj = self_copy._subset_coordinates(item)
         new_obj.metadata = self_copy.metadata.iloc[item].reset_index(drop=True)
         for name, var in self_copy.variables.items():
             new_obj.variables[name] = var[item]
@@ -2436,7 +2482,7 @@ class PointData(_PointBased):
             raise ValueError("as_pyvista method is only supported "
                              "for 3-dimensional data")
 
-        pv_points = _pv.PolyData(self.coordinates)
+        pv_points = _pv.PolyData(_np.asarray(self.coordinates))
 
         for var in self.variables.keys():
             self.variables[var].fill_pyvista_points(pv_points)
@@ -2539,29 +2585,62 @@ class PointData(_PointBased):
 
 
 class GaussianData(PointData):
+    """Points whose locations are uncertain, with a variance per coordinate."""
+
     def __init__(self, data, coordinates_mean, coordinates_variance):
         super().__init__(data, coordinates_mean)
-        self.variance = _np.array(data.loc[:, coordinates_variance], ndmin=2)
+
+        if isinstance(coordinates_variance, str):
+            coordinates_variance = [coordinates_variance]
+        self._init_variance(
+            _np.array(data.loc[:, coordinates_variance], ndmin=2, dtype=float),
+            coordinates_variance)
+
+    def _init_variance(self, variance, labels):
+        """Sets up the variance store, kept alongside the coordinate one."""
+        self.variance_labels = list(labels)
+        if isinstance(variance, _storage.ArrayStore):
+            self.variance = variance
+        else:
+            self.variance = _storage.ArrayStore.from_values(
+                _np.array(variance, ndmin=2, dtype=float), owner=self)
+
+        if self.variance.shape != (self._n_data, self._n_dim):
+            raise ValueError(
+                "variance must have the same shape as the coordinates - "
+                f"expected {(self._n_data, self._n_dim)}, "
+                f"got {self.variance.shape}")
 
     @classmethod
     def from_array(cls, coordinates, coordinates_variance,
                    coordinate_labels=None):
-        df = _pd.DataFrame(coordinates)
         if coordinate_labels is None:
-            n_dim = coordinates.shape[1]
-            if n_dim <= 3:
-                coordinate_labels = ["X", "Y", "Z"][0:n_dim]
-            else:
-                coordinate_labels = ["V" + str(i) for i in range(n_dim)]
-
-        df.columns = coordinate_labels
+            coordinate_labels = PointData.default_coordinate_labels(
+                coordinates.shape[1])
         var_labels = [s + "_var" for s in coordinate_labels]
-        df_var = _pd.DataFrame(coordinates_variance, columns=var_labels)
-        df = _pd.concat([df, df_var], axis=1)
-        return GaussianData(df, coordinate_labels, var_labels)
 
-    def get_batched_variance(self):
-        return self.variance
+        new_obj = GaussianData.__new__(GaussianData)
+        _PointBased.__init__(new_obj)
+        new_obj._init_coordinates(coordinates, coordinate_labels)
+        new_obj._init_variance(coordinates_variance, var_labels)
+        return new_obj
+
+    def _subset_coordinates(self, item):
+        return GaussianData.from_array(self.coordinates[item],
+                                       self.variance[item],
+                                       self.coordinate_labels)
+
+    def as_data_frame(self, metadata=True, **kwargs):
+        df = super().as_data_frame(metadata=metadata, **kwargs)
+        variance = _pd.DataFrame(_np.asarray(self.variance),
+                                 columns=self.variance_labels)
+        return _pd.concat([df, variance], axis=1)
+
+    def get_batched_variance(self, index=None):
+        if index is None:
+            index = _np.arange(self._n_data)
+
+        return self.variance[index], None
 
 
 class _GriddedData(_PointBased):
@@ -3404,7 +3483,8 @@ class DirectionalData(PointData):
         """
         Conversion of a spatial object to a data frame.
         """
-        df = [_pd.DataFrame(self.coordinates, columns=self.coordinate_labels),
+        df = [_pd.DataFrame(_np.asarray(self.coordinates),
+                            columns=self.coordinate_labels),
               _pd.DataFrame(self.directions, columns=self.direction_labels)]
         for variable in self.variables.values():
             df.append(variable.as_data_frame(full))
@@ -3413,16 +3493,13 @@ class DirectionalData(PointData):
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.coordinates = self.coordinates[item]
-        if len(new_obj.coordinates.shape) < 2:
-            new_obj.coordinates = _np.expand_dims(new_obj.coordinates, axis=0)
-        new_obj.directions = self.directions[item]
-        if len(new_obj.directions.shape) < 2:
-            new_obj.directions = _np.expand_dims(new_obj.directions, axis=0)
+        coords = _np.array(self.coordinates[item], ndmin=2)
+        new_obj.coordinates = _storage.ArrayStore.from_values(
+            coords, owner=new_obj)
+        new_obj.directions = _np.array(self.directions[item], ndmin=2)
         new_obj._n_data = new_obj.coordinates.shape[0]
 
-        all_coords = _np.concatenate([new_obj.coordinates, new_obj.directions],
-                                     axis=0)
+        all_coords = _np.concatenate([coords, new_obj.directions], axis=0)
         new_obj._bounding_box, new_obj._diagonal = bounding_box(all_coords)
 
         for name, var in new_obj.variables.items():
@@ -3920,7 +3997,7 @@ class Section3D(PointData):
                 faces.append([4, p_1, p_2, p_3, p_4])
         faces = _np.stack(faces)
 
-        pv_surf = _pv.PolyData(self.coordinates, faces)
+        pv_surf = _pv.PolyData(_np.asarray(self.coordinates), faces)
 
         for var in self.variables.keys():
             self.variables[var].fill_pyvista_points(pv_surf)
@@ -4039,10 +4116,17 @@ def _blockdata(cls):
         splits = None if _np.prod(self.discretization) == 1 else len(index)
         return coords, splits
 
+    def _batch_rows(self, index=None):
+        # one row per discretization point of every block in the batch
+        n, _ = _PointBased._batch_rows(self, index)
+        n_sub = int(_np.prod(self.discretization))
+        return n * n_sub, (None if n_sub == 1 else n)
+
     cls.__init__ = new_init
     cls.discretized_coordinates = discretized_coordinates
     cls.inducing_grid = inducing_grid
     cls.get_batched_coordinates = get_batched_coordinates
+    cls._batch_rows = _batch_rows
 
     return cls
 
@@ -4211,8 +4295,11 @@ def _write_container(group, container):
         return meta
 
     def write(name, array):
-        _storage.ArrayStore.from_numpy(_np.asarray(array)).write_into(
-            group, name)
+        # An ArrayStore streams itself chunk-by-chunk; anything else (a plain
+        # ndarray of triangles, directions, ...) is wrapped first.
+        if not isinstance(array, _storage.ArrayStore):
+            array = _storage.ArrayStore.from_numpy(_np.asarray(array))
+        array.write_into(group, name)
 
     if type(container) is PointData:
         write("_coordinates", container.coordinates)
@@ -4253,11 +4340,16 @@ def _rebuild_container(meta, group):
     def read(name):
         return _np.asarray(_storage.ArrayStore.wrap_zarr(group[name]))
 
+    def read_store(name):
+        # Coordinates and variance stay on disk (read/write), as variables do.
+        return _storage.ArrayStore.wrap_zarr(group[name])
+
     if cls_name == "PointData":
-        return PointData.from_array(read("_coordinates"), meta["labels"])
+        return PointData.from_array(read_store("_coordinates"), meta["labels"])
     if cls_name == "GaussianData":
         return GaussianData.from_array(
-            read("_coordinates"), read("_variance"), meta["labels"])
+            read_store("_coordinates"), read_store("_variance"),
+            meta["labels"])
     if cls_name == "DirectionalData":
         labels = meta["labels"]
         dir_labels = meta["direction_labels"]
@@ -4270,10 +4362,8 @@ def _rebuild_container(meta, group):
         # Bypass Section3D.__init__ (which needs the discarded construction
         # parameters) and initialize the PointData layer directly.
         section = Section3D.__new__(Section3D)
-        labels = meta["labels"]
-        PointData.__init__(
-            section, _pd.DataFrame(read("_coordinates"), columns=labels),
-            labels)
+        _PointBased.__init__(section)
+        section._init_coordinates(read_store("_coordinates"), meta["labels"])
         section.grid_shape = [int(x) for x in meta["grid_shape"]]
         return section
     if cls_name == "Surface3D":

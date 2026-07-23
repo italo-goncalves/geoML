@@ -971,11 +971,11 @@ class VGPNetwork(_GPModel):
                       % (str(i + 1), str(n_batches)), end="")
 
             data_coords, splits = newdata.get_batched_coordinates(batch)
-            data_var, _ = newdata.get_batched_variance()
+            data_var, _ = newdata.get_batched_variance(batch)
 
             output = batch_pred(
                 _tf.constant(data_coords, _tf.float64),
-                _tf.constant(data_var[batch], _tf.float64),
+                _tf.constant(data_var, _tf.float64),
                 n_splits=splits
             )
 

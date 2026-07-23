@@ -158,6 +158,25 @@ class ArrayStore:
         return cls(_np.asarray(values), backend="numpy")
 
     @classmethod
+    def from_values(cls, values, owner=None, threshold=None):
+        """Store an existing array, spilling to disk when it is large.
+
+        Unlike :meth:`from_numpy`, which always keeps the array in RAM, the
+        backend is chosen by size as in :meth:`allocate`. Use this for arrays a
+        container owns for its whole life (coordinates, input variance) so a
+        large one does not pin memory.
+        """
+        values = _np.asarray(values)
+        if threshold is None:
+            threshold = DEFAULT_THRESHOLD
+        if not _use_zarr(values.shape, values.dtype, threshold):
+            return cls(values, backend="numpy")
+        store = cls.allocate(values.shape, dtype=values.dtype, fill_value=0,
+                             backend="zarr", owner=owner)
+        store[...] = values
+        return store
+
+    @classmethod
     def allocate(cls, shape, dtype=float, fill_value=_np.nan, chunks=None,
                  backend="auto", store=None, threshold=None, owner=None):
         """Create a new, filled array.

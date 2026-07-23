@@ -8,6 +8,15 @@ dimension) rather than a list of separate arrays
 holds its full `(n_data, n_dim)` coordinate array in memory, but produces the
 requested rows on demand, so very large grids can be built and predicted into
 without the coordinates dominating RAM
+* Point coordinates and `GaussianData`'s input variance are stored the same way
+as variable arrays (NumPy in RAM or Zarr on disk, by size), so a large point
+cloud no longer has to stay in memory
+* Fixed a bug where the input variance was rebuilt for the whole object on every
+prediction batch, making prediction quadratic in the number of points; it is now
+generated for the requested batch only
+* Fixed `GaussianData`: predicting into one no longer fails, subsetting keeps the
+object's class and variance instead of degrading to `PointData`, and the variance
+is included in `as_data_frame()`
 * Containers can be persisted to and reloaded from a single Zarr store with
 `to_zarr()` / `open()`, covering all point-based containers and variable types
 * Quantiles and probabilities are computed lazily in a single pass over the
