@@ -8,4 +8,5 @@
 /*.egg-info
 /*.egg
 
-__init__.py
+# JetBrains per-user workspace state (not shared).
+.idea/workspace.xml
