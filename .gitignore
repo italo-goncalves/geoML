@@ -8,5 +8,5 @@
 /*.egg-info
 /*.egg
 
-# JetBrains per-user workspace state (not shared).
-.idea/workspace.xml
+# JetBrains per-user workspace state (not shared), one file per machine.
+.idea/workspace*.xml
