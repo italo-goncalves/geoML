@@ -4,6 +4,10 @@ or chunked Zarr on disk, chosen automatically by size, so large projects no
 longer need to hold every array in memory
 * Simulations are stored as a single `(n_data, n_sim)` array (a dedicated
 dimension) rather than a list of separate arrays
+* Grid and block coordinates are now generated lazily: a regular grid no longer
+holds its full `(n_data, n_dim)` coordinate array in memory, but produces the
+requested rows on demand, so very large grids can be built and predicted into
+without the coordinates dominating RAM
 * Containers can be persisted to and reloaded from a single Zarr store with
 `to_zarr()` / `open()`, covering all point-based containers and variable types
 * Quantiles and probabilities are computed lazily in a single pass over the

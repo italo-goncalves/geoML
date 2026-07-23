@@ -441,7 +441,7 @@ class _Variable(object):
             series = self.values
 
             if sigma is not None:
-                series = _filters.gaussian(series, sigma, preserve_range=True)
+                series = _filters.gaussian(series.to_numpy(), sigma, preserve_range=True)
             return series
 
         def as_image(self, sigma=None):
@@ -467,7 +467,7 @@ class _Variable(object):
                 raise ValueError("method only available for Grid2D data"
                                  "objects")
 
-            image = _np.reshape(self.values, #.astype(float),
+            image = _np.reshape(self.values.to_numpy(),
                                 newshape=self.coordinates.grid_size,
                                 order="F")
             image = image.transpose()
@@ -495,7 +495,7 @@ class _Variable(object):
                 raise ValueError("method only available for Grid3D data"
                                  "objects")
 
-            cube = _np.reshape(self.values,  # .astype(float),
+            cube = _np.reshape(self.values.to_numpy(),
                                self.coordinates.grid_size, order="F")
             if sigma is not None:
                 cube = _filters.gaussian(cube, sigma, preserve_range=True)
@@ -2556,14 +2556,103 @@ class GaussianData(PointData):
         return self.variance
 
 
-class _GriddedData(PointData):
-    def __init__(self, data, coordinates):
-        super().__init__(data, coordinates)
+class _GriddedData(_PointBased):
+    """Base class for regular grids; also its own lazy coordinate provider.
+
+    A regular grid's coordinates are the Cartesian product of its per-axis node
+    vectors, laid out in a fixed order (axis 0 varying fastest, matching
+    ``itertools.product(*axes[::-1])[:, ::-1]``). Materializing the full
+    ``(n_data, n_dim)`` array would cost several gigabytes for a large 3D grid,
+    so a grid instead regenerates only the requested rows on demand and serves
+    as its own ``coordinates`` (``grid.coordinates is grid``). It duck-types a
+    2-D ``float64`` ndarray for the operations the rest of the package performs
+    on ``coordinates``: ``shape``, row selection (``coords[batch]`` with an
+    int/bool array or slice — the prediction hot path), column access
+    (``coords[:, i]``), and full materialization via ``__array__``.
+
+    An optional affine ``transform`` ``(origin, matrix)`` is applied to every
+    generated row as ``(row - origin) @ matrix + origin``; ``RotatedGrid3D``
+    uses it to stay lazy while still following a predictable order.
+
+    Concrete subclasses build the per-axis node vectors and pass them to
+    ``__init__``, then fill in ``grid``/``grid_size``/``step_size``/``origin``.
+    """
+
+    def __init__(self, axes, labels, transform=None):
+        super().__init__()
+        self._axes = [_np.asarray(a, dtype=float) for a in axes]
+        self._sizes = [len(a) for a in self._axes]
+        self._transform = transform
+
+        if isinstance(labels, str):
+            labels = [labels]
+        self.coordinate_labels = list(labels)
+        self.coordinates = self
+        self._n_dim = len(self._axes)
+        self._n_data = int(_np.prod(self._sizes)) if self._axes else 0
+        lo = _np.array([axis.min() for axis in self._axes])
+        hi = _np.array([axis.max() for axis in self._axes])
+        self._bounding_box = BoundingBox.from_array(_np.stack([lo, hi], axis=0))
+        self.metadata = _pd.DataFrame(_np.empty([self._n_data, 0]))
+
+        # grid geometry, filled in by the concrete subclasses
         self.grid = None
         self.grid_size = None
         self.step_size = None
         self.origin = None
 
+    # -- lazy coordinate surface ------------------------------------------- #
+    @property
+    def shape(self):
+        return self._n_data, self._n_dim
+
+    @property
+    def dtype(self):
+        return _np.dtype(float)
+
+    def __len__(self):
+        return self._n_data
+
+    def _generate(self, flat):
+        """Materialize the rows at the given flat indices as a 2-D array."""
+        remaining = _np.atleast_1d(_np.asarray(flat)).astype(_np.int64,
+                                                             copy=False)
+        cols = []
+        for size, axis in zip(self._sizes, self._axes):
+            cols.append(axis[remaining % size])
+            remaining = remaining // size
+        rows = _np.stack(cols, axis=-1)
+        if self._transform is not None:
+            origin, matrix = self._transform
+            rows = _np.matmul(rows - origin, matrix) + origin
+        return rows
+
+    def _resolve_rows(self, key):
+        if isinstance(key, slice):
+            return _np.arange(self._n_data)[key]
+        arr = _np.asarray(key)
+        if arr.dtype == bool:
+            return _np.flatnonzero(arr)
+        return arr
+
+    def __array__(self, dtype=None, copy=None):
+        rows = self._generate(_np.arange(self._n_data))
+        if dtype is not None and rows.dtype != _np.dtype(dtype):
+            rows = rows.astype(dtype)
+        return rows
+
+    def __getitem__(self, item):
+        if isinstance(item, tuple):
+            row_key, col_key = item
+            return self._generate(self._resolve_rows(row_key))[:, col_key]
+        rows = self._generate(self._resolve_rows(item))
+        # match ndarray behaviour: a scalar row index drops the first axis
+        if _np.isscalar(item) or (isinstance(item, _np.ndarray)
+                                  and item.ndim == 0):
+            return rows[0]
+        return rows
+
+    # -- container behaviour ----------------------------------------------- #
     def index_data(self, data):
         if data.n_dim != self.n_dim:
             raise DimensionMismatchError(
@@ -2579,11 +2668,63 @@ class _GriddedData(PointData):
 
         return _np.stack(cell_id, axis=1)
 
-    def as_data_frame(self, **kwargs):
-        df = super().as_data_frame(**kwargs)
+    def as_data_frame(self, metadata=True, **kwargs):
+        df = [_pd.DataFrame(_np.asarray(self.coordinates),
+                            columns=self.coordinate_labels)]
+        for variable in self.variables.values():
+            df.append(variable.as_data_frame(**kwargs))
+        df = _pd.concat(df, axis=1)
+        if metadata:
+            df = _pd.concat([self.metadata, df], axis=1)
         for i, s in enumerate(self.coordinate_labels):
             df[f'_{s}'] = self.step_size[i]
         return df
+
+    def subset_region(self, min_val, max_val,
+                      include_min=None, include_max=None):
+        # A subset of a regular grid is irregular, so it materializes into a
+        # PointData (carrying any predicted variables), mirroring
+        # PointData.subset_region.
+        coords = _np.asarray(self.coordinates)
+        if not isinstance(min_val, (list, tuple, _np.ndarray)):
+            min_val = [min_val]
+        if not isinstance(max_val, (list, tuple, _np.ndarray)):
+            max_val = [max_val]
+        if include_min is None:
+            include_min = [True] * self.n_dim
+        if include_max is None:
+            include_max = [False] * self.n_dim
+        if not isinstance(include_min, (list, tuple)):
+            include_min = [include_min]
+        if not isinstance(include_max, (list, tuple)):
+            include_max = [include_max]
+
+        checks = (len(min_val) == self.n_dim,
+                  len(max_val) == self.n_dim,
+                  len(include_min) == self.n_dim,
+                  len(include_max) == self.n_dim)
+        if not all(checks):
+            raise ValueError("all arguments must match the data dimension")
+
+        keep = _np.ones(self.n_data, dtype=bool)
+        for i in range(self.n_dim):
+            keep = keep & (coords[:, i] >= min_val[i])
+            if not include_min[i]:
+                keep = keep & (coords[:, i] > min_val[i])
+            keep = keep & (coords[:, i] <= max_val[i])
+            if not include_max[i]:
+                keep = keep & (coords[:, i] < max_val[i])
+
+        if not keep.any():
+            return None
+
+        self_copy = _copy.deepcopy(self)
+        new_obj = PointData.from_array(coords[keep], self.coordinate_labels)
+        new_obj.metadata = self.metadata.iloc[keep].reset_index(drop=True)
+        for name, var in self_copy.variables.items():
+            new_obj.variables[name] = var[keep]
+            new_obj.variables[name].set_coordinates(new_obj)
+        return new_obj
 
 
 class Grid1D(_GriddedData):
@@ -2630,9 +2771,8 @@ class Grid1D(_GriddedData):
 
         if labels is None:
             labels = "X"
-        grid_df = _pd.DataFrame({labels: grid})
 
-        super().__init__(grid_df, labels)
+        super().__init__([grid], labels)
         self.step_size = [step]
         self.grid = [grid]
         self.grid_size = [int(n)]
@@ -2807,14 +2947,11 @@ class Grid2D(_GriddedData):
                               (end[1] - start[1]) / (n[1] - 1)])
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
-        coords = _np.array(list(_iter.product(grid_y, grid_x)),
-                           dtype=float)[:, ::-1]
 
         if labels is None:
             labels = ["X", "Y"]
-        grid = _pd.DataFrame(coords, columns=labels)
 
-        super().__init__(grid, labels)
+        super().__init__([grid_x, grid_y], labels)
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y]
         self.grid_size = [int(num) for num in n]
@@ -3009,14 +3146,11 @@ class Grid3D(_GriddedData):
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
         grid_z = _np.linspace(start[2], end[2], n[2])
-        coords = _np.array(list(_iter.product(grid_z, grid_y, grid_x)),
-                           dtype=float)[:, ::-1]
 
         if labels is None:
             labels = ["X", "Y", "Z"]
-        grid = _pd.DataFrame(coords, columns=labels)
 
-        super().__init__(grid, labels)
+        super().__init__([grid_x, grid_y, grid_z], labels)
         self.step_size = step.tolist()
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = [int(num) for num in n]
@@ -3213,24 +3347,15 @@ class GridND(_GriddedData):
         for st, e, n_ in zip(start, end, n):
             grids.append(_np.linspace(st, e, n_))
 
-        coords = _np.array(list(_iter.product(*grids[::-1])),
-                           dtype=float)[:, ::-1]
-
         if labels is None:
             labels = [f"X_{i}" for i in range(len(n))]
-        grid_df = _pd.DataFrame(coords, columns=labels)
 
-        super().__init__(grid_df, labels)
+        super().__init__(grids, labels)
 
         self.step_size = step.tolist()
         self.grid = grids
         self.grid_size = [int(num) for num in n]
         self.labels = labels
-
-        self._n_dim = len(self.grid)
-        self._n_data = _np.prod(self.grid_size)
-        self._bounding_box = BoundingBox.from_array(
-            _np.stack([start, end], axis=0))
 
     def __str__(self):
         s = "Object of class %s with %s data locations\n" \
@@ -3864,9 +3989,11 @@ def _blockdata(cls):
             discretization = [1] * self.n_dim
         self.discretization = discretization
 
+        lo = _np.array([axis.min() for axis in self.grid])
+        hi = _np.array([axis.max() for axis in self.grid])
         self._bounding_box = BoundingBox(
-            _np.min(self.coordinates, axis=0) - _np.array(self.step_size) / 2,
-            _np.max(self.coordinates, axis=0) + _np.array(self.step_size) / 2,
+            lo - _np.array(self.step_size) / 2,
+            hi + _np.array(self.step_size) / 2,
         )
 
         sub_grid = _np.array(
@@ -3955,11 +4082,19 @@ class RotatedGrid3D(Grid3D):
         self.rake = rake
         super().__init__(start, n, step=step, labels=labels)
 
-        rotated = self.rotate(self)
-        self.coordinates = rotated.coordinates
+        # Keep the coordinates lazy: rotation is a linear map applied per row
+        # by the grid's own coordinate generator.
+        mat = self.rotation_matrix()
+        origin = _np.asarray(self.origin, dtype=float)
+        self._transform = (origin, mat)
 
-        bbox, d = bounding_box(self.coordinates)
-        self._bounding_box = BoundingBox.from_array(bbox)
+        # The rotated grid lies in a parallelepiped whose axis-aligned bounding
+        # box is attained at its 8 corners, so it needs no full materialization.
+        extremes = [axis[[0, -1]] for axis in self.grid]
+        corners = _np.array(list(_iter.product(*extremes[::-1])),
+                            dtype=float)[:, ::-1]
+        corners = _np.matmul(corners - origin, mat) + origin
+        self._bounding_box = BoundingBox.from_array(corners)
 
     def rotate(self, other):
         return rotate(other, self.origin, self.azimuth, self.dip, self.rake)
