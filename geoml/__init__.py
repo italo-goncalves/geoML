@@ -10,6 +10,7 @@ __all__ = [
     'latent',
     'metrics',
     'models',
+    'persistence',
     'plotly',
     'probability',
     'pyvista',

@@ -92,17 +92,24 @@ class _LatentVariable(_gpr.Parametric):
 
     def _state_var(self, name, value):
         """
-        Store `value` in a non-trainable, shapeless tf.Variable and return it.
+        Store `value` in a non-trainable tf.Variable and return it.
 
         The Variable is created on first use (the shape is unknown when the node
         is built) and reassigned afterwards. A cached prediction graph that reads
         the returned Variable sees the value written by the latest call, so the
         posterior can be refreshed once per prediction rather than per batch.
+
+        The Variable takes the shape of the first value it receives. It must not
+        be left shapeless: a graph reading a shapeless Variable gets a tensor of
+        unknown rank, which spreads through the whole prediction and breaks any
+        operation that needs a static rank (`tf.nn.softmax` on a given axis, for
+        one). These values are sized by the network's structure -- the number of
+        inducing points and the node's size -- so they do not change from one
+        prediction to the next.
         """
         var = self._state_vars.get(name)
         if var is None:
-            var = _tf.Variable(value, shape=_tf.TensorShape(None),
-                               dtype=_tf.float64, trainable=False)
+            var = _tf.Variable(value, dtype=_tf.float64, trainable=False)
             self._state_vars[name] = var
         else:
             var.assign(value)

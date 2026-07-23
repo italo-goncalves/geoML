@@ -22,10 +22,23 @@ object's class and variance instead of degrading to `PointData`, and the varianc
 is included in `as_data_frame()`
 * Containers can be persisted to and reloaded from a single Zarr store with
 `to_zarr()` / `open()`, covering all point-based containers and variable types
+* Trained models can be saved and loaded whole with `model.save()` and
+`Model.open()`, in a new `persistence` module: structure, trained parameters
+and training data are all kept, so a reloaded model predicts exactly as it did
+and can be trained further. It remembers its variables and their types, and so
+creates them on any new data object it predicts on. `Model.open(path, data=...)`
+rebuilds the same model around a different data set
 * Quantiles and probabilities are computed lazily in a single pass over the
 simulations, without materializing them
 * `reset_probabilities()` is now the inverse of `reset_quantiles()`: it takes
 cutoff values and returns cumulative probabilities in (0, 1)
+* Fixed prediction of categorical variables, which failed with a `TypeError`
+after the prediction posterior started being cached between batches
+* Fixed predictions on a new data object degrading a variable to a more basic
+type: a categorical variable became a rock type variable, and an anomaly became
+a plain binary variable
+* Fixed the `n_sim` argument being ignored when predicting with the standard
+`GP` model, which failed for any value other than 50
 * Fixed construction of `OrderedRockType` and rock-type/binary variables from
 string measurements
 * Fixed a bug where a parameter shared between components (e.g. a transform

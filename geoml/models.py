@@ -105,6 +105,40 @@ class _GPModel(_gpr.Parametric):
         """
         raise NotImplementedError
 
+    def save(self, path):
+        """
+        Saves this model, with its structure, parameters and training data.
+
+        See `geoml.persistence.save_model()`.
+
+        Parameters
+        ----------
+        path : str
+            Directory to write to, overwritten if it already exists.
+        """
+        import geoml.persistence as _persistence
+        return _persistence.save_model(self, path)
+
+    @classmethod
+    def open(cls, path, data=None):
+        """
+        Loads a model saved with `save()`.
+
+        The model is rebuilt with its variables and their types, ready to
+        predict on new data objects or to be trained further. See
+        `geoml.persistence.load_model()`.
+
+        Parameters
+        ----------
+        path : str
+            A directory written by `save()`.
+        data
+            A data object to build the model around, in place of the one it was
+            trained on.
+        """
+        import geoml.persistence as _persistence
+        return _persistence.load_model(path, data=data)
+
 
 class GP(_GPModel):
     """
@@ -467,7 +501,7 @@ class GP(_GPModel):
 
             output = self.predict_raw(
                 _tf.constant(newdata.coordinates[batch], _tf.float64),
-                jitter=self.options.jitter, **prediction_input)
+                jitter=self.options.jitter, n_sim=n_sim, **prediction_input)
 
             newdata.variables[self.variable].update(batch, **output)
 

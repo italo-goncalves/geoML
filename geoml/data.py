@@ -194,7 +194,7 @@ class BoundingBox(object):
             array = _np.expand_dims(array, axis=0)
         min_values = _np.min(array, axis=0, keepdims=True)
         max_values = _np.max(array, axis=0, keepdims=True)
-        return BoundingBox(min_values, max_values)
+        return cls(min_values, max_values)
 
     def contains_points(self, array):
         """
@@ -797,7 +797,7 @@ class ContinuousVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = ContinuousVariable(variable.name, coordinates)
+        new_var = cls(variable.name, coordinates)
         return new_var
 
     def __getitem__(self, item):
@@ -1079,7 +1079,7 @@ class VectorVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = VectorVariable(
+        new_var = cls(
             variable.name,
             coordinates,
             variable.labels,
@@ -1089,7 +1089,7 @@ class VectorVariable(_Variable):
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
                         *args, **kwargs):
-        new_var = VectorVariable(
+        new_var = cls(
             name,
             coordinates,
             labels=columns,
@@ -1289,14 +1289,13 @@ class CompositionalVariable(VectorVariable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = CompositionalVariable(variable.name, coordinates,
-                                        variable.labels)
+        new_var = cls(variable.name, coordinates, variable.labels)
         return new_var
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
                         *args, **kwargs):
-        new_var = CompositionalVariable(
+        new_var = cls(
             name,
             coordinates,
             labels=columns,
@@ -1589,8 +1588,7 @@ class RockTypeVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = RockTypeVariable(variable.name, coordinates,
-                                   variable.labels)
+        new_var = cls(variable.name, coordinates, variable.labels)
         return new_var
 
     @classmethod
@@ -1601,6 +1599,8 @@ class RockTypeVariable(_Variable):
              _pd.Categorical(df[col_b])])
         labels = labels.categories.values
 
+        # not `cls`: this takes a measurement per contact side, which
+        # `CategoricalVariable` does not accept
         new_var = RockTypeVariable(name, coordinates, labels,
                                    measurements_a=df[col_a].values,
                                    measurements_b=df[col_b].values)
@@ -1942,7 +1942,7 @@ class BinaryVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = BinaryVariable(variable.name, coordinates, variable.labels)
+        new_var = cls(variable.name, coordinates, variable.labels)
         return new_var
 
     def __getitem__(self, item):
@@ -2047,8 +2047,8 @@ class BinaryVariable(_Variable):
         labels.append(positive_class)
         labels = labels[::-1]
 
-        new_var = BinaryVariable(name, coordinates, labels,
-                                 measurements=df[col].values)
+        new_var = cls(name, coordinates, labels,
+                      measurements=df[col].values)
         return new_var
 
     def fill_pyvista_cube(self, cube, prefix=None):
@@ -2122,8 +2122,13 @@ class AnomalyVariable(BinaryVariable):
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, col, positive_class):
-        new_var = AnomalyVariable(name, coordinates, positive_class,
-                                  measurements=df[col].values)
+        new_var = cls(name, coordinates, positive_class,
+                      measurements=df[col].values)
+        return new_var
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        new_var = cls(variable.name, coordinates, variable.labels[0])
         return new_var
 
 
@@ -2459,6 +2464,9 @@ class PointData(_PointBased):
                 coordinates.shape[1])
         # The coordinates go straight into the store: routing them through a
         # DataFrame would materialize a full copy of a large point cloud.
+        # Not `cls`: the subclasses that inherit this need more than
+        # coordinates (directions, a grid shape), so they would come out
+        # half-built. `GaussianData` has its own version.
         new_obj = PointData.__new__(PointData)
         _PointBased.__init__(new_obj)
         new_obj._init_coordinates(coordinates, coordinate_labels)
@@ -2659,7 +2667,7 @@ class GaussianData(PointData):
                 coordinates.shape[1])
         var_labels = [s + "_var" for s in coordinate_labels]
 
-        new_obj = GaussianData.__new__(GaussianData)
+        new_obj = cls.__new__(cls)
         _PointBased.__init__(new_obj)
         new_obj._init_coordinates(coordinates, coordinate_labels)
         new_obj._init_variance(coordinates_variance, var_labels)
@@ -3025,7 +3033,7 @@ class Grid1D(_GriddedData):
         n = int(_np.ceil((new_max - new_min)/step)) + 1
 
         label = box.labels[0] if box.labels else None
-        return Grid1D(start=new_min, n=n, step=step, labels=label)
+        return cls(start=new_min, n=n, step=step, labels=label)
 
 
 class Grid2D(_GriddedData):
@@ -3222,7 +3230,7 @@ class Grid2D(_GriddedData):
         new_max = _np.round(box.max + dif * margin[1], rounding_decimals)
         n = _np.ceil((new_max - new_min) / step).astype(int) + 1
 
-        return Grid2D(start=new_min[0], n=n[0], step=step, labels=box.labels)
+        return cls(start=new_min[0], n=n[0], step=step, labels=box.labels)
 
 
 class Grid3D(_GriddedData):
@@ -3453,7 +3461,7 @@ class Grid3D(_GriddedData):
         new_max = _np.round(box.max + dif * margin[1], rounding_decimals)
         n = _np.ceil((new_max - new_min) / step).astype(int) + 1
 
-        return Grid3D(start=new_min[0], n=n[0], step=step, labels=box.labels)
+        return cls(start=new_min[0], n=n[0], step=step, labels=box.labels)
 
 
 class GridND(_GriddedData):
@@ -3553,7 +3561,7 @@ class DirectionalData(PointData):
         data = data.copy()
         data["dX"] = _np.sin(azimuth / 180 * _np.pi)
         data["dY"] = _np.cos(azimuth / 180 * _np.pi)
-        return DirectionalData(data, coordinates, ["dX", "dY"])
+        return cls(data, coordinates, ["dX", "dY"])
 
     @classmethod
     def from_planes(cls, data, coordinates, azimuth, dip):
@@ -3577,7 +3585,7 @@ class DirectionalData(PointData):
         vecs = _pd.DataFrame(vecs, columns=["dX", "dY", "dZ"])
         data = _pd.concat([data, data], axis=0).reset_index(drop=True)
         data = _pd.concat([data, vecs], axis=1)
-        return DirectionalData(data, coordinates, ["dX", "dY", "dZ"])
+        return cls(data, coordinates, ["dX", "dY", "dZ"])
 
     @classmethod
     def from_azimuth_and_dip(cls, data, coordinates, azimuth, dip):
@@ -3592,7 +3600,7 @@ class DirectionalData(PointData):
         # result
         vecs = _pd.DataFrame(dipvec, columns=["dX", "dY", "dZ"])
         data = _pd.concat([data, vecs], axis=1)
-        return DirectionalData(data, coordinates, ["dX", "dY", "dZ"])
+        return cls(data, coordinates, ["dX", "dY", "dZ"])
 
     @classmethod
     def from_normals(cls, data, coordinates, azimuth, dip):
@@ -3611,7 +3619,7 @@ class DirectionalData(PointData):
         # result
         vecs = _pd.DataFrame(- normalvec, columns=["dX", "dY", "dZ"])
         data = _pd.concat([data, vecs], axis=1)
-        return DirectionalData(data, coordinates, ["dX", "dY", "dZ"])
+        return cls(data, coordinates, ["dX", "dY", "dZ"])
 
 
 class DrillholeData(_SpatialData):
@@ -4301,7 +4309,7 @@ class RotatedGrid3D(Grid3D):
         origin = _np.squeeze(_np.matmul(new_min, rotmat) + center)
         origin = _np.round(origin, rounding_decimals)
 
-        return RotatedGrid3D(start=origin, n=n, step=step, azimuth=az, dip=dip, rake=rake, labels=labels)
+        return cls(start=origin, n=n, step=step, azimuth=az, dip=dip, rake=rake, labels=labels)
 
 
 # --------------------------------------------------------------------------- #

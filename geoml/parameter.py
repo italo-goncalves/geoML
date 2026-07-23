@@ -24,10 +24,39 @@
 import tensorflow as _tf
 import numpy as _np
 import pickle as _pickle
+import functools as _functools
 
 
 class Parametric(object):
     """An abstract class for objects with trainable parameters"""
+
+    def __init_subclass__(cls, **kwargs):
+        """Records the arguments each subclass is constructed with.
+
+        A trained model is saved by writing down how it was built and rebuilding
+        it with the same calls (see the `persistence` module), so every object
+        must remember its own arguments. Doing it here keeps that bookkeeping
+        out of the constructors themselves.
+        """
+        super().__init_subclass__(**kwargs)
+
+        init = cls.__dict__.get("__init__")
+        if init is None:
+            # this class inherits an already wrapped initializer
+            return
+
+        @_functools.wraps(init)
+        def wrapped_init(self, *args, **kwargs):
+            # A subclass initializer runs before the `super().__init__()` it
+            # calls, so the first one to arrive is the one that was actually
+            # invoked; the inner calls must not overwrite it.
+            if "_init_args" not in self.__dict__:
+                self._init_args = args
+                self._init_kwargs = kwargs
+            init(self, *args, **kwargs)
+
+        cls.__init__ = wrapped_init
+
     def __init__(self):
         self.parameters = {}
         self._all_parameters = []

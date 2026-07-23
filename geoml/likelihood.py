@@ -758,7 +758,7 @@ class Bernoulli(_Likelihood):
 
     @classmethod
     def one_class(cls, sharpness=1):
-        lik = Bernoulli(shift=-3, sharpness=sharpness)
+        lik = cls(shift=-3, sharpness=sharpness)
         lik.parameters["shift"].fix()
         return lik
 

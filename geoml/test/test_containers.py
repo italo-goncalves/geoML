@@ -156,3 +156,54 @@ def test_blocks_discretization_on_zarr_backend(monkeypatch):
     assert got.shape == (blocks2.n_data,)
     assert np.all(np.isfinite(got))
     assert np.allclose(ref, got, atol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# variable types survive being copied to another container
+# --------------------------------------------------------------------------- #
+def _container_with_every_variable_type(n=12, seed=0):
+    rng = np.random.default_rng(seed)
+    coords = rng.uniform(0, 100, (n, 2))
+    cols = ["X", "Y"]
+    point = geoml.data.PointData(pd.DataFrame(coords, columns=cols), cols)
+
+    rock = np.array(["granite", "basalt"] * (n // 2))
+    point.add_continuous_variable("continuous", rng.normal(size=n))
+    point.add_vector_variable("vector", ["a", "b"], rng.normal(size=(n, 2)))
+    point.add_rock_type_variable("rock_type", labels=("granite", "basalt"),
+                                 measurements_a=rock)
+    point.add_categorical_variable("categorical", ("granite", "basalt"), rock)
+    point.add_rock_type_variable("ordered", labels=("granite", "basalt"),
+                                 measurements_a=rock, ordered=True)
+    point.add_binary_variable("binary", labels=("basalt", "granite"),
+                              measurements=rock)
+    point.add_anomaly_variable("anomaly", "granite", measurements=rock)
+    point.add_compositional_variable(
+        "composition", ["s", "t"],
+        np.tile([0.4, 0.6], (n, 1)))
+    return point
+
+
+@pytest.mark.parametrize("name", [
+    "continuous", "vector", "rock_type", "categorical", "ordered", "binary",
+    "anomaly", "composition"])
+def test_copy_to_keeps_the_variable_subclass(name):
+    """`predict` builds its output variable with `copy_to`, which used to
+    downgrade subclasses to their base (a CategoricalVariable came out as a
+    RockTypeVariable, an AnomalyVariable as a BinaryVariable)."""
+    source = _container_with_every_variable_type()
+    target = geoml.data.Grid2D(start=[0, 0], n=[4, 4], step=[10, 10])
+
+    variable = source.variables[name]
+    variable.copy_to(target)
+    copied = target.variables[name]
+
+    assert type(copied) is type(variable)
+    assert copied.name == variable.name
+    assert copied.length == variable.length
+    assert copied.coordinates is target
+
+    if hasattr(variable, "labels"):
+        assert list(copied.labels) == list(variable.labels)
+    if hasattr(variable, "components"):
+        assert list(copied.components.keys()) == list(variable.components.keys())
