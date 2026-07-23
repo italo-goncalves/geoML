@@ -152,7 +152,9 @@ class GP(_GPModel):
 
         keep = ~ _np.isnan(self.data.variables[self.variable].measurements.values)
         if _np.sum(keep) > 0:
-            self.warping.initialize(self.data.variables[self.variable].measurements.values[keep, None])
+            self.warping.initialize(
+                self.data.variables[self.variable]
+                    .measurements.values.to_numpy()[keep, None])
 
         self.directional_data = directional_data
         self.use_trend = use_trend
@@ -220,7 +222,7 @@ class GP(_GPModel):
 
         with _tf.name_scope("GP_refresh"):
             self.y = _tf.constant(self.data.variables[self.variable]
-                                  .measurements.values[keep, None],
+                                  .measurements.values.to_numpy()[keep, None],
                                   _tf.float64)
             self.x = _tf.constant(self.data.coordinates[keep, :],
                                   _tf.float64)
@@ -244,7 +246,7 @@ class GP(_GPModel):
 
                 self.y_dir = _tf.constant(
                     self.directional_data.variables[self.variable]
-                        .measurements.values,
+                        .measurements.values.to_numpy(),
                     _tf.float64
                 )
                 self.y_warped = _tf.concat([

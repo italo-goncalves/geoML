@@ -438,10 +438,10 @@ class _Variable(object):
                 raise ValueError("method only available for Grid1D data"
                                  "objects")
 
-            series = self.values
+            series = self.values.to_numpy()
 
             if sigma is not None:
-                series = _filters.gaussian(series.to_numpy(), sigma, preserve_range=True)
+                series = _filters.gaussian(series, sigma, preserve_range=True)
             return series
 
         def as_image(self, sigma=None):
@@ -580,9 +580,9 @@ class _Variable(object):
         def fill_pyvista_points(self, points, label):
             if self.values.dtype == object:
                 if not all(self.values == ""):
-                    points.point_data[label] = self.values
+                    points.point_data[label] = self.values.to_numpy()
             elif not all(_np.isnan(self.values)):
-                points.point_data[label] = self.values
+                points.point_data[label] = self.values.to_numpy()
 
         def fill_pyvista_blocks(self, cube, label, sigma=None):
             if self.values.dtype == object:
@@ -605,7 +605,8 @@ class _Variable(object):
                                      "3D coordinates")
 
             if isinstance(self.coordinates, Section3D):
-                values = _np.reshape(self.values, self.coordinates.grid_shape,
+                values = _np.reshape(self.values.to_numpy(),
+                                     self.coordinates.grid_shape,
                                      order="F")
                 gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
                                         self.coordinates.grid_shape,
@@ -623,11 +624,11 @@ class _Variable(object):
             if isinstance(self.coordinates, Surface3D):
                 return _py.isosurface(self.coordinates.coordinates,
                                       self.coordinates.triangles,
-                                      values=self.values)
+                                      values=self.values.to_numpy())
 
             return _py.numeric_points_3d(
                 self.coordinates.coordinates,
-                self.values,
+                self.values.to_numpy(),
                 **kwargs)
 
         def draw_categorical(self, colors, **kwargs):
@@ -637,7 +638,7 @@ class _Variable(object):
 
             return _py.categorical_points_3d(
                 self.coordinates.coordinates,
-                self.values,
+                self.values.to_numpy(),
                 colors,
                 **kwargs)
 
@@ -695,7 +696,7 @@ class ContinuousVariable(_Variable):
         return _np.asarray(self.simulations)
 
     def get_predictions(self):
-        return self.prediction.values
+        return self.prediction.values.to_numpy()
 
     def reset_quantiles(self, probabilities=None):
         """
@@ -810,14 +811,15 @@ class ContinuousVariable(_Variable):
         df = _pd.DataFrame({})
 
         if measurements:
-            df[self.name] = self.measurements.values
+            df[self.name] = self.measurements.values.to_numpy()
 
         if predictions:
-            df[self.name + "_prediction"] = self.prediction.values
+            df[self.name + "_prediction"] = self.prediction.values.to_numpy()
 
         if latent:
-            df[self.name + "_latent_mean"] = self.latent_mean.values
-            df[self.name + "_latent_variance"] = self.latent_variance.values
+            df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
+            df[self.name + "_latent_variance"] = \
+                self.latent_variance.values.to_numpy()
 
         if simulations and self.simulations is not None:
             for i in range(self.simulations.shape[1]):
@@ -826,12 +828,12 @@ class ContinuousVariable(_Variable):
         if quantiles:
             if len(self.quantiles) > 0:
                 for key, val in self.quantiles.items():
-                    df[self.name + "_q" + str(key)] = val.values
+                    df[self.name + "_q" + str(key)] = val.values.to_numpy()
 
         if probability:
             if len(self.probabilities) > 0:
                 for key, val in self.probabilities.items():
-                    df[self.name + "_p" + str(key)] = val.values
+                    df[self.name + "_p" + str(key)] = val.values.to_numpy()
 
         return df
 
@@ -953,7 +955,7 @@ class ContinuousVariable(_Variable):
         if _np.sum(has_value) == 0:
             raise ValueError('No measurements available')
 
-        y_pred = self.prediction.values
+        y_pred = self.prediction.values.to_numpy()
         sims = self.get_simulations()
 
         has_value = has_value[:, 0]
@@ -1010,7 +1012,7 @@ class VectorVariable(_Variable):
 
     def get_measurements(self):
         # not allowing partial missing data
-        out = [self.components[label].measurements.values
+        out = [self.components[label].measurements.values.to_numpy()
                for label in self.labels]
         out = _np.stack(out, axis=1)
 
@@ -1081,7 +1083,8 @@ class VectorVariable(_Variable):
         all_dfs = _pd.concat(all_dfs, axis=1)
 
         if predictions:
-            all_dfs[self.name + "_uncertainty"] = self.uncertainty.values
+            all_dfs[self.name + "_uncertainty"] = \
+                self.uncertainty.values.to_numpy()
 
         return all_dfs
 
@@ -1174,21 +1177,21 @@ class _Component(ContinuousVariable):
         df = _pd.DataFrame({})
 
         if measurements:
-            df[self.name] = self.measurements.values
+            df[self.name] = self.measurements.values.to_numpy()
 
         if predictions:
             df[self.name + "_prediction"] = \
-                self.prediction.values
+                self.prediction.values.to_numpy()
 
         if quantiles:
             if len(self.quantiles) > 0:
                 for key, val in self.quantiles.items():
-                    df[self.name + "_q" + str(key)] = val.values
+                    df[self.name + "_q" + str(key)] = val.values.to_numpy()
 
         if probability:
             if len(self.probabilities) > 0:
                 for key, val in self.probabilities.items():
-                    df[self.name + "_p" + str(key)] = val.values
+                    df[self.name + "_p" + str(key)] = val.values.to_numpy()
 
         if simulations and self.simulations is not None:
             for i in range(self.simulations.shape[1]):
@@ -1220,7 +1223,7 @@ class CompositionalVariable(VectorVariable):
 
     def get_measurements(self):
         # not allowing partial missing data
-        out = [self.components[label].measurements.values
+        out = [self.components[label].measurements.values.to_numpy()
                for label in self.labels]
 
         out = _np.stack(out, axis=1)
@@ -1274,7 +1277,8 @@ class CompositionalVariable(VectorVariable):
         all_dfs = _pd.concat(all_dfs, axis=1)
 
         if predictions:
-            all_dfs[self.name + "_uncertainty"] = self.uncertainty.values
+            all_dfs[self.name + "_uncertainty"] = \
+                self.uncertainty.values.to_numpy()
 
         return all_dfs
 
@@ -1298,7 +1302,8 @@ class CompositionalVariable(VectorVariable):
         metrics.columns = self.labels
 
         comp_true, has_value = self.get_measurements()
-        comp_pred = _np.stack([self.components[c].prediction.values for c in self.labels], axis=1)
+        comp_pred = _np.stack([self.components[c].prediction.values.to_numpy()
+                               for c in self.labels], axis=1)
         comp_true = comp_true[has_value[:, 0] == 1]
         comp_pred = comp_pred[has_value[:, 0] == 1]
         ad = _gmlmetrics.aitchison_distance(comp_true, comp_pred)
@@ -1350,17 +1355,18 @@ class _Category(_Variable):
         df = _pd.DataFrame({})
 
         if probability:
-            df[self.name + "_probability"] = self.probability.values
-            df[self.name + "_indicator"] = self.indicator.values
+            df[self.name + "_probability"] = self.probability.values.to_numpy()
+            df[self.name + "_indicator"] = self.indicator.values.to_numpy()
 
         if latent:
-            df[self.name + "_indicator_mean"] = self.indicator_mean.values
+            df[self.name + "_indicator_mean"] = \
+                self.indicator_mean.values.to_numpy()
             df[self.name + "_indicator_variance"] = \
-                self.indicator_variance.values
+                self.indicator_variance.values.to_numpy()
 
         if predictions:
             df[self.name + "_indicator_predicted"] = \
-                self.indicator_predicted.values
+                self.indicator_predicted.values.to_numpy()
 
         if simulations and self.simulations is not None:
             for i in range(self.simulations.shape[1]):
@@ -1522,7 +1528,7 @@ class RockTypeVariable(_Variable):
 
     def get_measurements(self):
         # not allowing partial missing data
-        out = [self.components[label].indicator.values
+        out = [self.components[label].indicator.values.to_numpy()
                for label in self.labels]
 
         out = _np.stack(out, axis=1)
@@ -1572,8 +1578,8 @@ class RockTypeVariable(_Variable):
         new_obj.measurements_b = self.measurements_b[item]
 
         # Resetting labels
-        cat_a = _pd.Categorical(new_obj.measurements_a.values)
-        cat_b = _pd.Categorical(new_obj.measurements_b.values)
+        cat_a = _pd.Categorical(new_obj.measurements_a.values.to_numpy())
+        cat_b = _pd.Categorical(new_obj.measurements_b.values.to_numpy())
         labels = _pd.api.types.union_categoricals([cat_a, cat_b])
         labels = labels.categories.values
         new_obj.labels = labels
@@ -1596,13 +1602,13 @@ class RockTypeVariable(_Variable):
         df = _pd.concat(all_dfs, axis=1)
 
         if measurements:
-            df[self.name + "_a"] = self.measurements_a.values
-            df[self.name + "_b"] = self.measurements_b.values
+            df[self.name + "_a"] = self.measurements_a.values.to_numpy()
+            df[self.name + "_b"] = self.measurements_b.values.to_numpy()
 
         if predictions:
-            df[self.name + "_predicted"] = self.predicted.values
-            df[self.name + "_entropy"] = self.entropy.values
-            df[self.name + "_uncertainty"] = self.uncertainty.values
+            df[self.name + "_predicted"] = self.predicted.values.to_numpy()
+            df[self.name + "_entropy"] = self.entropy.values.to_numpy()
+            df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
 
         return df
 
@@ -1634,8 +1640,8 @@ class RockTypeVariable(_Variable):
     def training_input(self, idx=None):
         if idx is None:
             idx = _np.arange(self.coordinates.n_data)
-        return {"is_boundary": _tf.constant(self.boundary.values[idx, None],
-                                            _tf.bool)}
+        return {"is_boundary": _tf.constant(
+            self.boundary.values.to_numpy()[idx, None], _tf.bool)}
 
     def fill_pyvista_cube(self, cube, prefix=None):
         self.measurements_a.fill_pyvista_cube(
@@ -1683,9 +1689,9 @@ class RockTypeVariable(_Variable):
             self.components[comp].fill_pyvista_blocks(cube, self.name)
 
     def compute_metrics(self, **kwargs):
-        y_pred = self.predicted.values
-        y_true_a = self.measurements_a.values
-        y_true_b = self.measurements_b.values
+        y_pred = self.predicted.values.to_numpy()
+        y_true_a = self.measurements_a.values.to_numpy()
+        y_true_b = self.measurements_b.values.to_numpy()
 
         valid = y_true_a == y_true_b
 
@@ -1932,18 +1938,20 @@ class BinaryVariable(_Variable):
         df = _pd.DataFrame({})
 
         if measurements:
-            df[self.name + "_measurements"] = self.measurements.values
-            df[self.name + "_weights"] = self.weights.values
+            df[self.name + "_measurements"] = \
+                self.measurements.values.to_numpy()
+            df[self.name + "_weights"] = self.weights.values.to_numpy()
 
         if predictions:
-            df[self.name + "_predicted"] = self.predicted.values
-            df[self.name + "_probability"] = self.probability.values
-            df[self.name + "_entropy"] = self.entropy.values
-            df[self.name + "_uncertainty"] = self.uncertainty.values
+            df[self.name + "_predicted"] = self.predicted.values.to_numpy()
+            df[self.name + "_probability"] = self.probability.values.to_numpy()
+            df[self.name + "_entropy"] = self.entropy.values.to_numpy()
+            df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
 
         if latent:
-            df[self.name + "_latent_mean"] = self.latent_mean.values
-            df[self.name + "_latent_variance"] = self.latent_variance.values
+            df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
+            df[self.name + "_latent_variance"] = \
+                self.latent_variance.values.to_numpy()
 
         if simulations and self.simulations is not None:
             for i in range(self.simulations.shape[1]):
@@ -2791,13 +2799,14 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values,
+            "value": data.variables[variable].measurements_a.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
              - self.step_size[0] / 2) / self.step_size[0])
         raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = data.variables[variable].measurements_b.values
+        raw_data_2["value"] = \
+            data.variables[variable].measurements_b.values.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -2832,7 +2841,7 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
+            "value": data.variables[variable].measurements.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -2869,7 +2878,7 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
+            "value": data.variables[variable].measurements.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -2972,7 +2981,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values,
+            "value": data.variables[variable].measurements_a.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -2981,7 +2990,8 @@ class Grid2D(_GriddedData):
             (data.coordinates[:, 1] - self.grid[1][0]
              - self.step_size[1] / 2) / self.step_size[1])
         raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = data.variables[variable].measurements_b.values
+        raw_data_2["value"] = \
+            data.variables[variable].measurements_b.values.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3018,7 +3028,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
+            "value": data.variables[variable].measurements.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3060,7 +3070,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
+            "value": data.variables[variable].measurements.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3172,7 +3182,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values,
+            "value": data.variables[variable].measurements_a.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3184,7 +3194,8 @@ class Grid3D(_GriddedData):
             (data.coordinates[:, 2] - self.grid[2][0]
              - self.step_size[2] / 2) / self.step_size[2])
         raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = data.variables[variable].measurements_b.values
+        raw_data_2["value"] = \
+            data.variables[variable].measurements_b.values.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3222,7 +3233,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
+            "value": data.variables[variable].measurements.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3268,7 +3279,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values,
+            "value": data.variables[variable].measurements.values.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
