@@ -507,7 +507,7 @@ class _Variable(object):
                                  "objects")
 
             image = _np.reshape(self.values.to_numpy(),
-                                newshape=self.coordinates.grid_size,
+                                self.coordinates.grid_size,
                                 order="F")
             image = image.transpose()
 
@@ -535,7 +535,8 @@ class _Variable(object):
                                  "objects")
 
             cube = _np.reshape(self.values.to_numpy(),
-                               self.coordinates.grid_size, order="F")
+                               self.coordinates.grid_size,
+                               order="F")
             if sigma is not None:
                 cube = _filters.gaussian(cube, sigma, preserve_range=True)
             return cube
