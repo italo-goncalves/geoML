@@ -223,6 +223,10 @@ class BoundingBox(object):
 class _Variable(object):
     """Representation of a dependent random variable."""
 
+    # Subclasses that can be simulated replace this with an (n_data, n_sim)
+    # store; declared here so the accessors below work on every variable.
+    simulations = None
+
     def __init__(self, name, coordinates):
         self.name = name
         self.coordinates = coordinates
@@ -248,6 +252,39 @@ class _Variable(object):
 
     def get_simulations(self):
         raise NotImplementedError
+
+    @property
+    def n_sim(self):
+        """Number of simulations available, or 0 if none were drawn."""
+        return 0 if self.simulations is None else self.simulations.shape[1]
+
+    def simulation(self, index):
+        """
+        A single simulation, in the form of an `_Attribute`.
+
+        Simulations are kept in one `(n_data, n_sim)` array, so a single one is
+        not an attribute in its own right. This wraps the corresponding column,
+        giving it the usual helpers (`as_image()`, `as_cube()`, `smooth()`,
+        `get_contour()`, `draw_*()`, ...).
+
+        Parameters
+        ----------
+        index : int
+            Position of the simulation, from 0 to `n_sim - 1`.
+
+        Returns
+        -------
+        attribute : _Attribute
+            A copy of the simulation. Modifying it (with `smooth()`, for
+            instance) does not affect the stored simulations; assign it back
+            with `variable.simulations[:, index] = attribute.values` if that is
+            the intention.
+        """
+        if self.simulations is None:
+            raise NoDataError(
+                f'No simulations available for variable {self.name}.')
+
+        return self._Attribute(self.coordinates, self.simulations[:, index])
 
     def get_predictions(self):
         raise NotImplementedError
@@ -657,8 +694,10 @@ class ContinuousVariable(_Variable):
         The mean of the latent Gaussian representation.
     latent_variance : _Attribute
         The variance of the latent Gaussian representation.
-    simulations : list
-        Draws from the variable's posterior distribution.
+    simulations : ArrayStore
+        Draws from the variable's posterior distribution, in a single
+        `(n_data, n_sim)` array. Use `simulation()` to get one of them as an
+        `_Attribute`.
     quantiles : dict
         The variables quantiles, indexed by the corresponding percentile.
     probabilities : dict

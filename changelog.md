@@ -4,6 +4,9 @@ or chunked Zarr on disk, chosen automatically by size, so large projects no
 longer need to hold every array in memory
 * Simulations are stored as a single `(n_data, n_sim)` array (a dedicated
 dimension) rather than a list of separate arrays
+* New `variable.simulation(i)` and `variable.n_sim`: a single simulation can
+again be handled as an attribute, with the usual `as_image()`, `as_cube()`,
+`smooth()` and contouring helpers
 * Grid and block coordinates are now generated lazily: a regular grid no longer
 holds its full `(n_data, n_dim)` coordinate array in memory, but produces the
 requested rows on demand, so very large grids can be built and predicted into
