@@ -117,6 +117,9 @@ Rules:
 
 1. After completing a coding task, give a small summary about the files and lines changed, as well as the functions, methods created, etc.
 2. Do not commit the changes immediately; allow the user the opportunity to open the IDE and see the changes.
+3. When you do commit, include the user's own uncommitted changes as well —
+   never stage only your own files. Describe them in the commit message as you
+   would your own, reading the diff to see what they do.
 
 ---
 
@@ -161,4 +164,4 @@ Machine learning models for spatial/geoscientific data, centered on **variationa
 
 - No `pyproject.toml`, `requirements.txt`, or CI. Install is `pip install -e .` from `setup.py`; deps: numpy, scipy, pandas, scikit-learn, scikit-image, tensorflow, tensorflow-probability, pyvista, plotly.
 - **Tests:** `geoml/test/test_vgp.py` is a small runnable pytest suite for the core VGP path (build / train / predict on Walker Lake). geoML isn't pip-installed here, so run from the repo root (so `import geoml` picks up the working tree) with an env that has TF/TFP. No pytest config or CI yet. The older `geoml/test/*.py` were stale scratch scripts (removed APIs, machine-specific paths) and have been deleted. Note: a model is only reproducible if the global NumPy/TF RNG is seeded *before construction* — parameter init isn't tied to `options.seed`.
-- **Version is out of sync:** `__init__.py` says `0.4.0` while `setup.py` says `0.4.1` (changelog's latest). Bump both together.
+- **Version:** `__init__.py` and `setup.py` both say `0.5.0` (changelog's latest). They drifted apart once — bump both together.
