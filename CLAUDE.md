@@ -116,7 +116,7 @@ Rules:
 ## Communicating changes
 
 1. After completing a coding task, give a small summary about the files and lines changed, as well as the functions, methods created, etc.
-2. Do not commit the changes immediately; allow the user the opportunity to open and IDE and see the changes.
+2. Do not commit the changes immediately; allow the user the opportunity to open the IDE and see the changes.
 
 ---
 
@@ -129,8 +129,9 @@ Machine learning models for spatial/geoscientific data, centered on **variationa
 | Module | Role |
 |---|---|
 | `parameter.py` | `Parametric` base class + `RealParameter` family. Foundation everything inherits from. |
-| `data.py` | Data containers (`PointData`, `Grid1D/2D/3D`, `DirectionalData`, `DrillholeData`, `Section3D`, `Surface3D`) and variable types (`ContinuousVariable`, `CategoricalVariable`, `CompositionalVariable`, `RockTypeVariable`, …). Largest module (~3800 lines). |
-| `datasets.py` | Loaders for bundled `sample_data/` (`walker()`, `jura()`, `ararangua()`, …). |
+| `data.py` | Data containers (`PointData`, `Grid1D/2D/3D`, `DirectionalData`, `Section3D`, `Surface3D`) and variable types (`ContinuousVariable`, `CategoricalVariable`, `CompositionalVariable`, `RockTypeVariable`, …). Largest module (~3800 lines). |
+| `drillhole.py` | `DrillholeData` (collar + optional survey + named `IntervalTable`s) and `IntervalTable`. Minimum-curvature desurveying, per-column roles, validation, compositing, subsetting/category grouping, and conversion to `PointData`. Never fed to a model — only converted. |
+| `datasets.py` | Loaders for bundled `sample_data/` (`walker()`, `jura()`, `ararangua()`, …), plus `macpass()`, which reads a database the user downloads themselves. |
 | `models.py` | User-facing models: `GP` (legacy, closed-form), `VGPNetwork` (the core variational model), `StructuralField`, `GPEnsemble`, `ProjectedVGP`, `Normalizer`. |
 | `latent.py` | Composable latent-variable network nodes (`BasicGP`, `Add`, `Multiply`, `LinearCombination`, `ProductOfExperts`, …) — the building blocks passed to `VGPNetwork`. |
 | `likelihood.py` | Likelihoods (`Gaussian`, `MultivariateGaussian`, `Bernoulli`, `CategoricalGaussianIndicator`, `GradientIndicator`, …). |

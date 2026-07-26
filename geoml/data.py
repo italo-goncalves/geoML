@@ -17,7 +17,6 @@
 __all__ = ["PointData",
            "Grid1D", "Grid2D", "Grid3D",
            "DirectionalData",
-           "DrillholeData",
            "batch_index",
            "export_planes",
            "RotatedGrid3D", "Section3D", "Surface3D",
@@ -1599,11 +1598,9 @@ class RockTypeVariable(_Variable):
              _pd.Categorical(df[col_b])])
         labels = labels.categories.values
 
-        # not `cls`: this takes a measurement per contact side, which
-        # `CategoricalVariable` does not accept
-        new_var = RockTypeVariable(name, coordinates, labels,
-                                   measurements_a=df[col_a].values,
-                                   measurements_b=df[col_b].values)
+        new_var = cls(name, coordinates, labels,
+                      measurements_a=df[col_a].values,
+                      measurements_b=df[col_b].values)
         return new_var
 
     def __getitem__(self, item):
@@ -1758,6 +1755,16 @@ class RockTypeVariable(_Variable):
 class CategoricalVariable(RockTypeVariable):
     def __init__(self, name, coordinates, labels=None, measurements=None):
         super().__init__(name, coordinates, labels=labels, measurements_a=measurements)
+
+    @classmethod
+    def from_data_frame(cls, name, coordinates, df, measurements_col=None,
+                        *args, **kwargs):
+        labels = _pd.Categorical(df[measurements_col])
+        labels = labels.categories.values
+
+        new_var = cls(name, coordinates, labels,
+                      measurements=df[measurements_col].values)
+        return new_var
 
     def fill_pyvista_cube(self, cube, prefix=None):
         self.measurements_a.fill_pyvista_cube(
@@ -3620,342 +3627,6 @@ class DirectionalData(PointData):
         vecs = _pd.DataFrame(- normalvec, columns=["dX", "dY", "dZ"])
         data = _pd.concat([data, vecs], axis=1)
         return cls(data, coordinates, ["dX", "dY", "dZ"])
-
-
-class DrillholeData(_SpatialData):
-    """
-    Drillhole data
-    
-    Attributes
-    ----------
-    coords_from, coords_to :
-        Coordinates for the start and end of each segment.
-    data :
-        The drillhole segments' attributes. The column HOLEID is reserved.
-    lengths :
-        The length of each segment
-    """
-
-    def __init__(self, collar=None, assay=None, survey=None, holeid="HOLEID",
-                 x="X", y="Y", z="Z", fr="FROM", to="TO", az=None,
-                 dip=None):
-        """
-        Initializer for DrillholeData.
-
-        Parameters
-        ----------
-        collar : DataFrame
-            The coordinates of the drillhole collars.
-        assay : DataFrame
-            The interval data.
-        survey : DataFrame
-            The hole survey data.
-        holeid : str
-            Column with the hole index.
-        x,y,z : str
-            Columns in collar with the coordinates.
-        fr,to : str
-            Columns in assay with the interval measurements.
-
-
-        The column HOLEID in the output is reserved.
-        """
-        super().__init__()
-        collar = collar.copy()
-
-        if survey is not None:
-            raise NotImplementedError("survey data is not yet supported")
-
-        if az is None:
-            az = "AZIMUTH"
-            collar[az] = 0
-        if dip is None:
-            dip = "DIP"
-            collar[dip] = 90
-
-        assay = assay.drop([x, y, z], axis=1, errors="ignore")
-
-        # column names
-        collar_names = collar.columns
-        collar_names = collar_names[[a not in [x, y, z]
-                                     for a in collar_names.tolist()]]
-        assay_names = assay.columns
-        assay_names = assay_names[[a not in [holeid, fr, to]
-                                   for a in assay_names.tolist()]]
-        if (holeid not in collar_names) & (holeid not in assay_names):
-            raise ValueError("holeid column must be present in collar "
-                             "and assay data frames")
-
-        # processing data
-        df = _pd.merge(collar,
-                       assay,
-                       on=holeid,
-                       suffixes=("_collar", "_assay"))
-
-        directions = DirectionalData.from_azimuth_and_dip(
-            df, [x, y, z], az, dip
-        ).directions
-
-        # df_from = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[fr]})
-        # df_to = _pd.DataFrame({"X": 0, "Y": 0, "Z": df[to]})
-        # coords_from = df.loc[:, [x, y, z]].values - df_from.values
-        # coords_to = df.loc[:, [x, y, z]].values - df_to.values
-
-        coords_from = df.loc[:, [x, y, z]].values \
-                      + directions * df[fr].values[:, None]
-        coords_to = df.loc[:, [x, y, z]].values \
-                      + directions * df[to].values[:, None]
-
-        df = df.drop([x, y, z], axis=1)
-        df = df.rename(columns={holeid: "HOLEID"})
-
-        # output
-        self.coords_from = coords_from
-        self.coords_to = coords_to
-        self.data = df
-        self.coordinate_labels = [x, y, z]
-
-        self._n_dim = self.coords_from.shape[1]
-        self._n_data = self.coords_from.shape[0]
-        self.lengths = _np.sqrt(_np.sum((self.coords_from
-                                         - self.coords_to) ** 2,
-                                        axis=1))
-
-        coords2 = _np.concatenate([self.coords_from, self.coords_to], axis=0)
-        # self._bounding_box, self._diagonal = bounding_box(coords2)
-        self._bounding_box = BoundingBox.from_array(coords2)
-
-    def __str__(self):
-        s = "Object of class " + self.__class__.__name__ + "\n\n"
-        s += str(self.coords_from.shape[0]) + " drillhole segments in "
-        s += str(self._n_dim) + " dimensions\n\n"
-        if self.data is not None:
-            s += "Data preview:\n\n"
-            s += str(self.data.head())
-        return s
-
-    def as_data_frame(self):
-        df = _pd.concat([
-            _pd.DataFrame(
-                self.coords_from,
-                columns=[s + "_from" for s in self.coordinate_labels]),
-            _pd.DataFrame(
-                self.coords_to,
-                columns=[s + "_to" for s in self.coordinate_labels]),
-            self.data
-        ], axis=1)
-        return df
-
-    def segment_fixed(self, interval=5):
-        dif = self.coords_to - self.coords_from
-        length = _np.sqrt(_np.sum(dif ** 2, axis=1))
-        points = []
-        newdata = []
-        for i, ln in enumerate(length):
-            n = int(_np.ceil(ln / interval))
-            position = _np.cumsum(_np.ones(n) / (n + 1))
-            points.extend([self.coords_from[i, :] + dif[i, :] * x
-                           for x in position])
-            newdata.append(self.data.iloc[[i] * n, :])
-        points = _np.stack(points, axis=0)
-        points = _pd.DataFrame(points, columns=self.coordinate_labels)
-        df = _pd.concat(newdata, ignore_index=True)
-        df = _pd.concat([points, df], axis=1)
-
-        return PointData(df, self.coordinate_labels), df
-
-    def segment_relative(self, locations=(0.05, 0.5, 0.95)):
-        if locations.__class__ is not _np.ndarray:
-            locations = _np.array(locations)
-        if (_np.min(locations) < 0) | (_np.max(locations) > 1):
-            raise ValueError("locations must contain values between " +
-                             "0 and 1, inclusive")
-
-        dif = self.coords_to - self.coords_from
-        points = [self.coords_from + dif * x for x in locations]
-        points = _np.concatenate(points, axis=0)
-        points = _pd.DataFrame(points, columns=self.coordinate_labels)
-        df = _pd.concat([self.data] * len(locations), ignore_index=True)
-        df = _pd.concat([points, df], axis=1)
-
-        return PointData(df, self.coordinate_labels), df
-
-    def merge_segments(self, by):
-        """
-        Merges redundant segments according to the by column in order to
-        form longer segments.
-        
-        Parameters
-        ----------
-        by : name of the column with categorical data
-        """
-        coords_dif = self.coords_from - self.coords_to
-        directions = _np.apply_along_axis(lambda x: x / self.lengths,
-                                          axis=0, arr=coords_dif)
-
-        # finding mergeable segments
-        # condition 1 - segments sharing a point
-        # (coords_to[i,:] == coords_from[i-1,:])
-        start_end = _np.apply_along_axis(
-            lambda x: all(x < 1e-6), axis=1,
-            arr=self.coords_to[0:(self.coords_to.shape[0] - 1), :]
-            - self.coords_from[1:self.coords_from.shape[0], :])
-        # condition 2 - parallelism
-        dir_from = directions[0:(directions.shape[0] - 1), :]
-        dir_to = directions[1:directions.shape[0], :]
-        parallel = _np.apply_along_axis(
-            lambda x: all(x < 1e-6), axis=1,
-            arr=dir_from - dir_to)
-        # condition 3 - same value in "by" column
-        val_from = self.data.loc[0:(self.coords_from.shape[0] - 1), by].values
-        val_to = self.data.loc[1:self.coords_from.shape[0], by].values
-        same_value = [val_from[i] == val_to[i] for i in range(len(val_to))]
-        # condition 4 - same hole
-        hole_from = self.data.loc[0:(self.coords_from.shape[0] - 1), "HOLEID"] \
-            .values
-        hole_to = self.data.loc[1:self.coords_from.shape[0], "HOLEID"].values
-        same_hole = [hole_from[i] == hole_to[i] for i in range(len(hole_to))]
-        # final vector
-        mergeable = start_end & parallel & same_value & same_hole
-
-        # merged object
-        # find contiguous mergeable segments
-        merge_ids = _np.split(
-            _np.arange(self.coords_from.shape[0]),
-            _np.where(_np.concatenate([[False], ~mergeable]))[0])
-        # merge_ids may contain empty elements
-        merge_ids = [x for x in merge_ids if x.size > 0]
-        # coordinates
-        new_coords_from = _np.zeros([len(merge_ids), self._n_dim])
-        new_coords_to = _np.zeros([len(merge_ids), self._n_dim])
-        for i in range(len(merge_ids)):
-            new_coords_from[i, :] = self.coords_from[merge_ids[i][0], :]
-            new_coords_to[i, :] = self.coords_to[merge_ids[i][-1], :]
-        # data
-        cols = by if by == "HOLEID" else ["HOLEID", by]
-        new_df = self.data.loc[[x[0] for x in merge_ids], cols]
-        new_df = new_df.reset_index(drop=True)  # very important
-
-        # initialization
-        new_obj = _copy.deepcopy(self)
-        new_obj.coords_from = new_coords_from
-        new_obj.coords_to = new_coords_to
-        new_obj.data = new_df
-
-        new_obj._n_data = new_obj.coords_from.shape[0]
-        new_obj.lengths = _np.sqrt(_np.sum((new_obj.coords_from
-                                            - new_obj.coords_to) ** 2,
-                                           axis=1))
-
-        coords2 = _np.concatenate(
-            [new_obj.coords_from, new_obj.coords_to], axis=0)
-        new_obj._bounding_box, new_obj._diagonal = bounding_box(coords2)
-
-        return new_obj
-
-    def get_contacts(self, by):
-        """
-        Returns a PointData with the coordinates of the contacts between
-        two different categories.
-        
-        Parameters
-        ----------
-        by : name of the column with the category
-        """
-        merged = self.merge_segments(by)
-        points, df = merged.segment_relative(_np.array([0, 1]))
-        points.add_categorical_variable(
-            by, _pd.unique(df[by]), measurements=df[by].values)
-        points.add_categorical_variable(
-            "HOLEID", _pd.unique(df["HOLEID"]),
-            measurements=df["HOLEID"].values)
-
-        # finding duplicates
-        dup_label = _pd.DataFrame(points.coordinates).duplicated(keep="last")
-        dup1 = _np.where(dup_label.values)[0]
-        dup2 = dup1 - 1
-
-        # new object
-        new_points = points.coordinates[dup1, :]
-        new_points = _pd.DataFrame(new_points, columns=self.coordinate_labels)
-        new_data = _pd.DataFrame(
-            {"HOLEID": points.variables["HOLEID"].measurements_a.values[dup2],
-             by + "_a": points.variables[by].measurements_a.values[dup2],
-             by + "_b": points.variables[by].measurements_b.values[dup1]})
-        new_data = new_data.reset_index(drop=True)
-        new_data = _pd.concat([new_points, new_data], axis=1)
-
-        new_obj = PointData(new_data, self.coordinate_labels)
-        new_obj.add_rock_type_variable(
-            by, points.variables[by].labels,
-            measurements_a=new_data[by + "_a"].values,
-            measurements_b=new_data[by + "_b"].values)
-        return new_obj
-
-    def as_classification_input(self, by, interval=5, label_order=None):
-        """
-        Returns a PointData object in a format suitable for use as input to
-        a classification model.
-        """
-        merged = self.merge_segments(by)
-        points, df = merged.segment_fixed(interval)
-        points.add_categorical_variable(
-            by, _pd.unique(df[by]), measurements=df[by].values)
-
-        df = points.as_data_frame()
-        contacts = merged.get_contacts(by)
-        contacts = contacts.as_data_frame()
-        new_data = _pd.concat([df, contacts], axis=0)
-
-        new_obj = PointData(new_data, self.coordinate_labels)
-        new_obj.add_rock_type_variable(
-            by,
-            labels=label_order if label_order is not None else points.variables[by].labels,
-            measurements_a=new_data[by + "_a"].values,
-            measurements_b=new_data[by + "_b"].values)
-        return new_obj
-
-    def as_pyvista(self):
-        # empty object
-        drill_coords = []
-        cell_links = []
-        for i in range(self.n_data):
-            drill_coords.append(self.coords_from[i])
-            drill_coords.append(self.coords_to[i])
-            cell_links.append([2, 2 * i, 2 * i + 1])
-        drill_coords = _np.stack(drill_coords, axis=0)
-        cell_links = _np.stack(cell_links, axis=0)
-
-        pv_dh = _pv.PolyData(drill_coords, lines=cell_links)
-
-        # scalars
-        df = self.data.dropna(axis=1, how="all")
-        for col in df.columns:
-            # fixing special characters
-            if df[col].dtype == 'object':
-                df[col] = df[col].str.normalize('NFKD')\
-                    .str.encode('ascii', errors='ignore').str.decode('utf-8')
-            pv_dh.cell_data[col] = df[col].values
-
-        return pv_dh
-
-    def draw_categorical(self, column, colors, **kwargs):
-        # converting to points and reordering
-        merged = self.merge_segments(column)
-        points = _np.concatenate([merged.coords_from, merged.coords_to], axis=0)
-        df = _pd.concat([
-            _pd.DataFrame(points, columns=self.coordinate_labels),
-            _pd.concat([merged.data] * 2, axis=0).reset_index(drop=True)
-        ], axis=1)
-        seq = _np.arange(merged.n_data)
-        sort_idx = _np.argsort(_np.concatenate([seq, seq + 0.1]))
-        df = df.iloc[sort_idx, :].reset_index(drop=True)
-        # return df
-        return _py.segments_3d(df.loc[:, self.coordinate_labels].values,
-                               df[column].values, colors, **kwargs)
-
-    def draw_numeric(self, column, **kwargs):
-        raise NotImplementedError()
 
 
 def batch_index(n_data, batch_size):

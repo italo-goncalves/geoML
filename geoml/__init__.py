@@ -3,6 +3,7 @@ __author__ = 'Ítalo Gomes Gonçalves'
 __all__ = [
     'data',
     'datasets',
+    'drillhole',
     'geometry',
     'interpolation',
     'kernels',

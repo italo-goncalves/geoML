@@ -207,3 +207,50 @@ def test_copy_to_keeps_the_variable_subclass(name):
         assert list(copied.labels) == list(variable.labels)
     if hasattr(variable, "components"):
         assert list(copied.components.keys()) == list(variable.components.keys())
+
+
+def _variable_data_frame(n=12, seed=1):
+    rng = np.random.default_rng(seed)
+    rock_a = np.array(["granite", "basalt"] * (n // 2))
+    return pd.DataFrame({
+        "cat": rock_a,
+        "rock_a": rock_a,
+        "rock_b": np.array(["basalt", "granite"] * (n // 2)),
+        "a": rng.normal(size=n),
+        "b": rng.normal(size=n),
+        "s": np.full(n, 0.4),
+        "t": np.full(n, 0.6),
+    })
+
+
+@pytest.mark.parametrize("cls,kwargs", [
+    (geoml.data.VectorVariable, {"columns": ["a", "b"]}),
+    (geoml.data.CompositionalVariable, {"columns": ["s", "t"]}),
+    (geoml.data.RockTypeVariable, {"col_a": "rock_a", "col_b": "rock_b"}),
+    (geoml.data.OrderedRockType, {"col_a": "rock_a", "col_b": "rock_b"}),
+    (geoml.data.CategoricalVariable, {"measurements_col": "cat"}),
+    (geoml.data.BinaryVariable, {"col": "cat", "positive_class": "granite"}),
+    (geoml.data.AnomalyVariable, {"col": "cat", "positive_class": "granite"}),
+], ids=lambda x: x.__name__ if isinstance(x, type) else "")
+def test_from_data_frame_builds_the_class_it_is_called_on(cls, kwargs):
+    """These used to hard-code their class, so subclasses came out downgraded.
+
+    Nothing inside the package calls `from_data_frame`, which is why the
+    downgrade went unnoticed; the constructors are exercised here directly.
+    """
+    df = _variable_data_frame()
+    coords = np.stack([np.arange(12.0), np.arange(12.0)], axis=1)
+    point = geoml.data.PointData(
+        pd.DataFrame(coords, columns=["X", "Y"]), ["X", "Y"])
+
+    variable = cls.from_data_frame("v", point, df, **kwargs)
+
+    assert type(variable) is cls
+    assert variable.name == "v"
+    assert variable.coordinates is point
+    assert len(variable.labels) >= 2
+
+    # the measurements must actually reach the variable
+    if hasattr(variable, "measurements_a"):
+        assert list(np.asarray(variable.measurements_a.values)) == \
+            list(df["rock_a" if "col_a" in kwargs else "cat"])

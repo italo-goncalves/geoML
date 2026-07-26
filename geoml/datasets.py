@@ -15,10 +15,12 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os as _os
+import glob as _glob
 import pandas as _pd
 import numpy as _np
 
 import geoml.data as _data
+import geoml.drillhole as _drillhole
 
 
 def walker():
@@ -56,8 +58,8 @@ def ararangua():
 
     Returns
     -------
-    ara_dh : geoml.data.DrillholeData
-        A dataset with 13 drillholes.
+    ara_dh : geoml.drillhole.DrillholeData
+        A dataset with 13 drillholes and one lithology table, named "lito".
     """
     path = _os.path.dirname(__file__)
     file = _os.path.join(path, "sample_data/Araranguá.xlsx")
@@ -65,12 +67,75 @@ def ararangua():
     ara_lito = _pd.read_excel(file, sheet_name="Lito")
     ara_collar = _pd.read_excel(file, sheet_name="Collar")
 
-    ara_dh = _data.DrillholeData(ara_collar,
-                                 ara_lito,
-                                 holeid="Hole ID",
-                                 fr="From",
-                                 to="To")
+    # there is no survey: these holes are vertical, which is stated here
+    # rather than left to the default
+    ara_collar["Dip"] = 90.0
+    ara_collar["Azimuth"] = 0.0
+
+    ara_dh = _drillhole.DrillholeData(
+        ara_collar, hole="Hole ID", x="X", y="Y", z="Z", length="Length",
+        dip="Dip", azimuth="Azimuth")
+    ara_dh.add_intervals(
+        "lito", ara_lito, hole="Hole ID", fr="From", to="To",
+        categorical=["Lito", "Formation", "Layer"])
     return ara_dh
+
+
+def macpass(path):
+    """
+    Drillhole data from the Macmillan Pass (Macpass) project, Yukon, Canada.
+
+    This data is NOT distributed with geoML. It is published by Fireweed
+    Metals Corp. at https://fireweedmetals.com/macpass-project/ and is subject
+    to the terms at https://fireweedmetals.com/macpass-disclaimer/, which the
+    user accepts by downloading it. Among other things, those terms state that
+    users agree to use the dataset for their own purposes only, and that the
+    accuracy, completeness and reliability of the data are not guaranteed.
+    Download the four CSV files yourself and pass the directory holding them.
+
+    Note that this database records a downward hole with a negative dip, the
+    opposite of geoML's convention, which is why the object below is built
+    with `dip_positive_down=False`.
+
+    Parameters
+    ----------
+    path : str
+        Directory with the MPA_Collar, MPA_Survey, MPA_Interp and
+        MPA_Samples_BD CSV files.
+
+    Returns
+    -------
+    macpass_dh : geoml.drillhole.DrillholeData
+        559 drillholes, with the interval tables "litho" (interpreted rock
+        code) and "assay" (Ag, Pb, Zn and bulk density).
+    """
+    def find(pattern):
+        matches = _glob.glob(_os.path.join(path, pattern))
+        if len(matches) == 0:
+            raise FileNotFoundError(
+                f"no file matching {pattern} in {path}; download the data "
+                f"from https://fireweedmetals.com/macpass-project/")
+        return sorted(matches)[-1]
+
+    # the samples file carries a byte order mark
+    collar = _pd.read_csv(find("MPA_Collar_*.csv"))
+    survey = _pd.read_csv(find("MPA_Survey_*.csv"))
+    litho = _pd.read_csv(find("MPA_Interp_*.csv"))
+    assay = _pd.read_csv(find("MPA_Samples_BD_*.csv"), encoding="utf-8-sig")
+
+    macpass_dh = _drillhole.DrillholeData(
+        collar, survey, hole="HoleID", x="Easting", y="Northing",
+        z="Elevation", length="Length_m", dip="Dip", azimuth="Azimuth",
+        depth="Depth_m", dip_positive_down=False)
+
+    macpass_dh.add_intervals(
+        "litho", litho, hole="holeid", fr="from", to="to",
+        categorical="Code", ignore=["Code_Long", "Code_Description"])
+    macpass_dh.add_intervals(
+        "assay", assay, hole="HoleID", fr="From_m", to="To_m",
+        grades=["Ag_ppm", "Pb_pct", "Zn_pct"], density="BD_tonnes_m3",
+        flags=["Method", "LowRecovery_<=85pct"], ignore="Comment")
+    return macpass_dh
 
 
 def example_fold():
