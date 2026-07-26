@@ -47,6 +47,12 @@ class _Kernel(_gpr.Parametric):
     def has_compact_support(self):
         return self._has_compact_support
 
+    def _summary_line(self):
+        s = self.__class__.__name__
+        if self.has_compact_support:
+            s += " (compact)"
+        return s
+
     def kernelize(self, x):
         raise NotImplemented
 
@@ -194,6 +200,12 @@ class _AbstractCovariance(_gpr.Parametric):
     @property
     def has_compact_support(self):
         return self._has_compact_support
+
+    def _summary_line(self):
+        s = self.__class__.__name__
+        if self.has_compact_support:
+            s += " (compact)"
+        return s
 
     def covariance_matrix(self, x, y):
         """Computes point-point covariance matrix between x and y tensors."""
@@ -370,22 +382,6 @@ class Covariance(_AbstractCovariance):
             v = _tf.ones([_tf.shape(x)[0]], dtype=_tf.float64)
         return v
 
-    def pretty_print(self, depth=0):
-        s = ""
-        s += "  " * depth + self.__class__.__name__
-        if self.has_compact_support:
-            s += " (compact)"
-        s += "\n"
-        depth += 1
-        for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " \
-                 + str(parameter.get_value().numpy())
-            if parameter.fixed:
-                s += " (fixed)"
-            s += "\n"
-        s += self.transform.pretty_print(depth)
-        return s
-
     def set_limits(self, data):
         self.transform.set_limits(data)
 
@@ -454,22 +450,6 @@ class _NodeCovariance(_AbstractCovariance):
         )
         return k
 
-    def pretty_print(self, depth=0):
-        s = ""
-        s += "  " * depth + self.__class__.__name__
-        if self.has_compact_support:
-            s += " (compact)"
-        s += "\n"
-        for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " \
-                 + str(parameter.get_value().numpy())
-            if parameter.fixed:
-                s += " (fixed)"
-            s += "\n"
-        for kernel in self.components:
-            s += kernel.pretty_print(depth + 1)
-        return s
-
     def set_limits(self, data):
         for comp in self.components:
             comp.set_limits(data)
@@ -491,23 +471,6 @@ class _WrapperCovariance(_AbstractCovariance):
         super().__init__()
         self.base_covariance = self._register(base_covariance)
         self._has_compact_support = self.base_covariance.has_compact_support
-
-    def pretty_print(self, depth=0):
-        s = ""
-        s += "  " * depth + self.__class__.__name__
-        if self.has_compact_support:
-            s += " (compact)"
-        s += "\n"
-        depth += 1
-        for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " \
-                 + str(parameter.get_value().numpy())
-            if parameter.fixed:
-                s += " (fixed)"
-            s += "\n"
-        s += self.base_covariance.pretty_print(depth)
-        return s
-
 
 class Linear(_AbstractCovariance):
     """Linear covariance"""

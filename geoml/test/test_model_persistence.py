@@ -37,6 +37,7 @@ def _inducing(n=6, seed=99):
 def _model(point=None, max_iter=5, seed=1234):
     """A small trained continuous model."""
     import tensorflow as tf
+    geoml.set_seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
@@ -116,6 +117,7 @@ def test_training_data_comes_back(tmp_path):
 def test_loaded_model_remembers_variable_types(tmp_path):
     """A reloaded model must create the right variable on a new container."""
     import tensorflow as tf
+    geoml.set_seed(1234)
     np.random.seed(1234)
     tf.random.set_seed(1234)
 
@@ -160,6 +162,7 @@ def test_loaded_model_remembers_variable_types(tmp_path):
 def test_categorical_variable_definition_survives(tmp_path):
     """Labels and components of a rock type must come back with the model."""
     import tensorflow as tf
+    geoml.set_seed(1234)
     np.random.seed(1234)
     tf.random.set_seed(1234)
 
@@ -216,6 +219,7 @@ def test_shared_nodes_are_not_duplicated(tmp_path):
     object would shift every position after it.
     """
     import tensorflow as tf
+    geoml.set_seed(1234)
     np.random.seed(1234)
     tf.random.set_seed(1234)
 
@@ -268,6 +272,7 @@ def test_fixed_flags_and_limits_survive(tmp_path):
 def test_fix_transform_flag_survives(tmp_path):
     """`BasicInput(fix_transform=True)` fixes parameters inside the transform."""
     import tensorflow as tf
+    geoml.set_seed(1234)
     np.random.seed(1234)
     tf.random.set_seed(1234)
 

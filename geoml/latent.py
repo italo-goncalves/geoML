@@ -21,6 +21,7 @@ import geoml.kernels as _kr
 import geoml.transform as _tr
 import geoml.interpolation as _gint
 import geoml.data as _data
+import geoml.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
@@ -62,9 +63,11 @@ class _LatentVariable(_gpr.Parametric):
         # baking them in at tracing time. Keyed by name, created on first use.
         self._state_vars = {}
 
+    def _summary_line(self):
+        return "%s (size %d)" % (self.__class__.__name__, self.size)
+
     def __repr__(self):
-        s = self.__class__.__name__ + "\n"
-        return s
+        return _gpr.describe(self, size=self.size)
 
     @property
     def size(self):
@@ -579,7 +582,7 @@ class BasicGP(_GPNode):
             self._add_parameter(
                 f"alpha_white_{i}",
                 _gpr.RealParameter(
-                    _np.random.normal(
+                    _rnd.rng().normal(
                         scale=1e-3,
                         size=[self.size, n, 1]
                     ),
@@ -933,7 +936,7 @@ class Linear(_FunctionalLatentVariable):
         self._size = size
 
         if unit_norm:
-            rnd = _np.random.normal(size=(parent.size, self.size))
+            rnd = _rnd.rng().normal(size=(parent.size, self.size))
             rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
             self._add_parameter(
                 "weights",
@@ -942,7 +945,7 @@ class Linear(_FunctionalLatentVariable):
                 )
             )
         else:
-            rnd = _np.random.normal(size=(parent.size, self.size), scale=1e-4)
+            rnd = _rnd.rng().normal(size=(parent.size, self.size), scale=1e-4)
             self._add_parameter(
                 "weights",
                 _gpr.RealParameter(
@@ -2044,7 +2047,7 @@ class MultiStructureGP(BasicGP):
             self._add_parameter(
                 f"alpha_white_{i}",
                 _gpr.RealParameter(
-                    _np.random.normal(
+                    _rnd.rng().normal(
                         scale=1e-3,
                         size=[self.size, n, 1]
                     ),
@@ -2206,7 +2209,7 @@ class GradientConstrainedInput(_RootLatentVariable):
             self._add_parameter(
                 f"alpha_white_{i}",
                 _gpr.RealParameter(
-                    _np.random.normal(
+                    _rnd.rng().normal(
                         scale=1e-3,
                         size=[self.size, n, 1]
                     ),

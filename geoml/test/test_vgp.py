@@ -13,11 +13,11 @@ import geoml
 def build_model(n_ip=12, samples=10, seed=1234):
     """A minimal single-GP network on the Walker Lake ``V`` variable.
 
-    ``BasicGP`` draws its initial inducing-point values from the global NumPy
-    RNG, so we seed it here to make construction (and therefore the whole run)
-    reproducible.
+    Initial parameter values are drawn when the objects are built, so the seed
+    goes in before that. TensorFlow's global generator is seeded as well: the
+    simulation noise in ``likelihood.white_noise`` still draws from it.
     """
-    np.random.seed(seed)
+    geoml.set_seed(seed)
     import tensorflow as tf
     tf.random.set_seed(seed)
     walker_point, walker_grid = geoml.datasets.walker()
@@ -177,7 +177,7 @@ def build_gradient_constrained_model(seed=1234):
     construction used to crash until n_ip was derived from that base set.
     """
     import tensorflow as tf
-    np.random.seed(seed)
+    geoml.set_seed(seed)
     tf.random.set_seed(seed)
     point, dirs, _ = geoml.datasets.example_fold()
     ip = geoml.data.Grid2D(start=[10, 10], n=[8, 8], step=[11, 11])

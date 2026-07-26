@@ -45,6 +45,10 @@ class _ModelOptions:
         self.prediction_batch_size = prediction_batch_size
         self.seed = seed
 
+    def __repr__(self):
+        return "%s(%s)" % (self.__class__.__name__, ", ".join(
+            "%s=%r" % item for item in vars(self).items()))
+
     def batch_index(self, n_data, batch_size=None):
         if batch_size is None:
             batch_size = self.training_batch_size
@@ -89,6 +93,11 @@ class _GPModel(_gpr.Parametric):
         self.options = options
         self._pre_computations = {}
         self._n_dim = None
+
+    def __str__(self):
+        # a model is summarized, not written as a call: `pretty_print()` is
+        # still there for the parameter tree
+        return self.__repr__()
 
     @property
     def n_dim(self):
@@ -229,9 +238,9 @@ class GP(_GPModel):
         s = "Gaussian process model\n\n"
         s += "Variable: " + self.variable + "\n\n"
         s += "Kernel:\n"
-        s += repr(self.covariance)
+        s += str(self.covariance)
         s += "\nWarping:\n"
-        s += repr(self.warping)
+        s += str(self.warping)
         return s
 
     def set_learning_rate(self, rate):
@@ -657,7 +666,7 @@ class VGPNetwork(_GPModel):
         for v, lik in zip(self.variables, self.likelihoods):
             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
         s += "\nLatent layer:\n"
-        s += repr(self.latent_network)
+        s += str(self.latent_network)
         return s
 
     def set_learning_rate(self, rate):
@@ -883,11 +892,13 @@ class VGPNetwork(_GPModel):
                     seed=self.options.seed
                 )
 
-        _np.random.seed(self.options.seed)
+        # a generator of its own, so the batch order is reproducible from
+        # options.seed without reaching any draw made outside training
+        rng = _np.random.default_rng(self.options.seed)
         for i in range(epochs):
             current_elbo = []
 
-            shuffled = _np.random.choice(
+            shuffled = rng.choice(
                 self.data.n_data, self.data.n_data, replace=False)
             batches = self.options.batch_index(self.data.n_data)
 
@@ -1073,7 +1084,7 @@ class StructuralField(_GPModel):
     def __repr__(self):
         s = "Gaussian process structural field model\n\n"
         s += "Kernel:\n"
-        s += repr(self.covariance)
+        s += str(self.covariance)
         return s
 
     def set_learning_rate(self, rate):

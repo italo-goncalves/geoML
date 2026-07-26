@@ -24,6 +24,7 @@
 #            "SelectVariables"]
 
 import geoml.parameter as _gpr
+import geoml.random as _rnd
 # import geoml.interpolation as _gint
 # import geoml.tftools as _tftools
 
@@ -42,21 +43,6 @@ class _Transform(_gpr.Parametric):
     
     def __call__(self, x):
         pass
-
-    def pretty_print(self, depth=0):
-        s = "  " * depth + self.__class__.__name__ + "\n"
-        depth += 1
-        for name, parameter in self.parameters.items():
-            s += "  " * depth + name + ": " \
-                 + str(parameter.get_value().numpy())
-            if parameter.fixed:
-                s += " (fixed)"
-            s += "\n"
-        return s
-
-    def __repr__(self):
-        return self.pretty_print()
-
 
 class Identity(_Transform):
     """The identity transformation"""
@@ -231,7 +217,7 @@ class Anisotropy2DDynamic(_Ellipsoidal):
             tr.parameters["theta"].fix()
             self._base_transforms.append(self._register(tr))
 
-        rnd = _np.random.normal(size=(n_directions, 1))
+        rnd = _rnd.rng().normal(size=(n_directions, 1))
         rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
         self._add_parameter(
             "weights",
@@ -440,7 +426,7 @@ class Anisotropy3DDynamic(_Ellipsoidal):
                     tr.parameters["theta_z"].fix()
                     self._base_transforms.append(self._register(tr))
 
-        rnd = _np.random.normal(size=(n_directions_per_axis**3, 1))
+        rnd = _rnd.rng().normal(size=(n_directions_per_axis**3, 1))
         rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
         self._add_parameter(
             "weights",
@@ -657,8 +643,11 @@ class RandomProjections(_Transform):
             projections = _np.stack([_np.cos(angles), _np.sin(angles)], axis=1)
             self.projections = _tf.constant(projections.T, _tf.float64)
         else:
-            _np.random.seed(seed)
-            projections = _np.random.normal(size=[n_dim, n_directions])
+            # a generator of its own: this transform is reproducible from its
+            # own seed, and seeding the global one would reach every draw made
+            # afterwards
+            projections = _np.random.default_rng(seed).normal(
+                size=[n_dim, n_directions])
             norm = _np.sqrt(_np.sum(projections**2, axis=0, keepdims=True))
             self.projections = _tf.constant(projections / norm, _tf.float64)
 

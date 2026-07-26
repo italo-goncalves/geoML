@@ -33,6 +33,7 @@ import geoml.interpolation as _gint
 import geoml.parameter as _gpr
 import geoml.tftools as _tftools
 import geoml.data as _data
+import geoml.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
@@ -50,10 +51,6 @@ class _Warping(_gpr.Parametric):
         super().__init__()
         self._size_in = None
         self._size_out = None
-
-    def __repr__(self):
-        s = self.__class__.__name__ + "\n"
-        return s
 
     @property
     def size_in(self):
@@ -432,10 +429,6 @@ class ChainedWarping(_Warping):
         self._size_in = self.warpings[0].size_in
         self._size_out = self.warpings[-1].size_out
 
-    def __repr__(self):
-        s = "".join([repr(wp) for wp in self.warpings])
-        return s
-
     def forward(self, x):
         d = _tf.reduce_sum(_tf.ones_like(x, dtype=_tf.float64), axis=1)
         for wp in self.warpings:
@@ -513,7 +506,7 @@ class ContinuousNormalizingFlow(_Warping):
         self._add_parameter(
             'alpha_white',
             _gpr.RealParameter(
-                _np.random.normal(scale=1e-3, size=[inducing_points, size, n_steps]),
+                _rnd.rng().normal(scale=1e-3, size=[inducing_points, size, n_steps]),
                 _np.full([inducing_points, size, n_steps], -10),
                 _np.full([inducing_points, size, n_steps], 10)
             )

@@ -1,3 +1,34 @@
+## version 0.5.1
+* A model can now be reproduced from a single call. Parameters are initialized
+at random when an object is built, which happens before any model exists to
+carry `options.seed`, so the draws now come from one generator held in the new
+`random` module: call `geoml.set_seed(1234)` before building and the same
+objects start from the same values, in this run or the next. Left alone, the
+generator is seeded by the operating system, as before. Scripts that pinned a
+build with `np.random.seed()` must call `geoml.set_seed()` instead —
+initialization no longer reads NumPy's or TensorFlow's global generators
+* Objects now print themselves. `repr` identifies one on a single line, as the
+call that would build it — `Covariance(Gaussian(), Isotropic(range=111.0))` —
+reading the arguments each object already records for persistence, and showing
+the *current* value of a parameter rather than the one it was built with, since
+training moves it. Objects holding many or large parameters, such as a GP node,
+fall back to naming their configuration. Data containers, variables and models
+keep summarizing themselves as they did. This also fixes `repr` raising
+`NotImplementedError` for every kernel and every likelihood, which took
+debuggers and failing assertions down with it
+* `str` lays out an object's state: its parameter values, and everything
+registered inside it, indented. A latent network therefore reads as its
+composition, from the output node down through its parents to the input, with
+each node's size. Large parameter arrays are summarized by shape and range
+instead of being printed in full. The four near-identical `pretty_print`
+implementations in `kernels` and `transform` are now one, inherited from
+`Parametric`
+
+* geoML no longer disturbs the generators the caller is using: building a
+`RandomProjections` transform used to reset NumPy's global seed outright, and
+training did the same before shuffling its batches. Both now draw from a
+generator of their own, and remain reproducible from the seed they are given
+
 ## version 0.5.0
 * `DrillholeData` was rewritten from scratch, in a new `drillhole` module.
 It is now built from a collar and an optional survey table, and interval files

@@ -26,6 +26,101 @@ import numpy as _np
 import pickle as _pickle
 import functools as _functools
 
+import geoml.random as _rnd
+
+
+def describe(obj, depth=1, **extra):
+    """
+    Writes an object as the call that would build it: `Class(arg, kw=value)`.
+
+    Reads the arguments recorded by `Parametric.__init_subclass__`, so it works
+    for any subclass without one of its own. Values are shortened — an array
+    becomes its shape, a data container its size — and nesting stops at `depth`,
+    so this stays cheap no matter how large the objects behind the arguments
+    are. Anything given in `extra` is added unless the object was built with an
+    argument of that name.
+
+    A node's parents are left out: they belong to the composition, which `str`
+    lays out, and nesting one node's arguments inside the next one's says the
+    same thing far less clearly.
+
+    An object holding a few small parameters is written with their *current*
+    values instead — `Isotropic(range=111.0)`, not the range it was built with,
+    which training has long since moved. Objects whose parameters are many or
+    large (a GP node's inducing values) fall back to their arguments, since
+    those values belong in `str`, not on one line.
+    """
+    values = _current_values(obj)
+    if values is not None:
+        return "%s(%s)" % (obj.__class__.__name__, ", ".join(values))
+
+    skip = set()
+    parent = getattr(obj, "parent", None)
+    if parent is not None:
+        skip.add(id(parent))
+    for node in getattr(obj, "parents", None) or ():
+        skip.add(id(node))
+
+    kwargs = dict(getattr(obj, "_init_kwargs", {}))
+    for name, value in extra.items():
+        kwargs.setdefault(name, value)
+
+    parts = [_brief(value, depth)
+             for value in getattr(obj, "_init_args", ())
+             if id(value) not in skip]
+    parts += ["%s=%s" % (name, _brief(value, depth))
+              for name, value in kwargs.items() if id(value) not in skip]
+    return "%s(%s)" % (obj.__class__.__name__, ", ".join(parts))
+
+
+def _current_values(obj):
+    """The object's own parameters, if few and small enough to fit on a line.
+
+    The shapes are read from `RealParameter.shape`, so a large parameter is
+    ruled out without touching its value.
+    """
+    parameters = getattr(obj, "parameters", None)
+    if not parameters or len(parameters) > 4:
+        return None
+    if any(int(_np.prod(p.shape)) > 4 for p in parameters.values()):
+        return None
+    return ["%s=%s" % (name, _short_value(parameter))
+            for name, parameter in parameters.items()]
+
+
+def _brief(value, depth):
+    """A constructor argument, short enough to sit on one line."""
+    if isinstance(value, Parametric):
+        if depth <= 0:
+            return value.__class__.__name__ + "(...)"
+        return describe(value, depth - 1)
+    if isinstance(value, _np.ndarray):
+        if value.size <= 4:
+            return _np.array2string(value, precision=4, separator=", ")
+        return "array(shape=%s)" % (value.shape,)
+    if isinstance(value, (list, tuple)):
+        if len(value) > 3:
+            return "[%d items]" % len(value)
+        inner = ", ".join(_brief(item, depth) for item in value)
+        return "[%s]" % inner if isinstance(value, list) else "(%s)" % inner
+    if isinstance(value, float):
+        return "%g" % value
+    if hasattr(value, "n_data"):
+        return "%s(n_data=%s)" % (value.__class__.__name__, value.n_data)
+    text = repr(value)
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+def _short_value(parameter):
+    """A parameter's value: in full when small, summarized when not."""
+    value = parameter.get_value().numpy()
+    if value.ndim == 0:
+        return "%g" % value
+    if value.size <= 6:
+        return _np.array2string(value, precision=4, separator=", ")
+    return "shape %s in [%.4g, %.4g]" % (
+        value.shape, value.min(), value.max())
+
 
 class Parametric(object):
     """An abstract class for objects with trainable parameters"""
@@ -61,12 +156,29 @@ class Parametric(object):
         self.parameters = {}
         self._all_parameters = []
         self._param_ids = set()  # identities already in _all_parameters
+        self._children = []      # registered sub-objects, in the order given
+
+    def _summary_line(self):
+        """The object's own line in `pretty_print`. Subclasses add to it."""
+        return self.__class__.__name__
 
     def pretty_print(self, depth=0):
-        raise NotImplementedError()
+        """The object's parameters and everything registered inside it."""
+        s = "  " * depth + self._summary_line() + "\n"
+        for name, parameter in self.parameters.items():
+            s += "  " * (depth + 1) + name + ": " + _short_value(parameter)
+            if parameter.fixed:
+                s += " (fixed)"
+            s += "\n"
+        for child in self._children:
+            s += child.pretty_print(depth + 1)
+        return s
+
+    def __str__(self):
+        return self.pretty_print()
 
     def __repr__(self):
-        return self.pretty_print()
+        return describe(self)
 
     @property
     def all_parameters(self):
@@ -88,6 +200,8 @@ class Parametric(object):
     def _register(self, parametric):
         for parameter in parametric.all_parameters:
             self._append_unique(parameter)
+        if not any(child is parametric for child in self._children):
+            self._children.append(parametric)
         return parametric
 
     def _set_parameters(self):
@@ -187,6 +301,14 @@ class RealParameter(object):
 
         self.refresh()
 
+    def __repr__(self):
+        s = "%s(%s" % (self.__class__.__name__, _short_value(self))
+        if self.name != "Parameter":
+            s += ", name=%r" % self.name
+        if self.fixed:
+            s += ", fixed=True"
+        return s + ")"
+
     def _transform(self, x):
         return x
 
@@ -225,7 +347,7 @@ class RealParameter(object):
     def randomize(self):
         val = (self.variable - self.min_transformed) \
               / (self.max_transformed - self.min_transformed)
-        val = val + _np.random.uniform(size=self.shape, low=-0.05, high=0.05)
+        val = val + _rnd.rng().uniform(size=self.shape, low=-0.05, high=0.05)
         val = _tf.maximum(0, _tf.minimum(1, val))
         val = val * (self.max_transformed - self.min_transformed) \
               + self.min_transformed
@@ -322,7 +444,7 @@ class OrthonormalMatrix(RealParameter):
             raise ValueError("cols cannot be higher than rows")
         # rnd = _tf.random.stateless_normal(batch_shape + (rows, cols),
         #                                   seed=[rows, cols])
-        rnd = _tf.random.normal(batch_shape + (rows, cols))
+        rnd = _rnd.rng().normal(size=batch_shape + (rows, cols))
         q, _ = _tf.linalg.qr(rnd)
         value = q.numpy()
         min_val = -1.1 * _np.ones_like(value)
@@ -343,7 +465,7 @@ class CenteredOrthonormalMatrix(RealParameter):
                  fixed=False, name="Parameter"):
         if cols > rows:
             raise ValueError("cols cannot be higher than rows")
-        rnd = _tf.random.normal(batch_shape + (rows, cols))
+        rnd = _rnd.rng().normal(size=batch_shape + (rows, cols))
         rnd = rnd - _tf.reduce_mean(rnd, axis=-2, keepdims=True)
         q, _ = _tf.linalg.qr(rnd)
         value = q.numpy()

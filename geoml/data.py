@@ -232,6 +232,13 @@ class _Variable(object):
         self._length = 1
         self.metrics = None
 
+    def __repr__(self):
+        s = "%s(%r, n_data=%s" % (
+            self.__class__.__name__, self.name, self.coordinates.n_data)
+        if self.n_sim > 0:
+            s += ", n_sim=%d" % self.n_sim
+        return s + ")"
+
     @property
     def length(self):
         return self._length

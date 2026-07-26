@@ -20,6 +20,7 @@ import geoml.kernels as _kr
 import geoml.transform as _tr
 # import geoml.interpolation as _gint
 import geoml.data as _data
+import geoml.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
@@ -52,7 +53,7 @@ def uniform_directions(n, dim, n_iter=100):
     mask = mask - _np.eye(n)
     mask = _tf.constant(mask, _tf.float64)
 
-    vectors = _np.random.normal(size=[n, dim])
+    vectors = _rnd.rng().normal(size=[n, dim])
     vectors = _tf.Variable(vectors, dtype=_tf.float64)
     vectors.assign(vectors / _tf.math.reduce_euclidean_norm(vectors, axis=1, keepdims=True))
 
@@ -83,9 +84,11 @@ class _ProjectedLatentVariable(_gpr.Parametric):
         self.min = None
         self.max = None
 
+    def _summary_line(self):
+        return "%s (size %d)" % (self.__class__.__name__, self.size)
+
     def __repr__(self):
-        s = self.__class__.__name__ + "\n"
-        return s
+        return _gpr.describe(self, size=self.size)
 
     @property
     def size(self):
@@ -250,7 +253,7 @@ class BasicProjectedGP(_FunctionalProjectedVariable):
         self._add_parameter(
             "alpha_white",
             _gpr.RealParameter(
-                _np.random.normal(
+                _rnd.rng().normal(
                     scale=1e-3,
                     size=[self.n_directions, self.size, n_ip, 1]
                 ),
@@ -486,7 +489,7 @@ class Linear(_FunctionalProjectedVariable):
         self._size = size
 
         if unit_norm:
-            rnd = _np.random.normal(size=(parent.size, self.size))
+            rnd = _rnd.rng().normal(size=(parent.size, self.size))
             rnd = rnd / _np.sqrt(_np.sum(rnd ** 2, axis=0, keepdims=True))
             self._add_parameter(
                 "weights",
@@ -495,7 +498,7 @@ class Linear(_FunctionalProjectedVariable):
                 )
             )
         else:
-            rnd = _np.random.normal(size=(parent.size, self.size), scale=1e-4)
+            rnd = _rnd.rng().normal(size=(parent.size, self.size), scale=1e-4)
             self._add_parameter(
                 "weights",
                 _gpr.RealParameter(
@@ -709,7 +712,7 @@ class _VariationalFourierFeatures(_FunctionalProjectedVariable):
         self._add_parameter(
             "mean",
             _gpr.RealParameter(
-                _np.random.normal(
+                _rnd.rng().normal(
                     scale=1e-3,
                     size=[self.n_directions, self.size, n_ip, 1]
                 ),

@@ -15,8 +15,14 @@ import geoml
 
 
 def _synth_point_model(n_dim, seed=1234, n_train=40, n_ip=6, max_iter=5):
-    """A minimal continuous VGP on random points in ``n_dim`` dimensions."""
+    """A minimal continuous VGP on random points in ``n_dim`` dimensions.
+
+    Two seeds, for two different draws: the synthetic coordinates below come
+    from NumPy's global generator, the model's initial parameters from the
+    package one.
+    """
     import tensorflow as tf
+    geoml.set_seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 

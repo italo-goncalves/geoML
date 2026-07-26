@@ -14,6 +14,7 @@ import geoml
 
 def _model_and_grid(seed=1234):
     import tensorflow as tf
+    geoml.set_seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
     cols = ["c0", "c1"]

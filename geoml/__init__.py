@@ -1,4 +1,4 @@
-__version__ = '0.5.0'
+__version__ = '0.5.1'
 __author__ = 'Ítalo Gomes Gonçalves'
 __all__ = [
     'data',
@@ -15,6 +15,7 @@ __all__ = [
     'plotly',
     'probability',
     'pyvista',
+    'random',
     'storage',
     'tftools',
     'transform',
@@ -22,3 +23,4 @@ __all__ = [
 ]
 
 from . import *
+from .random import set_seed

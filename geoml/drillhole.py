@@ -417,8 +417,7 @@ class IntervalTable(object):
         return s
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(name={self.name!r}, " \
-               f"n_intervals={len(self)}, n_holes={len(self.holes)})"
+        return self.__str__()
 
     @property
     def value_columns(self):
@@ -934,8 +933,9 @@ class DrillholeData(_data._SpatialData):
         return s
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(n_holes={self.n_holes}, " \
-               f"intervals={list(self.intervals.keys())})"
+        # a container shows its summary when named on its own, as the ones in
+        # `data` do
+        return self.__str__()
 
     @property
     def n_holes(self):

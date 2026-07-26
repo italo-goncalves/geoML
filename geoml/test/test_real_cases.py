@@ -24,8 +24,9 @@ import geoml.warping as wp
 
 
 def _seed(seed=1234):
-    """Model construction draws from the global RNGs; see test_vgp.py."""
+    """Pins the initial parameters, the synthetic data, and the noise draws."""
     import tensorflow as tf
+    geoml.set_seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 

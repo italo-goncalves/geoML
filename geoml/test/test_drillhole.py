@@ -708,7 +708,8 @@ def test_str_reports_the_tables_and_their_roles():
     assert "1 drillholes" in str(holes)
     assert "litho" in str(holes)
     assert "rock: categorical" in str(holes.intervals["litho"])
-    assert "n_holes=1" in repr(holes)
+    # a container summarizes itself when named on its own, as those in `data` do
+    assert repr(holes) == str(holes)
 
 
 # --------------------------------------------------------------------------- #
