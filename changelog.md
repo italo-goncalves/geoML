@@ -1,3 +1,24 @@
+## version 0.5.2
+* **Breaking:** `as_pyvista()` and the `fill_pyvista_*` methods no longer export
+simulations by default. Each one is a full-length array in the exported object,
+so a block model with twenty of them carried twenty copies of itself into
+memory whether or not they were going to be looked at. Pass `simulations=True`
+for all of them, an `int` for the first n, or a sequence of indices —
+`grid.as_pyvista(simulations=[0, 5])`
+* The simulations that are exported are now read in a single pass. The store is
+chunked along rows only, so a chunk holds every simulation of a row band and
+reading one column at a time decompressed the whole array once per simulation.
+On a 4 million point grid with 20 simulations the read went from 2.9 s to 1.5 s,
+and the default export — which no longer touches the simulations at all — from
+2.9 s to 0.02 s
+* `as_data_frame()` read its simulations the same way, one column at a time,
+and now takes the same single pass. Its `simulations` argument also accepts an
+`int` or a sequence of indices, not only a flag, so a data frame can carry a
+couple of realizations instead of all or nothing. Its defaults are unchanged
+* The check that skips an empty attribute is vectorized. It used the built-in
+`all()` over a NumPy array, walking it one element at a time in Python, for
+every attribute of every export
+
 ## version 0.5.1
 * A model can now be reproduced from a single call. Parameters are initialized
 at random when an object is built, which happens before any model exists to
