@@ -1,3 +1,60 @@
+## version 0.5.3
+* Point-wise information can be attached to any container with
+`obj.add_metadata(name, values)` and read back with `obj.get_metadata(name)` —
+an air/solid code, a cross-validation fold, a sample weight: things known per
+location that the models never see. It follows the object through subsetting,
+`as_data_frame()` and now `to_zarr()`/`open()`, which used to drop it silently
+* **Breaking:** `obj.metadata` is a dict of columns, not a `DataFrame`. A
+column is the same `_Attribute` a variable is built from, so it spills to Zarr
+when large and carries the same helpers — `grid.metadata["air"].as_cube()` and
+`fill_pyvista_blocks()` work on it. Text is kept as integer codes plus labels:
+as an object column a rock code on a two-million-block model costs 105 MB
+against 1.9 MB as codes, and object arrays can never spill to disk. Code that
+read `obj.metadata["fold"]` expecting a column of values wants
+`obj.get_metadata("fold")`
+* `_Attribute` is a module-level class instead of one nested inside
+`_Variable`, and it is where the text-as-codes handling lives
+(`_Attribute.encoded`). Two fixes came with it: an attribute built from values
+now chooses its backend by size like an empty one does, instead of being pinned
+in RAM whatever its length; and reopening one from disk no longer allocates a
+throwaway array first
+* **Breaking:** the categorical variables hold codes too.
+`RockTypeVariable.predicted` / `measurements_a` / `measurements_b`,
+`BinaryVariable.measurements` / `predicted` and their subclasses were arrays of
+Python strings — a predicted rock type on a 27-million-block model is about
+1.4 GB that cannot be spilled to disk, against 27 MB as `int8`. Read them with
+`attribute.to_numpy()`, which gives the labels back; `attribute.values` is now
+the codes. Anything that writes a prediction writes the position of the winning
+label. -1 means "not measured here" and reads back as the empty string, as it
+did before. A measurement column carries **its own** categories, not the
+variable's, so an `AnomalyVariable` measured as "hit"/"none" still reports
+"none" even though the variable calls that class `_dummy`. Containers saved by
+an earlier version are re-encoded when they are opened
+* Slicing a categorical variable now drops the categories that are no longer
+present, all the way through: the components go with them, and the prediction
+is re-coded to the shorter list, `update` writing the winning label's position.
+Before, only `labels` was reset, leaving a variable that claimed one category
+and carried three. An `OrderedRockType`'s implicit values are recomputed rather
+than carried over — they are positions in the label sequence, so dropping a
+category shifts every one after it, and a slice would otherwise be trained
+against a scale that no longer existed. A slice with nothing measured in it
+keeps the categories it was declared with
+* Categories that are not text are left as they are. Deriving them stringified
+them, so a variable measured as `1`/`2` compared its predictions against `'1'`
+and `'2'` and every metric came out at chance. They are stringified only on the
+way to disk, as the variable's own labels always have been — which also fixes a
+crash, older than this release, that made a variable with integer categories
+impossible to save at all
+* Interval columns can be renamed with `holes.rename(table, {"Pb_pct_ICP":
+"Pb"})`, or `table.rename(...)` on the table itself. The roles travel with the
+columns: renaming the data frame directly left them behind, keyed by the old
+name, so the column quietly stopped being a grade and printing or compositing
+the table raised a `KeyError`. Renaming the frame before it is added still
+works as it always did — this is for a database that was built for you, by
+`datasets.macpass()` or by compositing, where the frames were never in reach.
+Column names become variable names in `as_point_data()`, so it is also the last
+chance to tidy them before they reach a model
+
 ## version 0.5.2
 * Simulated predictions are reproducible. The likelihood noise was drawn from
 TensorFlow's global generator with a hard-coded seed, so `options.seed` never

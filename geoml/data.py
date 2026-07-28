@@ -261,6 +261,381 @@ def _selected_simulations(store, selection):
     return list(zip(index, values.T))
 
 
+def _code_dtype(n_labels):
+    """Smallest integer type holding `n_labels` codes and the missing one.
+
+    Signed, because -1 is what "not measured here" looks like.
+    """
+    return _np.min_scalar_type(-n_labels)
+
+
+def _encode(values, labels):
+    """Codes for `values` against `labels`; anything else is -1 (missing).
+
+    A lookup rather than a `searchsorted`: a variable's labels are in the order
+    the variable wants them (`BinaryVariable` puts the positive class first),
+    not in sorted order.
+    """
+    codes = _np.full(len(values), -1, dtype=_code_dtype(len(labels)))
+    for i, label in enumerate(labels):
+        codes[values == label] = i
+    return codes
+
+
+class _Attribute(object):
+    """A specific sequence of values, tied to data locations.
+
+    One value per location, in an `ArrayStore` — NumPy in RAM or chunked Zarr
+    on disk, chosen by size. Variables are built out of these (measurements,
+    latent mean, predictions, ...), and so is a container's point-wise
+    metadata.
+
+    Text can be held as integer codes plus a `labels` list, built by
+    :meth:`encoded`; `labels` is None for a plain numeric attribute. Codes are
+    what makes text affordable: an object array of two million rock codes
+    allocates 105 MB against 1.9 MB as `int8`, and `ArrayStore` cannot spill
+    an object array to disk at all.
+    """
+
+    # An attribute is coded only when `encoded` says so; the rest are plain.
+    labels = None
+
+    def __init__(self, coordinates, values=None, dtype=None):
+        self.coordinates = coordinates
+
+        if dtype is None:
+            dtype = float
+
+        if values is None:
+            # Lazily allocated and NaN-filled; the backend (NumPy in RAM
+            # vs. chunked Zarr on disk) is chosen by size. Large arrays of
+            # the same container share one consolidated scratch store.
+            self._store = _storage.ArrayStore.allocate(
+                (coordinates.n_data,), dtype=dtype, fill_value=_np.nan,
+                owner=coordinates)
+        else:
+            values = _np.array(values, ndmin=1, dtype=dtype)
+            if len(values.shape) > 1:
+                values = _np.squeeze(values)
+
+            if len(values.shape) != 1:
+                raise ValueError("Values must be 1-dimensional")
+
+            if len(values) != coordinates.n_data:
+                raise ValueError("Values and coordinates size mismatch")
+
+            # by size, as above: an attribute built from values used to be
+            # pinned in RAM while an empty one of the same length was not
+            self._store = _storage.ArrayStore.from_values(
+                values, owner=coordinates)
+
+    @classmethod
+    def encoded(cls, coordinates, values=None, labels=None):
+        """An attribute holding text as integer codes plus a label list.
+
+        Codes index `labels`; -1 is missing, and decodes to the empty string —
+        which is how the categorical variables spell "not measured here".
+
+        `labels` may be given when the categories are already known, as they
+        are for a variable, which owns them. Values are then encoded against
+        that list (anything not in it is missing), unless they are integers,
+        in which case they already are the codes. Without values, the whole
+        attribute is missing.
+        """
+        if labels is None:
+            # pandas rather than `np.unique`: it drops the missing values
+            # instead of making a category of them, codes them -1, and is how
+            # the variables derive their own labels, so the two agree — which
+            # they would not if the categories were stringified here and the
+            # variable's were left as, say, the integers they came in as
+            categorical = _pd.Categorical(_np.asarray(values))
+            labels = list(categorical.categories)
+            values = categorical.codes.astype(_code_dtype(len(labels)))
+        elif values is None:
+            values = _np.full(coordinates.n_data, -1,
+                              dtype=_code_dtype(len(labels)))
+        else:
+            values = _np.asarray(values)
+            if values.dtype.kind not in "iu":
+                values = _encode(values, labels)
+
+        attribute = cls(coordinates, values, dtype=values.dtype)
+        attribute.labels = list(labels)
+        return attribute
+
+    @classmethod
+    def from_store(cls, coordinates, store, labels=None):
+        """Wrap an existing store (reopened from disk) without copying it."""
+        attribute = cls.__new__(cls)
+        attribute.coordinates = coordinates
+        attribute._store = store
+        if labels is not None:
+            attribute.labels = list(labels)
+        return attribute
+
+    def to_numpy(self):
+        """The values, with a coded attribute decoded back to its labels.
+
+        The label list is extended with the empty string, so that -1 — the
+        missing code — indexes it without a branch of its own.
+        """
+        values = self.values.to_numpy()
+        if self.labels is None:
+            return values
+        return _np.asarray(self.labels + [""], dtype=object)[values]
+
+    @property
+    def values(self):
+        return self._store
+
+    @values.setter
+    def values(self, new):
+        # Region assignment (``attr.values[idx] = ...``) mutates the store
+        # in place and never reaches this setter; this handles whole
+        # replacement (``attr.values = array``).
+        if isinstance(new, _storage.ArrayStore):
+            self._store = new
+        else:
+            self._store = _storage.ArrayStore.from_numpy(_np.asarray(new))
+
+    def __str__(self):
+        return self.values.__array__().__str__()
+
+    def __repr__(self):
+        return self.values.__array__().__repr__()
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+        new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
+        return new_obj
+
+    def as_series(self, sigma=None):
+        """
+        Reshapes the data in the form of a smoothed 1-dimensional series.
+
+        Arguments
+        ---------
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data, in grid steps.
+            Default is no filter.
+
+        Returns
+        -------
+        series : _np.array
+            A 1-dimensional array.
+        """
+        if not isinstance(self.coordinates, Grid1D):
+            raise ValueError("method only available for Grid1D data"
+                             "objects")
+
+        series = self.to_numpy()
+
+        if sigma is not None:
+            series = _filters.gaussian(series, sigma, preserve_range=True)
+        return series
+
+    def as_image(self, sigma=None):
+        """
+        Reshapes the data in the form of a matrix for plotting.
+
+        The output can be used in plotting functions such as
+        matplotlib's `imshow()`. If you use it, do not forget to set
+        `origin="lower"`.
+
+        Arguments
+        ---------
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data, in grid steps.
+            Default is no filter.
+
+        Returns
+        -------
+        image : _np.array
+            A 2-dimensional array.
+        """
+        if not isinstance(self.coordinates, Grid2D):
+            raise ValueError("method only available for Grid2D data"
+                             "objects")
+
+        image = _np.reshape(self.to_numpy(),
+                            self.coordinates.grid_size,
+                            order="F")
+        image = image.transpose()
+
+        if sigma is not None:
+            image = _filters.gaussian(image, sigma, preserve_range=True)
+        return image
+
+    def as_cube(self, sigma=None):
+        """
+        Returns a rank-3 array filled with the specified variable.
+
+        Arguments
+        ---------
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data, in grid steps.
+            Default is no filter.
+
+        Returns
+        -------
+        cube : _np.array
+            A rank-3 array.
+        """
+        if not isinstance(self.coordinates, Grid3D):
+            raise ValueError("method only available for Grid3D data"
+                             "objects")
+
+        cube = _np.reshape(self.to_numpy(),
+                           self.coordinates.grid_size,
+                           order="F")
+        if sigma is not None:
+            cube = _filters.gaussian(cube, sigma, preserve_range=True)
+        return cube
+
+    def smooth(self, sigma):
+        if isinstance(self.coordinates, (Grid1D, Blocks1D)):
+            series = self.as_series(sigma=sigma)
+            self.values = series
+        elif isinstance(self.coordinates, (Grid2D, Blocks2D)):
+            image = self.as_image(sigma=sigma).T
+            self.values = image.ravel()
+        elif isinstance(self.coordinates, (Grid3D, Blocks3D, RotatedGrid3D)):
+            cube = self.as_cube(sigma=sigma).transpose([2, 1, 0])
+            self.values = cube.ravel()
+        else:
+            raise NotGriddedDataError("method only available for gridded data")
+
+    def get_contour(self, value, sigma=None):
+        """
+        Isosurface extraction.
+
+        This method calls `skimage.measure.marching_cubes()`.
+        See the original documentation for details.
+
+        Parameters
+        ----------
+        value : double
+            The value on which to calculate the isosurface.
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data before contouring.
+            Default is no filter.
+
+        Returns
+        -------
+        surf : Surface3D
+            A `Surface3D` object.
+        """
+        cube = self.as_cube(sigma=sigma)
+        verts, faces, normals, values = _measure.marching_cubes(
+            cube, value, gradient_direction="ascent",
+            allow_degenerate=False, spacing=self.coordinates.step_size)
+
+        mat = self.coordinates.rotation_matrix()
+
+        verts = _np.matmul(verts, mat) + self.coordinates.origin
+        normals = _np.matmul(normals, mat)
+
+        # return verts, faces, normals, values
+        return Surface3D(verts, faces, normals)
+
+    def export_contour(self, value, filename, triangles=True,
+                       offset=None, sigma=None):
+        verts, faces, normals, values = self.get_contour(value, sigma=sigma)
+
+        if offset is None:
+            offset = _np.zeros([1, 3])
+        else:
+            offset = _np.array(_np.squeeze(offset))[None, :]
+        verts = verts + offset
+        
+        with open(filename, 'w') as out_file:
+            if triangles:
+                out_file.write(
+                    str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
+            for line in verts:
+                out_file.write(" ".join(str(elem) for elem in line) + "\n")
+            if triangles:
+                for line in faces:
+                    out_file.write(
+                        " ".join(str(elem) for elem in line) + "\n")
+
+    def _has_content(self):
+        """Whether there is anything worth writing out.
+
+        The test is vectorized: the built-in `all()` walked the array one
+        element at a time, in Python, before a single value was written.
+        """
+        values = _np.asarray(self.values)
+        if self.labels is not None:
+            return not _np.all(values < 0)
+        if values.dtype == object:
+            return not _np.all(values == "")
+        return not _np.all(_np.isnan(values))
+
+    def fill_pyvista_cube(self, cube, label, sigma=None):
+        if self._has_content():
+            cube.point_data[label] = self.as_cube(sigma=sigma) \
+                .transpose([2, 1, 0]).ravel()
+
+    def fill_pyvista_points(self, points, label):
+        if self._has_content():
+            points.point_data[label] = self.to_numpy()
+
+    def fill_pyvista_blocks(self, cube, label, sigma=None):
+        if self._has_content():
+            cube.cell_data[label] = self.as_cube(sigma=sigma) \
+                .transpose([2, 1, 0]).ravel()
+
+    def draw_contour(self, value, sigma=None, **kwargs):
+        """Creates plotly object with the contour at the specified value."""
+        surf_obj = self.get_contour(value, sigma=sigma)
+        return _py.isosurface(
+            surf_obj.coordinates, surf_obj.triangles, **kwargs)
+
+    def draw_numeric(self, **kwargs):
+        if self.coordinates.n_dim != 3:
+            raise NotImplemented("method currently available only for"
+                                 "3D coordinates")
+
+        if isinstance(self.coordinates, Section3D):
+            values = _np.reshape(self.to_numpy(),
+                                 self.coordinates.grid_shape,
+                                 order="F")
+            gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
+                                    self.coordinates.grid_shape,
+                                    order="F")
+            gridded_y = _np.reshape(self.coordinates.coordinates[:, 1],
+                                    self.coordinates.grid_shape,
+                                    order="F")
+            gridded_z = _np.reshape(self.coordinates.coordinates[:, 2],
+                                    self.coordinates.grid_shape,
+                                    order="F")
+
+            return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
+                                          values, **kwargs)
+
+        if isinstance(self.coordinates, Surface3D):
+            return _py.isosurface(self.coordinates.coordinates,
+                                  self.coordinates.triangles,
+                                  values=self.to_numpy())
+
+        return _py.numeric_points_3d(
+            self.coordinates.coordinates,
+            self.to_numpy(),
+            **kwargs)
+
+    def draw_categorical(self, colors, **kwargs):
+        if self.coordinates.n_dim != 3:
+            raise NotImplemented("method currently available only for"
+                                 "3D coordinates")
+
+        return _py.categorical_points_3d(
+            self.coordinates.coordinates,
+            self.values.to_numpy(),
+            colors,
+            **kwargs)
+
+
 class _Variable(object):
     """Representation of a dependent random variable."""
 
@@ -395,7 +770,14 @@ class _Variable(object):
             target[:] = unicode
             return {"key": key, "encoding": "str"}
         store.write_into(group, key)
-        return {"key": key, "encoding": "array"}
+        info = {"key": key, "encoding": "array"}
+        if attr.labels is not None:
+            # a coded attribute's categories are its own — a measurement
+            # column's are not the variable's. Stringified, as the variable's
+            # own labels already are: this goes into JSON, and categories can
+            # come out of pandas as NumPy integers.
+            info["labels"] = [str(label) for label in attr.labels]
+        return info
 
     def _load_attr(self, group, info):
         z = group[info["key"]]
@@ -405,7 +787,10 @@ class _Variable(object):
         return _storage.ArrayStore.wrap_zarr(z)
 
     def _zarr_save(self, group, prefix):
-        meta = {"class": type(self).__name__, "name": self.name, "attrs": {}}
+        # str(name): a component is named after its category, which pandas can
+        # hand over as a NumPy integer, and this is JSON
+        meta = {"class": type(self).__name__, "name": str(self.name),
+                "attrs": {}}
         if hasattr(self, "labels"):
             meta["labels"] = [str(x) for x in self.labels]
         for role in self._ZARR_ATTRS:
@@ -430,13 +815,26 @@ class _Variable(object):
         if getattr(self, "components", None):
             meta["components"] = {}
             for cname, comp in self.components.items():
-                meta["components"][cname] = comp._zarr_save(
+                # str: this is a JSON key, and a category can be a NumPy
+                # integer. The labels above are stringified for the same
+                # reason, so the rebuilt variable's components match.
+                meta["components"][str(cname)] = comp._zarr_save(
                     group, prefix + "/" + str(cname))
         return meta
 
     def _zarr_load(self, group, prefix, meta):
         for role, info in meta.get("attrs", {}).items():
-            getattr(self, role).values = self._load_attr(group, info)
+            attribute = getattr(self, role)
+            store = self._load_attr(group, info)
+            if attribute.labels is not None and info["encoding"] == "str":
+                # written before the categorical attributes held codes; a
+                # value outside the variable's labels is lost here, there
+                # being nothing else to read the categories from
+                store = _storage.ArrayStore.from_numpy(
+                    _encode(_np.asarray(store), attribute.labels))
+            if "labels" in info:
+                attribute.labels = list(info["labels"])
+            attribute.values = store
         if meta.get("simulations") is not None:
             self.simulations = _storage.ArrayStore.wrap_zarr(
                 group[meta["simulations"]])
@@ -452,283 +850,10 @@ class _Variable(object):
             self.components[cname]._zarr_load(
                 group, prefix + "/" + str(cname), cmeta)
 
-    class _Attribute(object):
-        """A specific sequence of variable values, tied to data locations."""
 
-        def __init__(self, coordinates, values=None, dtype=None):
-            self.coordinates = coordinates
-
-            if dtype is None:
-                dtype = float
-
-            if values is None:
-                # Lazily allocated and NaN-filled; the backend (NumPy in RAM
-                # vs. chunked Zarr on disk) is chosen by size. Large arrays of
-                # the same container share one consolidated scratch store.
-                self._store = _storage.ArrayStore.allocate(
-                    (coordinates.n_data,), dtype=dtype, fill_value=_np.nan,
-                    owner=coordinates)
-            else:
-                values = _np.array(values, ndmin=1, dtype=dtype)
-                if len(values.shape) > 1:
-                    values = _np.squeeze(values)
-
-                if len(values.shape) != 1:
-                    raise ValueError("Values must be 1-dimensional")
-
-                if len(values) != coordinates.n_data:
-                    raise ValueError("Values and coordinates size mismatch")
-
-                self._store = _storage.ArrayStore.from_numpy(values)
-
-        @property
-        def values(self):
-            return self._store
-
-        @values.setter
-        def values(self, new):
-            # Region assignment (``attr.values[idx] = ...``) mutates the store
-            # in place and never reaches this setter; this handles whole
-            # replacement (``attr.values = array``).
-            if isinstance(new, _storage.ArrayStore):
-                self._store = new
-            else:
-                self._store = _storage.ArrayStore.from_numpy(_np.asarray(new))
-
-        def __str__(self):
-            return self.values.__array__().__str__()
-
-        def __repr__(self):
-            return self.values.__array__().__repr__()
-
-        def __getitem__(self, item):
-            new_obj = _copy.deepcopy(self)
-            new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
-            return new_obj
-
-        def as_series(self, sigma=None):
-            """
-            Reshapes the data in the form of a smoothed 1-dimensional series.
-
-            Arguments
-            ---------
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data, in grid steps.
-                Default is no filter.
-
-            Returns
-            -------
-            series : _np.array
-                A 1-dimensional array.
-            """
-            if not isinstance(self.coordinates, Grid1D):
-                raise ValueError("method only available for Grid1D data"
-                                 "objects")
-
-            series = self.values.to_numpy()
-
-            if sigma is not None:
-                series = _filters.gaussian(series, sigma, preserve_range=True)
-            return series
-
-        def as_image(self, sigma=None):
-            """
-            Reshapes the data in the form of a matrix for plotting.
-
-            The output can be used in plotting functions such as
-            matplotlib's `imshow()`. If you use it, do not forget to set
-            `origin="lower"`.
-
-            Arguments
-            ---------
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data, in grid steps.
-                Default is no filter.
-
-            Returns
-            -------
-            image : _np.array
-                A 2-dimensional array.
-            """
-            if not isinstance(self.coordinates, Grid2D):
-                raise ValueError("method only available for Grid2D data"
-                                 "objects")
-
-            image = _np.reshape(self.values.to_numpy(),
-                                self.coordinates.grid_size,
-                                order="F")
-            image = image.transpose()
-
-            if sigma is not None:
-                image = _filters.gaussian(image, sigma, preserve_range=True)
-            return image
-
-        def as_cube(self, sigma=None):
-            """
-            Returns a rank-3 array filled with the specified variable.
-
-            Arguments
-            ---------
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data, in grid steps.
-                Default is no filter.
-
-            Returns
-            -------
-            cube : _np.array
-                A rank-3 array.
-            """
-            if not isinstance(self.coordinates, Grid3D):
-                raise ValueError("method only available for Grid3D data"
-                                 "objects")
-
-            cube = _np.reshape(self.values.to_numpy(),
-                               self.coordinates.grid_size,
-                               order="F")
-            if sigma is not None:
-                cube = _filters.gaussian(cube, sigma, preserve_range=True)
-            return cube
-
-        def smooth(self, sigma):
-            if isinstance(self.coordinates, (Grid1D, Blocks1D)):
-                series = self.as_series(sigma=sigma)
-                self.values = series
-            elif isinstance(self.coordinates, (Grid2D, Blocks2D)):
-                image = self.as_image(sigma=sigma).T
-                self.values = image.ravel()
-            elif isinstance(self.coordinates, (Grid3D, Blocks3D, RotatedGrid3D)):
-                cube = self.as_cube(sigma=sigma).transpose([2, 1, 0])
-                self.values = cube.ravel()
-            else:
-                raise NotGriddedDataError("method only available for gridded data")
-
-        def get_contour(self, value, sigma=None):
-            """
-            Isosurface extraction.
-
-            This method calls `skimage.measure.marching_cubes()`.
-            See the original documentation for details.
-
-            Parameters
-            ----------
-            value : double
-                The value on which to calculate the isosurface.
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data before contouring.
-                Default is no filter.
-
-            Returns
-            -------
-            surf : Surface3D
-                A `Surface3D` object.
-            """
-            cube = self.as_cube(sigma=sigma)
-            verts, faces, normals, values = _measure.marching_cubes(
-                cube, value, gradient_direction="ascent",
-                allow_degenerate=False, spacing=self.coordinates.step_size)
-
-            mat = self.coordinates.rotation_matrix()
-
-            verts = _np.matmul(verts, mat) + self.coordinates.origin
-            normals = _np.matmul(normals, mat)
-
-            # return verts, faces, normals, values
-            return Surface3D(verts, faces, normals)
-
-        def export_contour(self, value, filename, triangles=True,
-                           offset=None, sigma=None):
-            verts, faces, normals, values = self.get_contour(value, sigma=sigma)
-
-            if offset is None:
-                offset = _np.zeros([1, 3])
-            else:
-                offset = _np.array(_np.squeeze(offset))[None, :]
-            verts = verts + offset
-            
-            with open(filename, 'w') as out_file:
-                if triangles:
-                    out_file.write(
-                        str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
-                for line in verts:
-                    out_file.write(" ".join(str(elem) for elem in line) + "\n")
-                if triangles:
-                    for line in faces:
-                        out_file.write(
-                            " ".join(str(elem) for elem in line) + "\n")
-
-        def _has_content(self):
-            """Whether there is anything worth writing out.
-
-            The test is vectorized: the built-in `all()` walked the array one
-            element at a time, in Python, before a single value was written.
-            """
-            values = _np.asarray(self.values)
-            if values.dtype == object:
-                return not _np.all(values == "")
-            return not _np.all(_np.isnan(values))
-
-        def fill_pyvista_cube(self, cube, label, sigma=None):
-            if self._has_content():
-                cube.point_data[label] = self.as_cube(sigma=sigma) \
-                    .transpose([2, 1, 0]).ravel()
-
-        def fill_pyvista_points(self, points, label):
-            if self._has_content():
-                points.point_data[label] = self.values.to_numpy()
-
-        def fill_pyvista_blocks(self, cube, label, sigma=None):
-            if self._has_content():
-                cube.cell_data[label] = self.as_cube(sigma=sigma) \
-                    .transpose([2, 1, 0]).ravel()
-
-        def draw_contour(self, value, sigma=None, **kwargs):
-            """Creates plotly object with the contour at the specified value."""
-            surf_obj = self.get_contour(value, sigma=sigma)
-            return _py.isosurface(
-                surf_obj.coordinates, surf_obj.triangles, **kwargs)
-
-        def draw_numeric(self, **kwargs):
-            if self.coordinates.n_dim != 3:
-                raise NotImplemented("method currently available only for"
-                                     "3D coordinates")
-
-            if isinstance(self.coordinates, Section3D):
-                values = _np.reshape(self.values.to_numpy(),
-                                     self.coordinates.grid_shape,
-                                     order="F")
-                gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
-                                        self.coordinates.grid_shape,
-                                        order="F")
-                gridded_y = _np.reshape(self.coordinates.coordinates[:, 1],
-                                        self.coordinates.grid_shape,
-                                        order="F")
-                gridded_z = _np.reshape(self.coordinates.coordinates[:, 2],
-                                        self.coordinates.grid_shape,
-                                        order="F")
-
-                return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
-                                              values, **kwargs)
-
-            if isinstance(self.coordinates, Surface3D):
-                return _py.isosurface(self.coordinates.coordinates,
-                                      self.coordinates.triangles,
-                                      values=self.values.to_numpy())
-
-            return _py.numeric_points_3d(
-                self.coordinates.coordinates,
-                self.values.to_numpy(),
-                **kwargs)
-
-        def draw_categorical(self, colors, **kwargs):
-            if self.coordinates.n_dim != 3:
-                raise NotImplemented("method currently available only for"
-                                     "3D coordinates")
-
-            return _py.categorical_points_3d(
-                self.coordinates.coordinates,
-                self.values.to_numpy(),
-                colors,
-                **kwargs)
+# `_Attribute` used to be defined inside `_Variable`; the alias keeps its
+# `self._Attribute(...)` call sites working.
+_Variable._Attribute = _Attribute
 
 
 class ContinuousVariable(_Variable):
@@ -1585,23 +1710,26 @@ class RockTypeVariable(_Variable):
                 avg_vals[:, i] if avg_vals is not None else None,
             )
 
-        self.predicted = self._Attribute(
-            coordinates, _np.array([""]*n_data), dtype=object)
+        # the categories are known here, so these three hold codes into
+        # `labels` rather than one string object per data location
+        self.predicted = self._Attribute.encoded(coordinates, labels=labels)
         self.entropy = self._Attribute(coordinates)
         self.uncertainty = self._Attribute(coordinates)
 
         if measurements_a is None:
-            self.measurements_a = self._Attribute(
-                coordinates, _np.array([""] * n_data), dtype=object)
-            self.measurements_b = self._Attribute(
-                coordinates, _np.array([""] * n_data), dtype=object)
+            self.measurements_a = self._Attribute.encoded(
+                coordinates, labels=labels)
+            self.measurements_b = self._Attribute.encoded(
+                coordinates, labels=labels)
             self.boundary = self._Attribute(
                 coordinates, [False]*n_data, dtype=bool)
         else:
-            self.measurements_a = self._Attribute(
-                coordinates, measurements_a, dtype=object)
-            self.measurements_b = self._Attribute(
-                coordinates, measurements_b, dtype=object)
+            # their own categories, not the variable's: a measurement outside
+            # `labels` is still worth keeping as what it says
+            self.measurements_a = self._Attribute.encoded(
+                coordinates, measurements_a)
+            self.measurements_b = self._Attribute.encoded(
+                coordinates, measurements_b)
             self.boundary = self._Attribute(
                 coordinates, measurements_a != measurements_b, dtype=bool)
 
@@ -1656,23 +1784,34 @@ class RockTypeVariable(_Variable):
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
 
-        for name, comp in self.components.items():
-            new_obj.components[name] = comp[item]
-
-        new_obj.predicted = self.predicted[item]
         new_obj.entropy = self.entropy[item]
         new_obj.uncertainty = self.uncertainty[item]
         new_obj.boundary = self.boundary[item]
         new_obj.measurements_a = self.measurements_a[item]
         new_obj.measurements_b = self.measurements_b[item]
 
-        # Resetting labels
-        cat_a = _pd.Categorical(new_obj.measurements_a.values.to_numpy())
-        cat_b = _pd.Categorical(new_obj.measurements_b.values.to_numpy())
-        labels = _pd.api.types.union_categoricals([cat_a, cat_b])
-        labels = labels.categories.values
+        # Only the categories still present: slicing is a pre-processing step
+        # before training, and a category with no data left in it has nothing
+        # to teach the model. The parent's order is kept, since it is the order
+        # of the components and of the codes below.
+        present = set(new_obj.measurements_a.to_numpy()) \
+            | set(new_obj.measurements_b.to_numpy())
+        labels = [label for label in self.labels if label in present]
+        if len(labels) == 0:
+            # nothing is measured here at all — a prediction target, say, whose
+            # categories come from the model rather than from the data
+            labels = list(self.labels)
         new_obj.labels = labels
         new_obj._length = len(labels)
+
+        # the components and the prediction follow the labels: `update` writes
+        # the winning label's position, which the dropped ones would shift
+        new_obj.components = {label: self.components[label][item]
+                              for label in labels}
+        predicted = self.predicted[item]
+        predicted.values = _encode(predicted.to_numpy(), labels)
+        predicted.labels = list(labels)
+        new_obj.predicted = predicted
 
         return new_obj
 
@@ -1691,11 +1830,11 @@ class RockTypeVariable(_Variable):
         df = _pd.concat(all_dfs, axis=1)
 
         if measurements:
-            df[self.name + "_a"] = self.measurements_a.values.to_numpy()
-            df[self.name + "_b"] = self.measurements_b.values.to_numpy()
+            df[self.name + "_a"] = self.measurements_a.to_numpy()
+            df[self.name + "_b"] = self.measurements_b.to_numpy()
 
         if predictions:
-            df[self.name + "_predicted"] = self.predicted.values.to_numpy()
+            df[self.name + "_predicted"] = self.predicted.to_numpy()
             df[self.name + "_entropy"] = self.entropy.values.to_numpy()
             df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
 
@@ -1705,9 +1844,9 @@ class RockTypeVariable(_Variable):
         self.entropy.values[idx] = kwargs["entropy"].numpy()
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
-        max_prob = _np.argmax(kwargs["probability"].numpy(), axis=1)
-        self.predicted.values[idx] = _np.array(self.labels)[max_prob]
-        # self.predicted.values[idx] = self.labels[max_prob]
+        # the winning category's position is the code
+        self.predicted.values[idx] = _np.argmax(
+            kwargs["probability"].numpy(), axis=1)
 
         mean = _tf.unstack(kwargs["mean"], axis=1)
         variance = _tf.unstack(kwargs["variance"], axis=1)
@@ -1781,9 +1920,9 @@ class RockTypeVariable(_Variable):
                 cube, self.name, simulations=simulations)
 
     def compute_metrics(self, **kwargs):
-        y_pred = self.predicted.values.to_numpy()
-        y_true_a = self.measurements_a.values.to_numpy()
-        y_true_b = self.measurements_b.values.to_numpy()
+        y_pred = self.predicted.to_numpy()
+        y_true_a = self.measurements_a.to_numpy()
+        y_true_b = self.measurements_b.to_numpy()
 
         valid = y_true_a == y_true_b
 
@@ -1884,8 +2023,17 @@ class OrderedRockType(RockTypeVariable):
             measurements_b = _np.asarray(measurements_b)
 
         # Labels may have been derived from the measurements by the parent.
-        labels = self.labels
+        self.implicit_values = self._Attribute(
+            coordinates,
+            self._implicit_values(measurements_a, measurements_b, self.labels))
 
+    @staticmethod
+    def _implicit_values(measurements_a, measurements_b, labels):
+        """Where each pair of measurements sits in the label sequence.
+
+        A function of the labels, so it has to be recomputed whenever they
+        change — slicing away a category shifts every position after it.
+        """
         # Built as a float array from the start; the previous
         # ``-0.5 * _np.ones_like(measurements_a)`` crashed on string inputs.
         implicit_values = _np.full(len(measurements_a), -0.5)
@@ -1923,7 +2071,7 @@ class OrderedRockType(RockTypeVariable):
             # implicit_values[(measurements_a == labels[i + 1])
             #                 & (measurements_b == labels[i + 1])] = i + 0.5
 
-        self.implicit_values = self._Attribute(coordinates, implicit_values)
+        return implicit_values
 
     def get_measurements(self):
         values = self.implicit_values.values.copy()[:, None]
@@ -1933,7 +2081,15 @@ class OrderedRockType(RockTypeVariable):
 
     def __getitem__(self, item):
         new_obj = super().__getitem__(item)
-        new_obj.implicit_values = self.implicit_values[item]
+        implicit = self.implicit_values[item]
+        if new_obj.measurements_a._has_content():
+            # positions in the label sequence, and the slice may have dropped
+            # labels, so these are recomputed rather than carried over
+            implicit.values = self._implicit_values(
+                new_obj.measurements_a.to_numpy(),
+                new_obj.measurements_b.to_numpy(),
+                new_obj.labels)
+        new_obj.implicit_values = implicit
         return new_obj
 
 
@@ -1968,18 +2124,19 @@ class BinaryVariable(_Variable):
         self.indicator = self._Attribute(
             coordinates, _np.array([_np.nan]*n_data))
         if measurements is None:
-            self.measurements = self._Attribute(
-                coordinates, [""]*n_data, dtype=object)
+            self.measurements = self._Attribute.encoded(
+                coordinates, labels=labels)
             self.weights = self._Attribute(coordinates)
         else:
-            self.measurements = self._Attribute(
-                coordinates, measurements, dtype=object)
+            # their own categories: an `AnomalyVariable` labels everything that
+            # is not the anomaly `_dummy`, but the measurements say what it was
+            self.measurements = self._Attribute.encoded(
+                coordinates, measurements)
             self.weights = self._Attribute(coordinates, _np.ones(n_data))
             self.indicator.values[measurements == labels[0]] = 1
             self.indicator.values[measurements == labels[1]] = 0
 
-        self.predicted = self._Attribute(
-            coordinates, [""]*n_data, dtype=object)
+        self.predicted = self._Attribute.encoded(coordinates, labels=labels)
         self.probability = self._Attribute(coordinates, _np.zeros(n_data))
         self.entropy = self._Attribute(coordinates)
         self.uncertainty = self._Attribute(coordinates)
@@ -2043,12 +2200,11 @@ class BinaryVariable(_Variable):
         df = _pd.DataFrame({})
 
         if measurements:
-            df[self.name + "_measurements"] = \
-                self.measurements.values.to_numpy()
+            df[self.name + "_measurements"] = self.measurements.to_numpy()
             df[self.name + "_weights"] = self.weights.values.to_numpy()
 
         if predictions:
-            df[self.name + "_predicted"] = self.predicted.values.to_numpy()
+            df[self.name + "_predicted"] = self.predicted.to_numpy()
             df[self.name + "_probability"] = self.probability.values.to_numpy()
             df[self.name + "_entropy"] = self.entropy.values.to_numpy()
             df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
@@ -2083,7 +2239,8 @@ class BinaryVariable(_Variable):
         label_idx = _np.zeros(prob.shape, dtype=int)  # positive class
         label_idx[prob < 0.5] = 1  # negative class
 
-        self.predicted.values[idx] = _np.array(self.labels)[label_idx]
+        # the label's position is the code
+        self.predicted.values[idx] = label_idx
         self.latent_mean.values[idx] = mean
         self.latent_variance.values[idx] = var
         self.entropy.values[idx] = entropy
@@ -2201,7 +2358,7 @@ class _SpatialData(object):
         self._n_data = None
         self._diagonal = None
         self.variables = {}
-        self.metadata = None
+        self.metadata = {}
 
     def __repr__(self):
         return self.__str__()
@@ -2216,6 +2373,57 @@ class _SpatialData(object):
         rather than meaning something different for every container.
         """
         return 1
+
+    def add_metadata(self, name, values, labels=None):
+        """
+        Attaches point-wise information to this object's locations.
+
+        Metadata is anything known per location that the models do not use —
+        an air/solid code, a cross-validation fold, a sample weight. It follows
+        the object through subsetting, `as_data_frame()` and `to_zarr()`, but
+        is never modeled: use a variable for that.
+
+        Parameters
+        ----------
+        name : str
+            Column name. An existing column with this name is replaced.
+        values : array-like
+            One value per data location. Text is stored as integer codes.
+        labels : list, optional
+            The categories `values` indexes into, when the codes are given
+            directly rather than the text they stand for.
+        """
+        values = _np.asarray(values)
+        if labels is None and values.dtype.kind not in "OUS":
+            self.metadata[name] = _Attribute(self, values, dtype=values.dtype)
+        else:
+            self.metadata[name] = _Attribute.encoded(self, values, labels)
+
+    def get_metadata(self, name):
+        """
+        The values of a metadata column, as an array.
+
+        A text column comes back as its labels, not as the codes it is stored
+        as. Use `obj.metadata[name]` for the column itself, which carries the
+        gridding and plotting helpers.
+        """
+        if name not in self.metadata:
+            raise ValueError(
+                f"there is no metadata column named {name}; "
+                f"found {list(self.metadata.keys())}")
+        return self.metadata[name].to_numpy()
+
+    def _metadata_frame(self):
+        """The metadata columns as a data frame, empty if there are none."""
+        return _pd.DataFrame(
+            {name: column.to_numpy()
+             for name, column in self.metadata.items()},
+            index=_np.arange(self.n_data))
+
+    def _subset_metadata(self, target, item):
+        """Copies this object's metadata columns onto a subset of it."""
+        for name, column in self.metadata.items():
+            target.add_metadata(name, column.values[item], column.labels)
 
     @property
     def n_dim(self):
@@ -2267,6 +2475,7 @@ class _SpatialData(object):
         group = _zarr.open_group(path, mode="w")
         meta = {"geoml_format": _GEOML_ZARR_FORMAT,
                 "container": _write_container(group, self),
+                "metadata": _write_metadata(group, self),
                 "variables": {}}
         for name, var in self.variables.items():
             meta["variables"][name] = _write_variable(group, var)
@@ -2284,6 +2493,7 @@ class _SpatialData(object):
         group = _zarr.open_group(path, mode="r+")
         meta = dict(group.attrs["geoml"])
         container = _rebuild_container(meta["container"], group)
+        _rebuild_metadata(container, group, meta.get("metadata", {}))
         for vmeta in meta["variables"].values():
             _rebuild_variable(container, group, vmeta)
         return container
@@ -2497,7 +2707,7 @@ class PointData(_PointBased):
             self._bounding_box = BoundingBox.from_array(
                 _np.zeros([2, self.n_dim]))
 
-        self.metadata = _pd.DataFrame(_np.empty([self.n_data, 0]))
+        self.metadata = {}
 
     def as_data_frame(self, metadata=True, **kwargs):
         """
@@ -2519,7 +2729,7 @@ class PointData(_PointBased):
             df.append(variable.as_data_frame(**kwargs))
         df = _pd.concat(df, axis=1)
         if metadata:
-            df = _pd.concat([self.metadata, df], axis=1)
+            df = _pd.concat([self._metadata_frame(), df], axis=1)
         return df
 
     @staticmethod
@@ -2551,7 +2761,7 @@ class PointData(_PointBased):
     def __getitem__(self, item):
         self_copy = _copy.deepcopy(self)
         new_obj = self_copy._subset_coordinates(item)
-        new_obj.metadata = self_copy.metadata.iloc[item].reset_index(drop=True)
+        self_copy._subset_metadata(new_obj, item)
         for name, var in self_copy.variables.items():
             new_obj.variables[name] = var[item]
             new_obj.variables[name].set_coordinates(new_obj)
@@ -2707,9 +2917,9 @@ class PointData(_PointBased):
 
         final_ecdf = get_fold_ecdf().numpy()
 
-        self.metadata['spatial_fold'] = final_folds
-        self.metadata['sample_weight'] = 1 - final_mask
-        n_points = _np.array([_np.sum(self.metadata['spatial_fold'] == i) for i in range(k)])
+        self.add_metadata('spatial_fold', final_folds)
+        self.add_metadata('sample_weight', 1 - final_mask)
+        n_points = _np.array([_np.sum(self.get_metadata('spatial_fold') == i) for i in range(k)])
 
         return history, n_points, dist_bins[:-1], test_ecdf, final_ecdf
 
@@ -2810,7 +3020,7 @@ class _GriddedData(_PointBased):
         lo = _np.array([axis.min() for axis in self._axes])
         hi = _np.array([axis.max() for axis in self._axes])
         self._bounding_box = BoundingBox.from_array(_np.stack([lo, hi], axis=0))
-        self.metadata = _pd.DataFrame(_np.empty([self._n_data, 0]))
+        self.metadata = {}
 
         # grid geometry, filled in by the concrete subclasses
         self.grid = None
@@ -2892,7 +3102,7 @@ class _GriddedData(_PointBased):
             df.append(variable.as_data_frame(**kwargs))
         df = _pd.concat(df, axis=1)
         if metadata:
-            df = _pd.concat([self.metadata, df], axis=1)
+            df = _pd.concat([self._metadata_frame(), df], axis=1)
         for i, s in enumerate(self.coordinate_labels):
             df[f'_{s}'] = self.step_size[i]
         return df
@@ -2937,7 +3147,7 @@ class _GriddedData(_PointBased):
 
         self_copy = _copy.deepcopy(self)
         new_obj = PointData.from_array(coords[keep], self.coordinate_labels)
-        new_obj.metadata = self.metadata.iloc[keep].reset_index(drop=True)
+        self._subset_metadata(new_obj, keep)
         for name, var in self_copy.variables.items():
             new_obj.variables[name] = var[keep]
             new_obj.variables[name].set_coordinates(new_obj)
@@ -3008,14 +3218,14 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values.to_numpy(),
+            "value": data.variables[variable].measurements_a.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
              - self.step_size[0] / 2) / self.step_size[0])
         raw_data_2 = raw_data.copy()
         raw_data_2["value"] = \
-            data.variables[variable].measurements_b.values.to_numpy()
+            data.variables[variable].measurements_b.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3050,7 +3260,7 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
+            "value": data.variables[variable].measurements.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3190,7 +3400,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values.to_numpy(),
+            "value": data.variables[variable].measurements_a.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3200,7 +3410,7 @@ class Grid2D(_GriddedData):
              - self.step_size[1] / 2) / self.step_size[1])
         raw_data_2 = raw_data.copy()
         raw_data_2["value"] = \
-            data.variables[variable].measurements_b.values.to_numpy()
+            data.variables[variable].measurements_b.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3237,7 +3447,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
+            "value": data.variables[variable].measurements.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3391,7 +3601,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values.to_numpy(),
+            "value": data.variables[variable].measurements_a.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3404,7 +3614,7 @@ class Grid3D(_GriddedData):
              - self.step_size[2] / 2) / self.step_size[2])
         raw_data_2 = raw_data.copy()
         raw_data_2["value"] = \
-            data.variables[variable].measurements_b.values.to_numpy()
+            data.variables[variable].measurements_b.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3442,7 +3652,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
+            "value": data.variables[variable].measurements.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -4188,6 +4398,28 @@ def _write_container(group, container):
     raise NotImplementedError(
         f"to_zarr does not yet support container type "
         f"'{type(container).__name__}'")
+
+
+def _write_metadata(group, container):
+    """Write the container's point-wise metadata columns into ``group``.
+
+    Text columns are stored as the integer codes they already are, with their
+    labels going into the JSON description.
+    """
+    meta = {}
+    for name, column in container.metadata.items():
+        key = "_metadata/" + name
+        column.values.write_into(group, key)
+        meta[name] = {"key": key, "labels": column.labels}
+    return meta
+
+
+def _rebuild_metadata(container, group, meta):
+    """Reattach the metadata columns, left on disk as the variables are."""
+    for name, info in meta.items():
+        container.metadata[name] = _Attribute.from_store(
+            container, _storage.ArrayStore.wrap_zarr(group[info["key"]]),
+            info["labels"])
 
 
 def _rebuild_container(meta, group):
