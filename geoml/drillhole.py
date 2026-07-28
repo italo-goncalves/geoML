@@ -458,6 +458,57 @@ class IntervalTable(object):
         self.roles[column] = role
         return self
 
+    def rename(self, columns):
+        """
+        Renames value columns, carrying their roles with them.
+
+        The roles are held beside the data, keyed by column name, so renaming
+        the data frame's columns directly leaves them behind: the column
+        quietly stops being a grade, and printing or compositing the table
+        raises. Rename here instead — or rename the data frame before it is
+        added, which is the other place where the two cannot drift apart.
+
+        Column names become variable names in `as_point_data()`, so this is the
+        last chance to tidy them before they reach a model.
+
+        Parameters
+        ----------
+        columns : dict
+            Maps each current column name to its new one.
+
+        Returns
+        -------
+        self, so that calls can be chained, as with `set_role`.
+        """
+        columns = dict(columns)
+
+        unknown = [c for c in columns if c not in self.data.columns]
+        if len(unknown) > 0:
+            raise ValueError(
+                f"column(s) {sorted(map(str, unknown))} are not in table "
+                f"{self.name}; found {self.value_columns}")
+
+        touched = [c for c in list(columns) + list(columns.values())
+                   if c in (HOLE, FROM, TO)]
+        if len(touched) > 0:
+            raise ValueError(
+                f"column(s) {sorted(set(touched))} are reserved; the hole and "
+                f"depth columns are named when the table is built")
+
+        new_names = list(columns.values())
+        kept = [c for c in self.data.columns if c not in columns]
+        taken = sorted(set(new_names) & set(kept))
+        repeated = sorted({c for c in new_names if new_names.count(c) > 1})
+        if len(taken) > 0 or len(repeated) > 0:
+            raise ValueError(
+                f"the new names would collide: {taken + repeated} would name "
+                f"more than one column")
+
+        self.data = self.data.rename(columns=columns)
+        self.roles = {columns.get(name, name): role
+                      for name, role in self.roles.items()}
+        return self
+
     def validate(self, on_error="warn", collar=None):
         """
         Checks the intervals for the problems that break compositing.
@@ -977,6 +1028,32 @@ class DrillholeData(_data._SpatialData):
         table.validate(on_error=on_error, collar=self.collar)
         self.intervals[name] = table
         self._update_bounding_box()
+        return self
+
+    def rename(self, table, columns):
+        """
+        Renames columns of one of the interval tables.
+
+        The roles travel with the columns; see `IntervalTable.rename()`. This
+        is the way to tidy the names of a database that was built for you — by
+        `datasets.macpass()`, say — where the data frames were never in reach.
+
+        Parameters
+        ----------
+        table : str
+            Name of the interval table.
+        columns : dict
+            Maps each current column name to its new one.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        if table not in self.intervals:
+            raise ValueError(
+                f"there is no table named {table}; found "
+                f"{list(self.intervals.keys())}")
+        self.intervals[table].rename(columns)
         return self
 
     def validate(self, on_error="warn"):

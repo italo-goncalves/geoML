@@ -702,6 +702,85 @@ def test_repeated_holes_in_the_collar_are_rejected():
         _drillholes(collar=_collar(holes=("H1", "H1"), dip=90.0, azimuth=0.0))
 
 
+def _assay_holes():
+    """One hole with a grade and a lithology column, both named badly."""
+    holes = _drillholes(collar=_collar(dip=90.0, azimuth=0.0, length=10.0))
+    holes.add_intervals(
+        "assay",
+        pd.DataFrame({"HoleID": "H1", "From": [0.0, 5.0], "To": [5.0, 10.0],
+                      "Pb_pct_ICP": [1.0, 3.0], "rock_code": ["ore", "waste"]}),
+        hole="HoleID", fr="From", to="To", categorical="rock_code")
+    return holes
+
+
+def test_rename_carries_the_roles_with_the_columns():
+    """Renaming the frame directly leaves the roles behind, keyed by old name."""
+    holes = _assay_holes()
+    holes.rename("assay", {"Pb_pct_ICP": "Pb", "rock_code": "litho"})
+    table = holes.intervals["assay"]
+
+    assert table.value_columns == ["Pb", "litho"]
+    assert table.columns_with_role("grade") == ["Pb"]
+    assert table.columns_with_role("categorical") == ["litho"]
+    assert "Pb_pct_ICP" not in table.roles
+
+
+def test_a_renamed_table_still_composites_and_converts():
+    holes = _assay_holes()
+    holes.rename("assay", {"Pb_pct_ICP": "Pb"})
+
+    composited = holes.composite(5.0)
+    assert "Pb" in composited.intervals["assay"].data.columns
+    assert list(composited.intervals["assay"].data["Pb"]) == [1.0, 3.0]
+
+    points = composited.as_point_data()
+    assert "Pb" in points.variables
+
+
+def test_renaming_only_some_columns_leaves_the_rest_alone():
+    holes = _assay_holes()
+    holes.rename("assay", {"Pb_pct_ICP": "Pb"})
+    table = holes.intervals["assay"]
+
+    assert table.value_columns == ["Pb", "rock_code"]
+    assert table.roles["rock_code"] == "categorical"
+
+
+def test_rename_reports_columns_that_are_not_there():
+    holes = _assay_holes()
+    with pytest.raises(ValueError, match="not in table"):
+        holes.rename("assay", {"Zn": "zinc"})
+
+
+def test_the_hole_and_depth_columns_cannot_be_renamed():
+    holes = _assay_holes()
+    with pytest.raises(ValueError, match="reserved"):
+        holes.rename("assay", {FROM: "depth"})
+    with pytest.raises(ValueError, match="reserved"):
+        holes.rename("assay", {"Pb_pct_ICP": HOLE})
+
+
+def test_a_rename_cannot_shadow_another_column():
+    holes = _assay_holes()
+    with pytest.raises(ValueError, match="collide"):
+        holes.rename("assay", {"Pb_pct_ICP": "rock_code"})
+    with pytest.raises(ValueError, match="collide"):
+        holes.rename("assay", {"Pb_pct_ICP": "x", "rock_code": "x"})
+
+
+def test_renaming_an_unknown_table_is_an_error():
+    holes = _assay_holes()
+    with pytest.raises(ValueError, match="no table named"):
+        holes.rename("litho", {"Pb_pct_ICP": "Pb"})
+
+
+def test_the_table_can_be_renamed_on_its_own():
+    """`IntervalTable.rename` chains, as `set_role` does."""
+    table = _assay_holes().intervals["assay"]
+    assert table.rename({"Pb_pct_ICP": "Pb"}) is table
+    assert "Pb: grade" in str(table)
+
+
 def test_str_reports_the_tables_and_their_roles():
     holes = _two_rock_holes()
 
