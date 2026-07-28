@@ -261,6 +261,337 @@ def _selected_simulations(store, selection):
     return list(zip(index, values.T))
 
 
+class _Attribute(object):
+    """A specific sequence of values, tied to data locations.
+
+    One value per location, in an `ArrayStore` — NumPy in RAM or chunked Zarr
+    on disk, chosen by size. Variables are built out of these (measurements,
+    latent mean, predictions, ...), and so is a container's point-wise
+    metadata.
+
+    Text can be held as integer codes plus a `labels` list, built by
+    :meth:`encoded`; `labels` is None for a plain numeric attribute. Codes are
+    what makes text affordable: an object array of two million rock codes
+    allocates 105 MB against 1.9 MB as `uint8`, and `ArrayStore` cannot spill
+    an object array to disk at all.
+    """
+
+    # An attribute is coded only when `encoded` says so; the rest are plain.
+    labels = None
+
+    def __init__(self, coordinates, values=None, dtype=None):
+        self.coordinates = coordinates
+
+        if dtype is None:
+            dtype = float
+
+        if values is None:
+            # Lazily allocated and NaN-filled; the backend (NumPy in RAM
+            # vs. chunked Zarr on disk) is chosen by size. Large arrays of
+            # the same container share one consolidated scratch store.
+            self._store = _storage.ArrayStore.allocate(
+                (coordinates.n_data,), dtype=dtype, fill_value=_np.nan,
+                owner=coordinates)
+        else:
+            values = _np.array(values, ndmin=1, dtype=dtype)
+            if len(values.shape) > 1:
+                values = _np.squeeze(values)
+
+            if len(values.shape) != 1:
+                raise ValueError("Values must be 1-dimensional")
+
+            if len(values) != coordinates.n_data:
+                raise ValueError("Values and coordinates size mismatch")
+
+            # by size, as above: an attribute built from values used to be
+            # pinned in RAM while an empty one of the same length was not
+            self._store = _storage.ArrayStore.from_values(
+                values, owner=coordinates)
+
+    @classmethod
+    def encoded(cls, coordinates, values, labels=None):
+        """An attribute holding text as integer codes plus a label list.
+
+        With `labels` given, `values` are the codes themselves; otherwise the
+        categories are read off the values, which are the text.
+        """
+        values = _np.asarray(values)
+        if labels is None:
+            labels, values = _np.unique(values, return_inverse=True)
+            labels = [str(label) for label in labels]
+            values = values.astype(_np.min_scalar_type(len(labels)))
+
+        attribute = cls(coordinates, values, dtype=values.dtype)
+        attribute.labels = list(labels)
+        return attribute
+
+    @classmethod
+    def from_store(cls, coordinates, store, labels=None):
+        """Wrap an existing store (reopened from disk) without copying it."""
+        attribute = cls.__new__(cls)
+        attribute.coordinates = coordinates
+        attribute._store = store
+        if labels is not None:
+            attribute.labels = list(labels)
+        return attribute
+
+    def to_numpy(self):
+        """The values, with a coded attribute decoded back to its labels."""
+        values = self.values.to_numpy()
+        if self.labels is None:
+            return values
+        return _np.asarray(self.labels, dtype=object)[values]
+
+    @property
+    def values(self):
+        return self._store
+
+    @values.setter
+    def values(self, new):
+        # Region assignment (``attr.values[idx] = ...``) mutates the store
+        # in place and never reaches this setter; this handles whole
+        # replacement (``attr.values = array``).
+        if isinstance(new, _storage.ArrayStore):
+            self._store = new
+        else:
+            self._store = _storage.ArrayStore.from_numpy(_np.asarray(new))
+
+    def __str__(self):
+        return self.values.__array__().__str__()
+
+    def __repr__(self):
+        return self.values.__array__().__repr__()
+
+    def __getitem__(self, item):
+        new_obj = _copy.deepcopy(self)
+        new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
+        return new_obj
+
+    def as_series(self, sigma=None):
+        """
+        Reshapes the data in the form of a smoothed 1-dimensional series.
+
+        Arguments
+        ---------
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data, in grid steps.
+            Default is no filter.
+
+        Returns
+        -------
+        series : _np.array
+            A 1-dimensional array.
+        """
+        if not isinstance(self.coordinates, Grid1D):
+            raise ValueError("method only available for Grid1D data"
+                             "objects")
+
+        series = self.values.to_numpy()
+
+        if sigma is not None:
+            series = _filters.gaussian(series, sigma, preserve_range=True)
+        return series
+
+    def as_image(self, sigma=None):
+        """
+        Reshapes the data in the form of a matrix for plotting.
+
+        The output can be used in plotting functions such as
+        matplotlib's `imshow()`. If you use it, do not forget to set
+        `origin="lower"`.
+
+        Arguments
+        ---------
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data, in grid steps.
+            Default is no filter.
+
+        Returns
+        -------
+        image : _np.array
+            A 2-dimensional array.
+        """
+        if not isinstance(self.coordinates, Grid2D):
+            raise ValueError("method only available for Grid2D data"
+                             "objects")
+
+        image = _np.reshape(self.values.to_numpy(),
+                            self.coordinates.grid_size,
+                            order="F")
+        image = image.transpose()
+
+        if sigma is not None:
+            image = _filters.gaussian(image, sigma, preserve_range=True)
+        return image
+
+    def as_cube(self, sigma=None):
+        """
+        Returns a rank-3 array filled with the specified variable.
+
+        Arguments
+        ---------
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data, in grid steps.
+            Default is no filter.
+
+        Returns
+        -------
+        cube : _np.array
+            A rank-3 array.
+        """
+        if not isinstance(self.coordinates, Grid3D):
+            raise ValueError("method only available for Grid3D data"
+                             "objects")
+
+        cube = _np.reshape(self.values.to_numpy(),
+                           self.coordinates.grid_size,
+                           order="F")
+        if sigma is not None:
+            cube = _filters.gaussian(cube, sigma, preserve_range=True)
+        return cube
+
+    def smooth(self, sigma):
+        if isinstance(self.coordinates, (Grid1D, Blocks1D)):
+            series = self.as_series(sigma=sigma)
+            self.values = series
+        elif isinstance(self.coordinates, (Grid2D, Blocks2D)):
+            image = self.as_image(sigma=sigma).T
+            self.values = image.ravel()
+        elif isinstance(self.coordinates, (Grid3D, Blocks3D, RotatedGrid3D)):
+            cube = self.as_cube(sigma=sigma).transpose([2, 1, 0])
+            self.values = cube.ravel()
+        else:
+            raise NotGriddedDataError("method only available for gridded data")
+
+    def get_contour(self, value, sigma=None):
+        """
+        Isosurface extraction.
+
+        This method calls `skimage.measure.marching_cubes()`.
+        See the original documentation for details.
+
+        Parameters
+        ----------
+        value : double
+            The value on which to calculate the isosurface.
+        sigma : scalar or array
+            Standard deviation of a Gaussian filter applied to the data before contouring.
+            Default is no filter.
+
+        Returns
+        -------
+        surf : Surface3D
+            A `Surface3D` object.
+        """
+        cube = self.as_cube(sigma=sigma)
+        verts, faces, normals, values = _measure.marching_cubes(
+            cube, value, gradient_direction="ascent",
+            allow_degenerate=False, spacing=self.coordinates.step_size)
+
+        mat = self.coordinates.rotation_matrix()
+
+        verts = _np.matmul(verts, mat) + self.coordinates.origin
+        normals = _np.matmul(normals, mat)
+
+        # return verts, faces, normals, values
+        return Surface3D(verts, faces, normals)
+
+    def export_contour(self, value, filename, triangles=True,
+                       offset=None, sigma=None):
+        verts, faces, normals, values = self.get_contour(value, sigma=sigma)
+
+        if offset is None:
+            offset = _np.zeros([1, 3])
+        else:
+            offset = _np.array(_np.squeeze(offset))[None, :]
+        verts = verts + offset
+        
+        with open(filename, 'w') as out_file:
+            if triangles:
+                out_file.write(
+                    str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
+            for line in verts:
+                out_file.write(" ".join(str(elem) for elem in line) + "\n")
+            if triangles:
+                for line in faces:
+                    out_file.write(
+                        " ".join(str(elem) for elem in line) + "\n")
+
+    def _has_content(self):
+        """Whether there is anything worth writing out.
+
+        The test is vectorized: the built-in `all()` walked the array one
+        element at a time, in Python, before a single value was written.
+        """
+        values = _np.asarray(self.values)
+        if values.dtype == object:
+            return not _np.all(values == "")
+        return not _np.all(_np.isnan(values))
+
+    def fill_pyvista_cube(self, cube, label, sigma=None):
+        if self._has_content():
+            cube.point_data[label] = self.as_cube(sigma=sigma) \
+                .transpose([2, 1, 0]).ravel()
+
+    def fill_pyvista_points(self, points, label):
+        if self._has_content():
+            points.point_data[label] = self.values.to_numpy()
+
+    def fill_pyvista_blocks(self, cube, label, sigma=None):
+        if self._has_content():
+            cube.cell_data[label] = self.as_cube(sigma=sigma) \
+                .transpose([2, 1, 0]).ravel()
+
+    def draw_contour(self, value, sigma=None, **kwargs):
+        """Creates plotly object with the contour at the specified value."""
+        surf_obj = self.get_contour(value, sigma=sigma)
+        return _py.isosurface(
+            surf_obj.coordinates, surf_obj.triangles, **kwargs)
+
+    def draw_numeric(self, **kwargs):
+        if self.coordinates.n_dim != 3:
+            raise NotImplemented("method currently available only for"
+                                 "3D coordinates")
+
+        if isinstance(self.coordinates, Section3D):
+            values = _np.reshape(self.values.to_numpy(),
+                                 self.coordinates.grid_shape,
+                                 order="F")
+            gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
+                                    self.coordinates.grid_shape,
+                                    order="F")
+            gridded_y = _np.reshape(self.coordinates.coordinates[:, 1],
+                                    self.coordinates.grid_shape,
+                                    order="F")
+            gridded_z = _np.reshape(self.coordinates.coordinates[:, 2],
+                                    self.coordinates.grid_shape,
+                                    order="F")
+
+            return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
+                                          values, **kwargs)
+
+        if isinstance(self.coordinates, Surface3D):
+            return _py.isosurface(self.coordinates.coordinates,
+                                  self.coordinates.triangles,
+                                  values=self.values.to_numpy())
+
+        return _py.numeric_points_3d(
+            self.coordinates.coordinates,
+            self.values.to_numpy(),
+            **kwargs)
+
+    def draw_categorical(self, colors, **kwargs):
+        if self.coordinates.n_dim != 3:
+            raise NotImplemented("method currently available only for"
+                                 "3D coordinates")
+
+        return _py.categorical_points_3d(
+            self.coordinates.coordinates,
+            self.values.to_numpy(),
+            colors,
+            **kwargs)
+
+
 class _Variable(object):
     """Representation of a dependent random variable."""
 
@@ -452,283 +783,10 @@ class _Variable(object):
             self.components[cname]._zarr_load(
                 group, prefix + "/" + str(cname), cmeta)
 
-    class _Attribute(object):
-        """A specific sequence of variable values, tied to data locations."""
 
-        def __init__(self, coordinates, values=None, dtype=None):
-            self.coordinates = coordinates
-
-            if dtype is None:
-                dtype = float
-
-            if values is None:
-                # Lazily allocated and NaN-filled; the backend (NumPy in RAM
-                # vs. chunked Zarr on disk) is chosen by size. Large arrays of
-                # the same container share one consolidated scratch store.
-                self._store = _storage.ArrayStore.allocate(
-                    (coordinates.n_data,), dtype=dtype, fill_value=_np.nan,
-                    owner=coordinates)
-            else:
-                values = _np.array(values, ndmin=1, dtype=dtype)
-                if len(values.shape) > 1:
-                    values = _np.squeeze(values)
-
-                if len(values.shape) != 1:
-                    raise ValueError("Values must be 1-dimensional")
-
-                if len(values) != coordinates.n_data:
-                    raise ValueError("Values and coordinates size mismatch")
-
-                self._store = _storage.ArrayStore.from_numpy(values)
-
-        @property
-        def values(self):
-            return self._store
-
-        @values.setter
-        def values(self, new):
-            # Region assignment (``attr.values[idx] = ...``) mutates the store
-            # in place and never reaches this setter; this handles whole
-            # replacement (``attr.values = array``).
-            if isinstance(new, _storage.ArrayStore):
-                self._store = new
-            else:
-                self._store = _storage.ArrayStore.from_numpy(_np.asarray(new))
-
-        def __str__(self):
-            return self.values.__array__().__str__()
-
-        def __repr__(self):
-            return self.values.__array__().__repr__()
-
-        def __getitem__(self, item):
-            new_obj = _copy.deepcopy(self)
-            new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
-            return new_obj
-
-        def as_series(self, sigma=None):
-            """
-            Reshapes the data in the form of a smoothed 1-dimensional series.
-
-            Arguments
-            ---------
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data, in grid steps.
-                Default is no filter.
-
-            Returns
-            -------
-            series : _np.array
-                A 1-dimensional array.
-            """
-            if not isinstance(self.coordinates, Grid1D):
-                raise ValueError("method only available for Grid1D data"
-                                 "objects")
-
-            series = self.values.to_numpy()
-
-            if sigma is not None:
-                series = _filters.gaussian(series, sigma, preserve_range=True)
-            return series
-
-        def as_image(self, sigma=None):
-            """
-            Reshapes the data in the form of a matrix for plotting.
-
-            The output can be used in plotting functions such as
-            matplotlib's `imshow()`. If you use it, do not forget to set
-            `origin="lower"`.
-
-            Arguments
-            ---------
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data, in grid steps.
-                Default is no filter.
-
-            Returns
-            -------
-            image : _np.array
-                A 2-dimensional array.
-            """
-            if not isinstance(self.coordinates, Grid2D):
-                raise ValueError("method only available for Grid2D data"
-                                 "objects")
-
-            image = _np.reshape(self.values.to_numpy(),
-                                self.coordinates.grid_size,
-                                order="F")
-            image = image.transpose()
-
-            if sigma is not None:
-                image = _filters.gaussian(image, sigma, preserve_range=True)
-            return image
-
-        def as_cube(self, sigma=None):
-            """
-            Returns a rank-3 array filled with the specified variable.
-
-            Arguments
-            ---------
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data, in grid steps.
-                Default is no filter.
-
-            Returns
-            -------
-            cube : _np.array
-                A rank-3 array.
-            """
-            if not isinstance(self.coordinates, Grid3D):
-                raise ValueError("method only available for Grid3D data"
-                                 "objects")
-
-            cube = _np.reshape(self.values.to_numpy(),
-                               self.coordinates.grid_size,
-                               order="F")
-            if sigma is not None:
-                cube = _filters.gaussian(cube, sigma, preserve_range=True)
-            return cube
-
-        def smooth(self, sigma):
-            if isinstance(self.coordinates, (Grid1D, Blocks1D)):
-                series = self.as_series(sigma=sigma)
-                self.values = series
-            elif isinstance(self.coordinates, (Grid2D, Blocks2D)):
-                image = self.as_image(sigma=sigma).T
-                self.values = image.ravel()
-            elif isinstance(self.coordinates, (Grid3D, Blocks3D, RotatedGrid3D)):
-                cube = self.as_cube(sigma=sigma).transpose([2, 1, 0])
-                self.values = cube.ravel()
-            else:
-                raise NotGriddedDataError("method only available for gridded data")
-
-        def get_contour(self, value, sigma=None):
-            """
-            Isosurface extraction.
-
-            This method calls `skimage.measure.marching_cubes()`.
-            See the original documentation for details.
-
-            Parameters
-            ----------
-            value : double
-                The value on which to calculate the isosurface.
-            sigma : scalar or array
-                Standard deviation of a Gaussian filter applied to the data before contouring.
-                Default is no filter.
-
-            Returns
-            -------
-            surf : Surface3D
-                A `Surface3D` object.
-            """
-            cube = self.as_cube(sigma=sigma)
-            verts, faces, normals, values = _measure.marching_cubes(
-                cube, value, gradient_direction="ascent",
-                allow_degenerate=False, spacing=self.coordinates.step_size)
-
-            mat = self.coordinates.rotation_matrix()
-
-            verts = _np.matmul(verts, mat) + self.coordinates.origin
-            normals = _np.matmul(normals, mat)
-
-            # return verts, faces, normals, values
-            return Surface3D(verts, faces, normals)
-
-        def export_contour(self, value, filename, triangles=True,
-                           offset=None, sigma=None):
-            verts, faces, normals, values = self.get_contour(value, sigma=sigma)
-
-            if offset is None:
-                offset = _np.zeros([1, 3])
-            else:
-                offset = _np.array(_np.squeeze(offset))[None, :]
-            verts = verts + offset
-            
-            with open(filename, 'w') as out_file:
-                if triangles:
-                    out_file.write(
-                        str(verts.shape[0]) + " " + str(faces.shape[0]) + "\n")
-                for line in verts:
-                    out_file.write(" ".join(str(elem) for elem in line) + "\n")
-                if triangles:
-                    for line in faces:
-                        out_file.write(
-                            " ".join(str(elem) for elem in line) + "\n")
-
-        def _has_content(self):
-            """Whether there is anything worth writing out.
-
-            The test is vectorized: the built-in `all()` walked the array one
-            element at a time, in Python, before a single value was written.
-            """
-            values = _np.asarray(self.values)
-            if values.dtype == object:
-                return not _np.all(values == "")
-            return not _np.all(_np.isnan(values))
-
-        def fill_pyvista_cube(self, cube, label, sigma=None):
-            if self._has_content():
-                cube.point_data[label] = self.as_cube(sigma=sigma) \
-                    .transpose([2, 1, 0]).ravel()
-
-        def fill_pyvista_points(self, points, label):
-            if self._has_content():
-                points.point_data[label] = self.values.to_numpy()
-
-        def fill_pyvista_blocks(self, cube, label, sigma=None):
-            if self._has_content():
-                cube.cell_data[label] = self.as_cube(sigma=sigma) \
-                    .transpose([2, 1, 0]).ravel()
-
-        def draw_contour(self, value, sigma=None, **kwargs):
-            """Creates plotly object with the contour at the specified value."""
-            surf_obj = self.get_contour(value, sigma=sigma)
-            return _py.isosurface(
-                surf_obj.coordinates, surf_obj.triangles, **kwargs)
-
-        def draw_numeric(self, **kwargs):
-            if self.coordinates.n_dim != 3:
-                raise NotImplemented("method currently available only for"
-                                     "3D coordinates")
-
-            if isinstance(self.coordinates, Section3D):
-                values = _np.reshape(self.values.to_numpy(),
-                                     self.coordinates.grid_shape,
-                                     order="F")
-                gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
-                                        self.coordinates.grid_shape,
-                                        order="F")
-                gridded_y = _np.reshape(self.coordinates.coordinates[:, 1],
-                                        self.coordinates.grid_shape,
-                                        order="F")
-                gridded_z = _np.reshape(self.coordinates.coordinates[:, 2],
-                                        self.coordinates.grid_shape,
-                                        order="F")
-
-                return _py.numeric_section_3d(gridded_x, gridded_y, gridded_z,
-                                              values, **kwargs)
-
-            if isinstance(self.coordinates, Surface3D):
-                return _py.isosurface(self.coordinates.coordinates,
-                                      self.coordinates.triangles,
-                                      values=self.values.to_numpy())
-
-            return _py.numeric_points_3d(
-                self.coordinates.coordinates,
-                self.values.to_numpy(),
-                **kwargs)
-
-        def draw_categorical(self, colors, **kwargs):
-            if self.coordinates.n_dim != 3:
-                raise NotImplemented("method currently available only for"
-                                     "3D coordinates")
-
-            return _py.categorical_points_3d(
-                self.coordinates.coordinates,
-                self.values.to_numpy(),
-                colors,
-                **kwargs)
+# `_Attribute` used to be defined inside `_Variable`; the alias keeps its
+# `self._Attribute(...)` call sites working.
+_Variable._Attribute = _Attribute
 
 
 class ContinuousVariable(_Variable):
@@ -2201,7 +2259,7 @@ class _SpatialData(object):
         self._n_data = None
         self._diagonal = None
         self.variables = {}
-        self.metadata = None
+        self.metadata = {}
 
     def __repr__(self):
         return self.__str__()
@@ -2216,6 +2274,57 @@ class _SpatialData(object):
         rather than meaning something different for every container.
         """
         return 1
+
+    def add_metadata(self, name, values, labels=None):
+        """
+        Attaches point-wise information to this object's locations.
+
+        Metadata is anything known per location that the models do not use —
+        an air/solid code, a cross-validation fold, a sample weight. It follows
+        the object through subsetting, `as_data_frame()` and `to_zarr()`, but
+        is never modeled: use a variable for that.
+
+        Parameters
+        ----------
+        name : str
+            Column name. An existing column with this name is replaced.
+        values : array-like
+            One value per data location. Text is stored as integer codes.
+        labels : list, optional
+            The categories `values` indexes into, when the codes are given
+            directly rather than the text they stand for.
+        """
+        values = _np.asarray(values)
+        if labels is None and values.dtype.kind not in "OUS":
+            self.metadata[name] = _Attribute(self, values, dtype=values.dtype)
+        else:
+            self.metadata[name] = _Attribute.encoded(self, values, labels)
+
+    def get_metadata(self, name):
+        """
+        The values of a metadata column, as an array.
+
+        A text column comes back as its labels, not as the codes it is stored
+        as. Use `obj.metadata[name]` for the column itself, which carries the
+        gridding and plotting helpers.
+        """
+        if name not in self.metadata:
+            raise ValueError(
+                f"there is no metadata column named {name}; "
+                f"found {list(self.metadata.keys())}")
+        return self.metadata[name].to_numpy()
+
+    def _metadata_frame(self):
+        """The metadata columns as a data frame, empty if there are none."""
+        return _pd.DataFrame(
+            {name: column.to_numpy()
+             for name, column in self.metadata.items()},
+            index=_np.arange(self.n_data))
+
+    def _subset_metadata(self, target, item):
+        """Copies this object's metadata columns onto a subset of it."""
+        for name, column in self.metadata.items():
+            target.add_metadata(name, column.values[item], column.labels)
 
     @property
     def n_dim(self):
@@ -2267,6 +2376,7 @@ class _SpatialData(object):
         group = _zarr.open_group(path, mode="w")
         meta = {"geoml_format": _GEOML_ZARR_FORMAT,
                 "container": _write_container(group, self),
+                "metadata": _write_metadata(group, self),
                 "variables": {}}
         for name, var in self.variables.items():
             meta["variables"][name] = _write_variable(group, var)
@@ -2284,6 +2394,7 @@ class _SpatialData(object):
         group = _zarr.open_group(path, mode="r+")
         meta = dict(group.attrs["geoml"])
         container = _rebuild_container(meta["container"], group)
+        _rebuild_metadata(container, group, meta.get("metadata", {}))
         for vmeta in meta["variables"].values():
             _rebuild_variable(container, group, vmeta)
         return container
@@ -2497,7 +2608,7 @@ class PointData(_PointBased):
             self._bounding_box = BoundingBox.from_array(
                 _np.zeros([2, self.n_dim]))
 
-        self.metadata = _pd.DataFrame(_np.empty([self.n_data, 0]))
+        self.metadata = {}
 
     def as_data_frame(self, metadata=True, **kwargs):
         """
@@ -2519,7 +2630,7 @@ class PointData(_PointBased):
             df.append(variable.as_data_frame(**kwargs))
         df = _pd.concat(df, axis=1)
         if metadata:
-            df = _pd.concat([self.metadata, df], axis=1)
+            df = _pd.concat([self._metadata_frame(), df], axis=1)
         return df
 
     @staticmethod
@@ -2551,7 +2662,7 @@ class PointData(_PointBased):
     def __getitem__(self, item):
         self_copy = _copy.deepcopy(self)
         new_obj = self_copy._subset_coordinates(item)
-        new_obj.metadata = self_copy.metadata.iloc[item].reset_index(drop=True)
+        self_copy._subset_metadata(new_obj, item)
         for name, var in self_copy.variables.items():
             new_obj.variables[name] = var[item]
             new_obj.variables[name].set_coordinates(new_obj)
@@ -2707,9 +2818,9 @@ class PointData(_PointBased):
 
         final_ecdf = get_fold_ecdf().numpy()
 
-        self.metadata['spatial_fold'] = final_folds
-        self.metadata['sample_weight'] = 1 - final_mask
-        n_points = _np.array([_np.sum(self.metadata['spatial_fold'] == i) for i in range(k)])
+        self.add_metadata('spatial_fold', final_folds)
+        self.add_metadata('sample_weight', 1 - final_mask)
+        n_points = _np.array([_np.sum(self.get_metadata('spatial_fold') == i) for i in range(k)])
 
         return history, n_points, dist_bins[:-1], test_ecdf, final_ecdf
 
@@ -2810,7 +2921,7 @@ class _GriddedData(_PointBased):
         lo = _np.array([axis.min() for axis in self._axes])
         hi = _np.array([axis.max() for axis in self._axes])
         self._bounding_box = BoundingBox.from_array(_np.stack([lo, hi], axis=0))
-        self.metadata = _pd.DataFrame(_np.empty([self._n_data, 0]))
+        self.metadata = {}
 
         # grid geometry, filled in by the concrete subclasses
         self.grid = None
@@ -2892,7 +3003,7 @@ class _GriddedData(_PointBased):
             df.append(variable.as_data_frame(**kwargs))
         df = _pd.concat(df, axis=1)
         if metadata:
-            df = _pd.concat([self.metadata, df], axis=1)
+            df = _pd.concat([self._metadata_frame(), df], axis=1)
         for i, s in enumerate(self.coordinate_labels):
             df[f'_{s}'] = self.step_size[i]
         return df
@@ -2937,7 +3048,7 @@ class _GriddedData(_PointBased):
 
         self_copy = _copy.deepcopy(self)
         new_obj = PointData.from_array(coords[keep], self.coordinate_labels)
-        new_obj.metadata = self.metadata.iloc[keep].reset_index(drop=True)
+        self._subset_metadata(new_obj, keep)
         for name, var in self_copy.variables.items():
             new_obj.variables[name] = var[keep]
             new_obj.variables[name].set_coordinates(new_obj)
@@ -4188,6 +4299,28 @@ def _write_container(group, container):
     raise NotImplementedError(
         f"to_zarr does not yet support container type "
         f"'{type(container).__name__}'")
+
+
+def _write_metadata(group, container):
+    """Write the container's point-wise metadata columns into ``group``.
+
+    Text columns are stored as the integer codes they already are, with their
+    labels going into the JSON description.
+    """
+    meta = {}
+    for name, column in container.metadata.items():
+        key = "_metadata/" + name
+        column.values.write_into(group, key)
+        meta[name] = {"key": key, "labels": column.labels}
+    return meta
+
+
+def _rebuild_metadata(container, group, meta):
+    """Reattach the metadata columns, left on disk as the variables are."""
+    for name, info in meta.items():
+        container.metadata[name] = _Attribute.from_store(
+            container, _storage.ArrayStore.wrap_zarr(group[info["key"]]),
+            info["labels"])
 
 
 def _rebuild_container(meta, group):

@@ -1,3 +1,34 @@
+## version 0.5.3
+* Point-wise information can be attached to any container with
+`obj.add_metadata(name, values)` and read back with `obj.get_metadata(name)` —
+an air/solid code, a cross-validation fold, a sample weight: things known per
+location that the models never see. It follows the object through subsetting,
+`as_data_frame()` and now `to_zarr()`/`open()`, which used to drop it silently
+* **Breaking:** `obj.metadata` is a dict of columns, not a `DataFrame`. A
+column is the same `_Attribute` a variable is built from, so it spills to Zarr
+when large and carries the same helpers — `grid.metadata["air"].as_cube()` and
+`fill_pyvista_blocks()` work on it. Text is kept as integer codes plus labels:
+as an object column a rock code on a two-million-block model costs 105 MB
+against 1.9 MB as codes, and object arrays can never spill to disk. Code that
+read `obj.metadata["fold"]` expecting a column of values wants
+`obj.get_metadata("fold")`
+* `_Attribute` is a module-level class instead of one nested inside
+`_Variable`, and it is where the text-as-codes handling lives
+(`_Attribute.encoded`), so the categorical variables can be moved onto it next
+— their `predicted` and `measurements` columns are object arrays today. Two
+fixes came with it: an attribute built from values now chooses its backend by
+size like an empty one does, instead of being pinned in RAM whatever its
+length; and reopening one from disk no longer allocates a throwaway array first
+* Interval columns can be renamed with `holes.rename(table, {"Pb_pct_ICP":
+"Pb"})`, or `table.rename(...)` on the table itself. The roles travel with the
+columns: renaming the data frame directly left them behind, keyed by the old
+name, so the column quietly stopped being a grade and printing or compositing
+the table raised a `KeyError`. Renaming the frame before it is added still
+works as it always did — this is for a database that was built for you, by
+`datasets.macpass()` or by compositing, where the frames were never in reach.
+Column names become variable names in `as_point_data()`, so it is also the last
+chance to tidy them before they reach a model
+
 ## version 0.5.2
 * Simulated predictions are reproducible. The likelihood noise was drawn from
 TensorFlow's global generator with a hard-coded seed, so `options.seed` never
