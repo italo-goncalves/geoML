@@ -67,7 +67,7 @@ def test_a_text_column_is_stored_as_codes_and_read_back_as_labels():
     assert column.labels == ["ore", "waste"]
     # the codes are the compact part: an object column can neither spill to
     # disk nor shrink
-    assert column.values.dtype == np.dtype(np.uint8)
+    assert column.values.dtype == np.dtype(np.int8)
     assert np.array_equal(np.asarray(column.values), [0, 1] * 6)
     assert np.array_equal(point.get_metadata("rock"), rock)
 

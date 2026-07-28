@@ -258,5 +258,5 @@ def test_from_data_frame_builds_the_class_it_is_called_on(cls, kwargs):
 
     # the measurements must actually reach the variable
     if hasattr(variable, "measurements_a"):
-        assert list(np.asarray(variable.measurements_a.values)) == \
+        assert list(variable.measurements_a.to_numpy()) == \
             list(df["rock_a" if "col_a" in kwargs else "cat"])

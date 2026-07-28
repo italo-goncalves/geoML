@@ -636,16 +636,16 @@ def test_contacts_sit_at_the_boundary_and_carry_both_categories():
     np.testing.assert_allclose(np.asarray(contacts.coordinates)[0],
                                [0.0, 0.0, 94.0])
     rock = contacts.variables["rock"]
-    assert np.asarray(rock.measurements_a.values)[0] == "ore"
-    assert np.asarray(rock.measurements_b.values)[0] == "waste"
+    assert rock.measurements_a.to_numpy()[0] == "ore"
+    assert rock.measurements_b.to_numpy()[0] == "waste"
 
 
 def test_classification_input_mixes_interior_points_with_contacts():
     point = _two_rock_holes().as_classification_input("litho", length=2.0)
 
     rock = point.variables["rock"]
-    first = np.asarray(rock.measurements_a.values)
-    second = np.asarray(rock.measurements_b.values)
+    first = rock.measurements_a.to_numpy()
+    second = rock.measurements_b.to_numpy()
 
     boundary = first != second
     assert boundary.sum() == 1               # one contact, at 6 m
@@ -1091,8 +1091,8 @@ def test_filled_holes_can_be_used_as_classification_input():
 
     point = holes.as_classification_input("litho", length=2.0)
     rock = point.variables["rock"]
-    first = np.asarray(rock.measurements_a.values)
-    second = np.asarray(rock.measurements_b.values)
+    first = rock.measurements_a.to_numpy()
+    second = rock.measurements_b.to_numpy()
 
     assert set(first) == {"ore", "waste"}
     # the ore/waste boundaries are now explicit contacts

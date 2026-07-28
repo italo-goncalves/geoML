@@ -1688,10 +1688,10 @@ class DrillholeData(_data._SpatialData):
         contacts = self.get_contacts(domain)
         contact_frame = _pd.DataFrame(_np.asarray(contacts.coordinates),
                                       columns=["X", "Y", "Z"])
-        contact_frame[column + "_a"] = _np.asarray(
-            contacts.variables[column].measurements_a.values)
-        contact_frame[column + "_b"] = _np.asarray(
-            contacts.variables[column].measurements_b.values)
+        contact_frame[column + "_a"] = \
+            contacts.variables[column].measurements_a.to_numpy()
+        contact_frame[column + "_b"] = \
+            contacts.variables[column].measurements_b.to_numpy()
 
         frame = _pd.concat([frame, contact_frame], ignore_index=True)
 

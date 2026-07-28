@@ -261,6 +261,27 @@ def _selected_simulations(store, selection):
     return list(zip(index, values.T))
 
 
+def _code_dtype(n_labels):
+    """Smallest integer type holding `n_labels` codes and the missing one.
+
+    Signed, because -1 is what "not measured here" looks like.
+    """
+    return _np.min_scalar_type(-n_labels)
+
+
+def _encode(values, labels):
+    """Codes for `values` against `labels`; anything else is -1 (missing).
+
+    A lookup rather than a `searchsorted`: a variable's labels are in the order
+    the variable wants them (`BinaryVariable` puts the positive class first),
+    not in sorted order.
+    """
+    codes = _np.full(len(values), -1, dtype=_code_dtype(len(labels)))
+    for i, label in enumerate(labels):
+        codes[values == label] = i
+    return codes
+
+
 class _Attribute(object):
     """A specific sequence of values, tied to data locations.
 
@@ -272,7 +293,7 @@ class _Attribute(object):
     Text can be held as integer codes plus a `labels` list, built by
     :meth:`encoded`; `labels` is None for a plain numeric attribute. Codes are
     what makes text affordable: an object array of two million rock codes
-    allocates 105 MB against 1.9 MB as `uint8`, and `ArrayStore` cannot spill
+    allocates 105 MB against 1.9 MB as `int8`, and `ArrayStore` cannot spill
     an object array to disk at all.
     """
 
@@ -309,17 +330,32 @@ class _Attribute(object):
                 values, owner=coordinates)
 
     @classmethod
-    def encoded(cls, coordinates, values, labels=None):
+    def encoded(cls, coordinates, values=None, labels=None):
         """An attribute holding text as integer codes plus a label list.
 
-        With `labels` given, `values` are the codes themselves; otherwise the
-        categories are read off the values, which are the text.
+        Codes index `labels`; -1 is missing, and decodes to the empty string —
+        which is how the categorical variables spell "not measured here".
+
+        `labels` may be given when the categories are already known, as they
+        are for a variable, which owns them. Values are then encoded against
+        that list (anything not in it is missing), unless they are integers,
+        in which case they already are the codes. Without values, the whole
+        attribute is missing.
         """
-        values = _np.asarray(values)
         if labels is None:
-            labels, values = _np.unique(values, return_inverse=True)
-            labels = [str(label) for label in labels]
-            values = values.astype(_np.min_scalar_type(len(labels)))
+            # pandas rather than `np.unique`: it drops the missing values
+            # instead of making a category of them, codes them -1, and is how
+            # the variables derive their own labels, so the two agree
+            categorical = _pd.Categorical(_np.asarray(values))
+            labels = [str(label) for label in categorical.categories]
+            values = categorical.codes.astype(_code_dtype(len(labels)))
+        elif values is None:
+            values = _np.full(coordinates.n_data, -1,
+                              dtype=_code_dtype(len(labels)))
+        else:
+            values = _np.asarray(values)
+            if values.dtype.kind not in "iu":
+                values = _encode(values, labels)
 
         attribute = cls(coordinates, values, dtype=values.dtype)
         attribute.labels = list(labels)
@@ -336,11 +372,15 @@ class _Attribute(object):
         return attribute
 
     def to_numpy(self):
-        """The values, with a coded attribute decoded back to its labels."""
+        """The values, with a coded attribute decoded back to its labels.
+
+        The label list is extended with the empty string, so that -1 — the
+        missing code — indexes it without a branch of its own.
+        """
         values = self.values.to_numpy()
         if self.labels is None:
             return values
-        return _np.asarray(self.labels, dtype=object)[values]
+        return _np.asarray(self.labels + [""], dtype=object)[values]
 
     @property
     def values(self):
@@ -386,7 +426,7 @@ class _Attribute(object):
             raise ValueError("method only available for Grid1D data"
                              "objects")
 
-        series = self.values.to_numpy()
+        series = self.to_numpy()
 
         if sigma is not None:
             series = _filters.gaussian(series, sigma, preserve_range=True)
@@ -415,7 +455,7 @@ class _Attribute(object):
             raise ValueError("method only available for Grid2D data"
                              "objects")
 
-        image = _np.reshape(self.values.to_numpy(),
+        image = _np.reshape(self.to_numpy(),
                             self.coordinates.grid_size,
                             order="F")
         image = image.transpose()
@@ -443,7 +483,7 @@ class _Attribute(object):
             raise ValueError("method only available for Grid3D data"
                              "objects")
 
-        cube = _np.reshape(self.values.to_numpy(),
+        cube = _np.reshape(self.to_numpy(),
                            self.coordinates.grid_size,
                            order="F")
         if sigma is not None:
@@ -524,6 +564,8 @@ class _Attribute(object):
         element at a time, in Python, before a single value was written.
         """
         values = _np.asarray(self.values)
+        if self.labels is not None:
+            return not _np.all(values < 0)
         if values.dtype == object:
             return not _np.all(values == "")
         return not _np.all(_np.isnan(values))
@@ -535,7 +577,7 @@ class _Attribute(object):
 
     def fill_pyvista_points(self, points, label):
         if self._has_content():
-            points.point_data[label] = self.values.to_numpy()
+            points.point_data[label] = self.to_numpy()
 
     def fill_pyvista_blocks(self, cube, label, sigma=None):
         if self._has_content():
@@ -554,7 +596,7 @@ class _Attribute(object):
                                  "3D coordinates")
 
         if isinstance(self.coordinates, Section3D):
-            values = _np.reshape(self.values.to_numpy(),
+            values = _np.reshape(self.to_numpy(),
                                  self.coordinates.grid_shape,
                                  order="F")
             gridded_x = _np.reshape(self.coordinates.coordinates[:, 0],
@@ -573,11 +615,11 @@ class _Attribute(object):
         if isinstance(self.coordinates, Surface3D):
             return _py.isosurface(self.coordinates.coordinates,
                                   self.coordinates.triangles,
-                                  values=self.values.to_numpy())
+                                  values=self.to_numpy())
 
         return _py.numeric_points_3d(
             self.coordinates.coordinates,
-            self.values.to_numpy(),
+            self.to_numpy(),
             **kwargs)
 
     def draw_categorical(self, colors, **kwargs):
@@ -726,7 +768,12 @@ class _Variable(object):
             target[:] = unicode
             return {"key": key, "encoding": "str"}
         store.write_into(group, key)
-        return {"key": key, "encoding": "array"}
+        info = {"key": key, "encoding": "array"}
+        if attr.labels is not None:
+            # a coded attribute's categories are its own — a measurement
+            # column's are not the variable's
+            info["labels"] = list(attr.labels)
+        return info
 
     def _load_attr(self, group, info):
         z = group[info["key"]]
@@ -767,7 +814,17 @@ class _Variable(object):
 
     def _zarr_load(self, group, prefix, meta):
         for role, info in meta.get("attrs", {}).items():
-            getattr(self, role).values = self._load_attr(group, info)
+            attribute = getattr(self, role)
+            store = self._load_attr(group, info)
+            if attribute.labels is not None and info["encoding"] == "str":
+                # written before the categorical attributes held codes; a
+                # value outside the variable's labels is lost here, there
+                # being nothing else to read the categories from
+                store = _storage.ArrayStore.from_numpy(
+                    _encode(_np.asarray(store), attribute.labels))
+            if "labels" in info:
+                attribute.labels = list(info["labels"])
+            attribute.values = store
         if meta.get("simulations") is not None:
             self.simulations = _storage.ArrayStore.wrap_zarr(
                 group[meta["simulations"]])
@@ -1643,23 +1700,26 @@ class RockTypeVariable(_Variable):
                 avg_vals[:, i] if avg_vals is not None else None,
             )
 
-        self.predicted = self._Attribute(
-            coordinates, _np.array([""]*n_data), dtype=object)
+        # the categories are known here, so these three hold codes into
+        # `labels` rather than one string object per data location
+        self.predicted = self._Attribute.encoded(coordinates, labels=labels)
         self.entropy = self._Attribute(coordinates)
         self.uncertainty = self._Attribute(coordinates)
 
         if measurements_a is None:
-            self.measurements_a = self._Attribute(
-                coordinates, _np.array([""] * n_data), dtype=object)
-            self.measurements_b = self._Attribute(
-                coordinates, _np.array([""] * n_data), dtype=object)
+            self.measurements_a = self._Attribute.encoded(
+                coordinates, labels=labels)
+            self.measurements_b = self._Attribute.encoded(
+                coordinates, labels=labels)
             self.boundary = self._Attribute(
                 coordinates, [False]*n_data, dtype=bool)
         else:
-            self.measurements_a = self._Attribute(
-                coordinates, measurements_a, dtype=object)
-            self.measurements_b = self._Attribute(
-                coordinates, measurements_b, dtype=object)
+            # their own categories, not the variable's: a measurement outside
+            # `labels` is still worth keeping as what it says
+            self.measurements_a = self._Attribute.encoded(
+                coordinates, measurements_a)
+            self.measurements_b = self._Attribute.encoded(
+                coordinates, measurements_b)
             self.boundary = self._Attribute(
                 coordinates, measurements_a != measurements_b, dtype=bool)
 
@@ -1725,8 +1785,8 @@ class RockTypeVariable(_Variable):
         new_obj.measurements_b = self.measurements_b[item]
 
         # Resetting labels
-        cat_a = _pd.Categorical(new_obj.measurements_a.values.to_numpy())
-        cat_b = _pd.Categorical(new_obj.measurements_b.values.to_numpy())
+        cat_a = _pd.Categorical(new_obj.measurements_a.to_numpy())
+        cat_b = _pd.Categorical(new_obj.measurements_b.to_numpy())
         labels = _pd.api.types.union_categoricals([cat_a, cat_b])
         labels = labels.categories.values
         new_obj.labels = labels
@@ -1749,11 +1809,11 @@ class RockTypeVariable(_Variable):
         df = _pd.concat(all_dfs, axis=1)
 
         if measurements:
-            df[self.name + "_a"] = self.measurements_a.values.to_numpy()
-            df[self.name + "_b"] = self.measurements_b.values.to_numpy()
+            df[self.name + "_a"] = self.measurements_a.to_numpy()
+            df[self.name + "_b"] = self.measurements_b.to_numpy()
 
         if predictions:
-            df[self.name + "_predicted"] = self.predicted.values.to_numpy()
+            df[self.name + "_predicted"] = self.predicted.to_numpy()
             df[self.name + "_entropy"] = self.entropy.values.to_numpy()
             df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
 
@@ -1763,9 +1823,9 @@ class RockTypeVariable(_Variable):
         self.entropy.values[idx] = kwargs["entropy"].numpy()
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
-        max_prob = _np.argmax(kwargs["probability"].numpy(), axis=1)
-        self.predicted.values[idx] = _np.array(self.labels)[max_prob]
-        # self.predicted.values[idx] = self.labels[max_prob]
+        # the winning category's position is the code
+        self.predicted.values[idx] = _np.argmax(
+            kwargs["probability"].numpy(), axis=1)
 
         mean = _tf.unstack(kwargs["mean"], axis=1)
         variance = _tf.unstack(kwargs["variance"], axis=1)
@@ -1839,9 +1899,9 @@ class RockTypeVariable(_Variable):
                 cube, self.name, simulations=simulations)
 
     def compute_metrics(self, **kwargs):
-        y_pred = self.predicted.values.to_numpy()
-        y_true_a = self.measurements_a.values.to_numpy()
-        y_true_b = self.measurements_b.values.to_numpy()
+        y_pred = self.predicted.to_numpy()
+        y_true_a = self.measurements_a.to_numpy()
+        y_true_b = self.measurements_b.to_numpy()
 
         valid = y_true_a == y_true_b
 
@@ -2026,18 +2086,19 @@ class BinaryVariable(_Variable):
         self.indicator = self._Attribute(
             coordinates, _np.array([_np.nan]*n_data))
         if measurements is None:
-            self.measurements = self._Attribute(
-                coordinates, [""]*n_data, dtype=object)
+            self.measurements = self._Attribute.encoded(
+                coordinates, labels=labels)
             self.weights = self._Attribute(coordinates)
         else:
-            self.measurements = self._Attribute(
-                coordinates, measurements, dtype=object)
+            # their own categories: an `AnomalyVariable` labels everything that
+            # is not the anomaly `_dummy`, but the measurements say what it was
+            self.measurements = self._Attribute.encoded(
+                coordinates, measurements)
             self.weights = self._Attribute(coordinates, _np.ones(n_data))
             self.indicator.values[measurements == labels[0]] = 1
             self.indicator.values[measurements == labels[1]] = 0
 
-        self.predicted = self._Attribute(
-            coordinates, [""]*n_data, dtype=object)
+        self.predicted = self._Attribute.encoded(coordinates, labels=labels)
         self.probability = self._Attribute(coordinates, _np.zeros(n_data))
         self.entropy = self._Attribute(coordinates)
         self.uncertainty = self._Attribute(coordinates)
@@ -2101,12 +2162,11 @@ class BinaryVariable(_Variable):
         df = _pd.DataFrame({})
 
         if measurements:
-            df[self.name + "_measurements"] = \
-                self.measurements.values.to_numpy()
+            df[self.name + "_measurements"] = self.measurements.to_numpy()
             df[self.name + "_weights"] = self.weights.values.to_numpy()
 
         if predictions:
-            df[self.name + "_predicted"] = self.predicted.values.to_numpy()
+            df[self.name + "_predicted"] = self.predicted.to_numpy()
             df[self.name + "_probability"] = self.probability.values.to_numpy()
             df[self.name + "_entropy"] = self.entropy.values.to_numpy()
             df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
@@ -2141,7 +2201,8 @@ class BinaryVariable(_Variable):
         label_idx = _np.zeros(prob.shape, dtype=int)  # positive class
         label_idx[prob < 0.5] = 1  # negative class
 
-        self.predicted.values[idx] = _np.array(self.labels)[label_idx]
+        # the label's position is the code
+        self.predicted.values[idx] = label_idx
         self.latent_mean.values[idx] = mean
         self.latent_variance.values[idx] = var
         self.entropy.values[idx] = entropy
@@ -3119,14 +3180,14 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values.to_numpy(),
+            "value": data.variables[variable].measurements_a.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
              - self.step_size[0] / 2) / self.step_size[0])
         raw_data_2 = raw_data.copy()
         raw_data_2["value"] = \
-            data.variables[variable].measurements_b.values.to_numpy()
+            data.variables[variable].measurements_b.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3161,7 +3222,7 @@ class Grid1D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
+            "value": data.variables[variable].measurements.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3301,7 +3362,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values.to_numpy(),
+            "value": data.variables[variable].measurements_a.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3311,7 +3372,7 @@ class Grid2D(_GriddedData):
              - self.step_size[1] / 2) / self.step_size[1])
         raw_data_2 = raw_data.copy()
         raw_data_2["value"] = \
-            data.variables[variable].measurements_b.values.to_numpy()
+            data.variables[variable].measurements_b.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3348,7 +3409,7 @@ class Grid2D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
+            "value": data.variables[variable].measurements.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3502,7 +3563,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.values.to_numpy(),
+            "value": data.variables[variable].measurements_a.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]
@@ -3515,7 +3576,7 @@ class Grid3D(_GriddedData):
              - self.step_size[2] / 2) / self.step_size[2])
         raw_data_2 = raw_data.copy()
         raw_data_2["value"] = \
-            data.variables[variable].measurements_b.values.to_numpy()
+            data.variables[variable].measurements_b.to_numpy()
         raw_data = _pd.concat([raw_data, raw_data_2],
                               axis=0).reset_index(drop=True)
 
@@ -3553,7 +3614,7 @@ class Grid3D(_GriddedData):
 
         # identifying cell id
         raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
+            "value": data.variables[variable].measurements.to_numpy(),
         })
         raw_data["xid"] = _np.round(
             (data.coordinates[:, 0] - self.grid[0][0]

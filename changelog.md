@@ -14,11 +14,22 @@ read `obj.metadata["fold"]` expecting a column of values wants
 `obj.get_metadata("fold")`
 * `_Attribute` is a module-level class instead of one nested inside
 `_Variable`, and it is where the text-as-codes handling lives
-(`_Attribute.encoded`), so the categorical variables can be moved onto it next
-— their `predicted` and `measurements` columns are object arrays today. Two
-fixes came with it: an attribute built from values now chooses its backend by
-size like an empty one does, instead of being pinned in RAM whatever its
-length; and reopening one from disk no longer allocates a throwaway array first
+(`_Attribute.encoded`). Two fixes came with it: an attribute built from values
+now chooses its backend by size like an empty one does, instead of being pinned
+in RAM whatever its length; and reopening one from disk no longer allocates a
+throwaway array first
+* **Breaking:** the categorical variables hold codes too.
+`RockTypeVariable.predicted` / `measurements_a` / `measurements_b`,
+`BinaryVariable.measurements` / `predicted` and their subclasses were arrays of
+Python strings — a predicted rock type on a 27-million-block model is about
+1.4 GB that cannot be spilled to disk, against 27 MB as `int8`. Read them with
+`attribute.to_numpy()`, which gives the labels back; `attribute.values` is now
+the codes. Anything that writes a prediction writes the position of the winning
+label. -1 means "not measured here" and reads back as the empty string, as it
+did before. A measurement column carries **its own** categories, not the
+variable's, so an `AnomalyVariable` measured as "hit"/"none" still reports
+"none" even though the variable calls that class `_dummy`. Containers saved by
+an earlier version are re-encoded when they are opened
 * Interval columns can be renamed with `holes.rename(table, {"Pb_pct_ICP":
 "Pb"})`, or `table.rename(...)` on the table itself. The roles travel with the
 columns: renaming the data frame directly left them behind, keyed by the old

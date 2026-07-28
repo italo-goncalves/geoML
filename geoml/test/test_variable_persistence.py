@@ -3,7 +3,7 @@
 Each variable is built on a small PointData, its attributes are populated
 directly (as ``update`` would), then the container is written with ``to_zarr``
 and reloaded. This exercises the collapsed (n_data, n_sim) simulation store, the
-string (object) and bool attribute encodings, and component recursion, without
+coded (text) and bool attribute encodings, and component recursion, without
 needing a trained categorical/binary model.
 """
 import numpy as np
@@ -20,6 +20,11 @@ def _point():
     df = pd.DataFrame({"c0": np.arange(N, dtype=float),
                        "c1": np.arange(N, dtype=float) * 2})
     return geoml.data.PointData(df, ["c0", "c1"])
+
+
+def _codes(labels, values):
+    """What a coded attribute stores for these labels — what `update` writes."""
+    return np.array([list(labels).index(value) for value in values])
 
 
 def test_vector_variable_roundtrip(tmp_path):
@@ -77,15 +82,15 @@ def test_categorical_variable_roundtrip(tmp_path):
                                 measurements=meas)
     rock = pt.variables["rock"]
     rock.allocate_simulations(3)
-    rock.predicted.values[:] = np.array(meas, dtype=object)   # string labels
+    rock.predicted.values[:] = _codes(rock.labels, meas)     # coded labels
     rock.entropy.values[:] = np.random.random(N)
     for lb in rock.labels:
         c = rock.components[lb]
         c.indicator_predicted.values[:] = np.random.random(N)
         c.simulations[:, :] = np.random.random((N, 3))
 
-    predicted = np.asarray(rock.predicted.values).copy()
-    meas_a = np.asarray(rock.measurements_a.values).copy()
+    predicted = rock.predicted.to_numpy().copy()
+    meas_a = rock.measurements_a.to_numpy().copy()
     boundary = np.asarray(rock.boundary.values).copy()
     entropy = np.asarray(rock.entropy.values).copy()
     ind = np.asarray(rock.components["granite"].indicator_predicted.values).copy()
@@ -96,9 +101,11 @@ def test_categorical_variable_roundtrip(tmp_path):
     rr = r.variables["rock"]
 
     assert list(rr.labels) == ["basalt", "granite"]
-    assert np.asarray(rr.predicted.values).dtype == object      # strings kept
-    assert np.array_equal(np.asarray(rr.predicted.values), predicted)
-    assert np.array_equal(np.asarray(rr.measurements_a.values), meas_a)
+    # stored as codes, read back as the labels they stand for
+    assert np.asarray(rr.predicted.values).dtype == np.int8
+    assert rr.predicted.labels == ["basalt", "granite"]
+    assert np.array_equal(rr.predicted.to_numpy(), predicted)
+    assert np.array_equal(rr.measurements_a.to_numpy(), meas_a)
     assert np.asarray(rr.boundary.values).dtype == bool          # bool kept
     assert np.array_equal(np.asarray(rr.boundary.values), boundary)
     assert np.allclose(np.asarray(rr.entropy.values), entropy)
@@ -113,13 +120,13 @@ def test_binary_variable_roundtrip(tmp_path):
     pt.add_binary_variable("ore", labels=["waste", "ore"], measurements=meas)
     var = pt.variables["ore"]
     var.allocate_simulations(4)
-    var.predicted.values[:] = np.array(meas, dtype=object)
+    var.predicted.values[:] = _codes(var.labels, meas)
     var.latent_mean.values[:] = np.random.random(N)
     var.probability.values[:] = np.random.random(N)
     var.simulations[:, :] = np.random.random((N, 4))
 
-    predicted = np.asarray(var.predicted.values).copy()
-    measurements = np.asarray(var.measurements.values).copy()
+    predicted = var.predicted.to_numpy().copy()
+    measurements = var.measurements.to_numpy().copy()
     weights = np.asarray(var.weights.values).copy()
     mean = np.asarray(var.latent_mean.values).copy()
     sims = np.asarray(var.simulations).copy()
@@ -129,8 +136,8 @@ def test_binary_variable_roundtrip(tmp_path):
     rv = r.variables["ore"]
 
     assert list(rv.labels) == ["waste", "ore"]
-    assert np.array_equal(np.asarray(rv.predicted.values), predicted)
-    assert np.array_equal(np.asarray(rv.measurements.values), measurements)
+    assert np.array_equal(rv.predicted.to_numpy(), predicted)
+    assert np.array_equal(rv.measurements.to_numpy(), measurements)
     assert np.allclose(np.asarray(rv.weights.values), weights)
     assert np.allclose(np.asarray(rv.latent_mean.values), mean)
     assert np.allclose(np.asarray(rv.simulations), sims)
@@ -142,9 +149,12 @@ def test_anomaly_variable_roundtrip(tmp_path):
     pt.add_anomaly_variable("anom", label="hit", measurements=meas)
     var = pt.variables["anom"]
     var.allocate_simulations(2)
-    var.predicted.values[:] = np.array(meas, dtype=object)
+    # this variable only ever predicts its own two labels, whatever the
+    # measurements say the other class was called
+    var.predicted.values[:] = [0, 1] * (N // 2)
     var.simulations[:, :] = np.random.random((N, 2))
-    predicted = np.asarray(var.predicted.values).copy()
+    predicted = var.predicted.to_numpy().copy()
+    measurements = var.measurements.to_numpy().copy()
     sims = np.asarray(var.simulations).copy()
 
     pt.to_zarr(str(tmp_path / "anom.zarr"))
@@ -153,7 +163,10 @@ def test_anomaly_variable_roundtrip(tmp_path):
 
     assert isinstance(rv, geoml.data.AnomalyVariable)
     assert rv.labels[0] == "hit"
-    assert np.array_equal(np.asarray(rv.predicted.values), predicted)
+    assert np.array_equal(rv.predicted.to_numpy(), predicted)
+    # "none" is not one of the variable's labels, and is kept all the same
+    assert np.array_equal(measurements, meas)
+    assert np.array_equal(rv.measurements.to_numpy(), meas)
     assert np.allclose(np.asarray(rv.simulations), sims)
 
 
@@ -222,13 +235,13 @@ def test_ordered_rock_type_roundtrip(tmp_path):
                               ordered=True)
     var = pt.variables["seq"]
     var.allocate_simulations(2)
-    var.predicted.values[:] = np.array(meas_a, dtype=object)
+    var.predicted.values[:] = _codes(var.labels, meas_a)
     var.entropy.values[:] = np.random.random(N)
     for lb in var.labels:
         var.components[lb].simulations[:, :] = np.random.random((N, 2))
 
     implicit = np.asarray(var.implicit_values.values).copy()
-    predicted = np.asarray(var.predicted.values).copy()
+    predicted = var.predicted.to_numpy().copy()
     boundary = np.asarray(var.boundary.values).copy()
     sims_mid = np.asarray(var.components["mid"].simulations).copy()
 
@@ -239,6 +252,6 @@ def test_ordered_rock_type_roundtrip(tmp_path):
     assert isinstance(rv, geoml.data.OrderedRockType)
     assert list(rv.labels) == ["low", "mid", "high"]
     assert np.allclose(np.asarray(rv.implicit_values.values), implicit)
-    assert np.array_equal(np.asarray(rv.predicted.values), predicted)
+    assert np.array_equal(rv.predicted.to_numpy(), predicted)
     assert np.array_equal(np.asarray(rv.boundary.values), boundary)
     assert np.allclose(np.asarray(rv.components["mid"].simulations), sims_mid)
