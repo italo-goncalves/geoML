@@ -10,3 +10,9 @@
 
 # JetBrains per-user workspace state (not shared), one file per machine.
 .idea/workspace*.xml
+
+# Written by the IDE itself; the rest of .idea/ is shared and tracked.
+.idea/.gitignore
+
+# VS Code launch/debug settings, per machine.
+.vscode/
