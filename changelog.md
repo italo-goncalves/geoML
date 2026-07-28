@@ -1,4 +1,28 @@
 ## version 0.5.2
+* Simulated predictions are reproducible. The likelihood noise was drawn from
+TensorFlow's global generator with a hard-coded seed, so `options.seed` never
+reached it and two predictions of the same model gave different simulations.
+The draws are now stateless and seeded from `options.seed`, in a stream of
+their own so they do not follow the latent draws
+* The noise on discretized blocks is drawn per sub-block position: the `k`
+sub-blocks of a block get independent values, and every block gets the same `k`
+values. Averaging them is what integrates the noise over the block, and the
+shared pattern means the noise shifts the map rather than roughening it, which
+is what makes simulations of a block model look like the field and not like
+static. Since the draw is indexed by sub-block rather than by row, simulations
+no longer depend on how the prediction was batched
+* `prediction_batch_size` now counts the rows the model actually evaluates. A
+block with a [5, 5, 5] discretization fans out into 125 of them, so the default
+20000 handed the model 2.5 million rows at once and had to be shrunk by hand to
+avoid running out of memory; the setting now means the same thing for every
+container
+* The block fan-out is built by broadcasting instead of a Python loop over
+blocks — 8x faster on a 40000-block model — and the noise is broadcast over the
+blocks instead of being tiled into a second copy of the largest tensor in the
+prediction
+* The two `white_noise` implementations, which disagreed on what "coherent"
+meant, are now one on the base likelihood
+
 * **Breaking:** `as_pyvista()` and the `fill_pyvista_*` methods no longer export
 simulations by default. Each one is a full-length array in the exported object,
 so a block model with twenty of them carried twenty copies of itself into

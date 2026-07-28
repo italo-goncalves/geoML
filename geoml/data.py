@@ -2207,6 +2207,17 @@ class _SpatialData(object):
         return self.__str__()
 
     @property
+    def rows_per_location(self):
+        """Rows the model evaluates for each location of this object.
+
+        One, except where a location fans out into several — a block with
+        discretization. Prediction divides the batch size by this, so that
+        `prediction_batch_size` counts the rows actually handed to the model
+        rather than meaning something different for every container.
+        """
+        return 1
+
+    @property
     def n_dim(self):
         return self._n_dim
 
@@ -3926,11 +3937,18 @@ def _blockdata(cls):
         if index is None:
             index = _np.arange(self._n_data)
 
-        centers = self.coordinates[index]
-        coords = _np.concatenate([self.sub_grid + c[None, :] for c in centers], axis=0)
+        centers = _np.asarray(self.coordinates[index])
+        # block-major, one temporary instead of one per block: block b owns
+        # rows b*k to (b+1)*k, which is what `_aggregate` averages back
+        coords = (centers[:, None, :] + self.sub_grid[None, :, :])
+        coords = coords.reshape(-1, centers.shape[1])
 
         splits = None if _np.prod(self.discretization) == 1 else len(index)
         return coords, splits
+
+    @property
+    def rows_per_location(self):
+        return int(_np.prod(self.discretization))
 
     def _batch_rows(self, index=None):
         # one row per discretization point of every block in the batch
@@ -3943,6 +3961,7 @@ def _blockdata(cls):
     cls.inducing_grid = inducing_grid
     cls.get_batched_coordinates = get_batched_coordinates
     cls._batch_rows = _batch_rows
+    cls.rows_per_location = rows_per_location
 
     return cls
 

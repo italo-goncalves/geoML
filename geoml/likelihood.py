@@ -153,6 +153,58 @@ class _Likelihood(_gpr.Parametric):
     def predict_from_samples(self, samples):
         raise NotImplementedError
 
+    def white_noise(self, shape, seed, n_splits=None, **kwargs):
+        """
+        Noise draws for a batch of simulations.
+
+        Without discretization there is one independent draw per row. With it,
+        the draw is indexed by *sub-block position*: the `k` sub-blocks of a
+        block get independent values, and every block gets the same `k` values.
+        Averaging them is what integrates the noise over the block, while the
+        pattern being shared means the noise adds no randomness from one block
+        to the next.
+
+        The draws are stateless, and their shape depends on the block model
+        rather than on the batch, so a prediction gives the same simulations
+        however it is batched.
+
+        Parameters
+        ----------
+        shape
+            The shape of the simulations: (rows, variables, samples).
+        seed : int
+            Usually `options.seed`. The noise is drawn from a stream of its
+            own, so it does not follow the latent draws.
+        n_splits : int
+            Number of blocks in the batch, or None where there is no
+            discretization.
+
+        Returns
+        -------
+        (rows, variables, samples) without discretization, and
+        (sub-blocks, variables, samples) with it, to be broadcast over blocks.
+        """
+        n_var = shape[1]
+        n_samples = shape[2]
+        n_rows = shape[0] if n_splits is None \
+            else _tf.cast(shape[0] / n_splits, _tf.int32)
+
+        dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
+        rnd = _tf.random.stateless_uniform(
+            [n_rows, n_var, n_samples], seed=[seed, 1], dtype=_tf.float64)
+        return dist.quantile(rnd)
+
+    def _add_noise(self, sims, seed, n_splits=None):
+        """Adds the likelihood noise to a batch of simulations."""
+        shape = _tf.shape(sims)
+        noise = self.white_noise(shape, seed=seed, n_splits=n_splits)
+        if n_splits is None:
+            return sims + noise
+        # broadcast the sub-block draws over the blocks, rather than tiling
+        # them into a second copy of the largest tensor in the pipeline
+        grouped = _tf.reshape(sims, [n_splits, -1, shape[1], shape[2]])
+        return _tf.reshape(grouped + noise[None, ...], shape)
+
     def initialize(self, y):
         pass
 
@@ -206,11 +258,11 @@ class _ContinuousLikelihood(_Likelihood):
 
         return lik * self.sharpness
 
-    def predict(self, mu, var, sims, explained_var, *args, include_noise=None, n_splits=None, **kwargs):
+    def predict(self, mu, var, sims, explained_var, *args, include_noise=None,
+                n_splits=None, seed=1234, **kwargs):
         # Simulations
         if include_noise == 'monte_carlo':
-            s = _tf.shape(sims)
-            sims = sims + self.white_noise(s, seed=1234)
+            sims = self._add_noise(sims, seed=seed, n_splits=n_splits)
             sims = _tf.transpose(sims, [2, 0, 1])
             sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
             sims = _tf.transpose(sims, [1, 2, 0])
@@ -232,21 +284,6 @@ class _ContinuousLikelihood(_Likelihood):
                "average_sim": avg_sim[:, 0],
                }
         return out
-
-    def white_noise(self, shape, seed, coherent_noise=False, **kwargs):
-        n_data = shape[0] if not coherent_noise else 1
-        n_var = shape[1]
-        n_samples = shape[2]
-
-        dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
-
-        if coherent_noise:
-            rnd = _tf.random.stateless_uniform([n_data, n_var, n_samples], seed=[seed, 0], dtype=_tf.float64)
-        else:
-            rnd = _tf.random.uniform([n_data, n_var, n_samples], seed=seed, dtype=_tf.float64)
-
-        sample = dist.quantile(rnd)
-        return sample
 
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
@@ -475,23 +512,6 @@ class _MultivariateLikelihood(_Likelihood):
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
 
-    def white_noise(self, shape, seed, coherent_noise=False, n_splits=1, **kwargs):
-        n_data = shape[0] if not coherent_noise else _tf.cast(shape[0] / n_splits, _tf.int32)
-        n_var = shape[1]
-        n_samples = shape[2]
-
-        dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
-
-        if coherent_noise:
-            rnd = _tf.random.stateless_uniform([n_data, n_var, n_samples], seed=[seed, 0], dtype=_tf.float64)
-        else:
-            rnd = _tf.random.uniform([n_data, n_var, n_samples], seed=seed, dtype=_tf.float64)
-
-        sample = dist.quantile(rnd)
-        if coherent_noise:
-            sample = _tf.tile(sample, [n_splits, 1, 1])
-        return sample
-
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
         y_warped, log_derivative = self.warping.forward(y)
@@ -512,21 +532,10 @@ class _MultivariateLikelihood(_Likelihood):
 
     def predict(self, mu, var, sims, explained_var,
                 *args, quantiles=None, include_noise=None, n_splits=None,
-                **kwargs):
-
-        # if include_noise:
-        #     coherent_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=True)
-        #     rough_sims = sims + self.white_noise(_tf.shape(sims), seed=1234, coherent_noise=False)
-        # else:
-        #     coherent_sims = sims
-        #     rough_sims = sims
+                seed=1234, **kwargs):
 
         if include_noise == 'monte_carlo':
-            s = _tf.shape(sims)
-            if n_splits:
-                sims = sims + self.white_noise(s, seed=1234, coherent_noise=True, n_splits=n_splits)
-            else:
-                sims = sims + self.white_noise(s, seed=1234)
+            sims = self._add_noise(sims, seed=seed, n_splits=n_splits)
             sims = _tf.transpose(sims, [2, 0, 1])
             sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
             sims = _tf.transpose(sims, [1, 2, 0])

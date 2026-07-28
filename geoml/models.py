@@ -953,7 +953,7 @@ class VGPNetwork(_GPModel):
                     lik.predict(
                         mu, var, sim, exp_var,
                         include_noise=include_noise,
-                        n_splits=n_splits, **v_inp
+                        n_splits=n_splits, seed=seed, **v_inp
                     )
                 )
             return output
@@ -983,9 +983,14 @@ class VGPNetwork(_GPModel):
             newdata.variables[v].allocate_simulations(n_sim)
             variable_inputs.append(self.data.variables[v].prediction_input())
 
-        # prediction in batches
+        # prediction in batches. A discretized block fans out into several rows
+        # before it reaches the model, so the batch is measured in those rows:
+        # otherwise prediction_batch_size would mean prod(discretization) times
+        # as much work here as it does on a grid of points.
+        batch_size = max(1, self.options.prediction_batch_size
+                         // newdata.rows_per_location)
         batch_id = self.options.batch_index(
-            newdata.n_data, batch_size=self.options.prediction_batch_size)
+            newdata.n_data, batch_size=batch_size)
         n_batches = len(batch_id)
 
         def batch_pred(x, x_var=None, n_splits=None):
