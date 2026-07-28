@@ -155,14 +155,96 @@ def test_an_older_store_holding_strings_is_re_encoded(tmp_path):
     assert np.array_equal(rock.predicted.to_numpy(), ["granite", "basalt"] * 3)
 
 
-def test_slicing_keeps_the_labels_with_the_codes():
+def test_slicing_drops_the_categories_that_are_gone():
+    """Slicing is pre-processing: a category with no data left is dropped, and
+    the components and the prediction codes follow it."""
     rock = _rock()
-    sliced = rock[np.array([0, 2, 4])]
+    rock.predicted.values[:] = np.asarray(rock.measurements_a.values)
+    sliced = rock[np.array([0, 2, 4])]                # granite only
 
     assert np.array_equal(sliced.measurements_a.to_numpy(), ["granite"] * 3)
-    # the variable's labels are recomputed from what is left, as they were
     assert list(sliced.labels) == ["granite"]
+    assert sliced.length == 1
+    assert list(sliced.components.keys()) == ["granite"]
+    # the code that meant granite was 1 in the parent and is 0 here
+    assert np.array_equal(np.asarray(sliced.predicted.values), [0, 0, 0])
+    assert np.array_equal(sliced.predicted.to_numpy(), ["granite"] * 3)
+    # a measurement column keeps its own dictionary, which is harmless
     assert sliced.measurements_a.labels == ["basalt", "granite"]
+
+
+def test_slicing_an_unmeasured_variable_keeps_its_categories():
+    """A prediction target has no measurements to drop categories by."""
+    point = _point()
+    point.add_categorical_variable("rock", labels=["basalt", "granite"])
+    sliced = point.variables["rock"][np.array([0, 2, 4])]
+
+    assert list(sliced.labels) == ["basalt", "granite"]
+    assert list(sliced.components.keys()) == ["basalt", "granite"]
+    assert np.all(np.asarray(sliced.predicted.values) == -1)
+
+
+def test_slicing_an_ordered_variable_rescales_its_implicit_values():
+    """They are positions in the label sequence, so dropping a category shifts
+    every one after it: a slice must give what building on those rows gives."""
+    point = _point()
+    a = np.array(["low", "low", "mid", "mid", "high", "high"])
+    b = np.array(["low", "mid", "mid", "high", "high", "high"])
+    point.add_rock_type_variable("seq", labels=["low", "mid", "high"],
+                                 measurements_a=a, measurements_b=b,
+                                 ordered=True)
+    keep = np.array([2, 3, 4, 5])                     # no "low" left
+    sliced = point.variables["seq"][keep]
+
+    rebuilt = _point()[keep]
+    rebuilt.add_rock_type_variable("seq", labels=["mid", "high"],
+                                   measurements_a=a[keep],
+                                   measurements_b=b[keep], ordered=True)
+
+    assert list(sliced.labels) == ["mid", "high"]
+    assert np.array_equal(
+        np.asarray(sliced.implicit_values.values),
+        np.asarray(rebuilt.variables["seq"].implicit_values.values))
+
+
+def test_slicing_an_unmeasured_ordered_variable_keeps_it_missing():
+    point = _point()
+    point.add_rock_type_variable("seq", labels=["low", "mid", "high"],
+                                 ordered=True)
+    sliced = point.variables["seq"][np.array([0, 2, 4])]
+
+    assert np.all(np.isnan(np.asarray(sliced.implicit_values.values)))
+
+
+def test_categories_that_are_not_text_are_left_alone():
+    """Stringifying the derived labels made the measurements disagree with the
+    variable's own labels, and every metric came out at chance."""
+    point = _point()
+    point.add_categorical_variable("rock", measurements=np.array([1, 2] * 3))
+    rock = point.variables["rock"]
+
+    assert list(rock.measurements_a.labels) == [1, 2]
+    assert list(rock.measurements_a.to_numpy()) == [1, 2] * 3
+
+    rock.predicted.values[:] = np.asarray(rock.measurements_a.values)
+    metrics = rock.compute_metrics()
+    assert list(metrics.loc["Balanced accuracy"]) == [1.0, 1.0]
+
+
+def test_a_variable_with_integer_categories_can_be_saved(tmp_path):
+    """The component names and dict keys are JSON, and a category can be a
+    NumPy integer — which used to raise on the way out."""
+    point = _point()
+    point.add_categorical_variable("rock", measurements=np.array([1, 2] * 3))
+
+    path = str(tmp_path / "rock.zarr")
+    point.to_zarr(path)
+    rock = geoml.data.PointData.open(path).variables["rock"]
+
+    # categories come back as their names, as the variable's labels always have
+    assert list(rock.labels) == ["1", "2"]
+    assert list(rock.measurements_a.labels) == ["1", "2"]
+    assert list(rock.measurements_a.to_numpy()) == ["1", "2"] * 3
 
 
 def test_the_exported_frame_reads_as_text():

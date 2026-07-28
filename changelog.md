@@ -30,6 +30,21 @@ did before. A measurement column carries **its own** categories, not the
 variable's, so an `AnomalyVariable` measured as "hit"/"none" still reports
 "none" even though the variable calls that class `_dummy`. Containers saved by
 an earlier version are re-encoded when they are opened
+* Slicing a categorical variable now drops the categories that are no longer
+present, all the way through: the components go with them, and the prediction
+is re-coded to the shorter list, `update` writing the winning label's position.
+Before, only `labels` was reset, leaving a variable that claimed one category
+and carried three. An `OrderedRockType`'s implicit values are recomputed rather
+than carried over — they are positions in the label sequence, so dropping a
+category shifts every one after it, and a slice would otherwise be trained
+against a scale that no longer existed. A slice with nothing measured in it
+keeps the categories it was declared with
+* Categories that are not text are left as they are. Deriving them stringified
+them, so a variable measured as `1`/`2` compared its predictions against `'1'`
+and `'2'` and every metric came out at chance. They are stringified only on the
+way to disk, as the variable's own labels always have been — which also fixes a
+crash, older than this release, that made a variable with integer categories
+impossible to save at all
 * Interval columns can be renamed with `holes.rename(table, {"Pb_pct_ICP":
 "Pb"})`, or `table.rename(...)` on the table itself. The roles travel with the
 columns: renaming the data frame directly left them behind, keyed by the old

@@ -345,9 +345,11 @@ class _Attribute(object):
         if labels is None:
             # pandas rather than `np.unique`: it drops the missing values
             # instead of making a category of them, codes them -1, and is how
-            # the variables derive their own labels, so the two agree
+            # the variables derive their own labels, so the two agree — which
+            # they would not if the categories were stringified here and the
+            # variable's were left as, say, the integers they came in as
             categorical = _pd.Categorical(_np.asarray(values))
-            labels = [str(label) for label in categorical.categories]
+            labels = list(categorical.categories)
             values = categorical.codes.astype(_code_dtype(len(labels)))
         elif values is None:
             values = _np.full(coordinates.n_data, -1,
@@ -771,8 +773,10 @@ class _Variable(object):
         info = {"key": key, "encoding": "array"}
         if attr.labels is not None:
             # a coded attribute's categories are its own — a measurement
-            # column's are not the variable's
-            info["labels"] = list(attr.labels)
+            # column's are not the variable's. Stringified, as the variable's
+            # own labels already are: this goes into JSON, and categories can
+            # come out of pandas as NumPy integers.
+            info["labels"] = [str(label) for label in attr.labels]
         return info
 
     def _load_attr(self, group, info):
@@ -783,7 +787,10 @@ class _Variable(object):
         return _storage.ArrayStore.wrap_zarr(z)
 
     def _zarr_save(self, group, prefix):
-        meta = {"class": type(self).__name__, "name": self.name, "attrs": {}}
+        # str(name): a component is named after its category, which pandas can
+        # hand over as a NumPy integer, and this is JSON
+        meta = {"class": type(self).__name__, "name": str(self.name),
+                "attrs": {}}
         if hasattr(self, "labels"):
             meta["labels"] = [str(x) for x in self.labels]
         for role in self._ZARR_ATTRS:
@@ -808,7 +815,10 @@ class _Variable(object):
         if getattr(self, "components", None):
             meta["components"] = {}
             for cname, comp in self.components.items():
-                meta["components"][cname] = comp._zarr_save(
+                # str: this is a JSON key, and a category can be a NumPy
+                # integer. The labels above are stringified for the same
+                # reason, so the rebuilt variable's components match.
+                meta["components"][str(cname)] = comp._zarr_save(
                     group, prefix + "/" + str(cname))
         return meta
 
@@ -1774,23 +1784,34 @@ class RockTypeVariable(_Variable):
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
 
-        for name, comp in self.components.items():
-            new_obj.components[name] = comp[item]
-
-        new_obj.predicted = self.predicted[item]
         new_obj.entropy = self.entropy[item]
         new_obj.uncertainty = self.uncertainty[item]
         new_obj.boundary = self.boundary[item]
         new_obj.measurements_a = self.measurements_a[item]
         new_obj.measurements_b = self.measurements_b[item]
 
-        # Resetting labels
-        cat_a = _pd.Categorical(new_obj.measurements_a.to_numpy())
-        cat_b = _pd.Categorical(new_obj.measurements_b.to_numpy())
-        labels = _pd.api.types.union_categoricals([cat_a, cat_b])
-        labels = labels.categories.values
+        # Only the categories still present: slicing is a pre-processing step
+        # before training, and a category with no data left in it has nothing
+        # to teach the model. The parent's order is kept, since it is the order
+        # of the components and of the codes below.
+        present = set(new_obj.measurements_a.to_numpy()) \
+            | set(new_obj.measurements_b.to_numpy())
+        labels = [label for label in self.labels if label in present]
+        if len(labels) == 0:
+            # nothing is measured here at all — a prediction target, say, whose
+            # categories come from the model rather than from the data
+            labels = list(self.labels)
         new_obj.labels = labels
         new_obj._length = len(labels)
+
+        # the components and the prediction follow the labels: `update` writes
+        # the winning label's position, which the dropped ones would shift
+        new_obj.components = {label: self.components[label][item]
+                              for label in labels}
+        predicted = self.predicted[item]
+        predicted.values = _encode(predicted.to_numpy(), labels)
+        predicted.labels = list(labels)
+        new_obj.predicted = predicted
 
         return new_obj
 
@@ -2002,8 +2023,17 @@ class OrderedRockType(RockTypeVariable):
             measurements_b = _np.asarray(measurements_b)
 
         # Labels may have been derived from the measurements by the parent.
-        labels = self.labels
+        self.implicit_values = self._Attribute(
+            coordinates,
+            self._implicit_values(measurements_a, measurements_b, self.labels))
 
+    @staticmethod
+    def _implicit_values(measurements_a, measurements_b, labels):
+        """Where each pair of measurements sits in the label sequence.
+
+        A function of the labels, so it has to be recomputed whenever they
+        change — slicing away a category shifts every position after it.
+        """
         # Built as a float array from the start; the previous
         # ``-0.5 * _np.ones_like(measurements_a)`` crashed on string inputs.
         implicit_values = _np.full(len(measurements_a), -0.5)
@@ -2041,7 +2071,7 @@ class OrderedRockType(RockTypeVariable):
             # implicit_values[(measurements_a == labels[i + 1])
             #                 & (measurements_b == labels[i + 1])] = i + 0.5
 
-        self.implicit_values = self._Attribute(coordinates, implicit_values)
+        return implicit_values
 
     def get_measurements(self):
         values = self.implicit_values.values.copy()[:, None]
@@ -2051,7 +2081,15 @@ class OrderedRockType(RockTypeVariable):
 
     def __getitem__(self, item):
         new_obj = super().__getitem__(item)
-        new_obj.implicit_values = self.implicit_values[item]
+        implicit = self.implicit_values[item]
+        if new_obj.measurements_a._has_content():
+            # positions in the label sequence, and the slice may have dropped
+            # labels, so these are recomputed rather than carried over
+            implicit.values = self._implicit_values(
+                new_obj.measurements_a.to_numpy(),
+                new_obj.measurements_b.to_numpy(),
+                new_obj.labels)
+        new_obj.implicit_values = implicit
         return new_obj
 
 
