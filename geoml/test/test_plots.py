@@ -669,10 +669,9 @@ def test_a_runaway_in_one_component_keeps_the_others(trained):
 def test_a_sparse_half_is_not_binned_like_a_dense_one():
     """A few hundred measurements against a hundred thousand simulated values:
     binning both alike leaves the sparse half as scattered single counts."""
-    explorer = geoml.plots.Explorer
-    assert explorer._cells(259, 60) < explorer._cells(100000, 60)
-    assert explorer._cells(100000, 60) == 60      # capped by the request
-    assert explorer._cells(4, 60) == 10           # and floored
+    assert prepare.cells(259, 60) < prepare.cells(100000, 60)
+    assert prepare.cells(100000, 60) == 60      # capped by the request
+    assert prepare.cells(4, 60) == 10           # and floored
 
 
 # --------------------------------------------------------------------------- #

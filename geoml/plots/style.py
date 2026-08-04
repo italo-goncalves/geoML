@@ -102,6 +102,37 @@ RC = {
 }
 
 
+# The same figure, for plotly. A plain dict rather than a `go.layout.Template`,
+# so that reading the package's colours never costs an import of plotly -- the
+# same reason `geoml.plotly` builds dicts and imports nothing. Plotly accepts a
+# dict wherever it accepts a template.
+TEMPLATE = {
+    "layout": {
+        "colorway": PALETTE,
+        "paper_bgcolor": "white",
+        "plot_bgcolor": "white",
+        "font": {"family": "sans-serif", "size": 11, "color": "#2b2b2b"},
+        "title": {"x": 0.0, "xanchor": "left",
+                  "font": {"size": 14, "color": "#2b2b2b"}},
+        "xaxis": {"gridcolor": "#d9d9d9", "gridwidth": 0.6,
+                  "linecolor": "#4a4a4a", "linewidth": 0.8,
+                  "showline": True, "zeroline": False,
+                  "ticks": "outside", "tickcolor": "#4a4a4a",
+                  "tickfont": {"size": 9}, "automargin": True},
+        "yaxis": {"gridcolor": "#d9d9d9", "gridwidth": 0.6,
+                  "linecolor": "#4a4a4a", "linewidth": 0.8,
+                  "showline": True, "zeroline": False,
+                  "ticks": "outside", "tickcolor": "#4a4a4a",
+                  "tickfont": {"size": 9}, "automargin": True},
+        "colorscale": {"sequential": SEQUENTIAL},
+        "legend": {"font": {"size": 10}, "bgcolor": "rgba(255,255,255,0.7)",
+                   "borderwidth": 0},
+        "hoverlabel": {"font": {"size": 11}},
+        "margin": {"l": 60, "r": 30, "t": 60, "b": 50},
+    }
+}
+
+
 def context():
     """The geoML settings, for the figure being drawn and nothing else."""
     return _mpl.rc_context(RC)

@@ -24,6 +24,7 @@ composition looks like once it is opened up -- can be tested against numbers
 instead of against pictures.
 """
 import numpy as _np
+import scipy.stats as _stats
 
 import geoml.data as _data
 
@@ -340,6 +341,207 @@ def padded_range(values, margin=0.1):
     return list(zip(low - room, high + room))
 
 
+def color_limits(values, clip=None):
+    """
+    The ends of a colour scale, set by where the data mostly is.
+
+    One value far from the rest takes the whole of a colour scale with it and
+    leaves everything else in a single shade -- the usual fate of a
+    geochemical assay, whose tail is long and whose interest is not in it.
+    Naming a pair of quantiles ends the scale where the data mostly ends
+    instead: `[0, 0.99]` for a variable skewed to the right, `[0.01, 0.99]` to
+    take both tails.
+
+    Nothing is dropped and nothing is altered. The values keep their own
+    numbers and a hover still reports what was measured; what is bounded is
+    the scale, so the few beyond it take the end colour rather than setting
+    it.
+
+    Returns `(low, high)`, or None when `clip` is None -- and None again when
+    the two ends come out equal, since a scale of zero width is no scale.
+    """
+    if clip is None:
+        return None
+
+    clip = _np.asarray(clip, dtype=float).ravel()
+    if len(clip) != 2 or not _np.all((clip >= 0) & (clip <= 1)) \
+            or clip[0] >= clip[1]:
+        raise ValueError(
+            "clip takes two quantiles between 0 and 1, the lower first: "
+            "[0, 0.99] keeps the long right tail off the scale, [0.01, 0.99] "
+            "takes both ends. Got %r" % (clip.tolist(),))
+
+    values = _np.asarray(values, dtype=float).ravel()
+    values = values[_np.isfinite(values)]
+    if len(values) == 0:
+        return None
+
+    low, high = _np.quantile(values, clip)
+    return None if low >= high else (float(low), float(high))
+
+
+def color_choices(container, names):
+    """
+    Several variables' values over the locations that carry all of them.
+
+    For a figure that keeps one set of points and swaps the values over them.
+    The locations are those measured in *every* one of the variables named,
+    which is the point: a cloud that gained and lost points as the choice
+    changed would be two things changing at once, and the comparison -- this
+    variable against that one, here -- is exactly what would be lost.
+
+    A name may be a variable, one component of a vector variable, or a vector
+    variable itself, which stands for all of its components in order. So
+    `["Elements"]` names seven grades and `["Cd", "Zn"]` names two.
+
+    Returns
+    -------
+    values : array
+        `(n_kept, n_columns)`, a column per choice in the order asked for.
+    rows : array
+        Which locations those are, as indices into the container.
+    labels : list
+        A name per column.
+    """
+    columns, labels = [], []
+    measured = _np.ones(container.n_data, dtype=bool)
+
+    for name in names:
+        var = variable_or_component(container, name)
+        if isinstance(var, (_data.RockTypeVariable, _data.BinaryVariable)):
+            raise TypeError(
+                "%r is categorical, and a menu of choices colours by a scale "
+                "rather than by a legend; name continuous variables here and "
+                "draw the categorical one on its own" % name)
+
+        values, has_value, names_here = numeric_values(var)
+        for i, label in enumerate(names_here):
+            columns.append(values[:, i])
+            labels.append(label)
+        measured &= has_value
+
+    if not _np.any(measured):
+        raise ValueError(
+            "no location carries all of %s at once, and a menu holds one set "
+            "of points for every choice on it" % ", ".join(labels))
+
+    rows = _np.where(measured)[0]
+    return _np.column_stack(columns)[rows], rows, labels
+
+
+def cells(n_points, most):
+    """
+    How many cells to count `n_points` into, at most `most` of them.
+
+    The two halves of a comparison rarely hold comparable numbers -- a few
+    hundred measurements against a hundred thousand simulated values -- and
+    binning both the same way leaves the sparse half as scattered single counts
+    that read as noise. Roughly the square root of the count keeps several
+    points in a typical cell either way.
+    """
+    return int(_np.clip(_np.sqrt(n_points), 10, most))
+
+
+def counts_2d(x, y, bins=60, log=False):
+    """
+    Points counted into cells, with the empty ones left empty.
+
+    A cell holding nothing comes back as NaN rather than as zero, so that
+    whatever draws it can leave it unpainted: painted, it takes the bottom of
+    the colour scale and fills the panel with a background that looks like
+    data.
+
+    Returns
+    -------
+    dict
+        `x` and `y`, the cell centres; `z`, what the colour is to be taken
+        from, which is the count or its base-ten logarithm; and `count`, the
+        count itself, so that a hover can say how many points a cell holds
+        whichever of the two is being coloured. `z` and `count` are shaped
+        `(n_y, n_x)`, the way an image is indexed.
+    """
+    counted, x_edges, y_edges = _np.histogram2d(
+        _np.asarray(x, dtype=float), _np.asarray(y, dtype=float), bins=bins)
+
+    # a heatmap is indexed by row, and a row runs along y
+    counted = counted.T
+    empty = counted == 0
+    values = _np.where(empty, _np.nan, counted)
+
+    return {"x": 0.5 * (x_edges[:-1] + x_edges[1:]),
+            "y": 0.5 * (y_edges[:-1] + y_edges[1:]),
+            "z": _np.log10(values) if log else values,
+            "count": counted.astype(int)}
+
+
+def density_grid(x, y, grid=60, most=4000):
+    """
+    Smoothed density over a pair of columns, on a regular mesh.
+
+    The estimate costs one pass over the data for every mesh cell, so a long
+    column is thinned first: a density is a shape, and a few thousand points
+    settle it as well as a few million do.
+
+    Returns `(x_axis, y_axis, density)` with `density` shaped
+    `(grid, grid)` -- rows along `y_axis`, as an image is -- or None when
+    there is nothing to smooth: fewer than three points, or a column that
+    never varies, which has no width for a kernel to sit in.
+    """
+    x = _np.asarray(x, dtype=float)
+    y = _np.asarray(y, dtype=float)
+    if len(x) > most:
+        step = len(x) // most
+        x, y = x[::step], y[::step]
+    if len(x) < 3 or _np.ptp(x) == 0 or _np.ptp(y) == 0:
+        return None
+
+    x_axis = _np.linspace(_np.min(x), _np.max(x), grid)
+    y_axis = _np.linspace(_np.min(y), _np.max(y), grid)
+    mesh_x, mesh_y = _np.meshgrid(x_axis, y_axis)
+
+    kernel = _stats.gaussian_kde(_np.vstack([x, y]))
+    density = kernel(_np.vstack([mesh_x.ravel(), mesh_y.ravel()]))
+    return x_axis, y_axis, density.reshape(grid, grid)
+
+
+def density_curve(values, limits, points=200, most=5000):
+    """
+    A smoothed distribution as a line, across `limits`.
+
+    Thinned as `density_grid` is, and for the same reason. Returns
+    `(grid, density)`, or None when there is nothing to smooth.
+    """
+    values = _np.asarray(values, dtype=float)
+    if len(values) > most:
+        values = values[::len(values) // most]
+    if len(values) < 3 or _np.ptp(values) == 0:
+        return None
+
+    grid = _np.linspace(limits[0], limits[1], points)
+    return grid, _stats.gaussian_kde(values)(grid)
+
+
+def normal_curve(values, low, high, points=200):
+    """
+    The normal of the same mean and spread as `values`, across a window.
+
+    Fitted rather than standard, so that the curve asks about the shape alone.
+    A warping's parameters are trained along with everything else and need not
+    leave the data at unit variance -- the GP's amplitude absorbs a scale
+    factor -- so a standard normal would call a perfectly symmetric result
+    skewed. Returns `(x, density)`, or None for a column that never varies.
+    """
+    values = _np.asarray(values, dtype=float)
+    mean, deviation = _np.mean(values), _np.std(values)
+    if deviation <= 0:
+        return None
+
+    x = _np.linspace(low, high, points)
+    density = _np.exp(-0.5 * ((x - mean) / deviation) ** 2) \
+        / (deviation * _np.sqrt(2 * _np.pi))
+    return x, density
+
+
 def prediction_values(container, name):
     """
     What was measured against what was predicted, component by component.
@@ -350,6 +552,11 @@ def prediction_values(container, name):
         `(n_compared, n_columns)`, holding only the locations that carry both.
     labels : list
         A name per column.
+    rows : array
+        Which locations those are, as indices into the container. A figure
+        that can be brushed needs to say which row each of its points came
+        from, and only the rows carrying both a measurement and a prediction
+        are drawn.
     """
     var = variable(container, name)
     components = getattr(var, "components", None)
@@ -379,7 +586,8 @@ def prediction_values(container, name):
             "%r has no location carrying both a measurement and a prediction; "
             "run the model over this data first" % name)
 
-    return measured_values[both], predicted_values[both], labels
+    return (measured_values[both], predicted_values[both], labels,
+            _np.where(both)[0])
 
 
 def moving_average(values, window):

@@ -130,6 +130,102 @@ settings globally if you want them
 * **matplotlib and plotly are now declared dependencies.** plotly was already
 used by `geoml.plotly` and had never been declared. `setup.py` also lists
 `geoml.plots`, without which the sub-package would be left out of an install
+* `geoml.plots.Interactive` is every one of those figures again, in plotly.
+Same class, same method names, same arguments — `histogram`, `pairs`, `pca`,
+`scene`, `training_curve`, `transformed_pairs`, `simulation_pairs`,
+`prediction_scatter`, `accuracy`, `grade_tonnage` — differing only in taking a
+size in pixels rather than in inches. `Explorer` is the one to save and print;
+`Interactive` is the one to look at, and what it adds is what a printed figure
+cannot do: zooming a panel of a scatter matrix takes its whole row and column
+with it, so a cluster can be followed across every pair at once; clicking a
+category in the legend takes it out of every panel; and a 3D scene can be
+turned around
+* Both classes now share `plots.base.Selection`, which holds the container,
+the choice of variables and the colours, and settles what a figure is *about*
+before anything is drawn. The numbers still come from `plots.prepare` — read
+by both, so the two backends cannot drift into showing different things
+* `geoml.plots.Dashboard` puts several figures on one page and **links their
+selections**: drag a box or a lasso over any panel and the same locations light
+up in every other one, which is the question no single figure answers — those
+samples out on the tail of the histogram, where are they on the map? Double-
+click to clear. Every trace `Interactive` draws from locations carries, in
+`customdata`, the row of the container each point came from, and selections are
+matched on those rows rather than on position, so a sample may be a bar in one
+panel and a dot in another and still be the same sample
+* What carries no rows is left alone, which is the honest answer rather than a
+guess: a counted cell holds a number of points and not one of them, a simulated
+value is a realization and not a place, and a 3D scene has neither a box to drag
+over it nor per-point selection to show a brush made elsewhere
+* `scene(clip=[0, 0.99])`, on both `Explorer` and `Interactive`, ends the
+colour scale at a pair of quantiles rather than at the extremes. One value far
+from the rest otherwise takes the whole scale with it and leaves every other
+point in a single shade, which is the usual fate of an assay: a Cd with one
+value twenty-five times the next draws as a uniformly dark map, and the same
+map clipped at the 99th percentile shows the structure that was there all
+along. Nothing is dropped and nothing is altered — the points past the end take
+the end colour, and a hover still reports what was measured. `[0.01, 0.99]`
+takes both tails; a menu clips each of its choices by its own quantiles
+* A categorical variable with no category measured anywhere now says so.
+Every series is drawn per category, so none of them meant no traces at all --
+a blank figure and no complaint. The commonest way to arrive there is passing
+the values to `add_categorical_variable` where the *categories* belong, and
+the message says as much
+* The dashboard's linked selection got out of its own way. Plotly redraws
+every trace of a figure whatever changed, at about a millisecond each, so a
+selection used to freeze the page for the sum over every panel at once. Now a
+panel drawn from no locations — a training curve, a grade-tonnage — is skipped
+rather than redrawn to no effect; a panel already clear is not cleared again;
+the panels are done lightest first, so the map answers at once and the scatter
+matrix follows; and the browser is handed back between them, so each appears
+as it is finished instead of all of them after a frozen half-second. A
+selection arriving mid-walk replaces the pending one rather than being dropped.
+What is left is the cost of the heaviest single panel, which is plotly's to
+pay: a seven-by-seven matrix split five ways is 161 traces and about 185ms of
+redraw. Fewer categories, fewer components, or `kind="hist2d"` are the levers
+on that
+* `Interactive.scene(color=[...])` puts a menu on the figure instead of
+drawing one variable, one entry per choice — and `color=["Elements"]` names
+every component of a vector variable, which is the answer to the error that
+says a vector is not one colour scale. The ground is drawn once and the values
+are swapped over it rather than a trace being carried per choice: lighter, a
+block model's coordinates being the bulk of it, and truer to what is being
+asked, since the cloud stays where it is while the variable over it changes.
+Only the locations measured in all of them are drawn, for that same reason. In
+1D, where the value is the vertical axis and carries no colour, the menu moves
+the points rather than repainting them
+* 3D scenes are linked the other way about. There is no brushing them, but
+there is turning them, and a page of several answers a question one of them
+cannot: the same body of ground under two variables, seen from the same angle.
+Turn one and the rest follow. The exchange ends by each panel ignoring a view
+it already holds — plotly answers a camera move with a camera event of its own,
+which arrives too late for a flag to catch, so the panels would otherwise hand
+the view back and forth for ever
+* The rows of a dashboard need not be equal. Nest an entry in `figures` and it
+becomes a row of its own, however many panels are in it — a map across the full
+width, a histogram and a training curve side by side beneath it, the scatter
+matrix under those. Nest nothing and the figures are dealt out `columns` to a
+row as before. A `(caption, figure)` pair is still a captioned figure and not a
+row of two: both arrive as a tuple, and what tells them apart is that a caption
+is a name and a figure is not
+* `board.write_html("jura.html")` writes a page that carries plotly with it —
+some four megabytes — so it opens anywhere, with no network and no geoML.
+`plotlyjs="cdn"` fetches the library instead, for a file small enough to keep
+in a repository. `eda.dashboard()` is the short way, naming the figures to
+draw; `Dashboard([...])` takes figures instead of names, drawn with whatever
+arguments you like and captioned where the caption is a better title
+* A dashboard renders in a notebook, inside an iframe. A notebook is not
+obliged to run a script it is handed and JupyterLab does not, which is how a
+bare `<script>` works in one notebook and silently does nothing in the next; an
+iframe is a document in its own right and runs its own, everywhere. Panels keep
+the proportions they were drawn at rather than being stretched to their column
+— a scatter matrix poured into half a page turns every panel into a slot
+* `plots.style` grew `TEMPLATE`, the same look for plotly, as a plain dict:
+reading the package's colours costs no import of plotly, the same way
+`geoml.plotly` builds a figure without importing it
+* `plots.prepare` gained the arithmetic both backends now share —
+`counts_2d`, `density_grid`, `density_curve`, `normal_curve` and `cells` — and
+`prediction_values` also returns which rows it drew, without which a
+predicted-against-measured panel could not say who its outliers are
 
 * A model can be drawn: `model.to_dot()` writes the whole thing as a Graphviz
 diagram — the coordinates that go in, the latent network, the warpings on the

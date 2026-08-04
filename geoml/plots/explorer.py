@@ -28,125 +28,33 @@ geoscientific data: does this population behave as one, or as several?
     eda.pairs()
     eda.pca(explained=0.9)
     eda.scene()
+
+These are matplotlib figures, meant to be saved and printed. `Interactive` is
+the same set of figures in plotly, for looking at on a screen.
 """
 import matplotlib.colors as _mcolors
 import matplotlib.pyplot as _plt
 import numpy as _np
-import scipy.stats as _stats
 
 import geoml.data as _data
 import geoml.metrics as _gmet
+import geoml.plots.base as _base
 import geoml.plots.prepare as _prep
 import geoml.plots.style as _style
 
 
-class Explorer(object):
+class Explorer(_base.Selection):
     """
     Exploratory figures for one data set and a choice of variables.
 
-    Parameters
-    ----------
-    data
-        Any container from the `data` module.
-    continuous : str
-        The name of a continuous or vector variable. `pairs` and `pca` need a
-        vector one, having nothing to pair otherwise.
-    categorical : str
-        The name of a categorical variable, used to split and colour the rest.
-    model
-        A trained model, for the figures that need one. Not used yet.
-    palette : list or dict
-        The colours for the categories. A list is taken in order, cycling if
-        there are more categories than colours; a dict names them, which is
-        what a mapping convention wants -- `{"granite": "#d99", "basalt":
-        "#48a"}` -- and any category it leaves out falls back to the package
-        palette. Defaults to `style.PALETTE`.
-    cmap : str or Colormap
-        The colours for a continuous value. Defaults to `style.SEQUENTIAL`.
-    uncertainty : str or array
-        Where to read how sure the model is at each location, for the figures
-        that can leave out what it is unsure of. Which column that is depends
-        on what was modelled -- `"latent_variance"` on a continuous variable,
-        `"uncertainty"` on a vector or categorical one, or a metadata column
-        written alongside -- so it is named rather than guessed at. A bare name
-        is looked for on the variable being drawn and on the one containing it,
-        then in the metadata; `"Variable.column"` says exactly where; and an
-        array of one value per location is taken as it comes. See
-        `prepare.uncertainty_values`.
+    Takes its arguments from `base.Selection`: the container, a continuous and
+    a categorical variable, a model for the figures that need one, and the
+    colours to draw them in.
     """
-
-    def __init__(self, data, continuous=None, categorical=None, model=None,
-                 palette=None, cmap=None, uncertainty=None):
-        self.data = data
-        self.model = model
-        self.palette = palette
-        self.cmap = cmap if cmap is not None else _style.SEQUENTIAL
-        self.uncertainty = uncertainty
-
-        self.continuous = None
-        if continuous is not None:
-            self.continuous = _prep.variable(data, continuous)
-
-        self.categorical = None
-        if categorical is not None:
-            self.categorical = _prep.variable(data, categorical)
-            # fails here rather than halfway through drawing
-            _prep.category_values(self.categorical)
-
-    def __repr__(self):
-        return "Explorer(%s, continuous=%r, categorical=%r)" % (
-            type(self.data).__name__,
-            getattr(self.continuous, "name", None),
-            getattr(self.categorical, "name", None))
 
     # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
-    def _require_continuous(self, caller):
-        if self.continuous is None:
-            raise ValueError("%s needs a continuous variable; the Explorer was "
-                             "built without one" % caller)
-        return self.continuous
-
-    @staticmethod
-    def _check_measured(var, measured):
-        """Nothing measured means nothing to explore, and a clearer error than
-        the one an empty array eventually raises somewhere in NumPy."""
-        if not _np.any(measured):
-            raise ValueError(
-                "%r has no measurements here; a grid predicted onto carries "
-                "values everywhere and observations nowhere, and this figure "
-                "is a comparison against what was observed" % var.name)
-
-    def _require_model(self, caller):
-        if self.model is None:
-            raise ValueError("%s needs a model; the Explorer was built "
-                             "without one" % caller)
-        return self.model
-
-    def _require_vector(self, caller):
-        var = self._require_continuous(caller)
-        if not isinstance(var, _data.VectorVariable):
-            raise TypeError(
-                "%s needs a vector variable to pair up; %r is a %s"
-                % (caller, var.name, type(var).__name__))
-        return var
-
-    def _color(self, index, label):
-        """The colour of one category: the user's, or the package's."""
-        if isinstance(self.palette, dict):
-            return self.palette.get(label, _style.color(index))
-        if self.palette is not None:
-            return self.palette[index % len(self.palette)]
-        return _style.color(index)
-
-    def _series(self):
-        """What to draw as separate colours: the categories, or everything."""
-        if self.categorical is None:
-            return [(None, None)]
-        values, measured, labels = _prep.category_values(self.categorical)
-        return _prep.groups(values, measured, labels)
-
     @staticmethod
     def _legend_fraction(figure):
         """
@@ -378,7 +286,7 @@ class Explorer(object):
             figure.tight_layout(rect=(0, 0, 1, 0.97))
         return figure
 
-    def scene(self, color=None, figsize=None, size=14):
+    def scene(self, color=None, clip=None, figsize=None, size=14):
         """
         Where the data is, coloured by a variable.
 
@@ -391,6 +299,13 @@ class Explorer(object):
         color : str
             The variable to colour by. Defaults to the continuous variable the
             Explorer holds, or the categorical one if that is all there is.
+        clip : pair of floats
+            Where to end the colour scale, as quantiles: `[0, 0.99]` for a
+            variable with a long right tail, which is most assays. Without it
+            one value far from the rest takes the whole scale and leaves
+            everything else in a single shade. Nothing is dropped -- the
+            points beyond the ends take the end colour. Has no effect in 1D,
+            where the value is an axis rather than a colour.
         """
         coordinates = _np.asarray(self.data.coordinates)
         n_dim = coordinates.shape[1]
@@ -415,7 +330,8 @@ class Explorer(object):
                 self._scene_categories(axes, coordinates, var, n_dim, size)
                 axes.legend(title=var.name, loc="best")
             else:
-                self._scene_values(figure, axes, coordinates, var, n_dim, size)
+                self._scene_values(figure, axes, coordinates, var, n_dim,
+                                   size, clip)
 
             axes.set_xlabel(labels[0])
             if n_dim == 1:
@@ -599,7 +515,7 @@ class Explorer(object):
                                             & inside[:, row]]
                         self._draw_points(
                             panel, source[:, column], source[:, row], size,
-                            kind, alpha, self._cells(len(source), bins),
+                            kind, alpha, _prep.cells(len(source), bins),
                             log_counts,
                             color=_style.color(0 if measurements else 1))
                         panel.set_ylim(limits[row])
@@ -625,28 +541,13 @@ class Explorer(object):
         return figure
 
     @staticmethod
-    def _cells(n_points, most):
-        """
-        How many cells to count `n_points` into, at most `most` of them.
-
-        The two halves of a comparison rarely hold comparable numbers -- a few
-        hundred measurements against a hundred thousand simulated values -- and
-        binning both the same way leaves the sparse half as scattered single
-        counts that read as noise. Roughly the square root of the count keeps
-        several points in a typical cell either way.
-        """
-        return int(_np.clip(_np.sqrt(n_points), 10, most))
-
-    def _draw_kde(self, panel, values, limits, most=5000):
+    def _draw_kde(panel, values, limits):
         """The simulated density, as a line over the measured histogram."""
-        if len(values) > most:
-            values = values[::len(values) // most]
-        if len(values) < 3 or _np.ptp(values) == 0:
+        curve = _prep.density_curve(values, limits)
+        if curve is None:
             return
-
-        grid = _np.linspace(limits[0], limits[1], 200)
-        panel.plot(grid, _stats.gaussian_kde(values)(grid),
-                   color=_style.color(1), linewidth=1.6, label="simulated")
+        panel.plot(curve[0], curve[1], color=_style.color(1), linewidth=1.6,
+                   label="simulated")
 
     def prediction_scatter(self, component=None, kind="scatter", alpha=0.6,
                            bins=60, log_counts=False, figsize=None, size=10):
@@ -677,7 +578,8 @@ class Explorer(object):
         """
         self._check_kind(kind)
         var = self._require_continuous("prediction_scatter")
-        true, predicted, labels = _prep.prediction_values(self.data, var.name)
+        true, predicted, labels, _ = _prep.prediction_values(self.data,
+                                                             var.name)
 
         if component is not None:
             if component not in labels:
@@ -847,42 +749,9 @@ class Explorer(object):
             figure.tight_layout()
         return figure
 
-    def _color_variable(self, color):
-        """
-        What to colour a scene by.
-
-        A named `color` may be a variable or one component of a vector
-        variable, so that `scene(color="Zn")` works without reaching into
-        `Elements` by hand. Asked for nothing, it takes what the Explorer
-        holds -- but a vector variable is several numbers per location and not
-        one colour scale, so it says so rather than quietly drawing the first
-        component under the whole variable's name.
-        """
-        if color is not None:
-            return _prep.variable_or_component(self.data, color)
-
-        var = self.continuous if self.continuous is not None \
-            else self.categorical
-        if var is None:
-            raise ValueError("scene needs a variable to colour by")
-
-        if not self._is_categorical(var) and var.length > 1:
-            if self.categorical is not None:
-                return self.categorical
-            raise ValueError(
-                "%r has %d components, which is not one colour scale; pass "
-                "color= with one of %s"
-                % (var.name, var.length,
-                   ", ".join(str(label) for label in var.labels)))
-        return var
-
     # ------------------------------------------------------------------ #
     # drawing
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _is_categorical(var):
-        return isinstance(var, (_data.RockTypeVariable, _data.BinaryVariable))
-
     def _draw_points(self, panel, x, y, size, kind, alpha, bins, log_counts,
                      color=None, label=None):
         """One panel of points, as a cloud or as counts in cells.
@@ -897,12 +766,6 @@ class Explorer(object):
                 norm=_mcolors.LogNorm() if log_counts else None)
         return panel.scatter(x, y, s=size, alpha=alpha, linewidths=0,
                              color=color, label=label)
-
-    @staticmethod
-    def _check_kind(kind, categorical=None):
-        if kind not in ("scatter", "hist2d"):
-            raise ValueError(
-                "kind must be 'scatter' or 'hist2d'; got %r" % kind)
 
     def _draw_matrix(self, axes, values, labels, series, measured, size,
                      density=False, kind="scatter", alpha=0.7, bins=60,
@@ -1023,30 +886,17 @@ class Explorer(object):
                 "upper must be 'hist2d', 'density' or 'correlation'; got %r"
                 % upper)
 
-    def _draw_density(self, panel, x, y, grid=60, most=4000):
-        """Smoothed contours of where the points are.
-
-        The estimate costs one pass over the data for every grid cell, so a
-        long column is thinned first: a density is a shape, and a few thousand
-        points settle it as well as a few million do.
-        """
-        if len(x) > most:
-            step = len(x) // most
-            x, y = x[::step], y[::step]
-        if len(x) < 3 or _np.ptp(x) == 0 or _np.ptp(y) == 0:
+    def _draw_density(self, panel, x, y):
+        """Smoothed contours of where the points are."""
+        grid = _prep.density_grid(x, y)
+        if grid is None:
             return
-
-        x_axis = _np.linspace(_np.min(x), _np.max(x), grid)
-        y_axis = _np.linspace(_np.min(y), _np.max(y), grid)
-        mesh_x, mesh_y = _np.meshgrid(x_axis, y_axis)
-
-        kernel = _stats.gaussian_kde(_np.vstack([x, y]))
-        density = kernel(_np.vstack([mesh_x.ravel(), mesh_y.ravel()]))
+        x_axis, y_axis, density = grid
 
         # lines rather than filled bands: a filled contour paints its lowest
         # level over the whole panel, and half a matrix of dark squares next to
         # the light scatter half reads as two figures pasted together
-        panel.contour(mesh_x, mesh_y, density.reshape(grid, grid),
+        panel.contour(*_np.meshgrid(x_axis, y_axis), density,
                       levels=6, cmap=self.cmap, linewidths=0.9)
 
     @staticmethod
@@ -1076,22 +926,15 @@ class Explorer(object):
     def _draw_normal(panel, values):
         """The normal of the same mean and spread, over the histogram.
 
-        Fitted rather than standard, so that the curve asks about the shape
-        alone. A warping's parameters are trained along with everything else
-        and need not leave the data at unit variance -- the GP's amplitude
-        absorbs a scale factor -- so a standard normal would call a perfectly
-        symmetric result skewed. What is left over is the question the warping
-        is answerable for: a distribution still leaning shows as a histogram
-        sliding out from under the curve.
+        What is left over is the question the warping is answerable for: a
+        distribution still leaning shows as a histogram sliding out from under
+        the curve.
         """
-        mean, deviation = _np.mean(values), _np.std(values)
-        if deviation <= 0:
+        curve = _prep.normal_curve(values, *panel.get_xlim())
+        if curve is None:
             return
-        low, high = panel.get_xlim()
-        x = _np.linspace(low, high, 200)
-        density = _np.exp(-0.5 * ((x - mean) / deviation) ** 2) \
-            / (deviation * _np.sqrt(2 * _np.pi))
-        panel.plot(x, density, color="#2b2b2b", linewidth=1.0, alpha=0.8)
+        panel.plot(curve[0], curve[1], color="#2b2b2b", linewidth=1.0,
+                   alpha=0.8)
 
     @staticmethod
     def _annotate_correlation(panel, x, y):
@@ -1151,16 +994,20 @@ class Explorer(object):
             self._scatter(axes, coordinates[mask], n_dim, size,
                           color=self._color(j, name), label=name)
 
-    def _scene_values(self, figure, axes, coordinates, var, n_dim, size):
+    def _scene_values(self, figure, axes, coordinates, var, n_dim, size,
+                      clip=None):
         values, measured, _ = _prep.numeric_values(var)
         drawn = self._scatter(axes, coordinates[measured], n_dim, size,
-                              values=values[measured, 0])
+                              values=values[measured, 0],
+                              limits=_prep.color_limits(values[measured, 0],
+                                                        clip))
         if n_dim > 1:
             # in 1D the value is the vertical axis, and carries no colour
-            figure.colorbar(drawn, ax=axes, label=var.name, shrink=0.8)
+            figure.colorbar(drawn, ax=axes, label=var.name, shrink=0.8,
+                            extend="both" if clip is not None else "neither")
 
     def _scatter(self, axes, coordinates, n_dim, size, values=None,
-                 color=None, label=None):
+                 color=None, label=None, limits=None):
         """One scatter call, whatever the number of coordinates."""
         if n_dim == 1:
             # nothing to put on the other axis, so the value goes there --
@@ -1180,4 +1027,8 @@ class Explorer(object):
         elif n_dim > 1:
             options["c"] = values
             options["cmap"] = self.cmap
+            if limits is not None:
+                # the scale is bounded, not the data: a point past the end
+                # keeps its own number and takes the end colour
+                options["vmin"], options["vmax"] = limits
         return axes.scatter(*position, **options)
