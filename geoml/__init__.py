@@ -14,6 +14,7 @@ __all__ = [
     'models',
     'persistence',
     'plotly',
+    'plots',
     'probability',
     'pyvista',
     'random',

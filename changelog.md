@@ -1,4 +1,136 @@
 ## version 0.5.4
+* Printing a variable now says what is on it. `repr` is unchanged — it names
+which variable this is — but `str` adds the parts it is made of and the columns
+that can be read off it, so they need not be looked up in the source: a
+`VectorVariable` lists its components, a categorical one its categories, and
+every variable its columns, its quantiles and how many simulations it holds.
+Only the names are listed, not whether anything has been written into each
+column: knowing that means reading the column, and a column on a large model
+lives on disk, which is too much work for a print
+* A new `geoml.plots` sub-package, for looking at a data set before modelling
+it. `Explorer` holds a container and a choice of variables — one continuous or
+vector, one categorical — and answers with figures: `histogram()`, `pairs()`,
+`pca(explained=0.9)` and `scene()`. The categorical variable splits and colours
+every one of them, which is the question worth asking of most geoscientific
+data: does this population behave as one, or as several
+* `pca()` draws the components carrying a share of the variance you name, with
+the loadings as arrows over the scores. A `CompositionalVariable` is opened up
+with the centred log-ratio first — proportions carry a constant sum, so their
+covariance is singular and a PCA of them spends a component describing the
+closure rather than the data
+* `scene()` draws the data where it is, in 1D, 2D or 3D, coloured by a variable
+or by one component of a vector variable (`scene(color="Zn")`). For more than a
+look at a 3D data set, `as_pyvista()` remains the better road
+* The arithmetic behind the figures is in `geoml.plots.prepare`, which draws
+nothing and imports no plotting library, so the numbers can be had on their own
+and a second way of showing them will read the same functions
+* Given a model, `Explorer` reports on it too. `training_curve()` draws the
+ELBO with a running mean over it — every value is an estimate, and under
+`train_svi` one per *batch*, so the curve is noisy whether or not training has
+settled. `transformed_pairs()` passes the measurements through the model's own
+warping, already fitted, and asks the two questions a fitted model rests on:
+whether the warping made each variable Gaussian, against a normal of the same
+mean and spread down the diagonal, and whether what is left is independent,
+with the correlation named on every panel. `prediction_scatter()` puts
+predicted against measured — one variable with its two distributions along the
+sides, where a bias shows that the scatter alone hides, or a panel per
+component. `accuracy()` asks whether the simulated spread is the spread the
+errors actually have
+* `pairs(principal_components=2)` draws the components over the data in the
+data's own axes — the reverse of `pca()`, which puts the data on the
+components' axes. Each is a line through the mean, one standard deviation of
+that component either way, so its length is in the measurements' own units:
+long means that direction carries much of the spread, and flat along an axis
+means that measurement moves on its own. A line is drawn rather than an arrow
+because the sign of a component means nothing, and it is named only where it is
+long enough to hang a name on. A `CompositionalVariable` refuses: its
+components belong to the log-ratios and are not directions in the proportions
+being drawn — `pca()` is the figure for those
+* `pairs(upper=...)` fills the upper triangle, which was empty: `"hist2d"` or
+`"density"` for where the data sits with the categories pooled, or
+`"correlation"` for the coefficient alone, sized by its strength. The lower
+half answers which category a point belongs to; the upper answers where the
+data as a whole is, which a colour-split scatter hides behind whichever
+category was drawn last
+* Every figure made of points — `pairs()`, `pca()`, `transformed_pairs()` and
+`prediction_scatter()` — takes `kind="hist2d"` for a block model, where the
+points are past counting and a scatter is a solid mass whatever its
+transparency, `alpha=` for the middling case where transparency is still
+enough, and `log_counts=True` to colour the cells by the logarithm of the
+count, which is worth having whenever a few cells hold most of the data. Empty
+cells are left unpainted rather than drawn as the bottom of the colour scale,
+which would fill the panel with a background that looks like data. Counts make
+one surface, so a categorical split is pooled rather than drawn five times over
+* `transformed_pairs()` numbers its axes `Variable 1`, `Variable 2`, … A
+warping may rotate the data or bend it, so a column is generally a mixture of
+what was measured rather than any one of it, and naming it after an element
+would be wrong in a way nobody would catch
+* `pca()` names the variance share to a decimal place — `PC1 (72.2%)` rather
+than `PC1 (72%)`
+* The figures that compare against observations say so when there is nothing to
+compare against. A grid predicted onto carries values everywhere and
+measurements nowhere, and `accuracy()`, `histogram()`, `pairs()`, `pca()` and
+`transformed_pairs()` now all name that rather than failing somewhere inside
+NumPy
+* `grade_tonnage()` draws how much material clears each cut-off and how good
+it is, on two scales. Without a density it is in volume — or in *area*, for a
+two-dimensional grid, which the axis says rather than calling it a volume.
+A density may be a number, a metadata column, or a `ContinuousVariable`, and
+in that last case its simulations are matched with the grade's **one to one**:
+pairing them any other way invents a correlation nobody modelled. Realizations
+are carried through separately and drawn as a family with the median over them,
+since the curve of the mean model is not the mean of the curves — a cut-off is
+a threshold, and averaging either side of it gives different answers
+* `grade_tonnage(max_uncertainty=...)` leaves out the blocks the model doubts
+most, reading what `Explorer(..., uncertainty=...)` points at. Which column
+that is depends on what was modelled — `latent_variance` on a continuous
+variable, `uncertainty` on a vector or categorical one, or a column written
+alongside — so it is named rather than guessed at. A bare name is looked for on
+the variable being drawn and then on the variable *containing* it, which is the
+ordinary case rather than an exotic one: grading one component of a vector
+variable, the uncertainty that was written belongs to the parent. Failing that,
+the metadata. `"Variable.column"` names exactly where to read it, and an array
+of one value per location is taken as it comes, which is the way out of every
+case a name does not reach. A column that was never filled does not count as
+found, so an empty `latent_variance` on a component does not hide the parent's. A block the model cannot
+speak for is not tonnage, and counting it flatters the answer at exactly the
+cut-offs with least data behind them; the title says how many blocks were kept
+* `simulation_pairs()` sets the measurements against the simulations: the
+data fills the lower triangle and the simulations the upper, in the same form
+and between the same limits, so a simulation that reproduces the data has an
+upper half mirroring the lower one. The diagonal carries the measured
+histogram with the simulated density drawn over it. Cells rather than points
+by default — simulations arrive in location-by-realization blocks running to
+millions of values, and a scatter of those is a filled rectangle whatever its
+transparency. The two halves are binned according to how many values each
+holds, since a few hundred measurements against a hundred thousand simulated
+values would otherwise leave the sparse half as scattered single counts
+* The simulations are thinned by striding through the block rather than read
+whole, one component at a time, so the high-water mark is one component's
+simulations and not the whole variable's. The **same stride serves every
+component**: thinning them separately would pair the value simulated at one
+location with the value simulated at another, and the joint shape — the thing
+the figure is for — would be an artefact of the thinning
+* `metrics.coverage` and `metrics.goodness` are new, and are plain numbers:
+the share of true values falling inside each simulated interval, and Deutsch's
+statistic summing that up. Intervals that are too wide count at half the weight
+of intervals that are too narrow — claiming a precision the model does not have
+is the mistake someone acts on
+* The colours are the Explorer's: `palette=` takes a list, or a dict naming
+the categories — `{"granite": "#d99"}`, which is what a mapping convention
+wants, since a category keeps its colour wherever it lands in the order — and
+`cmap=` takes any colormap for the continuous values. The default is `cividis`,
+which reads the same to colour-vision-deficient eyes and keeps both its ends
+visible against a white background
+* Figures are drawn under `geoml.plots.style`, applied through an
+`rc_context` to the figure being drawn: importing geoML does not change how
+anyone else's plots look. `geoml.plots.PALETTE` is one list, so a rock type
+keeps its colour from a histogram to a map; `geoml.plots.use()` takes the
+settings globally if you want them
+* **matplotlib and plotly are now declared dependencies.** plotly was already
+used by `geoml.plotly` and had never been declared. `setup.py` also lists
+`geoml.plots`, without which the sub-package would be left out of an install
+
 * A model can be drawn: `model.to_dot()` writes the whole thing as a Graphviz
 diagram — the coordinates that go in, the latent network, the warpings on the
 way out and the variables that come out — and `network.to_dot()` draws a latent
