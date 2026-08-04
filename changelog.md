@@ -1,3 +1,266 @@
+## version 0.5.4
+* Printing a variable now says what is on it. `repr` is unchanged — it names
+which variable this is — but `str` adds the parts it is made of and the columns
+that can be read off it, so they need not be looked up in the source: a
+`VectorVariable` lists its components, a categorical one its categories, and
+every variable its columns, its quantiles and how many simulations it holds.
+Only the names are listed, not whether anything has been written into each
+column: knowing that means reading the column, and a column on a large model
+lives on disk, which is too much work for a print
+* A new `geoml.plots` sub-package, for looking at a data set before modelling
+it. `Explorer` holds a container and a choice of variables — one continuous or
+vector, one categorical — and answers with figures: `histogram()`, `pairs()`,
+`pca(explained=0.9)` and `scene()`. The categorical variable splits and colours
+every one of them, which is the question worth asking of most geoscientific
+data: does this population behave as one, or as several
+* `pca()` draws the components carrying a share of the variance you name, with
+the loadings as arrows over the scores. A `CompositionalVariable` is opened up
+with the centred log-ratio first — proportions carry a constant sum, so their
+covariance is singular and a PCA of them spends a component describing the
+closure rather than the data
+* `scene()` draws the data where it is, in 1D, 2D or 3D, coloured by a variable
+or by one component of a vector variable (`scene(color="Zn")`). For more than a
+look at a 3D data set, `as_pyvista()` remains the better road
+* The arithmetic behind the figures is in `geoml.plots.prepare`, which draws
+nothing and imports no plotting library, so the numbers can be had on their own
+and a second way of showing them will read the same functions
+* Given a model, `Explorer` reports on it too. `training_curve()` draws the
+ELBO with a running mean over it — every value is an estimate, and under
+`train_svi` one per *batch*, so the curve is noisy whether or not training has
+settled. `transformed_pairs()` passes the measurements through the model's own
+warping, already fitted, and asks the two questions a fitted model rests on:
+whether the warping made each variable Gaussian, against a normal of the same
+mean and spread down the diagonal, and whether what is left is independent,
+with the correlation named on every panel. `prediction_scatter()` puts
+predicted against measured — one variable with its two distributions along the
+sides, where a bias shows that the scatter alone hides, or a panel per
+component. `accuracy()` asks whether the simulated spread is the spread the
+errors actually have
+* `pairs(principal_components=2)` draws the components over the data in the
+data's own axes — the reverse of `pca()`, which puts the data on the
+components' axes. Each is a line through the mean, one standard deviation of
+that component either way, so its length is in the measurements' own units:
+long means that direction carries much of the spread, and flat along an axis
+means that measurement moves on its own. A line is drawn rather than an arrow
+because the sign of a component means nothing, and it is named only where it is
+long enough to hang a name on. A `CompositionalVariable` refuses: its
+components belong to the log-ratios and are not directions in the proportions
+being drawn — `pca()` is the figure for those
+* `pairs(upper=...)` fills the upper triangle, which was empty: `"hist2d"` or
+`"density"` for where the data sits with the categories pooled, or
+`"correlation"` for the coefficient alone, sized by its strength. The lower
+half answers which category a point belongs to; the upper answers where the
+data as a whole is, which a colour-split scatter hides behind whichever
+category was drawn last
+* Every figure made of points — `pairs()`, `pca()`, `transformed_pairs()` and
+`prediction_scatter()` — takes `kind="hist2d"` for a block model, where the
+points are past counting and a scatter is a solid mass whatever its
+transparency, `alpha=` for the middling case where transparency is still
+enough, and `log_counts=True` to colour the cells by the logarithm of the
+count, which is worth having whenever a few cells hold most of the data. Empty
+cells are left unpainted rather than drawn as the bottom of the colour scale,
+which would fill the panel with a background that looks like data. Counts make
+one surface, so a categorical split is pooled rather than drawn five times over
+* `transformed_pairs()` numbers its axes `Variable 1`, `Variable 2`, … A
+warping may rotate the data or bend it, so a column is generally a mixture of
+what was measured rather than any one of it, and naming it after an element
+would be wrong in a way nobody would catch
+* `pca()` names the variance share to a decimal place — `PC1 (72.2%)` rather
+than `PC1 (72%)`
+* The figures that compare against observations say so when there is nothing to
+compare against. A grid predicted onto carries values everywhere and
+measurements nowhere, and `accuracy()`, `histogram()`, `pairs()`, `pca()` and
+`transformed_pairs()` now all name that rather than failing somewhere inside
+NumPy
+* `grade_tonnage()` draws how much material clears each cut-off and how good
+it is, on two scales. Without a density it is in volume — or in *area*, for a
+two-dimensional grid, which the axis says rather than calling it a volume.
+A density may be a number, a metadata column, or a `ContinuousVariable`, and
+in that last case its simulations are matched with the grade's **one to one**:
+pairing them any other way invents a correlation nobody modelled. Realizations
+are carried through separately and drawn as a family with the median over them,
+since the curve of the mean model is not the mean of the curves — a cut-off is
+a threshold, and averaging either side of it gives different answers
+* `grade_tonnage(max_uncertainty=...)` leaves out the blocks the model doubts
+most, reading what `Explorer(..., uncertainty=...)` points at. Which column
+that is depends on what was modelled — `latent_variance` on a continuous
+variable, `uncertainty` on a vector or categorical one, or a column written
+alongside — so it is named rather than guessed at. A bare name is looked for on
+the variable being drawn and then on the variable *containing* it, which is the
+ordinary case rather than an exotic one: grading one component of a vector
+variable, the uncertainty that was written belongs to the parent. Failing that,
+the metadata. `"Variable.column"` names exactly where to read it, and an array
+of one value per location is taken as it comes, which is the way out of every
+case a name does not reach. A column that was never filled does not count as
+found, so an empty `latent_variance` on a component does not hide the parent's. A block the model cannot
+speak for is not tonnage, and counting it flatters the answer at exactly the
+cut-offs with least data behind them; the title says how many blocks were kept
+* `simulation_pairs()` sets the measurements against the simulations: the
+data fills the lower triangle and the simulations the upper, in the same form
+and between the same limits, so a simulation that reproduces the data has an
+upper half mirroring the lower one. The diagonal carries the measured
+histogram with the simulated density drawn over it. Cells rather than points
+by default — simulations arrive in location-by-realization blocks running to
+millions of values, and a scatter of those is a filled rectangle whatever its
+transparency. The two halves are binned according to how many values each
+holds, since a few hundred measurements against a hundred thousand simulated
+values would otherwise leave the sparse half as scattered single counts
+* The simulations are thinned by striding through the block rather than read
+whole, one component at a time, so the high-water mark is one component's
+simulations and not the whole variable's. The **same stride serves every
+component**: thinning them separately would pair the value simulated at one
+location with the value simulated at another, and the joint shape — the thing
+the figure is for — would be an artefact of the thinning
+* `metrics.coverage` and `metrics.goodness` are new, and are plain numbers:
+the share of true values falling inside each simulated interval, and Deutsch's
+statistic summing that up. Intervals that are too wide count at half the weight
+of intervals that are too narrow — claiming a precision the model does not have
+is the mistake someone acts on
+* The colours are the Explorer's: `palette=` takes a list, or a dict naming
+the categories — `{"granite": "#d99"}`, which is what a mapping convention
+wants, since a category keeps its colour wherever it lands in the order — and
+`cmap=` takes any colormap for the continuous values. The default is `cividis`,
+which reads the same to colour-vision-deficient eyes and keeps both its ends
+visible against a white background
+* Figures are drawn under `geoml.plots.style`, applied through an
+`rc_context` to the figure being drawn: importing geoML does not change how
+anyone else's plots look. `geoml.plots.PALETTE` is one list, so a rock type
+keeps its colour from a histogram to a map; `geoml.plots.use()` takes the
+settings globally if you want them
+* **matplotlib and plotly are now declared dependencies.** plotly was already
+used by `geoml.plotly` and had never been declared. `setup.py` also lists
+`geoml.plots`, without which the sub-package would be left out of an install
+* `geoml.plots.Interactive` is every one of those figures again, in plotly.
+Same class, same method names, same arguments — `histogram`, `pairs`, `pca`,
+`scene`, `training_curve`, `transformed_pairs`, `simulation_pairs`,
+`prediction_scatter`, `accuracy`, `grade_tonnage` — differing only in taking a
+size in pixels rather than in inches. `Explorer` is the one to save and print;
+`Interactive` is the one to look at, and what it adds is what a printed figure
+cannot do: zooming a panel of a scatter matrix takes its whole row and column
+with it, so a cluster can be followed across every pair at once; clicking a
+category in the legend takes it out of every panel; and a 3D scene can be
+turned around
+* Both classes now share `plots.base.Selection`, which holds the container,
+the choice of variables and the colours, and settles what a figure is *about*
+before anything is drawn. The numbers still come from `plots.prepare` — read
+by both, so the two backends cannot drift into showing different things
+* `geoml.plots.Dashboard` puts several figures on one page and **links their
+selections**: drag a box or a lasso over any panel and the same locations light
+up in every other one, which is the question no single figure answers — those
+samples out on the tail of the histogram, where are they on the map? Double-
+click to clear. Every trace `Interactive` draws from locations carries, in
+`customdata`, the row of the container each point came from, and selections are
+matched on those rows rather than on position, so a sample may be a bar in one
+panel and a dot in another and still be the same sample
+* What carries no rows is left alone, which is the honest answer rather than a
+guess: a counted cell holds a number of points and not one of them, a simulated
+value is a realization and not a place, and a 3D scene has neither a box to drag
+over it nor per-point selection to show a brush made elsewhere
+* `scene(clip=[0, 0.99])`, on both `Explorer` and `Interactive`, ends the
+colour scale at a pair of quantiles rather than at the extremes. One value far
+from the rest otherwise takes the whole scale with it and leaves every other
+point in a single shade, which is the usual fate of an assay: a Cd with one
+value twenty-five times the next draws as a uniformly dark map, and the same
+map clipped at the 99th percentile shows the structure that was there all
+along. Nothing is dropped and nothing is altered — the points past the end take
+the end colour, and a hover still reports what was measured. `[0.01, 0.99]`
+takes both tails; a menu clips each of its choices by its own quantiles
+* A categorical variable with no category measured anywhere now says so.
+Every series is drawn per category, so none of them meant no traces at all --
+a blank figure and no complaint. The commonest way to arrive there is passing
+the values to `add_categorical_variable` where the *categories* belong, and
+the message says as much
+* The dashboard's linked selection got out of its own way. Plotly redraws
+every trace of a figure whatever changed, at about a millisecond each, so a
+selection used to freeze the page for the sum over every panel at once. Now a
+panel drawn from no locations — a training curve, a grade-tonnage — is skipped
+rather than redrawn to no effect; a panel already clear is not cleared again;
+the panels are done lightest first, so the map answers at once and the scatter
+matrix follows; and the browser is handed back between them, so each appears
+as it is finished instead of all of them after a frozen half-second. A
+selection arriving mid-walk replaces the pending one rather than being dropped.
+What is left is the cost of the heaviest single panel, which is plotly's to
+pay: a seven-by-seven matrix split five ways is 161 traces and about 185ms of
+redraw. Fewer categories, fewer components, or `kind="hist2d"` are the levers
+on that
+* `Interactive.scene(color=[...])` puts a menu on the figure instead of
+drawing one variable, one entry per choice — and `color=["Elements"]` names
+every component of a vector variable, which is the answer to the error that
+says a vector is not one colour scale. The ground is drawn once and the values
+are swapped over it rather than a trace being carried per choice: lighter, a
+block model's coordinates being the bulk of it, and truer to what is being
+asked, since the cloud stays where it is while the variable over it changes.
+Only the locations measured in all of them are drawn, for that same reason. In
+1D, where the value is the vertical axis and carries no colour, the menu moves
+the points rather than repainting them
+* 3D scenes are linked the other way about. There is no brushing them, but
+there is turning them, and a page of several answers a question one of them
+cannot: the same body of ground under two variables, seen from the same angle.
+Turn one and the rest follow. The exchange ends by each panel ignoring a view
+it already holds — plotly answers a camera move with a camera event of its own,
+which arrives too late for a flag to catch, so the panels would otherwise hand
+the view back and forth for ever
+* The rows of a dashboard need not be equal. Nest an entry in `figures` and it
+becomes a row of its own, however many panels are in it — a map across the full
+width, a histogram and a training curve side by side beneath it, the scatter
+matrix under those. Nest nothing and the figures are dealt out `columns` to a
+row as before. A `(caption, figure)` pair is still a captioned figure and not a
+row of two: both arrive as a tuple, and what tells them apart is that a caption
+is a name and a figure is not
+* `board.write_html("jura.html")` writes a page that carries plotly with it —
+some four megabytes — so it opens anywhere, with no network and no geoML.
+`plotlyjs="cdn"` fetches the library instead, for a file small enough to keep
+in a repository. `eda.dashboard()` is the short way, naming the figures to
+draw; `Dashboard([...])` takes figures instead of names, drawn with whatever
+arguments you like and captioned where the caption is a better title
+* A dashboard renders in a notebook, inside an iframe. A notebook is not
+obliged to run a script it is handed and JupyterLab does not, which is how a
+bare `<script>` works in one notebook and silently does nothing in the next; an
+iframe is a document in its own right and runs its own, everywhere. Panels keep
+the proportions they were drawn at rather than being stretched to their column
+— a scatter matrix poured into half a page turns every panel into a slot
+* `plots.style` grew `TEMPLATE`, the same look for plotly, as a plain dict:
+reading the package's colours costs no import of plotly, the same way
+`geoml.plotly` builds a figure without importing it
+* `plots.prepare` gained the arithmetic both backends now share —
+`counts_2d`, `density_grid`, `density_curve`, `normal_curve` and `cells` — and
+`prediction_values` also returns which rows it drew, without which a
+predicted-against-measured panel could not say who its outliers are
+
+* A model can be drawn: `model.to_dot()` writes the whole thing as a Graphviz
+diagram — the coordinates that go in, the latent network, the warpings on the
+way out and the variables that come out — and `network.to_dot()` draws a latent
+network on its own. Boxes are coloured by the part they play, a `Stack` or
+`Concatenate` is the circle the hand-drawn diagrams use, and every arrow is
+labelled with the number of variables travelling along it. The warpings are
+drawn the way the model *generates* a value rather than the way it reads one,
+so all the arrows run together. Render with `dot -Tpng network.dot -o
+network.png`
+* The new `geoml.graphviz` module imports nothing, the way `geoml.plotly`
+builds a figure without importing plotly: Graphviz is needed to look at a
+diagram, never to write one. Its `PALETTE` is a plain dict, so the colours are
+yours to change
+* A diagram says one thing the printed tree cannot: a node feeding several
+branches is drawn once, with an arrow to each. `str` has to repeat it, which
+reads as though there were two
+* Latent nodes have names. Every node in `latent.py` takes an optional `name`,
+and one built without it is numbered against the nodes it is connected to —
+`BasicGP_1`, `BasicGP_2` — so the branches of a network can be told apart in
+`str(network)` without naming anything. The numbering looks along the network
+in both directions, not only upwards, because a new node's siblings are not
+among its ancestors; two subnetworks built separately and joined only later are
+the one case it cannot see through, and `get_node` says so if it is ever asked
+for a name they share
+* `network.get_node(name)` returns a node by name, among the top node and
+everything feeding it. Names given by the user are recorded as constructor
+arguments, so they are saved with the model; automatic ones are regenerated by
+the replay, in the same order, and come back identical
+* The node incompatibility errors name the nodes involved. A size mismatch
+used to read `All parents must have the same size. Found [1, 2]`, and now reads
+`Add_1: all parents must have the same size. Found BasicGP_1 (size 1),
+BasicGP_2 (size 2)`; a GP built on a parent that cannot propagate inducing
+points names both
+
 ## version 0.5.3
 * Point-wise information can be attached to any container with
 `obj.add_metadata(name, values)` and read back with `obj.get_metadata(name)` —

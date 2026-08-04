@@ -649,12 +649,50 @@ class _Variable(object):
         self._length = 1
         self.metrics = None
 
+    # What this variable's ``labels`` are called when it prints itself.
+    _LABEL_KIND = "labels"
+
     def __repr__(self):
         s = "%s(%r, n_data=%s" % (
             self.__class__.__name__, self.name, self.coordinates.n_data)
         if self.n_sim > 0:
             s += ", n_sim=%d" % self.n_sim
         return s + ")"
+
+    def __str__(self):
+        """
+        The variable, what it is made of, and what can be read off it.
+
+        ``repr`` says which variable this is; this says what is on it, so that
+        the columns do not have to be looked up in the source -- a variable
+        carries different ones depending on what it models.
+
+        Only the names are listed, not whether anything has been written into
+        them: knowing that means reading each column, and a column on a large
+        model lives on disk, which is too much to do for a print.
+        """
+        lines = [repr(self)]
+
+        labels = getattr(self, "labels", None)
+        if labels is not None:
+            lines.append("    %s: %s" % (
+                self._LABEL_KIND, ", ".join(str(label) for label in labels)))
+
+        columns = [name for name, value in vars(self).items()
+                   if isinstance(value, _Attribute)]
+        if len(columns) > 0:
+            lines.append("    columns: " + ", ".join(columns))
+
+        for name in ("quantiles", "probabilities"):
+            keys = getattr(self, name, None)
+            if keys:
+                lines.append("    %s: %s"
+                             % (name, ", ".join(str(key) for key in keys)))
+
+        if self.n_sim > 0:
+            lines.append("    simulations: %d" % self.n_sim)
+
+        return "\n".join(lines)
 
     @property
     def length(self):
@@ -1204,6 +1242,7 @@ class ContinuousVariable(_Variable):
 
 class VectorVariable(_Variable):
     _ZARR_ATTRS = ("uncertainty",)
+    _LABEL_KIND = "components"
 
     def __init__(self, name, coordinates, labels, measurements=None):
         super().__init__(name, coordinates)
@@ -1663,6 +1702,7 @@ class _Category(_Variable):
 class RockTypeVariable(_Variable):
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
                    "measurements_a", "measurements_b", "boundary")
+    _LABEL_KIND = "categories"
 
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
                  measurements_b=None):
@@ -2097,6 +2137,7 @@ class BinaryVariable(_Variable):
     _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
                    "probability", "entropy", "uncertainty",
                    "latent_mean", "latent_variance")
+    _LABEL_KIND = "categories"
     _ZARR_HAS_SIMS = True
 
     def __init__(self, name, coordinates, labels=None, measurements=None):

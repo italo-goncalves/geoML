@@ -7,7 +7,7 @@ from setuptools import setup
 
 
 setup(name='geoml',
-      version='0.5.3',
+      version='0.5.4',
       description='Machine learning for spatial data',
       #      long_description=readme(),
       keywords=['machine learning', 'spatial data', 'gaussian process'],
@@ -15,7 +15,7 @@ setup(name='geoml',
       author='Ítalo Gomes Gonçalves',
       author_email='italogoncalves.igg@gmail.com',
       license='GPL3',
-      packages=['geoml'],
+      packages=['geoml', 'geoml.plots'],
       # package_dir={'geoml': 'src/geoml'},
       package_data={'geoml': ['sample_data/*.dat', 'sample_data/*.csv', 'sample_data/*.xlsx']},
       include_package_data=True,
@@ -23,4 +23,5 @@ setup(name='geoml',
       install_requires=['scikit-image', 'pandas', 'numpy', 'pyvista',
                         'tensorflow', 'tensorflow-probability',
                         'scipy', 'scikit-learn',
-                        'zarr', 'xarray', 'dask'])
+                        'zarr', 'xarray', 'dask',
+                        'matplotlib', 'plotly'])

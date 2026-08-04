@@ -54,6 +54,9 @@ class _LatentVariable(_gpr.Parametric):
         self.root = None
         self.propagates_inducing_points = None
 
+        # Filled in by `_set_name`, once the node is wired to its neighbors.
+        self.name = None
+
         # These are TensorFlow attributes, defined at graph execution time
         self.inducing_points = None
         self.inducing_points_variance = None
@@ -64,10 +67,89 @@ class _LatentVariable(_gpr.Parametric):
         self._state_vars = {}
 
     def _summary_line(self):
-        return "%s (size %d)" % (self.__class__.__name__, self.size)
+        name = self.name or self.__class__.__name__
+        if not name.startswith(self.__class__.__name__):
+            # a name of the user's choosing says nothing about the node's type
+            name = "%s '%s'" % (self.__class__.__name__, name)
+        return "%s (size %d)" % (name, self.size)
 
     def __repr__(self):
         return _gpr.describe(self, size=self.size)
+
+    def _connected_nodes(self):
+        """
+        Every other node reachable from this one, in either direction.
+
+        Walking upwards alone is not enough to name a node: a new node's
+        siblings are not among its ancestors. They are reachable through the
+        `children` list every node keeps of the nodes built on top of it, which
+        is what this follows in the other direction.
+        """
+        found, stack = {}, [self]
+        while len(stack) > 0:
+            node = stack.pop()
+            if id(node) in found:
+                continue
+            found[id(node)] = node
+            stack.extend(node.children)
+            stack.extend(node.get_unique_parents())
+        return [node for node in found.values() if node is not self]
+
+    def _set_name(self, name):
+        """
+        Names the node. Called once its parents and children are wired.
+
+        A node left unnamed takes the first `Class_k` that no node it is
+        connected to is using, so the branches of a network can be told apart
+        without the user naming anything. Two subnetworks built separately and
+        joined only later are the exception — while they are being numbered
+        they cannot see each other, so they may repeat a name, which `get_node`
+        reports if it is ever asked for one.
+        """
+        if name is None:
+            taken = {node.name for node in self._connected_nodes()}
+            index = 1
+            while "%s_%d" % (self.__class__.__name__, index) in taken:
+                index += 1
+            name = "%s_%d" % (self.__class__.__name__, index)
+        self.name = name
+
+    def to_dot(self, legend=True, rankdir="BT"):
+        """
+        Writes this node and everything feeding it as a Graphviz diagram.
+
+        See `geoml.graphviz.to_dot`, which draws a whole model when given one.
+        """
+        # imported here because that module reads this one
+        import geoml.graphviz as _gv
+        return _gv.to_dot(self, legend=legend, rankdir=rankdir)
+
+    def get_node(self, name):
+        """
+        Finds a node by name, among this node and everything feeding it.
+
+        Parameters
+        ----------
+        name : str
+            The node's name, as it appears in `str(network)`.
+
+        Returns
+        -------
+        node
+            The node with that name.
+        """
+        nodes = [self] + self.get_unique_parents()
+        found = [node for node in nodes if node.name == name]
+
+        if len(found) > 1:
+            raise KeyError(
+                "%d nodes are named %r; name them explicitly to tell them "
+                "apart" % (len(found), name))
+        if len(found) == 0:
+            raise KeyError(
+                "no node named %r; found %s"
+                % (name, ", ".join(sorted(node.name for node in nodes))))
+        return found[0]
 
     @property
     def size(self):
@@ -213,11 +295,12 @@ class _RootLatentVariable(_LatentVariable):
 
     A root latent variable node processes an input, passing it along to other nodes as a Gaussian random variable.
     """
-    def __init__(self):
+    def __init__(self, name=None):
         super().__init__()
         self.root = self
         self.propagates_inducing_points = True
         self._n_experts = None
+        self._set_name(name)
 
     def get_unique_parents(self):
         return []
@@ -238,7 +321,7 @@ class _FunctionalLatentVariable(_LatentVariable):
     that may or not be Gaussian.
 
     """
-    def __init__(self, parent):
+    def __init__(self, parent, name=None):
         """
         Initializer for _FunctionalLatentVariable.
 
@@ -246,12 +329,15 @@ class _FunctionalLatentVariable(_LatentVariable):
         ----------
         parent
             Parent node.
+        name : str
+            A name for this node.
         """
         super().__init__()
         self.parent = self._register(parent)
         parent.children.append(self)
         self.root = parent.root
         self.propagates_inducing_points = self.parent.propagates_inducing_points
+        self._set_name(name)
 
     def get_unique_parents(self):
         return [self.parent] + self.parent.get_unique_parents()
@@ -276,7 +362,7 @@ class _Operation(_LatentVariable):
     An operation node combines multiple latent variables in some form (sum, linear combination, concatenation, etc.).
 
     """
-    def __init__(self, *latent_variables):
+    def __init__(self, *latent_variables, name=None):
         super().__init__()
         self.parents = list(latent_variables)
 
@@ -288,11 +374,23 @@ class _Operation(_LatentVariable):
             self._register(node)
             node.children.append(self)
 
+        self._set_name(name)
+
     def get_unique_parents(self):
         all_parents = self.parents.copy()
         for p in self.parents:
             all_parents.extend(p.get_unique_parents())
         return list(set(all_parents))
+
+    def _common_size(self):
+        """The parents' size, which the combining nodes require to be shared."""
+        sizes = [p.size for p in self.parents]
+        if not all(s == sizes[0] for s in sizes):
+            raise SizeIncompatibilityError(
+                "%s: all parents must have the same size. Found %s."
+                % (self.name, ", ".join("%s (size %d)" % (p.name, p.size)
+                                        for p in self.parents)))
+        return sizes[0]
 
     def set_parameter_limits(self, data):
         for p in self.parents:
@@ -300,10 +398,12 @@ class _Operation(_LatentVariable):
 
 
 class _GPNode(_FunctionalLatentVariable):
-    def __init__(self, parent):
-        super().__init__(parent)
+    def __init__(self, parent, name=None):
+        super().__init__(parent, name=name)
         if not self.propagates_inducing_points:
-            raise BrokenPropagationError('GP nodes require their parent to propagate inducing points.')
+            raise BrokenPropagationError(
+                '%s: GP nodes require their parent to propagate inducing '
+                'points, and %s does not.' % (self.name, parent.name))
 
     def predict(self, x, x_var=None, n_sim=1, seed=(0, 0)):
         """
@@ -368,7 +468,7 @@ class BasicInput(_RootLatentVariable):
     """
     def __init__(self, inducing_points, transform=_tr.Identity(),
                  fix_transform=False,
-                 center=False):
+                 center=False, name=None):
         """
         Initializer for BasicInput.
 
@@ -382,8 +482,11 @@ class BasicInput(_RootLatentVariable):
             Whether to fix the transform parameters to prevent them from changing during training.
         center : bool
             Whether to center the data, based on the inducing points' bounding box.
+        name : str
+            A name for this node, shown in the printed network and accepted by
+            `get_node`. Numbered automatically if omitted.
         """
-        super().__init__()
+        super().__init__(name=name)
 
         if not isinstance(inducing_points, (list, tuple)):
             inducing_points = (inducing_points, )
@@ -455,8 +558,8 @@ class Stack(_Operation):
 
     Consolidates a list of latent variables into a single object.
     """
-    def __init__(self, *latent_variables):
-        super().__init__(*latent_variables)
+    def __init__(self, *latent_variables, name=None):
+        super().__init__(*latent_variables, name=name)
         self._size = sum([p.size for p in self.parents])
 
     def propagate(self, x, x_var=None):
@@ -514,8 +617,8 @@ class Concatenate(Stack):
     Consolidates a list of latent variables into a single object. This operation requires all its parent nodes to
     be able to propagate inducing points.
     """
-    def __init__(self, *latent_variables):
-        super().__init__(*latent_variables)
+    def __init__(self, *latent_variables, name=None):
+        super().__init__(*latent_variables, name=name)
         if self.same_root:
             self.propagates_inducing_points = True
 
@@ -539,7 +642,7 @@ class BasicGP(_GPNode):
     applying the non-stationary covariance.
     """
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
-                 fix_range=False, isotropic=False):
+                 fix_range=False, isotropic=False, name=None):
         """
         Initializer for BasicGP.
 
@@ -555,8 +658,11 @@ class BasicGP(_GPNode):
             Whether to force a unit range for all input dimensions.
         isotropic : bool
             If `True`, forces the same range for all input dimensions.
+        name : str
+            A name for this node, shown in the printed network and accepted by
+            `get_node`. Numbered automatically if omitted.
         """
-        super().__init__(parent)
+        super().__init__(parent, name=name)
         self._size = size
         self.kernel = self._register(kernel)
 
@@ -918,7 +1024,7 @@ class Linear(_FunctionalLatentVariable):
     Close to a root node it induces rotation in the coordinates. At the end it induces correlations between the
     outputs, and in the middle it can serve as an information bottleneck.
     """
-    def __init__(self, parent, size=1, unit_norm=True):
+    def __init__(self, parent, size=1, unit_norm=True, name=None):
         """
         Initializer for Linear.
 
@@ -931,8 +1037,10 @@ class Linear(_FunctionalLatentVariable):
         unit_norm : bool
             Whether the weights should form a unit norm vector. If `False` the weights will be constrained to the
             [-1, 1] interval.
+        name : str
+            A name for this node.
         """
-        super().__init__(parent)
+        super().__init__(parent, name=name)
         self._size = size
 
         if unit_norm:
@@ -1016,7 +1124,7 @@ class SelectInput(_FunctionalLatentVariable):
 
     Returns the specified columns of the input, discarding the others.
     """
-    def __init__(self, parent, columns):
+    def __init__(self, parent, columns, name=None):
         """
         Initializer for SelectInput.
 
@@ -1026,8 +1134,10 @@ class SelectInput(_FunctionalLatentVariable):
             Parent node.
         columns : list
             List of indices to retain.
+        name : str
+            A name for this node.
         """
-        super().__init__(parent)
+        super().__init__(parent, name=name)
         self.columns = _tf.constant(columns)
         self._size = len(columns)
 
@@ -1075,7 +1185,7 @@ class LinearCombination(_Operation):
 
     This node combines the inputs linearly with positive weights.
     """
-    def __init__(self, *latent_variables, unit_variance=True):
+    def __init__(self, *latent_variables, unit_variance=True, name=None):
         """
         Initializer for LinearCombination.
 
@@ -1085,15 +1195,11 @@ class LinearCombination(_Operation):
             Nodes to combine. They must all have the same number of variables.
         unit_variance : bool
             If `True`, constrains the weights to unit sum to control the variance of the output.
+        name : str
+            A name for this node.
         """
-        super().__init__(*latent_variables)
-        sizes = [p.size for p in self.parents]
-        if not all(s == sizes[0] for s in sizes):
-            raise SizeIncompatibilityError(
-                f"All parents must have the same size. Found {sizes}."
-            )
-
-        self._size = sizes[0]
+        super().__init__(*latent_variables, name=name)
+        self._size = self._common_size()
         self.propagates_inducing_points = self.same_root and all([p.propagates_inducing_points for p in self.parents])
 
         if unit_variance:
@@ -1211,7 +1317,7 @@ class ProductOfExperts(_Operation):
 
     This node is not capable of propagating inducing points.
     """
-    def __init__(self, *latent_variables):
+    def __init__(self, *latent_variables, name=None):
         """
         Initializer for ProductOfExperts.
 
@@ -1219,15 +1325,11 @@ class ProductOfExperts(_Operation):
         ----------
         latent_variables
             Parent nodes to combine.
+        name : str
+            A name for this node.
         """
-        super().__init__(*latent_variables)
-        sizes = [p.size for p in self.parents]
-        if not all(s == sizes[0] for s in sizes):
-            raise SizeIncompatibilityError(
-                f"All parents must have the same size. Found {sizes}."
-            )
-
-        self._size = sizes[0]
+        super().__init__(*latent_variables, name=name)
+        self._size = self._common_size()
         self.propagates_inducing_points = False
 
     def refresh(self, jitter=1e-6):
@@ -1302,8 +1404,8 @@ class ProductOfExperts(_Operation):
 
 
 class Exponentiation(_FunctionalLatentVariable):
-    def __init__(self, parent):
-        super().__init__(parent)
+    def __init__(self, parent, name=None):
+        super().__init__(parent, name=name)
         self._add_parameter("amp_mean", _gpr.RealParameter(0, -5, 5))
         self._add_parameter(
             "amp_scale", _gpr.PositiveParameter(0.25, 0.01, 10))
@@ -1368,15 +1470,9 @@ class Exponentiation(_FunctionalLatentVariable):
 
 
 class Multiply(_Operation):
-    def __init__(self, *latent_variables):
-        super().__init__(*latent_variables)
-        sizes = [p.size for p in self.parents]
-        if not all(s == sizes[0] for s in sizes):
-            raise SizeIncompatibilityError(
-                f"All parents must have the same size. Found {sizes}."
-            )
-
-        self._size = sizes[0]
+    def __init__(self, *latent_variables, name=None):
+        super().__init__(*latent_variables, name=name)
+        self._size = self._common_size()
         self.propagates_inducing_points = False
 
     def refresh(self, jitter=1e-6):
@@ -1452,15 +1548,9 @@ class Multiply(_Operation):
 
 
 class Add(_Operation):
-    def __init__(self, *latent_variables):
-        super().__init__(*latent_variables)
-        sizes = [p.size for p in self.parents]
-        if not all(s == sizes[0] for s in sizes):
-            raise SizeIncompatibilityError(
-                f"All parents must have the same size. Found {sizes}."
-            )
-
-        self._size = sizes[0]
+    def __init__(self, *latent_variables, name=None):
+        super().__init__(*latent_variables, name=name)
+        self._size = self._common_size()
         self.propagates_inducing_points = self.same_root and all([p.propagates_inducing_points for p in self.parents])
 
     def refresh(self, jitter=1e-6):
@@ -1564,8 +1654,8 @@ class Bias(_FunctionalLatentVariable):
 
     Adds a deterministic constant to its input.
     """
-    def __init__(self, parent, scale=5):
-        super().__init__(parent)
+    def __init__(self, parent, scale=5, name=None):
+        super().__init__(parent, name=name)
         self._size = parent.size
 
         self._add_parameter(
@@ -1615,8 +1705,8 @@ class Scale(_FunctionalLatentVariable):
 
     Multiplies its input by a constant. The variance is multiplied by the square of the same value.
     """
-    def __init__(self, parent):
-        super().__init__(parent)
+    def __init__(self, parent, name=None):
+        super().__init__(parent, name=name)
         self._size = parent.size
 
         self._add_parameter(
@@ -1681,7 +1771,7 @@ class RadialTrend(_FunctionalLatentVariable):
 
     It will ignore the variance of its inputs.
     """
-    def __init__(self, parent, size=1):
+    def __init__(self, parent, size=1, name=None):
         """
         Initializer for RadialTrend.
 
@@ -1691,8 +1781,10 @@ class RadialTrend(_FunctionalLatentVariable):
             Parent node.
         size : int
             Number of output functions to generate.
+        name : str
+            A name for this node.
         """
-        super().__init__(parent)
+        super().__init__(parent, name=name)
         self._size = size
 
         self._add_parameter(
@@ -1810,7 +1902,7 @@ class GPWalk(_FunctionalLatentVariable):
     The node's parent (a GP) defines the vector field and the parent's parent contains the coordinates that will be
     moved. Both must have the same size.
     """
-    def __init__(self, parent, step=0.01, n_steps=10):
+    def __init__(self, parent, step=0.01, n_steps=10, name=None):
         """
         Initializer for GPWalk.
 
@@ -1827,12 +1919,16 @@ class GPWalk(_FunctionalLatentVariable):
             Size of the step at each iteration.
         n_steps : int
             Number of steps.
+        name : str
+            A name for this node.
         """
-        super().__init__(parent)
+        super().__init__(parent, name=name)
 
         if parent.size != parent.parent.size:
             raise SizeIncompatibilityError(
-                f"Parent node must have the same size as its own parent. Found {parent.size} and {parent.parent.size}."
+                f"{self.name}: the parent node must have the same size as its own parent. "
+                f"Found {parent.name} (size {parent.size}) and "
+                f"{parent.parent.name} (size {parent.parent.size})."
             )
 
         self.walker = parent.parent
@@ -2022,7 +2118,7 @@ class MultiStructureGP(BasicGP):
     and applying a linear combination externally is that here the combination is at the kernel level instead of the
     latent variable level.
     """
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False, n_structures=2):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False, n_structures=2, name=None):
         """
         Initializer for MultiStructureGP.
 
@@ -2038,9 +2134,11 @@ class MultiStructureGP(BasicGP):
             Whether to force a unit range for all input dimensions.
         n_structures : int
             Number of kernels to combine (minimum 2).
+        name : str
+            A name for this node.
         """
         self.n_structures = n_structures
-        super().__init__(parent, size, kernel, fix_range)
+        super().__init__(parent, size, kernel, fix_range, name=name)
 
     def _set_parameters(self):
         for i, n in enumerate(self.root.n_ip):
@@ -2126,7 +2224,7 @@ class GradientConstrainedInput(_RootLatentVariable):
     zero gradient in the specified directions, flowing only in the orthogonal direction.
     """
     def __init__(self, inducing_points, directional_data,
-                 covariance, size=1, fix_covariance=False):
+                 covariance, size=1, fix_covariance=False, name=None):
         """
         Initializer for GradientConstrainedInput.
 
@@ -2145,8 +2243,10 @@ class GradientConstrainedInput(_RootLatentVariable):
             Number of output variables.
         fix_covariance : bool
             Whether to fix the covariance's parameters during training.
+        name : str
+            A name for this node.
         """
-        super().__init__()
+        super().__init__(name=name)
 
         self._size = size
         # self.root_size = inducing_points.n_dim

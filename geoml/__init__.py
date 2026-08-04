@@ -1,10 +1,11 @@
-__version__ = '0.5.3'
+__version__ = '0.5.4'
 __author__ = 'Ítalo Gomes Gonçalves'
 __all__ = [
     'data',
     'datasets',
     'drillhole',
     'geometry',
+    'graphviz',
     'interpolation',
     'kernels',
     'likelihood',
@@ -13,6 +14,7 @@ __all__ = [
     'models',
     'persistence',
     'plotly',
+    'plots',
     'probability',
     'pyvista',
     'random',

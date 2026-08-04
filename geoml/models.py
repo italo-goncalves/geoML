@@ -669,6 +669,17 @@ class VGPNetwork(_GPModel):
         s += str(self.latent_network)
         return s
 
+    def to_dot(self, legend=True, rankdir="BT"):
+        """
+        Writes the model as a Graphviz diagram: coordinates, latent network,
+        warpings and output variables.
+
+        See `geoml.graphviz.to_dot`.
+        """
+        # imported here because that module reads the modules this one needs
+        import geoml.graphviz as _gv
+        return _gv.to_dot(self, legend=legend, rankdir=rankdir)
+
     def set_learning_rate(self, rate):
         self.optimizer = _tf.keras.optimizers.Adam(
             _tf.keras.optimizers.schedules.ExponentialDecay(rate, 1, 0.999),

@@ -120,6 +120,49 @@ def test_a_model_keeps_its_summary():
     assert "V (Gaussian)" in repr(model)
 
 
+def test_a_vector_variable_names_its_components():
+    """`repr` says which variable this is; `str` says what is on it, so the
+    columns need not be looked up in the source."""
+    train, _ = geoml.datasets.jura()
+    text = str(train.variables["Elements"])
+
+    assert text.startswith("VectorVariable('Elements', n_data=259)")
+    assert "components: Cd, Co, Cr, Cu, Ni, Pb, Zn" in text
+    assert "columns: uncertainty" in text
+    # the one-line identity is unchanged by any of this
+    assert repr(train.variables["Elements"]) == \
+        "VectorVariable('Elements', n_data=259)"
+
+
+def test_a_categorical_variable_names_its_categories():
+    train, _ = geoml.datasets.jura()
+    text = str(train.variables["Rock"])
+
+    assert "categories: Argovian, Kimmeridgian" in text
+    assert "measurements_a" in text and "predicted" in text
+
+
+def test_a_variable_lists_what_can_be_read_off_it():
+    point, _ = geoml.datasets.walker()
+    variable = point.variables["V"]
+
+    assert "columns: measurements, latent_mean, latent_variance, prediction" \
+        in str(variable)
+
+    variable.allocate_simulations(8)
+    variable.reset_quantiles([0.1, 0.9])
+    text = str(variable)
+    assert "simulations: 8" in text
+    assert "quantiles: 0.1, 0.9" in text
+
+
+def test_a_container_still_lists_its_variables_in_one_line_each():
+    """Containers name the class rather than printing each variable, so a
+    variable growing a longer `str` does not grow theirs."""
+    point, _ = geoml.datasets.walker()
+    assert "    V: ContinuousVariable\n" in str(point)
+
+
 def test_parameters_and_variables_identify_themselves():
     point, _ = geoml.datasets.walker()
     assert repr(point.variables["V"]) == "ContinuousVariable('V', n_data=470)"

@@ -79,6 +79,84 @@ def bias_variance_decomposition(y_true, y_pred):
     return bias_squared, variance
 
 
+def coverage(y_true, y_pred, probabilities=None):
+    """
+    How often the truth falls inside an interval of a given probability.
+
+    The numbers behind an accuracy plot. At every location the central interval
+    holding a share `p` of the simulated values is built, and the fraction of
+    true values inside it is counted. A model that knows what it does not know
+    puts those fractions on the 1:1 line: below it the intervals are narrower
+    than the errors they have to cover, above it the model is hedging.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples, n_predictions)
+        Simulated values at the same locations.
+    probabilities : array-like
+        The nominal probabilities to check. Defaults to 0.05 to 0.95.
+
+    Returns
+    -------
+    probabilities : array of shape (n_probabilities,)
+        The nominal probabilities, as given.
+    observed : array of shape (n_probabilities,)
+        The share of true values actually inside each interval.
+    """
+    if probabilities is None:
+        probabilities = _np.linspace(0.05, 0.95, 19)
+    probabilities = _np.asarray(probabilities, dtype=float)
+
+    y_true = _np.asarray(y_true).ravel()
+    y_pred = _np.asarray(y_pred)
+
+    observed = _np.zeros_like(probabilities)
+    for i, p in enumerate(probabilities):
+        lower = _np.quantile(y_pred, (1 - p) / 2, axis=1)
+        upper = _np.quantile(y_pred, (1 + p) / 2, axis=1)
+        observed[i] = _np.mean((y_true >= lower) & (y_true <= upper))
+
+    return probabilities, observed
+
+
+def goodness(probabilities, observed):
+    """
+    How close an accuracy plot sits to the 1:1 line. One is perfect.
+
+    Deutsch's statistic. Intervals that are too wide are counted at half the
+    weight of intervals that are too narrow: claiming a precision the model
+    does not have is the worse mistake, since it is the one that leads someone
+    to act on the number.
+
+    Parameters
+    ----------
+    probabilities : array-like
+        Nominal probabilities, as returned by `coverage`.
+    observed : array-like
+        Observed shares, as returned by `coverage`.
+
+    Returns
+    -------
+    g : float
+        One when the two agree everywhere, less as they part.
+    """
+    probabilities = _np.asarray(probabilities, dtype=float)
+    observed = _np.asarray(observed, dtype=float)
+
+    weight = _np.where(observed >= probabilities, 1.0, 2.0)
+    departure = weight * _np.abs(observed - probabilities)
+
+    # the trapezoid rule, written out rather than taken from NumPy, whose name
+    # for it changed in 2.0
+    width = _np.diff(probabilities)
+    area = _np.sum(width * 0.5 * (departure[:-1] + departure[1:]))
+    span = probabilities[-1] - probabilities[0]
+
+    return 1.0 - area / span if span > 0 else 1.0
+
+
 def aitchison_distance(comp_true, comp_pred):
     clr_true = _np.log(comp_true)
     clr_true = clr_true - _np.mean(clr_true, axis=1, keepdims=True)
