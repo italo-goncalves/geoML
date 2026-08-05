@@ -7,7 +7,7 @@ from setuptools import setup
 
 
 setup(name='geoml',
-      version='0.5.4',
+      version='0.5.5',
       description='Machine learning for spatial data',
       #      long_description=readme(),
       keywords=['machine learning', 'spatial data', 'gaussian process'],
@@ -24,4 +24,4 @@ setup(name='geoml',
                         'tensorflow', 'tensorflow-probability',
                         'scipy', 'scikit-learn',
                         'zarr', 'xarray', 'dask',
-                        'matplotlib', 'plotly'])
+                        'matplotlib', 'plotly', 'ezdxf'])

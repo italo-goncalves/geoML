@@ -9,7 +9,7 @@
 project = 'geoML'
 copyright = '2025, Ítalo Gomes Gonçalves'
 author = 'Ítalo Gomes Gonçalves'
-release = '0.5.4'
+release = '0.5.5'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
