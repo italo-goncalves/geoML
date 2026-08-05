@@ -1,3 +1,139 @@
+## version 0.5.5
+* `get_contour(value, close="above")` closes a surface where it runs out of
+the grid, so what comes back is a body with a volume rather than a sheet with
+a hole in its side. It works by padding the cube with one cell of "well
+outside" before contouring, which gives the surface somewhere to close inside
+the padded volume — no capping geometry, and nothing to go wrong at a corner.
+`"above"` keeps the region where the values exceed the contour, a grade shell;
+`"below"` the region under it
+* `DTM3D` is a terrain: a sheet that promises never to fold back over itself,
+so that it stands at one height over each (x, y). That promise is what lets a
+body be divided into what lies under it and what lies over it, and it is
+checked where the object is made, by asking whether every triangle projects
+onto the ground the same way round. Not what `mesh3d` returns — an ordinary
+sheet stays a `Surface3D` until a terrain is asked for, this being a promise
+to make rather than a fact to detect
+* Meshes of different kinds can now be cut against each other, and the answer
+keeps the caller's kind. `surface.intersection(solid)` is the part of the
+sheet inside the body and `surface.difference(solid)` the part outside, both
+sheets, cut where they cross the body rather than along their own triangles.
+`solid.intersection(sheet)` is the part of the body below the sheet and
+`solid.difference(sheet)` the part above, both bodies — worked by extruding
+the sheet downwards into the ground beneath itself and letting the ordinary
+body-to-body operations do the rest
+* The edge cases raise rather than answer quietly, through four new errors,
+all of them `ValueError`: `NotClosedError`, `InconsistentMeshError`,
+`NotSingleValuedError` (a sheet that folds has no single "below" to keep) and
+`MeshTypeError` (a sheet has no volume to add to a body; a sheet that does not
+reach across a body would cut it at its own edge, and says so with both
+extents in the message)
+* Triangulated meshes are now three classes rather than one. `Mesh3D` is the
+primitive — vertices, triangles, normals — and it measures itself as it is
+built: its `area`, and whether it is `closed` and `consistent`, meaning its
+triangles agree which way is out. `Surface3D` and `Solid3D` are siblings on
+top of it, a sheet and a body, each checking its promise where the object is
+made. A `Solid3D` therefore always has a `volume` worth reading, and
+`assign_from_solid` can trust what it is handed instead of measuring it again
+* `mesh3d(points, triangles, normals)` returns whichever of the three the
+geometry calls for, and is what `get_contour` and `Mesh3D.from_dxf` now answer
+with — so a contour that closes inside the grid comes back as a body, with its
+volume, while one the grid cuts off comes back as a sheet
+* A body wound inwards is turned round as it is built rather than refused:
+nothing about it is ambiguous, only reversed. A closed mesh whose triangles
+disagree with each other is a plain `Mesh3D`, being neither sheet nor body
+* `Mesh3D.heal()` returns a repaired copy — vertices welded, holes up to a
+size covered over, triangles made to agree and turned to face outward. That
+last step is not a nicety: filling a hole leaves the new triangles wound
+however they came, which would leave the mesh closed and still untestable.
+What comes back is whichever class the repair earned, and an empty `Mesh3D` if
+nothing survived
+* `Mesh3D.split()` returns the connected pieces, each as an object of its own.
+A boolean readily answers with a body in several pieces — an ore shell cut in
+two — which is one legitimate mesh until you want them apart
+* `Solid3D` does `union`, `intersection` and `difference`. VTK is asked first,
+but it answers with nothing at all whenever the two surfaces have no face
+crossing another — whether they stand apart or one contains the other, and
+with no error either way — so an empty answer is not believed but worked out
+from which body contains which. A difference where the other body lies wholly
+inside is a body with a cavity, written as both surfaces with the inner one
+turned inwards, so the volumes subtract and a location in the hollow tests as
+outside
+* A `Surface3D` can now be read from and written to a DXF file —
+`Surface3D.from_dxf(filename)` and `surface.export_dxf(filename)`. Until now a
+surface could only be *made*, by contouring a grid; a triangulation somebody
+else built had no way in
+* The export writes a single `MESH` entity, which holds the vertex list and the
+triangles that index into it, so a surface comes back exactly as it went out.
+The `POLYFACE` mesh that DXF triangulations are more often written as would
+have been the obvious choice, but its vertex indices are 16-bit in most
+readers — a ceiling near 32,000 vertices, which a contour off a real grid goes
+through without trying
+* The import is more forgiving than the export, foreign files not being ours to
+choose: `MESH`, `POLYFACE` and loose `3DFACE` entities are all read. The last
+two spell out the coordinates of every corner, so a vertex shared by six
+triangles arrives six times; those are welded back into shared vertices, and a
+face with more than three corners is split into a fan of triangles. Every mesh
+in the file is read, so a file holding several bodies comes back as one surface
+in several disconnected pieces
+* Normals are computed on the way in — the area-weighted mean of the triangles
+meeting at each vertex — since a DXF file carries none and `Surface3D` requires
+them
+* Only the geometry travels. A DXF file has nowhere to put the variables and
+metadata a surface carries: `to_zarr` keeps a container whole, and
+`as_pyvista` carries the values onto a mesh object
+* `ezdxf` is now a dependency
+* Surfaces can be assigned to a container's locations, which is what a
+surface is usually read in for. `assign_from_surface(surface, name)` records
+which side of a sheet each location falls on — above or below a topography, a
+seam roof, a weathering front — by comparing it with the sheet's elevation
+directly over it, interpolated across the triangle its (x, y) lands in.
+`assign_from_solid(solid, name)` asks instead whether a location falls inside
+a closed body, an ore envelope or a stope. Both are on every container
+* The answer is a metadata column, which is what a domain code should be:
+point-wise, carried through `as_data_frame()` and `to_zarr()`, and never seen
+by the models. Locations the sheet does not reach are left empty rather than
+guessed at
+* A grid reads the sheet once for each column of cells rather than once for
+each cell — the same (x, y) repeats at every level, and a sheet depends on
+nothing else. A `RotatedGrid3D` is not on an axis-aligned lattice and takes
+the general path
+* A block model can measure the blocks a surface cuts through. The flag
+follows the block centre, as a whole-block code does everywhere else, but
+naming a `fraction` column as well records the share of each block below the
+sheet, or inside the body, over the sub-blocks `discretization` already
+defines — what a tonnage near surface needs, where counting a half-buried
+block whole is the error
+* The mesh arithmetic behind both — splitting faces into triangles, normals
+from the triangles meeting at a vertex, counting the edges that belong to one
+triangle, interpolating a sheet, testing a body — is in `geoml.geometry`,
+taking arrays and returning arrays. `data.py` keeps only what touches a
+container, which is the two lines that turn a `Surface3D` into either
+* A sheet need not cover everything it is assigned to, and what happens where
+it does not is the caller's to choose. Its flag is empty there in any case —
+neither above nor below, since the surface says nothing — and the `uncovered`
+argument decides the rest: `numpy.nan` by default, so an uncovered block
+cannot pass for an empty one in the `fraction` column, `0.0` to count it as
+nothing, or `"raise"` to refuse a surface that leaves any location out, which
+is the right answer when it was meant to cover the whole model. The footprint
+is the triangulation's own, not its convex hull, so a survey boundary, an
+L-shaped sheet or a hole around a lake are all respected
+* A surface is refused by the assignment it cannot answer: a closed body has
+no single elevation above a location, and a sheet has no inside. The two are
+told apart by counting the edges that belong to only one triangle — after
+welding the vertices, since a mesh can be closed in space while indexing every
+triangle's corners separately, as `pyvista.Cylinder` does. A cylinder with one
+end open is a sheet by this reckoning, which is the right answer
+* A body is also refused when its triangles disagree about which way is out,
+because the inside/outside test reads a disagreement as a hole rather than as
+an error — quietly, and only where the offending faces are. One wound inwards
+throughout is not ambiguous, only reversed, and is turned round rather than
+refused; the sign of `geometry.signed_volume` is what tells the two apart, and
+its size is the volume the body encloses
+* Fixed: `export_contour` raised `TypeError` on every call. It still unpacked
+the four arrays `get_contour` once returned, but `get_contour` builds a
+`Surface3D` now and hands back that; nothing tested either one, so nothing
+noticed
+
 ## version 0.5.4
 * Printing a variable now says what is on it. `repr` is unchanged — it names
 which variable this is — but `str` adds the parts it is made of and the columns

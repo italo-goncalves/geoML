@@ -16,7 +16,14 @@
 
 
 import numpy as _np
+import pyvista as _pv
 from sklearn.decomposition import PCA as _PCA
+from scipy.sparse import coo_matrix as _coo_matrix
+from scipy.sparse.csgraph import connected_components as _connected_components
+
+# geometry, not drawing: `tri` locates a point in a triangulation and
+# interpolates over it, which is what asking a sheet its elevation amounts to
+from matplotlib import tri as _mtri
 
 
 def rotation_matrix(azimuth=0.0, dip=0.0, rake=0.0):
@@ -112,3 +119,365 @@ def vector_product(vec1, vec2):
     normalvec = vec1[[1, 2, 0]] * vec2[[2, 0, 1]] \
                 - vec1[[2, 0, 1]] * vec2[[1, 2, 0]]
     return normalvec
+
+
+# -- triangulated surfaces ------------------------------------------------- #
+# Arrays of points and triangles, not containers: `data.Surface3D` is what
+# holds them together, and what calls these.
+
+def fan_triangulation(faces):
+    """
+    Splits faces, given as vertex indices, into triangles.
+
+    A DXF `3DFACE` has four corners and a `MESH` face may have more, neither
+    of which a `Surface3D` has room for. A fan from the first corner is the
+    standard split, and is exact for the convex faces a triangulated surface
+    is made of.
+
+    Parameters
+    ----------
+    faces : sequence
+        One sequence of vertex indices per face, of any length.
+
+    Returns
+    -------
+    triangles : array
+        An (n, 3) array of vertex indices.
+    """
+    if all(len(face) == 3 for face in faces):
+        return _np.asarray(faces, dtype=int).reshape([-1, 3])
+
+    triangles = []
+    for face in faces:
+        for corner in range(1, len(face) - 1):
+            triangles.append((face[0], face[corner], face[corner + 1]))
+    return _np.asarray(triangles, dtype=int).reshape([-1, 3])
+
+
+def vertex_normals(points, triangles):
+    """
+    The unit normal at each vertex, from the triangles meeting there.
+
+    A DXF file carries no normals and `Surface3D` keeps one per vertex, as
+    `marching_cubes` hands them over. The cross product of a triangle's edges
+    has twice the triangle's area for its length, so summing the face normals
+    before normalizing weights each one by its area — which keeps a large face
+    from being outvoted by the slivers around it.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+
+    Returns
+    -------
+    normals : array
+        An (n, 3) array of unit vectors, one per vertex.
+    """
+    corners = points[triangles]
+    face_normals = _np.cross(corners[:, 1] - corners[:, 0],
+                             corners[:, 2] - corners[:, 0])
+
+    normals = _np.zeros_like(points)
+    index = triangles.ravel()
+    for axis in range(3):
+        normals[:, axis] = _np.bincount(
+            index, weights=_np.repeat(face_normals[:, axis], 3),
+            minlength=points.shape[0])
+
+    length = _np.linalg.norm(normals, axis=1, keepdims=True)
+    return normals / _np.where(length > 0, length, 1)
+
+
+def weld(points, triangles, precision=6):
+    """
+    Merges vertices sitting at the same place, remapping the triangles.
+
+    Whether a surface is closed is a question about its edges, and an edge is
+    only shared if the triangles meeting along it say so with the same two
+    indices. Plenty of meshes are closed in space while indexing every
+    triangle's corners separately — `pyvista.Cylinder` is one — and welding is
+    what lets the seams be seen for what they are.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+    precision : int
+        Decimal places the coordinates are matched to.
+
+    Returns
+    -------
+    points : array
+        The distinct vertices.
+    triangles : array
+        The triangles, indexing into them.
+    """
+    keys = _np.round(_np.asarray(points, dtype=float), precision)
+    unique, index = _np.unique(keys, axis=0, return_inverse=True)
+    return unique, index.ravel()[_np.asarray(triangles)]
+
+
+def _edge_counts(points, triangles, precision, directed):
+    """How often each edge appears, undirected (shared) or directed (wound)."""
+    points, triangles = weld(points, triangles, precision)
+    edges = _np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]],
+                             triangles[:, [2, 0]]], axis=0)
+    if not directed:
+        edges = _np.sort(edges, axis=1)
+    key = edges[:, 0].astype(_np.int64) * points.shape[0] + edges[:, 1]
+    _, counts = _np.unique(key, return_counts=True)
+    return counts
+
+
+def open_edges(points, triangles, precision=6):
+    """
+    How many of a surface's edges belong to a single triangle.
+
+    None on a closed body, where every edge is shared by two faces; at least
+    the outline on a sheet. It is what tells the two apart, and so which
+    questions a surface can answer — a body has no elevation above a location,
+    and a sheet has no inside. Vertices are welded first, so a mesh that is
+    closed in space counts as closed however its corners are indexed.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+    precision : int
+        Decimal places the coordinates are welded to.
+
+    Returns
+    -------
+    count : int
+        The number of edges belonging to one triangle only.
+    """
+    return int(_np.sum(_edge_counts(points, triangles, precision, False) == 1))
+
+
+def reversed_edges(points, triangles, precision=6):
+    """
+    How many edges the triangles sharing them walk the same way round.
+
+    None where the winding is consistent: two triangles meeting along an edge
+    traverse it in opposite directions, which is what makes "outward" mean one
+    thing over a whole closed surface. Any at all and some triangle faces the
+    wrong way, which an inside/outside test reads as a hole in the body —
+    quietly, and only in the region the offending faces bound.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+    precision : int
+        Decimal places the coordinates are welded to.
+
+    Returns
+    -------
+    count : int
+        The number of edges traversed more than once in the same direction.
+    """
+    return int(_np.sum(_edge_counts(points, triangles, precision, True) > 1))
+
+
+def area(points, triangles):
+    """
+    The surface area of a triangulation.
+
+    Meaningful whether or not the surface closes, unlike its volume.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+
+    Returns
+    -------
+    area : float
+    """
+    corners = _np.asarray(points, dtype=float)[_np.asarray(triangles)]
+    crossed = _np.cross(corners[:, 1] - corners[:, 0],
+                        corners[:, 2] - corners[:, 0])
+    return float(_np.sum(_np.linalg.norm(crossed, axis=1)) / 2)
+
+
+def components(points, triangles, precision=6):
+    """
+    Labels the triangles by the connected piece of surface they belong to.
+
+    A boolean operation readily answers with a surface in several pieces — an
+    ore body cut in two, a shell around a cavity — and each piece is a body in
+    its own right. Vertices are welded first, since pieces that touch only
+    through unwelded corners are one piece in space.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+    precision : int
+        Decimal places the coordinates are welded to.
+
+    Returns
+    -------
+    count : int
+        How many pieces there are.
+    labels : array
+        One piece number per triangle.
+    """
+    welded_points, welded = weld(points, triangles, precision)
+    if welded.shape[0] == 0:
+        return 0, _np.zeros([0], dtype=int)
+
+    rows = _np.concatenate([welded[:, 0], welded[:, 1], welded[:, 2]])
+    cols = _np.concatenate([welded[:, 1], welded[:, 2], welded[:, 0]])
+    graph = _coo_matrix((_np.ones(rows.size), (rows, cols)),
+                        shape=(welded_points.shape[0],) * 2)
+    count, vertex_label = _connected_components(graph, directed=False)
+
+    # a triangle belongs to the piece its corners do -- all three of them,
+    # an edge between them being what put them in the same piece
+    return int(count), vertex_label[welded[:, 0]]
+
+
+def single_valued(points, triangles, tolerance=1e-9):
+    """
+    Whether a surface stands at one height over each (x, y).
+
+    True where every triangle projects onto the ground the same way round. A
+    fold or an overhang turns some of them over, and a closed body turns its
+    whole underside over, so both are caught. Triangles standing vertically
+    project to nothing at all and are allowed: a cliff is single valued
+    everywhere except along the line of its face.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+    tolerance : float
+        Projected areas this much smaller than the largest count as nothing.
+
+    Returns
+    -------
+    single_valued : bool
+    """
+    corners = _np.asarray(points, dtype=float)[_np.asarray(triangles)]
+    edge_a = corners[:, 1, :2] - corners[:, 0, :2]
+    edge_b = corners[:, 2, :2] - corners[:, 0, :2]
+    twice_area = edge_a[:, 0] * edge_b[:, 1] - edge_a[:, 1] * edge_b[:, 0]
+    if twice_area.size == 0:
+        return True
+
+    flat = tolerance * _np.max(_np.abs(twice_area))
+    return not (_np.any(twice_area > flat) and _np.any(twice_area < -flat))
+
+
+def signed_volume(points, triangles):
+    """
+    The volume a closed surface encloses, negative if it is wound inwards.
+
+    Each triangle forms a tetrahedron with the origin, whose signed volume is
+    a sixth of the determinant of its corners; over a closed surface those
+    add up to what it encloses, wherever the origin happens to be. The sign
+    is the useful part: it says which way the triangles face taken together,
+    which is what an inside/outside test must know and cannot learn from any
+    one of them.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices, of a closed surface.
+
+    Returns
+    -------
+    volume : float
+        Positive where the triangles face outwards, negative where they face
+        in. Meaningless for a surface that is not closed.
+    """
+    corners = _np.asarray(points, dtype=float)[_np.asarray(triangles)]
+    return float(_np.sum(_np.einsum(
+        "ij,ij->i", corners[:, 0],
+        _np.cross(corners[:, 1], corners[:, 2]))) / 6.0)
+
+
+def sheet_interpolator(points, triangles):
+    """
+    Prepares a sheet to be asked its elevation.
+
+    The sheet must be single valued — checking that is the caller's business,
+    and `open_edges` is what tells a sheet from a body. `matplotlib` takes a
+    folded triangulation without complaint, answering with whichever of its
+    sheets it happens to find.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices.
+
+    Returns
+    -------
+    interpolator : matplotlib.tri.LinearTriInterpolator
+        To be handed to `sheet_elevation`.
+    """
+    mesh = _mtri.Triangulation(points[:, 0], points[:, 1],
+                               _np.asarray(triangles))
+    return _mtri.LinearTriInterpolator(mesh, points[:, 2])
+
+
+def sheet_elevation(interpolator, coordinates):
+    """
+    The sheet's height over each location, NaN past its edge.
+
+    Parameters
+    ----------
+    interpolator : matplotlib.tri.LinearTriInterpolator
+        From `sheet_interpolator`.
+    coordinates : array
+        An (n, 2) or (n, 3) array; only the first two columns are read.
+
+    Returns
+    -------
+    elevation : array
+        One height per location, NaN where the sheet does not reach.
+    """
+    elevation = interpolator(coordinates[:, 0], coordinates[:, 1])
+    return _np.ma.filled(elevation.astype(float), _np.nan)
+
+
+def inside_solid(mesh, coordinates):
+    """
+    Whether each location falls within a closed body, asking VTK.
+
+    Parameters
+    ----------
+    mesh : pyvista.PolyData
+        The body, which must be watertight — checking that is the caller's
+        business, and `open_edges` is what tells it.
+    coordinates : array
+        An (n, 3) array of locations.
+
+    Returns
+    -------
+    inside : array
+        One boolean per location.
+    """
+    cloud = _pv.PolyData(_np.ascontiguousarray(coordinates))
+    selected = cloud.select_interior_points(mesh, check_surface=False)
+    return _np.asarray(selected["selected_points"]).astype(bool)

@@ -24,4 +24,4 @@ setup(name='geoml',
                         'tensorflow', 'tensorflow-probability',
                         'scipy', 'scikit-learn',
                         'zarr', 'xarray', 'dask',
-                        'matplotlib', 'plotly'])
+                        'matplotlib', 'plotly', 'ezdxf'])
