@@ -70,6 +70,38 @@ treatment applied to training was both slower and unstable
 The default was written as `options=GPOptions()`, which Python evaluates once,
 when the module is imported, so every model that did not bring its own options
 shared a single object and setting an option on one model set it on all of them
+* A grade-tonnage curve no longer needs the simulations in memory. It opened
+by asking for all of them as one array, which on a real block model — 280 GB
+of them on disk — killed the session before any arithmetic happened. They are
+now read a band of blocks at a time and reduced as they arrive, so what memory
+holds is one band and the answer, which is a few numbers per cut-off per
+realization however many blocks there were. The chunking never had to change:
+the simulations are already split along the block axis only, so a chunk is a
+band of blocks holding every realization of each — exactly what a reduction
+over blocks wants. A simulated density is streamed alongside the grade rather
+than materialized, since it is as large as the grade itself, and a density
+given as a number is now kept as one instead of being spread over an array of
+one value per block
+* The same curve is also about five times faster. Each cut-off used to take
+its own pass over every block, so thirty cut-offs meant thirty passes; now
+each block is placed once at the highest cut-off it clears, and summing those
+from the top down at the end turns them into the curve. Giving `cutoffs` as
+values rather than as a count saves a further pass, the one that would
+otherwise go looking for their range. On two million blocks by forty
+realizations: 11.2 s and 2.7 GB of working memory, against 2.4 s and none
+* `simulation_sample`, which thins the simulations down to what a scatter
+matrix can draw, now strides through them while reading rather than
+materializing a whole component and throwing most of it away. Which values it
+takes follows from the stride alone, so two components chunked differently are
+still thinned to the same locations and the pairs stay pairs
+* `ArrayStore.row_bands()` is the slices to read a store in, each holding
+whole chunks. This is what the above is written against, and what anything
+reducing over locations should use
+* Fixed: a variable with no simulations was meant to fall back on its
+prediction as the only realization there is, but never could. Asked for
+simulations it does not have, it hands back `asarray(None)` — a dimensionless
+nan, which reads as a value right up to the point where it is asked for its
+length, and the fallback was only reached when something raised
 * Networks with more than one expert are now tested — building, training,
 predicting in one batch and in many, propagating through a second layer, and
 surviving a save and load

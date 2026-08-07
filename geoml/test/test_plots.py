@@ -8,6 +8,7 @@ structural -- how many panels, which ones are drawn, what a bad request says --
 and for the one promise the style makes, that drawing a geoML figure does not
 change how anyone else's figures look.
 """
+import copy
 import re
 
 import matplotlib
@@ -1079,6 +1080,130 @@ def test_the_explorer_carries_the_uncertainty_column(blocks):
     # and without a threshold nothing is left out, so nothing is said
     assert "doubt3" not in explorer.grade_tonnage().axes[0].get_title(
         loc="left")
+
+
+# --------------------------------------------------------------------------- #
+# reading the simulations a band at a time
+# --------------------------------------------------------------------------- #
+def _chunk(variable, tmp_path, name, rows):
+    """Put a variable's simulations on disk in chunks of `rows`.
+
+    A block model's simulations run to hundreds of gigabytes and arrive
+    chunked; a fixture small enough to stay in RAM as one piece is the one
+    case that would not catch a band being read wrong.
+    """
+    values = np.asarray(variable.simulations)
+    variable.simulations = geoml.storage.ArrayStore.allocate(
+        values.shape, backend="zarr", store=str(tmp_path / name),
+        chunks=(rows, values.shape[1]))
+    variable.simulations[:] = values
+    return variable
+
+
+@pytest.fixture
+def streamed():
+    """A block model to re-chunk -- so, unlike `blocks`, one per test.
+
+    Some blocks are left unvalued: a cut-off has to place those nowhere, and
+    the reduction that finds the range of the data has to step over them. Two
+    whole bands are emptied as well, one by having no values in it and one by
+    the uncertainty filter -- on a real block model a band of blocks outside
+    the domain is the ordinary case, not the corner one.
+    """
+    geoml.set_seed(11)
+    grid = geoml.data.Grid2D(start=[0, 0], n=[10, 10], step=[2.0, 5.0])
+    rng = np.random.default_rng(5)
+
+    grade = grid.coordinates[:, 0] + rng.normal(size=grid.n_data)
+    grid.add_continuous_variable("grade", grade)
+    grid.variables["grade"].allocate_simulations(4)
+    simulated = grade[:, None] + rng.normal(size=(grid.n_data, 4)) * 0.1
+    simulated[rng.random(simulated.shape) < 0.05] = np.nan
+    simulated[91:98] = np.nan                       # a band with nothing in it
+    grid.variables["grade"].simulations[:, :] = simulated
+
+    density = np.full(grid.n_data, 2.0)
+    grid.add_continuous_variable("rho", density)
+    grid.variables["rho"].allocate_simulations(4)
+    grid.variables["rho"].simulations[:, :] = \
+        density[:, None] + rng.normal(size=(grid.n_data, 4)) * 0.01
+
+    doubt = rng.uniform(0.0, 0.6, grid.n_data)
+    doubt[70:77] = 1.0                     # a band the filter empties entirely
+    grid.add_metadata("doubt", doubt)
+    return grid
+
+
+def test_the_curves_do_not_depend_on_how_the_simulations_are_chunked(
+        streamed, tmp_path):
+    """Every block is placed at the highest cut-off it clears and the bands are
+    summed afterwards, so where the chunk boundaries fall must not reach the
+    answer -- including the boundaries of the density, which multiplies the
+    grade band for band and is chunked differently here."""
+    asked = dict(density="rho", cutoffs=6, uncertainty="doubt",
+                 max_uncertainty=0.7)
+    whole = prepare.grade_tonnage(streamed, "grade", **asked)
+
+    _chunk(streamed.variables["grade"], tmp_path, "g.zarr", rows=7)
+    _chunk(streamed.variables["rho"], tmp_path, "r.zarr", rows=3)
+    assert len(streamed.variables["grade"].simulations.row_bands()) > 1
+    assert len(streamed.variables["rho"].simulations.row_bands()) > 1
+
+    banded = prepare.grade_tonnage(streamed, "grade", **asked)
+    for key in ("cutoff", "tonnage", "grade", "metal"):
+        assert np.allclose(banded[key], whole[key], equal_nan=True)
+    assert banded["kept"] == whole["kept"] < streamed.n_data
+
+
+def test_the_simulations_are_never_held_whole(streamed, tmp_path, monkeypatch):
+    """The failure this replaced: a 280 GB block model died on the `asarray`
+    that used to open the function."""
+    _chunk(streamed.variables["grade"], tmp_path, "g.zarr", rows=7)
+    read = []
+
+    materialize = geoml.storage.ArrayStore.__array__
+    monkeypatch.setattr(
+        geoml.storage.ArrayStore, "__array__",
+        lambda self, *args, **kwargs: (read.append(self.shape),
+                                       materialize(self, *args, **kwargs))[1])
+
+    prepare.grade_tonnage(streamed, "grade", cutoffs=6,
+                          uncertainty="doubt", max_uncertainty=0.5)
+
+    # the column of doubt is one number per block and is read whole, which is
+    # also what says the watch is wired up
+    assert (streamed.n_data,) in read
+    assert streamed.variables["grade"].simulations.shape not in read
+
+
+def test_a_thinned_sample_is_the_same_however_it_is_chunked(trained, tmp_path):
+    """`_strided` picks up where the last band left off, so which values are
+    taken follows from the stride and not from where the chunks happen to
+    end -- otherwise two components chunked differently would be thinned to
+    different locations and the pairs would stop being pairs."""
+    _, point = trained
+    variable = copy.deepcopy(point.variables["v"])
+
+    whole = prepare.simulation_sample(variable, most=200)
+    for i, label in enumerate(variable.labels):
+        _chunk(variable.components[label], tmp_path, "c%d.zarr" % i,
+               rows=3 + i)
+
+    assert np.allclose(prepare.simulation_sample(variable, most=200), whole)
+
+
+def test_a_grade_with_no_simulations_falls_back_on_its_prediction(streamed):
+    """A variable that was predicted but not simulated still has one
+    realization, and it is the prediction."""
+    predicted = streamed.variables["rho"]
+    predicted.simulations = None
+    predicted.prediction.values[:] = np.linspace(1.0, 5.0, streamed.n_data)
+
+    store = prepare.realization_store(predicted)
+    assert store.shape == (streamed.n_data, 1)
+    assert store.row_bands() == [slice(0, streamed.n_data)]
+    assert np.allclose(np.asarray(store)[:, 0],
+                       predicted.prediction.values.to_numpy())
 
 
 # --------------------------------------------------------------------------- #

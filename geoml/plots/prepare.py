@@ -27,6 +27,7 @@ import numpy as _np
 import scipy.stats as _stats
 
 import geoml.data as _data
+import geoml.storage as _storage
 
 
 def variable(container, name):
@@ -280,6 +281,24 @@ def warped_values(model, name):
     return warped, measured, labels
 
 
+def _strided(store, stride):
+    """Every `stride`-th value of a store, flattened, read a band at a time.
+
+    The same values as `asarray(store).reshape(-1)[::stride]`, arrived at
+    without the materialization. Each band picks up where the last one left
+    off, so which values are taken depends on the stride alone and not on where
+    the chunk boundaries happen to fall -- two stores of the same shape are
+    thinned to the same positions, which is what lets the columns be paired.
+    """
+    n_columns = store.shape[1] if len(store.shape) > 1 else 1
+    pieces = []
+    for band in store.row_bands():
+        values = _np.asarray(store[band], dtype=float).reshape(-1)
+        pieces.append(values[(-band.start * n_columns) % stride::stride])
+
+    return _np.concatenate(pieces) if len(pieces) > 0 else _np.zeros(0)
+
+
 def simulation_sample(var, most=100000):
     """
     The simulated values, thinned to a number that can be drawn.
@@ -288,9 +307,9 @@ def simulation_sample(var, most=100000):
     a block model runs to hundreds of millions -- more than a figure can show
     and, spread across every pair of a matrix, more than memory should be
     asked to hold. What a distribution looks like is settled by far fewer, so
-    a stride is taken through the block. Reading one component at a time keeps
-    the high-water mark to a single component's simulations rather than all of
-    them at once.
+    a stride is taken through the block -- and taken while reading, a band of
+    locations at a time, so the values that are thrown away are never all in
+    memory together either.
 
     The stride is the same for every component, and the mask that drops
     non-finite values is applied to whole rows. Thinning the components
@@ -312,15 +331,15 @@ def simulation_sample(var, most=100000):
         # asked for simulations it does not have, a variable hands back
         # `asarray(None)` rather than raising, which would go on to fail
         # somewhere less informative
-        if getattr(part, "simulations", None) is None:
+        store = getattr(part, "simulations", None)
+        if store is None:
             raise ValueError(
                 "%r carries no simulations to compare against; predict with "
                 "n_sim greater than zero first" % var.name)
 
-        flat = _np.asarray(part.get_simulations(), dtype=float).reshape(-1)
         if stride is None:
-            stride = max(1, len(flat) // int(most))
-        columns.append(flat[::stride])
+            stride = max(1, int(_np.prod(store.shape)) // int(most))
+        columns.append(_strided(store, stride))
 
     values = _np.column_stack(columns)
     return values[_np.all(_np.isfinite(values), axis=1)]
@@ -646,9 +665,17 @@ def realizations(var):
     Returns `(n_data, n_realizations)` either way, so that whatever reads it
     does not have to care which it got.
     """
+    values = None
     try:
         values = _np.asarray(var.get_simulations(), dtype=float)
     except Exception:
+        # a vector variable with nothing simulated fails stacking its
+        # components rather than handing anything back
+        pass
+
+    # and a continuous one hands back `asarray(None)`, a dimensionless nan,
+    # which reads as a value right up until it is asked for its length
+    if values is None or values.ndim == 0:
         prediction = getattr(var, "prediction", None)
         if prediction is None:
             raise ValueError(
@@ -656,6 +683,26 @@ def realizations(var):
         values = _np.asarray(prediction.values.to_numpy(), dtype=float)
 
     return values.reshape(len(values), -1)
+
+
+def realization_store(var):
+    """
+    A variable's realizations as a store to read in bands, not as an array.
+
+    The same `(n_data, n_realizations)` that `realizations` hands back, without
+    asking memory for all of it at once. A block model's simulations are the
+    one thing a container holds that will not fit -- hundreds of gigabytes is
+    an ordinary size for them -- and every use of them here is a reduction over
+    locations, which never needs more than a band of rows at a time.
+
+    A variable with no simulations falls back on its prediction, which is a
+    single column and already in RAM, and comes back as a one-band store so
+    that the caller has only the one path to write.
+    """
+    store = getattr(var, "simulations", None)
+    if store is not None and len(getattr(store, "shape", ())) == 2:
+        return store
+    return _storage.ArrayStore.from_numpy(realizations(var))
 
 
 def block_density(container, density, n_data, n_realizations):
@@ -667,26 +714,31 @@ def block_density(container, density, n_data, n_realizations):
     is, its realizations are matched one to one with the grade's: simulation
     `i` of the density belongs with simulation `i` of the grade, and pairing
     them any other way would invent a correlation that was never modelled.
+
+    Comes back as a single number where the density is one, and otherwise as a
+    store to read in bands alongside the grade. A simulated density is exactly
+    as big as the grade, so materializing it would give back everything not
+    materializing the grade saves.
     """
     if density is None:
-        return _np.ones([n_data, 1])
+        return 1.0
 
     if isinstance(density, (int, float)):
-        return _np.full([n_data, 1], float(density))
+        return float(density)
 
     if density in container.metadata:
         values = _np.asarray(container.get_metadata(density), dtype=float)
-        return values.reshape(n_data, 1)
+        return _storage.ArrayStore.from_numpy(values.reshape(n_data, 1))
 
     if density in container.variables:
-        values = realizations(variable(container, density))
-        if values.shape[1] not in (1, n_realizations):
+        store = realization_store(variable(container, density))
+        if store.shape[1] not in (1, n_realizations):
             raise ValueError(
                 "%r carries %d realizations and the grade carries %d; they "
                 "have to be matched one to one, or the density has to be the "
                 "same in all of them"
-                % (density, values.shape[1], n_realizations))
-        return values
+                % (density, store.shape[1], n_realizations))
+        return store
 
     raise KeyError(
         "nothing named %r to take a density from; metadata holds %s and the "
@@ -777,6 +829,38 @@ def uncertainty_values(container, name, variables=()):
            ", ".join(sorted(container.metadata)) or "nothing"))
 
 
+def _grade_band(store, band, keep):
+    """One band of realizations, with the blocks that were filtered out gone."""
+    values = _np.asarray(store[band], dtype=float)
+    return values if keep is None else values[keep[band]]
+
+
+def _mass_band(density, band, keep, shape):
+    """The mass of every block of a band, broadcast to the grade's shape."""
+    if not hasattr(density, "shape"):
+        return _np.broadcast_to(float(density), shape)
+
+    values = _np.asarray(density[band], dtype=float)
+    if keep is not None:
+        values = values[keep[band]]
+    return _np.broadcast_to(values, shape)
+
+
+def _cutoff_range(store, bands, keep, name):
+    """The span of the finite realizations, in one pass over the store."""
+    low, high = _np.inf, -_np.inf
+    for band in bands:
+        values = _grade_band(store, band, keep)
+        finite = values[_np.isfinite(values)]
+        if finite.size > 0:
+            low = min(low, float(finite.min()))
+            high = max(high, float(finite.max()))
+
+    if not _np.isfinite(low):
+        raise ValueError("%r holds no values to cut" % name)
+    return low, high
+
+
 def grade_tonnage(container, name, density=None, cutoffs=30,
                   uncertainty=None, max_uncertainty=None):
     """
@@ -787,6 +871,14 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
     separately rather than averaged first: the curve of the mean model is not
     the mean of the curves, since a cut-off is a threshold and averaging either
     side of it gives different answers.
+
+    The simulations are read a band of blocks at a time and never held whole:
+    a block model runs to hundreds of gigabytes of them, and what comes out is
+    one small number per cut-off per realization. Each block is placed at the
+    highest cut-off it clears and the curve is the running total from the top
+    down, so the cost is one pass over the grade rather than one per cut-off.
+    Giving `cutoffs` as values rather than as a count saves the pass that would
+    otherwise be needed to find their range.
 
     Parameters
     ----------
@@ -830,12 +922,13 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
     extent = {1: "length", 2: "area", 3: "volume"}.get(len(step), "volume")
 
     var = variable_or_component(container, name)
-    grade = realizations(var)
+    grade = realization_store(var)
     n_data, n_realizations = grade.shape
 
-    mass = volume * block_density(container, density, n_data, n_realizations)
+    mass_per_volume = block_density(
+        container, density, n_data, n_realizations)
 
-    total = n_data
+    total, keep = n_data, None
     if max_uncertainty is not None:
         if uncertainty is None:
             raise ValueError(
@@ -846,28 +939,54 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
             container, uncertainty,
             [var] + ([owner] if owner is not None else []))
         keep = _np.isfinite(doubt) & (doubt <= float(max_uncertainty))
-        grade, mass = grade[keep], mass[keep] if mass.shape[0] > 1 else mass
         if not _np.any(keep):
             raise ValueError(
                 "no block is certain enough to keep: the smallest %r is %g, "
                 "above the %g asked for"
                 % (uncertainty, _np.nanmin(doubt), max_uncertainty))
-    kept = grade.shape[0]
+    kept = total if keep is None else int(_np.count_nonzero(keep))
 
+    bands = grade.row_bands()
     if isinstance(cutoffs, (int, _np.integer)):
-        finite = grade[_np.isfinite(grade)]
-        if len(finite) == 0:
-            raise ValueError("%r holds no values to cut" % name)
-        cutoffs = _np.linspace(_np.min(finite), _np.max(finite), int(cutoffs))
+        low, high = _cutoff_range(grade, bands, keep, name)
+        cutoffs = _np.linspace(low, high, int(cutoffs))
     cutoffs = _np.asarray(cutoffs, dtype=float)
 
-    tonnage = _np.zeros([len(cutoffs), n_realizations])
-    metal = _np.zeros_like(tonnage)
-    for i, cutoff in enumerate(cutoffs):
-        above = (grade >= cutoff) & _np.isfinite(grade)
-        weight = _np.where(above, mass, 0.0)
-        tonnage[i] = _np.sum(weight, axis=0)
-        metal[i] = _np.sum(weight * _np.where(above, grade, 0.0), axis=0)
+    # What each band adds is the mass sitting *at* a cut-off -- above it and
+    # below the next one up. Summing those from the top down at the end turns
+    # them into the mass above each cut-off, which is the curve.
+    n_cutoffs = len(cutoffs)
+    at_cutoff = _np.zeros([n_cutoffs, n_realizations])
+    metal_at_cutoff = _np.zeros_like(at_cutoff)
+    columns = _np.arange(n_realizations)
+
+    for band in bands:
+        values = _grade_band(grade, band, keep)
+        if values.shape[0] == 0:
+            continue
+        weight = _mass_band(mass_per_volume, band, keep, values.shape)
+
+        # the highest cut-off each block clears; -1 for one that clears none,
+        # which is where a block with no value belongs as well
+        index = _np.searchsorted(cutoffs, values, side="right") - 1
+        index[~_np.isfinite(values)] = -1
+        above = index >= 0
+
+        # one bin per (cut-off, realization) pair, so every realization is
+        # accumulated in the same pass over the band
+        binned = (index * n_realizations + columns)[above]
+        values, weight = values[above], weight[above]
+        at_cutoff += _np.bincount(
+            binned, weights=weight,
+            minlength=n_cutoffs * n_realizations
+        ).reshape(n_cutoffs, n_realizations)
+        metal_at_cutoff += _np.bincount(
+            binned, weights=weight * values,
+            minlength=n_cutoffs * n_realizations
+        ).reshape(n_cutoffs, n_realizations)
+
+    tonnage = volume * _np.cumsum(at_cutoff[::-1], axis=0)[::-1]
+    metal = volume * _np.cumsum(metal_at_cutoff[::-1], axis=0)[::-1]
 
     with _np.errstate(invalid="ignore", divide="ignore"):
         mean_grade = _np.where(tonnage > 0, metal / tonnage, _np.nan)
