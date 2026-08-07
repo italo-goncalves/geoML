@@ -58,9 +58,16 @@ class _ModelOptions:
 
 
 class GPOptions(_ModelOptions):
+    # Class default, so that a model saved before this option existed still
+    # opens: `persistence` rebuilds options with `__new__` plus a `vars()`
+    # update, never calling `__init__`, so the instance dict has no entry and
+    # the lookup falls through to here.
+    jit_predict = False
+
     def __init__(self, verbose=True, prediction_batch_size=20000,
                  seed=1234, jitter=1e-9,
-                 training_batch_size=2000, training_samples=20):
+                 training_batch_size=2000, training_samples=20,
+                 jit_predict=False):
         """
         Configuration of Gaussian process models.
 
@@ -81,19 +88,31 @@ class GPOptions(_ModelOptions):
             Number of data points per batch during training.
         training_samples : int
             Number of Monte Carlo samples to be drawn when training requires it.
+        jit_predict : bool
+            Whether to compile the prediction graph with XLA. Worth 3-5x on a
+            grid of any size, and more on a GPU, but XLA compiles per distinct
+            batch shape (so a grid that `prediction_batch_size` does not divide
+            pays that cost twice) and refuses to run anything it cannot
+            compile, rather than falling back. Prediction only: the same
+            treatment makes training both slower and unstable.
         """
         super().__init__(verbose, prediction_batch_size,
                          training_batch_size, seed)
         self.jitter = jitter
         self.training_samples = training_samples
+        self.jit_predict = jit_predict
 
 
 class _GPModel(_gpr.Parametric):
-    def __init__(self, options=GPOptions()):
+    def __init__(self, options=None):
         super().__init__()
-        self.options = options
+        # Not a default argument: one `GPOptions()` would then be built at
+        # import time and shared by every model that did not bring its own,
+        # so setting an option on one model would set it on all of them.
+        self.options = GPOptions() if options is None else options
         self._pre_computations = {}
         self._n_dim = None
+        self._compiled = {}
 
     def __str__(self):
         # a model is summarized, not written as a call: `pretty_print()` is
@@ -156,7 +175,7 @@ class GP(_GPModel):
     """
     def __init__(self, data, variable, covariance, warping=None,
                  directional_data=None, interpolation=False,
-                 use_trend=False, options=GPOptions()):
+                 use_trend=False, options=None):
         """
         Basic Gaussian process model.
 
@@ -560,7 +579,7 @@ class VGPNetwork(_GPModel):
     def __init__(self, data, variables, likelihoods,
                  latent_network,
                  directional_data=None,
-                 options=GPOptions()):
+                 options=None):
         """
         Variational Gaussian process network.
 
@@ -904,9 +923,23 @@ class VGPNetwork(_GPModel):
         if self.options.verbose:
             print("\n")
 
-    @_tf.function
-    def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, include_noise='delta', n_splits=None):
+    def predict_raw(self, *args, **kwargs):
+        """`_predict_raw` in a graph, XLA-compiled when the options ask for it.
+
+        `jit_compile` is settled when a `tf.function` is built, so honouring an
+        option means holding one function per setting rather than a flag on a
+        single one. Each is traced at most once per model, and `None` (rather
+        than `False`) leaves the uncompiled path exactly as it was.
+        """
+        jit = bool(self.options.jit_predict)
+        traced = self._compiled.get(jit)
+        if traced is None:
+            traced = _tf.function(self._predict_raw, jit_compile=jit or None)
+            self._compiled[jit] = traced
+        return traced(*args, **kwargs)
+
+    def _predict_raw(self, x_new, variable_inputs, x_var=None,
+                     n_sim=1, seed=0, include_noise='delta', n_splits=None):
         # The posterior is refreshed once by `predict` and snapshotted into
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
@@ -1019,7 +1052,7 @@ class VGPNetwork(_GPModel):
 class StructuralField(_GPModel):
     """Structural field modeling based on gradient data."""
     def __init__(self, tangents, covariance, normals=None, mean_vector=None,
-                 options=GPOptions()):
+                 options=None):
         super().__init__(options=options)
 
         self.tangents = tangents
@@ -1264,7 +1297,7 @@ class StructuralField(_GPModel):
 
 
 class _EnsembleModel(_GPModel):
-    def __init__(self, options=GPOptions):
+    def __init__(self, options=None):
         super().__init__(options)
         self.models = []
         self.variable = None
@@ -1343,7 +1376,7 @@ class _EnsembleModel(_GPModel):
 class GPEnsemble(_EnsembleModel):
     """An ensemble of Gaussian processes."""
     def __init__(self, data, variable, covariance, warping=None, directional_data=None,
-                 use_trend=False, options=GPOptions()):
+                 use_trend=False, options=None):
         """
         An ensemble of Gaussian processes.
 
@@ -1585,7 +1618,7 @@ class GPEnsemble(_EnsembleModel):
 
 class Normalizer(_GPModel):
     """Trainable data normalizer."""
-    def __init__(self, warping, options=GPOptions()):
+    def __init__(self, warping, options=None):
         """
         Trainable data normalizer.
 
@@ -1697,9 +1730,9 @@ class ProjectedVGP(VGPNetwork):
 
             return elbo
 
-    @_tf.function
-    def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, jitter=1e-6, include_noise=True):
+    def _predict_raw(self, x_new, variable_inputs, x_var=None,
+                     n_sim=1, seed=0, jitter=1e-6, include_noise=True):
+        # `predict_raw` is inherited: it compiles this the way the options ask.
         self.latent_network.refresh(jitter)
 
         with _tf.name_scope("Prediction"):

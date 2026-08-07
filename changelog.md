@@ -49,6 +49,27 @@ run recovers it within a few hundred iterations
 * `train_svi` passes its directional data correctly. It was building each of
 the four directional tensors with a trailing comma, so a one-element tuple
 reached the model in place of the tensor
+* `GPOptions(jit_predict=True)` compiles the prediction graph with XLA, which
+is worth 3 to 5 times on a grid of any size: on a 200 000-node grid a
+prediction went from 2.46 s to 0.53 s on the processor, and from 1.05 s to
+0.36 s on a GPU; a block model, 16 000 blocks discretized 3x3x3, from 5.27 s to
+1.06 s and from 2.26 s to 0.73 s. The gain is not in the arithmetic but in the
+memory it saves: the covariance between a batch of locations and the inducing
+points builds a difference tensor of one entry per pair per dimension, several
+times over, and every one of those is a full pass through memory to compute
+something that is only read once. XLA fuses that chain into a single loop and
+the intermediates are never written down at all — which is also why the gain is
+smaller on a GPU, whose memory is fast enough that the unfused version hurt
+less. Two things to know. XLA compiles for the exact shape it is given, so a
+grid that `prediction_batch_size` does not divide pays that compilation twice,
+about half a second; and it refuses to run anything it cannot compile rather
+than falling back quietly, which is why this is an option and not simply how
+prediction works. It is off by default. Prediction only, and named so: the same
+treatment applied to training was both slower and unstable
+* A model built without an `options` argument now gets its own `GPOptions`.
+The default was written as `options=GPOptions()`, which Python evaluates once,
+when the module is imported, so every model that did not bring its own options
+shared a single object and setting an option on one model set it on all of them
 * Networks with more than one expert are now tested — building, training,
 predicting in one batch and in many, propagating through a second layer, and
 surviving a save and load
