@@ -20,6 +20,14 @@ geoml.datasets module
    :show-inheritance:
    :undoc-members:
 
+geoml.inducing module
+---------------------
+
+.. automodule:: geoml.inducing
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 geoml.interpolation module
 --------------------------
 

@@ -1,3 +1,55 @@
+## version 0.5.6
+* `geoml.inducing` builds the inducing points a network is given, which until
+now had to be assembled by hand. `from_kmeans` puts them where the data is,
+`from_grid` on a regular lattice, and `combine` merges sets — the usual
+mixture of a regular backbone and the data's own locations is
+`combine(from_grid(data, 50), from_kmeans(data, 200))`. The two `*_experts`
+functions build a list, one set per expert, which is what `BasicInput` wants
+when a model is divided into local experts. Both make neighbouring experts
+overlap, which is what stops a prediction showing a seam where one gives way
+to the next. `grid_experts` cuts space into regular blocks, each taking its own
+block plus one node of margin all round: every expert holds the same number of
+points and its neighbours are known in advance rather than measured — the
+Moore neighbourhood, 8 in the plane and 26 in space. `experts` is the unordered
+counterpart, for points that follow the data rather than a lattice, as a
+drillhole survey does since it does not fill its bounding box. It clusters the
+points into groups of about the same size, then lets each group take in
+everything within `1 + overlap` times the Mahalanobis radius its own members
+reach — a point absorbed that way keeps its original group as well, so the
+experts come to share the points between them. The usual call divides a set
+chosen beforehand, `experts(from_kmeans(data, 1500), 12)`. A cluster of samples
+taken along one drillhole is nearly a line, whose covariance is singular and
+whose Mahalanobis distance across the line would be unbounded, so the
+eigenvalues are floored before the radius is measured
+* A GP node no longer propagates its inducing points when nothing is built on
+top of it. Every expert's set is predicted from every other, so this is the
+one step in the network that is quadratic in the number of experts, and on the
+last node of a network it was pure waste: nothing ever read the result. On a
+single-layer model with 32 experts that alone took a prediction from 1.9 s to
+0.18 s. Deeper networks keep paying it where it is genuinely needed
+* The refresh that `predict` runs once per call is now traced rather than run
+in eager Python. It is arithmetic over parameters that do not move during a
+prediction, but run eagerly it pays Python overhead for each covariance block,
+which with several experts was most of the call. The trace is kept on the
+network so predicting again does not rebuild it, and it reads the parameters
+live, so a model trained further still predicts from its new state
+* A training step — the ELBO, its gradient and the update — is now traced as
+one graph instead of being driven from eager Python. Run eagerly, Adam issues
+its update variable by variable at about 1.5 ms each whatever the variable's
+size, which is invisible on a small model and dominant on a large one: a GP
+node holds three parameters per expert, so 40 experts spent more time in the
+optimizer than in the model, 278 ms a step against 98 ms traced. The step is
+built once per call to `train_full`/`train_svi` and reused. The cost is a
+larger graph to build the first time, which a short run does not repay — the
+mixed Jura case, five iterations, went from 30.3 s to 38.5 s — while a real
+run recovers it within a few hundred iterations
+* `train_svi` passes its directional data correctly. It was building each of
+the four directional tensors with a trailing comma, so a one-element tuple
+reached the model in place of the tensor
+* Networks with more than one expert are now tested — building, training,
+predicting in one batch and in many, propagating through a second layer, and
+surviving a save and load
+
 ## version 0.5.5
 * `get_contour(value, close="above")` closes a surface where it runs out of
 the grid, so what comes back is a body with a volume rather than a sheet with

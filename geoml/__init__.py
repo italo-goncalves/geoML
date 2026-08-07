@@ -6,6 +6,7 @@ __all__ = [
     'drillhole',
     'geometry',
     'graphviz',
+    'inducing',
     'interpolation',
     'kernels',
     'likelihood',
