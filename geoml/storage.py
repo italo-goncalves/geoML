@@ -352,6 +352,25 @@ class ArrayStore:
         """A labelled ``xarray.DataArray`` over this store (dask-backed)."""
         return _xr.DataArray(self.as_dask(), dims=dims, coords=coords, name=name)
 
+    def row_bands(self, rows=None):
+        """Slices covering axis 0, each one holding whole chunks.
+
+        Reading a store a band at a time is what keeps a reduction over
+        locations flat in memory. Chunking splits axis 0 only, so a band is a
+        whole number of chunks and every row in it is complete: a reduction
+        across simulations sees all of a location's at once, and nothing has to
+        be stitched back together afterwards.
+
+        A NumPy-backed store is already in RAM and comes back as a single band,
+        so a caller written this way costs nothing on small data.
+        """
+        n_rows = int(self.shape[0])
+        if rows is None:
+            rows = self._array.chunks[0] if self._backend == "zarr" else n_rows
+        rows = max(1, int(rows))
+        return [slice(lo, min(lo + rows, n_rows))
+                for lo in range(0, n_rows, rows)]
+
     def row_quantiles(self, qs):
         """Lazy row-wise quantiles of a 2-D store.
 

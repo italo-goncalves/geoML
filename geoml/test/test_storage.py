@@ -148,6 +148,39 @@ def test_scratch_consolidation_and_cleanup():
     assert os.path.exists(c.store_path)            # other owner unaffected
 
 
+def test_row_bands_cover_every_row_once_and_hold_whole_chunks(tmp_path):
+    reference = np.random.random((40, 16))
+    sims = ArrayStore.allocate((40, 16), backend="zarr",
+                               store=str(tmp_path / "b.zarr"),
+                               chunks=(7, 16))
+    sims[:] = reference
+
+    bands = sims.row_bands()
+    assert len(bands) == 6                              # 40 rows, 7 to a chunk
+    assert [(b.start, b.stop) for b in bands][:2] == [(0, 7), (7, 14)]
+    assert bands[-1].stop == 40                         # the short last one
+    assert np.allclose(np.concatenate([sims[b] for b in bands]), reference)
+
+    # a band is what a reduction across simulations reads at once, so it has to
+    # hold every column of the rows it covers
+    assert all(sims[b].shape[1] == 16 for b in bands)
+
+
+def test_row_bands_of_a_numpy_store_are_a_single_band():
+    """Data already in RAM has nothing to stream, so a caller written to band
+    it pays nothing for being written that way."""
+    store = ArrayStore.from_numpy(np.random.random((40, 16)))
+    assert store.row_bands() == [slice(0, 40)]
+
+
+def test_row_bands_can_be_asked_for_a_size(tmp_path):
+    sims = ArrayStore.allocate((40, 16), backend="zarr",
+                               store=str(tmp_path / "s.zarr"), chunks=(7, 16))
+    assert len(sims.row_bands(rows=20)) == 2
+    assert len(sims.row_bands(rows=1)) == 40
+    assert sims.row_bands(rows=0) == sims.row_bands(rows=1)   # never empty
+
+
 def test_row_quantiles_matches_numpy(tmp_path):
     reference = np.random.random((40, 16))
     sims = ArrayStore.allocate((40, 16), backend="zarr",

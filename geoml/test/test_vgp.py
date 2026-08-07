@@ -220,3 +220,123 @@ def test_gradient_constrained_input_reflects_retraining():
     after = np.array(grid.variables["rock_num"].latent_mean.values, copy=True)
 
     assert not np.allclose(before, after)
+
+
+# --------------------------------------------------------------------------- #
+# options.jit_predict (XLA)
+# --------------------------------------------------------------------------- #
+def test_jit_prediction_matches_the_plain_one():
+    """XLA must not change the answer, and the flag must work both ways.
+
+    Fusion reassociates floating-point arithmetic, so the two paths agree to
+    rounding rather than exactly; anything larger means the compiled graph is
+    computing something else.
+    """
+    model, grid = build_model()
+    model.train_full(max_iter=10)
+
+    model.predict(grid, n_sim=4)
+    plain = np.array(grid.variables["V"].latent_mean.values, copy=True)
+
+    model.options.jit_predict = True
+    model.predict(grid, n_sim=4)
+    compiled = np.array(grid.variables["V"].latent_mean.values, copy=True)
+
+    # and back again, on the same live model
+    model.options.jit_predict = False
+    model.predict(grid, n_sim=4)
+    plain_again = np.array(grid.variables["V"].latent_mean.values, copy=True)
+
+    assert np.all(np.isfinite(compiled))
+    assert np.allclose(plain, compiled, atol=1e-8)
+    assert np.allclose(plain, plain_again, atol=1e-8)
+
+
+def test_jit_holds_one_traced_function_per_setting():
+    """`jit_compile` is fixed when a tf.function is built, so each setting gets
+    its own, built once and kept."""
+    model, grid = build_model()
+    model.train_full(max_iter=5)
+
+    model.predict(grid, n_sim=4)
+    assert set(model._compiled) == {False}
+    first = model._compiled[False]
+
+    model.options.jit_predict = True
+    model.predict(grid, n_sim=4)
+    assert set(model._compiled) == {False, True}
+
+    model.options.jit_predict = False
+    model.predict(grid, n_sim=4)
+    assert model._compiled[False] is first     # reused, not rebuilt
+
+
+def test_jit_prediction_is_batch_invariant():
+    """XLA compiles per batch shape, so a partial last batch takes a second
+    trace. The result must not depend on that."""
+    model, grid = build_model()
+    model.train_full(max_iter=10)
+    model.options.jit_predict = True
+
+    model.options.prediction_batch_size = 10 ** 9
+    model.predict(grid, n_sim=4)
+    one_batch = np.array(grid.variables["V"].latent_mean.values, copy=True)
+
+    model.options.prediction_batch_size = 700      # does not divide the grid
+    model.predict(grid, n_sim=4)
+    many_batches = np.array(grid.variables["V"].latent_mean.values, copy=True)
+
+    assert np.allclose(one_batch, many_batches, atol=1e-8)
+
+
+def test_jit_prediction_on_the_gradient_constrained_path():
+    """The other network root that carries its own posterior state."""
+    model, grid = build_gradient_constrained_model()
+    model.train_full(max_iter=8)
+
+    model.predict(grid, n_sim=4)
+    plain = np.array(grid.variables["rock_num"].latent_mean.values, copy=True)
+
+    model.options.jit_predict = True
+    model.predict(grid, n_sim=4)
+    compiled = np.array(grid.variables["rock_num"].latent_mean.values,
+                        copy=True)
+
+    assert np.all(np.isfinite(compiled))
+    assert np.allclose(plain, compiled, atol=1e-8)
+
+
+def test_models_built_without_options_do_not_share_them():
+    """`options=GPOptions()` as a default argument would build one object at
+    import time and hand it to every model, so setting an option on one would
+    set it on all of them."""
+    first = geoml.models.GPOptions()
+    second = geoml.models.GPOptions()
+    assert first is not second
+
+    walker_point, _ = geoml.datasets.walker()
+    ip = geoml.data.Grid2D(start=[1, 1], n=[6, 6], step=[44, 50])
+    models = []
+    for _ in range(2):
+        root = geoml.latent.BasicInput(
+            ip, transform=geoml.transform.Isotropic(50))
+        gp = geoml.latent.BasicGP(root, size=1)
+        models.append(geoml.models.VGPNetwork(
+            walker_point, "V", geoml.likelihood.Gaussian(), gp))
+
+    assert models[0].options is not models[1].options
+    models[0].options.jit_predict = True
+    assert models[1].options.jit_predict is False
+
+
+def test_options_saved_before_jit_predict_still_open():
+    """`persistence` rebuilds options with __new__ plus a vars() update, never
+    calling __init__, so an option added later is absent from an old file. The
+    class-level default is what keeps those models loadable."""
+    old = geoml.models.GPOptions.__new__(geoml.models.GPOptions)
+    vars(old).update({"verbose": False, "prediction_batch_size": 20000,
+                      "training_batch_size": 2000, "seed": 1234,
+                      "jitter": 1e-9, "training_samples": 20})
+
+    assert "jit_predict" not in vars(old)
+    assert old.jit_predict is False

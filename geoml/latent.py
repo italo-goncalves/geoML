@@ -27,6 +27,67 @@ import numpy as _np
 import tensorflow as _tf
 
 
+def _graph_state(node):
+    """
+    The attributes a node holds as tensors, which a traced refresh must return.
+
+    An attribute written while a `tf.function` is tracing keeps a symbolic
+    tensor, which is unusable once the trace is over. Reading them off the node
+    rather than listing them per class means a new node needs nothing new here.
+    """
+    state = {}
+    for name, value in vars(node).items():
+        if name.startswith("_"):
+            continue
+        if isinstance(value, _tf.Tensor):
+            state[name] = value
+        elif (isinstance(value, (tuple, list)) and len(value) > 0
+                and all(isinstance(v, _tf.Tensor) for v in value)):
+            state[name] = tuple(value)
+    return state
+
+
+def refresh_cached(network, jitter=1e-6):
+    """
+    Refreshes a network once and snapshots it for prediction.
+
+    `refresh` is pure arithmetic over parameters that do not move during
+    prediction, but running it eagerly pays Python overhead for each of the
+    K x K covariance blocks a multi-expert network builds -- at 32 experts that
+    is most of a `predict` call. Tracing it collapses those into one graph
+    call. The trace is kept on the network, so predicting again does not
+    rebuild it, and it reads the parameters live, so it also follows further
+    training.
+
+    Parameters
+    ----------
+    network
+        The output node of a latent network.
+    jitter : float
+        Small value added to the covariance matrices for numerical stability.
+    """
+    cached = network._refresh_graph
+    if cached is None or cached[0] != jitter:
+        # fixed once, so that the values coming back keep lining up with the
+        # nodes they belong to
+        nodes = list(set(network.get_unique_parents()) | {network})
+
+        def traced():
+            network.refresh(jitter)
+            return [_graph_state(node) for node in nodes]
+
+        cached = (jitter, _tf.function(traced), nodes)
+        network._refresh_graph = cached
+
+    _, traced_refresh, nodes = cached
+    for node, state in zip(nodes, traced_refresh()):
+        for name, value in state.items():
+            setattr(node, name, value)
+
+    for node in nodes:
+        node.cache_prediction_state()
+
+
 class NodeIncompatibilityError(Exception):
     """Exception raised for incompatibilities between a node and its parents/children."""
     pass
@@ -56,6 +117,10 @@ class _LatentVariable(_gpr.Parametric):
 
         # Filled in by `_set_name`, once the node is wired to its neighbors.
         self.name = None
+
+        # The traced refresh built by `refresh_cached`, kept so that repeated
+        # predictions reuse it instead of tracing again. Holds (jitter, fn).
+        self._refresh_graph = None
 
         # These are TensorFlow attributes, defined at graph execution time
         self.inducing_points = None
@@ -805,35 +870,40 @@ class BasicGP(_GPNode):
                 for mat, vec in zip(self.cov_inv, means)
             )
 
-            bias = [self.parameters[f'bias_{i}'].get_value() for i in range(self.root.n_experts)]
+            # inducing points, for whatever is built on top of this node.
+            # Every expert's set is predicted from every other, so this is the
+            # one quadratic step in the network: with a terminal node it is
+            # also pure waste, since nothing ever reads the result.
+            if len(self.children) > 0:
+                bias = [self.parameters[f'bias_{i}'].get_value() for i in range(self.root.n_experts)]
 
-            self.inducing_points = []
-            self.inducing_points_variance = []
-            for i in range(self.root.n_experts):
-                ip_i = self.parent.inducing_points[i]
-                ipv_i = self.parent.inducing_points_variance[i]
-                means = []
-                pred_vars = []
-                for j in range(self.root.n_experts):
-                    ip_j = self.parent.inducing_points[j]
-                    ipv_j = self.parent.inducing_points_variance[j]
-                    cov = self.covariance_matrix(ip_i, ip_j, ipv_i, ipv_j)
-                    means.append(_tf.einsum("ab,sbc->sac", cov, self.alpha[j]) + bias[j])
-                    pred_vars.append(
-                        1.0 - _tf.reduce_sum(
-                            _tf.einsum("ab,sbc->sac", cov, self.cov_smooth_inv[j]) * cov[None, :, :],
-                            axis=2, keepdims=False
+                self.inducing_points = []
+                self.inducing_points_variance = []
+                for i in range(self.root.n_experts):
+                    ip_i = self.parent.inducing_points[i]
+                    ipv_i = self.parent.inducing_points_variance[i]
+                    means = []
+                    pred_vars = []
+                    for j in range(self.root.n_experts):
+                        ip_j = self.parent.inducing_points[j]
+                        ipv_j = self.parent.inducing_points_variance[j]
+                        cov = self.covariance_matrix(ip_i, ip_j, ipv_i, ipv_j)
+                        means.append(_tf.einsum("ab,sbc->sac", cov, self.alpha[j]) + bias[j])
+                        pred_vars.append(
+                            1.0 - _tf.reduce_sum(
+                                _tf.einsum("ab,sbc->sac", cov, self.cov_smooth_inv[j]) * cov[None, :, :],
+                                axis=2, keepdims=False
+                            )
                         )
+                    means = _tf.stack(means, axis=0)  # [n_experts, n_latent, n_data, 1]
+                    pred_vars = _tf.stack(pred_vars, axis=0)  # [n_experts, n_latent, n_data]
+                    weights = _GPNode.get_expert_weights(pred_vars)
+                    self.inducing_points.append(
+                        _tf.transpose(_tf.reduce_sum(means[:, :, :, 0] * weights, axis=0))
                     )
-                means = _tf.stack(means, axis=0)  # [n_experts, n_latent, n_data, 1]
-                pred_vars = _tf.stack(pred_vars, axis=0)  # [n_experts, n_latent, n_data]
-                weights = _GPNode.get_expert_weights(pred_vars)
-                self.inducing_points.append(
-                    _tf.transpose(_tf.reduce_sum(means[:, :, :, 0] * weights, axis=0))
-                )
-                self.inducing_points_variance.append(
-                    _tf.transpose(_tf.reduce_sum(pred_vars * weights, axis=0))
-                )
+                    self.inducing_points_variance.append(
+                        _tf.transpose(_tf.reduce_sum(pred_vars * weights, axis=0))
+                    )
 
     def cache_prediction_state(self):
         super().cache_prediction_state()

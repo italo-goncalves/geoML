@@ -21,6 +21,7 @@ import numpy as np
 
 import geoml.data as _data
 import geoml.parameter as _gpr
+import geoml.latent as _latent
 import geoml.likelihood as _lk
 import geoml.warping as _warp
 import geoml.tftools as _tftools
@@ -57,9 +58,16 @@ class _ModelOptions:
 
 
 class GPOptions(_ModelOptions):
+    # Class default, so that a model saved before this option existed still
+    # opens: `persistence` rebuilds options with `__new__` plus a `vars()`
+    # update, never calling `__init__`, so the instance dict has no entry and
+    # the lookup falls through to here.
+    jit_predict = False
+
     def __init__(self, verbose=True, prediction_batch_size=20000,
                  seed=1234, jitter=1e-9,
-                 training_batch_size=2000, training_samples=20):
+                 training_batch_size=2000, training_samples=20,
+                 jit_predict=False):
         """
         Configuration of Gaussian process models.
 
@@ -80,19 +88,31 @@ class GPOptions(_ModelOptions):
             Number of data points per batch during training.
         training_samples : int
             Number of Monte Carlo samples to be drawn when training requires it.
+        jit_predict : bool
+            Whether to compile the prediction graph with XLA. Worth 3-5x on a
+            grid of any size, and more on a GPU, but XLA compiles per distinct
+            batch shape (so a grid that `prediction_batch_size` does not divide
+            pays that cost twice) and refuses to run anything it cannot
+            compile, rather than falling back. Prediction only: the same
+            treatment makes training both slower and unstable.
         """
         super().__init__(verbose, prediction_batch_size,
                          training_batch_size, seed)
         self.jitter = jitter
         self.training_samples = training_samples
+        self.jit_predict = jit_predict
 
 
 class _GPModel(_gpr.Parametric):
-    def __init__(self, options=GPOptions()):
+    def __init__(self, options=None):
         super().__init__()
-        self.options = options
+        # Not a default argument: one `GPOptions()` would then be built at
+        # import time and shared by every model that did not bring its own,
+        # so setting an option on one model would set it on all of them.
+        self.options = GPOptions() if options is None else options
         self._pre_computations = {}
         self._n_dim = None
+        self._compiled = {}
 
     def __str__(self):
         # a model is summarized, not written as a call: `pretty_print()` is
@@ -155,7 +175,7 @@ class GP(_GPModel):
     """
     def __init__(self, data, variable, covariance, warping=None,
                  directional_data=None, interpolation=False,
-                 use_trend=False, options=GPOptions()):
+                 use_trend=False, options=None):
         """
         Basic Gaussian process model.
 
@@ -559,7 +579,7 @@ class VGPNetwork(_GPModel):
     def __init__(self, data, variables, likelihoods,
                  latent_network,
                  directional_data=None,
-                 options=GPOptions()):
+                 options=None):
         """
         Variational Gaussian process network.
 
@@ -769,6 +789,47 @@ class VGPNetwork(_GPModel):
 
             return elbo
 
+    def _training_step(self, variables, training_inputs):
+        """
+        One traced training step: the ELBO, its gradient and the update.
+
+        Keeping all three inside a single `tf.function` matters more than it
+        looks. Run eagerly — as it is when the tape and `apply_gradients` sit
+        outside a graph — Adam issues its update variable by variable, at a
+        cost of roughly 1.5 ms each whatever the variable's size. A GP node
+        holds three parameters *per expert*, so a network of 40 experts spends
+        more time in the optimizer than in the model itself: 278 ms a step
+        against 98 ms traced.
+
+        Built once per call to `train_full`/`train_svi` and reused for every
+        iteration; building it per iteration would retrace each time and cost
+        far more than it saves.
+        """
+        directions = {}
+        if self.directional_data is not None:
+            directions = dict(
+                x_dir=_tf.constant(
+                    self.directional_data.coordinates, _tf.float64),
+                directions=_tf.constant(
+                    self.directional_data.directions, _tf.float64),
+                y_dir=_tf.constant(self.y_dir, _tf.float64),
+                has_value_directions=_tf.constant(
+                    self.has_value_dir, _tf.float64))
+
+        @_tf.function
+        def step(x, y, has_value, x_var):
+            with _tf.GradientTape() as tape:
+                loss = - self._training_elbo(
+                    x, y, has_value, training_inputs, x_var=x_var,
+                    samples=self.options.training_samples,
+                    jitter=self.options.jitter,
+                    seed=self.options.seed,
+                    **directions)
+            self.optimizer.apply_gradients(
+                zip(tape.gradient(loss, variables), variables))
+
+        return step
+
     def train_full(self, max_iter=1000):
         """
         Model training.
@@ -785,42 +846,16 @@ class VGPNetwork(_GPModel):
                            for v in self.variables]
 
         model_variables = self.get_unfixed_variables()
+        step = self._training_step(model_variables, training_inputs)
 
-        def loss():
-            if self.directional_data is None:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates, _tf.float64),
-                    _tf.constant(self.y, _tf.float64),
-                    _tf.constant(self.has_value, _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_batched_variance()[0],
-                                       _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed)
-            else:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates, _tf.float64),
-                    _tf.constant(self.y, _tf.float64),
-                    _tf.constant(self.has_value, _tf.float64),
-                    training_inputs,
-                    x_var=_tf.constant(self.data.get_batched_variance()[0],
-                                       _tf.float64),
-                    x_dir=_tf.constant(
-                        self.directional_data.coordinates,
-                        _tf.float64),
-                    directions=_tf.constant(
-                        self.directional_data.directions, _tf.float64),
-                    y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    has_value_directions=_tf.constant(
-                        self.has_value_dir, _tf.float64),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed)
+        # the whole data set every iteration, so it is converted once
+        x = _tf.constant(self.data.coordinates, _tf.float64)
+        y = _tf.constant(self.y, _tf.float64)
+        has_value = _tf.constant(self.has_value, _tf.float64)
+        x_var = _tf.constant(self.data.get_batched_variance()[0], _tf.float64)
 
         for i in range(max_iter):
-            # self.optimizer.minimize(loss, model_variables)
-            _tftools.training_step(self.optimizer, loss, model_variables)
+            step(x, y, has_value, x_var)
 
             for pr in self._all_parameters:
                 pr.refresh()
@@ -848,60 +883,10 @@ class VGPNetwork(_GPModel):
         """
         model_variables = self.get_unfixed_variables()
 
-        if self.directional_data is not None:
-            x_dir = _tf.constant(
-                self.directional_data.coordinates,
-                _tf.float64),
-            directions = _tf.constant(
-                self.directional_data.directions, _tf.float64),
-            y_dir = _tf.constant(self.y_dir, _tf.float64),
-            has_value_directions = _tf.constant(
-                self.has_value_dir, _tf.float64),
-
-        def loss(idx):
-            # training_inputs = [
-            #     self.data.variables[v].training_input(idx)
-            #     for v in self.variables]
-
-            if self.directional_data is None:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    # training_inputs,
-                    [{} for v in self.variables],
-                    x_var=_tf.constant(self.data.get_batched_variance(idx)[0],
-                                       _tf.float64),
-                    # local_x, local_y, local_hv, {}, local_x_var,
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed
-                )
-            else:
-                return - self._training_elbo(
-                    _tf.constant(self.data.coordinates[idx],
-                                 _tf.float64),
-                    _tf.constant(self.y[idx], _tf.float64),
-                    _tf.constant(self.has_value[idx], _tf.float64),
-                    # training_inputs,
-                    [{} for v in self.variables],
-                    x_var=_tf.constant(self.data.get_batched_variance(idx)[0],
-                                       _tf.float64),
-                    # local_x, local_y, local_hv, {}, local_x_var,
-                    x_dir=_tf.identity(x_dir),
-                    # directions=_tf.constant(
-                    #     self.directional_data.directions, _tf.float64),
-                    # y_dir=_tf.constant(self.y_dir, _tf.float64),
-                    # has_value_directions=_tf.constant(
-                    #     self.has_value_dir, _tf.float64),
-                    directions=_tf.identity(directions),
-                    y_dir=_tf.identity(y_dir),
-                    has_value_directions=_tf.identity(has_value_directions),
-                    samples=self.options.training_samples,
-                    jitter=self.options.jitter,
-                    seed=self.options.seed
-                )
+        # The variables' own training inputs are not indexed by batch here, as
+        # they are in `train_full` -- see the commented-out attempt below.
+        step = self._training_step(
+            model_variables, [{} for _ in self.variables])
 
         # a generator of its own, so the batch order is reproducible from
         # options.seed without reaching any draw made outside training
@@ -914,11 +899,15 @@ class VGPNetwork(_GPModel):
             batches = self.options.batch_index(self.data.n_data)
 
             for batch in batches:
-                # self.optimizer.minimize(
-                #     # loss,
-                #     lambda: loss(shuffled[batch]),
-                #     model_variables)
-                _tftools.training_step(self.optimizer, lambda: loss(shuffled[batch]), model_variables)
+                # training_inputs = [
+                #     self.data.variables[v].training_input(idx)
+                #     for v in self.variables]
+                idx = shuffled[batch]
+                step(_tf.constant(self.data.coordinates[idx], _tf.float64),
+                     _tf.constant(self.y[idx], _tf.float64),
+                     _tf.constant(self.has_value[idx], _tf.float64),
+                     _tf.constant(self.data.get_batched_variance(idx)[0],
+                                  _tf.float64))
 
                 for pr in self._all_parameters:
                     pr.refresh()
@@ -934,9 +923,23 @@ class VGPNetwork(_GPModel):
         if self.options.verbose:
             print("\n")
 
-    @_tf.function
-    def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, include_noise='delta', n_splits=None):
+    def predict_raw(self, *args, **kwargs):
+        """`_predict_raw` in a graph, XLA-compiled when the options ask for it.
+
+        `jit_compile` is settled when a `tf.function` is built, so honouring an
+        option means holding one function per setting rather than a flag on a
+        single one. Each is traced at most once per model, and `None` (rather
+        than `False`) leaves the uncompiled path exactly as it was.
+        """
+        jit = bool(self.options.jit_predict)
+        traced = self._compiled.get(jit)
+        if traced is None:
+            traced = _tf.function(self._predict_raw, jit_compile=jit or None)
+            self._compiled[jit] = traced
+        return traced(*args, **kwargs)
+
+    def _predict_raw(self, x_new, variable_inputs, x_var=None,
+                     n_sim=1, seed=0, include_noise='delta', n_splits=None):
         # The posterior is refreshed once by `predict` and snapshotted into
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
@@ -1019,13 +1022,12 @@ class VGPNetwork(_GPModel):
         # Refresh the posterior once (the parameters are fixed during
         # prediction) and snapshot each node's state into Variables, so the
         # cached `predict_raw` graph reads current values without recomputing the
-        # posterior (Cholesky factorizations, etc.) on every batch.
-        self.latent_network.refresh(self.options.jitter)
+        # posterior (Cholesky factorizations, etc.) on every batch. The refresh
+        # itself is traced -- see `latent.refresh_cached`.
         if hasattr(self.latent_network, "cache_prediction_state"):
-            nodes = set(self.latent_network.get_unique_parents())
-            nodes.add(self.latent_network)
-            for node in nodes:
-                node.cache_prediction_state()
+            _latent.refresh_cached(self.latent_network, self.options.jitter)
+        else:
+            self.latent_network.refresh(self.options.jitter)
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
                 print("\rProcessing batch %s of %s       "
@@ -1050,7 +1052,7 @@ class VGPNetwork(_GPModel):
 class StructuralField(_GPModel):
     """Structural field modeling based on gradient data."""
     def __init__(self, tangents, covariance, normals=None, mean_vector=None,
-                 options=GPOptions()):
+                 options=None):
         super().__init__(options=options)
 
         self.tangents = tangents
@@ -1295,7 +1297,7 @@ class StructuralField(_GPModel):
 
 
 class _EnsembleModel(_GPModel):
-    def __init__(self, options=GPOptions):
+    def __init__(self, options=None):
         super().__init__(options)
         self.models = []
         self.variable = None
@@ -1374,7 +1376,7 @@ class _EnsembleModel(_GPModel):
 class GPEnsemble(_EnsembleModel):
     """An ensemble of Gaussian processes."""
     def __init__(self, data, variable, covariance, warping=None, directional_data=None,
-                 use_trend=False, options=GPOptions()):
+                 use_trend=False, options=None):
         """
         An ensemble of Gaussian processes.
 
@@ -1616,7 +1618,7 @@ class GPEnsemble(_EnsembleModel):
 
 class Normalizer(_GPModel):
     """Trainable data normalizer."""
-    def __init__(self, warping, options=GPOptions()):
+    def __init__(self, warping, options=None):
         """
         Trainable data normalizer.
 
@@ -1728,9 +1730,9 @@ class ProjectedVGP(VGPNetwork):
 
             return elbo
 
-    @_tf.function
-    def predict_raw(self, x_new, variable_inputs, x_var=None,
-                    n_sim=1, seed=0, jitter=1e-6, include_noise=True):
+    def _predict_raw(self, x_new, variable_inputs, x_var=None,
+                     n_sim=1, seed=0, jitter=1e-6, include_noise=True):
+        # `predict_raw` is inherited: it compiles this the way the options ask.
         self.latent_network.refresh(jitter)
 
         with _tf.name_scope("Prediction"):

@@ -1,3 +1,111 @@
+## version 0.5.6
+* `geoml.inducing` builds the inducing points a network is given, which until
+now had to be assembled by hand. `from_kmeans` puts them where the data is,
+`from_grid` on a regular lattice, and `combine` merges sets — the usual
+mixture of a regular backbone and the data's own locations is
+`combine(from_grid(data, 50), from_kmeans(data, 200))`. The two `*_experts`
+functions build a list, one set per expert, which is what `BasicInput` wants
+when a model is divided into local experts. Both make neighbouring experts
+overlap, which is what stops a prediction showing a seam where one gives way
+to the next. `grid_experts` cuts space into regular blocks, each taking its own
+block plus one node of margin all round: every expert holds the same number of
+points and its neighbours are known in advance rather than measured — the
+Moore neighbourhood, 8 in the plane and 26 in space. `experts` is the unordered
+counterpart, for points that follow the data rather than a lattice, as a
+drillhole survey does since it does not fill its bounding box. It clusters the
+points into groups of about the same size, and each group then borrows a
+further `overlap` of its own count from around it — the nearest points, in
+Mahalanobis distance, among those belonging to other groups. A borrowed point
+keeps its own group as well, so the experts come to share the points between
+them. Counting the overlap in points rather than in distance is what keeps the
+experts the same size: growing each group's radius instead lets one in a
+crowded part of the survey swallow far more than one out on its own. The usual
+call divides a set chosen beforehand, `experts(from_kmeans(data, 1500), 12)`.
+A cluster of samples taken along one drillhole is nearly a line, whose
+covariance is singular and whose Mahalanobis distance across the line would be
+unbounded, so the eigenvalues are floored before the distances are measured
+* A GP node no longer propagates its inducing points when nothing is built on
+top of it. Every expert's set is predicted from every other, so this is the
+one step in the network that is quadratic in the number of experts, and on the
+last node of a network it was pure waste: nothing ever read the result. On a
+single-layer model with 32 experts that alone took a prediction from 1.9 s to
+0.18 s. Deeper networks keep paying it where it is genuinely needed
+* The refresh that `predict` runs once per call is now traced rather than run
+in eager Python. It is arithmetic over parameters that do not move during a
+prediction, but run eagerly it pays Python overhead for each covariance block,
+which with several experts was most of the call. The trace is kept on the
+network so predicting again does not rebuild it, and it reads the parameters
+live, so a model trained further still predicts from its new state
+* A training step — the ELBO, its gradient and the update — is now traced as
+one graph instead of being driven from eager Python. Run eagerly, Adam issues
+its update variable by variable at about 1.5 ms each whatever the variable's
+size, which is invisible on a small model and dominant on a large one: a GP
+node holds three parameters per expert, so 40 experts spent more time in the
+optimizer than in the model, 278 ms a step against 98 ms traced. The step is
+built once per call to `train_full`/`train_svi` and reused. The cost is a
+larger graph to build the first time, which a short run does not repay — the
+mixed Jura case, five iterations, went from 30.3 s to 38.5 s — while a real
+run recovers it within a few hundred iterations
+* `train_svi` passes its directional data correctly. It was building each of
+the four directional tensors with a trailing comma, so a one-element tuple
+reached the model in place of the tensor
+* `GPOptions(jit_predict=True)` compiles the prediction graph with XLA, which
+is worth 3 to 5 times on a grid of any size: on a 200 000-node grid a
+prediction went from 2.46 s to 0.53 s on the processor, and from 1.05 s to
+0.36 s on a GPU; a block model, 16 000 blocks discretized 3x3x3, from 5.27 s to
+1.06 s and from 2.26 s to 0.73 s. The gain is not in the arithmetic but in the
+memory it saves: the covariance between a batch of locations and the inducing
+points builds a difference tensor of one entry per pair per dimension, several
+times over, and every one of those is a full pass through memory to compute
+something that is only read once. XLA fuses that chain into a single loop and
+the intermediates are never written down at all — which is also why the gain is
+smaller on a GPU, whose memory is fast enough that the unfused version hurt
+less. Two things to know. XLA compiles for the exact shape it is given, so a
+grid that `prediction_batch_size` does not divide pays that compilation twice,
+about half a second; and it refuses to run anything it cannot compile rather
+than falling back quietly, which is why this is an option and not simply how
+prediction works. It is off by default. Prediction only, and named so: the same
+treatment applied to training was both slower and unstable
+* A model built without an `options` argument now gets its own `GPOptions`.
+The default was written as `options=GPOptions()`, which Python evaluates once,
+when the module is imported, so every model that did not bring its own options
+shared a single object and setting an option on one model set it on all of them
+* A grade-tonnage curve no longer needs the simulations in memory. It opened
+by asking for all of them as one array, which on a real block model — 280 GB
+of them on disk — killed the session before any arithmetic happened. They are
+now read a band of blocks at a time and reduced as they arrive, so what memory
+holds is one band and the answer, which is a few numbers per cut-off per
+realization however many blocks there were. The chunking never had to change:
+the simulations are already split along the block axis only, so a chunk is a
+band of blocks holding every realization of each — exactly what a reduction
+over blocks wants. A simulated density is streamed alongside the grade rather
+than materialized, since it is as large as the grade itself, and a density
+given as a number is now kept as one instead of being spread over an array of
+one value per block
+* The same curve is also about five times faster. Each cut-off used to take
+its own pass over every block, so thirty cut-offs meant thirty passes; now
+each block is placed once at the highest cut-off it clears, and summing those
+from the top down at the end turns them into the curve. Giving `cutoffs` as
+values rather than as a count saves a further pass, the one that would
+otherwise go looking for their range. On two million blocks by forty
+realizations: 11.2 s and 2.7 GB of working memory, against 2.4 s and none
+* `simulation_sample`, which thins the simulations down to what a scatter
+matrix can draw, now strides through them while reading rather than
+materializing a whole component and throwing most of it away. Which values it
+takes follows from the stride alone, so two components chunked differently are
+still thinned to the same locations and the pairs stay pairs
+* `ArrayStore.row_bands()` is the slices to read a store in, each holding
+whole chunks. This is what the above is written against, and what anything
+reducing over locations should use
+* Fixed: a variable with no simulations was meant to fall back on its
+prediction as the only realization there is, but never could. Asked for
+simulations it does not have, it hands back `asarray(None)` — a dimensionless
+nan, which reads as a value right up to the point where it is asked for its
+length, and the fallback was only reached when something raised
+* Networks with more than one expert are now tested — building, training,
+predicting in one batch and in many, propagating through a second layer, and
+surviving a save and load
+
 ## version 0.5.5
 * `get_contour(value, close="above")` closes a surface where it runs out of
 the grid, so what comes back is a body with a volume rather than a sheet with
