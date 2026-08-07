@@ -133,33 +133,50 @@ def test_experts_cover_every_point_at_least_once():
     assert everything == original
 
 
-def test_experts_overlap_and_more_overlap_shares_more():
+def test_no_overlap_is_a_strict_partition():
     walker_point, _ = _walker()
     points = ind.from_kmeans(walker_point, 200, seed=0)
+    sets = ind.experts(points, 5, overlap=0.0, seed=0)
+    assert sum(s.n_data for s in sets) == points.n_data
 
-    def total(overlap):
-        return sum(s.n_data for s in ind.experts(points, 5, overlap=overlap,
-                                                 seed=0))
 
-    # every expert holds more than its share, and asking for more reach shares
-    # more points out
-    assert total(0.0) > points.n_data
-    assert total(0.5) > total(0.0)
-    assert total(1.0) > total(0.5)
+def test_overlap_is_a_fraction_of_the_experts_own_points():
+    walker_point, _ = _walker()
+    points = ind.from_kmeans(walker_point, 200, seed=0)
+    core = [s.n_data for s in ind.experts(points, 5, overlap=0.0, seed=0)]
+
+    for overlap in (0.2, 0.5):
+        sizes = [s.n_data for s in ind.experts(points, 5, overlap=overlap,
+                                               seed=0)]
+        for own, grown in zip(core, sizes):
+            assert grown == own + round(overlap * own)
+
+
+def test_overlap_keeps_the_experts_the_same_size():
+    """The point of counting the overlap in points rather than in distance:
+    a crowded cluster must not swallow far more than an isolated one."""
+    rng = np.random.default_rng(0)
+    crowded = rng.normal([0, 0], 3.0, (300, 2))
+    sparse = rng.uniform([40, 40], [140, 140], (300, 2))
+    points = geoml.data.PointData.from_array(
+        np.concatenate([crowded, sparse]))
+
+    sizes = [s.n_data for s in ind.experts(points, 6, overlap=0.25, seed=0)]
+    assert max(sizes) / min(sizes) < 1.1
 
 
 def test_experts_keep_their_own_cluster():
-    """A point may be absorbed by a neighbour but never dropped by its own."""
+    """A point may be borrowed by a neighbour but never dropped by its own."""
     walker_point, _ = _walker()
     points = ind.from_kmeans(walker_point, 150, seed=0)
-    sets = ind.experts(points, 4, overlap=0.0, seed=0)
+    sets = ind.experts(points, 4, overlap=0.3, seed=0)
     counts = {}
     for s in sets:
         for p in np.asarray(s.coordinates):
-            counts[tuple(np.round(p, 6))] = counts.get(
-                tuple(np.round(p, 6)), 0) + 1
-    assert min(counts.values()) >= 1
-    assert max(counts.values()) > 1      # something really is shared
+            key = tuple(np.round(p, 6))
+            counts[key] = counts.get(key, 0) + 1
+    assert len(counts) == points.n_data   # nothing lost
+    assert max(counts.values()) > 1       # something really is shared
 
 
 def test_experts_survive_a_collinear_cluster():

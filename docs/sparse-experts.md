@@ -500,10 +500,19 @@ runs are in the thousands. Worth knowing before timing anything short.
 
 ---
 
-Found while testing, not touched: **`predict(newdata, n_sim=0)` raises.**
-`_GPNode.predict` returns two values when `n_sim=0` and `predict_raw` unpacks
-five (`models.py:944`). It fails the same way on master, so it is not something
-the changes above introduced, but nothing in the suite covers it.
+Noticed while testing, and **left alone deliberately**:
+`predict(newdata, n_sim=0)` raises, because `_GPNode.predict` returns two
+values when `n_sim=0` while `predict_raw` unpacks five (`models.py:944`).
+
+It is not dead code so much as a capability with nothing above it to use. The
+latent variables are Gaussian, so a node can carry a mean and a variance
+without drawing anything, which is what the `n_sim=0` branch in
+`_GPNode.predict` and the two-value returns in `interpolate`,
+`BasicInput.predict` and `ProductOfExperts.predict` are for. What forces
+simulations is `likelihood.py`, which works from samples — so a prediction
+through `VGPNetwork` needs at least about 20 of them, and `predict` defaults to
+20. The analytic path is therefore unreachable from the model layer today, but
+it says something true about the latent layer and is worth keeping.
 
 ### 8.1 `geoml/inducing.py`
 

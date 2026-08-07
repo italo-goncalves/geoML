@@ -318,16 +318,18 @@ def experts(points, n_experts, overlap=0.1, seed=None):
 
     The unordered counterpart to `grid_experts`, for inducing points that
     follow the data rather than a lattice. The points are split into clusters
-    of about the same size; each cluster then measures how far its own members
-    reach from its centre, in Mahalanobis distance, and takes in every point
-    within `1 + overlap` times that radius. A point absorbed this way keeps its
-    original cluster too, so neighbouring experts come to share the points
-    between them — which is what stops a prediction showing a seam where one
-    expert gives way to the next, and is the irregular equivalent of the one
-    step of margin `grid_experts` adds to each block.
+    of about the same size, and each cluster then borrows a further `overlap`
+    of its own count from its surroundings: the points nearest its centre, in
+    Mahalanobis distance, among those belonging to other clusters. A borrowed
+    point keeps its own cluster too, so neighbouring experts come to share the
+    points between them — which is what stops a prediction showing a seam where
+    one expert gives way to the next, and is the irregular equivalent of the
+    one step of margin `grid_experts` adds to each block.
 
-    The experts therefore come back with different numbers of points, unlike
-    `grid_experts`, and their union is larger than the set handed in.
+    Counting the overlap in points rather than in distance is what keeps the
+    experts the same size. Growing each cluster's Mahalanobis radius instead
+    lets a cluster in a crowded part of the survey swallow far more than one
+    out on its own, and the experts come out wildly uneven.
 
     Since this divides inducing points rather than data, the usual call is
     ``experts(from_kmeans(data, 1500), 12)``.
@@ -340,17 +342,17 @@ def experts(points, n_experts, overlap=0.1, seed=None):
     n_experts : int
         Number of experts. Must not exceed the number of points.
     overlap : float
-        How far past its own members each cluster reaches, as a fraction of
-        its Mahalanobis radius. Zero still overlaps a little, since a cluster's
-        ellipsoid generally covers some of its neighbours' points.
+        How many points each expert borrows from its neighbours, as a fraction
+        of its own count, so an expert ends up with about `1 + overlap` times
+        the points its cluster holds. Zero leaves the experts a strict
+        partition, sharing nothing.
     seed : int
         Passed to `sklearn.cluster.KMeans` for a reproducible result.
 
     Returns
     -------
     list of geoml.data.PointData
-        One set per expert, each holding its own cluster and whatever it
-        absorbed from around it.
+        One set per expert: its own cluster, plus what it borrowed.
     """
     coordinates = _coordinates(points)
     n_points, n_dim = coordinates.shape
@@ -368,14 +370,20 @@ def experts(points, n_experts, overlap=0.1, seed=None):
     sets = []
     for j in range(n_experts):
         core = labels == j
+        keep = core.copy()
+
         members = coordinates[core]
-        center = members.mean(axis=0)
-        covariance = _cluster_covariance(members, n_dim)
+        outside = _np.flatnonzero(~core)
+        borrowed = min(int(round(overlap * core.sum())), outside.size)
 
-        distance = _mahalanobis(coordinates, center, covariance)
-        radius = (1.0 + overlap) * distance[core].max()
+        if borrowed > 0:
+            covariance = _cluster_covariance(members, n_dim)
+            distance = _mahalanobis(coordinates, members.mean(axis=0),
+                                    covariance)[outside]
+            if borrowed < outside.size:
+                outside = outside[_np.argpartition(distance, borrowed - 1)
+                                  [:borrowed]]
+            keep[outside] = True
 
-        keep = distance <= radius
-        keep[core] = True  # a cluster never loses its own members
         sets.append(_as_points(coordinates[keep], coordinate_labels))
     return sets

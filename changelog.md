@@ -13,14 +13,17 @@ points and its neighbours are known in advance rather than measured — the
 Moore neighbourhood, 8 in the plane and 26 in space. `experts` is the unordered
 counterpart, for points that follow the data rather than a lattice, as a
 drillhole survey does since it does not fill its bounding box. It clusters the
-points into groups of about the same size, then lets each group take in
-everything within `1 + overlap` times the Mahalanobis radius its own members
-reach — a point absorbed that way keeps its original group as well, so the
-experts come to share the points between them. The usual call divides a set
-chosen beforehand, `experts(from_kmeans(data, 1500), 12)`. A cluster of samples
-taken along one drillhole is nearly a line, whose covariance is singular and
-whose Mahalanobis distance across the line would be unbounded, so the
-eigenvalues are floored before the radius is measured
+points into groups of about the same size, and each group then borrows a
+further `overlap` of its own count from around it — the nearest points, in
+Mahalanobis distance, among those belonging to other groups. A borrowed point
+keeps its own group as well, so the experts come to share the points between
+them. Counting the overlap in points rather than in distance is what keeps the
+experts the same size: growing each group's radius instead lets one in a
+crowded part of the survey swallow far more than one out on its own. The usual
+call divides a set chosen beforehand, `experts(from_kmeans(data, 1500), 12)`.
+A cluster of samples taken along one drillhole is nearly a line, whose
+covariance is singular and whose Mahalanobis distance across the line would be
+unbounded, so the eigenvalues are floored before the distances are measured
 * A GP node no longer propagates its inducing points when nothing is built on
 top of it. Every expert's set is predicted from every other, so this is the
 one step in the network that is quadratic in the number of experts, and on the
