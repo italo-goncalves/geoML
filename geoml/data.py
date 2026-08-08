@@ -239,6 +239,24 @@ class BoundingBox(object):
         return contains
 
 
+def _carry_rows(source, target, keep):
+    """Copy the `keep` rows of one simulation store into the front of another.
+
+    A band of the source at a time, so a store too large to hold is never
+    asked for whole. The kept rows keep their order and land contiguously,
+    which is what lets every write here be a plain slice.
+    """
+    index = _np.flatnonzero(keep)
+    written = 0
+    for band in source.row_bands():
+        inside = index[(index >= band.start) & (index < band.stop)]
+        if len(inside) == 0:
+            continue
+        chunk = _np.asarray(source[band])
+        target[written:written + len(inside), :] = chunk[inside - band.start]
+        written += len(inside)
+
+
 def _selected_simulations(store, selection):
     """The simulations to export, read in a single pass over the store.
 
@@ -752,6 +770,49 @@ class _Variable(object):
     @classmethod
     def from_variable(cls, coordinates, variable):
         raise NotImplementedError
+
+    def carry_to(self, coordinates, keep, n_new):
+        """This variable on a longer set of locations, keeping what still fits.
+
+        The locations of `coordinates` are the `keep` ones of this variable, in
+        their old order, followed by `n_new` that did not exist before. The
+        first take their values across; the rest come back missing, which is
+        what marks them as still to be predicted.
+
+        Used when a block set is refined: a block that was not split is the
+        same block on the same support, and its value is still the right
+        answer for it, so re-predicting it would spend the work to arrive at
+        the number already there.
+        """
+        keep = _np.asarray(keep, dtype=bool)
+        n_kept = int(_np.count_nonzero(keep))
+        new = self.__class__.from_variable(coordinates, self)
+
+        for role in self._ZARR_ATTRS:
+            old = getattr(self, role, None)
+            fresh = getattr(new, role, None)
+            if old is None or fresh is None or not old._has_content():
+                continue
+            fresh.labels = old.labels
+            fresh.values[:n_kept] = _np.asarray(old.values)[keep]
+
+        if self._ZARR_HAS_SIMS and self.simulations is not None:
+            new.allocate_simulations(self.simulations.shape[1])
+            _carry_rows(self.simulations, new.simulations, keep)
+
+        if self._ZARR_HAS_QUANTILES:
+            for source, target in ((self.quantiles, new.quantiles),
+                                   (self.probabilities, new.probabilities)):
+                for key, attr in source.items():
+                    fresh = self._Attribute(coordinates)
+                    fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
+                    target[key] = fresh
+
+        for name, component in (getattr(self, "components", None) or {}).items():
+            new.components[name] = component.carry_to(
+                coordinates, keep, n_new)
+
+        return new
 
     def __getitem__(self, item):
         raise NotImplementedError
@@ -5258,19 +5319,28 @@ class Blocks3D(Grid3D):
         return pv_blocks
 
 
+def _sub_block_index(discretization):
+    """Which sub-block sits where, as integer counts along each axis.
+
+    Axis 0 varies fastest, the order `_blockdata` has always used and the one
+    the likelihood's noise is indexed by. Both the sub-block offsets and, in a
+    `BlockSet3D`, the children of a split are built from this, so sub-block
+    `j` of a block and child `j` of that same block are the same corner of it.
+    """
+    return _np.array(
+        list(_iter.product(*[_np.arange(d) for d in discretization[::-1]])),
+        dtype=_np.int64)[:, ::-1]
+
+
 def _unit_sub_grid(discretization):
     """Sub-block offsets from a block's centre, as fractions of its size.
 
-    The same layout `_blockdata` builds, with axis 0 varying fastest, but
-    divided through by the block so that one array serves every size. Scaling
-    it per block is the whole of what a variable-size block model has to do
-    differently when it fans out.
+    The same layout `_blockdata` builds, but divided through by the block so
+    that one array serves every size. Scaling it per block is the whole of
+    what a variable-size block model has to do differently when it fans out.
     """
-    offsets = _np.array(
-        list(_iter.product(*[_np.arange(d) for d in discretization[::-1]])),
-        dtype=float)[:, ::-1]
-    offsets -= (_np.array(discretization)[None, :] - 1) / 2
-    return offsets / _np.array(discretization)[None, :]
+    counts = _np.array(discretization)[None, :]
+    return (_sub_block_index(discretization) - (counts - 1) / 2) / counts
 
 
 class BlockSet3D(PointData):
@@ -5284,8 +5354,8 @@ class BlockSet3D(PointData):
     is wanted takes a 29-million-cell model to under 700 000.
 
     Every block's position and size are whole numbers of a **base cell**, the
-    finest the model may go, which is `step / 2 ** max_levels`. Working in
-    those integers rather than in metres is what makes the arithmetic exact:
+    finest the model may go, which is `step / discretization ** max_levels`.
+    Working in those integers rather than in metres is what makes it exact:
     blocks meet without a tolerance, a block is a whole number of its own
     children, and regrouping conserves mass to the last digit. It also means
     the model can say which of its answers rest on coarse blocks, which is the
@@ -5297,12 +5367,16 @@ class BlockSet3D(PointData):
     removed, so that grouping is always safe -- a half-populated group would
     average over blocks that are not there and quietly weigh the answer wrong.
 
-    `discretization` is the same at every level, which is what lets a block of
-    any size fan out into the same number of rows: the model then sees one
-    shape whatever it is looking at, and nothing downstream has to know that
-    levels exist. It costs a coarse block some accuracy in its own average,
-    always by overstating how variable it is, which errs towards splitting it
-    -- and splitting is what removes the error.
+    `discretization` does two jobs, and they are the same job. It is how
+    finely a block is sampled to average it, and it is how a block splits:
+    each sub-block becomes a child. So the refinement ratio is the
+    discretization, per axis and not necessarily two -- `[2, 2, 1]` refines in
+    plan and leaves the bench height alone. Being the same at every level is
+    what lets a block of any size fan out into the same number of rows, so the
+    model sees one shape whatever it is looking at and nothing downstream has
+    to know that levels exist. It costs a coarse block some accuracy in its
+    own average, always by overstating how variable it is, which errs towards
+    splitting it -- and splitting is what removes the error.
 
     Parameters
     ----------
@@ -5313,10 +5387,10 @@ class BlockSet3D(PointData):
     step : array-like
         Size of a coarsest-level block.
     discretization : array-like
-        Sub-blocks per axis, used at every level. `[2, 2, 2]` by default,
-        which also places the sub-blocks exactly at the children's centres.
+        Sub-blocks per axis, used at every level, and so also the ratio a
+        block splits by. An axis given 1 is never refined.
     max_levels : int
-        How many times a block may be halved. Fixes the base cell, and so the
+        How many times a block may be split. Fixes the base cell, and so the
         lattice everything else is counted in.
     labels : list
         Coordinate names.
@@ -5346,6 +5420,11 @@ class BlockSet3D(PointData):
             raise ValueError(
                 "discretization needs three positive numbers; got %r"
                 % (discretization,))
+        if self.max_levels > 0 and _np.prod(self.discretization) == 1:
+            raise ValueError(
+                "a discretization of one sub-block cannot refine anything, so "
+                "max_levels=%d would have nothing to do; give a coarser "
+                "discretization or max_levels=0" % self.max_levels)
 
         n = _np.asarray(n, dtype=_np.int64)
         step = _np.asarray(step, dtype=float)
@@ -5355,20 +5434,24 @@ class BlockSet3D(PointData):
                 "start, n and step are three numbers each; got %s, %s and %s"
                 % (start.shape, n.shape, step.shape))
 
-        # the coarsest block is this many base cells across, so the whole
-        # lattice is counted in units no block can be smaller than
-        self._coarse = 2 ** self.max_levels
-        self.base_step = step / self._coarse
+        # Splitting a block hands each of its sub-blocks a block of its own, so
+        # the discretization is also the refinement ratio -- per axis, and not
+        # necessarily two. That is what keeps sub-block `j` and child `j` the
+        # same corner of the parent, which is what lets the criterion read off
+        # a coarse prediction mean anything about the children it would make.
+        # It also lets an axis be left alone: [2, 2, 1] refines in plan and
+        # keeps the bench height.
+        self.base_step = step / self._coarse_size
         # the box corner, not the first centre: a block's origin is its lower
         # corner, which is what makes the lattice arithmetic come out integer
         self.box_corner = start - step / 2
-        self.lattice_shape = n * self._coarse
+        self.lattice_shape = n * self._coarse_size
 
         cells = _np.stack(_np.meshgrid(
             *[_np.arange(k) for k in n], indexing="ij"), axis=-1
         ).reshape(-1, 3)
-        self._origin = cells * self._coarse
-        self._size = _np.full_like(self._origin, self._coarse)
+        self._origin = cells * self._coarse_size
+        self._level = _np.zeros(len(cells), dtype=_np.int64)
 
         self._sub_grid = _unit_sub_grid(self.discretization)
 
@@ -5386,6 +5469,29 @@ class BlockSet3D(PointData):
             * self.base_step
 
     @property
+    def _coarse_size(self):
+        """A coarsest block's extent, in base cells, along each axis.
+
+        Not the number of sub-blocks, which is `prod(discretization)` and is
+        the same at every level -- this is how far a level-0 block reaches
+        across the lattice, and so how many base cells it would come to if it
+        were split all the way down.
+        """
+        return _np.array(self.discretization,
+                         dtype=_np.int64) ** self.max_levels
+
+    @property
+    def _size(self):
+        """Each block's extent in base cells, from its level.
+
+        Held as the level rather than the size: a level is one small number
+        against three, and the two cannot then disagree.
+        """
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        return self._coarse_size[None, :] \
+            // ratio[None, :] ** self._level[:, None]
+
+    @property
     def block_size(self):
         return self._size * self.base_step
 
@@ -5395,9 +5501,7 @@ class BlockSet3D(PointData):
 
     @property
     def level(self):
-        # size halves at every level, so the level is how many halvings from
-        # the coarsest -- read off the first axis, all three being equal
-        return self.max_levels - _np.log2(self._size[:, 0]).astype(int)
+        return self._level
 
     @property
     def rows_per_location(self):
@@ -5427,19 +5531,28 @@ class BlockSet3D(PointData):
     # ------------------------------------------------------------------ #
     # refinement
     # ------------------------------------------------------------------ #
-    def split(self, mask, labels=("X", "Y", "Z")):
-        """A new block set with the marked blocks halved on every axis.
+    def split(self, mask, carry=True, labels=("X", "Y", "Z")):
+        """A new block set with each marked block cut into its own sub-blocks.
 
-        Returns geometry only: the variables are **not** carried over. A
-        block's value belongs to the support it was predicted on, and handing
-        a parent's value to its children would manufacture eight blocks that
-        agree exactly -- which is the one thing a refined model is supposed to
-        find out rather than assume. Predict onto the result.
+        A block becomes `prod(discretization)` children, one per sub-block and
+        in the same order, so the values a coarse prediction already holds for
+        those sub-blocks describe the blocks this makes.
+
+        A block that was **not** split keeps what was predicted for it: it is
+        the same block on the same support, so its value is still the right
+        answer and arriving at it again would be work for nothing. The
+        children start missing, and `unpredicted()` says which they are, so
+        `predict(..., where=...)` visits only them. A parent's value is never
+        handed down -- that would manufacture children agreeing exactly, which
+        is the one thing refining is meant to find out rather than assume.
 
         Parameters
         ----------
         mask : array-like
             One boolean per block, or the indices of the blocks to split.
+        carry : bool
+            Whether to bring the variables and metadata across. `False` gives
+            bare geometry, for building a mesh to predict onto from scratch.
         """
         mask = _np.asarray(mask)
         if mask.dtype != bool:
@@ -5451,7 +5564,7 @@ class BlockSet3D(PointData):
                 "the mask needs one value per block: got %d for %d"
                 % (mask.size, self.n_data))
 
-        finest = _np.any(self._size <= 1, axis=1)
+        finest = self._level >= self.max_levels
         if _np.any(mask & finest):
             raise ValueError(
                 "%d block(s) are already at the finest level the lattice "
@@ -5459,22 +5572,57 @@ class BlockSet3D(PointData):
                 "go further"
                 % (int(_np.count_nonzero(mask & finest)), self.max_levels))
 
-        half = self._size[mask] // 2
-        corner = _np.array(list(_iter.product([0, 1], repeat=3)))
+        # one child per sub-block, in the sub-blocks' own order
+        corner = _sub_block_index(self.discretization)
+        child_size = self._size[mask] // _np.array(self.discretization)
         children = (self._origin[mask][:, None, :]
-                    + corner[None, :, :] * half[:, None, :]).reshape(-1, 3)
-        child_size = _np.repeat(half, len(corner), axis=0)
+                    + corner[None, :, :] * child_size[:, None, :]
+                    ).reshape(-1, 3)
+        child_level = _np.repeat(self._level[mask] + 1, len(corner))
 
         new = _copy.copy(self)
         new._origin = _np.concatenate([self._origin[~mask], children])
-        new._size = _np.concatenate([self._size[~mask], child_size])
+        new._level = _np.concatenate([self._level[~mask], child_level])
         new.variables = {}
         new.metadata = {}
         new._init_coordinates(new._centres(), list(labels))
+        # `_init_coordinates` has just measured the box off the coordinates,
+        # which are block *centres*: that box is half a block short on every
+        # side, and short by a different amount after every split, since
+        # refining an edge block moves its centre nearer the boundary. Two
+        # sets over the same ground would then disagree about their extent.
+        # The real box is the lattice, which no refinement changes.
         new._bounding_box = BoundingBox(
             self.box_corner,
             self.box_corner + self.lattice_shape * self.base_step)
+
+        if carry:
+            # A block that was not split is the same block on the same
+            # support, so what was predicted for it still stands; only the new
+            # children have nothing yet. Metadata goes to the children as
+            # well, and by inheritance rather than as missing: it describes the
+            # ground, and a child occupies its parent's ground.
+            parent = _np.concatenate(
+                [_np.flatnonzero(~mask),
+                 _np.repeat(_np.flatnonzero(mask), len(corner))])
+            for name, variable in self.variables.items():
+                new.variables[name] = variable.carry_to(
+                    new, ~mask, len(children))
+            for name, column in self.metadata.items():
+                values = _np.asarray(column.values)[parent]
+                fresh = _Attribute(new, values, dtype=values.dtype)
+                fresh.labels = column.labels
+                new.metadata[name] = fresh
         return new
+
+    def unpredicted(self, variable):
+        """Which blocks the named variable has no value for yet.
+
+        What `split` leaves behind: hand it to `predict(..., where=...)` and
+        only the blocks the refinement created are visited.
+        """
+        return _np.isnan(_np.asarray(
+            self.variables[variable].prediction.values))
 
     # ------------------------------------------------------------------ #
     # what the model asks for
@@ -5690,7 +5838,7 @@ def _write_container(group, container):
         # the lattice itself, in integers, plus what it is counted in; the
         # centres are derived from those and are not stored twice
         write("_origin", container._origin)
-        write("_size", container._size)
+        write("_level", container._level)
         return {"class": "BlockSet3D",
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "box_corner": [float(x) for x in container.box_corner],
@@ -5772,14 +5920,13 @@ def _rebuild_container(meta, group):
         _PointBased.__init__(blocks)
         blocks.max_levels = int(meta["max_levels"])
         blocks.discretization = [int(d) for d in meta["discretization"]]
-        blocks._coarse = 2 ** blocks.max_levels
         blocks._sub_grid = _unit_sub_grid(blocks.discretization)
         blocks.base_step = _np.asarray(meta["base_step"], dtype=float)
         blocks.box_corner = _np.asarray(meta["box_corner"], dtype=float)
         blocks.lattice_shape = _np.asarray(meta["lattice_shape"],
                                            dtype=_np.int64)
         blocks._origin = read("_origin").astype(_np.int64)
-        blocks._size = read("_size").astype(_np.int64)
+        blocks._level = read("_level").astype(_np.int64)
         blocks._init_coordinates(blocks._centres(), meta["labels"])
         blocks._bounding_box = BoundingBox(
             blocks.box_corner,

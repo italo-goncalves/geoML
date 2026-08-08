@@ -972,7 +972,8 @@ class VGPNetwork(_GPModel):
                 )
             return output
 
-    def predict(self, newdata, n_sim=20, include_noise='monte_carlo'):
+    def predict(self, newdata, n_sim=20, include_noise='monte_carlo',
+                where=None):
         """
         Makes a prediction on the specified coordinates.
 
@@ -985,6 +986,17 @@ class VGPNetwork(_GPModel):
             Number of predictive samples to draw.
         include_noise : str
             The method to handle the noise. Either 'monte_carlo' (default), 'delta', or None to predict without noise.
+        where : array-like, optional
+            One boolean per location, or the indices of the locations to
+            predict. The rest are left exactly as they are, variables and
+            simulations alike, instead of being allocated afresh.
+
+            For refining a block model: `split` keeps what the blocks that
+            were not split already hold, and `unpredicted()` names the ones it
+            created, so only those are visited. A location's simulated value
+            does not depend on what else is in the batch, so this gives the
+            same answer as predicting the lot -- it just does not pay for it
+            twice.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
@@ -993,8 +1005,14 @@ class VGPNetwork(_GPModel):
         variable_inputs = []
         for v in self.variables:
             if v not in newdata.variables.keys():
+                if where is not None:
+                    raise ValueError(
+                        "predicting only some locations needs %r to be on the "
+                        "object already, holding what the others were given; "
+                        "predict once without `where` first" % v)
                 self.data.variables[v].copy_to(newdata)
-            newdata.variables[v].allocate_simulations(n_sim)
+            if where is None:
+                newdata.variables[v].allocate_simulations(n_sim)
             variable_inputs.append(self.data.variables[v].prediction_input())
 
         # prediction in batches. A discretized block fans out into several rows
@@ -1003,8 +1021,14 @@ class VGPNetwork(_GPModel):
         # as much work here as it does on a grid of points.
         batch_size = max(1, self.options.prediction_batch_size
                          // newdata.rows_per_location)
-        batch_id = self.options.batch_index(
-            newdata.n_data, batch_size=batch_size)
+        rows = _np.arange(newdata.n_data)
+        if where is not None:
+            where = _np.asarray(where)
+            rows = _np.flatnonzero(where) if where.dtype == bool else where
+        # the batches index into the chosen rows, so `update` still writes
+        # each result to the location it came from
+        batch_id = [rows[batch] for batch in
+                    self.options.batch_index(len(rows), batch_size=batch_size)]
         n_batches = len(batch_id)
 
         def batch_pred(x, x_var=None, n_splits=None):

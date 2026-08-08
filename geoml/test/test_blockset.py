@@ -55,14 +55,61 @@ def test_it_starts_as_a_full_uniform_grid():
                       np.prod(np.array(N) * np.array(STEP)))
 
 
-def test_the_base_cell_follows_max_levels():
-    """`max_levels` is what fixes the lattice everything else is counted in."""
-    for levels in (0, 1, 3):
-        blocks = _blockset(max_levels=levels)
-        assert np.allclose(blocks.base_step,
-                           np.array(STEP) / 2 ** levels)
-        assert np.all(blocks.lattice_shape
-                      == np.array(N) * 2 ** levels)
+def test_the_base_cell_follows_the_discretization_not_a_factor_of_two():
+    """The discretization *is* the refinement ratio: a block splits into its
+    own sub-blocks. So the base cell divides by it, per axis."""
+    for discretization in ((2, 2, 2), (3, 3, 3), (4, 4, 2), (2, 2, 1)):
+        for levels in (0, 1, 2):
+            blocks = _blockset(discretization, max_levels=levels)
+            ratio = np.array(discretization) ** levels
+            assert np.allclose(blocks.base_step, np.array(STEP) / ratio)
+            assert np.all(blocks.lattice_shape == np.array(N) * ratio)
+
+
+def test_a_split_makes_one_child_per_sub_block():
+    for discretization in ((2, 2, 2), (3, 3, 3), (4, 4, 2), (2, 2, 1)):
+        blocks = _blockset(discretization, max_levels=1)
+        fine = blocks.split([0])
+
+        k = int(np.prod(discretization))
+        assert fine.n_data == blocks.n_data - 1 + k
+        assert fine.is_full()
+        assert np.isclose(fine.block_volume.sum(), blocks.block_volume.sum())
+        # the child is the parent divided by the discretization, per axis
+        child = fine.block_size[fine.level == 1][0]
+        assert np.allclose(child, np.array(STEP) / np.array(discretization))
+
+
+def test_an_axis_given_one_sub_block_is_never_refined():
+    """`[2, 2, 1]` refines in plan and leaves the bench height alone."""
+    blocks = _blockset((2, 2, 1), max_levels=2)
+    fine = blocks.split(np.ones(blocks.n_data, dtype=bool))
+
+    assert np.allclose(fine.block_size[:, 2], STEP[2])
+    assert np.allclose(fine.block_size[:, 0], STEP[0] / 2)
+    assert fine.is_full()
+
+
+def test_the_children_land_where_the_sub_blocks_were():
+    """Sub-block j and child j are the same corner of the parent, which is
+    what lets a coarse prediction speak about the blocks a split would make."""
+    blocks = _blockset((2, 2, 2), max_levels=1)
+    sub, _ = blocks.get_batched_coordinates([0])
+
+    fine = blocks.split([0])
+    children = np.asarray(fine.coordinates)[fine.level == 1]
+    assert np.allclose(sub, children)
+
+
+def test_a_discretization_that_cannot_refine_is_refused():
+    with pytest.raises(ValueError, match="cannot refine"):
+        geoml.data.BlockSet3D(START, N, STEP, discretization=(1, 1, 1),
+                              max_levels=2)
+    # ... unless it is not being asked to
+    flat = geoml.data.BlockSet3D(START, N, STEP, discretization=(1, 1, 1),
+                                 max_levels=0)
+    assert flat.rows_per_location == 1
+    assert flat.get_batched_coordinates([0])[1] is None
 
 
 def test_splitting_keeps_the_box_full_and_the_volume_exact():
@@ -106,16 +153,83 @@ def test_the_mask_may_be_indices_and_has_to_fit():
         blocks.split(np.ones(blocks.n_data + 1, dtype=bool))
 
 
-def test_splitting_does_not_carry_the_predictions_over():
-    """A value belongs to the support it was predicted on. Handing a parent's
-    to its children would manufacture eight blocks that agree exactly, which
-    is what refining is meant to find out rather than assume."""
+def test_a_split_keeps_what_the_unsplit_blocks_already_held():
+    """A block that was not split is the same block on the same support, so
+    its value still stands. The children start missing -- handing a parent's
+    value down would manufacture children agreeing exactly, which is what
+    refining is meant to find out rather than assume."""
+    model = _model()
+    blocks = _blockset()
+    model.predict(blocks, n_sim=6)
+    before = blocks.variables["y"].prediction.values.to_numpy().copy()
+    before_sims = np.asarray(blocks.variables["y"].simulations).copy()
+
+    mask = np.asarray(blocks.coordinates)[:, 0] < 60.0
+    fine = blocks.split(mask)
+    kept = int((~mask).sum())
+
+    carried = fine.variables["y"].prediction.values.to_numpy()
+    assert np.allclose(carried[:kept], before[~mask])
+    assert np.allclose(np.asarray(fine.variables["y"].simulations)[:kept],
+                       before_sims[~mask])
+    assert np.all(np.isnan(carried[kept:]))
+    assert fine.unpredicted("y").sum() == fine.n_data - kept
+
+
+def test_metadata_is_inherited_by_the_children():
+    """Unlike a prediction, metadata describes the ground, and a child sits on
+    its parent's ground."""
+    blocks = _blockset()
+    blocks.add_metadata("domain", np.arange(blocks.n_data) % 3)
+    mask = np.zeros(blocks.n_data, dtype=bool)
+    mask[[1, 4]] = True
+    fine = blocks.split(mask)
+
+    kept = int((~mask).sum())
+    assert np.all(fine.get_metadata("domain")[:kept]
+                  == blocks.get_metadata("domain")[~mask])
+    assert np.all(fine.get_metadata("domain")[kept:]
+                  == np.repeat(blocks.get_metadata("domain")[mask], 8))
+
+
+def test_predicting_only_the_new_blocks_gives_the_same_answer():
+    """The point of carrying anything over. A location's simulated value does
+    not depend on what else is in the batch, so filling in the children alone
+    lands exactly where predicting the lot would have."""
+    model = _model()
+    blocks = _blockset()
+    model.predict(blocks, n_sim=6)
+    mask = np.asarray(blocks.coordinates)[:, 0] < 60.0
+
+    partial = blocks.split(mask)
+    model.predict(partial, n_sim=6, where=partial.unpredicted("y"))
+
+    whole = blocks.split(mask, carry=False)
+    model.predict(whole, n_sim=6)
+
+    for role in ("prediction", "dispersion", "latent_mean"):
+        assert np.allclose(
+            getattr(partial.variables["y"], role).values.to_numpy(),
+            getattr(whole.variables["y"], role).values.to_numpy(),
+            equal_nan=True)
+    assert np.allclose(np.asarray(partial.variables["y"].simulations),
+                       np.asarray(whole.variables["y"].simulations))
+    assert not np.any(np.isnan(
+        partial.variables["y"].prediction.values.to_numpy()))
+
+
+def test_carry_can_be_turned_off():
     blocks = _blockset()
     blocks.add_continuous_variable("y", np.zeros(blocks.n_data))
-    fine = blocks.split([0])
+    assert list(blocks.split([0], carry=False).variables) == []
+    assert list(blocks.split([0]).variables) == ["y"]
 
-    assert list(blocks.variables) == ["y"]
-    assert list(fine.variables) == []
+
+def test_predicting_a_subset_needs_the_variable_to_be_there_already():
+    model = _model()
+    blocks = _blockset()
+    with pytest.raises(ValueError, match="on the object already"):
+        model.predict(blocks, n_sim=4, where=np.arange(3))
 
 
 # --------------------------------------------------------------------------- #

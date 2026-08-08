@@ -4,20 +4,34 @@ fine where the ground is worth resolving, coarse everywhere else. On a real
 deposit that is most of the volume: refining to 5 m only around the drillholes
 takes a 29-million-cell model under 700 000, and its simulations from 22 GiB
 to half of one. Every block's position and size are whole numbers of a **base
-cell**, `step / 2 ** max_levels`, and working in those integers rather than in
+cell**, `step / discretization ** max_levels`, and working in those integers
+rather than in
 metres is what makes the arithmetic exact — blocks meet with no tolerance, a
 block is a whole number of its own children, and regrouping conserves mass to
 the last digit. It is built full, as a uniform grid, and `split` keeps it that
 way, so the blocks always tile their box: `is_full()` says so by counting base
 cells, since volume alone cannot tell a gap from an overlap that cancels it.
-`discretization` is the same at every level, which is the reason nothing
+`discretization` does two jobs, and they are the same job: it is how finely a
+block is sampled in order to average it, and it is how that block splits —
+each sub-block becomes a child. So the refinement ratio is the
+discretization, per axis and not necessarily two, which means an axis can be
+left alone (`[2, 2, 1]` refines in plan and keeps the bench height) and
+sub-block `j` and child `j` are the same corner of the parent, so what a
+coarse prediction already says about its sub-blocks describes the blocks a
+split would make. Being the same at every level is the reason nothing
 downstream had to change: a block of any size fans out into the same number of
 rows, so `_aggregate` still reshapes, batches need not be sorted by level, and
-the model never learns that levels exist. Splitting deliberately does **not**
-carry the predictions over — a value belongs to the support it was predicted
-on, and handing a parent's to its children would manufacture eight blocks that
-agree exactly, which is the one thing refining is meant to find out rather
-than assume. Per-block sizes are `block_size` and `block_volume`, not
+the model never learns that levels exist. Splitting keeps what the blocks that were *not*
+split already hold: such a block is the same block on the same support, so its
+value is still the right answer for it and arriving at it again would be work
+for nothing. Only the children start missing — a parent's value is never
+handed down, which would manufacture children agreeing exactly, the one thing
+refining is meant to find out rather than assume. `unpredicted()` names them
+and `predict(..., where=...)` visits only those, which gives bit-identical
+numbers to predicting the whole refined set because a location's simulated
+value does not depend on what else is in its batch. Metadata *is* inherited by
+the children, unlike a prediction: it describes the ground, and a child sits
+on its parent's ground. Per-block sizes are `block_size` and `block_volume`, not
 `step_size`: that name means one size for the whole object, and anything
 reading it would take the product of the array for a volume. Saves and reopens
 through `to_zarr`. The plan it comes from, and the measurements behind it, are
