@@ -451,30 +451,75 @@ three errors push toward splitting too much rather than too little.
 
 ### 7.3 The splitting criterion
 
-A union over every participating variable — conservative, so one variable
-demanding a split is enough.
+Every likelihood answers one question: *what does a value have to cross for
+the decision to change?* A grade crosses the cut-offs someone declared; an
+indicator crosses zero, `ind_skew` being a category's log-odds against its
+best rival, so that the contact between two categories is its zero level set.
+One reduction then serves both, and the categorical case needs no special
+handling — it simply has no realization axis.
 
-- **Continuous with cut-offs**: the proportion of the block above the cut-off,
-  at sub-block support, strictly inside `(eps, 1 - eps)`. The block straddles a
-  decision boundary.
-- **Categorical**: the sub-blocks disagree on the winning class — the block
-  contains a contact. The same extra reduction applied to `prob`
-  (`likelihood.py:742`); the natural statistic is the majority-class fraction.
+- **Continuous with cut-offs**: `cutoffs` declared on the variable and carried
+  to whatever is predicted from it. `cutoffs = None` is the opt-out — a
+  composition's rest component takes no part in any decision.
+- **Categorical**: the crossing is always zero, so nothing is declared;
+  opting out belongs to `split_on`.
 - **Geometric**: already built. `assign_from_surface(..., fraction=...)` gives
   the share of a block's sub-blocks below a sheet, and a fraction strictly
   between 0 and 1 means the surface cuts the block.
 - **Cap**: `max_levels`.
 
-**The test is direction-agnostic.** A cut-off sometimes keeps what is below it
-— a contaminant limit — but
-`p_above in (eps, 1-eps)  <=>  p_below in (eps, 1-eps)`. Direction matters for
-reporting, never for the split decision. So the proportion is stored in one
-convention (at-or-below, matching `row_cdf` and `reset_probabilities`) and the
-reporting layer flips it.
+A union over the participating variables, conservative on purpose: one
+variable demanding a split is enough.
 
-Resolution of the criterion at 2x2x2: a block carries `8 x n_sim` samples of
-its own interior — 160 at `n_sim = 20`, giving the proportion to sd 0.038, and
-never falsely saturating at 0 or 1 in 20 000 trials.
+#### The criterion this section first specified was wrong
+
+It said: split when the proportion of the block above the cut-off, over
+sub-blocks *and* realizations, lies strictly inside `(eps, 1 - eps)`. Built
+that way it marked **239 of 256** blocks, then 1766, then 13 460 — refining
+almost everything, which is the opposite of the point.
+
+The reason is the distinction §6.2 of this document already draws and the
+formula walks straight past. Averaging over sub-blocks and realizations
+together mixes two different things back into one number:
+
+- realizations either side of a cut-off are **the model not knowing**, and no
+  amount of cutting will settle it — the answer to that is another drillhole;
+- sub-blocks either side **within one realization** are two answers inside one
+  block, and cutting is exactly what separates them.
+
+Only the second licenses a split. So each realization is judged on its own —
+*is this block divided, in this realization?* — and only then averaged over
+realizations. That is `likelihood._divided`, against
+`likelihood._proportions` which keeps the first reading.
+
+Both are stored, because they answer different questions. `proportions[c]` is
+the recoverable share of the block, and per category for a categorical
+variable it is the partial-block domaining number — worth having whether or
+not anything is ever refined. `divided[c]` is the criterion.
+
+On a compact ore body in a barren domain, cut-off 1.0, three passes from a
+256-block start: **4309 blocks against 131 072** for the equivalent uniform
+model, 30x fewer, with the level-0 blocks at grade -0.17 to 0.66 and the
+finest spanning the cut-off.
+
+**The criterion reads the noise-free field.** Noise is the part of a block's
+spread that cutting cannot resolve, so a block straddling a cut-off only on
+account of it would be cut for nothing; the same argument makes `dispersion`
+noise-free, that being a statement about the ground rather than about the
+measurement. The predictions themselves still carry noise as `include_noise`
+asks. Verified: proportions, `divided` and dispersion all agree to `0.0e+00`
+between a noisy and a noise-free prediction, while the simulations differ.
+
+**The test is direction-agnostic.** A cut-off sometimes keeps what is below it
+— a contaminant limit — but a block is divided by the cut-off either way.
+Direction matters for reporting, never for the decision, so the proportion is
+stored in one convention (at-or-below, matching `row_cdf` and
+`reset_probabilities`) and the reporting layer flips it.
+
+Resolution at 2x2x2: a block carries `8 x n_sim` samples of its own interior —
+160 at `n_sim = 20`, giving a share to sd 0.038, and never falsely saturating
+at 0 or 1 in 20 000 trials. `tolerance` defaults to 0.05, so one realization
+in twenty finding a block divided does not carry it.
 
 ### 7.4 The saving erodes with variable count
 
@@ -658,12 +703,25 @@ Not recoverable, and not worth faking: `as_cube`, `as_image`, `smooth` and
    required, initialized as a full grid in lieu of `Blocks3D`. Split and group
    preserving fullness and conserving mass. Filters as metadata.
 3. **Per-cell volume in `grade_tonnage`**, and the VTK contour path.
-4. **The refinement criterion and the two-pass driver** — `split_on` naming
-   the variables, the union rule, the margin of §5.1 so contours stay
-   watertight. This is the stage needing a modelling judgement rather than an
-   engineering one, and it should be settled on a real deposit.
+4. **The refinement criterion and the two-pass driver** — `models.refine`,
+   `BlockSet3D.needs_splitting`, `split_on` naming the variables, the union
+   rule. **Done**, with the correction in §7.3.
 5. **Point location** for `aggregate_*` and `index_data`.
+6. **The margin of §5.1**, so a refined mesh does not crack where a contour
+   runs through it. Needs neighbour lookup on the lattice, which is
+   independent of everything above, so it was left out of stage 4 rather than
+   folded in.
+7. **`group`**, the inverse of `split`, with the per-group completeness check
+   of §10 — what makes conversion between supports two-directional.
 
 Deliberately excluded: level-aware batching (§2.1 makes it unnecessary),
 economic criteria such as NSR (§7.4 — not modelling inputs), tetrahedra as a
 block support (§9.1), and corner-point geometry (§9.2).
+
+Noted for later rather than done: `_CategoricalLikelihood.
+entropy_and_indicators` builds `ind_skew` with one full-size scatter per
+category, which a single top-2 pass would replace. It matters more since
+§7.3 moved that call before aggregation, where it sees
+`prod(discretization)` times as many rows. And the noise integration behind
+§7.2 is still crude — with a fixed sub-block count a coarse block averages
+out no more noise than a fine one, which it should.

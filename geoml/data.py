@@ -993,6 +993,15 @@ class _Variable(object):
                 key = prefix + "/probability_" + str(q)
                 attr.values.write_into(group, key)
                 meta["probabilities"].append({"key": key, "q": float(q)})
+            for role, source in (("proportions", "proportion"),
+                                 ("divided", "divided")):
+                meta[role] = []
+                for c, attr in getattr(self, role, {}).items():
+                    key = prefix + "/" + source + "_" + str(c)
+                    attr.values.write_into(group, key)
+                    meta[role].append({"key": key, "c": float(c)})
+            if getattr(self, "cutoffs", None) is not None:
+                meta["cutoffs"] = [float(c) for c in self.cutoffs]
         if getattr(self, "components", None):
             meta["components"] = {}
             for cname, comp in self.components.items():
@@ -1027,6 +1036,13 @@ class _Variable(object):
             attr = self._Attribute(self.coordinates)
             attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
             self.probabilities[info["q"]] = attr
+        for role in ("proportions", "divided"):
+            for info in meta.get(role, []):
+                attr = self._Attribute(self.coordinates)
+                attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
+                getattr(self, role)[info["c"]] = attr
+        if meta.get("cutoffs") is not None:
+            self.cutoffs = [float(c) for c in meta["cutoffs"]]
         for cname, cmeta in meta.get("components", {}).items():
             self.components[cname]._zarr_load(
                 group, prefix + "/" + str(cname), cmeta)
@@ -1099,6 +1115,36 @@ class ContinuousVariable(_Variable):
         self.quantiles = _col.OrderedDict()
         self.probabilities = _col.OrderedDict()
 
+        # The grades a decision turns on -- a mining cut-off, a contaminant
+        # limit. Declared on the data and carried to whatever is predicted
+        # from it; `None` means this variable takes no part in any decision,
+        # which is the answer for the rest component of a composition.
+        self.cutoffs = None
+        # For each of them, how much of each block sits at or below it, over
+        # the sub-blocks and the realizations both -- the recoverable share,
+        # and what a partial-block report wants.
+        self.proportions = _col.OrderedDict()
+        # And for each, how often the cut-off passes *through* the block:
+        # the share of realizations whose sub-blocks fall on both sides. A
+        # different question, and the one that says whether cutting the block
+        # finer would settle anything. See `likelihood._divided`.
+        self.divided = _col.OrderedDict()
+
+    def set_cutoffs(self, cutoffs):
+        """The grades this variable is judged against.
+
+        They travel with the variable, so a model trained on data that
+        declares them hands them to every block model predicted from it, and
+        `refine` knows what the blocks have to be resolved against without
+        being told a second time.
+        """
+        self.cutoffs = None if cutoffs is None else \
+            [float(c) for c in _np.atleast_1d(cutoffs)]
+        return self
+
+    def prediction_input(self):
+        return {} if self.cutoffs is None else {"cutoffs": self.cutoffs}
+
     def get_measurements(self):
         values = self.measurements.values.copy()[:, None]
         has_value = (~ _np.isnan(values)) * 1.0
@@ -1169,6 +1215,9 @@ class ContinuousVariable(_Variable):
     @classmethod
     def from_variable(cls, coordinates, variable):
         new_var = cls(variable.name, coordinates)
+        # what the variable is judged against belongs to the variable, not to
+        # the locations, so it follows it onto whatever it is predicted into
+        new_var.cutoffs = variable.cutoffs
         return new_var
 
     def __getitem__(self, item):
@@ -1178,6 +1227,10 @@ class ContinuousVariable(_Variable):
         new_obj.latent_variance = self.latent_variance[item]
         new_obj.prediction = self.prediction[item]
         new_obj.dispersion = self.dispersion[item]
+        new_obj.proportions = _col.OrderedDict(
+            (key, val[item]) for key, val in self.proportions.items())
+        new_obj.divided = _col.OrderedDict(
+            (key, val[item]) for key, val in self.divided.items())
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1266,6 +1319,16 @@ class ContinuousVariable(_Variable):
         if "dispersion" in kwargs.keys():
             self.dispersion.values[idx] = kwargs["dispersion"].numpy()
 
+        for key, target in (("proportions", self.proportions),
+                            ("divided", self.divided)):
+            if key not in kwargs.keys():
+                continue
+            values = kwargs[key].numpy()
+            for i, cutoff in enumerate(self.cutoffs):
+                if cutoff not in target:
+                    target[cutoff] = self._Attribute(self.coordinates)
+                target[cutoff].values[idx] = values[:, i]
+
         if "simulations" in kwargs.keys():
             # Whole (batch, n_sim) block written as one region into the store.
             self.simulations[idx, :] = kwargs["simulations"].numpy()
@@ -1282,6 +1345,11 @@ class ContinuousVariable(_Variable):
         self.latent_variance.coordinates = coordinates
         self.prediction.coordinates = coordinates
         self.dispersion.coordinates = coordinates
+
+        for share in self.proportions.values():
+            share.coordinates = coordinates
+        for share in self.divided.values():
+            share.coordinates = coordinates
 
         if len(self.quantiles) > 0:
             for p in self.quantiles.values():
@@ -1752,7 +1820,8 @@ class CompositionalVariable(VectorVariable):
 
 class _Category(_Variable):
     _ZARR_ATTRS = ("probability", "indicator", "indicator_mean",
-                   "indicator_variance", "indicator_predicted")
+                   "indicator_variance", "indicator_predicted", "proportion",
+                   "divided")
     _ZARR_HAS_SIMS = True
 
     def __init__(self, name, coordinates, indicator):
@@ -1764,6 +1833,15 @@ class _Category(_Variable):
         self.indicator_mean = self._Attribute(coordinates)
         self.indicator_variance = self._Attribute(coordinates)
         self.indicator_predicted = self._Attribute(coordinates)
+        # How much of each block this category holds, counted over the
+        # sub-blocks: 1 where it takes the whole block, 0 where it takes none,
+        # and in between where the block straddles a contact. A different
+        # thing from `probability`, which is how sure the model is that the
+        # block as a whole belongs here.
+        self.proportion = self._Attribute(coordinates)
+        # And whether the block is cut in two by this category's boundary,
+        # which is the question splitting answers -- see `likelihood._divided`
+        self.divided = self._Attribute(coordinates)
         self.simulations = None
 
     def __getitem__(self, item):
@@ -1773,6 +1851,8 @@ class _Category(_Variable):
         new_obj.indicator_mean = self.indicator_mean[item]
         new_obj.indicator_variance = self.indicator_variance[item]
         new_obj.indicator_predicted = self.indicator_predicted[item]
+        new_obj.proportion = self.proportion[item]
+        new_obj.divided = self.divided[item]
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1786,6 +1866,8 @@ class _Category(_Variable):
         self.indicator_mean.coordinates = coordinates
         self.indicator_variance.coordinates = coordinates
         self.indicator_predicted.coordinates = coordinates
+        self.proportion.coordinates = coordinates
+        self.divided.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
                       latent=True, simulations=False):
@@ -1804,6 +1886,9 @@ class _Category(_Variable):
         if predictions:
             df[self.name + "_indicator_predicted"] = \
                 self.indicator_predicted.values.to_numpy()
+            if self.proportion._has_content():
+                df[self.name + "_proportion"] = \
+                    self.proportion.values.to_numpy()
 
         for i, values in _selected_simulations(self.simulations,
                                               simulations):
@@ -1816,6 +1901,11 @@ class _Category(_Variable):
         self.indicator_mean.values[idx] = kwargs["mean"].numpy()
         self.indicator_variance.values[idx] = kwargs["variance"].numpy()
         self.probability.values[idx] = kwargs["probability"].numpy()
+
+        if "proportion" in kwargs.keys():
+            self.proportion.values[idx] = kwargs["proportion"].numpy()
+        if "divided" in kwargs.keys():
+            self.divided.values[idx] = kwargs["divided"].numpy()
 
         self.simulations[idx, :] = kwargs["simulations"].numpy()
 
@@ -2073,17 +2163,22 @@ class RockTypeVariable(_Variable):
         indicators = _tf.unstack(kwargs["indicators"], axis=1)
         probability = _tf.unstack(kwargs["probability"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
+        # the share of each block this category holds, one column per label
+        blank = [None] * len(self.labels)
+        proportions = _tf.unstack(kwargs["proportions"], axis=1) \
+            if "proportions" in kwargs.keys() else blank
+        divided = _tf.unstack(kwargs["divided"], axis=1) \
+            if "divided" in kwargs.keys() else blank
 
-        for lb, m, v, i, p, s in zip(
+        for lb, m, v, i, p, s, share, cut in zip(
                 self.labels, mean, variance, indicators,
-                probability, simulations):
-            self.components[lb].update(idx, **{
-                "mean": m,
-                "variance": v,
-                "indicator": i,
-                "probability": p,
-                "simulations": s
-            })
+                probability, simulations, proportions, divided):
+            values = {"mean": m, "variance": v, "indicator": i,
+                      "probability": p, "simulations": s}
+            if share is not None:
+                values["proportion"] = share
+                values["divided"] = cut
+            self.components[lb].update(idx, **values)
 
     def training_input(self, idx=None):
         if idx is None:
@@ -5483,6 +5578,8 @@ class BlockSet3D(PointData):
         ).reshape(-1, 3)
         self._origin = cells * self._coarse_size
         self._level = _np.zeros(len(cells), dtype=_np.int64)
+        # nothing has been predicted yet, so every block is new
+        self._fresh = _np.ones(len(cells), dtype=bool)
 
         self._sub_grid = _unit_sub_grid(self.discretization)
 
@@ -5614,6 +5711,11 @@ class BlockSet3D(PointData):
         new = _copy.copy(self)
         new._origin = _np.concatenate([self._origin[~mask], children])
         new._level = _np.concatenate([self._level[~mask], child_level])
+        # the blocks this made, so that predicting can be told to visit only
+        # them without first being told what was predicted before
+        new._fresh = _np.concatenate([
+            _np.zeros(int(_np.count_nonzero(~mask)), dtype=bool),
+            _np.ones(len(children), dtype=bool)])
         new.variables = {}
         new.metadata = {}
         new._init_coordinates(new._centres(), list(labels))
@@ -5646,12 +5748,86 @@ class BlockSet3D(PointData):
                 new.metadata[name] = fresh
         return new
 
-    def unpredicted(self, variable):
-        """Which blocks the named variable has no value for yet.
+    def block_shares(self, split_on=None):
+        """How often each decision cuts a block in two.
+
+        A continuous variable contributes one column per cut-off it declares,
+        a categorical one per category, and both mean the same thing: the
+        share of realizations in which this block's sub-blocks fall on both
+        sides of something that matters. A grade is judged against the grades
+        someone declared; an indicator against zero, that being where one
+        category stops winning and its rival starts.
+
+        Returns a dict of name -> `(n_data,)` array, empty where nothing
+        declared a decision to make.
+        """
+        chosen = list(self.variables) if split_on is None else \
+            [str(name) for name in _np.atleast_1d(split_on)]
+        shares = {}
+        for name in chosen:
+            if name not in self.variables:
+                raise ValueError(
+                    "no variable named %r to split on; found %s"
+                    % (name, ", ".join(sorted(self.variables)) or "none"))
+            variable = self.variables[name]
+
+            for cutoff, attr in getattr(variable, "divided", {}).items():
+                shares["%s @ %g" % (name, cutoff)] = attr.values.to_numpy()
+
+            for label, component in (
+                    getattr(variable, "components", None) or {}).items():
+                cut = getattr(component, "divided", None)
+                if cut is not None and cut._has_content():
+                    shares["%s = %s" % (name, label)] = cut.values.to_numpy()
+        return shares
+
+    def needs_splitting(self, split_on=None, tolerance=0.05):
+        """Which blocks hold more than one answer, and so are worth cutting.
+
+        A block whose sub-blocks agree, realization by realization, holds one
+        answer however finely it is cut. One whose sub-blocks disagree holds
+        two, and cutting is what separates them.
+
+        Note what this does *not* mark: a block the model is merely unsure
+        about. Realizations either side of a cut-off are the model not
+        knowing, and no amount of cutting will settle that -- the answer to it
+        is another drillhole. Only disagreement *within* a realization counts.
+
+        The test is over every decision at once and any one is enough, which
+        is the cautious way round on purpose: a block worth splitting for one
+        variable is worth splitting whatever the others say. Name `split_on`
+        to narrow it -- letting every element of a polymetallic deposit vote
+        marks most of the model and gives back the saving.
+
+        Blocks already at the finest level are never marked, there being
+        nothing to cut them into.
+
+        Parameters
+        ----------
+        split_on : str or list, optional
+            Which variables get a say. All of them by default.
+        tolerance : float
+            The share of realizations that must find the block divided. Small
+            but not zero, so that one realization in twenty does not carry it.
+        """
+        shares = self.block_shares(split_on)
+        mask = _np.zeros(self.n_data, dtype=bool)
+        for values in shares.values():
+            mask |= _np.asarray(values, dtype=float) > tolerance
+        return mask & (self._level < self.max_levels)
+
+    def unpredicted(self, variable=None):
+        """Which blocks have nothing in them yet.
 
         What `split` leaves behind: hand it to `predict(..., where=...)` and
-        only the blocks the refinement created are visited.
+        only the blocks the refinement created are visited. Without a variable
+        it is the blocks the last split made, which is what a container knows
+        without having to be told what was predicted into it; naming one reads
+        its missing values instead, which stays true however the object was
+        arrived at.
         """
+        if variable is None:
+            return _np.array(self._fresh, dtype=bool)
         return _np.isnan(_np.asarray(
             self.variables[variable].prediction.values))
 
@@ -6066,6 +6242,8 @@ def _rebuild_container(meta, group):
                                            dtype=_np.int64)
         blocks._origin = read("_origin").astype(_np.int64)
         blocks._level = read("_level").astype(_np.int64)
+        # a saved model is one that was predicted into, not one mid-refinement
+        blocks._fresh = _np.zeros(len(blocks._origin), dtype=bool)
         blocks._init_coordinates(blocks._centres(), meta["labels"])
         blocks._bounding_box = BoundingBox(
             blocks.box_corner,

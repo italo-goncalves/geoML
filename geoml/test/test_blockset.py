@@ -356,6 +356,165 @@ def test_it_survives_a_zarr_round_trip(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# deciding what to split
+# --------------------------------------------------------------------------- #
+def _ore_model(seed=1234):
+    """A compact ore body in a mostly barren domain, with a cut-off declared
+    on the data -- the shape of problem refinement exists for."""
+    geoml.set_seed(seed)
+    rng = np.random.default_rng(seed)
+    xyz = rng.uniform(0, 160, size=[500, 3])
+    radius = np.linalg.norm(xyz - np.array([80.0, 80.0, 80.0]), axis=1)
+
+    point = geoml.data.PointData.from_array(xyz)
+    point.add_continuous_variable(
+        "au", 4.0 * np.exp(-(radius / 28.0) ** 2) + 0.02)
+    point.variables["au"].set_cutoffs([1.0])
+
+    ip = geoml.inducing.from_kmeans(point, 150, seed=0)
+    root = geoml.latent.BasicInput(
+        [ip], transform=geoml.transform.Isotropic(22.0))
+    gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "au", geoml.likelihood.Gaussian(), gp,
+        options=geoml.models.GPOptions(verbose=False, seed=seed,
+                                       training_samples=10))
+    model.train_full(max_iter=60)
+    return model
+
+
+def _ore_blocks():
+    return geoml.data.BlockSet3D([0, 0, 0], [8, 8, 4], [20.0, 20.0, 40.0],
+                                 discretization=(2, 2, 2), max_levels=2)
+
+
+def test_the_cutoffs_travel_with_the_variable():
+    """Declared on the data, and every model predicted from it knows them
+    without being told a second time."""
+    model = _ore_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    assert blocks.variables["au"].cutoffs == [1.0]
+    assert list(blocks.variables["au"].proportions) == [1.0]
+    assert list(blocks.variables["au"].divided) == [1.0]
+
+
+def test_a_share_of_a_block_is_between_none_and_all_of_it():
+    model = _ore_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    share = blocks.variables["au"].proportions[1.0].values.to_numpy()
+    assert np.all((share >= 0.0) & (share <= 1.0))
+    # and some blocks are wholly on one side, or the model has resolved
+    # nothing and the rest of these tests mean little
+    assert np.any(share >= 1.0 - 1e-12)
+
+
+def test_the_criterion_ignores_the_noise():
+    """Noise is the part of a block's spread that cutting cannot resolve, so
+    a block straddling a cut-off only on account of it would be cut for
+    nothing. The simulations still carry it."""
+    model = _ore_model()
+
+    noisy, clean = _ore_blocks(), _ore_blocks()
+    model.predict(noisy, n_sim=8, include_noise='monte_carlo')
+    model.predict(clean, n_sim=8, include_noise=None)
+
+    for role in ("proportions", "divided"):
+        assert np.allclose(
+            getattr(noisy.variables["au"], role)[1.0].values.to_numpy(),
+            getattr(clean.variables["au"], role)[1.0].values.to_numpy())
+    assert np.allclose(noisy.variables["au"].dispersion.values.to_numpy(),
+                       clean.variables["au"].dispersion.values.to_numpy())
+    # the predictions themselves must differ, or the noise did nothing
+    assert not np.allclose(np.asarray(noisy.variables["au"].simulations),
+                           np.asarray(clean.variables["au"].simulations))
+
+
+def test_being_unsure_is_not_a_reason_to_split():
+    """The distinction the whole criterion turns on. Realizations either side
+    of a cut-off are the model not knowing, which cutting cannot mend;
+    sub-blocks either side *within* one realization are two answers in one
+    block, which is exactly what cutting separates."""
+    model = _ore_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    var = blocks.variables["au"]
+    share = var.proportions[1.0].values.to_numpy()
+    divided = var.divided[1.0].values.to_numpy()
+
+    # The implication runs one way only. A block divided in some realization
+    # must have sub-blocks either side of the cut-off, so its share cannot be
+    # 0 or 1; but a block can be partly above the cut-off across its
+    # realizations while no single realization finds it divided, and that is
+    # the model being unsure rather than the block holding two answers.
+    straddling = (share > 0.0) & (share < 1.0)
+    assert np.all(straddling[divided > 0.0])
+    assert np.count_nonzero(divided > 0.0) <= np.count_nonzero(straddling)
+    assert np.all(divided[share <= 0.0] == 0.0)
+    assert np.all(divided[share >= 1.0] == 0.0)
+
+
+def test_refinement_goes_where_the_cutoff_is():
+    model = _ore_model()
+    blocks = _ore_blocks()
+
+    refined = geoml.models.refine(model, blocks, n_sim=8, levels=2)
+    assert refined.is_full()
+    assert np.isclose(refined.block_volume.sum(), blocks.block_volume.sum())
+    assert not np.any(np.isnan(
+        refined.variables["au"].prediction.values.to_numpy()))
+
+    # a good deal smaller than refining the lot
+    assert refined.n_data < blocks.n_data * 8 ** 2 / 4
+
+    # and the coarse blocks are the ones far from the cut-off
+    grade = refined.variables["au"].prediction.values.to_numpy()
+    coarse = refined.level == 0
+    assert np.nanmax(np.abs(grade[coarse] - 1.0)) > \
+        np.nanmin(np.abs(grade[~coarse] - 1.0))
+
+
+def test_refining_stops_when_there_is_nothing_left_to_cut():
+    model = _ore_model()
+    blocks = _ore_blocks()
+    # nothing declares a decision, so nothing is ever divided
+    blocks_no_cutoff = _ore_blocks()
+    model.predict(blocks_no_cutoff, n_sim=8)
+    blocks_no_cutoff.variables["au"].cutoffs = None
+    blocks_no_cutoff.variables["au"].divided.clear()
+
+    assert not np.any(blocks_no_cutoff.needs_splitting())
+    same = geoml.models.refine(model, blocks, n_sim=8, levels=0)
+    assert same.n_data == blocks.n_data
+
+
+def test_only_the_named_variables_get_a_say():
+    model = _ore_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    assert list(blocks.block_shares()) == ["au @ 1"]
+    assert blocks.block_shares(split_on="au") == blocks.block_shares()
+    with pytest.raises(ValueError, match="no variable named"):
+        blocks.needs_splitting(split_on="nope")
+
+
+def test_the_criterion_never_marks_the_finest_blocks():
+    model = _ore_model()
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [4, 4, 2], [20.0, 20.0, 40.0],
+                                   discretization=(2, 2, 2), max_levels=1)
+    refined = geoml.models.refine(model, blocks, n_sim=8, levels=3)
+
+    assert np.all(refined.level <= refined.max_levels)
+    assert not np.any(refined.needs_splitting()[
+        refined.level >= refined.max_levels])
+
+
+# --------------------------------------------------------------------------- #
 # reporting on blocks of more than one size
 # --------------------------------------------------------------------------- #
 def _graded(blocks, values):

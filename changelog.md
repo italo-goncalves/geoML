@@ -1,4 +1,41 @@
 ## version 0.5.7
+* `geoml.models.refine(model, blocks, levels=...)` predicts on a coarse block
+model, works out which blocks cannot decide, cuts those, and predicts on what
+the cutting made — as many times as asked. Only the new blocks are visited at
+each pass, a block that was not split being the same block on the same
+support. On a compact ore body in a barren domain it reached 4309 blocks where
+the equivalent uniform model needed 131 072, the coarse ones sitting where the
+grade is plainly below the cut-off and the fine ones spanning it
+* What decides a split is one question asked of every variable: *what does a
+value have to cross for the decision to change?* A grade crosses the cut-offs
+someone declared — `variable.set_cutoffs([...])`, carried to whatever is
+predicted from that data, and `None` for a variable that takes no part, which
+is the answer for a composition's rest component. A category crosses zero:
+`ind_skew` is its log-odds against its best rival, so the contact between two
+categories is exactly its zero level set. One reduction serves both, and the
+categorical case needs no special handling at all
+* Two numbers come back per cut-off, and they answer different questions.
+`proportions` is how much of the block sits below it — the recoverable share,
+and per category on a categorical variable the partial-block domaining number,
+worth having whether or not anything is ever refined. `divided` is how often
+the cut-off passes *through* the block. Only the second licenses a split, and
+the difference is the whole of what refining can fix: realizations either side
+of a cut-off are the model not knowing, which no amount of cutting will settle
+— that wants another drillhole — while sub-blocks either side *within one
+realization* are two answers in one block, which cutting separates
+* The splitting criterion, and `dispersion` with it, are read from the
+**noise-free** field. Noise is the part of a block's spread that cutting
+cannot resolve, so a block straddling a cut-off only on account of it would be
+cut for nothing, and a dispersion carrying it would report a variability that
+is not the ground's. The predictions themselves still carry noise as
+`include_noise` asks
+* A categorical likelihood now works out its entropy, uncertainty and
+indicators from the sub-blocks and averages afterwards, where it used to
+average the probabilities first and work from those. Averaged first, a block
+half granite and half schist looks like a place where the model cannot decide
+rather than one where it decides differently in different corners. Two of the
+three call sites were also passing block-averaged probabilities alongside
+sub-block variances, which this makes moot
 * Grade-tonnage counts every block at its own size. It used to take one volume
 from `step_size` and multiply the finished curve by it, which a model of one
 block size allows and `BlockSet3D` does not; the volume now goes into each

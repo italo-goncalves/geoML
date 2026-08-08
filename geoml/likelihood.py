@@ -160,6 +160,80 @@ def _dispersion(x, n_splits=None):
     return _tf.math.reduce_variance(grouped, axis=1)
 
 
+def _proportions(x, cutoffs, n_splits=None):
+    """How much of a block sits at or below each of `cutoffs`.
+
+    The third of the reductions over a block's sub-blocks, beside `_aggregate`
+    and `_dispersion`, and the one a splitting decision is made from: a share
+    of 0 or 1 says the whole block is on one side of the cut-off and cutting it
+    finer would find nothing, while anything in between says the block straddles
+    a decision and its children would not agree.
+
+    What counts as a cut-off is the likelihood's own business. A grade has the
+    ones someone declared; an indicator has zero, that being where a category
+    stops winning and its rival starts.
+
+    Averages over the realizations as well as the sub-blocks, so a block that
+    is only sometimes above the cut-off reads as partly above it. Without a
+    discretization there are no sub-blocks and this is the share of the
+    realizations alone -- the same number `reset_probabilities` arrives at from
+    the stored simulations afterwards.
+
+    Returns `(n_blocks, n_var, n_cutoffs)`.
+    """
+    cutoffs = _tf.reshape(_tf.cast(cutoffs, x.dtype), [-1])
+
+    if n_splits is None:
+        below = _tf.cast(x[..., None] <= cutoffs, x.dtype)
+        return _tf.reduce_mean(below, axis=2)
+
+    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    grouped = _tf.reshape(
+        x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
+    below = _tf.cast(grouped[..., None] <= cutoffs, x.dtype)
+    return _tf.reduce_mean(below, axis=[1, 3])
+
+
+def _divided(x, cutoffs, n_splits=None):
+    """How often a block is cut in two by each of `cutoffs`.
+
+    Not the same question as `_proportions`, and the difference is the whole
+    of what refining can and cannot fix. A block whose value is uncertain
+    around a cut-off has realizations either side of it, and *no* amount of
+    cutting will change that -- it is the model not knowing, and the answer to
+    it is another drillhole. A block whose sub-blocks disagree *within* one
+    realization is a block holding two answers, and cutting is exactly what
+    separates them.
+
+    So the sub-blocks are judged one realization at a time -- is this block
+    divided, in this realization? -- and only then averaged over realizations.
+    Reading the share over sub-blocks and realizations together, as
+    `_proportions` does, would mix the two back into one number and mark for
+    splitting every block the model happens to be unsure about.
+
+    Returns `(n_blocks, n_var, n_cutoffs)`, the share of realizations in which
+    the block straddles each cut-off. Zero without a discretization: a
+    location has no sub-blocks to disagree.
+    """
+    cutoffs = _tf.reshape(_tf.cast(cutoffs, x.dtype), [-1])
+
+    if n_splits is None:
+        return _tf.zeros(
+            _tf.concat([_tf.shape(x)[:2], [_tf.size(cutoffs)]], axis=0),
+            dtype=x.dtype)
+
+    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    grouped = _tf.reshape(
+        x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
+    below = _tf.cast(grouped[..., None] <= cutoffs, x.dtype)
+
+    # per realization: what share of this block's sub-blocks sit below
+    share = _tf.reduce_mean(below, axis=1)
+    straddles = _tf.cast(
+        (share > 0.0) & (share < 1.0), x.dtype)
+    return _tf.reduce_mean(straddles, axis=2)
+
+
 class _Likelihood(_gpr.Parametric):
     def __init__(self, size, use_monte_carlo=False):
         super().__init__()
@@ -287,28 +361,36 @@ class _ContinuousLikelihood(_Likelihood):
 
         return lik * self.sharpness
 
+    def _back_transform(self, sims):
+        """Simulations out of the latent space, one realization at a time."""
+        sims = _tf.transpose(sims, [2, 0, 1])
+        sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
+        return _tf.transpose(sims, [1, 2, 0])
+
     def predict(self, mu, var, sims, explained_var, *args, include_noise=None,
-                n_splits=None, seed=1234, **kwargs):
-        # Simulations
+                n_splits=None, seed=1234, cutoffs=None, **kwargs):
+        # The field with no noise on it. Everything said about a block's
+        # *interior* is read from here: the noise is the part of the spread
+        # that refining cannot resolve, so a block straddling a cut-off only
+        # on account of it would be split to no purpose, and its dispersion
+        # would report a variability that is not the ground's.
+        clean = self._back_transform(sims)
+
         if include_noise == 'monte_carlo':
-            sims = self._add_noise(sims, seed=seed, n_splits=n_splits)
-            sims = _tf.transpose(sims, [2, 0, 1])
-            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
-            sims = _tf.transpose(sims, [1, 2, 0])
+            noisy = self._back_transform(
+                self._add_noise(sims, seed=seed, n_splits=n_splits))
         elif include_noise == 'delta':
-            sims = self.integrate_noise(sims)
+            noisy = self.integrate_noise(sims)
         else:
-            sims = _tf.transpose(sims, [2, 0, 1])
-            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
-            sims = _tf.transpose(sims, [1, 2, 0])
+            noisy = clean
 
         # taken from the sub-blocks, so before they are averaged away; one
         # value per realization, then the mean over them, which is the
         # dispersion of a block's interior as the model sees it
         dispersion = _tf.reduce_mean(
-            _dispersion(sims, n_splits=n_splits), axis=2)
+            _dispersion(clean, n_splits=n_splits), axis=2)
 
-        sims = _aggregate(sims, n_splits=n_splits)
+        sims = _aggregate(noisy, n_splits=n_splits)
         mu = _aggregate(mu, n_splits=n_splits)
         var = _aggregate(var, n_splits=n_splits)
 
@@ -319,6 +401,11 @@ class _ContinuousLikelihood(_Likelihood):
                "average_sim": avg_sim[:, 0],
                "dispersion": dispersion[:, 0],
                }
+        if cutoffs is not None:
+            out["proportions"] = _proportions(
+                clean, cutoffs, n_splits=n_splits)[:, 0, :]
+            out["divided"] = _divided(
+                clean, cutoffs, n_splits=n_splits)[:, 0, :]
         return out
 
     def _make_distribution(self, *args, **kwargs):
@@ -566,21 +653,27 @@ class _MultivariateLikelihood(_Likelihood):
 
         return lik * self.sharpness
 
+    def _back_transform(self, sims):
+        """Simulations out of the latent space, one realization at a time."""
+        sims = _tf.transpose(sims, [2, 0, 1])
+        sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
+        return _tf.transpose(sims, [1, 2, 0])
+
     def predict(self, mu, var, sims, explained_var,
                 *args, quantiles=None, include_noise=None, n_splits=None,
-                seed=1234, **kwargs):
+                seed=1234, cutoffs=None, **kwargs):
+
+        # noise-free, and what everything about a block's interior is read
+        # from -- see the note in `_ContinuousLikelihood.predict`
+        clean = self._back_transform(sims)
 
         if include_noise == 'monte_carlo':
-            sims = self._add_noise(sims, seed=seed, n_splits=n_splits)
-            sims = _tf.transpose(sims, [2, 0, 1])
-            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
-            sims = _tf.transpose(sims, [1, 2, 0])
+            sims = self._back_transform(
+                self._add_noise(sims, seed=seed, n_splits=n_splits))
         elif include_noise == 'delta':
             sims = self.integrate_noise(sims)
         else:
-            sims = _tf.transpose(sims, [2, 0, 1])
-            sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
-            sims = _tf.transpose(sims, [1, 2, 0])
+            sims = clean
 
         # coherent_sims = _tf.stack([self.warping.backward(s) for s in _tf.unstack(coherent_sims, axis=2)], axis=2)
         # rough_sims = _tf.stack([self.warping.backward(s) for s in _tf.unstack(rough_sims, axis=2)], axis=2)
@@ -596,7 +689,11 @@ class _MultivariateLikelihood(_Likelihood):
         # before the sub-blocks are averaged away, and per variable: the
         # components of a vector variable are dispersed independently
         dispersion = _tf.reduce_mean(
-            _dispersion(sims, n_splits=n_splits), axis=2)
+            _dispersion(clean, n_splits=n_splits), axis=2)
+        proportions = None if cutoffs is None else _proportions(
+            clean, cutoffs, n_splits=n_splits)
+        divided = None if cutoffs is None else _divided(
+            clean, cutoffs, n_splits=n_splits)
 
         sims = _aggregate(sims, n_splits)
 
@@ -614,6 +711,9 @@ class _MultivariateLikelihood(_Likelihood):
                "uncertainty": uncertainty,
                "dispersion": dispersion
                }
+        if proportions is not None:
+            out["proportions"] = proportions
+            out["divided"] = divided
 
         return out
 
@@ -920,6 +1020,43 @@ class _CategoricalLikelihood(_Likelihood):
 
         return entropy, uncertainty, ind_skew, weights
 
+    def _resolve(self, prob, var, explained_var, n_splits):
+        """The indicator picture, read from the sub-blocks and then averaged.
+
+        Taken before the sub-blocks are aggregated, so a block holding a
+        contact is described by the sub-blocks falling either side of it
+        rather than by the mixed probability their average comes to. The two
+        are not the same and the second is the less useful: averaged first, a
+        block half granite and half schist looks like a place where the model
+        cannot decide, instead of one where it decides differently in
+        different corners.
+
+        `ind_skew` is a category's log-odds against its best rival, so it is
+        positive where that category wins and zero exactly where two are tied.
+        The contact is its zero level set, which is what makes the share of a
+        block on either side of zero the same question a grade asks of a
+        cut-off -- and `proportions` the share of the block each category
+        holds, which is worth having in its own right on a domained model.
+        """
+        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
+            prob, var, explained_var)
+
+        # `_proportions` counts what is at or *below* the cut-off, and a
+        # category holds the ground where its skew is above zero. There is no
+        # realization axis here -- the probabilities are already expectations
+        # -- so the dummy one makes `_divided` degenerate to the same test:
+        # do this block's sub-blocks disagree about who holds it.
+        skew = ind_skew[:, :, None]
+        share = 1.0 - _proportions(skew, [0.0], n_splits=n_splits)[:, :, 0]
+        divided = _divided(skew, [0.0], n_splits=n_splits)[:, :, 0]
+
+        return {"entropy": _aggregate(entropy, n_splits),
+                "uncertainty": _aggregate(uncertainty, n_splits),
+                "indicators": _aggregate(ind_skew, n_splits),
+                "weights": _aggregate(weights, n_splits),
+                "proportions": share,
+                "divided": divided}
+
 
 class CategoricalGaussianIndicator(_CategoricalLikelihood):
     """
@@ -1046,24 +1183,19 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         # prob = _tf.nn.softmax(log_prob_positive, axis=1)
         prob = _tf.nn.softmax(log_prob_final, axis=1)
 
+        indicators = self._resolve(prob, var, explained_var, n_splits)
+
         prob = _aggregate(prob, n_splits)
         mu = _aggregate(mu, n_splits)
         var = _aggregate(var, n_splits)
         explained_var = _aggregate(explained_var, n_splits)
         sims = _aggregate(sims, n_splits)
 
-        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
-            prob, var, explained_var
-        )
-
         output = {"mean": mu,
                   "variance": var,
                   "probability": prob,
-                  "simulations": sims,
-                  "entropy": entropy,
-                  "uncertainty": uncertainty,
-                  "indicators": ind_skew,
-                  "weights": weights}
+                  "simulations": sims}
+        output.update(indicators)
         return output
 
 
@@ -1246,23 +1378,17 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
 
         prob = _tf.nn.softmax(log_prob_final, axis=1)
 
+        indicators = self._resolve(prob, var, explained_var, n_splits)
+
         prob = _aggregate(prob, n_splits)
-
-        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
-            prob, var, explained_var
-        )
-
         mu = _aggregate(mu, n_splits)
         var = _aggregate(var, n_splits)
 
         output = {"mean": mu,
                   "variance": var,
                   "probability": prob,
-                  "simulations": sims,
-                  "entropy": entropy,
-                  "uncertainty": uncertainty,
-                  "indicators": ind_skew,
-                  "weights": weights}
+                  "simulations": sims}
+        output.update(indicators)
         return output
 
 
@@ -1424,11 +1550,9 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
             prob.append(dist.survival_function(self.levels - 1))
         prob = _tf.concat(prob, axis=1)
 
-        prob = _aggregate(prob, n_splits)
+        indicators = self._resolve(prob, var, explained_var, n_splits)
 
-        entropy, uncertainty, ind_skew, weights = self.entropy_and_indicators(
-            prob, var, explained_var
-        )
+        prob = _aggregate(prob, n_splits)
 
         # if self.levels > 1:
         #     mu = mu - thresholds[None, :]
@@ -1440,11 +1564,8 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
         output = {"mean": _tf.tile(mu, [1, self.levels + 1]),
                   "variance": _tf.tile(var, [1, self.levels + 1]),
                   "simulations": _tf.tile(sims, [1, self.levels + 1, 1]),
-                  "weights": weights,
-                  "probability": prob,
-                  "entropy": entropy,
-                  "uncertainty": uncertainty,
-                  "indicators": ind_skew}
+                  "probability": prob}
+        output.update(indicators)
         return output
 
 

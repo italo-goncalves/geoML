@@ -1073,6 +1073,76 @@ class VGPNetwork(_GPModel):
             print("\n")
 
 
+def refine(model, blocks, n_sim=20, levels=1, split_on=None, tolerance=0.05,
+           include_noise='monte_carlo', verbose=False):
+    """
+    Predict on a block model, cutting finer wherever it cannot decide.
+
+    The workflow `BlockSet3D` exists for. Predict once on coarse blocks, ask
+    which of them straddle something that matters -- a cut-off a grade is
+    judged against, a contact between two categories -- cut those, and predict
+    again on what the cutting made. A block on one side of every decision
+    holds one answer however finely it is cut, so it is left alone, and the
+    work goes where the answer is still in doubt.
+
+    Only the new blocks are predicted at each pass. A block that was not split
+    is the same block on the same support and its value already stands, which
+    is what makes this cheaper than predicting a fine model outright rather
+    than merely different.
+
+    What decides a split is read from the **noise-free** field. Noise is the
+    part of a block's spread that cutting it cannot resolve, so a block that
+    straddles a cut-off only on account of it would be cut for nothing. The
+    noise is still added to the predictions themselves, as `include_noise`
+    asks.
+
+    Parameters
+    ----------
+    model
+        A trained `VGPNetwork`, or anything else with a compatible `predict`.
+    blocks : BlockSet3D
+        The coarse model to start from. It is not modified; each pass returns
+        a new one.
+    n_sim : int
+        Simulations to draw, at every pass.
+    levels : int
+        How many times to cut. Stops early once nothing needs cutting, and
+        never goes past the lattice's own `max_levels`.
+    split_on : str or list, optional
+        Which variables get a say. All of them by default -- name a few on a
+        polymetallic deposit, or every element marks most of the model and
+        gives back the saving.
+    tolerance : float
+        How near 0 or 1 a share still counts as undivided.
+    include_noise : str
+        Passed to `predict` for the predictions themselves.
+    verbose : bool
+        Report what each pass cut.
+
+    Returns
+    -------
+    BlockSet3D
+        The refined model, predicted throughout.
+    """
+    model.predict(blocks, n_sim=n_sim, include_noise=include_noise)
+
+    for step in range(int(levels)):
+        mask = blocks.needs_splitting(split_on, tolerance=tolerance)
+        if not _np.any(mask):
+            if verbose:
+                print("pass %d: nothing left to cut" % (step + 1))
+            break
+
+        blocks = blocks.split(mask)
+        model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
+                      where=blocks.unpredicted())
+        if verbose:
+            print("pass %d: cut %d block(s), %d now"
+                  % (step + 1, int(_np.count_nonzero(mask)), blocks.n_data))
+
+    return blocks
+
+
 class StructuralField(_GPModel):
     """Structural field modeling based on gradient data."""
     def __init__(self, tangents, covariance, normals=None, mean_vector=None,
