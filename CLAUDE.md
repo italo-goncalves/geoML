@@ -166,6 +166,8 @@ Machine learning models for spatial/geoscientific data, centered on **variationa
 - **Imports:** sibling modules are imported with underscore aliases — `import geoml.parameter as _gpr`, `import geoml.tftools as _tftools`. Third-party too: `import numpy as _np`, `import tensorflow as _tf`, `import tensorflow_probability as _tfp`. Match this in any module code. (Test scripts use a bare `import geoml`.)
 - Every source file carries the GPL-3 header block — keep it on new files.
 - Public API is re-exported via `geoml/__init__.py`'s `__all__`; add new modules there.
+- **A variable that holds components does not copy what belongs to them.** `VectorVariable`, `CompositionalVariable` and the `RockTypeVariable` family build their components inside `__init__`, so anything a *component* owns — its `cutoffs`, and whatever is added next — is left behind by every method that rebuilds a variable: `from_variable`, `carry_to`, `copy_to`, the persistence round trip. Each has to carry it across by hand, and each has been fixed once for forgetting to. The failure is quiet: the rebuilt variable is structurally complete and merely does nothing, so **add a test with a vector variable, not only a scalar and a categorical one** — categorical components are `_Category`, which is a different class with different attributes, and testing it proves nothing about the graded case.
+- **Do not reach into a variable for an attribute whose type depends on the class.** `divided` is one column on `_Category` and a dict keyed by cut-off on `ContinuousVariable`; `proportion`/`proportions` likewise. Ask the variable — `split_shares()` is the pattern — rather than `getattr`-ing and hoping.
 
 ## Build / test / gotchas
 
