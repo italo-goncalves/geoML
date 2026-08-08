@@ -263,15 +263,129 @@ watertight, but that is a property of a field smooth at this resolution — a
 sign change on a face interior implying one at a corner — and should not be
 relied on.
 
-**Mitigation: refine with 2–4 cells of margin** so the surface is strictly
-interior to the fine region. §3 already costs that: the 3-cell-width rule is
-the 44x row, not the 434x one.
-
 *A correction worth recording.* The first run of `crack_study` placed child
 cells at `±step` instead of `±step/2`, so they did not tile the parent at all.
 It reported open edges for every band, which read as a far worse crack problem
 than there is. Those gaps were geometric, not contouring artefacts. The table
 above is the corrected run.
+
+### 5.1.1 Why the margin was the wrong fix, and what replaced it
+
+The mitigation this section first recommended — refine with 2–4 cells of
+margin — works, and is exact. It is also the wrong trade. `refine` cuts
+precisely the blocks that straddle, which is zero margin, so the workflow the
+feature exists for produced exactly the failure documented above: a real run
+lost **13% of the surface area** to tears, 1455 of them.
+
+Widening the refinement closes them, at a price the model pays for a display
+problem. Measured on one analytic field, against the same surface drawn on a
+uniform model of the finest size:
+
+| | blocks predicted | mesh cells | tears | area error |
+|---|---|---|---|---|
+| no margin | 1 674 | 1 674 | 1018 | −12.8% |
+| margin in the model | 8 107 | 8 107 | 0 | 0.00% |
+| **cut the mesh, not the model** | **1 674** | 7 015 | **0** | **−0.01%** |
+
+So the cut happens in `get_contour`, on the mesh handed to VTK, and the model
+is left alone. Blocks the surface runs through go to the finest size the
+lattice allows, one ring of neighbours included so the surface has room to
+shift as its values are read at the finer size, and the interfaces end up
+away from it. Nothing is predicted.
+
+A child cannot simply copy its parent, which costs 0.8% in area — it takes the
+parent's value **plus what the block's corners say about the shape running
+across it**, read at the sub-block centres with the trilinear weights. Because
+those weights are symmetric about the centre, the correction averages to zero
+over the children, so a block's estimate stays exactly the mean of the children
+standing in for it and no metal is invented. Interpolating without that anchor
+is worse than copying: it inherits the corner averaging's smoothing and drifts
+1.5% in mass.
+
+Tetrahedralising into a conforming mesh — the textbook fix — was tried and
+abandoned: a face collects midpoints from edge-adjacent blocks as well as
+face-adjacent ones, so no simple triangulation rule makes both sides agree,
+and 2:1 balancing does not rescue it. VTK's `vtkHyperTreeGridContour` is the
+off-the-shelf version but is limited to a branch factor of 2 or 3, which would
+rule out a discretization like `(4, 4, 2)`.
+
+### 5.1.2 Faceting, and why the cure is not smoothing
+
+Closed, the surface still looked blocky. Two candidates: the cut itself, or
+the resolution. On a sphere the refined surface came back indistinguishable
+from a uniform model at the finest size — 0.091 m against 0.089 m from the
+true sphere, mean angle between neighbouring triangles 1.68° against 1.62° —
+so the cut is not what does it.
+
+What does is the reconstruction. VTK reads a **trilinear** field between block
+corners: continuous, but with a crease at every face it crosses. On a field
+with structure at a few blocks those creases are the faceting. On a
+deliberately rough test field, against the true level set:
+
+| | angle between triangles | off true surface | blocks predicted |
+|---|---|---|---|
+| as it stands (5 m) | 9.07° | 0.51 m | 19 853 |
+| + Taubin smoothing, 40 iterations | 7.63° | **0.78 m** | 19 853 |
+| **+ one level of supersampling** | **5.73°** | **0.22 m** | **19 853** |
+| + supersample and a smoothing pass | 4.88° | 0.36 m | 19 853 |
+| 2.5 m blocks, actually predicted | 5.29° | 0.19 m | 67 705 |
+
+**Smoothing the triangles is the wrong answer.** Taubin buys a sixth of the
+faceting and pays 50% more distance from the surface it is meant to be — it
+makes the picture rounder by making it less true, which on an ore body is a
+bad trade. It is not offered.
+
+**Supersampling the display mesh is the right one, and it is nearly free.**
+Cutting one level past the model's finest block, which costs no prediction at
+all, removes more faceting than smoothing does *and* halves the distance from
+the true surface. It lands on the quality of a model with 3.4 times as many
+blocks in it. The reason both improve together is that averaging onto corners
+again at each level composes the box filters into a rounder reconstruction, so
+the extra levels are not empty interpolation — they converge on the underlying
+field rather than on the trilinear caricature of it.
+
+`get_contour(..., supersample=1)` is the default. A second smoothing pass over
+the corner field is what the fourth row measures: less faceting again, but
+paid for in accuracy, so it is not done either. Past one level the returns
+flatten while the mesh keeps multiplying, which is why the default is one and
+not more. On the end-to-end `refine` case the whole thing costs a mesh of
+96 055 cells against a model of 24 711 and 0.4 s.
+
+### 5.1.3 The jump the block itself cannot see
+
+Supersampling left it blocky still, and this is why. A block whose own
+sub-blocks agree is never marked by `needs_splitting`, and rightly so —
+cutting it would not change the answer it gives. But the field can still turn
+sharply inside it, and **nothing in the block says so**. That a *neighbour*
+was cut twice while this block was not cut at all is the evidence, and it
+lives outside the block where nothing was looking.
+
+It costs accuracy, not just looks: a contour reads a block through its eight
+corners, so a coarse block beside much finer ones lays a crude straight guess
+across a long span, right where the surface runs. On the rough field, 5.0% of
+blocks had a neighbour more than one level finer:
+
+| | blocks | angle between triangles | off true surface |
+|---|---|---|---|
+| straddle criterion only | 11 117 | 7.24° | 0.779 m |
+| **plus levelling the jumps** | **14 841** | **5.89°** | **0.266 m** |
+| a whole level deeper, jumps kept | 28 393 | 5.64° | 0.758 m |
+| a level deeper, jumps levelled | 53 166 | 3.68° | 0.081 m |
+
+Levelling the jumps is **three times closer to the true surface for a third
+more blocks**. Refining a whole level deeper without it buys almost nothing
+for 2.6 times as many — deeper refinement widens the jumps as fast as it
+narrows the blocks, which is why resolution alone does not fix this and why
+the third row is the trap to avoid. `models.refine` now cuts both.
+
+`BlockSet3D.unbalanced(gap=1)` finds them **from the fine side**: each fine
+block steps one cell past each of its faces and names the coarse block
+covering that point. Asking the coarse block instead is not exact — a cell of
+its own size beyond its face holds blocks that do not touch it — and painting
+the base lattice to be sure is the memory the model exists to avoid. Levels
+were already stored per block, so the criterion needed no new bookkeeping,
+only the lookup. It agrees exactly with a brute-force raster across
+anisotropic and non-power-of-two discretizations, which is a test.
 
 ### 5.2 An existing safety net
 
@@ -883,11 +997,11 @@ shell = refined.get_contour("Zn_pct", 4.0)
     4% shell: Surface3D, 57301 triangles, closed=False
 
 Note the type. It came back a `Surface3D` and not a `Solid3D`, which is the
-honest answer: the shell is cut by the edge of the modelled box, and it may
-also have cracked where the mesh changes level (§5.1). A body would have been
-a claim about an enclosed volume that this surface cannot support. `heal()`
-is there when the geometry is nearly right, and leaving a level of margin
-around what is being contoured is the way to avoid the second cause.
+honest answer: the shell is cut by the edge of the modelled box, so it is not
+a body and cannot say what volume it encloses. That is the only cause left —
+tearing where the mesh changes level is handled inside `get_contour` now
+(§5.1.1), and this run predates that. `heal()` is there when the geometry is
+nearly right.
 
 ### 11.7 Saving it
 
@@ -917,10 +1031,9 @@ as what went in did, and can be refined further.
    `BlockSet3D.needs_splitting`, `split_on` naming the variables, the union
    rule. **Done**, with the correction in §7.3.
 5. **Point location** for `aggregate_*` and `index_data`.
-6. **The margin of §5.1**, so a refined mesh does not crack where a contour
-   runs through it. Needs neighbour lookup on the lattice, which is
-   independent of everything above, so it was left out of stage 4 rather than
-   folded in.
+6. **Crack-free contouring across levels**, so a refined mesh does not tear
+   where a contour runs through it. **Done**, but not as §5.1 proposed: the
+   mesh is cut, not the model. See §5.1.1.
 7. **`group`**, the inverse of `split`, with the per-group completeness check
    of §10 — what makes conversion between supports two-directional.
 

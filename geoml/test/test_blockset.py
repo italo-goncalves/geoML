@@ -748,13 +748,177 @@ def test_refining_away_from_a_surface_leaves_it_alone():
     assert np.isclose(after.area, before.area)
 
 
+def test_a_contour_over_blocks_refined_at_the_surface_is_closed():
+    """The case the whole feature produces: `refine` cuts exactly the blocks
+    that straddle, so the coarse/fine interfaces sit right where the surface
+    runs. Contoured naively that tears the surface open along every one of
+    them -- a third of the area went missing before the mesh was cut down."""
+    start, n, step = [0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0]
+    blocks = geoml.data.BlockSet3D(start, n, step, max_levels=2)
+    field = _sphere(blocks, centre=(80.0, 80.0, 80.0), radius=55.0)
+    _graded(blocks, field)
+
+    # cut precisely what the surface passes through, and nothing more
+    straddle = np.abs(field) < np.linalg.norm(blocks.block_size, axis=1) / 2
+    for _ in range(2):
+        blocks = blocks.split(straddle & (blocks.level < blocks.max_levels),
+                              carry=False)
+        _graded(blocks, _sphere(blocks, radius=55.0))
+        field = _sphere(blocks, radius=55.0)
+        straddle = np.abs(field) < np.linalg.norm(blocks.block_size, axis=1) / 2
+
+    assert len(np.unique(blocks.level)) > 1, "no mixed sizes, nothing to test"
+    surface = blocks.get_contour("g", 0.0)
+
+    assert isinstance(surface, geoml.data.Solid3D)
+    assert surface.closed
+
+    # and it is the surface the finest size throughout would have drawn
+    fine = geoml.data.BlockSet3D(start, [k * 4 for k in n],
+                                 [s / 4 for s in step], max_levels=0)
+    _graded(fine, _sphere(fine, radius=55.0))
+    assert abs(surface.area / fine.get_contour("g", 0.0).area - 1) < 0.02
+
+
+def test_cutting_the_mesh_for_a_contour_keeps_each_block_estimate():
+    """A child is its parent's value plus what the corners say about the shape
+    across it, and that correction cancels over the children -- so the mesh a
+    contour is drawn on holds the same metal as the model it came from."""
+    blocks = _blockset(max_levels=2)
+    rng = np.random.default_rng(7)
+    grade = rng.uniform(0.5, 4.0, blocks.n_data)
+    _graded(blocks, grade)
+
+    for supersample in (0, 1):
+        origin, size, step, values = blocks._cut_to_contour(
+            grade, 2.0, supersample=supersample)
+        assert origin is not None
+
+        volume = np.prod(size * step, axis=1)
+        assert np.isclose((values * volume).sum(),
+                          (grade * blocks.block_volume).sum())
+        assert np.isclose(volume.sum(), blocks.block_volume.sum())
+
+
+def test_supersampling_cuts_the_mesh_below_the_model_but_not_the_model():
+    """The lattice a contour is drawn on may go finer than any block that was
+    ever predicted -- the reconstruction gets rounder, and it costs nothing but
+    mesh."""
+    blocks = _blockset(max_levels=1)
+    _graded(blocks, _sphere(blocks, centre=(80.0, 80.0, 40.0), radius=45.0))
+    finest = blocks.block_size.min()
+
+    plain = blocks._cut_to_contour(
+        np.asarray(blocks.variables["g"].prediction.values), 0.0,
+        supersample=0)
+    deeper = blocks._cut_to_contour(
+        np.asarray(blocks.variables["g"].prediction.values), 0.0,
+        supersample=1)
+
+    assert np.isclose(np.prod(plain[1] * plain[2], axis=1).min() ** (1 / 3),
+                      finest, rtol=0.5)
+    # the finer lattice reaches below anything the model carries
+    assert (deeper[1] * deeper[2]).min() < finest
+    assert len(deeper[0]) > len(plain[0])
+    # and the model itself is untouched by either
+    assert blocks.n_data == int(np.prod(N))
+    assert blocks.get_contour("g", 0.0, supersample=2).area > 0
+
+
+def _brute_unbalanced(blocks, gap=1):
+    """Every base cell painted with its block's level, then a look just outside
+    each face. Exact, and unaffordable on anything real -- which is the whole
+    reason `unbalanced` does not work this way."""
+    lvl = np.full(tuple(blocks.lattice_shape), -1, dtype=np.int16)
+    for o, s, l in zip(blocks._origin, blocks._size, blocks.level):
+        lvl[o[0]:o[0] + s[0], o[1]:o[1] + s[1], o[2]:o[2] + s[2]] = l
+    out = np.zeros(blocks.n_data, dtype=bool)
+    for i, (o, s, l) in enumerate(zip(blocks._origin, blocks._size,
+                                      blocks.level)):
+        best = -1
+        for axis in range(3):
+            for side in (-1, 1):
+                j = o[axis] - 1 if side < 0 else o[axis] + s[axis]
+                if j < 0 or j >= blocks.lattice_shape[axis]:
+                    continue
+                cut = [slice(o[a], o[a] + s[a]) for a in range(3)]
+                cut[axis] = slice(j, j + 1)
+                best = max(best, int(lvl[tuple(cut)].max()))
+        out[i] = (best - l) > gap
+    return out & (blocks.level < blocks.max_levels)
+
+
+@pytest.mark.parametrize("n,discretization,max_levels", [
+    ([8, 8, 8], (2, 2, 2), 2),
+    ([6, 6, 6], (2, 2, 2), 3),
+    ([8, 8, 6], (2, 2, 1), 2),
+    ([6, 6, 6], (3, 3, 3), 2),
+    ([6, 6, 4], (4, 2, 2), 2),
+])
+def test_an_uneven_jump_is_found_without_painting_the_lattice(
+        n, discretization, max_levels):
+    """`unbalanced` asks from the fine side and reads sorted tables, never an
+    array the shape of the base lattice. It must find exactly what painting
+    that lattice would have found."""
+    rng = np.random.default_rng(3)
+    blocks = geoml.data.BlockSet3D([0, 0, 0], n, [20.0, 20.0, 20.0],
+                                   discretization=discretization,
+                                   max_levels=max_levels)
+    # refine unevenly, so jumps of every size occur
+    for _ in range(max_levels):
+        pick = ((np.abs(_sphere(blocks, centre=(60.0, 60.0, 60.0))) < 25.0)
+                & (blocks.level < blocks.max_levels)
+                & (rng.random(blocks.n_data) < 0.7))
+        if not np.any(pick):
+            break
+        blocks = blocks.split(pick, carry=False)
+
+    assert np.array_equal(blocks.unbalanced(), _brute_unbalanced(blocks))
+
+
+def test_refining_levels_the_jumps_it_makes():
+    """A block whose own sub-blocks agree is never marked by the criterion,
+    but a neighbour cut twice over says the field turns sharply nearby."""
+    model = _model()
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                                   max_levels=2)
+    model.data.variables["y"].set_cutoffs([0.5])
+    refined = geoml.models.refine(model, blocks, n_sim=6)
+
+    assert not np.any(refined.unbalanced())
+    assert refined.is_full()
+
+
+def test_a_component_of_a_vector_variable_can_be_contoured():
+    """Only the components of a composition hold a grade, so naming one has to
+    work -- the variable itself has nothing to draw a surface through."""
+    model = _vector_model()
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                                   discretization=(2, 2, 2), max_levels=1)
+    model.predict(blocks, n_sim=6)
+
+    grade = blocks.variables["metals"].components["zn"] \
+        .prediction.values.to_numpy()
+    middle = float(np.nanmean(grade))
+
+    surface = blocks.get_contour("zn", middle)
+    assert isinstance(surface, geoml.data.Mesh3D)
+    assert len(surface.triangles) > 0
+
+    # and naming the variable it belongs to says which parts to ask for
+    with pytest.raises(ValueError, match="made of components"):
+        blocks.get_contour("metals", middle)
+    with pytest.raises(ValueError, match="no variable or component named"):
+        blocks.get_contour("nickel", middle)
+
+
 def test_a_contour_says_when_there_is_nothing_to_draw():
     blocks = _blockset()
     _graded(blocks, np.linspace(0.0, 1.0, blocks.n_data))
 
     with pytest.raises(ValueError, match="no surface at"):
         blocks.get_contour("g", 99.0)
-    with pytest.raises(ValueError, match="no variable named"):
+    with pytest.raises(ValueError, match="no variable or component named"):
         blocks.get_contour("nope", 0.5)
     with pytest.raises(ValueError, match="nothing under"):
         blocks.get_contour("g", 0.5, attribute="measurements")

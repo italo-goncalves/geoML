@@ -1,4 +1,53 @@
 ## version 0.5.7
+* Fixed: `BlockSet3D.get_contour` tore the surface open wherever it crossed a
+change of block size — on a real refined model, 1455 holes and 13% of the area
+missing. A hexahedron is contoured from its own eight corners, so a coarse
+block cannot see the corners its finer neighbours place in the middle of the
+face they share; the two sides draw different curves there. The blocks a
+surface runs through are now cut to the finest size the lattice allows before
+contouring, in the mesh handed to VTK and not in the model, which puts the
+interfaces out of the surface's way. Nothing is predicted: a child takes its
+parent's value plus what the block's corners say about the shape running
+across it, and since the trilinear weights are symmetric about the centre that
+correction cancels over the children, so a block's estimate stays exactly the
+mean of the children standing in for it. The surface comes back the one a
+model carried at the finest size throughout would have drawn — 0.01% in area
+against 13% before — for 13% more cells in the mesh and none in the model.
+Widening the refinement instead, which `docs/variable-block-models.md` §5.1
+used to recommend, is equally correct and costs five times the blocks to
+predict; §5.1.1 has the comparison
+* `BlockSet3D.get_contour(..., supersample=1)` cuts that mesh a further level
+past the model's finest block, which costs no prediction and makes the surface
+both rounder and closer to the level set it stands for. What VTK reads between
+block corners is trilinear — continuous, but creased at every face it crosses,
+and on a field with structure at a few blocks the creases are what looks
+blocky. Averaging onto corners again at each level composes into a rounder
+reconstruction, so the extra levels converge on the field rather than on the
+trilinear caricature of it: on a rough test field one level took the mean
+angle between neighbouring triangles from 9.1° to 5.7° and halved the distance
+from the true surface, matching a model of 3.4 times as many blocks. Smoothing
+the triangles instead was measured and rejected — Taubin bought a sixth of the
+faceting for 50% more distance from the true surface, which is a rounder
+picture at the price of a less true one. `supersample=0` leaves the mesh at the
+model's own resolution
+* `models.refine` also cuts a block whose neighbour ended up more than one
+level finer than itself, and `BlockSet3D.unbalanced(gap=1)` is what finds
+them. Such a block is undecided by its own reckoning — its sub-blocks agree,
+so `needs_splitting` rightly leaves it alone — but a neighbour cut twice over
+is evidence that the field turns sharply nearby, and that evidence sits
+outside the block where nothing was looking. It shows up in what gets drawn: a
+contour reads a block through its eight corners, so a coarse block beside much
+finer ones lays a crude straight guess right where the surface runs. Levelling
+those jumps measured **three times closer to the true surface for a third more
+blocks**, where refining a whole level deeper without it bought almost nothing
+for 2.6 times as many — deeper refinement widens the jumps as fast as it
+narrows the blocks. The search runs from the fine side, each fine block
+stepping one cell past its faces to name the coarse block covering that point,
+which is exact where asking the coarse block is not and needs no array the
+shape of the base lattice
+* Fixed: `BlockSet3D.get_contour` could not name a component of a vector or
+compositional variable, only the variable holding it — but only the components
+carry a grade, so there was nothing to contour under the name it accepted
 * Fixed: refining a model whose variable has components — a vector or
 compositional one — raised `AttributeError: 'collections.OrderedDict' object
 has no attribute '_has_content'`. `divided` was two different things depending

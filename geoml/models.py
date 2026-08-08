@@ -1085,12 +1085,23 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     holds one answer however finely it is cut, so it is left alone, and the
     work goes where the answer is still in doubt.
 
+    It also cuts a block whose neighbour ended up more than one level finer
+    than itself (`BlockSet3D.unbalanced`). Such a block is undecided by its own
+    reckoning -- its sub-blocks agree -- but a neighbour cut twice over is
+    evidence the field turns sharply nearby, and that evidence sits outside the
+    block where nothing else looks. It shows in what gets drawn rather than in
+    what gets decided: a contour reads a block through its eight corners, so a
+    coarse block beside much finer ones lays a crude straight guess right where
+    the surface runs. Levelling those jumps measured three times closer to the
+    true surface for 35% more blocks, against a whole level of extra refinement
+    buying almost nothing for 2.6 times as many.
+
     It runs until there is nothing left to cut, and needs no telling how many
-    passes that is: every pass takes the blocks it splits one level finer,
-    `needs_splitting` never marks a block already at the lattice's
-    `max_levels`, so within `max_levels` passes every block is either settled
-    or as fine as the model was built to go. How fine that is was decided when
-    the block set was made, which is the one place it belongs.
+    passes that is: every pass takes the blocks it splits one level finer and
+    neither criterion ever marks a block already at the lattice's `max_levels`,
+    so within `max_levels` passes every block is either settled or as fine as
+    the model was built to go. How fine that is was decided when the block set
+    was made, which is the one place it belongs.
 
     Only the new blocks are predicted at each pass. A block that was not split
     is the same block on the same support and its value already stands, which
@@ -1137,7 +1148,9 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
 
     step = 0
     while True:
-        mask = blocks.needs_splitting(split_on, tolerance=tolerance)
+        undecided = blocks.needs_splitting(split_on, tolerance=tolerance)
+        uneven = blocks.unbalanced()
+        mask = undecided | uneven
         if not _np.any(mask):
             return blocks
 
@@ -1146,8 +1159,12 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
         model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
                       where=blocks.unpredicted())
         if verbose:
-            print("pass %d: cut %d block(s), %d now"
-                  % (step, int(_np.count_nonzero(mask)), blocks.n_data))
+            print("pass %d: cut %d block(s) (%d undecided, %d to level a jump)"
+                  ", %d now"
+                  % (step, int(_np.count_nonzero(mask)),
+                     int(_np.count_nonzero(undecided)),
+                     int(_np.count_nonzero(uneven & ~undecided)),
+                     blocks.n_data))
 
 
 class StructuralField(_GPModel):
