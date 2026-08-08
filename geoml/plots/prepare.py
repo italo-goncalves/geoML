@@ -835,15 +835,53 @@ def _grade_band(store, band, keep):
     return values if keep is None else values[keep[band]]
 
 
-def _mass_band(density, band, keep, shape):
-    """The mass of every block of a band, broadcast to the grade's shape."""
-    if not hasattr(density, "shape"):
-        return _np.broadcast_to(float(density), shape)
+def _per_block(value, band, keep):
+    """One quantity for the blocks of a band: a number, a column, or a store.
 
-    values = _np.asarray(density[band], dtype=float)
+    A number stays a number -- a model whose blocks are all the same size has
+    one volume, not a copy of it per block -- and anything longer is banded and
+    filtered like the grade beside it.
+    """
+    if _np.ndim(value) == 0:
+        return float(value)
+
+    values = _np.asarray(value[band], dtype=float)
+    if values.ndim == 1:
+        values = values[:, None]
     if keep is not None:
         values = values[keep[band]]
-    return _np.broadcast_to(values, shape)
+    return values
+
+
+def _mass_band(volume, density, band, keep, shape):
+    """What every block of a band weighs: its size times what fills it.
+
+    Both may be one number for the whole model or one per block, and either
+    way the product broadcasts over the realizations.
+    """
+    return _np.broadcast_to(
+        _per_block(volume, band, keep) * _per_block(density, band, keep),
+        shape)
+
+
+def block_volume(container):
+    """What one block is worth, as a number or as one value per block.
+
+    A regular grid has a single spacing and so a single volume; a `BlockSet3D`
+    carries a size per block and answers with a column. Kept apart from the
+    density because only one of them is a property of the container.
+    """
+    volume = getattr(container, "block_volume", None)
+    if volume is not None:
+        return _np.asarray(volume, dtype=float)
+
+    step = getattr(container, "step_size", None)
+    if step is None:
+        raise TypeError(
+            "grade-tonnage needs to know how big a block is, and %s says "
+            "neither `block_volume` nor `step_size`"
+            % type(container).__name__)
+    return float(_np.prod(step))
 
 
 def _cutoff_range(store, bands, keep, name):
@@ -911,15 +949,11 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
         `total`, the blocks that survived the uncertainty filter and the
         blocks there were.
     """
-    step = getattr(container, "step_size", None)
-    if step is None:
-        raise TypeError(
-            "grade-tonnage needs a gridded container, which is what carries "
-            "the size of a block; %s does not" % type(container).__name__)
-    volume = float(_np.prod(step))
+    volume = block_volume(container)
     # a block of a two-dimensional grid has an area, not a volume, and saying
     # otherwise on the axis of a figure someone is reading off is not harmless
-    extent = {1: "length", 2: "area", 3: "volume"}.get(len(step), "volume")
+    extent = {1: "length", 2: "area", 3: "volume"}.get(
+        container.n_dim, "volume")
 
     var = variable_or_component(container, name)
     grade = realization_store(var)
@@ -964,7 +998,7 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
         values = _grade_band(grade, band, keep)
         if values.shape[0] == 0:
             continue
-        weight = _mass_band(mass_per_volume, band, keep, values.shape)
+        weight = _mass_band(volume, mass_per_volume, band, keep, values.shape)
 
         # the highest cut-off each block clears; -1 for one that clears none,
         # which is where a block with no value belongs as well
@@ -985,8 +1019,10 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
             minlength=n_cutoffs * n_realizations
         ).reshape(n_cutoffs, n_realizations)
 
-    tonnage = volume * _np.cumsum(at_cutoff[::-1], axis=0)[::-1]
-    metal = volume * _np.cumsum(metal_at_cutoff[::-1], axis=0)[::-1]
+    # the volume is already in the weights: with a block size per block it
+    # cannot be saved for the end the way one shared size could
+    tonnage = _np.cumsum(at_cutoff[::-1], axis=0)[::-1]
+    metal = _np.cumsum(metal_at_cutoff[::-1], axis=0)[::-1]
 
     with _np.errstate(invalid="ignore", divide="ignore"):
         mean_grade = _np.where(tonnage > 0, metal / tonnage, _np.nan)

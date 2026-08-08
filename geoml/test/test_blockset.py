@@ -355,6 +355,123 @@ def test_it_survives_a_zarr_round_trip(tmp_path):
     assert back.split([0]).is_full()
 
 
+# --------------------------------------------------------------------------- #
+# reporting on blocks of more than one size
+# --------------------------------------------------------------------------- #
+def _graded(blocks, values):
+    blocks.add_continuous_variable("g")
+    blocks.variables["g"].prediction.values[:] = values
+    blocks.variables["g"].allocate_simulations(1)
+    blocks.variables["g"].simulations[:, :] = np.asarray(values)[:, None]
+    return blocks
+
+
+def test_the_tonnage_counts_every_block_at_its_own_size():
+    """Splitting a block into eight and giving each an eighth of the volume
+    has to leave the curve where it was."""
+    from geoml.plots import prepare
+
+    blocks = _blockset()
+    grade = np.linspace(0.2, 4.0, blocks.n_data)
+    _graded(blocks, grade)
+    cutoffs = np.linspace(0.3, 3.8, 8)
+    before = prepare.grade_tonnage(blocks, "g", cutoffs=cutoffs, density=2.7)
+
+    fine = blocks.split(np.ones(blocks.n_data, dtype=bool), carry=False)
+    _graded(fine, np.repeat(grade, 8))
+    after = prepare.grade_tonnage(fine, "g", cutoffs=cutoffs, density=2.7)
+
+    assert np.allclose(after["tonnage"], before["tonnage"])
+    assert np.allclose(after["grade"], before["grade"], equal_nan=True)
+    assert after["unit"] == "mass"
+
+
+def test_a_half_refined_model_reports_the_same_tonnage():
+    from geoml.plots import prepare
+
+    blocks = _blockset()
+    grade = np.linspace(0.2, 4.0, blocks.n_data)
+    _graded(blocks, grade)
+    cutoffs = np.linspace(0.3, 3.8, 8)
+    before = prepare.grade_tonnage(blocks, "g", cutoffs=cutoffs)
+
+    mask = np.asarray(blocks.coordinates)[:, 0] < 60.0
+    mixed = blocks.split(mask, carry=False)
+    _graded(mixed, np.concatenate([grade[~mask], np.repeat(grade[mask], 8)]))
+
+    after = prepare.grade_tonnage(mixed, "g", cutoffs=cutoffs)
+    assert np.allclose(after["tonnage"], before["tonnage"])
+    assert after["unit"] == "volume"
+
+
+def test_the_export_is_one_welded_hexahedron_per_block():
+    blocks = _blockset().split([0])
+    _graded(blocks, np.arange(blocks.n_data, dtype=float))
+    blocks.add_metadata("domain", np.arange(blocks.n_data) % 2)
+    mesh = blocks.as_pyvista()
+
+    assert mesh.n_cells == blocks.n_data
+    # welded: eight corners a block would be 8 * n_data points
+    assert mesh.n_points < 8 * blocks.n_data
+    assert "g - prediction" in mesh.cell_data
+    assert "domain" in mesh.cell_data
+    assert np.allclose(mesh.cell_data["g - prediction"],
+                       np.arange(blocks.n_data))
+    assert np.isclose(mesh.volume, blocks.block_volume.sum())
+
+
+def _sphere(blocks, centre=(80.0, 80.0, 80.0), radius=60.0):
+    return 60.0 - np.linalg.norm(
+        np.asarray(blocks.coordinates) - np.array(centre), axis=1)
+
+
+def test_a_contour_over_mixed_blocks_agrees_with_marching_cubes():
+    start, n, step = [0, 0, 0], [16, 16, 16], [10.0, 10.0, 10.0]
+    blocks = geoml.data.BlockSet3D(start, n, step, max_levels=2)
+    _graded(blocks, _sphere(blocks))
+    surface = blocks.get_contour("g", 0.0)
+
+    grid = geoml.data.Grid3D(start=start, n=n, step=step)
+    grid.add_continuous_variable("f")
+    grid.variables["f"].prediction.values[:] = 60.0 - np.linalg.norm(
+        np.asarray(grid.coordinates) - np.array([80.0, 80.0, 80.0]), axis=1)
+    reference = grid.variables["f"].prediction.get_contour(0.0)
+
+    assert isinstance(surface, geoml.data.Solid3D)
+    assert surface.closed
+    # two different algorithms over the same field, so close rather than equal
+    assert abs(surface.area / reference.area - 1) < 0.05
+
+
+def test_refining_away_from_a_surface_leaves_it_alone():
+    """The blocks the surface passes through are unchanged, so the surface is
+    too -- which is the whole argument for carrying the rest coarsely."""
+    start, n, step = [0, 0, 0], [16, 16, 16], [10.0, 10.0, 10.0]
+    blocks = geoml.data.BlockSet3D(start, n, step, max_levels=2)
+    _graded(blocks, _sphere(blocks))
+    before = blocks.get_contour("g", 0.0)
+
+    far = np.abs(_sphere(blocks)) > 50.0
+    fine = blocks.split(far, carry=False)
+    _graded(fine, _sphere(fine))
+    after = fine.get_contour("g", 0.0)
+
+    assert fine.n_data > blocks.n_data
+    assert np.isclose(after.area, before.area)
+
+
+def test_a_contour_says_when_there_is_nothing_to_draw():
+    blocks = _blockset()
+    _graded(blocks, np.linspace(0.0, 1.0, blocks.n_data))
+
+    with pytest.raises(ValueError, match="no surface at"):
+        blocks.get_contour("g", 99.0)
+    with pytest.raises(ValueError, match="no variable named"):
+        blocks.get_contour("nope", 0.5)
+    with pytest.raises(ValueError, match="nothing under"):
+        blocks.get_contour("g", 0.5, attribute="measurements")
+
+
 def test_it_refuses_a_lattice_it_cannot_count_in():
     with pytest.raises(ValueError, match="max_levels"):
         geoml.data.BlockSet3D(START, N, STEP, max_levels=-1)

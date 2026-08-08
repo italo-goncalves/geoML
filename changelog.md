@@ -1,4 +1,30 @@
 ## version 0.5.7
+* Grade-tonnage counts every block at its own size. It used to take one volume
+from `step_size` and multiply the finished curve by it, which a model of one
+block size allows and `BlockSet3D` does not; the volume now goes into each
+block's weight as the bands are read, so a model half refined reports exactly
+the tonnage the coarse one did. `prepare.block_volume` is what asks a
+container how big its blocks are — a number where they are all alike, a column
+where they are not
+* `BlockSet3D.get_contour` draws an isosurface through blocks of more than one
+size. `marching_cubes` needs a rectangular array and there is none to give it,
+so the blocks go to VTK as hexahedra, which contours an unstructured grid
+directly; on a model of one block size it lands within a few percent of what
+marching cubes gives on the equivalent grid, and refining away from the
+surface leaves it exactly where it was. Values live on the blocks and an
+isosurface needs them on the corners, so they are averaged there first — the
+blocks meeting at a corner are what decide where the surface passes. A mesh
+refined right where the surface runs may still come back open, a coarse face
+and the fine faces against it interpolating along their own edges and not
+agreeing, so leave a level or two of margin; a cracked answer arrives as a
+`Surface3D` rather than a `Solid3D`, never as a body quietly enclosing the
+wrong volume, and `heal()` is there for it
+* `BlockSet3D.as_pyvista` writes one hexahedron per block, welded so that
+blocks sharing a face share its corners — implicit `ImageData` can only state
+one spacing, and the point of this container is that there is more than one.
+Cell values come from `_Variable.fill_pyvista_cells`, one implementation
+serving every variable type rather than the per-type methods a structured
+export needs
 * `BlockSet3D` is a block model whose blocks need not all be the same size —
 fine where the ground is worth resolving, coarse everywhere else. On a real
 deposit that is most of the volume: refining to 5 m only around the drillholes

@@ -655,6 +655,16 @@ class _Attribute(object):
             cube.cell_data[label] = self.as_cube(sigma=sigma) \
                 .transpose([2, 1, 0]).ravel()
 
+    def fill_pyvista_cells(self, mesh, label):
+        """One value per cell, in the order the cells were built.
+
+        The unstructured counterpart of `fill_pyvista_blocks`: where a regular
+        grid has to fold its values back into a cube first, a mesh built one
+        cell per location already has them in the right order.
+        """
+        if self._has_content():
+            mesh.cell_data[label] = self.to_numpy()
+
     def draw_contour(self, value, sigma=None, **kwargs):
         """Creates plotly object with the contour at the specified value."""
         surf_obj = self.get_contour(value, sigma=sigma)
@@ -770,6 +780,27 @@ class _Variable(object):
     @classmethod
     def from_variable(cls, coordinates, variable):
         raise NotImplementedError
+
+    def fill_pyvista_cells(self, mesh, simulations=False):
+        """Every filled column of this variable, as cell data.
+
+        One implementation for every variable type, rather than the per-type
+        `fill_pyvista_*` above: a mesh of one cell per location wants the
+        values in the order they are already in, so the roles the variable
+        persists are exactly the ones worth exporting.
+        """
+        for role in self._ZARR_ATTRS:
+            attribute = getattr(self, role, None)
+            if attribute is not None:
+                attribute.fill_pyvista_cells(
+                    mesh, "%s - %s" % (self.name, role))
+
+        for i, values in _selected_simulations(self.simulations, simulations):
+            _Attribute(self.coordinates, values).fill_pyvista_cells(
+                mesh, "%s - simulation %d" % (self.name, i))
+
+        for component in (getattr(self, "components", None) or {}).values():
+            component.fill_pyvista_cells(mesh, simulations=simulations)
 
     def carry_to(self, coordinates, keep, n_new):
         """This variable on a longer set of locations, keeping what still fits.
@@ -5654,6 +5685,114 @@ class BlockSet3D(PointData):
         for i, label in enumerate(self.coordinate_labels):
             df["_" + label] = self.block_size[:, i]
         return df
+
+    # ------------------------------------------------------------------ #
+    # export
+    # ------------------------------------------------------------------ #
+    def as_pyvista(self, simulations=False):
+        """
+        Converts this object to a pyvista one, carrying its variables.
+
+        One hexahedron per block, written out corner by corner, rather than
+        the `ImageData` a regular block model exports: implicit geometry can
+        only say one spacing, and the point here is that there is more than
+        one. The cells are welded, so blocks that touch share the corners they
+        meet at -- which is what lets anything be contoured across them.
+
+        Parameters
+        ----------
+        simulations
+            Which simulations to include: `False` for none (the default, since
+            each one is a full-length array in the exported object), `True` for
+            all of them, an `int` for the first n, or a sequence of indices.
+        """
+        corner = _np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+                           dtype=float)
+        low = self.box_corner + self._origin * self.base_step
+        points = (low[:, None, :]
+                  + corner[None, :, :] * self.block_size[:, None, :]
+                  ).reshape(-1, 3)
+
+        connectivity = _np.arange(len(points)).reshape(-1, 8)
+        cells = _np.hstack(
+            [_np.full((len(connectivity), 1), 8), connectivity]).ravel()
+        kinds = _np.full(len(connectivity), _pv.CellType.HEXAHEDRON,
+                         dtype=_np.uint8)
+        # Welded, and it matters: written corner by corner every cell owns its
+        # own eight, so neighbours share nothing, and anything reading values
+        # at a corner sees one block there instead of the several that meet.
+        # A contour over an unwelded mesh comes back empty for that reason.
+        mesh = _pv.UnstructuredGrid(cells, kinds, points).clean(
+            tolerance=1e-9, produce_merge_map=False)
+
+        for variable in self.variables.values():
+            variable.fill_pyvista_cells(mesh, simulations=simulations)
+        for name, column in self.metadata.items():
+            column.fill_pyvista_cells(mesh, name)
+        return mesh
+
+    def get_contour(self, variable, value, attribute="prediction"):
+        """
+        Isosurface through blocks of more than one size.
+
+        `marching_cubes` wants a rectangular array and there is none to give
+        it, so the cells are handed to VTK instead, which contours an
+        unstructured grid directly. On a model of one block size the two agree
+        exactly; here the answer is the one a regular grid could not have
+        produced without carrying every block at the finest size.
+
+        Values live on the cells and an isosurface needs them on the corners,
+        so they are averaged onto the corners first -- the blocks meeting at a
+        corner are what decide where the surface passes.
+
+        Note that a mesh refined right where the surface runs may come back
+        open: two coarse and fine faces meeting interpolate the surface along
+        their own edges and need not agree. Leave a level or two of margin
+        around what is being contoured. A cracked answer is a `Surface3D`
+        rather than a `Solid3D`, never a body that quietly encloses the wrong
+        volume, and `heal()` is there for it.
+
+        Parameters
+        ----------
+        variable : str
+            Which variable to contour.
+        value : float
+            The value to draw the surface at.
+        attribute : str
+            Which of the variable's columns to read; the prediction by
+            default.
+
+        Returns
+        -------
+        surf : Solid3D, Surface3D or Mesh3D
+            Whichever the geometry calls for, as `get_contour` on a grid.
+        """
+        if variable not in self.variables:
+            raise ValueError(
+                "no variable named %r; found %s"
+                % (variable, ", ".join(sorted(self.variables)) or "none"))
+
+        label = "%s - %s" % (variable, attribute)
+        mesh = self.as_pyvista()
+        if label not in mesh.cell_data:
+            raise ValueError(
+                "%r holds nothing under %r to contour; it carries %s"
+                % (variable, attribute,
+                   ", ".join(sorted(mesh.cell_data.keys())) or "nothing"))
+
+        surface = mesh.cell_data_to_point_data().contour(
+            [float(value)], scalars=label)
+        if surface.n_cells == 0:
+            raise ValueError(
+                "no surface at %g; %r runs from %g to %g"
+                % (value, label, float(_np.nanmin(mesh.cell_data[label])),
+                   float(_np.nanmax(mesh.cell_data[label]))))
+
+        surface = surface.triangulate()
+        verts = _np.asarray(surface.points, dtype=float)
+        faces = _np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
+        return mesh3d(verts, faces, _gmt.vertex_normals(verts, faces))
 
 
 def rotate(data, origin, azimuth=0.0, dip=0.0, rake=0.0, reverse=False):

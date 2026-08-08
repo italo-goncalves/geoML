@@ -876,10 +876,12 @@ def test_each_scale_gets_its_own_gridlines(blocks):
 
 
 def test_a_grade_tonnage_needs_blocks_to_measure():
+    """Points have no size, so there is no tonnage to be had from them --
+    whether the sizes come one per model or one per block."""
     point, rng = _points(n=20)
     point.add_continuous_variable("v", rng.normal(size=20))
 
-    with pytest.raises(TypeError, match="gridded container"):
+    with pytest.raises(TypeError, match="how big a block is"):
         prepare.grade_tonnage(point, "v")
 
 
