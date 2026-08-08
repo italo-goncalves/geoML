@@ -1,4 +1,16 @@
 ## version 0.5.7
+* Fixed: refining a model whose variable has components — a vector or
+compositional one — raised `AttributeError: 'collections.OrderedDict' object
+has no attribute '_has_content'`. `divided` was two different things depending
+on the class, a single column on a category and a dict keyed by cut-off on a
+grade, and the criterion reached in for it from outside and hoped. Each
+variable now reports its own decisions through `split_shares`, so nothing has
+to guess. Cut-offs are declared per component (two grades are judged against
+two different numbers) and travel to the model as a matrix with a row each,
+short rows padded with infinity so the spare columns come back empty
+* Fixed: `VectorVariable.from_variable` built its components afresh and left
+their cut-offs behind, so a model predicted into a new container had none and
+quietly refined nothing
 * `docs/variable-block-models.md` §11 works the whole thing through on the
 Macpass drillholes, from declaring a cut-off to the grade-tonnage curve and
 the grade shell, with the output of an actual run against each snippet

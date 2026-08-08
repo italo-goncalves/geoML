@@ -781,6 +781,28 @@ class _Variable(object):
     def from_variable(cls, coordinates, variable):
         raise NotImplementedError
 
+    def split_shares(self):
+        """Which decisions this variable carries, and how often each cuts a
+        block in two.
+
+        `{name: (n_data,) array}`, the name saying which decision *within*
+        this variable -- a cut-off for a grade, a boundary for a category --
+        and empty where the variable declares none.
+
+        Asked of the variable rather than worked out from outside, because
+        what carries the answer differs by kind: a graded variable holds one
+        column per cut-off in a dict, a category holds a single column of its
+        own, and a variable made of components has whatever its components
+        have. Reaching in for an attribute called `divided` and hoping finds
+        an `_Attribute` on one and an `OrderedDict` on the other.
+        """
+        shares = {}
+        for label, component in (
+                getattr(self, "components", None) or {}).items():
+            for key, values in component.split_shares().items():
+                shares[("%s %s" % (label, key)).strip()] = values
+        return shares
+
     def fill_pyvista_cells(self, mesh, simulations=False):
         """Every filled column of this variable, as cell data.
 
@@ -1138,6 +1160,10 @@ class ContinuousVariable(_Variable):
         # finer would settle anything. See `likelihood._divided`.
         self.divided = _col.OrderedDict()
 
+    def split_shares(self):
+        return {"@ %g" % cutoff: attr.values.to_numpy()
+                for cutoff, attr in self.divided.items()}
+
     def set_cutoffs(self, cutoffs):
         """The grades this variable is judged against.
 
@@ -1332,16 +1358,21 @@ class ContinuousVariable(_Variable):
             if key not in kwargs.keys():
                 continue
             values = kwargs[key].numpy()
+            cutoffs = self.cutoffs or []
+            if values.shape[1] == 0:
+                # a component of a vector variable that declared none, whose
+                # columns its parent has already trimmed away
+                continue
             # the model asked the *training* variable what the cut-offs were,
             # and the answer is being filed against this one; they match
             # unless somebody has moved one of them since
-            if len(self.cutoffs or []) != values.shape[1]:
+            if len(cutoffs) != values.shape[1]:
                 raise ValueError(
                     "%r was predicted against %d cut-off(s) but declares %s; "
                     "set them on the data the model was trained from, and let "
                     "`copy_to` carry them"
                     % (self.name, values.shape[1], self.cutoffs))
-            for i, cutoff in enumerate(self.cutoffs):
+            for i, cutoff in enumerate(cutoffs):
                 if cutoff not in target:
                     target[cutoff] = self._Attribute(self.coordinates)
                 target[cutoff].values[idx] = values[:, i]
@@ -1535,6 +1566,23 @@ class VectorVariable(_Variable):
         out = _np.where(has_value == 0.0, 1.0, out)
         return out, has_value
 
+    def prediction_input(self):
+        """The components' cut-offs, as one row each.
+
+        They are declared per component -- two grades are judged against two
+        different numbers -- but the model sees the variable whole, so they
+        travel as a matrix with a row per component. A component declaring
+        fewer than the widest is padded with infinity, which nothing is ever
+        above, so its spare columns come back empty and `update` drops them.
+        """
+        declared = [self.components[label].cutoffs or [] for label in
+                    self.labels]
+        widest = max(len(row) for row in declared) if declared else 0
+        if widest == 0:
+            return {}
+        return {"cutoffs": [row + [_np.inf] * (widest - len(row))
+                            for row in declared]}
+
     def get_simulations(self):
         sims = _np.stack([self.components[v].get_simulations() for v in self.labels], axis=2)
         return sims
@@ -1556,6 +1604,12 @@ class VectorVariable(_Variable):
             coordinates,
             variable.labels,
         )
+        # the components are built fresh by `__init__`, so what belongs to
+        # them rather than to the container has to be brought across by hand:
+        # a cut-off is declared per component and a vector variable is how it
+        # reaches the model
+        for label, component in variable.components.items():
+            new_var.components[label].cutoffs = component.cutoffs
         return new_var
 
     @classmethod
@@ -1607,14 +1661,22 @@ class VectorVariable(_Variable):
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
         # each component is dispersed inside a block on its own account
         dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
+        blank = [None] * len(self.labels)
+        shares = {
+            key: (_tf.unstack(kwargs[key], axis=1)
+                  if key in kwargs.keys() else blank)
+            for key in ("proportions", "divided")}
 
-        for lb, p, s, d in zip(self.labels, prediction, simulations,
-                               dispersion):
-            self.components[lb].update(idx, **{
-                "average_sim": p,
-                "simulations": s,
-                "dispersion": d
-            })
+        for i, (lb, p, s, d) in enumerate(zip(self.labels, prediction,
+                                              simulations, dispersion)):
+            values = {"average_sim": p, "simulations": s, "dispersion": d}
+            for key, unstacked in shares.items():
+                if unstacked[i] is not None:
+                    # the matrix was padded out to the widest component, so
+                    # this one takes only the cut-offs it declared
+                    declared = len(self.components[lb].cutoffs or [])
+                    values[key] = unstacked[i][:, :declared]
+            self.components[lb].update(idx, **values)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
@@ -1860,6 +1922,13 @@ class _Category(_Variable):
         # which is the question splitting answers -- see `likelihood._divided`
         self.divided = self._Attribute(coordinates)
         self.simulations = None
+
+    def split_shares(self):
+        # one boundary, its own, and no cut-off to name it by: a category's
+        # crossing is always zero
+        if not self.divided._has_content():
+            return {}
+        return {"": self.divided.values.to_numpy()}
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
@@ -5786,16 +5855,9 @@ class BlockSet3D(PointData):
                 raise ValueError(
                     "no variable named %r to split on; found %s"
                     % (name, ", ".join(sorted(self.variables)) or "none"))
-            variable = self.variables[name]
-
-            for cutoff, attr in getattr(variable, "divided", {}).items():
-                shares["%s @ %g" % (name, cutoff)] = attr.values.to_numpy()
-
-            for label, component in (
-                    getattr(variable, "components", None) or {}).items():
-                cut = getattr(component, "divided", None)
-                if cut is not None and cut._has_content():
-                    shares["%s = %s" % (name, label)] = cut.values.to_numpy()
+            # each variable reports its own -- see `_Variable.split_shares`
+            for key, values in self.variables[name].split_shares().items():
+                shares[("%s %s" % (name, key)).strip()] = values
         return shares
 
     def needs_splitting(self, split_on=None, tolerance=0.05):

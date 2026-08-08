@@ -502,6 +502,57 @@ def test_refining_stops_on_its_own():
     assert not np.any(refined.needs_splitting())
 
 
+def _vector_model(seed=1234):
+    """Two grades modelled together, so the components carry cut-offs of
+    their own -- the shape `block_shares` used to guess wrong about."""
+    geoml.set_seed(seed)
+    rng = np.random.default_rng(seed)
+    xyz = rng.uniform(0, 160, size=[300, 3])
+    radius = np.linalg.norm(xyz - np.array([80.0, 80.0, 80.0]), axis=1)
+    core = np.exp(-(radius / 30.0) ** 2)
+
+    point = geoml.data.PointData.from_array(xyz)
+    point.add_vector_variable(
+        "metals", ["zn", "pb"],
+        np.stack([4.0 * core + 0.02, 1.5 * core + 0.01], axis=1))
+    point.variables["metals"].components["zn"].set_cutoffs([1.0])
+    point.variables["metals"].components["pb"].set_cutoffs([0.5])
+
+    ip = geoml.inducing.from_kmeans(point, 100, seed=0)
+    root = geoml.latent.BasicInput(
+        [ip], transform=geoml.transform.Isotropic(30.0))
+    gp = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "metals", geoml.likelihood.MultivariateGaussian(2), gp,
+        options=geoml.models.GPOptions(verbose=False, seed=seed,
+                                       training_samples=10))
+    model.train_full(max_iter=30)
+    return model
+
+
+def test_a_vector_variables_components_each_bring_their_own_cutoffs():
+    """`divided` is an `_Attribute` on a category and an `OrderedDict` on a
+    graded variable, so reaching in for it from outside found the wrong thing
+    on a vector variable's components. Each variable reports its own now."""
+    model = _vector_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    shares = blocks.block_shares()
+    assert sorted(shares) == ["metals pb @ 0.5", "metals zn @ 1"]
+    for values in shares.values():
+        assert values.shape == (blocks.n_data,)
+        assert np.all((values >= 0.0) & (values <= 1.0))
+
+    # and the whole workflow runs on it, doing exactly what the criterion
+    # asked -- which is the invariant, where whether this particular field
+    # happens to straddle a cut-off is a property of the fixture
+    wanted = blocks.needs_splitting()
+    refined = geoml.models.refine(model, blocks, n_sim=8)
+    assert refined.is_full()
+    assert (refined.n_data > blocks.n_data) == bool(np.any(wanted))
+
+
 def test_only_the_named_variables_get_a_say():
     model = _ore_model()
     blocks = _ore_blocks()
@@ -544,7 +595,7 @@ def test_a_category_splits_a_block_where_its_boundary_runs():
     model.predict(blocks, n_sim=8)
 
     variable = blocks.variables["rock"]
-    assert sorted(blocks.block_shares()) == ["rock = granite", "rock = schist"]
+    assert sorted(blocks.block_shares()) == ["rock granite", "rock schist"]
 
     for component in variable.components.values():
         share = component.proportion.values.to_numpy()

@@ -160,6 +160,20 @@ def _dispersion(x, n_splits=None):
     return _tf.math.reduce_variance(grouped, axis=1)
 
 
+def _cutoff_matrix(cutoffs, dtype):
+    """Cut-offs as `(n_var, n_cutoffs)`, ready to broadcast over a block.
+
+    One list applies to every variable and comes back with a leading 1, which
+    broadcasts; a matrix is one row per variable and is left alone. Either way
+    the result slots in as `cuts[:, None, :]` against a `(..., n_var, n_sim)`
+    tensor.
+    """
+    cuts = _tf.cast(cutoffs, dtype)
+    if len(cuts.shape) < 2:
+        cuts = _tf.reshape(cuts, [1, -1])
+    return cuts
+
+
 def _proportions(x, cutoffs, n_splits=None):
     """How much of a block sits at or below each of `cutoffs`.
 
@@ -179,18 +193,22 @@ def _proportions(x, cutoffs, n_splits=None):
     realizations alone -- the same number `reset_probabilities` arrives at from
     the stored simulations afterwards.
 
+    `cutoffs` is one list for every variable, or a `(n_var, n_cutoffs)` matrix
+    where they differ -- the components of a vector variable are separate
+    grades and are judged against separate numbers.
+
     Returns `(n_blocks, n_var, n_cutoffs)`.
     """
-    cutoffs = _tf.reshape(_tf.cast(cutoffs, x.dtype), [-1])
+    cuts = _cutoff_matrix(cutoffs, x.dtype)
 
     if n_splits is None:
-        below = _tf.cast(x[..., None] <= cutoffs, x.dtype)
+        below = _tf.cast(x[..., None] <= cuts[:, None, :], x.dtype)
         return _tf.reduce_mean(below, axis=2)
 
     n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
-    below = _tf.cast(grouped[..., None] <= cutoffs, x.dtype)
+    below = _tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
     return _tf.reduce_mean(below, axis=[1, 3])
 
 
@@ -215,17 +233,17 @@ def _divided(x, cutoffs, n_splits=None):
     the block straddles each cut-off. Zero without a discretization: a
     location has no sub-blocks to disagree.
     """
-    cutoffs = _tf.reshape(_tf.cast(cutoffs, x.dtype), [-1])
+    cuts = _cutoff_matrix(cutoffs, x.dtype)
 
     if n_splits is None:
         return _tf.zeros(
-            _tf.concat([_tf.shape(x)[:2], [_tf.size(cutoffs)]], axis=0),
+            _tf.concat([_tf.shape(x)[:2], [_tf.shape(cuts)[-1]]], axis=0),
             dtype=x.dtype)
 
     n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
-    below = _tf.cast(grouped[..., None] <= cutoffs, x.dtype)
+    below = _tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
 
     # per realization: what share of this block's sub-blocks sit below
     share = _tf.reduce_mean(below, axis=1)
