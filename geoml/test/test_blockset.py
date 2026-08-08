@@ -503,6 +503,74 @@ def test_only_the_named_variables_get_a_say():
         blocks.needs_splitting(split_on="nope")
 
 
+def _rock_model(seed=1234):
+    """Two rock types either side of a plane, so there is a contact to find."""
+    geoml.set_seed(seed)
+    rng = np.random.default_rng(seed)
+    xyz = rng.uniform(0, 160, size=[350, 3])
+    rock = np.where(xyz[:, 0] + 0.4 * xyz[:, 1] < 110, "granite", "schist")
+
+    point = geoml.data.PointData.from_array(xyz)
+    point.add_categorical_variable("rock", measurements=rock)
+
+    ip = geoml.inducing.from_kmeans(point, 100, seed=0)
+    root = geoml.latent.BasicInput(
+        [ip], transform=geoml.transform.Isotropic(40.0))
+    gp = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "rock", geoml.likelihood.CategoricalGaussianIndicator(2), gp,
+        options=geoml.models.GPOptions(verbose=False, seed=seed,
+                                       training_samples=10))
+    model.train_full(max_iter=30)
+    return model
+
+
+def test_a_category_splits_a_block_where_its_boundary_runs():
+    """`ind_skew` is a category's log-odds against its best rival, so the
+    contact is its zero level set and the criterion is the same one a grade
+    gets -- with the cut-off fixed at zero and nothing to declare."""
+    model = _rock_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    variable = blocks.variables["rock"]
+    assert sorted(blocks.block_shares()) == ["rock = granite", "rock = schist"]
+
+    for component in variable.components.values():
+        share = component.proportion.values.to_numpy()
+        assert np.all((share >= 0.0) & (share <= 1.0))
+        assert np.any(share >= 1.0 - 1e-12)      # blocks wholly one rock
+    # the shares of the two categories account for the whole block
+    total = sum(c.proportion.values.to_numpy()
+                for c in variable.components.values())
+    assert np.allclose(total, 1.0)
+
+    assert np.any(blocks.needs_splitting())
+
+
+def test_a_variable_with_components_survives_being_carried_over():
+    """`from_variable` builds the components, so carrying has to fill those
+    rather than build a second set that would go nowhere."""
+    model = _rock_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    mask = blocks.needs_splitting()
+    fine = blocks.split(mask)
+    kept = int((~mask).sum())
+
+    assert sorted(fine.variables["rock"].components) == ["granite", "schist"]
+    for label, component in fine.variables["rock"].components.items():
+        before = blocks.variables["rock"].components[label]
+        assert np.allclose(
+            component.probability.values.to_numpy()[:kept],
+            before.probability.values.to_numpy()[~mask])
+
+    refined = geoml.models.refine(model, blocks, n_sim=8, levels=2)
+    assert refined.is_full()
+    assert refined.n_data < blocks.n_data * 8 ** 2 / 4
+
+
 def test_the_criterion_never_marks_the_finest_blocks():
     model = _ore_model()
     blocks = geoml.data.BlockSet3D([0, 0, 0], [4, 4, 2], [20.0, 20.0, 40.0],

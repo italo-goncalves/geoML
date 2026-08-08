@@ -691,7 +691,209 @@ Not recoverable, and not worth faking: `as_cube`, `as_image`, `smooth` and
 
 ---
 
-## 11. Plan
+## 11. Using it
+
+Worked on the Macpass drillholes, which are not distributed with geoML —
+`datasets.macpass` takes the directory you downloaded them into. Every number
+below is from running it; the whole thing takes about a minute and a half on
+a GPU.
+
+### 11.1 The data, and one deposit
+
+The field is 27 x 18 km in three widely separated groups, so a single block
+model over all of it would be mostly air.
+
+```python
+import numpy as np
+from scipy.cluster import hierarchy
+import geoml
+
+geoml.set_seed(1234)
+holes = geoml.datasets.macpass("path/to/Macpass")
+samples = holes.composite(5.0).as_point_data()
+
+xy = np.asarray(samples.coordinates)[:, :2]
+group = hierarchy.fcluster(hierarchy.linkage(xy, method="single"),
+                           900.0, criterion="distance")
+biggest = np.argmax(np.bincount(group))
+lo, hi = xy[group == biggest].min(axis=0), xy[group == biggest].max(axis=0)
+z = np.asarray(samples.coordinates)[:, 2]
+deposit = samples.subset_region([lo[0] - 100, lo[1] - 100, z.min() - 10],
+                                [hi[0] + 100, hi[1] + 100, z.max() + 10])
+```
+
+    deposit: 5667 samples over [2352.  860.  656.] m
+
+### 11.2 Declaring what the decision is
+
+A cut-off is a property of the variable, not of the blocks. Declared on the
+data, it travels to whatever is predicted from it, so nothing downstream has
+to be told a second time.
+
+```python
+deposit.variables["Zn_pct"].set_cutoffs([4.0])
+```
+
+    Zn 0.000 .. 45.7 %, 656 of 5667 samples over 4%
+
+`set_cutoffs(None)` is the opt-out: that variable takes no part in any
+decision and reports no shares. It is the right answer for a composition's
+rest component, and for anything carried along that nobody mines on.
+
+A **categorical** variable declares nothing. Its cut-off is zero on
+`ind_skew`, a category's log-odds against its best rival, so the contact
+between two categories is that quantity's zero level set and the criterion is
+the same one a grade gets. Excluding a category from the decision is
+`split_on`'s job, not the variable's.
+
+### 11.3 A model, and a coarse block model to start from
+
+Nothing here is new — the model is built and trained as always.
+
+```python
+warping = geoml.warping.ChainedWarping(
+    geoml.warping.Softplus(1), geoml.warping.ZScore(1),
+    geoml.warping.Spline(1, 8), geoml.warping.ZScore(1))
+inducing = geoml.inducing.from_kmeans(deposit, 400, seed=0)
+root = geoml.latent.BasicInput(
+    [inducing], transform=geoml.transform.Anisotropy3D(
+        maxrange=120.0, midrange_fct=0.6, minrange_fct=0.25, azimuth=45.0))
+gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
+
+model = geoml.models.VGPNetwork(
+    deposit, "Zn_pct", geoml.likelihood.Gaussian(warping=warping), gp,
+    options=geoml.models.GPOptions(verbose=False, seed=1234,
+                                   training_samples=10))
+model.train_full(max_iter=120)
+```
+
+The block model starts **coarse**, and `max_levels` fixes how fine it may
+ever go. `discretization` is both the sub-block lattice and the ratio a block
+splits by, so `(2, 2, 2)` with `max_levels=3` means 40 m blocks that can
+reach 5 m.
+
+```python
+corner = np.asarray(deposit.coordinates).min(axis=0)
+span = np.ptp(np.asarray(deposit.coordinates), axis=0)
+step = np.array([40.0, 40.0, 40.0])
+
+blocks = geoml.data.BlockSet3D(
+    start=corner, n=np.ceil(span / step).astype(int) + 1, step=step,
+    discretization=(2, 2, 2), max_levels=3)
+```
+
+    coarse model: 24840 blocks of [40.0, 40.0, 40.0] m, base cell [5.0, 5.0, 5.0] m
+    a uniform model at the finest level would be 12718080 blocks
+
+### 11.4 The multi-pass prediction
+
+```python
+refined = geoml.models.refine(model, blocks, n_sim=20, levels=3, verbose=True)
+```
+
+    pass 1: cut 5485 block(s), 63235 now
+    pass 2: cut 18106 block(s), 189977 now
+    pass 3: cut 43802 block(s), 496591 now
+    refined in 74 s
+
+    496591 blocks, 25.6x fewer than uniform, full=True
+       level 0:  19355 blocks of  40.0 m
+       level 1:  25774 blocks of  20.0 m
+       level 2: 101046 blocks of  10.0 m
+       level 3: 350416 blocks of   5.0 m
+
+Half a million blocks against the 12.7 million a uniform 5 m model would need,
+and the 5 m ones are where the 4% surface runs.
+
+`refine` takes `split_on` to name which variables get a say, `tolerance` for
+how often a block must be found divided, and `include_noise`, which is passed
+to the predictions. The criterion never reads the noise (§7.3).
+
+### 11.5 Doing it by hand
+
+`refine` is a short loop over three calls, and there is no reason not to
+write it out when the decision wants more than `needs_splitting` gives:
+
+```python
+model.predict(blocks, n_sim=20)
+
+for _ in range(3):
+    mask = blocks.needs_splitting(split_on="Zn_pct", tolerance=0.05)
+    if not mask.any():
+        break
+    blocks = blocks.split(mask)
+    model.predict(blocks, n_sim=20, where=blocks.unpredicted())
+```
+
+`split` keeps what the blocks that were not split already hold, `unpredicted()`
+names the ones it created, and `where=` visits only those. The result is
+bit-identical to predicting the whole refined model.
+
+What the mask is made from is readable on its own:
+
+```python
+blocks.block_shares()            # {'Zn_pct @ 4': array([...])}
+variable = blocks.variables["Zn_pct"]
+variable.proportions[4.0]        # how much of each block is under 4% Zn
+variable.divided[4.0]            # how often 4% passes through the block
+variable.dispersion              # how much the block varies inside itself
+```
+
+`proportions` is the recoverable share and is worth having whether or not
+anything is refined; on a categorical variable it is per category, and it is
+the partial-block domaining number:
+
+```python
+for label, part in blocks.variables["rock"].components.items():
+    part.proportion   # the share of each block this rock type holds
+    part.divided      # whether the block straddles its boundary
+```
+
+### 11.6 Reporting on the result
+
+Everything downstream counts each block at its own size.
+
+```python
+import geoml.plots.prepare as prep
+
+curves = prep.grade_tonnage(refined, "Zn_pct", density=2.96,
+                            cutoffs=[1.0, 2.0, 4.0, 8.0])
+```
+
+    >=  1.0 %Zn :    1.491e+09 t, at 3.71 %
+    >=  2.0 %Zn :    8.830e+08 t, at 5.72 %
+    >=  4.0 %Zn :    4.566e+08 t, at 8.42 %
+    >=  8.0 %Zn :    1.815e+08 t, at 12.55 %
+
+A grade shell comes from VTK rather than marching cubes, there being no
+rectangular array to give it:
+
+```python
+shell = refined.get_contour("Zn_pct", 4.0)
+```
+
+    4% shell: Surface3D, 57301 triangles, closed=False
+
+Note the type. It came back a `Surface3D` and not a `Solid3D`, which is the
+honest answer: the shell is cut by the edge of the modelled box, and it may
+also have cracked where the mesh changes level (§5.1). A body would have been
+a claim about an enclosed volume that this surface cannot support. `heal()`
+is there when the geometry is nearly right, and leaving a level of margin
+around what is being contoured is the way to avoid the second cause.
+
+### 11.7 Saving it
+
+```python
+refined.to_zarr("macpass_zn.zarr")
+back = geoml.data.BlockSet3D.open("macpass_zn.zarr")
+```
+
+The lattice is stored as integers, so what comes back tiles its box exactly
+as what went in did, and can be refined further.
+
+---
+
+## 12. Plan
 
 1. **Within-block dispersion from the coarse pass.** A second reduction beside
    `_aggregate` (`likelihood.py:276`), a `dispersion` column and a

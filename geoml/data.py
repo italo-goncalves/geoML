@@ -815,9 +815,18 @@ class _Variable(object):
         answer for it, so re-predicting it would spend the work to arrive at
         the number already there.
         """
-        keep = _np.asarray(keep, dtype=bool)
-        n_kept = int(_np.count_nonzero(keep))
         new = self.__class__.from_variable(coordinates, self)
+        self._carry_into(new, _np.asarray(keep, dtype=bool))
+        return new
+
+    def _carry_into(self, new, keep):
+        """Fill an already-built variable with the `keep` rows of this one.
+
+        Apart from `carry_to` so that a variable holding components fills the
+        ones its own `from_variable` just created, rather than building a
+        second set that would go nowhere.
+        """
+        n_kept = int(_np.count_nonzero(keep))
 
         for role in self._ZARR_ATTRS:
             old = getattr(self, role, None)
@@ -833,17 +842,16 @@ class _Variable(object):
 
         if self._ZARR_HAS_QUANTILES:
             for source, target in ((self.quantiles, new.quantiles),
-                                   (self.probabilities, new.probabilities)):
+                                   (self.probabilities, new.probabilities),
+                                   (self.proportions, new.proportions),
+                                   (self.divided, new.divided)):
                 for key, attr in source.items():
-                    fresh = self._Attribute(coordinates)
+                    fresh = self._Attribute(new.coordinates)
                     fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
                     target[key] = fresh
 
         for name, component in (getattr(self, "components", None) or {}).items():
-            new.components[name] = component.carry_to(
-                coordinates, keep, n_new)
-
-        return new
+            component._carry_into(new.components[name], keep)
 
     def __getitem__(self, item):
         raise NotImplementedError

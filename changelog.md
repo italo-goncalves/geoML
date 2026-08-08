@@ -1,4 +1,7 @@
 ## version 0.5.7
+* `docs/variable-block-models.md` §11 works the whole thing through on the
+Macpass drillholes, from declaring a cut-off to the grade-tonnage curve and
+the grade shell, with the output of an actual run against each snippet
 * `geoml.models.refine(model, blocks, levels=...)` predicts on a coarse block
 model, works out which blocks cannot decide, cuts those, and predicts on what
 the cutting made — as many times as asked. Only the new blocks are visited at
