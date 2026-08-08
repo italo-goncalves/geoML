@@ -788,7 +788,7 @@ blocks = geoml.data.BlockSet3D(
 ### 11.4 The multi-pass prediction
 
 ```python
-refined = geoml.models.refine(model, blocks, n_sim=20, levels=3, verbose=True)
+refined = geoml.models.refine(model, blocks, n_sim=20, verbose=True)
 ```
 
     pass 1: cut 5485 block(s), 63235 now
@@ -805,14 +805,22 @@ refined = geoml.models.refine(model, blocks, n_sim=20, levels=3, verbose=True)
 Half a million blocks against the 12.7 million a uniform 5 m model would need,
 and the 5 m ones are where the 4% surface runs.
 
+Three passes, and nobody asked for three. `refine` runs until nothing needs
+cutting, and needs no count: each pass takes the blocks it splits one level
+finer, and the criterion never marks a block already at `max_levels`, so
+within that many passes every block is either settled or as fine as the
+lattice allows. How fine that is was decided when the block set was made,
+which is the one place it belongs.
+
 `refine` takes `split_on` to name which variables get a say, `tolerance` for
 how often a block must be found divided, and `include_noise`, which is passed
 to the predictions. The criterion never reads the noise (§7.3).
 
 ### 11.5 Doing it by hand
 
-`refine` is a short loop over three calls, and there is no reason not to
-write it out when the decision wants more than `needs_splitting` gives:
+`refine` is a short loop over three calls, and there is no reason not to write
+it out — to stop part way and look at what a pass cost, or where it went, or
+to decide on something `needs_splitting` does not offer:
 
 ```python
 model.predict(blocks, n_sim=20)

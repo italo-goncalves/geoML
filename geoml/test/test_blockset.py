@@ -462,7 +462,7 @@ def test_refinement_goes_where_the_cutoff_is():
     model = _ore_model()
     blocks = _ore_blocks()
 
-    refined = geoml.models.refine(model, blocks, n_sim=8, levels=2)
+    refined = geoml.models.refine(model, blocks, n_sim=8)
     assert refined.is_full()
     assert np.isclose(refined.block_volume.sum(), blocks.block_volume.sum())
     assert not np.any(np.isnan(
@@ -478,18 +478,28 @@ def test_refinement_goes_where_the_cutoff_is():
         np.nanmin(np.abs(grade[~coarse] - 1.0))
 
 
-def test_refining_stops_when_there_is_nothing_left_to_cut():
+def test_refining_stops_on_its_own():
+    """It is told how many passes by the lattice, not by an argument. Every
+    pass takes what it splits one level finer and the criterion never marks a
+    block already at `max_levels`, so it runs out within `max_levels` passes
+    whatever it is given."""
     model = _ore_model()
-    blocks = _ore_blocks()
-    # nothing declares a decision, so nothing is ever divided
-    blocks_no_cutoff = _ore_blocks()
-    model.predict(blocks_no_cutoff, n_sim=8)
-    blocks_no_cutoff.variables["au"].cutoffs = None
-    blocks_no_cutoff.variables["au"].divided.clear()
 
-    assert not np.any(blocks_no_cutoff.needs_splitting())
-    same = geoml.models.refine(model, blocks, n_sim=8, levels=0)
-    assert same.n_data == blocks.n_data
+    # a model whose variable declares no cut-off has nothing to decide, so
+    # the first pass is also the last
+    quiet_model, quiet = _model(), _blockset()
+    quiet_model.predict(quiet, n_sim=6)
+    assert quiet.variables["y"].cutoffs is None
+    assert not np.any(quiet.needs_splitting())
+    assert geoml.models.refine(
+        quiet_model, quiet, n_sim=6).n_data == quiet.n_data
+
+    # and where there is something to cut, it stops at the finest level the
+    # lattice allows rather than running on
+    blocks = _ore_blocks()
+    refined = geoml.models.refine(model, blocks, n_sim=8)
+    assert refined.level.max() <= refined.max_levels
+    assert not np.any(refined.needs_splitting())
 
 
 def test_only_the_named_variables_get_a_say():
@@ -566,7 +576,7 @@ def test_a_variable_with_components_survives_being_carried_over():
             component.probability.values.to_numpy()[:kept],
             before.probability.values.to_numpy()[~mask])
 
-    refined = geoml.models.refine(model, blocks, n_sim=8, levels=2)
+    refined = geoml.models.refine(model, blocks, n_sim=8)
     assert refined.is_full()
     assert refined.n_data < blocks.n_data * 8 ** 2 / 4
 
@@ -575,7 +585,7 @@ def test_the_criterion_never_marks_the_finest_blocks():
     model = _ore_model()
     blocks = geoml.data.BlockSet3D([0, 0, 0], [4, 4, 2], [20.0, 20.0, 40.0],
                                    discretization=(2, 2, 2), max_levels=1)
-    refined = geoml.models.refine(model, blocks, n_sim=8, levels=3)
+    refined = geoml.models.refine(model, blocks, n_sim=8)
 
     assert np.all(refined.level <= refined.max_levels)
     assert not np.any(refined.needs_splitting()[

@@ -1332,6 +1332,15 @@ class ContinuousVariable(_Variable):
             if key not in kwargs.keys():
                 continue
             values = kwargs[key].numpy()
+            # the model asked the *training* variable what the cut-offs were,
+            # and the answer is being filed against this one; they match
+            # unless somebody has moved one of them since
+            if len(self.cutoffs or []) != values.shape[1]:
+                raise ValueError(
+                    "%r was predicted against %d cut-off(s) but declares %s; "
+                    "set them on the data the model was trained from, and let "
+                    "`copy_to` carry them"
+                    % (self.name, values.shape[1], self.cutoffs))
             for i, cutoff in enumerate(self.cutoffs):
                 if cutoff not in target:
                     target[cutoff] = self._Attribute(self.coordinates)

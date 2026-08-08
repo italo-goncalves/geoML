@@ -2,11 +2,15 @@
 * `docs/variable-block-models.md` §11 works the whole thing through on the
 Macpass drillholes, from declaring a cut-off to the grade-tonnage curve and
 the grade shell, with the output of an actual run against each snippet
-* `geoml.models.refine(model, blocks, levels=...)` predicts on a coarse block
+* `geoml.models.refine(model, blocks)` predicts on a coarse block
 model, works out which blocks cannot decide, cuts those, and predicts on what
-the cutting made — as many times as asked. Only the new blocks are visited at
-each pass, a block that was not split being the same block on the same
-support. On a compact ore body in a barren domain it reached 4309 blocks where
+the cutting made — until there is nothing left to cut. It needs no telling how
+many passes that is: each one takes the blocks it splits a level finer and the
+criterion never marks a block already at the lattice's `max_levels`, so it
+runs out on its own within that many passes. How fine the model may go was
+settled when the block set was made, which is the one place it belongs. Only
+the new blocks are visited at each pass, a block that was not split being the
+same block on the same support. On a compact ore body in a barren domain it reached 4309 blocks where
 the equivalent uniform model needed 131 072, the coarse ones sitting where the
 grade is plainly below the cut-off and the fine ones spanning it
 * What decides a split is one question asked of every variable: *what does a

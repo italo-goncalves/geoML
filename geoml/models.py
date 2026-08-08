@@ -1073,7 +1073,7 @@ class VGPNetwork(_GPModel):
             print("\n")
 
 
-def refine(model, blocks, n_sim=20, levels=1, split_on=None, tolerance=0.05,
+def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
            include_noise='monte_carlo', verbose=False):
     """
     Predict on a block model, cutting finer wherever it cannot decide.
@@ -1084,6 +1084,13 @@ def refine(model, blocks, n_sim=20, levels=1, split_on=None, tolerance=0.05,
     again on what the cutting made. A block on one side of every decision
     holds one answer however finely it is cut, so it is left alone, and the
     work goes where the answer is still in doubt.
+
+    It runs until there is nothing left to cut, and needs no telling how many
+    passes that is: every pass takes the blocks it splits one level finer,
+    `needs_splitting` never marks a block already at the lattice's
+    `max_levels`, so within `max_levels` passes every block is either settled
+    or as fine as the model was built to go. How fine that is was decided when
+    the block set was made, which is the one place it belongs.
 
     Only the new blocks are predicted at each pass. A block that was not split
     is the same block on the same support and its value already stands, which
@@ -1096,6 +1103,10 @@ def refine(model, blocks, n_sim=20, levels=1, split_on=None, tolerance=0.05,
     noise is still added to the predictions themselves, as `include_noise`
     asks.
 
+    To stop part way and look -- at what a pass cost, or at where it went --
+    write the loop out instead; it is three calls, and
+    `docs/variable-block-models.md` §11.5 has it.
+
     Parameters
     ----------
     model
@@ -1105,15 +1116,13 @@ def refine(model, blocks, n_sim=20, levels=1, split_on=None, tolerance=0.05,
         a new one.
     n_sim : int
         Simulations to draw, at every pass.
-    levels : int
-        How many times to cut. Stops early once nothing needs cutting, and
-        never goes past the lattice's own `max_levels`.
     split_on : str or list, optional
         Which variables get a say. All of them by default -- name a few on a
         polymetallic deposit, or every element marks most of the model and
         gives back the saving.
     tolerance : float
-        How near 0 or 1 a share still counts as undivided.
+        The share of realizations that must find a block divided before it is
+        cut.
     include_noise : str
         Passed to `predict` for the predictions themselves.
     verbose : bool
@@ -1126,21 +1135,19 @@ def refine(model, blocks, n_sim=20, levels=1, split_on=None, tolerance=0.05,
     """
     model.predict(blocks, n_sim=n_sim, include_noise=include_noise)
 
-    for step in range(int(levels)):
+    step = 0
+    while True:
         mask = blocks.needs_splitting(split_on, tolerance=tolerance)
         if not _np.any(mask):
-            if verbose:
-                print("pass %d: nothing left to cut" % (step + 1))
-            break
+            return blocks
 
+        step += 1
         blocks = blocks.split(mask)
         model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
                       where=blocks.unpredicted())
         if verbose:
             print("pass %d: cut %d block(s), %d now"
-                  % (step + 1, int(_np.count_nonzero(mask)), blocks.n_data))
-
-    return blocks
+                  % (step, int(_np.count_nonzero(mask)), blocks.n_data))
 
 
 class StructuralField(_GPModel):
