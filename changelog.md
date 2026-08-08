@@ -1,3 +1,46 @@
+## version 0.5.7
+* `BlockSet3D` is a block model whose blocks need not all be the same size —
+fine where the ground is worth resolving, coarse everywhere else. On a real
+deposit that is most of the volume: refining to 5 m only around the drillholes
+takes a 29-million-cell model under 700 000, and its simulations from 22 GiB
+to half of one. Every block's position and size are whole numbers of a **base
+cell**, `step / 2 ** max_levels`, and working in those integers rather than in
+metres is what makes the arithmetic exact — blocks meet with no tolerance, a
+block is a whole number of its own children, and regrouping conserves mass to
+the last digit. It is built full, as a uniform grid, and `split` keeps it that
+way, so the blocks always tile their box: `is_full()` says so by counting base
+cells, since volume alone cannot tell a gap from an overlap that cancels it.
+`discretization` is the same at every level, which is the reason nothing
+downstream had to change: a block of any size fans out into the same number of
+rows, so `_aggregate` still reshapes, batches need not be sorted by level, and
+the model never learns that levels exist. Splitting deliberately does **not**
+carry the predictions over — a value belongs to the support it was predicted
+on, and handing a parent's to its children would manufacture eight blocks that
+agree exactly, which is the one thing refining is meant to find out rather
+than assume. Per-block sizes are `block_size` and `block_volume`, not
+`step_size`: that name means one size for the whole object, and anything
+reading it would take the product of the array for a volume. Saves and reopens
+through `to_zarr`. The plan it comes from, and the measurements behind it, are
+in `docs/variable-block-models.md`
+* A predicted `ContinuousVariable` now carries a `dispersion` column: how much
+the locations inside each block differ among themselves. It is the variance
+over a block's sub-blocks, averaged over the realizations, and it answers a
+different question from `latent_variance` — that one says how sure the model
+is *of* a block, this one says how much the block varies *within itself*. A
+well-drilled block can still be heterogeneous, and it is the second number,
+not the first, that says whether cutting the block finer would tell anyone
+anything. Nothing in the package reported change of support before this.
+It is taken from the sub-blocks before they are averaged away and *after* the
+warping has been undone, so it is a spread of grades rather than of the latent
+field — the two are not the same thing under a warping and only the first is
+reportable. Where a container does not discretize the column stays missing
+rather than zero: a location has no interior, and a block the model treats as
+its own centre has one it knows nothing about, whereas zero would read as
+"uniform inside", which is a claim nobody made. It follows the variable
+through subsetting, `as_data_frame`, the pyvista exports and `to_zarr`, and a
+vector variable's components each carry their own. See
+`docs/variable-block-models.md`, which is what this is the first step of
+
 ## version 0.5.6
 * `geoml.inducing` builds the inducing points a network is given, which until
 now had to be assembled by hand. `from_kmeans` puts them where the data is,

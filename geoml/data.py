@@ -957,6 +957,16 @@ class ContinuousVariable(_Variable):
         The mean of the latent Gaussian representation.
     latent_variance : _Attribute
         The variance of the latent Gaussian representation.
+    dispersion : _Attribute
+        How much the locations inside each block differ among themselves --
+        the variance over a block's sub-blocks, averaged over the
+        realizations, in the variable's own units rather than the latent
+        ones. A different question from `latent_variance`, which is how sure
+        the model is *of* the block: a well-known block can still be
+        heterogeneous, and that is what decides whether cutting it finer
+        would tell anyone anything. Filled only where the container
+        discretizes; elsewhere a location has no interior and this stays
+        missing rather than zero.
     simulations : ArrayStore
         Draws from the variable's posterior distribution, in a single
         `(n_data, n_sim)` array. Use `simulation()` to get one of them as an
@@ -967,7 +977,8 @@ class ContinuousVariable(_Variable):
         Cumulative distribution probabilities, indexed by the corresponding
         quantile.
     """
-    _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance", "prediction")
+    _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
+                   "prediction", "dispersion")
     _ZARR_HAS_SIMS = True
     _ZARR_HAS_QUANTILES = True
 
@@ -982,6 +993,12 @@ class ContinuousVariable(_Variable):
         self.latent_mean = self._Attribute(coordinates)
         self.latent_variance = self._Attribute(coordinates)
         self.prediction = self._Attribute(coordinates)
+
+        # How much the locations *inside* each block differ among themselves,
+        # which is a different question from how sure the model is of the block
+        # (`latent_variance`). Filled only where the container discretizes;
+        # everywhere else a location has no interior and this stays zero.
+        self.dispersion = self._Attribute(coordinates)
 
         # A single (n_data, n_sim) store (NumPy or Zarr by size); None until
         # ``allocate_simulations`` is called.
@@ -1068,6 +1085,7 @@ class ContinuousVariable(_Variable):
         new_obj.latent_mean = self.latent_mean[item]
         new_obj.latent_variance = self.latent_variance[item]
         new_obj.prediction = self.prediction[item]
+        new_obj.dispersion = self.dispersion[item]
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1119,6 +1137,11 @@ class ContinuousVariable(_Variable):
 
         if predictions:
             df[self.name + "_prediction"] = self.prediction.values.to_numpy()
+            # only where a container discretizes; elsewhere the column was
+            # never written and every point data set would carry an empty one
+            if self.dispersion._has_content():
+                df[self.name + "_dispersion"] = \
+                    self.dispersion.values.to_numpy()
 
         if latent:
             df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
@@ -1148,6 +1171,9 @@ class ContinuousVariable(_Variable):
             self.latent_mean.values[idx] = kwargs["mean"].numpy()
             self.latent_variance.values[idx] = kwargs["variance"].numpy()
 
+        if "dispersion" in kwargs.keys():
+            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+
         if "simulations" in kwargs.keys():
             # Whole (batch, n_sim) block written as one region into the store.
             self.simulations[idx, :] = kwargs["simulations"].numpy()
@@ -1163,6 +1189,7 @@ class ContinuousVariable(_Variable):
         self.latent_mean.coordinates = coordinates
         self.latent_variance.coordinates = coordinates
         self.prediction.coordinates = coordinates
+        self.dispersion.coordinates = coordinates
 
         if len(self.quantiles) > 0:
             for p in self.quantiles.values():
@@ -1184,6 +1211,8 @@ class ContinuousVariable(_Variable):
                 cube, self.name + " - latent variance")
         self.prediction.fill_pyvista_cube(
             cube, self.name + " - prediction", sigma=sigma)
+        self.dispersion.fill_pyvista_cube(
+            cube, self.name + " - dispersion")
 
         for i, values in _selected_simulations(self.simulations, simulations):
             col = self._Attribute(self.coordinates, values)
@@ -1208,6 +1237,8 @@ class ContinuousVariable(_Variable):
         if self.latent_variance:
             self.latent_variance.fill_pyvista_points(
                 points, self.name + " - latent variance")
+        self.dispersion.fill_pyvista_points(
+            points, self.name + " - dispersion")
         self.prediction.fill_pyvista_points(
             points, self.name + " - prediction")
 
@@ -1235,6 +1266,8 @@ class ContinuousVariable(_Variable):
             self.latent_variance.fill_pyvista_blocks(
                 cube, self.name + " - latent variance"
             )
+        self.dispersion.fill_pyvista_blocks(
+            cube, self.name + " - dispersion")
         self.prediction.fill_pyvista_blocks(
             cube, self.name + " - prediction", sigma=sigma
         )
@@ -1395,11 +1428,15 @@ class VectorVariable(_Variable):
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
+        # each component is dispersed inside a block on its own account
+        dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
 
-        for lb, p, s in zip(self.labels, prediction, simulations):
+        for lb, p, s, d in zip(self.labels, prediction, simulations,
+                               dispersion):
             self.components[lb].update(idx, **{
                 "average_sim": p,
-                "simulations": s
+                "simulations": s,
+                "dispersion": d
             })
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
@@ -5221,6 +5258,256 @@ class Blocks3D(Grid3D):
         return pv_blocks
 
 
+def _unit_sub_grid(discretization):
+    """Sub-block offsets from a block's centre, as fractions of its size.
+
+    The same layout `_blockdata` builds, with axis 0 varying fastest, but
+    divided through by the block so that one array serves every size. Scaling
+    it per block is the whole of what a variable-size block model has to do
+    differently when it fans out.
+    """
+    offsets = _np.array(
+        list(_iter.product(*[_np.arange(d) for d in discretization[::-1]])),
+        dtype=float)[:, ::-1]
+    offsets -= (_np.array(discretization)[None, :] - 1) / 2
+    return offsets / _np.array(discretization)[None, :]
+
+
+class BlockSet3D(PointData):
+    """
+    Blocks of several sizes, on one integer lattice.
+
+    A block model where the interesting ground can be carried finely and the
+    rest coarsely. On a real deposit the ground worth resolving is a small
+    part of the volume, and a uniform model at the resolution that part needs
+    spends almost all of its cells saying nothing: refining 5 m only where it
+    is wanted takes a 29-million-cell model to under 700 000.
+
+    Every block's position and size are whole numbers of a **base cell**, the
+    finest the model may go, which is `step / 2 ** max_levels`. Working in
+    those integers rather than in metres is what makes the arithmetic exact:
+    blocks meet without a tolerance, a block is a whole number of its own
+    children, and regrouping conserves mass to the last digit. It also means
+    the model can say which of its answers rest on coarse blocks, which is the
+    one thing a mixed-support model has to be able to prove -- see
+    `docs/variable-block-models.md`.
+
+    It is built **full**: the blocks tile their box exactly, and every
+    operation keeps them that way. Ground to leave out is filtered, not
+    removed, so that grouping is always safe -- a half-populated group would
+    average over blocks that are not there and quietly weigh the answer wrong.
+
+    `discretization` is the same at every level, which is what lets a block of
+    any size fan out into the same number of rows: the model then sees one
+    shape whatever it is looking at, and nothing downstream has to know that
+    levels exist. It costs a coarse block some accuracy in its own average,
+    always by overstating how variable it is, which errs towards splitting it
+    -- and splitting is what removes the error.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first (coarsest) block.
+    n : array-like
+        Number of blocks along each axis, at the coarsest level.
+    step : array-like
+        Size of a coarsest-level block.
+    discretization : array-like
+        Sub-blocks per axis, used at every level. `[2, 2, 2]` by default,
+        which also places the sub-blocks exactly at the children's centres.
+    max_levels : int
+        How many times a block may be halved. Fixes the base cell, and so the
+        lattice everything else is counted in.
+    labels : list
+        Coordinate names.
+
+    Attributes
+    ----------
+    block_size : array
+        `(n_data, 3)`, each block's size in the coordinates' own units. Not
+        called `step_size`: that name means one size for the whole object, and
+        anything reading it would take the product of this array for a volume.
+    block_volume : array
+        `(n_data,)`, what each block is worth in a tonnage.
+    level : array
+        `(n_data,)`, 0 for a coarsest block up to `max_levels` for a base one.
+    """
+
+    def __init__(self, start, n, step, discretization=(2, 2, 2), max_levels=3,
+                 labels=("X", "Y", "Z")):
+        if int(max_levels) < 0:
+            raise ValueError("max_levels cannot be negative; got %r"
+                             % max_levels)
+
+        self.max_levels = int(max_levels)
+        self.discretization = [int(d) for d in discretization]
+        if len(self.discretization) != 3 or any(
+                d < 1 for d in self.discretization):
+            raise ValueError(
+                "discretization needs three positive numbers; got %r"
+                % (discretization,))
+
+        n = _np.asarray(n, dtype=_np.int64)
+        step = _np.asarray(step, dtype=float)
+        start = _np.asarray(start, dtype=float)
+        if not (n.shape == step.shape == start.shape == (3,)):
+            raise ValueError(
+                "start, n and step are three numbers each; got %s, %s and %s"
+                % (start.shape, n.shape, step.shape))
+
+        # the coarsest block is this many base cells across, so the whole
+        # lattice is counted in units no block can be smaller than
+        self._coarse = 2 ** self.max_levels
+        self.base_step = step / self._coarse
+        # the box corner, not the first centre: a block's origin is its lower
+        # corner, which is what makes the lattice arithmetic come out integer
+        self.box_corner = start - step / 2
+        self.lattice_shape = n * self._coarse
+
+        cells = _np.stack(_np.meshgrid(
+            *[_np.arange(k) for k in n], indexing="ij"), axis=-1
+        ).reshape(-1, 3)
+        self._origin = cells * self._coarse
+        self._size = _np.full_like(self._origin, self._coarse)
+
+        self._sub_grid = _unit_sub_grid(self.discretization)
+
+        super().__init__(
+            _pd.DataFrame(self._centres(), columns=list(labels)), list(labels))
+        self._bounding_box = BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+    # ------------------------------------------------------------------ #
+    # geometry
+    # ------------------------------------------------------------------ #
+    def _centres(self):
+        return self.box_corner + (self._origin + self._size / 2) \
+            * self.base_step
+
+    @property
+    def block_size(self):
+        return self._size * self.base_step
+
+    @property
+    def block_volume(self):
+        return _np.prod(self.block_size, axis=1)
+
+    @property
+    def level(self):
+        # size halves at every level, so the level is how many halvings from
+        # the coarsest -- read off the first axis, all three being equal
+        return self.max_levels - _np.log2(self._size[:, 0]).astype(int)
+
+    @property
+    def rows_per_location(self):
+        return int(_np.prod(self.discretization))
+
+    def is_full(self):
+        """Whether the blocks tile their box exactly -- no gap, no overlap.
+
+        Volume alone cannot answer: a gap and an overlap of the same size
+        cancel. So the base cells are counted, in an array the shape of the
+        lattice, which costs a byte per base cell (29 MB for a 30-million-cell
+        model). Construction is full and both `split` and `group` preserve it,
+        so this is for checking something that came from elsewhere rather than
+        for routine use.
+        """
+        covered = int(_np.prod(self._size, axis=1).sum())
+        if covered != int(_np.prod(self.lattice_shape)):
+            return False
+
+        seen = _np.zeros(tuple(self.lattice_shape), dtype=_np.uint8)
+        for origin, size in zip(self._origin, self._size):
+            seen[origin[0]:origin[0] + size[0],
+                 origin[1]:origin[1] + size[1],
+                 origin[2]:origin[2] + size[2]] += 1
+        return bool(seen.min() == 1 and seen.max() == 1)
+
+    # ------------------------------------------------------------------ #
+    # refinement
+    # ------------------------------------------------------------------ #
+    def split(self, mask, labels=("X", "Y", "Z")):
+        """A new block set with the marked blocks halved on every axis.
+
+        Returns geometry only: the variables are **not** carried over. A
+        block's value belongs to the support it was predicted on, and handing
+        a parent's value to its children would manufacture eight blocks that
+        agree exactly -- which is the one thing a refined model is supposed to
+        find out rather than assume. Predict onto the result.
+
+        Parameters
+        ----------
+        mask : array-like
+            One boolean per block, or the indices of the blocks to split.
+        """
+        mask = _np.asarray(mask)
+        if mask.dtype != bool:
+            index = _np.zeros(self.n_data, dtype=bool)
+            index[mask] = True
+            mask = index
+        if mask.shape != (self.n_data,):
+            raise ValueError(
+                "the mask needs one value per block: got %d for %d"
+                % (mask.size, self.n_data))
+
+        finest = _np.any(self._size <= 1, axis=1)
+        if _np.any(mask & finest):
+            raise ValueError(
+                "%d block(s) are already at the finest level the lattice "
+                "allows (max_levels=%d); build the set with more levels to "
+                "go further"
+                % (int(_np.count_nonzero(mask & finest)), self.max_levels))
+
+        half = self._size[mask] // 2
+        corner = _np.array(list(_iter.product([0, 1], repeat=3)))
+        children = (self._origin[mask][:, None, :]
+                    + corner[None, :, :] * half[:, None, :]).reshape(-1, 3)
+        child_size = _np.repeat(half, len(corner), axis=0)
+
+        new = _copy.copy(self)
+        new._origin = _np.concatenate([self._origin[~mask], children])
+        new._size = _np.concatenate([self._size[~mask], child_size])
+        new.variables = {}
+        new.metadata = {}
+        new._init_coordinates(new._centres(), list(labels))
+        new._bounding_box = BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+        return new
+
+    # ------------------------------------------------------------------ #
+    # what the model asks for
+    # ------------------------------------------------------------------ #
+    def get_batched_coordinates(self, index=None):
+        if index is None:
+            index = _np.arange(self._n_data)
+
+        centres = _np.asarray(self.coordinates[index])
+        size = self.block_size[index]
+        # block-major, one temporary rather than one per block: block b owns
+        # rows b*k to (b+1)*k, which is what `_aggregate` averages back. The
+        # only difference from a fixed-size block model is that the sub-grid
+        # is scaled by each block's own size.
+        coords = centres[:, None, :] + self._sub_grid[None, :, :] \
+            * size[:, None, :]
+        coords = coords.reshape(-1, centres.shape[1])
+
+        splits = None if self.rows_per_location == 1 else len(centres)
+        return coords, splits
+
+    def _batch_rows(self, index=None):
+        n, _ = _PointBased._batch_rows(self, index)
+        k = self.rows_per_location
+        return n * k, (None if k == 1 else n)
+
+    def as_data_frame(self, metadata=True, **kwargs):
+        df = super().as_data_frame(metadata=metadata, **kwargs)
+        for i, label in enumerate(self.coordinate_labels):
+            df["_" + label] = self.block_size[:, i]
+        return df
+
+
 def rotate(data, origin, azimuth=0.0, dip=0.0, rake=0.0, reverse=False):
     mat = _gmt.rotation_matrix(azimuth, dip, rake)
     if reverse:
@@ -5399,6 +5686,19 @@ def _write_container(group, container):
         return {"class": "Section3D",
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "grid_shape": [int(x) for x in container.grid_shape]}
+    if type(container) is BlockSet3D:
+        # the lattice itself, in integers, plus what it is counted in; the
+        # centres are derived from those and are not stored twice
+        write("_origin", container._origin)
+        write("_size", container._size)
+        return {"class": "BlockSet3D",
+                "labels": [str(lb) for lb in container.coordinate_labels],
+                "box_corner": [float(x) for x in container.box_corner],
+                "base_step": [float(x) for x in container.base_step],
+                "lattice_shape": [int(x) for x in container.lattice_shape],
+                "discretization":
+                    [int(d) for d in container.discretization],
+                "max_levels": int(container.max_levels)}
     if isinstance(container, Mesh3D):
         write("_coordinates", container.coordinates)
         write("_triangles", container.triangles)
@@ -5465,6 +5765,27 @@ def _rebuild_container(meta, group):
         section._init_coordinates(read_store("_coordinates"), meta["labels"])
         section.grid_shape = [int(x) for x in meta["grid_shape"]]
         return section
+    if cls_name == "BlockSet3D":
+        # Bypass __init__, which builds a full coarse grid: the lattice that
+        # was saved is whatever it had been refined to since.
+        blocks = BlockSet3D.__new__(BlockSet3D)
+        _PointBased.__init__(blocks)
+        blocks.max_levels = int(meta["max_levels"])
+        blocks.discretization = [int(d) for d in meta["discretization"]]
+        blocks._coarse = 2 ** blocks.max_levels
+        blocks._sub_grid = _unit_sub_grid(blocks.discretization)
+        blocks.base_step = _np.asarray(meta["base_step"], dtype=float)
+        blocks.box_corner = _np.asarray(meta["box_corner"], dtype=float)
+        blocks.lattice_shape = _np.asarray(meta["lattice_shape"],
+                                           dtype=_np.int64)
+        blocks._origin = read("_origin").astype(_np.int64)
+        blocks._size = read("_size").astype(_np.int64)
+        blocks._init_coordinates(blocks._centres(), meta["labels"])
+        blocks._bounding_box = BoundingBox(
+            blocks.box_corner,
+            blocks.box_corner + blocks.lattice_shape * blocks.base_step)
+        return blocks
+
     meshes = {"Mesh3D": Mesh3D, "Surface3D": Surface3D, "Solid3D": Solid3D,
               "DTM3D": DTM3D}
     if cls_name in meshes:

@@ -131,6 +131,35 @@ def _aggregate(x, n_splits=None, fun=_tf.reduce_mean):
     return agg
 
 
+def _dispersion(x, n_splits=None):
+    """How much a block's sub-blocks differ among themselves.
+
+    The companion of `_aggregate`: that one takes the mean over a block's
+    sub-blocks, this one their variance, over the same axis and the same
+    grouping. It is the within-block dispersion -- what change of support is
+    about -- and it is what says whether splitting a block would tell anyone
+    anything: a block whose sub-blocks agree holds one value however finely it
+    is cut.
+
+    Read *before* `_aggregate`, and after the warping has been undone, so the
+    spread is of grades rather than of the latent field. The two are not the
+    same thing and only the first is reportable.
+
+    Without a discretization the answer is *missing*, not zero: a location has
+    no interior, and a block the model treats as its own centre has one it
+    knows nothing about. Zero would read as "uniform inside", which is a claim
+    nobody made. Divides by the number of sub-blocks, not by one less: they
+    are the block, not a sample drawn from it.
+    """
+    if n_splits is None:
+        return _tf.fill(_tf.shape(x), _tf.constant(_np.nan, dtype=x.dtype))
+
+    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    grouped = _tf.reshape(
+        x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
+    return _tf.math.reduce_variance(grouped, axis=1)
+
+
 class _Likelihood(_gpr.Parametric):
     def __init__(self, size, use_monte_carlo=False):
         super().__init__()
@@ -273,6 +302,12 @@ class _ContinuousLikelihood(_Likelihood):
             sims = _tf.map_fn(lambda x: self.warping.backward(x), sims)
             sims = _tf.transpose(sims, [1, 2, 0])
 
+        # taken from the sub-blocks, so before they are averaged away; one
+        # value per realization, then the mean over them, which is the
+        # dispersion of a block's interior as the model sees it
+        dispersion = _tf.reduce_mean(
+            _dispersion(sims, n_splits=n_splits), axis=2)
+
         sims = _aggregate(sims, n_splits=n_splits)
         mu = _aggregate(mu, n_splits=n_splits)
         var = _aggregate(var, n_splits=n_splits)
@@ -282,6 +317,7 @@ class _ContinuousLikelihood(_Likelihood):
                "variance": var[:, 0],
                "simulations": sims[:, 0, :],
                "average_sim": avg_sim[:, 0],
+               "dispersion": dispersion[:, 0],
                }
         return out
 
@@ -557,6 +593,11 @@ class _MultivariateLikelihood(_Likelihood):
         # sims = _tf.map_fn(lambda s: self.warping.backward(s), sims)
         # sims = _tf.transpose(sims, [1, 2, 0])
 
+        # before the sub-blocks are averaged away, and per variable: the
+        # components of a vector variable are dispersed independently
+        dispersion = _tf.reduce_mean(
+            _dispersion(sims, n_splits=n_splits), axis=2)
+
         sims = _aggregate(sims, n_splits)
 
         # mean and variance are also estimates
@@ -570,7 +611,8 @@ class _MultivariateLikelihood(_Likelihood):
                "variance": var,
                "simulations": sims,
                "average_sim": avg,
-               "uncertainty": uncertainty
+               "uncertainty": uncertainty,
+               "dispersion": dispersion
                }
 
         return out
