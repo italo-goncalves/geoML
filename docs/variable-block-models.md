@@ -800,13 +800,20 @@ asks for `block_volume` and falls back to `step_size` — so a container with a
 size per block is served without knowing it is one. All three goals below are
 met.
 
-What is left is the **subset**, and it fails quietly: `blocks[mask]` returns a
-plain `PointData` with no `_origin`, no `_level` and no size, so `_X`/`_Y`/`_Z`
-vanish from the data frame, `as_pyvista` gives points rather than blocks, and
-`grade_tonnage` raises. Whether that is worth fixing depends on §10: if filters
-are the way to exclude ground, subsetting a block model is the wrong operation
-and should say so rather than hand back something that looks usable. Either
-carry the size across or refuse the call — doing neither is the trap.
+The **subset** used to fail quietly: `blocks[mask]` returned a plain
+`PointData` with no `_origin`, no `_level` and no size, so `_X`/`_Y`/`_Z`
+vanished from the data frame, `as_pyvista` gave points rather than blocks and
+`grade_tonnage` raised — on an object that looked usable. It now **raises**.
+`__getitem__` and `subset_region` are overridden to refuse, which is §10's
+conclusion carried into the code: a block model is structurally complete, and
+ground is excluded by value rather than by removing blocks. The message names
+the three ways out — a metadata column for the exclusion, `predict(...,
+where=...)` to visit part of a model without making a smaller one, and
+`as_data_frame`/`as_pyvista`/`to_zarr` for a handoff.
+
+That is the whole of the "should it carry the size or refuse" question below:
+refusing, because carrying it would make a half-capable object that still
+could not group, and grouping is the point of the lattice.
 
 Original notes below.
 

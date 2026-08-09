@@ -5776,6 +5776,27 @@ class BlockSet3D(PointData):
                  origin[2]:origin[2] + size[2]] += 1
         return bool(seen.min() == 1 and seen.max() == 1)
 
+    _NO_SUBSET = (
+        "a %s cannot be subsetted: it is structurally complete by design, and "
+        "removing blocks would leave a group averaging over children that are "
+        "no longer there -- the mass-conservation error the lattice exists to "
+        "prevent. Exclude ground by value instead, with a metadata column "
+        "(`add_metadata`); `predict(..., where=...)` visits part of a model "
+        "without making a smaller one. To hand the blocks to something else, "
+        "`as_data_frame` carries a size per row, `as_pyvista` writes them as "
+        "hexahedra, and `to_zarr` round-trips the lattice whole.")
+
+    def __getitem__(self, item):
+        # PointData's would hand back a plain PointData, silently: no origin,
+        # no level, no size, so the size columns vanish, `as_pyvista` draws
+        # points rather than blocks and `grade_tonnage` refuses. Better to say
+        # so here than to return something that looks usable.
+        raise TypeError(self._NO_SUBSET % type(self).__name__)
+
+    def subset_region(self, min_val, max_val,
+                      include_min=None, include_max=None):
+        raise TypeError(self._NO_SUBSET % type(self).__name__)
+
     # ------------------------------------------------------------------ #
     # refinement
     # ------------------------------------------------------------------ #

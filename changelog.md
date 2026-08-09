@@ -1,4 +1,16 @@
 ## version 0.5.7
+* `BlockSet3D` now refuses to be subsetted — `blocks[mask]` and
+`subset_region` raise `TypeError` instead of quietly handing back a plain
+`PointData`. That object had no origin, no level and no block size, so the
+size columns vanished from `as_data_frame`, `as_pyvista` drew points rather
+than blocks and `grade_tonnage` refused it, all while looking like a block
+model. The class is structurally complete by design: every block tiles its box,
+which is what keeps a coarsening group from averaging over children that are
+no longer there. Ground is excluded by value instead, and the message names
+the ways — a metadata column for the exclusion, `predict(..., where=...)` to
+visit part of a model without making a smaller one, and
+`as_data_frame`/`as_pyvista`/`to_zarr` for a handoff, each of which already
+carries the per-block size
 * Fixed: `BlockSet3D.get_contour` tore the surface open wherever it crossed a
 change of block size — on a real refined model, 1455 holes and 13% of the area
 missing. A hexahedron is contoured from its own eight corners, so a coarse

@@ -825,6 +825,24 @@ def test_supersampling_cuts_the_mesh_below_the_model_but_not_the_model():
     assert blocks.get_contour("g", 0.0, supersample=2).area > 0
 
 
+def test_a_block_model_refuses_to_be_subsetted():
+    """It is structurally complete by design. `PointData`'s subsetting would
+    hand back a plain `PointData` -- no origin, no level, no size -- which
+    looks usable and cannot report a tonnage."""
+    blocks = _blockset().split([0])
+    _graded(blocks, np.arange(blocks.n_data, dtype=float))
+
+    for call in (lambda: blocks[np.arange(3)],
+                 lambda: blocks[blocks.level == 0],
+                 lambda: blocks.subset_region([0, 0, 0], [80, 80, 40])):
+        with pytest.raises(TypeError, match="structurally complete"):
+            call()
+
+    # the ways out the message names all still work
+    assert "_X" in blocks.as_data_frame().columns
+    assert blocks.as_pyvista().n_cells == blocks.n_data
+
+
 def _brute_unbalanced(blocks, gap=1):
     """Every base cell painted with its block's level, then a look just outside
     each face. Exact, and unaffordable on anything real -- which is the whole
