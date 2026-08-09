@@ -835,6 +835,100 @@ def test_supersampling_cuts_the_mesh_below_the_model_but_not_the_model():
     assert blocks.get_contour("g", 0.0, supersample=2).area > 0
 
 
+def _model_blocks(max_levels=2):
+    """Eight 20 m blocks an axis, so the box runs -10 to 150."""
+    return geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                                 max_levels=max_levels)
+
+
+def _ramp(z0=40.0, slope=0.4, lo=-30.0, hi=170.0):
+    """A tilted plane reaching across the model, so it cuts many blocks."""
+    xy = np.array([[lo, lo], [hi, lo], [hi, hi], [lo, hi]])
+    points = np.column_stack([xy, z0 + slope * (xy[:, 0] - lo)])
+    triangles = np.array([[0, 1, 2], [0, 2, 3]])
+    return geoml.data.Surface3D(
+        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+
+
+def _body(bounds=(38.0, 102.0, 38.0, 102.0, 38.0, 102.0)):
+    """A watertight box whose walls fall *between* sub-block centres. On a
+    block boundary nothing would straddle, and `crossed_by` would rightly mark
+    nothing at all."""
+    import pyvista as pv
+    mesh = pv.Box(bounds=bounds).triangulate()
+    points = np.asarray(mesh.points, dtype=float)
+    triangles = mesh.faces.reshape(-1, 4)[:, 1:]
+    return geoml.data.Solid3D(
+        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+
+
+def test_a_sheet_marks_the_blocks_it_runs_through():
+    """The question `needs_splitting` asks of a cut-off, asked of geometry: a
+    block the surface passes through holds two answers whatever is predicted
+    into it."""
+    blocks = _model_blocks()
+    sheet = _ramp()
+    crossed = blocks.crossed_by(sheet)
+
+    assert crossed.any() and not crossed.all()
+
+    # what it marked really does straddle, and what it left alone does not
+    blocks.assign_from_surface(sheet, "side", fraction="below")
+    share = np.asarray(blocks.get_metadata("below"))
+    assert np.all((share[crossed] > 0) & (share[crossed] < 1))
+    assert np.all((share[~crossed] == 0) | (share[~crossed] == 1))
+
+    # and cutting them leaves the model tiling its box exactly
+    cut = blocks.split(crossed)
+    assert cut.n_data > blocks.n_data
+    assert cut.is_full()
+    assert np.isclose(cut.block_volume.sum(), blocks.block_volume.sum())
+
+
+def test_a_body_marks_the_blocks_on_its_wall():
+    blocks = _model_blocks(max_levels=1)
+    body = _body()
+    crossed = blocks.crossed_by(body)
+
+    blocks.assign_from_solid(body, "domain", fraction="inside")
+    share = np.asarray(blocks.get_metadata("inside"))
+    assert crossed.any()
+    assert np.all((share[crossed] > 0) & (share[crossed] < 1))
+    # a block wholly inside the body is not on its wall and is left alone
+    assert np.any(share == 1.0) and not np.any(crossed & (share == 1.0))
+
+
+def test_a_mesh_with_no_sides_is_refused():
+    blocks = _model_blocks()
+    body = _body()
+    neither = geoml.data.Mesh3D(np.asarray(body.coordinates),
+                                np.asarray(body.triangles),
+                                np.asarray(body.normals))
+    with pytest.raises(geoml.data.MeshTypeError, match="no sides"):
+        blocks.crossed_by(neither)
+
+
+def test_refining_at_a_mesh_needs_no_model():
+    """`crossed_by` is geometry, so the loop against `split` refines a block
+    model before anything has been predicted into it."""
+    blocks = _model_blocks()
+    sheet = _ramp()
+    coarse = blocks.n_data
+
+    while True:
+        mask = blocks.crossed_by(sheet)
+        if not np.any(mask):
+            break
+        blocks = blocks.split(mask, carry=False)
+
+    assert blocks.n_data > coarse
+    assert blocks.is_full()
+    assert blocks.level.max() == blocks.max_levels
+    # ground away from the sheet is still carried coarsely, which is the point
+    assert np.any(blocks.level == 0)
+    assert blocks.n_data < (8 * 4) ** 3
+
+
 def test_refine_never_visits_the_ground_it_was_not_asked_about():
     """A filter is what excludes ground from a model that cannot be subsetted.
     Blocks left out are never predicted at any pass, and never cut either --

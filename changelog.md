@@ -1,4 +1,23 @@
 ## version 0.5.7
+* A mesh can force the blocks it runs through to split.
+`BlockSet3D.crossed_by(mesh)` marks the blocks whose sub-blocks fall on both
+sides of a surface or a closed body — the question `needs_splitting` asks of a
+cut-off, asked of geometry instead. A block a topography or a vein wall passes
+through holds two answers whatever is predicted into it, and geometry says so
+before any prediction does; one entirely above or entirely below is left alone
+however close it lies, which is what keeps it from refining a whole domain.
+Hand the mask to `split`, or give `models.refine(..., meshes=[...])` the
+meshes and it unions this with the other two criteria. It needs no model at
+all, so a block model can be refined at a topography before anything has been
+predicted into it — the loop is three lines and the docstring has it
+* `BlockSet3D` gained the `assign_from_surface`/`assign_from_solid` overrides
+`Blocks3D` already had, so `fraction=` measures the share of a block below a
+sheet or inside a body over its own sub-blocks. Before this it fell back to
+`PointData`'s, which knows only the block centre, so partial blocks were not
+available on a variable-size model at all. The shared parts of both now live
+in `_sub_block_shares`/`_blocks_from_surface`/`_blocks_from_solid` at module
+level, which `Blocks3D` and `BlockSet3D` both call rather than keeping two
+copies of the geometry
 * `models.refine(..., where=mask)` names the ground worth modelling. The blocks
 left out are never predicted at any pass and never cut either — they hold
 nothing to decide and draw no surface, so cutting them would only make more of

@@ -1081,7 +1081,8 @@ class VGPNetwork(_GPModel):
 
 
 def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
-           include_noise='monte_carlo', where=None, verbose=False):
+           include_noise='monte_carlo', where=None, meshes=None,
+           verbose=False):
     """
     Predict on a block model, cutting finer wherever it cannot decide.
 
@@ -1091,6 +1092,12 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     again on what the cutting made. A block on one side of every decision
     holds one answer however finely it is cut, so it is left alone, and the
     work goes where the answer is still in doubt.
+
+    Geometry can force a cut too. Give it `meshes` and a block a topography or
+    a domain boundary passes through is cut whatever the grades say, because a
+    block the surface runs through holds two answers however finely it is
+    predicted. That is `BlockSet3D.crossed_by`, and it needs no model at all --
+    to refine on geometry alone, loop it against `split` directly.
 
     It also cuts a block whose neighbour ended up more than one level finer
     than itself (`BlockSet3D.unbalanced`). Such a block is undecided by its own
@@ -1154,6 +1161,12 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
         Given once, against the blocks as they stand at the start: the mask is
         carried across each split, so a block that was worth modelling has
         children that are too.
+    meshes : list, optional
+        Surfaces and closed bodies whose crossings force a split, through
+        `BlockSet3D.crossed_by`. A block a topography or a vein wall runs
+        through holds two answers whatever is predicted into it, and geometry
+        says so before any prediction does. Costs a side test per sub-block of
+        every splittable block, each pass.
     verbose : bool
         Report what each pass cut.
 
@@ -1180,7 +1193,10 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     while True:
         undecided = blocks.needs_splitting(split_on, tolerance=tolerance)
         uneven = blocks.unbalanced()
-        mask = undecided | uneven
+        crossed = _np.zeros(blocks.n_data, dtype=bool)
+        for mesh in (meshes or []):
+            crossed |= blocks.crossed_by(mesh)
+        mask = undecided | uneven | crossed
         if keep is not None:
             # a block nobody asked for holds nothing to decide and draws no
             # surface, so cutting it would only make more of nothing
@@ -1201,11 +1217,12 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
         model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
                       where=visit)
         if verbose:
-            print("pass %d: cut %d block(s) (%d undecided, %d to level a jump)"
-                  ", %d now"
+            print("pass %d: cut %d block(s) (%d undecided, %d crossed by a "
+                  "mesh, %d to level a jump), %d now"
                   % (step, int(_np.count_nonzero(mask)),
                      int(_np.count_nonzero(undecided)),
-                     int(_np.count_nonzero(uneven & ~undecided)),
+                     int(_np.count_nonzero(crossed & ~undecided)),
+                     int(_np.count_nonzero(uneven & ~undecided & ~crossed)),
                      blocks.n_data))
 
 

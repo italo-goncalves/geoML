@@ -5310,6 +5310,82 @@ def mesh3d(points, triangles, normals):
     return Solid3D(points, triangles, normals)
 
 
+def _below_sheet(surface):
+    """The test a sheet poses of a location: is it under the surface?"""
+    interpolator = _sheet_interpolator(surface)
+
+    def below(coordinates):
+        return coordinates[:, 2] < _gmt.sheet_elevation(interpolator,
+                                                        coordinates)
+    return below
+
+
+def _within_body(solid):
+    """The test a closed body poses of a location: is it inside?"""
+    mesh = _closed_body(solid)
+    return lambda coordinates: _gmt.inside_solid(mesh, coordinates)
+
+
+def _mesh_test(mesh):
+    """Which side of `mesh` a location falls on, whichever kind it is."""
+    if isinstance(mesh, Solid3D):
+        return _within_body(mesh)
+    if isinstance(mesh, Surface3D):
+        return _below_sheet(mesh)
+    raise MeshTypeError(
+        "a %s says nothing about which side a block is on: a sheet has an "
+        "above and a below, a body an inside and an outside, and a mesh that "
+        "is neither has no sides to speak of. `heal()` is what turns one into "
+        "a body" % type(mesh).__name__)
+
+
+def _sub_block_shares(blocks, test, rows=None):
+    """The share of each block's sub-blocks that `test` accepts.
+
+    Walked in chunks: a 5 x 5 x 5 discretization is 125 sub-blocks for
+    every location, and materializing all of them at once is what the
+    batching in `get_batched_coordinates` exists to avoid. `rows` narrows it
+    to the blocks worth asking about; the rest come back `nan`.
+    """
+    per_block = blocks.rows_per_location
+    chunk = max(1, 1000000 // per_block)
+    if rows is None:
+        rows = _np.arange(blocks._n_data)
+
+    shares = _np.full(blocks._n_data, _np.nan)
+    for start in range(0, len(rows), chunk):
+        index = rows[start:start + chunk]
+        coordinates, _ = blocks.get_batched_coordinates(index)
+        # block-major, so every block's sub-blocks are one row
+        accepted = test(coordinates).reshape([len(index), per_block])
+        shares[index] = accepted.mean(axis=1)
+    return shares
+
+
+def _blocks_from_surface(blocks, base, surface, name, labels, fraction,
+                         uncovered):
+    """`assign_from_surface` for anything made of blocks."""
+    base(blocks, surface, name, labels, uncovered=uncovered)
+
+    if fraction is not None:
+        shares = _sub_block_shares(blocks, _below_sheet(surface))
+        # a sheet that misses the centre describes the block no better
+        # than it describes a location, and left the flag empty for the
+        # same reason -- so the fraction says so rather than reading 0
+        missed = _np.asarray(blocks.metadata[name].values).ravel() < 0
+        shares[missed] = _uncovered_rule(uncovered)[1]
+        blocks.add_metadata(fraction, shares)
+
+
+def _blocks_from_solid(blocks, base, solid, name, labels, fraction):
+    """`assign_from_solid` for anything made of blocks."""
+    base(blocks, solid, name, labels)
+
+    if fraction is not None:
+        blocks.add_metadata(
+            fraction, _sub_block_shares(blocks, _within_body(solid)))
+
+
 def _blockdata(cls):
     # Decorator to extend functionality of some classes
     # Used to avoid multiple inheritance
@@ -5380,23 +5456,8 @@ def _blockdata(cls):
     base_assign_from_solid = cls.assign_from_solid
 
     def _sub_block_fraction(self, test):
-        """The share of each block's sub-blocks that `test` accepts.
-
-        Walked in chunks: a 5 x 5 x 5 discretization is 125 sub-blocks for
-        every location, and materializing all of them at once is what the
-        batching in `get_batched_coordinates` exists to avoid.
-        """
-        per_block = self.rows_per_location
-        chunk = max(1, 1000000 // per_block)
-
-        shares = _np.empty(self._n_data)
-        for start in range(0, self._n_data, chunk):
-            index = _np.arange(start, min(start + chunk, self._n_data))
-            coordinates, _ = self.get_batched_coordinates(index)
-            # block-major, so every block's sub-blocks are one row
-            accepted = test(coordinates).reshape([len(index), per_block])
-            shares[index] = accepted.mean(axis=1)
-        return shares
+        """The share of each block's sub-blocks that `test` accepts."""
+        return _sub_block_shares(self, test)
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
                             fraction=None, uncovered=_np.nan):
@@ -5432,23 +5493,8 @@ def _blockdata(cls):
             genuinely above ground, or `0.0` to count it as nothing. Pass
             `"raise"` to refuse a surface that does not cover every block.
         """
-        base_assign_from_surface(self, surface, name, labels,
-                                 uncovered=uncovered)
-
-        if fraction is not None:
-            interpolator = _sheet_interpolator(surface)
-
-            def below(coordinates):
-                return coordinates[:, 2] < _gmt.sheet_elevation(interpolator,
-                                                                coordinates)
-
-            shares = self._sub_block_fraction(below)
-            # a sheet that misses the centre describes the block no better
-            # than it describes a location, and left the flag empty for the
-            # same reason -- so the fraction says so rather than reading 0
-            missed = _np.asarray(self.metadata[name].values).ravel() < 0
-            shares[missed] = _uncovered_rule(uncovered)[1]
-            self.add_metadata(fraction, shares)
+        _blocks_from_surface(self, base_assign_from_surface, surface, name,
+                             labels, fraction, uncovered)
 
     def assign_from_solid(self, solid, name, labels=("outside", "inside"),
                           fraction=None):
@@ -5473,14 +5519,8 @@ def _blockdata(cls):
             Name of a second metadata column, to hold the share of each block
             inside the body. Costs `prod(discretization)` queries per block.
         """
-        base_assign_from_solid(self, solid, name, labels)
-
-        if fraction is not None:
-            mesh = _closed_body(solid)
-            self.add_metadata(
-                fraction,
-                self._sub_block_fraction(
-                    lambda coordinates: _gmt.inside_solid(mesh, coordinates)))
+        _blocks_from_solid(self, base_assign_from_solid, solid, name, labels,
+                           fraction)
 
     cls.__init__ = new_init
     cls.discretized_coordinates = discretized_coordinates
@@ -6034,6 +6074,77 @@ class BlockSet3D(PointData):
                         marked[owner[at[hit]]] = True
 
         return marked & (self._level < self.max_levels)
+
+    def assign_from_surface(self, surface, name, labels=("above", "below"),
+                            fraction=None, uncovered=_np.nan):
+        """
+        As `Blocks3D.assign_from_surface`, over blocks of several sizes.
+
+        The flag in `name` follows the block centre; naming a `fraction`
+        column measures the share of each block below the sheet over the
+        sub-blocks `discretization` defines, scaled to each block's own size.
+        `crossed_by` asks the same question and answers with the blocks worth
+        cutting.
+        """
+        _blocks_from_surface(self, PointData.assign_from_surface, surface,
+                             name, labels, fraction, uncovered)
+
+    def assign_from_solid(self, solid, name, labels=("outside", "inside"),
+                          fraction=None):
+        """
+        As `Blocks3D.assign_from_solid`, over blocks of several sizes.
+
+        `fraction` holds the share of each block's volume inside the body, and
+        `crossed_by` turns the same test into the blocks worth cutting.
+        """
+        _blocks_from_solid(self, PointData.assign_from_solid, solid, name,
+                           labels, fraction)
+
+    def crossed_by(self, mesh):
+        """Which blocks a mesh passes through, and so which are worth cutting.
+
+        A block is crossed when its sub-blocks fall on **both** sides of the
+        mesh -- the question `needs_splitting` asks of a cut-off, asked of
+        geometry instead. A topography, a vein wall, a lease boundary: a block
+        the surface runs through holds two answers whatever is predicted into
+        it, and no amount of prediction will separate them.
+
+        One entirely above or entirely below is left alone however close it
+        lies, which is what keeps this from refining a whole domain. Blocks
+        already at the finest level are never marked, as elsewhere.
+
+        Hand it to `split`, or give the mesh to `models.refine`, which unions
+        this with the other two criteria and repeats until nothing is left to
+        cut::
+
+            blocks = blocks.split(blocks.crossed_by(topography))
+
+        A sheet that covers only part of the model counts a sub-block past its
+        edge as not below, the way `fraction` does, so a block straddling the
+        sheet's own boundary reads as crossed. That is usually wanted -- the
+        edge is a real feature of the ground being described -- but it is why
+        a sheet should reach across the model when it is not.
+
+        Parameters
+        ----------
+        mesh : Surface3D or Solid3D
+            The sheet or closed body to test against. A `Mesh3D` that is
+            neither has no sides and is refused.
+
+        Returns
+        -------
+        array
+            One boolean per block.
+        """
+        splittable = _np.flatnonzero(self._level < self.max_levels)
+        if len(splittable) == 0:
+            return _np.zeros(self.n_data, dtype=bool)
+
+        shares = _sub_block_shares(self, _mesh_test(mesh), rows=splittable)
+        # nan everywhere else, and a comparison against it is False, so the
+        # blocks that were never asked about answer no on their own
+        with _np.errstate(invalid="ignore"):
+            return (shares > 0) & (shares < 1)
 
     def unpredicted(self, variable=None):
         """Which blocks have nothing in them yet.

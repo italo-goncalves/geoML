@@ -764,6 +764,19 @@ with the two-pass: filter, predict coarse, refine. A filtered block's value
 stays NaN, and since `grade_tonnage` already skips non-finite values, most of
 the reporting layer needs no filter awareness at all.
 
+**Geometry can force a split too**, which is the other half of the same idea:
+`BlockSet3D.crossed_by(mesh)` marks the blocks whose sub-blocks fall on both
+sides of a surface or a closed body — `needs_splitting`'s question asked of a
+topography, a vein wall or a lease boundary. A block the surface runs through
+holds two answers whatever is predicted into it; one entirely above or below is
+left alone however close it lies, which is what stops it refining a domain
+rather than a boundary. `refine(..., meshes=[...])` unions it with the other
+two criteria, and since it needs no model the same mask refines a block model
+*before* anything is predicted into it. `BlockSet3D` gained the
+`assign_from_surface`/`assign_from_solid` overrides that answer with a
+`fraction` at the same time — it is not a `Blocks3D`, so it had been falling
+back to the centre-only version and had no partial blocks at all.
+
 **Done**, as `where=` rather than as a stored filter: `refine(model, blocks,
 where=mask)` names the ground worth modelling, and the blocks left out are
 never predicted at any pass *and* never cut — they hold nothing to decide and
