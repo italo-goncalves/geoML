@@ -1,4 +1,17 @@
 ## version 0.5.7
+* `models.refine(..., where=mask)` names the ground worth modelling. The blocks
+left out are never predicted at any pass and never cut either — they hold
+nothing to decide and draw no surface, so cutting them would only make more of
+nothing. This is what a block model has instead of being subsettable: air above
+a topography or ground beyond a lease boundary costs nothing, rather than
+costing a prediction that is then filtered out of the reports. The mask is
+given once, against the blocks as they stand, and carried across each split.
+`predict(..., where=)` was relaxed to make the first pass possible: naming only
+some locations of a container that does not carry the variable yet used to
+raise, and now creates the variable and leaves the rest at `nan` — which is
+what `unpredicted` reads and what the reporting layer already skips. An
+existing variable is still never reallocated under `where`, since that would
+wipe what the untouched locations hold
 * `BlockSet3D` now refuses to be subsetted — `blocks[mask]` and
 `subset_region` raise `TypeError` instead of quietly handing back a plain
 `PointData`. That object had no origin, no level and no block size, so the

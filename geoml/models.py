@@ -997,6 +997,11 @@ class VGPNetwork(_GPModel):
             does not depend on what else is in the batch, so this gives the
             same answer as predicting the lot -- it just does not pay for it
             twice.
+
+            For a filter: naming the ground worth modelling means the rest is
+            never predicted at all. Those locations keep `nan`, which is what
+            `unpredicted` reads and what the reporting layer already skips, so
+            air above a topography costs nothing.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
@@ -1004,14 +1009,16 @@ class VGPNetwork(_GPModel):
         # managing variables
         variable_inputs = []
         for v in self.variables:
-            if v not in newdata.variables.keys():
-                if where is not None:
-                    raise ValueError(
-                        "predicting only some locations needs %r to be on the "
-                        "object already, holding what the others were given; "
-                        "predict once without `where` first" % v)
+            fresh = v not in newdata.variables.keys()
+            if fresh:
                 self.data.variables[v].copy_to(newdata)
-            if where is None:
+            # Allocate when the variable is new, whether or not only some
+            # locations are being visited: what is not visited stays NaN,
+            # which is what `unpredicted` reads and what the reporting layer
+            # already skips. Never reallocate an existing one under `where` --
+            # that would wipe the simulations the untouched locations hold,
+            # which is the whole point of naming only some.
+            if where is None or fresh:
                 newdata.variables[v].allocate_simulations(n_sim)
             variable_inputs.append(self.data.variables[v].prediction_input())
 
@@ -1074,7 +1081,7 @@ class VGPNetwork(_GPModel):
 
 
 def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
-           include_noise='monte_carlo', verbose=False):
+           include_noise='monte_carlo', where=None, verbose=False):
     """
     Predict on a block model, cutting finer wherever it cannot decide.
 
@@ -1136,6 +1143,17 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
         cut.
     include_noise : str
         Passed to `predict` for the predictions themselves.
+    where : array-like, optional
+        One boolean per block, or the indices of the blocks worth modelling.
+        The rest are never predicted at any pass and are never cut, so ground
+        outside the area of interest -- air above a topography, everything
+        beyond a lease boundary -- costs nothing rather than costing a
+        prediction that is then filtered out of the reports. They keep `nan`,
+        which the reporting layer already skips.
+
+        Given once, against the blocks as they stand at the start: the mask is
+        carried across each split, so a block that was worth modelling has
+        children that are too.
     verbose : bool
         Report what each pass cut.
 
@@ -1144,20 +1162,44 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     BlockSet3D
         The refined model, predicted throughout.
     """
-    model.predict(blocks, n_sim=n_sim, include_noise=include_noise)
+    keep = None
+    if where is not None:
+        keep = _np.asarray(where)
+        if keep.dtype != bool:
+            index = _np.zeros(blocks.n_data, dtype=bool)
+            index[keep] = True
+            keep = index
+        if keep.shape != (blocks.n_data,):
+            raise ValueError(
+                "`where` needs one value per block: got %d for %d"
+                % (keep.size, blocks.n_data))
+
+    model.predict(blocks, n_sim=n_sim, include_noise=include_noise, where=keep)
 
     step = 0
     while True:
         undecided = blocks.needs_splitting(split_on, tolerance=tolerance)
         uneven = blocks.unbalanced()
         mask = undecided | uneven
+        if keep is not None:
+            # a block nobody asked for holds nothing to decide and draws no
+            # surface, so cutting it would only make more of nothing
+            mask = mask & keep
         if not _np.any(mask):
             return blocks
 
         step += 1
+        # `split` keeps the unsplit blocks first, then each parent's children
+        # in sub-block order, which is how the mask follows them across
+        children = blocks.rows_per_location
         blocks = blocks.split(mask)
+        visit = blocks.unpredicted()
+        if keep is not None:
+            keep = _np.concatenate(
+                [keep[~mask], _np.repeat(keep[mask], children)])
+            visit = visit & keep
         model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
-                      where=blocks.unpredicted())
+                      where=visit)
         if verbose:
             print("pass %d: cut %d block(s) (%d undecided, %d to level a jump)"
                   ", %d now"

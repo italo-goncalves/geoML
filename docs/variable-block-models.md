@@ -764,6 +764,19 @@ with the two-pass: filter, predict coarse, refine. A filtered block's value
 stays NaN, and since `grade_tonnage` already skips non-finite values, most of
 the reporting layer needs no filter awareness at all.
 
+**Done**, as `where=` rather than as a stored filter: `refine(model, blocks,
+where=mask)` names the ground worth modelling, and the blocks left out are
+never predicted at any pass *and* never cut — they hold nothing to decide and
+draw no surface, so cutting them would only make more of nothing. The mask is
+given once, against the blocks as they stand, and carried across each split,
+because `split` keeps the unsplit blocks first and then each parent's children
+in sub-block order. `predict(..., where=)` had to be relaxed for the first
+pass: naming only some locations of a container that does not carry the
+variable yet used to be refused, and now creates the variable and leaves the
+rest at NaN, which is what `unpredicted` reads. No `set_filter` and no stored
+state — the argument is enough, and a mask that ought to persist is an
+ordinary metadata column the caller passes in.
+
 **Fullness is cheap to keep** for the same reason it is worth keeping: the
 excluded regions are the uninteresting ones, which coarsen to almost nothing.
 

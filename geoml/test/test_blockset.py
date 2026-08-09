@@ -225,11 +225,21 @@ def test_carry_can_be_turned_off():
     assert list(blocks.split([0]).variables) == ["y"]
 
 
-def test_predicting_a_subset_needs_the_variable_to_be_there_already():
+def test_predicting_a_subset_of_a_fresh_container_leaves_the_rest_missing():
+    """`where` on a container that does not carry the variable yet used to be
+    refused. It is how a filter works: the variable is created, the named
+    locations are predicted, and the rest keep `nan` -- which is what
+    `unpredicted` reads, so nothing downstream mistakes them for answers."""
     model = _model()
     blocks = _blockset()
-    with pytest.raises(ValueError, match="on the object already"):
-        model.predict(blocks, n_sim=4, where=np.arange(3))
+    model.predict(blocks, n_sim=4, where=np.arange(3))
+
+    values = np.asarray(blocks.variables["y"].prediction.values)
+    assert np.all(np.isfinite(values[:3]))
+    assert np.all(np.isnan(values[3:]))
+    assert np.all(blocks.unpredicted("y")[3:])
+    assert np.asarray(
+        blocks.variables["y"].simulations)[:3].shape == (3, 4)
 
 
 # --------------------------------------------------------------------------- #
@@ -823,6 +833,35 @@ def test_supersampling_cuts_the_mesh_below_the_model_but_not_the_model():
     # and the model itself is untouched by either
     assert blocks.n_data == int(np.prod(N))
     assert blocks.get_contour("g", 0.0, supersample=2).area > 0
+
+
+def test_refine_never_visits_the_ground_it_was_not_asked_about():
+    """A filter is what excludes ground from a model that cannot be subsetted.
+    Blocks left out are never predicted at any pass, and never cut either --
+    they hold nothing to decide and draw no surface."""
+    model = _model()
+    model.data.variables["y"].set_cutoffs([0.5])
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                                   max_levels=2)
+    wanted = np.asarray(blocks.coordinates)[:, 0] < 80.0
+
+    refined = geoml.models.refine(model, blocks, n_sim=6, where=wanted)
+    values = np.asarray(refined.variables["y"].prediction.values)
+    inside = np.asarray(refined.coordinates)[:, 0] < 80.0
+
+    assert np.all(np.isnan(values[~inside])), "predicted what it was not asked"
+    assert np.any(np.isfinite(values[inside]))
+    # the excluded half was never cut, so it is still the coarse blocks it was
+    assert np.all(refined.level[~inside] == 0)
+    assert refined.is_full()
+
+    # and a filtered model is cheaper than the same model unfiltered
+    whole = geoml.models.refine(
+        model,
+        geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                              max_levels=2),
+        n_sim=6)
+    assert refined.n_data < whole.n_data
 
 
 def test_a_block_model_refuses_to_be_subsetted():
