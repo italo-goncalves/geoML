@@ -791,6 +791,25 @@ Keep the two capabilities under distinct names:
 
 ### 10.2 What a `PointData` export should carry
 
+**Mostly done, and not the way this section proposed.** Nothing had to be
+handed to an export, because the block model answers for itself:
+`BlockSet3D.as_data_frame` appends a `_X`/`_Y`/`_Z` column of per-row block
+size, `as_pyvista` writes explicit hexahedra (volume exact against
+`block_volume.sum()`), and `grade_tonnage` reads `prepare.block_volume`, which
+asks for `block_volume` and falls back to `step_size` — so a container with a
+size per block is served without knowing it is one. All three goals below are
+met.
+
+What is left is the **subset**, and it fails quietly: `blocks[mask]` returns a
+plain `PointData` with no `_origin`, no `_level` and no size, so `_X`/`_Y`/`_Z`
+vanish from the data frame, `as_pyvista` gives points rather than blocks, and
+`grade_tonnage` raises. Whether that is worth fixing depends on §10: if filters
+are the way to exclude ground, subsetting a block model is the wrong operation
+and should say so rather than hand back something that looks usable. Either
+carry the size across or refuse the call — doing neither is the trap.
+
+Original notes below.
+
 Block size as metadata is under-powered: `grade_tonnage` reads
 `container.step_size`. Give the export **per-row `step_size` plus
 `discretization`** and it recovers `grade_tonnage` (which needs only a
