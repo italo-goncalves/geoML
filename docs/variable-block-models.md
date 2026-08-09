@@ -1122,18 +1122,21 @@ as what went in did, and can be refined further.
    model.
 
 With that the plan is done. What is left is written up where it belongs
-rather than here: the two deferred items below, and the follow-ups in the
-repository's own to-do list.
+rather than here: the follow-ups in the repository's own to-do list.
 
 Deliberately excluded: level-aware batching (§2.1 makes it unnecessary),
 economic criteria such as NSR (§7.4 — not modelling inputs), tetrahedra as a
 block support (§9.1), and corner-point geometry (§9.2).
 
-Noted for later rather than done: `_CategoricalLikelihood.
-entropy_and_indicators` builds `ind_skew` with one full-size scatter per
-category, which a single top-2 pass would replace. It matters more since
+Two things were noted for later here rather than done, and both landed in
+0.5.8. The noise integration behind §7.2 — a coarse block averaging out no
+more noise than a fine one — is settled by integrating the noise out by
+quadrature at every support rather than drawing it, so no block carries any.
+And `_CategoricalLikelihood.entropy_and_indicators` no longer builds
+`ind_skew` with one full-size scatter per category, which mattered more once
 §7.3 moved that call before aggregation, where it sees
-`prod(discretization)` times as many rows. *(The noise integration behind
-§7.2 — a coarse block averaging out no more noise than a fine one — was the
-other item here, and is done in 0.5.8: the noise is integrated out by
-quadrature at every support rather than drawn, so no block carries any.)*
+`prod(discretization)` times as many rows: a category's rival is the best of
+the others, so two row maxima give the whole matrix at once. Not by the
+top-2 pass this paragraph proposed, though — `tf.math.top_k` costs a flat
+19 ms a call on the GPU whatever its arguments, several times the scatters
+it was meant to replace.

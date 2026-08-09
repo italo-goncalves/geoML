@@ -1036,7 +1036,6 @@ class _CategoricalLikelihood(_Likelihood):
     def entropy_and_indicators(probabilities, var, explained_var):
         n_cat = _tf.shape(probabilities)[1]
         log_n = _tf.math.log(_tf.cast(n_cat, _tf.float64))
-        n_data = _tf.shape(probabilities)[0]
 
         entropy = - _tf.reduce_sum(
             probabilities * _tf.math.log(probabilities + 1e-6), axis=1) / log_n
@@ -1045,21 +1044,21 @@ class _CategoricalLikelihood(_Likelihood):
         uncertainty = _tf.sqrt(avg_var * entropy)
         indicators = _tf.math.log(probabilities + 1e-6)
 
-        idx = _tf.range(n_data)[:, None]
-
-        def ind_fn(z):
-            idx_cat, col = z
-            tmp_ind = _tf.tensor_scatter_nd_update(
-                indicators,
-                _tf.concat([idx, _tf.ones_like(idx) * idx_cat], axis=1),
-                _tf.ones([n_data], _tf.float64) * -999
-            )
-            return col - _tf.reduce_max(tmp_ind, axis=1)
-
-        ind_skew = _tf.map_fn(
-            ind_fn, [_tf.range(n_cat), _tf.transpose(indicators)],
-            dtype=_tf.float64)
-        ind_skew = _tf.transpose(ind_skew)
+        # A category's rival is the best of the others, which is the runner-up
+        # for whoever wins and the winner for everybody else -- two row maxima,
+        # the second taken with the winners dropped, rather than one full-size
+        # scatter per category. The tie is what the count is for: two
+        # categories sharing the maximum are each other's rival, so both come
+        # out at zero and the contact stays the zero level set.
+        best = _tf.reduce_max(indicators, axis=1, keepdims=True)
+        winner = indicators >= best
+        runner_up = _tf.reduce_max(
+            _tf.where(winner, indicators.dtype.min, indicators),
+            axis=1, keepdims=True)
+        shared = _tf.reduce_sum(_tf.cast(winner, _tf.float64), axis=1,
+                                keepdims=True) > 1.0
+        ind_skew = indicators - _tf.where(
+            winner, _tf.where(shared, best, runner_up), best)
 
         lik_var = probabilities * (1 - probabilities)
         lik_var = _tf.reduce_sum(lik_var, axis=1)
@@ -1215,17 +1214,12 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         log_prob_positive = dist.log_survival_function(self.tol)
         log_prob_negative = dist.log_prob(- self.tol)
 
-        # probability of being class i AND not being the others
-        log_prob_final = []
-        for i in range(self.size):
-            log_prob_i = []
-            for j in range(self.size):
-                if j == i:
-                    log_prob_i.append(log_prob_positive[:, j])
-                else:
-                    log_prob_i.append(log_prob_negative[:, j])
-            log_prob_final.append(_tf.add_n(log_prob_i))
-        log_prob_final = _tf.stack(log_prob_final, axis=1)
+        # probability of being class i AND not being the others -- the whole
+        # row of negative log-probabilities, with category i's own swapped
+        # for its positive one
+        log_prob_final = (
+            _tf.reduce_sum(log_prob_negative, axis=1, keepdims=True)
+            - log_prob_negative + log_prob_positive)
 
         # prob = _tf.nn.softmax(log_prob_positive, axis=1)
         prob = _tf.nn.softmax(log_prob_final, axis=1)
@@ -1411,17 +1405,12 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
         log_prob_negative = _tf.math.log(prob_neg + 1e-6)
         log_prob_positive = _tf.math.log(prob_pos + 1e-6)
 
-        # probability of being class i AND not being the others
-        log_prob_final = []
-        for i in range(self.size):
-            log_prob_i = []
-            for j in range(self.size):
-                if j == i:
-                    log_prob_i.append(log_prob_positive[:, j])
-                else:
-                    log_prob_i.append(log_prob_negative[:, j])
-            log_prob_final.append(_tf.add_n(log_prob_i))
-        log_prob_final = _tf.stack(log_prob_final, axis=1)
+        # probability of being class i AND not being the others -- the whole
+        # row of negative log-probabilities, with category i's own swapped
+        # for its positive one
+        log_prob_final = (
+            _tf.reduce_sum(log_prob_negative, axis=1, keepdims=True)
+            - log_prob_negative + log_prob_positive)
 
         prob = _tf.nn.softmax(log_prob_final, axis=1)
 

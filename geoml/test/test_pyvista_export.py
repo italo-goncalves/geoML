@@ -199,3 +199,51 @@ def test_an_empty_attribute_is_still_left_out():
 
     grid.variables["v"].measurements.values[0] = 1.0
     assert "v" in grid.as_pyvista().point_data
+
+
+def _three_kinds(container):
+    """A scalar, a vector and a composition, each with every predicted column
+    written -- the three ways a continuous value reaches an export."""
+    n = container.n_data
+    container.add_continuous_variable("au", np.zeros(n))
+    container.add_vector_variable("vec", ["p", "q"], np.zeros((n, 2)))
+    container.add_compositional_variable(
+        "assay", ["a", "b"], np.tile([0.6, 0.4], (n, 1)))
+
+    for variable in container.variables.values():
+        parts = [variable] + list(
+            (getattr(variable, "components", None) or {}).values())
+        for part in parts:
+            for role in ("prediction", "dispersion", "noise_variance"):
+                column = getattr(part, role, None)
+                if column is not None:
+                    column.values[:] = np.arange(n) + 1.0
+    return container
+
+
+@pytest.mark.parametrize("role", ["dispersion", "noise_variance"])
+def test_every_kind_of_continuous_variable_exports_the_same_columns(role):
+    """A composition's parts are `_Component`, which used to answer with a
+    copy of `ContinuousVariable.as_data_frame` and so kept only the columns
+    that copy had been written with. It delegates now, which is why the same
+    check passes for all three kinds rather than only the first two."""
+    coords = np.stack([np.arange(6.0)] * 3, axis=1)
+    point = _three_kinds(geoml.data.PointData(
+        pd.DataFrame(coords, columns=["X", "Y", "Z"]), ["X", "Y", "Z"]))
+
+    columns = list(point.as_data_frame().columns)
+    for stem in ["au", "vec_p", "vec_q", "assay_a", "assay_b"]:
+        assert "%s_%s" % (stem, role) in columns
+
+
+def test_a_component_is_exported_under_the_name_of_its_variable():
+    """`a` alone does not say which assay it is, and two variables may each
+    hold a component called `a`."""
+    grid = _three_kinds(
+        geoml.data.Grid3D(start=[0, 0, 0], n=[2, 2, 2], step=[1, 1, 1]))
+    keys = grid.as_pyvista().point_data.keys()
+
+    assert "au - prediction" in keys                # a scalar keeps its own
+    assert "assay - a - prediction" in keys
+    assert "vec - p - prediction" in keys
+    assert "a - prediction" not in keys

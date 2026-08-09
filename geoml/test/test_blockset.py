@@ -578,6 +578,29 @@ def test_only_the_named_variables_get_a_say():
         blocks.needs_splitting(split_on="nope")
 
 
+def test_a_category_is_scored_against_the_best_of_the_others():
+    """The rival is the best of the *others*: the runner-up for whoever wins,
+    the winner for everybody else. Two categories that tie are each other's
+    rival, so both come out at zero -- which is what puts the contact on the
+    zero level set instead of a hair to one side of it."""
+    prob = np.array([[0.5, 0.3, 0.2],       # one winner
+                     [0.4, 0.4, 0.2],       # two tied
+                     [1 / 3, 1 / 3, 1 / 3]])  # all tied
+    var = np.ones_like(prob)
+    skew = geoml.likelihood.CategoricalGaussianIndicator \
+        .entropy_and_indicators(prob, var, var)[2].numpy()
+
+    log_p = np.log(prob + 1e-6)
+    expected = np.array(
+        [[log_p[i, j] - max(log_p[i, k] for k in range(3) if k != j)
+          for j in range(3)] for i in range(3)])
+    assert np.allclose(skew, expected)
+
+    assert skew[0, 0] > 0 and np.all(skew[0, 1:] < 0)
+    assert np.all(skew[1, :2] == 0.0) and skew[1, 2] < 0
+    assert np.all(skew[2] == 0.0)
+
+
 def _rock_model(seed=1234):
     """Two rock types either side of a plane, so there is a contact to find."""
     geoml.set_seed(seed)

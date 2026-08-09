@@ -124,6 +124,64 @@ leave-one-hole-out split reads, and `LENGTH` is the support each value stands
 for, which any weighting by it needs. A contact has no length, so
 `get_contacts` records none; in `as_classification_input` the contacts come
 through at zero, the zero support being the whole reason they are added
+* **A category is scored against the best of the others in two row maxima.**
+`_CategoricalLikelihood.entropy_and_indicators` built `ind_skew` by masking
+one category out at a time — a scatter over the whole `(n, n_cat)` indicator
+matrix per category, driven by a `tf.map_fn`, so the work grew with the
+number of categories and the loop went through a `while_loop` on the way. It
+is the same quantity read differently: the rival of whoever wins is the
+runner-up and the rival of everybody else is the winner, so the row maximum
+and the row maximum with the winners dropped answer for every category at
+once. Where two categories share the maximum they are each other's rival, so
+both still come out at zero and the contact stays the zero level set — which
+is why the count of winners is taken rather than assumed to be one. Bit for
+bit the same numbers (the old sentinel was -999 and an indicator is at worst
+`log(1e-6)`, so the masking never bound), and on the GPU 4.8x faster at two
+categories, 11.9x at twelve — 0.5-0.8 ms a batch of 20 000 rows against
+2.6-9.7, and flat in the category count where it used to grow with it. This
+matters at every prediction on a discretized block model, where the call
+happens before aggregation and so sees `prod(discretization)` times as many
+rows. A top-2 pass was the obvious replacement and is *not* what went in:
+`tf.math.top_k` costs a flat ~19 ms a call on the GPU whatever its shape,
+dtype or `k`, so it would have been two to seven times slower than the
+scatters it replaced while looking like an optimization on paper
+* The two nested Python loops that built `log_prob_final` in
+`CategoricalGaussianIndicator.predict` and `HierarchicalGaussianIndicator.
+predict` — "the probability of being class i and not being the others",
+assembled a column at a time — are one broadcast: the row of negative
+log-probabilities summed, with each category's own swapped for its positive
+one. **This is a graph-size change, not a speed one**, and it is worth saying
+which: prediction runs 1.0-1.3x faster, because the time goes into the
+`log_prob`/`log_survival_function` pair rather than the summation, but the
+graph drops from 2427 operations to 102 at 24 categories (687 at 12), which
+is 12x less tracing and, with `jit_predict`, a 4.0 s XLA compilation instead
+of 1.6. The reformulation sums the whole row and takes one term back out
+where the loop never added it, so the numbers are no longer bit-identical:
+checked against the pre-change file across every output of `predict` for both
+classes, the worst disagreement is 4e-15 relative, four ulps, and it stays
+there when the variance is small enough to push the log-probabilities to 1e7
+* **A composition's parts export everything the other continuous variables
+do.** `as_data_frame` gave `assay_a_prediction` and stopped there, leaving out
+`dispersion` and `noise_variance`, so a block model's composition reported
+neither — the columns were written, filled and persisted, and only the export
+could not see them. `_Component.as_data_frame` was a copy of
+`ContinuousVariable`'s minus the latent columns, so every column added
+upstream had to be added there too and the omission was silent. It delegates
+now, with `latent=False`, which is what the copy was for; what the parent
+writes is guarded on the attribute being there and holding something, so a
+component's absent latent space and a column no prediction ever filled are
+both simply skipped. This is the fifth bug of that family — `update`,
+`__getitem__` and two rounds of `carry_to` were the others — and the second
+fixed by deleting a duplicate rather than adding to it
+* **An exported component carries the name of the variable it belongs to.**
+`assay - a - prediction` in pyvista, where it used to be `a - prediction`: a
+bare `a` says nothing about which assay it is, and two variables may each hold
+a component so named, in which case one quietly overwrote the other.
+Categories already did this (`rock - granite - probability`) — the continuous
+side accepted a `prefix` argument in all three `fill_pyvista_*` and dropped it
+on the floor. `BlockSet3D.get_contour` reads those labels back, so it now
+takes the owner's name from `_variable_or_component`, which returns it
+alongside the component
 
 ## version 0.5.7
 * `BlockSet3D.index_data` locates sample data in a model of several block
