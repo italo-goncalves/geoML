@@ -47,6 +47,16 @@ class _Warping(_gpr.Parametric):
     """
     Base warping class.
     """
+
+    # Whether this warping lets one component of its input reach another
+    # component of its output. It decides how the likelihood noise is
+    # integrated out: a warping that works on each component alone needs one
+    # integration rule per component, and one that mixes them needs a rule
+    # over all of them at once, which costs an order of magnitude more nodes.
+    # Keep it truthful -- `test_warping_integration` checks every warping's
+    # declaration against a numerical Jacobian.
+    _mixes = False
+
     def __init__(self, **kwargs):
         super().__init__()
         self._size_in = None
@@ -59,7 +69,17 @@ class _Warping(_gpr.Parametric):
     @property
     def size_out(self):
         return self._size_out
-        
+
+    @property
+    def elementwise(self):
+        """Whether this warping acts on each component on its own.
+
+        With a single component there is nothing to mix, so a rotation is a
+        sign and a one-component PCA is a scale.
+        """
+        return not self._mixes or self.size_out == 1
+
+
     def forward(self, x):
         """
         Passes values through the class's warping function.
@@ -289,7 +309,7 @@ class Center(ZScore):
         mean : double
             The desired mean of the data.
         """
-        super().__init__(size, mean, std=_np.ones[size])
+        super().__init__(size, mean, std=_np.ones(size))
         self.parameters['std'].fix()
 
     def initialize(self, x):
@@ -429,6 +449,15 @@ class ChainedWarping(_Warping):
         self._size_in = self.warpings[0].size_in
         self._size_out = self.warpings[-1].size_out
 
+    @property
+    def elementwise(self):
+        """A chain is elementwise only if every link is.
+
+        One mixing link is enough to spread a component over the others, and
+        everything applied after it sees the mixture.
+        """
+        return all(wp.elementwise for wp in self.warpings)
+
     def forward(self, x):
         d = _tf.reduce_sum(_tf.ones_like(x, dtype=_tf.float64), axis=1)
         for wp in self.warpings:
@@ -485,6 +514,8 @@ class Sigmoid(_Warping):
 
 
 class ContinuousNormalizingFlow(_Warping):
+    _mixes = True
+
     def __init__(self, size, inducing_points=20, n_steps=10, step=0.01):
         super().__init__()
         self._size_in = size
@@ -659,6 +690,8 @@ class ContinuousNormalizingFlow(_Warping):
 
 
 class PCA(_Warping):
+    _mixes = True
+
     def __init__(self, n_dim, n_components=None):
         super().__init__()
         if n_components is None:
@@ -712,6 +745,8 @@ class RobustPCA(PCA):
 
 
 class CenteredLogRatio(_Warping):
+    _mixes = True
+
     def __init__(self, n_dim):
         super().__init__()
         self._size_in = n_dim
@@ -731,6 +766,8 @@ class CenteredLogRatio(_Warping):
 
 
 class Rotation(Identity):
+    _mixes = True
+
     def __init__(self, n_dim, fixed=False):
         super().__init__(n_dim)
 
@@ -767,6 +804,7 @@ class ScaledSimplex(Identity):
 
     Accepts zeros.
     """
+    _mixes = True
 
     def __init__(self, size):
         super().__init__(size)

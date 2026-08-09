@@ -70,6 +70,9 @@ class Selection(object):
                  palette=None, cmap=None, uncertainty=None):
         self.data = data
         self.model = model
+        # measurement-level simulations, per variable, built on demand by
+        # `_measurement_samples` and never stored on the container
+        self._measurements = None
         self.palette = palette
         self.cmap = cmap if cmap is not None else _style.SEQUENTIAL
         self.uncertainty = uncertainty
@@ -131,6 +134,29 @@ class Selection(object):
             raise ValueError("%s needs a model; the %s was built without one"
                              % (caller, type(self).__name__))
         return self.model
+
+    def _measurement_samples(self, var, caller, n_sim=20):
+        """What a measurement at each location would read, from the model.
+
+        A prediction reports the ground, with the likelihood noise integrated
+        out, so the simulations stored on the container are intervals for a
+        quantity no assay observes; scoring them against measured values asks
+        the model a question it did not answer. This asks the right one.
+
+        Kept for as long as this selection lives, since every component of a
+        vector variable wants the same array, and a figure redrawn wants it
+        again. Nothing reaches the container.
+        """
+        model = self._require_model(caller)
+        if self._measurements is None:
+            self._measurements = model.predict_measurements(
+                self.data, n_sim=n_sim)
+        if var.name not in self._measurements:
+            raise ValueError(
+                "%s has nothing to say about %r: its likelihood carries no "
+                "warping, so there is no value for a measurement of it to "
+                "scatter around" % (caller, var.name))
+        return self._measurements[var.name]
 
     def _require_vector(self, caller):
         var = self._require_continuous(caller)

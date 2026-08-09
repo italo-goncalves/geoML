@@ -146,7 +146,7 @@ def test_jura_elements():
     model.train_full(5)
 
     grid = geoml.data.Grid2D(start=[0, 0], n=[21, 21], end=[6, 6])
-    model.predict(grid, n_sim=10, include_noise="monte_carlo")
+    model.predict(grid, n_sim=10, include_noise=True)
     grid.variables["Elements"].reset_quantiles([0.025, 0.5, 0.975])
 
     component = grid.variables["Elements"].components[elements[0]]
@@ -165,7 +165,7 @@ def test_jura_elements():
     assert simulations.shape == (grid.n_data, 10, n_el)
 
     # scoring against held-out data
-    model.predict(jura_validation, n_sim=10, include_noise="monte_carlo")
+    model.predict(jura_validation, n_sim=10, include_noise=True)
     jura_validation.variables["Elements"].reset_quantiles([0.025, 0.5, 0.975])
     metrics = jura_validation.variables["Elements"].compute_metrics()
     assert metrics is not None

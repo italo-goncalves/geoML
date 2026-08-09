@@ -621,11 +621,28 @@ class Explorer(_base.Selection):
         model knows what it does not know; below it the intervals are too
         narrow for the errors they have to cover, and above it the model is
         hedging. Deutsch's goodness statistic sums that up in one number.
+
+        The intervals come from the model rather than from the container: what
+        is stored there is the ground, the likelihood noise having been
+        integrated out, and an assay is a measurement of the ground rather
+        than the ground itself. Scoring the stored simulations against
+        measured values would ask the model a question it never answered, and
+        it would fail -- so this figure needs the model the selection was
+        built with.
         """
         var = self._require_continuous("accuracy")
         components = getattr(var, "components", None)
         parts = [var] if components is None else \
             [components[label] for label in var.labels]
+
+        # a grid predicted onto has simulations everywhere and measurements
+        # nowhere, and there is nothing to check against -- said before the
+        # model is asked for anything, so it fails fast
+        measured = [part.measurements.values.to_numpy().astype(float)
+                    for part in parts]
+        for part, values in zip(parts, measured):
+            self._check_measured(part, ~_np.isnan(values))
+        samples = self._measurement_samples(var, "accuracy")
 
         with _style.context():
             figure, axes = _plt.subplots(figsize=figsize or (5.0, 5.0))
@@ -633,14 +650,10 @@ class Explorer(_base.Selection):
                       linestyle="--", label="perfect")
 
             for i, part in enumerate(parts):
-                measured = part.measurements.values.to_numpy().astype(float)
-                simulations = _np.asarray(part.get_simulations(), dtype=float)
-                keep = ~_np.isnan(measured)
-                # a grid predicted onto has simulations everywhere and
-                # measurements nowhere, and there is nothing to check against
-                self._check_measured(part, keep)
+                simulations = _np.asarray(samples[:, i, :], dtype=float)
+                keep = ~_np.isnan(measured[i])
                 nominal, observed = _gmet.coverage(
-                    measured[keep], simulations[keep], probabilities)
+                    measured[i][keep], simulations[keep], probabilities)
                 axes.plot(nominal, observed, marker="o", markersize=3,
                           color=self._color(i, str(part.name)),
                           label="%s (G = %.2f)"
@@ -655,8 +668,92 @@ class Explorer(_base.Selection):
             figure.tight_layout()
         return figure
 
+    def spread_check(self, bins=8, figsize=None):
+        """
+        Whether the noise the model fitted is the noise the data has.
+
+        A residual holds two things at once -- how wrong the model was about
+        the ground, and how far the assay fell from the ground -- so it is
+        read against the two together. The band is the noise, the line the
+        whole claim, the points what the errors actually did. On the line is
+        calibrated, below it is hedging, above it is over-confident.
+
+        The level axis is what says which term is at fault. A warping bends,
+        so the noise grows with the value while the model's own uncertainty
+        does not: a shortfall widening with the grade is the noise, a flat one
+        is the posterior. Points inside the band alone are the plainest case
+        -- the fitted noise over-explains the errors by itself.
+
+        Only honest on data the model has not seen: at a training location it
+        interpolates its own measurement, and the residual is not an error.
+
+        Parameters
+        ----------
+        bins : int or sequence
+            How many bins, or where their edges are. A count gives
+            **equal-count** bins, since a predicted grade is skewed and equal
+            width would leave the top bins with a sample each; pass
+            `np.linspace(...)` to ask for equal width instead.
+        """
+        var = self._require_continuous("spread_check")
+        panels = _prep.spread_check(self.data, var.name, bins=bins)
+
+        rows, columns = _prep.grid_shape(len(panels))
+        with _style.context():
+            size = figsize or (4.2 * columns, 0.6 + 3.4 * rows)
+            # three entries explaining a band, a line and a set of points do
+            # not fit inside a panel without covering the very curve they
+            # explain, so the key gets an axes of its own above them all --
+            # side by side where the figure is wide enough for it
+            side_by_side = size[0] >= 8.0
+            figure = _plt.figure(figsize=size)
+            grid = figure.add_gridspec(
+                rows + 1, columns,
+                height_ratios=[0.3 if side_by_side else 0.8] + [1.0] * rows)
+
+            key = figure.add_subplot(grid[0, :])
+            key.axis("off")
+
+            drawn = []
+            for i, panel in enumerate(panels):
+                row, column = divmod(i, columns)
+                axes = figure.add_subplot(grid[row + 1, column])
+                self._draw_spread(axes, panel)
+                axes.set_title(panel["label"])
+                axes.set_xlabel("predicted value")
+                axes.set_ylabel("spread")
+                drawn.append(axes)
+
+            handles, labels = drawn[0].get_legend_handles_labels()
+            key.legend(handles, labels, loc="center", frameon=False,
+                       ncol=len(labels) if side_by_side else 1,
+                       fontsize="small")
+            figure.suptitle("%s: claimed spread against observed" % var.name)
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+        return figure
+
+    def _draw_spread(self, axes, panel):
+        """One component of `spread_check`."""
+        x, noise = _prep.step_path(panel["lo"], panel["hi"], panel["noise"])
+        _, total = _prep.step_path(panel["lo"], panel["hi"], panel["total"])
+
+        axes.fill_between(x, 0.0, noise, color=self._color(0, "noise"),
+                          alpha=0.25, label="claimed: measurement noise")
+        axes.plot(x, total, color=self._color(0, "noise"), linewidth=1.6,
+                  label="claimed: noise and uncertainty")
+        # the points span their bin, so a wide one reads as a thin stretch of
+        # data rather than as a wide interval
+        axes.errorbar(panel["centre"], panel["observed"],
+                      yerr=panel["observed_error"],
+                      xerr=_np.stack([panel["centre"] - panel["lo"],
+                                      panel["hi"] - panel["centre"]]),
+                      fmt="o", markersize=4, capsize=0, linewidth=1.0,
+                      color=self._color(3, "observed"),
+                      label="observed: rms residual")
+        axes.set_ylim(bottom=0.0)
+
     def grade_tonnage(self, component=None, density=None, cutoffs=30,
-                      max_uncertainty=None, figsize=None):
+                      max_uncertainty=None, log_mass=False, figsize=None):
         """
         How much material clears each cut-off, and how good it is.
 
@@ -683,6 +780,13 @@ class Explorer(_base.Selection):
             column named when the Explorer was built. A block the model cannot
             speak for is not tonnage, and counting it flatters the answer at
             exactly the cut-offs where there is least data to go on.
+        log_mass : bool
+            Put the tonnage on a logarithmic scale. Most of a deposit clears
+            the low cut-offs, so on a linear axis the high ones are a flat
+            line along the bottom and the spread between the realizations
+            there -- which is where the decision usually is -- cannot be seen
+            at all. A cut-off that nothing clears has no logarithm and drops
+            out of the curve rather than being drawn at the axis floor.
         """
         var = self._require_continuous("grade_tonnage")
         name = var.name
@@ -728,6 +832,11 @@ class Explorer(_base.Selection):
                 panel.plot(cutoff, _np.median(curves[key], axis=1),
                            color=_style.color(index), linewidth=2.0,
                            label=key)
+
+            if log_mass:
+                # only the tonnage: the grade axis spans one order of
+                # magnitude at most and a log scale would say nothing
+                axes.set_yscale("log")
 
             axes.set_xlabel("cut-off grade (%s)" % name)
             axes.set_ylabel(curves["unit"] + " above the cut-off",

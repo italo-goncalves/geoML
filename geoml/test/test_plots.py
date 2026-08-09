@@ -712,13 +712,243 @@ def test_a_prediction_is_needed_before_it_can_be_drawn():
 
 def test_the_accuracy_plot_draws_the_reference_and_a_line_per_component(
         trained):
-    _, point = trained
-    figure = geoml.plots.Explorer(point, continuous="v").accuracy()
+    model, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v",
+                                  model=model).accuracy()
 
     assert len(figure.axes[0].lines) == 1 + 3
     labels = [line.get_label() for line in figure.axes[0].lines]
     assert labels[0] == "perfect"
     assert all("G = " in label for label in labels[1:])
+
+
+@pytest.fixture(scope="module")
+def trained_composition():
+    """A trained model on a *composition*.
+
+    Worth having beside `trained`: a composition's parts are `_Component`,
+    which is a different class from the components a vector variable holds,
+    with an `update` of its own. Anything a prediction writes has to be
+    carried through `CompositionalVariable.update` by hand, and forgetting is
+    silent -- the column is simply never filled.
+    """
+    geoml.set_seed(1234)
+    point, rng = _points(n=40)
+    point.add_compositional_variable(
+        "assay", ["a", "b", "c"], rng.dirichlet([4.0, 2.0, 1.0], size=40))
+
+    warping = geoml.warping.ChainedWarping(
+        geoml.warping.CenteredLogRatio(3),
+        geoml.warping.RobustPCA(3, 2),
+        geoml.warping.ZScore(2))
+    inducing = geoml.data.Grid2D(start=[0, 0], n=[4, 4], step=[30, 30])
+    network = geoml.latent.BasicGP(
+        geoml.latent.BasicInput(inducing,
+                                transform=geoml.transform.Isotropic(40)),
+        size=2, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "assay", geoml.likelihood.MultivariateGaussian(3, warping),
+        network,
+        options=geoml.models.GPOptions(verbose=False, training_samples=5))
+    model.train_full(max_iter=5)
+    model.predict(point, n_sim=10)
+    return model, point
+
+
+def test_a_compositions_parts_each_carry_a_noise_variance(trained_composition):
+    _, point = trained_composition
+
+    for label in point.variables["assay"].labels:
+        part = point.variables["assay"].components[label]
+        assert part.noise_variance._has_content()
+        assert np.all(part.noise_variance.values.to_numpy() > 0)
+
+
+def test_a_compositions_parts_each_carry_a_dispersion(trained_composition):
+    """And only where the container discretizes: a point has no interior, so
+    there the answer stays missing rather than becoming zero."""
+    model, point = trained_composition
+    blocks = geoml.data.Blocks2D(start=[0, 0], n=[3, 3], step=[30, 30],
+                                 discretization=[2, 2])
+    model.predict(blocks, n_sim=6)
+
+    for label in blocks.variables["assay"].labels:
+        part = blocks.variables["assay"].components[label]
+        assert part.dispersion._has_content()
+        assert np.all(part.dispersion.values.to_numpy() >= 0)
+
+    on_points = point.variables["assay"].components["a"]
+    assert not on_points.dispersion._has_content()
+
+
+def test_subsetting_a_composition_carries_every_column(trained_composition):
+    """A held-out set is a subset, and a column left at its old length only
+    goes wrong later, in whatever reads it against the new one."""
+    _, point = trained_composition
+    kept = point[np.arange(0, point.n_data, 2)]
+
+    for label in kept.variables["assay"].labels:
+        part = kept.variables["assay"].components[label]
+        for role in part._ZARR_ATTRS:
+            column = getattr(part, role)
+            # a part has no latent space of its own, and says so with a None
+            if column is not None:
+                assert len(column.values) == kept.n_data, role
+        assert part.noise_variance._has_content()
+
+
+def test_the_spread_check_works_on_a_composition(trained_composition):
+    _, point = trained_composition
+    figure = geoml.plots.Explorer(point, continuous="assay").spread_check(
+        bins=3)
+
+    assert len([ax for ax in figure.axes if ax.lines]) == 3
+
+
+def test_a_per_bin_value_is_drawn_as_a_step():
+    """One number per bin is not a curve, and a line through the centres says
+    it is."""
+    x, y = prepare.step_path([0, 1], [1, 2], [10, 20])
+    assert list(x) == [0, 1, 1, 2]
+    assert list(y) == [10, 10, 20, 20]
+
+
+def test_a_gap_between_bins_is_a_break_rather_than_a_line_across_it():
+    x, y = prepare.step_path([0, 3], [1, 4], [10, 20])
+    assert np.isnan(x[2]) and np.isnan(y[2])
+
+
+def test_the_spread_check_bins_hold_the_same_count(trained):
+    """A count asks for equal-count bins: a predicted grade is skewed, and
+    equal width would leave the top bins with a sample each."""
+    _, point = trained
+    panels = prepare.spread_check(point, "v", bins=5)
+
+    assert [panel["label"] for panel in panels] == ["a", "b", "c"]
+    for panel in panels:
+        assert panel["count"].sum() == point.n_data
+        assert panel["count"].max() - panel["count"].min() <= 1
+
+
+def test_the_spread_check_takes_the_bin_positions(trained):
+    _, point = trained
+    predicted = point.variables["v"].components["a"] \
+        .prediction.values.to_numpy()
+    edges = [predicted.min(), float(np.median(predicted)), predicted.max()]
+
+    panel = prepare.spread_check(point, "v", bins=edges)[0]
+    assert np.allclose(panel["lo"], edges[:2])
+    assert np.allclose(panel["hi"], edges[1:])
+
+
+def test_the_spread_check_measures_the_residuals_it_bins(trained):
+    _, point = trained
+    panel = prepare.spread_check(point, "v", bins=2)[0]
+    part = point.variables["v"].components["a"]
+    measured = part.measurements.values.to_numpy()
+    predicted = part.prediction.values.to_numpy()
+
+    inside = (predicted >= panel["lo"][0]) & (predicted < panel["hi"][0])
+    expected = np.sqrt(np.mean((measured[inside] - predicted[inside]) ** 2))
+    assert panel["observed"][0] == pytest.approx(expected)
+    assert panel["observed_error"][0] == pytest.approx(
+        expected / np.sqrt(2 * panel["count"][0]))
+
+
+def test_the_claimed_total_is_never_below_its_noise_part(trained):
+    """It is the noise and the model's own uncertainty added in quadrature,
+    so the band can only sit under the line."""
+    _, point = trained
+    for panel in prepare.spread_check(point, "v", bins=4):
+        assert np.all(panel["total"] >= panel["noise"] - 1e-12)
+
+
+def test_the_spread_check_needs_the_noise_to_have_been_integrated(trained):
+    model, point = trained
+    latent = geoml.data.PointData.from_array(np.asarray(point.coordinates))
+    model.predict(latent, n_sim=5, include_noise=False)
+
+    with pytest.raises(ValueError, match="carries no noise variance"):
+        prepare.spread_check(latent, "v")
+
+
+def test_the_spread_check_draws_a_panel_per_component(trained):
+    """And needs no model: everything it reads is on the container."""
+    _, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v").spread_check(bins=4)
+
+    drawn = [ax for ax in figure.axes if ax.lines]
+    assert len(drawn) == 3
+    for ax in drawn:
+        assert len(ax.lines) >= 2            # the claim, and the observed
+        assert len(ax.collections) >= 1      # the noise band
+
+
+def test_the_spread_check_puts_its_key_on_an_axes_of_its_own(trained):
+    """Three entries explaining a band, a line and a set of points cover the
+    curve they explain if they sit inside a panel."""
+    _, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v").spread_check(bins=4)
+
+    key = figure.axes[0]
+    assert not key.axison                    # nothing but the legend on it
+    assert not key.lines
+    assert [text.get_text() for text in key.get_legend().get_texts()] == [
+        "claimed: measurement noise", "claimed: noise and uncertainty",
+        "observed: rms residual"]
+    assert all(ax.get_legend() is None for ax in figure.axes[1:])
+
+
+def test_the_accuracy_plot_needs_the_model(trained):
+    """Its intervals are of a measurement, and only the model can say what a
+    measurement would read -- the container holds the ground."""
+    _, point = trained
+    with pytest.raises(ValueError, match="accuracy needs a model"):
+        geoml.plots.Explorer(point, continuous="v").accuracy()
+
+
+def test_the_accuracy_intervals_are_the_models_not_the_containers(trained):
+    """The stored simulations have the noise integrated out, so scoring them
+    against measured values reads as wild over-confidence. Asking the model
+    what a sample would read is the same question the plot always meant."""
+    model, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v",
+                                  model=model).accuracy()
+    from_model = [float(line.get_label().split("G = ")[1].rstrip(")"))
+                  for line in figure.axes[0].lines[1:]]
+
+    stored = []
+    for label in point.variables["v"].labels:
+        part = point.variables["v"].components[label]
+        measured = part.measurements.values.to_numpy().astype(float)
+        nominal, observed = geoml.metrics.coverage(
+            measured, np.asarray(part.get_simulations(), dtype=float))
+        stored.append(geoml.metrics.goodness(nominal, observed))
+
+    assert all(a > b for a, b in zip(from_model, stored))
+
+
+def test_the_measurement_samples_are_built_once(trained):
+    """Every component wants the same array, and a figure redrawn wants it
+    again; nothing of it reaches the container."""
+    model, point = trained
+    explorer = geoml.plots.Explorer(point, continuous="v", model=model)
+
+    calls = []
+    original = type(model).predict_measurements
+
+    def spy(self, *args, **kwargs):
+        calls.append(1)
+        return original(self, *args, **kwargs)
+
+    type(model).predict_measurements = spy
+    try:
+        explorer.accuracy()
+        explorer.accuracy()
+    finally:
+        type(model).predict_measurements = original
+
+    assert len(calls) == 1
 
 
 def test_the_points_can_be_counted_into_cells_instead(trained):
@@ -855,6 +1085,21 @@ def test_the_cutoffs_can_be_given_outright(blocks):
     assert list(curves["cutoff"]) == [1.0, 5.0, 9.0]
 
 
+def test_the_tonnage_can_be_read_on_a_log_scale(blocks):
+    """Most of a deposit clears the low cut-offs, so the high ones are a flat
+    line along the bottom until the axis is logarithmic. The grade axis spans
+    one order of magnitude at most and is left alone."""
+    explorer = geoml.plots.Explorer(blocks, continuous="grade")
+
+    linear, _ = explorer.grade_tonnage(density="rho").axes
+    tonnage_axes, grade_axes = explorer.grade_tonnage(
+        density="rho", log_mass=True).axes
+
+    assert linear.get_yscale() == "linear"
+    assert tonnage_axes.get_yscale() == "log"
+    assert grade_axes.get_yscale() == "linear"
+
+
 def test_each_scale_gets_its_own_gridlines(blocks):
     """One grid on a twin axis belongs to the left scale without saying so,
     and a reader following the grade curve to a line reads a tonnage."""
@@ -955,7 +1200,7 @@ def test_a_grid_predicted_onto_has_nothing_to_check_against(trained):
     grid = geoml.data.Grid2D(start=[0, 0], n=[6, 6], step=[20, 20])
     model.predict(grid, n_sim=5)
 
-    explorer = geoml.plots.Explorer(grid, continuous="v")
+    explorer = geoml.plots.Explorer(grid, continuous="v", model=model)
     with pytest.raises(ValueError, match="no measurements here"):
         explorer.accuracy()
     with pytest.raises(ValueError, match="no measurements here"):

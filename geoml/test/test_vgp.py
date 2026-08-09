@@ -14,8 +14,8 @@ def build_model(n_ip=12, samples=10, seed=1234):
     """A minimal single-GP network on the Walker Lake ``V`` variable.
 
     Initial parameter values are drawn when the objects are built, so the seed
-    goes in before that. TensorFlow's global generator is seeded as well: the
-    simulation noise in ``likelihood.white_noise`` still draws from it.
+    goes in before that. TensorFlow's global generator is seeded as well, for
+    anything still reading it.
     """
     geoml.set_seed(seed)
     import tensorflow as tf

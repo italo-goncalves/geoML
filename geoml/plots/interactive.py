@@ -811,25 +811,35 @@ class Interactive(_base.Selection):
         model knows what it does not know; below it the intervals are too
         narrow for the errors they have to cover, and above it the model is
         hedging. Deutsch's goodness statistic sums that up in one number.
+
+        The intervals come from the model rather than from the container: what
+        is stored there is the ground, the likelihood noise having been
+        integrated out, and an assay is a measurement of the ground rather
+        than the ground itself. So this figure needs the model the selection
+        was built with.
         """
         var = self._require_continuous("accuracy")
         components = getattr(var, "components", None)
         parts = [var] if components is None else \
             [components[label] for label in var.labels]
 
+        # nothing measured means nothing to check against, said before the
+        # model is asked for anything
+        measured = [part.measurements.values.to_numpy().astype(float)
+                    for part in parts]
+        for part, values in zip(parts, measured):
+            self._check_measured(part, ~_np.isnan(values))
+        samples = self._measurement_samples(var, "accuracy")
+
         figure = _go.Figure()
         self._line(figure, [0, 1], [0, 1], REFERENCE, width=1.0,
                    name="perfect", legend=True, dash="dash")
 
         for i, part in enumerate(parts):
-            measured = part.measurements.values.to_numpy().astype(float)
-            simulations = _np.asarray(part.get_simulations(), dtype=float)
-            keep = ~_np.isnan(measured)
-            # a grid predicted onto has simulations everywhere and
-            # measurements nowhere, and there is nothing to check against
-            self._check_measured(part, keep)
+            simulations = _np.asarray(samples[:, i, :], dtype=float)
+            keep = ~_np.isnan(measured[i])
             nominal, observed = _gmet.coverage(
-                measured[keep], simulations[keep], probabilities)
+                measured[i][keep], simulations[keep], probabilities)
             figure.add_trace(_go.Scatter(
                 x=nominal, y=observed, mode="lines+markers",
                 marker={"size": 6},
@@ -847,8 +857,84 @@ class Interactive(_base.Selection):
             legend={"x": 0.02, "y": 0.98, "xanchor": "left",
                     "yanchor": "top"})
 
+    def spread_check(self, bins=8, height=None, width=None):
+        """
+        Whether the noise the model fitted is the noise the data has.
+
+        A residual holds two things at once -- how wrong the model was about
+        the ground, and how far the assay fell from the ground -- so it is
+        read against the two together. The band is the noise, the line the
+        whole claim, the points what the errors actually did. On the line is
+        calibrated, below it is hedging, above it is over-confident.
+
+        The level axis is what says which term is at fault. A warping bends,
+        so the noise grows with the value while the model's own uncertainty
+        does not: a shortfall widening with the grade is the noise, a flat one
+        is the posterior.
+
+        Only honest on data the model has not seen.
+
+        Parameters
+        ----------
+        bins : int or sequence
+            How many bins, or where their edges are. A count gives
+            **equal-count** bins; pass `np.linspace(...)` for equal width.
+        """
+        var = self._require_continuous("spread_check")
+        panels = _prep.spread_check(self.data, var.name, bins=bins)
+        labels = [panel["label"] for panel in panels]
+
+        rows, columns = _prep.grid_shape(len(panels))
+        figure = _subplots(rows=rows, cols=columns, subplot_titles=labels,
+                           horizontal_spacing=0.1)
+        for i, panel in enumerate(panels):
+            row, column = divmod(i, columns)
+            self._spread(figure, panel, row + 1, column + 1, legend=i == 0)
+        figure.update_xaxes(title_text="predicted value", row=rows)
+        figure.update_yaxes(title_text="spread", col=1, rangemode="tozero")
+
+        return self._finish(
+            figure, title="%s: claimed spread against observed" % var.name,
+            height=height or 120 + 320 * rows, width=width,
+            # above the panels rather than beside them, as in `Explorer`: the
+            # entries are long and a column of them squeezes every panel
+            legend={"orientation": "h", "x": 0.5, "xanchor": "center",
+                    "y": 1.0, "yanchor": "bottom"})
+
+    def _spread(self, figure, panel, row, column, legend):
+        """One component of `spread_check`."""
+        x, noise = _prep.step_path(panel["lo"], panel["hi"], panel["noise"])
+        _, total = _prep.step_path(panel["lo"], panel["hi"], panel["total"])
+        claimed = self._color(0, "noise")
+
+        figure.add_trace(_go.Scatter(
+            x=x, y=noise, mode="lines", fill="tozeroy",
+            line={"color": claimed, "width": 0.8},
+            fillcolor="rgba(31, 111, 139, 0.25)",
+            name="claimed: measurement noise", showlegend=legend,
+            hovertemplate="noise %{y:.4g}<extra></extra>"), row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=x, y=total, mode="lines", line={"color": claimed, "width": 1.8},
+            name="claimed: noise and uncertainty", showlegend=legend,
+            hovertemplate="claimed %{y:.4g}<extra></extra>"),
+            row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=panel["centre"], y=panel["observed"], mode="markers",
+            marker={"size": 7, "color": self._color(3, "observed")},
+            error_y={"type": "data", "array": panel["observed_error"]},
+            error_x={"type": "data",
+                     "array": panel["hi"] - panel["centre"],
+                     "arrayminus": panel["centre"] - panel["lo"]},
+            customdata=_np.stack([panel["count"],
+                                  panel["observed"] / panel["total"]], axis=1),
+            name="observed: rms residual", showlegend=legend,
+            hovertemplate="observed %{y:.4g}<br>%{customdata[0]} samples"
+                          "<br>observed/claimed %{customdata[1]:.2f}"
+                          "<extra></extra>"), row=row, col=column)
+
     def grade_tonnage(self, component=None, density=None, cutoffs=30,
-                      max_uncertainty=None, height=None, width=None):
+                      max_uncertainty=None, log_mass=False, height=None,
+                      width=None):
         """
         How much material clears each cut-off, and how good it is.
 
@@ -876,6 +962,12 @@ class Interactive(_base.Selection):
         max_uncertainty : float
             Leave out the blocks the model doubts more than this, reading the
             column named when the Interactive was built.
+        log_mass : bool
+            Put the tonnage on a logarithmic scale. Most of a deposit clears
+            the low cut-offs, so on a linear axis the high ones are a flat
+            line along the bottom and the spread between the realizations
+            there -- which is where the decision usually is -- cannot be seen.
+            A cut-off that nothing clears has no logarithm and drops out.
         """
         var = self._require_continuous("grade_tonnage")
         name = var.name
@@ -924,9 +1016,12 @@ class Interactive(_base.Selection):
         return self._finish(
             figure, title=title, height=height or 470, width=width,
             xaxis={"title": {"text": "cut-off grade (%s)" % name}},
+            # only the tonnage: the grade axis spans one order of magnitude at
+            # most and a log scale would say nothing
             yaxis={"title": {"text": curves["unit"] + " above the cut-off",
                              "font": {"color": _style.color(0)}},
                    "tickfont": {"color": _style.color(0)},
+                   "type": "log" if log_mass else "linear",
                    "gridcolor": self._faint(_style.color(0))},
             yaxis2={"title": {"text": "mean grade above the cut-off",
                               "font": {"color": _style.color(1)}},

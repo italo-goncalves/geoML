@@ -1,4 +1,120 @@
 ## version 0.5.8
+* **The likelihood noise is integrated out of a prediction rather than drawn.**
+What a prediction reports is `E[g(z + eps)]` — the value the ground would show
+once the measurement error and the variability below the model's resolution
+were averaged over — instead of `g(z + eps)` for some `eps` pulled out of a
+random number generator. There is no point in mapping noise, and a block of
+any size integrates it away in any case; that is the conceptual difference
+from a conventional geostatistical simulation, which conflates signal and
+noise. It matters more than it sounds: on the Macpass assays, not integrating
+costs 2.8% of a standard deviation on silver and 17.3% on a composition, and
+the error is a bias, always in the same direction, because a back-transform
+that bends is convex where grades are skewed
+* **The accuracy plot asks the model what a measurement would read.** Its
+intervals used to come from the stored simulations, which since this release
+hold the ground with the noise integrated out — so scoring them against assays
+compared an interval for one quantity against observations of another, and
+read as wild over-confidence (on the Macpass composition, a spread 4.7 times
+too narrow: G fell to 0.22 where the ensemble's own histogram was matching the
+data well). `model.predict_measurements(newdata)` returns the predictive
+distribution of a *sample* instead — `n_sim * n_nodes` equally likely values
+per location, the same computation `predict` makes but stopped one step
+earlier, before the nodes are averaged. Equal-share nodes rather than
+Gauss-Hermite: a rule built to make an integral exact carries a few far-flung
+points at weights of 1e-4, which is excellent for a mean and useless as a
+picture of a distribution. Nothing is stored, `newdata` is untouched, and
+`variable.simulations` keeps its one meaning. Measured on a synthetic
+reproduction of the Macpass case, this puts G at 0.96-0.99 where the stored
+simulations gave 0.14-0.24, and where widening them by `noise_variance` — the
+cheap alternative, tried and rejected — reached only 0.78-0.87 while
+over-covering in the middle, a symmetric interval being the wrong shape for a
+skewed conditional. `Explorer.accuracy` and `Interactive.accuracy` now need
+the model the selection was built with, and build the array once per
+selection. A likelihood carrying no warping is passed over rather than asked:
+a categorical one keeps its noise in the probabilities and has no value for a
+sample to scatter around, which `_Likelihood.warped` now says out loud instead
+of leaving to whoever reaches for `warping` first
+* **`spread_check`**, a new figure in both backends: what the model claims a
+value's spread is, against what it turned out to be, along the predicted
+value. A residual holds two things at once — how wrong the model was about the
+ground, and how far the assay fell from the ground — so it can only be read
+against the two together, which is why the figure carries three things: the
+noise as a band, the whole claim as a line, and the observed root mean square
+residual as points. On the line is calibrated, below it hedging, above it
+over-confident. The level axis is what says *which* term is at fault: a
+warping bends, so the noise grows with the value while the model's own
+uncertainty does not, and a shortfall widening with the grade is the noise
+where a flat one is the posterior. Points sitting inside the noise band alone
+are the plainest case — the fitted noise over-explains the errors by itself,
+which is what an under-trained model looks like. Unlike `accuracy` it needs no
+model: everything it reads is on the container. `bins` takes a count or the
+positions, as a histogram does; a count gives **equal-count** bins, a
+predicted grade being skewed enough that equal width would leave the top bins
+holding a sample each. The per-bin values are drawn as steps rather than as a
+line through the centres — one number per bin is not a curve — and the points
+span their bin, so a wide bar reads as a thin stretch of data
+* Subsetting a composition carries every column. `_Component.__getitem__`
+listed the ones to cut by hand and stopped at `prediction`, so a held-out set
+came back with `dispersion` and `noise_variance` still at the *original*
+length — wrong only later, in whatever read one against the new length. Both
+it and `ContinuousVariable.__getitem__` now walk `_ZARR_ATTRS`, the list the
+Zarr round trip and `carry_to` already use, so a column added in one place is
+subset without being named a fourth time
+* A composition's parts now carry a `dispersion`, which they never had:
+`CompositionalVariable.update` overrides `VectorVariable`'s and its parts are
+`_Component`, which overrides `ContinuousVariable`'s and reads different keys,
+so the column added when block discretization went in reached every kind of
+variable except this one. A compositional block model reported no within-block
+spread on any part, silently
+* `grade_tonnage(log_mass=True)` puts the tonnage on a logarithmic scale, in
+both backends. Most of a deposit clears the low cut-offs, so on a linear axis
+the high ones are a flat line along the bottom and the spread between the
+realizations there — which is where the decision usually is — cannot be seen
+at all. Only the tonnage: the grade axis spans one order of magnitude at most
+and a log scale there would say nothing
+* A continuous variable gained a third variance, `noise_variance`, and with it
+a third question. `latent_variance` is how sure the model is of the value,
+`dispersion` is how much the ground varies inside a block, and this is how far
+a fresh *measurement* of the value would fall from it — the likelihood noise
+carried into the variable's own units. It is the second moment of the same
+quadrature that produces the value, so it costs nothing beyond an accumulator,
+and it is what has to be added back to compare a prediction with an assay,
+since the prediction itself reports the ground. On a block it averages over
+the sub-blocks, being what a sample taken inside the block would read. Missing
+rather than zero where the prediction was made with `include_noise=False`:
+nobody claimed a measurement there is exact
+* The consequences run through the whole prediction path. There is no longer a
+noisy field and a clean one to keep apart, so a block's cut-off shares, its
+dispersion and its simulations are read from one set of numbers and the
+back-transform runs **once instead of twice**. Nothing is drawn, so the noise
+follows no seed and cannot depend on how a prediction was batched. And the
+noise no longer contributes randomness that refining could not resolve, which
+`refine`'s criteria used to have to look past
+* `include_noise` is now a boolean and defaults to `True`. The `'delta'`
+method is gone: measured against a 40 001-node reference on a Walker-style
+chain it left an error of 7.0% of a standard deviation — *exactly* what not
+correcting at all costs, the third-order terms being the same size as the
+second. `white_noise` and `_add_noise` are gone with it
+* How the integral is done is decided by the warping, and the two cases differ
+only in which array of nodes is used — nothing in `likelihood.py` asks which
+one it got. A warping that works on each component alone gets **eight
+Gauss-Hermite nodes**, the same node applied to every component, so the cost
+does not grow with their number; it is exact to five figures. One that mixes
+them has to be integrated over all of them at once and gets **64 scrambled
+Sobol points**, reaching 0.2-0.6% where plain Monte Carlo of the same size
+gives 4-9%. The scramble is seeded, so the rule is fixed rather than random.
+`_Warping.elementwise` is what picks, `False` for `PCA`/`RobustPCA`,
+`CenteredLogRatio`, `Rotation`, `ScaledSimplex` and
+`ContinuousNormalizingFlow`, and a chain is elementwise only if every link is
+— one mixing link and everything after it sees the mixture, which is worth
+3-4% of a standard deviation on the Macpass chains. A test checks every
+warping's declaration against a numerical Jacobian
+* Non-Gaussian noise needs nothing special. The nodes live in the unit cube
+and reach the noise through the likelihood's own quantile function, which is
+how it was ever drawn, so `Laplace`, `Huber` and `EpsilonInsensitive` go
+through the same code
+* `warping.Center` could not be constructed at all: `_np.ones[size]` where
+`_np.ones(size)` was meant
 * Points made from drillholes remember where they came from. Every conversion
 — `as_point_data`, `get_contacts` and `as_classification_input` — carries the
 hole as the metadata column `HOLEID` and the sample's own length as `LENGTH`.

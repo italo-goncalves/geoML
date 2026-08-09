@@ -319,11 +319,11 @@ def test_a_refined_block_disperses_less_than_its_parent():
     answer and not a worse one."""
     model = _model()
     blocks = _blockset()
-    model.predict(blocks, n_sim=12, include_noise=None)
+    model.predict(blocks, n_sim=12, include_noise=False)
     coarse = np.nanmean(blocks.variables["y"].dispersion.values.to_numpy())
 
     fine = blocks.split(np.ones(blocks.n_data, dtype=bool))
-    model.predict(fine, n_sim=12, include_noise=None)
+    model.predict(fine, n_sim=12, include_noise=False)
     assert np.nanmean(
         fine.variables["y"].dispersion.values.to_numpy()) < coarse
 
@@ -422,25 +422,29 @@ def test_a_share_of_a_block_is_between_none_and_all_of_it():
     assert np.any(share >= 1.0 - 1e-12)
 
 
-def test_the_criterion_ignores_the_noise():
-    """Noise is the part of a block's spread that cutting cannot resolve, so
-    a block straddling a cut-off only on account of it would be cut for
-    nothing. The simulations still carry it."""
+def test_the_criterion_and_the_prediction_see_one_field():
+    """The noise being integrated out rather than drawn, there is no longer a
+    noisy field and a clean one to choose between: a block's cut-off shares,
+    its dispersion and its simulations are all read from the same numbers, and
+    none of them carries a spread that cutting the block could not resolve.
+
+    This model's warping is the default `ZScore`, which is affine, so the
+    integral has nothing to correct and turning it off changes nothing at
+    all -- `test_noise_integration.py` is where a bending one is measured."""
     model = _ore_model()
 
-    noisy, clean = _ore_blocks(), _ore_blocks()
-    model.predict(noisy, n_sim=8, include_noise='monte_carlo')
-    model.predict(clean, n_sim=8, include_noise=None)
+    integrated, latent = _ore_blocks(), _ore_blocks()
+    model.predict(integrated, n_sim=8)
+    model.predict(latent, n_sim=8, include_noise=False)
 
     for role in ("proportions", "divided"):
         assert np.allclose(
-            getattr(noisy.variables["au"], role)[1.0].values.to_numpy(),
-            getattr(clean.variables["au"], role)[1.0].values.to_numpy())
-    assert np.allclose(noisy.variables["au"].dispersion.values.to_numpy(),
-                       clean.variables["au"].dispersion.values.to_numpy())
-    # the predictions themselves must differ, or the noise did nothing
-    assert not np.allclose(np.asarray(noisy.variables["au"].simulations),
-                           np.asarray(clean.variables["au"].simulations))
+            getattr(integrated.variables["au"], role)[1.0].values.to_numpy(),
+            getattr(latent.variables["au"], role)[1.0].values.to_numpy())
+    assert np.allclose(integrated.variables["au"].dispersion.values.to_numpy(),
+                       latent.variables["au"].dispersion.values.to_numpy())
+    assert np.allclose(np.asarray(integrated.variables["au"].simulations),
+                       np.asarray(latent.variables["au"].simulations))
 
 
 def test_being_unsure_is_not_a_reason_to_split():

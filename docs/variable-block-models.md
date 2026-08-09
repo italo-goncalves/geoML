@@ -101,6 +101,11 @@ Same single temporary, same block-major layout that `_aggregate` averages back.
 `white_noise` also needs no change: it draws `k` rows indexed by sub-block
 position and shares them across blocks, and `k` is now constant everywhere.
 
+*(Since 0.5.8 there is no such draw: the likelihood noise is integrated out by
+quadrature rather than simulated — §7.2 — so `white_noise` and `_add_noise`
+are gone. The argument above is unaffected, `_aggregate` being the part that
+depends on `k`.)*
+
 ---
 
 ## 3. What would actually be saved
@@ -478,6 +483,10 @@ within-block dispersion **in data space, after warping and after noise** —
 the quantity that matters, with no kernel integration anywhere. (`mu` and
 `var` at 277–278 stay in latent space, as their names say.)
 
+*(Since 0.5.8 the noise line is an integration rather than a draw, and the
+back-transform runs once instead of twice — there is no longer a noisy field
+and a clean one to keep apart.)*
+
 ### 6.5 What the lattice buys: an audit
 
 Because every block is a known number of base cells, the tonnage resting on
@@ -558,7 +567,10 @@ many blocks.
 
 The same conservatism appears twice more. With fixed `k`, block-averaged noise
 variance is `sigma0^2 / k` whatever the block's size, though a larger block
-should average out more — again an overstatement, again on coarse blocks. And
+should average out more — again an overstatement, again on coarse blocks.
+*(Settled in 0.5.8, and not by scaling that variance: the noise is integrated
+out entirely, at every support, so there is no block-averaged noise variance
+left to get wrong.)* And
 with binary refinement the 8 sub-blocks sit at the children's *centres*, so
 the criterion reads point values, which vary more than block averages. All
 three errors push toward splitting too much rather than too little.
@@ -623,6 +635,11 @@ noise-free, that being a statement about the ground rather than about the
 measurement. The predictions themselves still carry noise as `include_noise`
 asks. Verified: proportions, `divided` and dispersion all agree to `0.0e+00`
 between a noisy and a noise-free prediction, while the simulations differ.
+
+*(Since 0.5.8 this holds by construction rather than by keeping two fields
+apart. The noise is integrated out of the predictions too — see §7.2 — so
+there is only one field and it carries no unresolvable spread. What the
+criterion reads and what gets reported are now the same numbers.)*
 
 **The test is direction-agnostic.** A cut-off sometimes keeps what is below it
 — a contaminant limit — but a block is divided by the cut-off either way.
@@ -980,7 +997,8 @@ which is the one place it belongs.
 
 `refine` takes `split_on` to name which variables get a say, `tolerance` for
 how often a block must be found divided, and `include_noise`, which is passed
-to the predictions. The criterion never reads the noise (§7.3).
+to the predictions. No criterion ever reads noise, because since 0.5.8 nothing
+does: it is integrated out rather than drawn (§7.3).
 
 ### 11.5 Doing it by hand
 
@@ -1115,6 +1133,7 @@ Noted for later rather than done: `_CategoricalLikelihood.
 entropy_and_indicators` builds `ind_skew` with one full-size scatter per
 category, which a single top-2 pass would replace. It matters more since
 §7.3 moved that call before aggregation, where it sees
-`prod(discretization)` times as many rows. And the noise integration behind
-§7.2 is still crude — with a fixed sub-block count a coarse block averages
-out no more noise than a fine one, which it should.
+`prod(discretization)` times as many rows. *(The noise integration behind
+§7.2 — a coarse block averaging out no more noise than a fine one — was the
+other item here, and is done in 0.5.8: the noise is integrated out by
+quadrature at every support rather than drawn, so no block carries any.)*

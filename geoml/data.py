@@ -1105,6 +1105,16 @@ class ContinuousVariable(_Variable):
         would tell anyone anything. Filled only where the container
         discretizes; elsewhere a location has no interior and this stays
         missing rather than zero.
+    noise_variance : _Attribute
+        How far a fresh *measurement* here would fall from the value above --
+        the likelihood noise carried into the variable's own units, averaged
+        over the realizations. The third of three variances and the third
+        question: `latent_variance` is how sure the model is of the value,
+        `dispersion` is how much the ground varies inside a block, and this is
+        how much a sample of it would scatter. A prediction reports the ground,
+        with the noise integrated out, so this is what has to be added back to
+        compare against an assay. Missing where the prediction was made with
+        `include_noise=False`, there being no integration to read it from.
     simulations : ArrayStore
         Draws from the variable's posterior distribution, in a single
         `(n_data, n_sim)` array. Use `simulation()` to get one of them as an
@@ -1116,7 +1126,7 @@ class ContinuousVariable(_Variable):
         quantile.
     """
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
-                   "prediction", "dispersion")
+                   "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
     _ZARR_HAS_QUANTILES = True
 
@@ -1137,6 +1147,12 @@ class ContinuousVariable(_Variable):
         # (`latent_variance`). Filled only where the container discretizes;
         # everywhere else a location has no interior and this stays zero.
         self.dispersion = self._Attribute(coordinates)
+
+        # What a sample taken here would read, as against what the ground
+        # holds: the likelihood noise in this variable's units. A prediction
+        # integrates that noise out, so this is the piece to add back before
+        # comparing with an assay.
+        self.noise_variance = self._Attribute(coordinates)
 
         # A single (n_data, n_sim) store (NumPy or Zarr by size); None until
         # ``allocate_simulations`` is called.
@@ -1256,11 +1272,12 @@ class ContinuousVariable(_Variable):
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.measurements = self.measurements[item]
-        new_obj.latent_mean = self.latent_mean[item]
-        new_obj.latent_variance = self.latent_variance[item]
-        new_obj.prediction = self.prediction[item]
-        new_obj.dispersion = self.dispersion[item]
+        # the same list the Zarr round trip and `carry_to` walk, so a column
+        # added in one place is subset in this one without being named twice
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None:
+                setattr(new_obj, role, column[item])
         new_obj.proportions = _col.OrderedDict(
             (key, val[item]) for key, val in self.proportions.items())
         new_obj.divided = _col.OrderedDict(
@@ -1321,6 +1338,11 @@ class ContinuousVariable(_Variable):
             if self.dispersion._has_content():
                 df[self.name + "_dispersion"] = \
                     self.dispersion.values.to_numpy()
+            # only where the noise was integrated; a prediction made without
+            # it has nothing to say about what a sample would read
+            if self.noise_variance._has_content():
+                df[self.name + "_noise_variance"] = \
+                    self.noise_variance.values.to_numpy()
 
         if latent:
             df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
@@ -1352,6 +1374,10 @@ class ContinuousVariable(_Variable):
 
         if "dispersion" in kwargs.keys():
             self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+
+        if "noise_variance" in kwargs.keys():
+            self.noise_variance.values[idx] = \
+                kwargs["noise_variance"].numpy()
 
         for key, target in (("proportions", self.proportions),
                             ("divided", self.divided)):
@@ -1393,6 +1419,7 @@ class ContinuousVariable(_Variable):
         self.latent_variance.coordinates = coordinates
         self.prediction.coordinates = coordinates
         self.dispersion.coordinates = coordinates
+        self.noise_variance.coordinates = coordinates
 
         for share in self.proportions.values():
             share.coordinates = coordinates
@@ -1421,6 +1448,8 @@ class ContinuousVariable(_Variable):
             cube, self.name + " - prediction", sigma=sigma)
         self.dispersion.fill_pyvista_cube(
             cube, self.name + " - dispersion")
+        self.noise_variance.fill_pyvista_cube(
+            cube, self.name + " - noise variance")
 
         for i, values in _selected_simulations(self.simulations, simulations):
             col = self._Attribute(self.coordinates, values)
@@ -1447,6 +1476,8 @@ class ContinuousVariable(_Variable):
                 points, self.name + " - latent variance")
         self.dispersion.fill_pyvista_points(
             points, self.name + " - dispersion")
+        self.noise_variance.fill_pyvista_points(
+            points, self.name + " - noise variance")
         self.prediction.fill_pyvista_points(
             points, self.name + " - prediction")
 
@@ -1476,6 +1507,8 @@ class ContinuousVariable(_Variable):
             )
         self.dispersion.fill_pyvista_blocks(
             cube, self.name + " - dispersion")
+        self.noise_variance.fill_pyvista_blocks(
+            cube, self.name + " - noise variance")
         self.prediction.fill_pyvista_blocks(
             cube, self.name + " - prediction", sigma=sigma
         )
@@ -1659,17 +1692,21 @@ class VectorVariable(_Variable):
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
-        # each component is dispersed inside a block on its own account
+        # each component is dispersed inside a block, and measured, on its own
+        # account
         dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
+        noise = _tf.unstack(kwargs["noise_variance"], axis=1)
         blank = [None] * len(self.labels)
         shares = {
             key: (_tf.unstack(kwargs[key], axis=1)
                   if key in kwargs.keys() else blank)
             for key in ("proportions", "divided")}
 
-        for i, (lb, p, s, d) in enumerate(zip(self.labels, prediction,
-                                              simulations, dispersion)):
-            values = {"average_sim": p, "simulations": s, "dispersion": d}
+        for i, (lb, p, s, d, nv) in enumerate(zip(self.labels, prediction,
+                                                  simulations, dispersion,
+                                                  noise)):
+            values = {"average_sim": p, "simulations": s, "dispersion": d,
+                      "noise_variance": nv}
             for key, unstacked in shares.items():
                 if unstacked[i] is not None:
                     # the matrix was padded out to the widest component, so
@@ -1728,8 +1765,15 @@ class _Component(ContinuousVariable):
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.measurements = self.measurements[item]
-        new_obj.prediction = self.prediction[item]
+        # driven by the list rather than written out: a column named there and
+        # forgotten here survives the subset at its old length, and only
+        # something that reads it afterwards finds out. A component has no
+        # latent space of its own and says so with a None, as `_carry_into`
+        # also has to allow for
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None:
+                setattr(new_obj, role, column[item])
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1787,6 +1831,13 @@ class _Component(ContinuousVariable):
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
         self.simulations[idx, :] = kwargs["simulations"].numpy()
+
+        if "dispersion" in kwargs.keys():
+            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+
+        if "noise_variance" in kwargs.keys():
+            self.noise_variance.values[idx] = \
+                kwargs["noise_variance"].numpy()
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -1869,13 +1920,18 @@ class CompositionalVariable(VectorVariable):
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
+        # a part varies inside a block, and is assayed, on its own account
+        dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
+        noise = _tf.unstack(kwargs["noise_variance"], axis=1)
 
-        for lb, p, s in zip(
+        for lb, p, s, d, nv in zip(
                 self.labels,
-                prediction, simulations):
+                prediction, simulations, dispersion, noise):
             self.components[lb].update(idx, **{
                 "prediction": p,
-                "simulations": s
+                "simulations": s,
+                "dispersion": d,
+                "noise_variance": nv
             })
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
