@@ -1,3 +1,14 @@
+## version 0.5.8
+* Points made from drillholes remember where they came from. Every conversion
+— `as_point_data`, `get_contacts` and `as_classification_input` — carries the
+hole as the metadata column `HOLEID` and the sample's own length as `LENGTH`.
+Metadata rather than variables, so the models never see them while subsetting,
+`as_data_frame` and `to_zarr` all keep them: `HOLEID` is what a
+leave-one-hole-out split reads, and `LENGTH` is the support each value stands
+for, which any weighting by it needs. A contact has no length, so
+`get_contacts` records none; in `as_classification_input` the contacts come
+through at zero, the zero support being the whole reason they are added
+
 ## version 0.5.7
 * `BlockSet3D.index_data` locates sample data in a model of several block
 sizes, and `aggregate_numeric`/`aggregate_categorical`/`aggregate_binary`

@@ -31,6 +31,9 @@ HOLE = "HOLEID"
 FROM = "FROM"
 TO = "TO"
 
+# what a sample's own length is called once it is a point
+LENGTH = "LENGTH"
+
 ROLES = ("grade", "categorical", "density", "flag", "ignore")
 
 # what to divide a column by to turn it into a fraction of the whole
@@ -1507,6 +1510,11 @@ class DrillholeData(_data._SpatialData):
         become continuous variables and categorical ones become categorical
         variables, unless they are claimed by a compositional or vector group.
 
+        The hole each point came from and the length it stands for are carried
+        as the metadata columns `HOLEID` and `LENGTH`, which the models never
+        see: they are what a leave-one-hole-out split and a support-weighted
+        statistic read.
+
         Parameters
         ----------
         tables : str or list
@@ -1575,6 +1583,12 @@ class DrillholeData(_data._SpatialData):
             axis=1)
         point = _data.PointData(frame, ["X", "Y", "Z"])
 
+        # where the sample came from, which the models never see: the hole is
+        # what a leave-one-hole-out split needs, and the length is the support
+        # the value stands for
+        point.add_metadata(HOLE, merged[HOLE].values)
+        point.add_metadata(LENGTH, merged[TO].values - merged[FROM].values)
+
         for column in numeric:
             point.add_continuous_variable(
                 column, frame[column].values.astype(float))
@@ -1607,7 +1621,9 @@ class DrillholeData(_data._SpatialData):
         The points where the category changes, as a rock type variable.
 
         Each contact carries the category above it and the category below it,
-        which is what an implicit model needs to place a boundary.
+        which is what an implicit model needs to place a boundary. The hole it
+        came from is carried as the metadata column `HOLEID`; a contact has no
+        length, so none is recorded.
 
         Parameters
         ----------
@@ -1640,6 +1656,7 @@ class DrillholeData(_data._SpatialData):
         frame = frame.loc[keep].reset_index(drop=True)
 
         point = _data.PointData(frame, ["X", "Y", "Z"])
+        point.add_metadata(HOLE, frame[HOLE].values)
         point.add_rock_type_variable(
             column, labels=_pd.unique(value[~_pd.isna(value)]),
             measurements_a=value[above][keep],
@@ -1656,6 +1673,9 @@ class DrillholeData(_data._SpatialData):
         as points carrying both neighbouring categories. A boundary therefore
         enters the model with zero effective support, which is what lets an
         implicit model honour it exactly.
+
+        The hole and the length are carried as the metadata columns `HOLEID`
+        and `LENGTH`, the latter being zero at the contacts.
 
         Parameters
         ----------
@@ -1684,6 +1704,8 @@ class DrillholeData(_data._SpatialData):
         frame = _pd.DataFrame(coordinates[keep], columns=["X", "Y", "Z"])
         frame[column + "_a"] = value[keep]
         frame[column + "_b"] = value[keep]
+        frame[HOLE] = interior[HOLE].values[keep]
+        frame[LENGTH] = interior[TO].values[keep] - interior[FROM].values[keep]
 
         contacts = self.get_contacts(domain)
         contact_frame = _pd.DataFrame(_np.asarray(contacts.coordinates),
@@ -1692,12 +1714,18 @@ class DrillholeData(_data._SpatialData):
             contacts.variables[column].measurements_a.to_numpy()
         contact_frame[column + "_b"] = \
             contacts.variables[column].measurements_b.to_numpy()
+        contact_frame[HOLE] = contacts.get_metadata(HOLE)
+        # a contact is a point, not an interval — the zero support is the
+        # whole reason it is added
+        contact_frame[LENGTH] = 0.0
 
         frame = _pd.concat([frame, contact_frame], ignore_index=True)
 
         labels = label_order if label_order is not None \
             else _pd.unique(runs[column].dropna())
         point = _data.PointData(frame, ["X", "Y", "Z"])
+        point.add_metadata(HOLE, frame[HOLE].values)
+        point.add_metadata(LENGTH, frame[LENGTH].values)
         point.add_rock_type_variable(
             column, labels=labels,
             measurements_a=frame[column + "_a"].values,
