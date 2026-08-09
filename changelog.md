@@ -1,4 +1,24 @@
 ## version 0.5.7
+* `BlockSet3D.index_data` locates sample data in a model of several block
+sizes, and `aggregate_numeric`/`aggregate_categorical`/`aggregate_binary`
+follow from it — the last of the block model's methods that a grid had and it
+did not. It answers with **which block**, not with a cell index per axis:
+blocks of several sizes have no per-axis index to give. The lattice makes it
+cheap, a location's base cell being arithmetic and the block covering it the
+one whose origin is that cell's ancestor at its own level, so one
+`searchsorted` per level settles every location
+* `BlockSet3D.group(mask)` is the inverse of `split`: whole families of
+children back into the parent they came from. The mask must name every child
+of a parent or none — a partial family would average over children that are
+not there, the mass-conservation error the lattice exists to prevent, so it is
+refused rather than approximated. A block that was not grouped keeps what it
+holds, as in `split` and for the same reason; the parents come back missing,
+because coarsening is a change of support and a parent's spread, within-block
+dispersion and categories are not its children's. Metadata crosses from the
+first child, describing the ground rather than the model
+* `refine(..., where="column")` takes the name of a boolean metadata column,
+which is what a stored filter is here — `assign_from_solid` writing one being
+the usual way to come by it
 * A mesh can force the blocks it runs through to split.
 `BlockSet3D.crossed_by(mesh)` marks the blocks whose sub-blocks fall on both
 sides of a surface or a closed body — the question `needs_splitting` asks of a

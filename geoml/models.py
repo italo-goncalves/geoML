@@ -1150,8 +1150,11 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
         cut.
     include_noise : str
         Passed to `predict` for the predictions themselves.
-    where : array-like, optional
-        One boolean per block, or the indices of the blocks worth modelling.
+    where : array-like or str, optional
+        One boolean per block, the indices of the blocks worth modelling, or
+        the name of a boolean metadata column holding the same -- which is
+        what a stored filter is here, `assign_from_solid` writing one being
+        the usual way to come by it.
         The rest are never predicted at any pass and are never cut, so ground
         outside the area of interest -- air above a topography, everything
         beyond a lease boundary -- costs nothing rather than costing a
@@ -1177,11 +1180,17 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     """
     keep = None
     if where is not None:
-        keep = _np.asarray(where)
-        if keep.dtype != bool:
-            index = _np.zeros(blocks.n_data, dtype=bool)
-            index[keep] = True
-            keep = index
+        if isinstance(where, str):
+            # a stored filter is an ordinary metadata column, which is what
+            # the block model has instead of being subsettable
+            keep = _np.asarray(
+                blocks.get_metadata(where)).ravel().astype(bool)
+        else:
+            keep = _np.asarray(where)
+            if keep.dtype != bool:
+                index = _np.zeros(blocks.n_data, dtype=bool)
+                index[keep] = True
+                keep = index
         if keep.shape != (blocks.n_data,):
             raise ValueError(
                 "`where` needs one value per block: got %d for %d"

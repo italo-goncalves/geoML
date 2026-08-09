@@ -1082,12 +1082,30 @@ as what went in did, and can be refined further.
 4. **The refinement criterion and the two-pass driver** — `models.refine`,
    `BlockSet3D.needs_splitting`, `split_on` naming the variables, the union
    rule. **Done**, with the correction in §7.3.
-5. **Point location** for `aggregate_*` and `index_data`.
+5. **Point location** for `aggregate_*` and `index_data`. **Done.**
+   `index_data` answers with *which block*, not a cell index per axis — blocks
+   of several sizes have no per-axis index to give. A location's base cell is
+   arithmetic and the block covering it is the one whose origin is that cell's
+   ancestor at its own level, so one `searchsorted` per level settles it. The
+   three `aggregate_*` follow from the flat index, and without the per-axis
+   join the grids do three times over.
 6. **Crack-free contouring across levels**, so a refined mesh does not tear
    where a contour runs through it. **Done**, but not as §5.1 proposed: the
    mesh is cut, not the model. See §5.1.1.
 7. **`group`**, the inverse of `split`, with the per-group completeness check
-   of §10 — what makes conversion between supports two-directional.
+   of §10 — what makes conversion between supports two-directional. **Done.**
+   The mask must name every child of a parent or none; a partial family is
+   refused rather than averaged over blocks that are not there. A block that
+   was not grouped keeps what it holds, as in `split` and for the same reason,
+   while the parents come back missing: a parent's value is never averaged
+   from its children, because coarsening is a change of support and a parent's
+   spread, dispersion and categories are not its children's. Metadata does
+   cross, from the first child — it describes the ground rather than the
+   model.
+
+With that the plan is done. What is left is written up where it belongs
+rather than here: the two deferred items below, and the follow-ups in the
+repository's own to-do list.
 
 Deliberately excluded: level-aware batching (§2.1 makes it unnecessary),
 economic criteria such as NSR (§7.4 — not modelling inputs), tetrahedra as a

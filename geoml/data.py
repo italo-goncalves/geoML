@@ -5929,6 +5929,111 @@ class BlockSet3D(PointData):
                 new.metadata[name] = fresh
         return new
 
+    def group(self, mask, carry=True, labels=("X", "Y", "Z")):
+        """The inverse of `split`: whole families of children, back into the
+        parent they came from.
+
+        A block is grouped with its siblings, so the mask must name **every**
+        child of a parent or none of them. A partial family would average over
+        children that are not there and mis-weight the parent -- the
+        mass-conservation error the lattice exists to prevent -- so it is
+        refused rather than approximated. That check is what makes conversion
+        between supports two-directional: `group` undoes `split` exactly, and
+        the blocks tile their box afterwards as they did before.
+
+        A block that was **not** grouped keeps what it holds, exactly as in
+        `split` and for the same reason: it is the same block on the same
+        support, so its value is still the right answer for it. The parents
+        are the ones on new ground, and they come back missing --
+        `unpredicted()` names them and `predict(..., where=...)` fills them.
+
+        A parent's value is never averaged from its children. Coarsening is a
+        change of support and almost nothing survives it: a parent's spread is
+        not its children's, its within-block dispersion is larger by exactly
+        what the grouping absorbed, and a category has no mean. The one thing
+        that would come across exactly is a realization, and a variable is
+        more than its realizations. Metadata does come across, from the first
+        child -- it describes the ground rather than the model, and where the
+        children disagree about it there is no right answer to be had.
+
+        Parameters
+        ----------
+        mask : array-like
+            One boolean per block, or the indices of the blocks to group.
+        carry : bool
+            Whether to bring across what the blocks that were not grouped
+            hold. `False` gives bare geometry.
+        labels : list
+            Coordinate names.
+        """
+        mask = _np.asarray(mask)
+        if mask.dtype != bool:
+            index = _np.zeros(self.n_data, dtype=bool)
+            index[mask] = True
+            mask = index
+        if mask.shape != (self.n_data,):
+            raise ValueError(
+                "the mask needs one value per block: got %d for %d"
+                % (mask.size, self.n_data))
+
+        coarsest = self._level < 1
+        if _np.any(mask & coarsest):
+            raise ValueError(
+                "%d block(s) are already at the coarsest level the lattice "
+                "has and belong to no parent"
+                % int(_np.count_nonzero(mask & coarsest)))
+
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        family = self._size[mask] * ratio[None, :]
+        parent = (self._origin[mask] // family) * family
+        level = self._level[mask] - 1
+
+        # one key a parent, level included: two families of different sizes can
+        # share a lower corner, and they are not the same parent
+        shape = self.lattice_shape
+        key = (((parent[:, 0] * shape[1] + parent[:, 1]) * shape[2]
+                + parent[:, 2]) * (self.max_levels + 1) + level)
+        _, first, counts = _np.unique(key, return_index=True,
+                                      return_counts=True)
+
+        whole = int(_np.prod(self.discretization))
+        if _np.any(counts != whole):
+            short = _np.flatnonzero(counts != whole)
+            raise ValueError(
+                "grouping takes whole families: %d parent(s) were named by "
+                "only some of their %d children, the first by %d. A partial "
+                "family averages over blocks that are not there, which is the "
+                "one thing the lattice exists to prevent"
+                % (len(short), whole, int(counts[short[0]])))
+
+        new = _copy.copy(self)
+        new._origin = _np.concatenate([self._origin[~mask], parent[first]])
+        new._level = _np.concatenate([self._level[~mask], level[first]])
+        # the blocks this made, on a support nothing has been predicted on
+        new._fresh = _np.concatenate([
+            _np.zeros(int(_np.count_nonzero(~mask)), dtype=bool),
+            _np.ones(len(first), dtype=bool)])
+        new.variables = {}
+        new.metadata = {}
+        new._init_coordinates(new._centres(), list(labels))
+        # the lattice is the box, not the spread of the centres -- see `split`
+        new._bounding_box = BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+        if carry:
+            source = _np.concatenate(
+                [_np.flatnonzero(~mask), _np.flatnonzero(mask)[first]])
+            for name, variable in self.variables.items():
+                new.variables[name] = variable.carry_to(
+                    new, ~mask, len(first))
+            for name, column in self.metadata.items():
+                values = _np.asarray(column.values)[source]
+                fresh = _Attribute(new, values, dtype=values.dtype)
+                fresh.labels = column.labels
+                new.metadata[name] = fresh
+        return new
+
     def block_shares(self, split_on=None):
         """How often each decision cuts a block in two.
 
@@ -6074,6 +6179,106 @@ class BlockSet3D(PointData):
                         marked[owner[at[hit]]] = True
 
         return marked & (self._level < self.max_levels)
+
+    # ------------------------------------------------------------------ #
+    # sample data
+    # ------------------------------------------------------------------ #
+    def index_data(self, data):
+        """Which block each of `data`'s locations falls in.
+
+        One row index per location, `-1` for anything outside the box. Note
+        this is **not** what a grid's `index_data` returns -- a cell index per
+        axis -- because blocks of several sizes have no per-axis index to
+        return. Which block *is* the answer here.
+
+        The lattice makes it cheap: a location's base cell is arithmetic, and
+        the block covering that cell is the one whose origin is the cell's
+        ancestor at that block's own level, so one `searchsorted` per level
+        finds it and every location is settled within `max_levels + 1` of them.
+        """
+        if data.n_dim != self.n_dim:
+            raise DimensionMismatchError(
+                "Data dimension mismatch. Expected dimension %d and found %d."
+                % (self.n_dim, data.n_dim))
+
+        coordinates = _np.asarray(data.coordinates, dtype=float)
+        cell = _np.floor(
+            (coordinates - self.box_corner) / self.base_step).astype(_np.int64)
+        shape = self.lattice_shape
+
+        found = _np.full(len(coordinates), -1, dtype=_np.int64)
+        left = _np.flatnonzero(
+            _np.all((cell >= 0) & (cell < shape), axis=1))
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        tables = self._by_level()
+
+        for k in range(self.max_levels + 1):
+            if len(left) == 0:
+                break
+            key_of, owner = tables[k]
+            if len(owner) == 0:
+                continue
+            size = self._coarse_size // ratio ** k
+            ancestor = (cell[left] // size) * size
+            key = ((ancestor[:, 0] * shape[1] + ancestor[:, 1]) * shape[2]
+                   + ancestor[:, 2])
+            at = _np.minimum(_np.searchsorted(key_of, key), len(key_of) - 1)
+            hit = key_of[at] == key
+            found[left[hit]] = owner[at[hit]]
+            left = left[~hit]
+
+        return found
+
+    @staticmethod
+    def _held_by(block, values):
+        """`values` against the block holding each, the strays dropped."""
+        frame = _pd.DataFrame({"block": block, "value": values})
+        return frame[frame["block"] >= 0].dropna(subset=["value"])
+
+    def _dominant(self, block, values):
+        """The label most often measured in each block, blank where none was.
+
+        The count decides it, as on a grid; ties go to whichever label sorts
+        last, which is arbitrary but has to be something.
+        """
+        counts = self._held_by(block, values).groupby(
+            ["block", "value"]).size().reset_index(name="_n")
+        winner = counts.sort_values("_n").groupby("block").tail(1)
+        out = _np.full(self.n_data, "", dtype=object)
+        out[winner["block"].to_numpy()] = winner["value"].to_numpy()
+        return out
+
+    def aggregate_numeric(self, data, variable):
+        """The mean of `data`'s measurements over the block holding them."""
+        held = self._held_by(
+            self.index_data(data),
+            data.variables[variable].measurements.values.to_numpy())
+        mean = _np.full(self.n_data, _np.nan)
+        grouped = held.groupby("block")["value"].mean()
+        mean[grouped.index.to_numpy()] = grouped.to_numpy()
+        self.variables[variable] = ContinuousVariable(variable, self, mean)
+
+    def aggregate_categorical(self, data, variable):
+        """The dominant category in each block.
+
+        Both sides of a contact vote, as on a grid: a boundary measurement
+        names the category either side of it and neither is the measurement.
+        """
+        source = data.variables[variable]
+        block = self.index_data(data)
+        self.variables[variable] = CategoricalVariable(
+            variable, self, source.labels,
+            self._dominant(_np.tile(block, 2),
+                           _np.concatenate([source.measurements_a.to_numpy(),
+                                            source.measurements_b.to_numpy()])))
+
+    def aggregate_binary(self, data, variable):
+        """The dominant label in each block."""
+        source = data.variables[variable]
+        self.variables[variable] = BinaryVariable(
+            variable, self, source.labels,
+            self._dominant(self.index_data(data),
+                           source.measurements.to_numpy()))
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
                             fraction=None, uncovered=_np.nan):

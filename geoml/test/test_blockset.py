@@ -958,6 +958,98 @@ def test_refine_never_visits_the_ground_it_was_not_asked_about():
     assert refined.n_data < whole.n_data
 
 
+def test_a_location_is_found_in_the_block_that_holds_it():
+    """Point location on the lattice: one searchsorted a level, and the
+    coordinates of the block found must contain the point."""
+    blocks = _model_blocks().split([0, 5, 17])
+    blocks = blocks.split(np.flatnonzero(blocks.level == 1)[:4])
+
+    rng = np.random.default_rng(0)
+    xyz = rng.uniform(-9.0, 149.0, size=[300, 3])
+    found = blocks.index_data(geoml.data.PointData.from_array(xyz))
+
+    assert np.all(found >= 0), "every point is inside the box"
+    low = np.asarray(blocks.coordinates) - blocks.block_size / 2
+    high = low + blocks.block_size
+    assert np.all(xyz >= low[found]) and np.all(xyz < high[found])
+
+    # and outside the box is -1 rather than a wrong answer
+    outside = geoml.data.PointData.from_array(
+        np.array([[-50.0, 0, 0], [0, 500.0, 0], [0, 0, -200.0]]))
+    assert np.all(blocks.index_data(outside) == -1)
+
+
+def test_measurements_aggregate_into_the_blocks_that_hold_them():
+    blocks = _model_blocks().split([0])
+    rng = np.random.default_rng(1)
+    xyz = rng.uniform(-9.0, 149.0, size=[400, 3])
+    points = geoml.data.PointData.from_array(xyz)
+    points.add_continuous_variable("g", xyz[:, 0])
+    points.add_categorical_variable(
+        "rock", np.where(xyz[:, 2] > 70, "waste", "ore"))
+
+    blocks.aggregate_numeric(points, "g")
+    blocks.aggregate_categorical(points, "rock")
+
+    held = blocks.index_data(points)
+    mean = np.asarray(blocks.variables["g"].measurements.values)
+    for b in np.unique(held):
+        assert np.isclose(mean[b], xyz[held == b, 0].mean())
+    # a block nothing fell in has nothing to report
+    empty = np.setdiff1d(np.arange(blocks.n_data), held)
+    assert np.all(np.isnan(mean[empty]))
+    assert "rock" in blocks.variables
+
+
+def test_group_undoes_split_exactly():
+    blocks = _model_blocks()
+    _graded(blocks, np.arange(blocks.n_data, dtype=float))
+    blocks.add_metadata("domain", np.arange(blocks.n_data) % 3)
+    before = blocks.n_data
+
+    cut = blocks.split([0, 1, 2])
+    back = cut.group(np.flatnonzero(cut.level == 1))
+
+    assert back.n_data == before
+    assert back.is_full()
+    assert np.isclose(back.block_volume.sum(), blocks.block_volume.sum())
+    assert np.array_equal(np.sort(back.level), np.sort(blocks.level))
+
+    # the three regrouped blocks are on new ground and hold nothing; the rest
+    # never moved, so what they held still stands
+    values = np.asarray(back.variables["g"].prediction.values)
+    assert np.count_nonzero(back.unpredicted()) == 3
+    assert np.all(np.isnan(values[back.unpredicted()]))
+    assert np.all(np.isfinite(values[~back.unpredicted()]))
+    # metadata describes the ground, so it survives the change of support
+    assert not np.any(np.isnan(np.asarray(back.get_metadata("domain"),
+                                          dtype=float)))
+
+
+def test_group_refuses_a_family_that_is_not_all_there():
+    """A partial family averages over children that are not there, which is
+    the mass-conservation error the lattice exists to prevent."""
+    cut = _model_blocks().split([0, 1])
+    children = np.flatnonzero(cut.level == 1)
+
+    with pytest.raises(ValueError, match="whole families"):
+        cut.group(children[:5])
+    with pytest.raises(ValueError, match="coarsest level"):
+        cut.group(np.flatnonzero(cut.level == 0)[:1])
+
+
+def test_a_stored_column_can_be_the_filter():
+    model = _model()
+    blocks = _model_blocks()
+    blocks.add_metadata(
+        "wanted", np.asarray(blocks.coordinates)[:, 0] < 80.0)
+
+    refined = geoml.models.refine(model, blocks, n_sim=4, where="wanted")
+    values = np.asarray(refined.variables["y"].prediction.values)
+    outside = np.asarray(refined.coordinates)[:, 0] >= 80.0
+    assert np.all(np.isnan(values[outside]))
+
+
 def test_a_block_model_refuses_to_be_subsetted():
     """It is structurally complete by design. `PointData`'s subsetting would
     hand back a plain `PointData` -- no origin, no level, no size -- which
