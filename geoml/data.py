@@ -239,6 +239,24 @@ class BoundingBox(object):
         return contains
 
 
+def _carry_rows(source, target, keep):
+    """Copy the `keep` rows of one simulation store into the front of another.
+
+    A band of the source at a time, so a store too large to hold is never
+    asked for whole. The kept rows keep their order and land contiguously,
+    which is what lets every write here be a plain slice.
+    """
+    index = _np.flatnonzero(keep)
+    written = 0
+    for band in source.row_bands():
+        inside = index[(index >= band.start) & (index < band.stop)]
+        if len(inside) == 0:
+            continue
+        chunk = _np.asarray(source[band])
+        target[written:written + len(inside), :] = chunk[inside - band.start]
+        written += len(inside)
+
+
 def _selected_simulations(store, selection):
     """The simulations to export, read in a single pass over the store.
 
@@ -637,6 +655,16 @@ class _Attribute(object):
             cube.cell_data[label] = self.as_cube(sigma=sigma) \
                 .transpose([2, 1, 0]).ravel()
 
+    def fill_pyvista_cells(self, mesh, label):
+        """One value per cell, in the order the cells were built.
+
+        The unstructured counterpart of `fill_pyvista_blocks`: where a regular
+        grid has to fold its values back into a cube first, a mesh built one
+        cell per location already has them in the right order.
+        """
+        if self._has_content():
+            mesh.cell_data[label] = self.to_numpy()
+
     def draw_contour(self, value, sigma=None, **kwargs):
         """Creates plotly object with the contour at the specified value."""
         surf_obj = self.get_contour(value, sigma=sigma)
@@ -752,6 +780,100 @@ class _Variable(object):
     @classmethod
     def from_variable(cls, coordinates, variable):
         raise NotImplementedError
+
+    def split_shares(self):
+        """Which decisions this variable carries, and how often each cuts a
+        block in two.
+
+        `{name: (n_data,) array}`, the name saying which decision *within*
+        this variable -- a cut-off for a grade, a boundary for a category --
+        and empty where the variable declares none.
+
+        Asked of the variable rather than worked out from outside, because
+        what carries the answer differs by kind: a graded variable holds one
+        column per cut-off in a dict, a category holds a single column of its
+        own, and a variable made of components has whatever its components
+        have. Reaching in for an attribute called `divided` and hoping finds
+        an `_Attribute` on one and an `OrderedDict` on the other.
+        """
+        shares = {}
+        for label, component in (
+                getattr(self, "components", None) or {}).items():
+            for key, values in component.split_shares().items():
+                shares[("%s %s" % (label, key)).strip()] = values
+        return shares
+
+    def fill_pyvista_cells(self, mesh, simulations=False):
+        """Every filled column of this variable, as cell data.
+
+        One implementation for every variable type, rather than the per-type
+        `fill_pyvista_*` above: a mesh of one cell per location wants the
+        values in the order they are already in, so the roles the variable
+        persists are exactly the ones worth exporting.
+        """
+        for role in self._ZARR_ATTRS:
+            attribute = getattr(self, role, None)
+            if attribute is not None:
+                attribute.fill_pyvista_cells(
+                    mesh, "%s - %s" % (self.name, role))
+
+        for i, values in _selected_simulations(self.simulations, simulations):
+            _Attribute(self.coordinates, values).fill_pyvista_cells(
+                mesh, "%s - simulation %d" % (self.name, i))
+
+        for component in (getattr(self, "components", None) or {}).values():
+            component.fill_pyvista_cells(mesh, simulations=simulations)
+
+    def carry_to(self, coordinates, keep, n_new):
+        """This variable on a longer set of locations, keeping what still fits.
+
+        The locations of `coordinates` are the `keep` ones of this variable, in
+        their old order, followed by `n_new` that did not exist before. The
+        first take their values across; the rest come back missing, which is
+        what marks them as still to be predicted.
+
+        Used when a block set is refined: a block that was not split is the
+        same block on the same support, and its value is still the right
+        answer for it, so re-predicting it would spend the work to arrive at
+        the number already there.
+        """
+        new = self.__class__.from_variable(coordinates, self)
+        self._carry_into(new, _np.asarray(keep, dtype=bool))
+        return new
+
+    def _carry_into(self, new, keep):
+        """Fill an already-built variable with the `keep` rows of this one.
+
+        Apart from `carry_to` so that a variable holding components fills the
+        ones its own `from_variable` just created, rather than building a
+        second set that would go nowhere.
+        """
+        n_kept = int(_np.count_nonzero(keep))
+
+        for role in self._ZARR_ATTRS:
+            old = getattr(self, role, None)
+            fresh = getattr(new, role, None)
+            if old is None or fresh is None or not old._has_content():
+                continue
+            fresh.labels = old.labels
+            fresh.values[:n_kept] = _np.asarray(old.values)[keep]
+
+        if self._ZARR_HAS_SIMS and self.simulations is not None:
+            new.allocate_simulations(self.simulations.shape[1])
+            _carry_rows(self.simulations, new.simulations, keep)
+
+        if self._ZARR_HAS_QUANTILES:
+            for source, target in ((self.quantiles, new.quantiles),
+                                   (self.probabilities, new.probabilities),
+                                   (self.proportions, new.proportions),
+                                   (self.divided, new.divided)):
+                for key, attr in source.items():
+                    fresh = self._Attribute(new.coordinates)
+                    fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
+                    target[key] = fresh
+
+        for name, component in (getattr(self, "components", None) or {}).items():
+            component._carry_into(new.components[name], keep)
 
     def __getitem__(self, item):
         raise NotImplementedError
@@ -901,6 +1023,15 @@ class _Variable(object):
                 key = prefix + "/probability_" + str(q)
                 attr.values.write_into(group, key)
                 meta["probabilities"].append({"key": key, "q": float(q)})
+            for role, source in (("proportions", "proportion"),
+                                 ("divided", "divided")):
+                meta[role] = []
+                for c, attr in getattr(self, role, {}).items():
+                    key = prefix + "/" + source + "_" + str(c)
+                    attr.values.write_into(group, key)
+                    meta[role].append({"key": key, "c": float(c)})
+            if getattr(self, "cutoffs", None) is not None:
+                meta["cutoffs"] = [float(c) for c in self.cutoffs]
         if getattr(self, "components", None):
             meta["components"] = {}
             for cname, comp in self.components.items():
@@ -935,6 +1066,13 @@ class _Variable(object):
             attr = self._Attribute(self.coordinates)
             attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
             self.probabilities[info["q"]] = attr
+        for role in ("proportions", "divided"):
+            for info in meta.get(role, []):
+                attr = self._Attribute(self.coordinates)
+                attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
+                getattr(self, role)[info["c"]] = attr
+        if meta.get("cutoffs") is not None:
+            self.cutoffs = [float(c) for c in meta["cutoffs"]]
         for cname, cmeta in meta.get("components", {}).items():
             self.components[cname]._zarr_load(
                 group, prefix + "/" + str(cname), cmeta)
@@ -957,6 +1095,16 @@ class ContinuousVariable(_Variable):
         The mean of the latent Gaussian representation.
     latent_variance : _Attribute
         The variance of the latent Gaussian representation.
+    dispersion : _Attribute
+        How much the locations inside each block differ among themselves --
+        the variance over a block's sub-blocks, averaged over the
+        realizations, in the variable's own units rather than the latent
+        ones. A different question from `latent_variance`, which is how sure
+        the model is *of* the block: a well-known block can still be
+        heterogeneous, and that is what decides whether cutting it finer
+        would tell anyone anything. Filled only where the container
+        discretizes; elsewhere a location has no interior and this stays
+        missing rather than zero.
     simulations : ArrayStore
         Draws from the variable's posterior distribution, in a single
         `(n_data, n_sim)` array. Use `simulation()` to get one of them as an
@@ -967,7 +1115,8 @@ class ContinuousVariable(_Variable):
         Cumulative distribution probabilities, indexed by the corresponding
         quantile.
     """
-    _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance", "prediction")
+    _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
+                   "prediction", "dispersion")
     _ZARR_HAS_SIMS = True
     _ZARR_HAS_QUANTILES = True
 
@@ -983,12 +1132,52 @@ class ContinuousVariable(_Variable):
         self.latent_variance = self._Attribute(coordinates)
         self.prediction = self._Attribute(coordinates)
 
+        # How much the locations *inside* each block differ among themselves,
+        # which is a different question from how sure the model is of the block
+        # (`latent_variance`). Filled only where the container discretizes;
+        # everywhere else a location has no interior and this stays zero.
+        self.dispersion = self._Attribute(coordinates)
+
         # A single (n_data, n_sim) store (NumPy or Zarr by size); None until
         # ``allocate_simulations`` is called.
         self.simulations = None
 
         self.quantiles = _col.OrderedDict()
         self.probabilities = _col.OrderedDict()
+
+        # The grades a decision turns on -- a mining cut-off, a contaminant
+        # limit. Declared on the data and carried to whatever is predicted
+        # from it; `None` means this variable takes no part in any decision,
+        # which is the answer for the rest component of a composition.
+        self.cutoffs = None
+        # For each of them, how much of each block sits at or below it, over
+        # the sub-blocks and the realizations both -- the recoverable share,
+        # and what a partial-block report wants.
+        self.proportions = _col.OrderedDict()
+        # And for each, how often the cut-off passes *through* the block:
+        # the share of realizations whose sub-blocks fall on both sides. A
+        # different question, and the one that says whether cutting the block
+        # finer would settle anything. See `likelihood._divided`.
+        self.divided = _col.OrderedDict()
+
+    def split_shares(self):
+        return {"@ %g" % cutoff: attr.values.to_numpy()
+                for cutoff, attr in self.divided.items()}
+
+    def set_cutoffs(self, cutoffs):
+        """The grades this variable is judged against.
+
+        They travel with the variable, so a model trained on data that
+        declares them hands them to every block model predicted from it, and
+        `refine` knows what the blocks have to be resolved against without
+        being told a second time.
+        """
+        self.cutoffs = None if cutoffs is None else \
+            [float(c) for c in _np.atleast_1d(cutoffs)]
+        return self
+
+    def prediction_input(self):
+        return {} if self.cutoffs is None else {"cutoffs": self.cutoffs}
 
     def get_measurements(self):
         values = self.measurements.values.copy()[:, None]
@@ -1060,6 +1249,9 @@ class ContinuousVariable(_Variable):
     @classmethod
     def from_variable(cls, coordinates, variable):
         new_var = cls(variable.name, coordinates)
+        # what the variable is judged against belongs to the variable, not to
+        # the locations, so it follows it onto whatever it is predicted into
+        new_var.cutoffs = variable.cutoffs
         return new_var
 
     def __getitem__(self, item):
@@ -1068,6 +1260,11 @@ class ContinuousVariable(_Variable):
         new_obj.latent_mean = self.latent_mean[item]
         new_obj.latent_variance = self.latent_variance[item]
         new_obj.prediction = self.prediction[item]
+        new_obj.dispersion = self.dispersion[item]
+        new_obj.proportions = _col.OrderedDict(
+            (key, val[item]) for key, val in self.proportions.items())
+        new_obj.divided = _col.OrderedDict(
+            (key, val[item]) for key, val in self.divided.items())
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1119,6 +1316,11 @@ class ContinuousVariable(_Variable):
 
         if predictions:
             df[self.name + "_prediction"] = self.prediction.values.to_numpy()
+            # only where a container discretizes; elsewhere the column was
+            # never written and every point data set would carry an empty one
+            if self.dispersion._has_content():
+                df[self.name + "_dispersion"] = \
+                    self.dispersion.values.to_numpy()
 
         if latent:
             df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
@@ -1148,6 +1350,33 @@ class ContinuousVariable(_Variable):
             self.latent_mean.values[idx] = kwargs["mean"].numpy()
             self.latent_variance.values[idx] = kwargs["variance"].numpy()
 
+        if "dispersion" in kwargs.keys():
+            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+
+        for key, target in (("proportions", self.proportions),
+                            ("divided", self.divided)):
+            if key not in kwargs.keys():
+                continue
+            values = kwargs[key].numpy()
+            cutoffs = self.cutoffs or []
+            if values.shape[1] == 0:
+                # a component of a vector variable that declared none, whose
+                # columns its parent has already trimmed away
+                continue
+            # the model asked the *training* variable what the cut-offs were,
+            # and the answer is being filed against this one; they match
+            # unless somebody has moved one of them since
+            if len(cutoffs) != values.shape[1]:
+                raise ValueError(
+                    "%r was predicted against %d cut-off(s) but declares %s; "
+                    "set them on the data the model was trained from, and let "
+                    "`copy_to` carry them"
+                    % (self.name, values.shape[1], self.cutoffs))
+            for i, cutoff in enumerate(cutoffs):
+                if cutoff not in target:
+                    target[cutoff] = self._Attribute(self.coordinates)
+                target[cutoff].values[idx] = values[:, i]
+
         if "simulations" in kwargs.keys():
             # Whole (batch, n_sim) block written as one region into the store.
             self.simulations[idx, :] = kwargs["simulations"].numpy()
@@ -1163,6 +1392,12 @@ class ContinuousVariable(_Variable):
         self.latent_mean.coordinates = coordinates
         self.latent_variance.coordinates = coordinates
         self.prediction.coordinates = coordinates
+        self.dispersion.coordinates = coordinates
+
+        for share in self.proportions.values():
+            share.coordinates = coordinates
+        for share in self.divided.values():
+            share.coordinates = coordinates
 
         if len(self.quantiles) > 0:
             for p in self.quantiles.values():
@@ -1184,6 +1419,8 @@ class ContinuousVariable(_Variable):
                 cube, self.name + " - latent variance")
         self.prediction.fill_pyvista_cube(
             cube, self.name + " - prediction", sigma=sigma)
+        self.dispersion.fill_pyvista_cube(
+            cube, self.name + " - dispersion")
 
         for i, values in _selected_simulations(self.simulations, simulations):
             col = self._Attribute(self.coordinates, values)
@@ -1208,6 +1445,8 @@ class ContinuousVariable(_Variable):
         if self.latent_variance:
             self.latent_variance.fill_pyvista_points(
                 points, self.name + " - latent variance")
+        self.dispersion.fill_pyvista_points(
+            points, self.name + " - dispersion")
         self.prediction.fill_pyvista_points(
             points, self.name + " - prediction")
 
@@ -1235,6 +1474,8 @@ class ContinuousVariable(_Variable):
             self.latent_variance.fill_pyvista_blocks(
                 cube, self.name + " - latent variance"
             )
+        self.dispersion.fill_pyvista_blocks(
+            cube, self.name + " - dispersion")
         self.prediction.fill_pyvista_blocks(
             cube, self.name + " - prediction", sigma=sigma
         )
@@ -1325,6 +1566,23 @@ class VectorVariable(_Variable):
         out = _np.where(has_value == 0.0, 1.0, out)
         return out, has_value
 
+    def prediction_input(self):
+        """The components' cut-offs, as one row each.
+
+        They are declared per component -- two grades are judged against two
+        different numbers -- but the model sees the variable whole, so they
+        travel as a matrix with a row per component. A component declaring
+        fewer than the widest is padded with infinity, which nothing is ever
+        above, so its spare columns come back empty and `update` drops them.
+        """
+        declared = [self.components[label].cutoffs or [] for label in
+                    self.labels]
+        widest = max(len(row) for row in declared) if declared else 0
+        if widest == 0:
+            return {}
+        return {"cutoffs": [row + [_np.inf] * (widest - len(row))
+                            for row in declared]}
+
     def get_simulations(self):
         sims = _np.stack([self.components[v].get_simulations() for v in self.labels], axis=2)
         return sims
@@ -1346,6 +1604,12 @@ class VectorVariable(_Variable):
             coordinates,
             variable.labels,
         )
+        # the components are built fresh by `__init__`, so what belongs to
+        # them rather than to the container has to be brought across by hand:
+        # a cut-off is declared per component and a vector variable is how it
+        # reaches the model
+        for label, component in variable.components.items():
+            new_var.components[label].cutoffs = component.cutoffs
         return new_var
 
     @classmethod
@@ -1395,12 +1659,24 @@ class VectorVariable(_Variable):
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
+        # each component is dispersed inside a block on its own account
+        dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
+        blank = [None] * len(self.labels)
+        shares = {
+            key: (_tf.unstack(kwargs[key], axis=1)
+                  if key in kwargs.keys() else blank)
+            for key in ("proportions", "divided")}
 
-        for lb, p, s in zip(self.labels, prediction, simulations):
-            self.components[lb].update(idx, **{
-                "average_sim": p,
-                "simulations": s
-            })
+        for i, (lb, p, s, d) in enumerate(zip(self.labels, prediction,
+                                              simulations, dispersion)):
+            values = {"average_sim": p, "simulations": s, "dispersion": d}
+            for key, unstacked in shares.items():
+                if unstacked[i] is not None:
+                    # the matrix was padded out to the widest component, so
+                    # this one takes only the cut-offs it declared
+                    declared = len(self.components[lb].cutoffs or [])
+                    values[key] = unstacked[i][:, :declared]
+            self.components[lb].update(idx, **values)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
@@ -1623,7 +1899,8 @@ class CompositionalVariable(VectorVariable):
 
 class _Category(_Variable):
     _ZARR_ATTRS = ("probability", "indicator", "indicator_mean",
-                   "indicator_variance", "indicator_predicted")
+                   "indicator_variance", "indicator_predicted", "proportion",
+                   "divided")
     _ZARR_HAS_SIMS = True
 
     def __init__(self, name, coordinates, indicator):
@@ -1635,7 +1912,23 @@ class _Category(_Variable):
         self.indicator_mean = self._Attribute(coordinates)
         self.indicator_variance = self._Attribute(coordinates)
         self.indicator_predicted = self._Attribute(coordinates)
+        # How much of each block this category holds, counted over the
+        # sub-blocks: 1 where it takes the whole block, 0 where it takes none,
+        # and in between where the block straddles a contact. A different
+        # thing from `probability`, which is how sure the model is that the
+        # block as a whole belongs here.
+        self.proportion = self._Attribute(coordinates)
+        # And whether the block is cut in two by this category's boundary,
+        # which is the question splitting answers -- see `likelihood._divided`
+        self.divided = self._Attribute(coordinates)
         self.simulations = None
+
+    def split_shares(self):
+        # one boundary, its own, and no cut-off to name it by: a category's
+        # crossing is always zero
+        if not self.divided._has_content():
+            return {}
+        return {"": self.divided.values.to_numpy()}
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
@@ -1644,6 +1937,8 @@ class _Category(_Variable):
         new_obj.indicator_mean = self.indicator_mean[item]
         new_obj.indicator_variance = self.indicator_variance[item]
         new_obj.indicator_predicted = self.indicator_predicted[item]
+        new_obj.proportion = self.proportion[item]
+        new_obj.divided = self.divided[item]
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1657,6 +1952,8 @@ class _Category(_Variable):
         self.indicator_mean.coordinates = coordinates
         self.indicator_variance.coordinates = coordinates
         self.indicator_predicted.coordinates = coordinates
+        self.proportion.coordinates = coordinates
+        self.divided.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
                       latent=True, simulations=False):
@@ -1675,6 +1972,9 @@ class _Category(_Variable):
         if predictions:
             df[self.name + "_indicator_predicted"] = \
                 self.indicator_predicted.values.to_numpy()
+            if self.proportion._has_content():
+                df[self.name + "_proportion"] = \
+                    self.proportion.values.to_numpy()
 
         for i, values in _selected_simulations(self.simulations,
                                               simulations):
@@ -1687,6 +1987,11 @@ class _Category(_Variable):
         self.indicator_mean.values[idx] = kwargs["mean"].numpy()
         self.indicator_variance.values[idx] = kwargs["variance"].numpy()
         self.probability.values[idx] = kwargs["probability"].numpy()
+
+        if "proportion" in kwargs.keys():
+            self.proportion.values[idx] = kwargs["proportion"].numpy()
+        if "divided" in kwargs.keys():
+            self.divided.values[idx] = kwargs["divided"].numpy()
 
         self.simulations[idx, :] = kwargs["simulations"].numpy()
 
@@ -1944,17 +2249,22 @@ class RockTypeVariable(_Variable):
         indicators = _tf.unstack(kwargs["indicators"], axis=1)
         probability = _tf.unstack(kwargs["probability"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
+        # the share of each block this category holds, one column per label
+        blank = [None] * len(self.labels)
+        proportions = _tf.unstack(kwargs["proportions"], axis=1) \
+            if "proportions" in kwargs.keys() else blank
+        divided = _tf.unstack(kwargs["divided"], axis=1) \
+            if "divided" in kwargs.keys() else blank
 
-        for lb, m, v, i, p, s in zip(
+        for lb, m, v, i, p, s, share, cut in zip(
                 self.labels, mean, variance, indicators,
-                probability, simulations):
-            self.components[lb].update(idx, **{
-                "mean": m,
-                "variance": v,
-                "indicator": i,
-                "probability": p,
-                "simulations": s
-            })
+                probability, simulations, proportions, divided):
+            values = {"mean": m, "variance": v, "indicator": i,
+                      "probability": p, "simulations": s}
+            if share is not None:
+                values["proportion"] = share
+                values["divided"] = cut
+            self.components[lb].update(idx, **values)
 
     def training_input(self, idx=None):
         if idx is None:
@@ -5000,6 +5310,82 @@ def mesh3d(points, triangles, normals):
     return Solid3D(points, triangles, normals)
 
 
+def _below_sheet(surface):
+    """The test a sheet poses of a location: is it under the surface?"""
+    interpolator = _sheet_interpolator(surface)
+
+    def below(coordinates):
+        return coordinates[:, 2] < _gmt.sheet_elevation(interpolator,
+                                                        coordinates)
+    return below
+
+
+def _within_body(solid):
+    """The test a closed body poses of a location: is it inside?"""
+    mesh = _closed_body(solid)
+    return lambda coordinates: _gmt.inside_solid(mesh, coordinates)
+
+
+def _mesh_test(mesh):
+    """Which side of `mesh` a location falls on, whichever kind it is."""
+    if isinstance(mesh, Solid3D):
+        return _within_body(mesh)
+    if isinstance(mesh, Surface3D):
+        return _below_sheet(mesh)
+    raise MeshTypeError(
+        "a %s says nothing about which side a block is on: a sheet has an "
+        "above and a below, a body an inside and an outside, and a mesh that "
+        "is neither has no sides to speak of. `heal()` is what turns one into "
+        "a body" % type(mesh).__name__)
+
+
+def _sub_block_shares(blocks, test, rows=None):
+    """The share of each block's sub-blocks that `test` accepts.
+
+    Walked in chunks: a 5 x 5 x 5 discretization is 125 sub-blocks for
+    every location, and materializing all of them at once is what the
+    batching in `get_batched_coordinates` exists to avoid. `rows` narrows it
+    to the blocks worth asking about; the rest come back `nan`.
+    """
+    per_block = blocks.rows_per_location
+    chunk = max(1, 1000000 // per_block)
+    if rows is None:
+        rows = _np.arange(blocks._n_data)
+
+    shares = _np.full(blocks._n_data, _np.nan)
+    for start in range(0, len(rows), chunk):
+        index = rows[start:start + chunk]
+        coordinates, _ = blocks.get_batched_coordinates(index)
+        # block-major, so every block's sub-blocks are one row
+        accepted = test(coordinates).reshape([len(index), per_block])
+        shares[index] = accepted.mean(axis=1)
+    return shares
+
+
+def _blocks_from_surface(blocks, base, surface, name, labels, fraction,
+                         uncovered):
+    """`assign_from_surface` for anything made of blocks."""
+    base(blocks, surface, name, labels, uncovered=uncovered)
+
+    if fraction is not None:
+        shares = _sub_block_shares(blocks, _below_sheet(surface))
+        # a sheet that misses the centre describes the block no better
+        # than it describes a location, and left the flag empty for the
+        # same reason -- so the fraction says so rather than reading 0
+        missed = _np.asarray(blocks.metadata[name].values).ravel() < 0
+        shares[missed] = _uncovered_rule(uncovered)[1]
+        blocks.add_metadata(fraction, shares)
+
+
+def _blocks_from_solid(blocks, base, solid, name, labels, fraction):
+    """`assign_from_solid` for anything made of blocks."""
+    base(blocks, solid, name, labels)
+
+    if fraction is not None:
+        blocks.add_metadata(
+            fraction, _sub_block_shares(blocks, _within_body(solid)))
+
+
 def _blockdata(cls):
     # Decorator to extend functionality of some classes
     # Used to avoid multiple inheritance
@@ -5070,23 +5456,8 @@ def _blockdata(cls):
     base_assign_from_solid = cls.assign_from_solid
 
     def _sub_block_fraction(self, test):
-        """The share of each block's sub-blocks that `test` accepts.
-
-        Walked in chunks: a 5 x 5 x 5 discretization is 125 sub-blocks for
-        every location, and materializing all of them at once is what the
-        batching in `get_batched_coordinates` exists to avoid.
-        """
-        per_block = self.rows_per_location
-        chunk = max(1, 1000000 // per_block)
-
-        shares = _np.empty(self._n_data)
-        for start in range(0, self._n_data, chunk):
-            index = _np.arange(start, min(start + chunk, self._n_data))
-            coordinates, _ = self.get_batched_coordinates(index)
-            # block-major, so every block's sub-blocks are one row
-            accepted = test(coordinates).reshape([len(index), per_block])
-            shares[index] = accepted.mean(axis=1)
-        return shares
+        """The share of each block's sub-blocks that `test` accepts."""
+        return _sub_block_shares(self, test)
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
                             fraction=None, uncovered=_np.nan):
@@ -5122,23 +5493,8 @@ def _blockdata(cls):
             genuinely above ground, or `0.0` to count it as nothing. Pass
             `"raise"` to refuse a surface that does not cover every block.
         """
-        base_assign_from_surface(self, surface, name, labels,
-                                 uncovered=uncovered)
-
-        if fraction is not None:
-            interpolator = _sheet_interpolator(surface)
-
-            def below(coordinates):
-                return coordinates[:, 2] < _gmt.sheet_elevation(interpolator,
-                                                                coordinates)
-
-            shares = self._sub_block_fraction(below)
-            # a sheet that misses the centre describes the block no better
-            # than it describes a location, and left the flag empty for the
-            # same reason -- so the fraction says so rather than reading 0
-            missed = _np.asarray(self.metadata[name].values).ravel() < 0
-            shares[missed] = _uncovered_rule(uncovered)[1]
-            self.add_metadata(fraction, shares)
+        _blocks_from_surface(self, base_assign_from_surface, surface, name,
+                             labels, fraction, uncovered)
 
     def assign_from_solid(self, solid, name, labels=("outside", "inside"),
                           fraction=None):
@@ -5163,14 +5519,8 @@ def _blockdata(cls):
             Name of a second metadata column, to hold the share of each block
             inside the body. Costs `prod(discretization)` queries per block.
         """
-        base_assign_from_solid(self, solid, name, labels)
-
-        if fraction is not None:
-            mesh = _closed_body(solid)
-            self.add_metadata(
-                fraction,
-                self._sub_block_fraction(
-                    lambda coordinates: _gmt.inside_solid(mesh, coordinates)))
+        _blocks_from_solid(self, base_assign_from_solid, solid, name, labels,
+                           fraction)
 
     cls.__init__ = new_init
     cls.discretized_coordinates = discretized_coordinates
@@ -5219,6 +5569,1112 @@ class Blocks3D(Grid3D):
                 pv_blocks, simulations=simulations)
 
         return pv_blocks
+
+
+def _sub_block_index(discretization):
+    """Which sub-block sits where, as integer counts along each axis.
+
+    Axis 0 varies fastest, the order `_blockdata` has always used and the one
+    the likelihood's noise is indexed by. Both the sub-block offsets and, in a
+    `BlockSet3D`, the children of a split are built from this, so sub-block
+    `j` of a block and child `j` of that same block are the same corner of it.
+    """
+    return _np.array(
+        list(_iter.product(*[_np.arange(d) for d in discretization[::-1]])),
+        dtype=_np.int64)[:, ::-1]
+
+
+def _unit_sub_grid(discretization):
+    """Sub-block offsets from a block's centre, as fractions of its size.
+
+    The same layout `_blockdata` builds, but divided through by the block so
+    that one array serves every size. Scaling it per block is the whole of
+    what a variable-size block model has to do differently when it fans out.
+    """
+    counts = _np.array(discretization)[None, :]
+    return (_sub_block_index(discretization) - (counts - 1) / 2) / counts
+
+
+# a hexahedron's eight corners, in the order VTK reads them
+_HEX_CORNERS = _np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                          [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+                         dtype=_np.int64)
+
+
+def _trilinear_weights(discretization):
+    """What each of a block's eight corners is worth at each sub-block centre.
+
+    A corner carries what the blocks meeting there say, so reading the corners
+    at the sub-blocks is how a child learns the shape running across its
+    parent. The layout is symmetric about the centre, so the weights average
+    to an eighth apiece and a correction built from them cancels over the
+    children -- which is what keeps a block's own estimate the mean of the
+    children standing in for it.
+    """
+    t = _unit_sub_grid(discretization) + 0.5
+    return _np.prod(_np.where(_HEX_CORNERS[None, :, :] == 1,
+                              t[:, None, :], 1.0 - t[:, None, :]), axis=2)
+
+
+def _grow(corners, marked, rings):
+    """Add `rings` of neighbouring blocks, through the corners blocks share.
+
+    Sparse on purpose: dilating a mask over the base lattice would cost a cell
+    for every one the model exists to avoid carrying.
+    """
+    for _ in range(rings):
+        touched = _np.zeros(int(corners.max()) + 1, dtype=bool)
+        touched[corners[marked].ravel()] = True
+        marked = touched[corners].any(axis=1)
+    return marked
+
+
+class BlockSet3D(PointData):
+    """
+    Blocks of several sizes, on one integer lattice.
+
+    A block model where the interesting ground can be carried finely and the
+    rest coarsely. On a real deposit the ground worth resolving is a small
+    part of the volume, and a uniform model at the resolution that part needs
+    spends almost all of its cells saying nothing: refining 5 m only where it
+    is wanted takes a 29-million-cell model to under 700 000.
+
+    Every block's position and size are whole numbers of a **base cell**, the
+    finest the model may go, which is `step / discretization ** max_levels`.
+    Working in those integers rather than in metres is what makes it exact:
+    blocks meet without a tolerance, a block is a whole number of its own
+    children, and regrouping conserves mass to the last digit. It also means
+    the model can say which of its answers rest on coarse blocks, which is the
+    one thing a mixed-support model has to be able to prove -- see
+    `docs/variable-block-models.md`.
+
+    It is built **full**: the blocks tile their box exactly, and every
+    operation keeps them that way. Ground to leave out is filtered, not
+    removed, so that grouping is always safe -- a half-populated group would
+    average over blocks that are not there and quietly weigh the answer wrong.
+
+    `discretization` does two jobs, and they are the same job. It is how
+    finely a block is sampled to average it, and it is how a block splits:
+    each sub-block becomes a child. So the refinement ratio is the
+    discretization, per axis and not necessarily two -- `[2, 2, 1]` refines in
+    plan and leaves the bench height alone. Being the same at every level is
+    what lets a block of any size fan out into the same number of rows, so the
+    model sees one shape whatever it is looking at and nothing downstream has
+    to know that levels exist. It costs a coarse block some accuracy in its
+    own average, always by overstating how variable it is, which errs towards
+    splitting it -- and splitting is what removes the error.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first (coarsest) block.
+    n : array-like
+        Number of blocks along each axis, at the coarsest level.
+    step : array-like
+        Size of a coarsest-level block.
+    discretization : array-like
+        Sub-blocks per axis, used at every level, and so also the ratio a
+        block splits by. An axis given 1 is never refined.
+    max_levels : int
+        How many times a block may be split. Fixes the base cell, and so the
+        lattice everything else is counted in.
+    labels : list
+        Coordinate names.
+
+    Attributes
+    ----------
+    block_size : array
+        `(n_data, 3)`, each block's size in the coordinates' own units. Not
+        called `step_size`: that name means one size for the whole object, and
+        anything reading it would take the product of this array for a volume.
+    block_volume : array
+        `(n_data,)`, what each block is worth in a tonnage.
+    level : array
+        `(n_data,)`, 0 for a coarsest block up to `max_levels` for a base one.
+    """
+
+    def __init__(self, start, n, step, discretization=(2, 2, 2), max_levels=3,
+                 labels=("X", "Y", "Z")):
+        if int(max_levels) < 0:
+            raise ValueError("max_levels cannot be negative; got %r"
+                             % max_levels)
+
+        self.max_levels = int(max_levels)
+        self.discretization = [int(d) for d in discretization]
+        if len(self.discretization) != 3 or any(
+                d < 1 for d in self.discretization):
+            raise ValueError(
+                "discretization needs three positive numbers; got %r"
+                % (discretization,))
+        if self.max_levels > 0 and _np.prod(self.discretization) == 1:
+            raise ValueError(
+                "a discretization of one sub-block cannot refine anything, so "
+                "max_levels=%d would have nothing to do; give a coarser "
+                "discretization or max_levels=0" % self.max_levels)
+
+        n = _np.asarray(n, dtype=_np.int64)
+        step = _np.asarray(step, dtype=float)
+        start = _np.asarray(start, dtype=float)
+        if not (n.shape == step.shape == start.shape == (3,)):
+            raise ValueError(
+                "start, n and step are three numbers each; got %s, %s and %s"
+                % (start.shape, n.shape, step.shape))
+
+        # Splitting a block hands each of its sub-blocks a block of its own, so
+        # the discretization is also the refinement ratio -- per axis, and not
+        # necessarily two. That is what keeps sub-block `j` and child `j` the
+        # same corner of the parent, which is what lets the criterion read off
+        # a coarse prediction mean anything about the children it would make.
+        # It also lets an axis be left alone: [2, 2, 1] refines in plan and
+        # keeps the bench height.
+        self.base_step = step / self._coarse_size
+        # the box corner, not the first centre: a block's origin is its lower
+        # corner, which is what makes the lattice arithmetic come out integer
+        self.box_corner = start - step / 2
+        self.lattice_shape = n * self._coarse_size
+
+        cells = _np.stack(_np.meshgrid(
+            *[_np.arange(k) for k in n], indexing="ij"), axis=-1
+        ).reshape(-1, 3)
+        self._origin = cells * self._coarse_size
+        self._level = _np.zeros(len(cells), dtype=_np.int64)
+        # nothing has been predicted yet, so every block is new
+        self._fresh = _np.ones(len(cells), dtype=bool)
+
+        self._sub_grid = _unit_sub_grid(self.discretization)
+
+        super().__init__(
+            _pd.DataFrame(self._centres(), columns=list(labels)), list(labels))
+        self._bounding_box = BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+    # ------------------------------------------------------------------ #
+    # geometry
+    # ------------------------------------------------------------------ #
+    def _centres(self):
+        return self.box_corner + (self._origin + self._size / 2) \
+            * self.base_step
+
+    @property
+    def _coarse_size(self):
+        """A coarsest block's extent, in base cells, along each axis.
+
+        Not the number of sub-blocks, which is `prod(discretization)` and is
+        the same at every level -- this is how far a level-0 block reaches
+        across the lattice, and so how many base cells it would come to if it
+        were split all the way down.
+        """
+        return _np.array(self.discretization,
+                         dtype=_np.int64) ** self.max_levels
+
+    @property
+    def _size(self):
+        """Each block's extent in base cells, from its level.
+
+        Held as the level rather than the size: a level is one small number
+        against three, and the two cannot then disagree.
+        """
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        return self._coarse_size[None, :] \
+            // ratio[None, :] ** self._level[:, None]
+
+    @property
+    def block_size(self):
+        return self._size * self.base_step
+
+    @property
+    def block_volume(self):
+        return _np.prod(self.block_size, axis=1)
+
+    @property
+    def level(self):
+        return self._level
+
+    @property
+    def rows_per_location(self):
+        return int(_np.prod(self.discretization))
+
+    def is_full(self):
+        """Whether the blocks tile their box exactly -- no gap, no overlap.
+
+        Volume alone cannot answer: a gap and an overlap of the same size
+        cancel. So the base cells are counted, in an array the shape of the
+        lattice, which costs a byte per base cell (29 MB for a 30-million-cell
+        model). Construction is full and both `split` and `group` preserve it,
+        so this is for checking something that came from elsewhere rather than
+        for routine use.
+        """
+        covered = int(_np.prod(self._size, axis=1).sum())
+        if covered != int(_np.prod(self.lattice_shape)):
+            return False
+
+        seen = _np.zeros(tuple(self.lattice_shape), dtype=_np.uint8)
+        for origin, size in zip(self._origin, self._size):
+            seen[origin[0]:origin[0] + size[0],
+                 origin[1]:origin[1] + size[1],
+                 origin[2]:origin[2] + size[2]] += 1
+        return bool(seen.min() == 1 and seen.max() == 1)
+
+    _NO_SUBSET = (
+        "a %s cannot be subsetted: it is structurally complete by design, and "
+        "removing blocks would leave a group averaging over children that are "
+        "no longer there -- the mass-conservation error the lattice exists to "
+        "prevent. Exclude ground by value instead, with a metadata column "
+        "(`add_metadata`); `predict(..., where=...)` visits part of a model "
+        "without making a smaller one. To hand the blocks to something else, "
+        "`as_data_frame` carries a size per row, `as_pyvista` writes them as "
+        "hexahedra, and `to_zarr` round-trips the lattice whole.")
+
+    def __getitem__(self, item):
+        # PointData's would hand back a plain PointData, silently: no origin,
+        # no level, no size, so the size columns vanish, `as_pyvista` draws
+        # points rather than blocks and `grade_tonnage` refuses. Better to say
+        # so here than to return something that looks usable.
+        raise TypeError(self._NO_SUBSET % type(self).__name__)
+
+    def subset_region(self, min_val, max_val,
+                      include_min=None, include_max=None):
+        raise TypeError(self._NO_SUBSET % type(self).__name__)
+
+    # ------------------------------------------------------------------ #
+    # refinement
+    # ------------------------------------------------------------------ #
+    def split(self, mask, carry=True, labels=("X", "Y", "Z")):
+        """A new block set with each marked block cut into its own sub-blocks.
+
+        A block becomes `prod(discretization)` children, one per sub-block and
+        in the same order, so the values a coarse prediction already holds for
+        those sub-blocks describe the blocks this makes.
+
+        A block that was **not** split keeps what was predicted for it: it is
+        the same block on the same support, so its value is still the right
+        answer and arriving at it again would be work for nothing. The
+        children start missing, and `unpredicted()` says which they are, so
+        `predict(..., where=...)` visits only them. A parent's value is never
+        handed down -- that would manufacture children agreeing exactly, which
+        is the one thing refining is meant to find out rather than assume.
+
+        Parameters
+        ----------
+        mask : array-like
+            One boolean per block, or the indices of the blocks to split.
+        carry : bool
+            Whether to bring the variables and metadata across. `False` gives
+            bare geometry, for building a mesh to predict onto from scratch.
+        """
+        mask = _np.asarray(mask)
+        if mask.dtype != bool:
+            index = _np.zeros(self.n_data, dtype=bool)
+            index[mask] = True
+            mask = index
+        if mask.shape != (self.n_data,):
+            raise ValueError(
+                "the mask needs one value per block: got %d for %d"
+                % (mask.size, self.n_data))
+
+        finest = self._level >= self.max_levels
+        if _np.any(mask & finest):
+            raise ValueError(
+                "%d block(s) are already at the finest level the lattice "
+                "allows (max_levels=%d); build the set with more levels to "
+                "go further"
+                % (int(_np.count_nonzero(mask & finest)), self.max_levels))
+
+        # one child per sub-block, in the sub-blocks' own order
+        corner = _sub_block_index(self.discretization)
+        child_size = self._size[mask] // _np.array(self.discretization)
+        children = (self._origin[mask][:, None, :]
+                    + corner[None, :, :] * child_size[:, None, :]
+                    ).reshape(-1, 3)
+        child_level = _np.repeat(self._level[mask] + 1, len(corner))
+
+        new = _copy.copy(self)
+        new._origin = _np.concatenate([self._origin[~mask], children])
+        new._level = _np.concatenate([self._level[~mask], child_level])
+        # the blocks this made, so that predicting can be told to visit only
+        # them without first being told what was predicted before
+        new._fresh = _np.concatenate([
+            _np.zeros(int(_np.count_nonzero(~mask)), dtype=bool),
+            _np.ones(len(children), dtype=bool)])
+        new.variables = {}
+        new.metadata = {}
+        new._init_coordinates(new._centres(), list(labels))
+        # `_init_coordinates` has just measured the box off the coordinates,
+        # which are block *centres*: that box is half a block short on every
+        # side, and short by a different amount after every split, since
+        # refining an edge block moves its centre nearer the boundary. Two
+        # sets over the same ground would then disagree about their extent.
+        # The real box is the lattice, which no refinement changes.
+        new._bounding_box = BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+        if carry:
+            # A block that was not split is the same block on the same
+            # support, so what was predicted for it still stands; only the new
+            # children have nothing yet. Metadata goes to the children as
+            # well, and by inheritance rather than as missing: it describes the
+            # ground, and a child occupies its parent's ground.
+            parent = _np.concatenate(
+                [_np.flatnonzero(~mask),
+                 _np.repeat(_np.flatnonzero(mask), len(corner))])
+            for name, variable in self.variables.items():
+                new.variables[name] = variable.carry_to(
+                    new, ~mask, len(children))
+            for name, column in self.metadata.items():
+                values = _np.asarray(column.values)[parent]
+                fresh = _Attribute(new, values, dtype=values.dtype)
+                fresh.labels = column.labels
+                new.metadata[name] = fresh
+        return new
+
+    def group(self, mask, carry=True, labels=("X", "Y", "Z")):
+        """The inverse of `split`: whole families of children, back into the
+        parent they came from.
+
+        A block is grouped with its siblings, so the mask must name **every**
+        child of a parent or none of them. A partial family would average over
+        children that are not there and mis-weight the parent -- the
+        mass-conservation error the lattice exists to prevent -- so it is
+        refused rather than approximated. That check is what makes conversion
+        between supports two-directional: `group` undoes `split` exactly, and
+        the blocks tile their box afterwards as they did before.
+
+        A block that was **not** grouped keeps what it holds, exactly as in
+        `split` and for the same reason: it is the same block on the same
+        support, so its value is still the right answer for it. The parents
+        are the ones on new ground, and they come back missing --
+        `unpredicted()` names them and `predict(..., where=...)` fills them.
+
+        A parent's value is never averaged from its children. Coarsening is a
+        change of support and almost nothing survives it: a parent's spread is
+        not its children's, its within-block dispersion is larger by exactly
+        what the grouping absorbed, and a category has no mean. The one thing
+        that would come across exactly is a realization, and a variable is
+        more than its realizations. Metadata does come across, from the first
+        child -- it describes the ground rather than the model, and where the
+        children disagree about it there is no right answer to be had.
+
+        Parameters
+        ----------
+        mask : array-like
+            One boolean per block, or the indices of the blocks to group.
+        carry : bool
+            Whether to bring across what the blocks that were not grouped
+            hold. `False` gives bare geometry.
+        labels : list
+            Coordinate names.
+        """
+        mask = _np.asarray(mask)
+        if mask.dtype != bool:
+            index = _np.zeros(self.n_data, dtype=bool)
+            index[mask] = True
+            mask = index
+        if mask.shape != (self.n_data,):
+            raise ValueError(
+                "the mask needs one value per block: got %d for %d"
+                % (mask.size, self.n_data))
+
+        coarsest = self._level < 1
+        if _np.any(mask & coarsest):
+            raise ValueError(
+                "%d block(s) are already at the coarsest level the lattice "
+                "has and belong to no parent"
+                % int(_np.count_nonzero(mask & coarsest)))
+
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        family = self._size[mask] * ratio[None, :]
+        parent = (self._origin[mask] // family) * family
+        level = self._level[mask] - 1
+
+        # one key a parent, level included: two families of different sizes can
+        # share a lower corner, and they are not the same parent
+        shape = self.lattice_shape
+        key = (((parent[:, 0] * shape[1] + parent[:, 1]) * shape[2]
+                + parent[:, 2]) * (self.max_levels + 1) + level)
+        _, first, counts = _np.unique(key, return_index=True,
+                                      return_counts=True)
+
+        whole = int(_np.prod(self.discretization))
+        if _np.any(counts != whole):
+            short = _np.flatnonzero(counts != whole)
+            raise ValueError(
+                "grouping takes whole families: %d parent(s) were named by "
+                "only some of their %d children, the first by %d. A partial "
+                "family averages over blocks that are not there, which is the "
+                "one thing the lattice exists to prevent"
+                % (len(short), whole, int(counts[short[0]])))
+
+        new = _copy.copy(self)
+        new._origin = _np.concatenate([self._origin[~mask], parent[first]])
+        new._level = _np.concatenate([self._level[~mask], level[first]])
+        # the blocks this made, on a support nothing has been predicted on
+        new._fresh = _np.concatenate([
+            _np.zeros(int(_np.count_nonzero(~mask)), dtype=bool),
+            _np.ones(len(first), dtype=bool)])
+        new.variables = {}
+        new.metadata = {}
+        new._init_coordinates(new._centres(), list(labels))
+        # the lattice is the box, not the spread of the centres -- see `split`
+        new._bounding_box = BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+        if carry:
+            source = _np.concatenate(
+                [_np.flatnonzero(~mask), _np.flatnonzero(mask)[first]])
+            for name, variable in self.variables.items():
+                new.variables[name] = variable.carry_to(
+                    new, ~mask, len(first))
+            for name, column in self.metadata.items():
+                values = _np.asarray(column.values)[source]
+                fresh = _Attribute(new, values, dtype=values.dtype)
+                fresh.labels = column.labels
+                new.metadata[name] = fresh
+        return new
+
+    def block_shares(self, split_on=None):
+        """How often each decision cuts a block in two.
+
+        A continuous variable contributes one column per cut-off it declares,
+        a categorical one per category, and both mean the same thing: the
+        share of realizations in which this block's sub-blocks fall on both
+        sides of something that matters. A grade is judged against the grades
+        someone declared; an indicator against zero, that being where one
+        category stops winning and its rival starts.
+
+        Returns a dict of name -> `(n_data,)` array, empty where nothing
+        declared a decision to make.
+        """
+        chosen = list(self.variables) if split_on is None else \
+            [str(name) for name in _np.atleast_1d(split_on)]
+        shares = {}
+        for name in chosen:
+            if name not in self.variables:
+                raise ValueError(
+                    "no variable named %r to split on; found %s"
+                    % (name, ", ".join(sorted(self.variables)) or "none"))
+            # each variable reports its own -- see `_Variable.split_shares`
+            for key, values in self.variables[name].split_shares().items():
+                shares[("%s %s" % (name, key)).strip()] = values
+        return shares
+
+    def needs_splitting(self, split_on=None, tolerance=0.05):
+        """Which blocks hold more than one answer, and so are worth cutting.
+
+        A block whose sub-blocks agree, realization by realization, holds one
+        answer however finely it is cut. One whose sub-blocks disagree holds
+        two, and cutting is what separates them.
+
+        Note what this does *not* mark: a block the model is merely unsure
+        about. Realizations either side of a cut-off are the model not
+        knowing, and no amount of cutting will settle that -- the answer to it
+        is another drillhole. Only disagreement *within* a realization counts.
+
+        The test is over every decision at once and any one is enough, which
+        is the cautious way round on purpose: a block worth splitting for one
+        variable is worth splitting whatever the others say. Name `split_on`
+        to narrow it -- letting every element of a polymetallic deposit vote
+        marks most of the model and gives back the saving.
+
+        Blocks already at the finest level are never marked, there being
+        nothing to cut them into.
+
+        Parameters
+        ----------
+        split_on : str or list, optional
+            Which variables get a say. All of them by default.
+        tolerance : float
+            The share of realizations that must find the block divided. Small
+            but not zero, so that one realization in twenty does not carry it.
+        """
+        shares = self.block_shares(split_on)
+        mask = _np.zeros(self.n_data, dtype=bool)
+        for values in shares.values():
+            mask |= _np.asarray(values, dtype=float) > tolerance
+        return mask & (self._level < self.max_levels)
+
+    def _by_level(self):
+        """Where the blocks of each level sit, as a sorted table of origins.
+
+        Sorted rather than rasterized on purpose: naming the block covering a
+        point is then a `searchsorted`, where painting the base lattice would
+        cost a cell for every one the model exists to avoid carrying.
+        """
+        shape = self.lattice_shape
+        tables = []
+        for k in range(self.max_levels + 1):
+            rows = _np.flatnonzero(self._level == k)
+            here = self._origin[rows]
+            key = ((here[:, 0] * shape[1] + here[:, 1]) * shape[2]
+                   + here[:, 2])
+            order = _np.argsort(key, kind="stable")
+            tables.append((key[order], rows[order]))
+        return tables
+
+    def unbalanced(self, gap=1):
+        """Blocks with a neighbour more than `gap` levels finer than they are.
+
+        A block whose own sub-blocks agree is never marked by
+        `needs_splitting`, and rightly so -- cutting it would not change the
+        answer it gives. But the field can still turn sharply inside it, and
+        nothing in the block itself says so. That a *neighbour* was cut twice
+        while this block was not cut at all is the evidence, and it lives
+        outside the block.
+
+        It matters for what is drawn rather than for what is decided. A
+        contour reads a block through its eight corners, so a coarse block
+        beside much finer ones is a crude straight guess across a long span
+        laid right where the surface runs. Levelling the jump measured three
+        times closer to the true surface for 35% more blocks, where refining a
+        whole level deeper without it bought almost nothing for 2.6 times as
+        many -- deeper refinement widens the jumps as fast as it narrows the
+        blocks. `models.refine` therefore cuts these as it goes.
+
+        Blocks already at the finest level are never marked, there being
+        nothing to cut them into.
+
+        Parameters
+        ----------
+        gap : int
+            How many levels of difference to tolerate. One is the usual 2:1
+            balance: a block may meet blocks one level finer, not two.
+        """
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        shape = self.lattice_shape
+        tables = self._by_level()
+        size = self._size
+        marked = _np.zeros(self.n_data, dtype=bool)
+
+        # asked from the fine side: a fine block steps one cell past each of
+        # its faces and names the coarse block covering that point, which is
+        # exact where asking the coarse block what lies beyond its face is not
+        # -- a cell of its own size holds blocks that do not touch it
+        for fine in range(int(gap) + 1, self.max_levels + 1):
+            rows = _np.flatnonzero(self._level == fine)
+            if len(rows) == 0:
+                continue
+            origin, extent = self._origin[rows], size[rows]
+
+            for coarse in range(fine - int(gap)):
+                key_of, owner = tables[coarse]
+                if len(owner) == 0:
+                    continue
+                cell = self._coarse_size // ratio ** coarse
+
+                for axis in range(3):
+                    for side in (-1, 1):
+                        beyond = origin.copy()
+                        beyond[:, axis] += (extent[:, axis] if side > 0
+                                            else -1)
+                        inside = ((beyond[:, axis] >= 0)
+                                  & (beyond[:, axis] < shape[axis]))
+                        owning = (beyond // cell) * cell
+                        key = ((owning[:, 0] * shape[1] + owning[:, 1])
+                               * shape[2] + owning[:, 2])
+                        at = _np.minimum(_np.searchsorted(key_of, key),
+                                         len(key_of) - 1)
+                        hit = inside & (key_of[at] == key)
+                        marked[owner[at[hit]]] = True
+
+        return marked & (self._level < self.max_levels)
+
+    # ------------------------------------------------------------------ #
+    # sample data
+    # ------------------------------------------------------------------ #
+    def index_data(self, data):
+        """Which block each of `data`'s locations falls in.
+
+        One row index per location, `-1` for anything outside the box. Note
+        this is **not** what a grid's `index_data` returns -- a cell index per
+        axis -- because blocks of several sizes have no per-axis index to
+        return. Which block *is* the answer here.
+
+        The lattice makes it cheap: a location's base cell is arithmetic, and
+        the block covering that cell is the one whose origin is the cell's
+        ancestor at that block's own level, so one `searchsorted` per level
+        finds it and every location is settled within `max_levels + 1` of them.
+        """
+        if data.n_dim != self.n_dim:
+            raise DimensionMismatchError(
+                "Data dimension mismatch. Expected dimension %d and found %d."
+                % (self.n_dim, data.n_dim))
+
+        coordinates = _np.asarray(data.coordinates, dtype=float)
+        cell = _np.floor(
+            (coordinates - self.box_corner) / self.base_step).astype(_np.int64)
+        shape = self.lattice_shape
+
+        found = _np.full(len(coordinates), -1, dtype=_np.int64)
+        left = _np.flatnonzero(
+            _np.all((cell >= 0) & (cell < shape), axis=1))
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        tables = self._by_level()
+
+        for k in range(self.max_levels + 1):
+            if len(left) == 0:
+                break
+            key_of, owner = tables[k]
+            if len(owner) == 0:
+                continue
+            size = self._coarse_size // ratio ** k
+            ancestor = (cell[left] // size) * size
+            key = ((ancestor[:, 0] * shape[1] + ancestor[:, 1]) * shape[2]
+                   + ancestor[:, 2])
+            at = _np.minimum(_np.searchsorted(key_of, key), len(key_of) - 1)
+            hit = key_of[at] == key
+            found[left[hit]] = owner[at[hit]]
+            left = left[~hit]
+
+        return found
+
+    @staticmethod
+    def _held_by(block, values):
+        """`values` against the block holding each, the strays dropped."""
+        frame = _pd.DataFrame({"block": block, "value": values})
+        return frame[frame["block"] >= 0].dropna(subset=["value"])
+
+    def _dominant(self, block, values):
+        """The label most often measured in each block, blank where none was.
+
+        The count decides it, as on a grid; ties go to whichever label sorts
+        last, which is arbitrary but has to be something.
+        """
+        counts = self._held_by(block, values).groupby(
+            ["block", "value"]).size().reset_index(name="_n")
+        winner = counts.sort_values("_n").groupby("block").tail(1)
+        out = _np.full(self.n_data, "", dtype=object)
+        out[winner["block"].to_numpy()] = winner["value"].to_numpy()
+        return out
+
+    def aggregate_numeric(self, data, variable):
+        """The mean of `data`'s measurements over the block holding them."""
+        held = self._held_by(
+            self.index_data(data),
+            data.variables[variable].measurements.values.to_numpy())
+        mean = _np.full(self.n_data, _np.nan)
+        grouped = held.groupby("block")["value"].mean()
+        mean[grouped.index.to_numpy()] = grouped.to_numpy()
+        self.variables[variable] = ContinuousVariable(variable, self, mean)
+
+    def aggregate_categorical(self, data, variable):
+        """The dominant category in each block.
+
+        Both sides of a contact vote, as on a grid: a boundary measurement
+        names the category either side of it and neither is the measurement.
+        """
+        source = data.variables[variable]
+        block = self.index_data(data)
+        self.variables[variable] = CategoricalVariable(
+            variable, self, source.labels,
+            self._dominant(_np.tile(block, 2),
+                           _np.concatenate([source.measurements_a.to_numpy(),
+                                            source.measurements_b.to_numpy()])))
+
+    def aggregate_binary(self, data, variable):
+        """The dominant label in each block."""
+        source = data.variables[variable]
+        self.variables[variable] = BinaryVariable(
+            variable, self, source.labels,
+            self._dominant(self.index_data(data),
+                           source.measurements.to_numpy()))
+
+    def assign_from_surface(self, surface, name, labels=("above", "below"),
+                            fraction=None, uncovered=_np.nan):
+        """
+        As `Blocks3D.assign_from_surface`, over blocks of several sizes.
+
+        The flag in `name` follows the block centre; naming a `fraction`
+        column measures the share of each block below the sheet over the
+        sub-blocks `discretization` defines, scaled to each block's own size.
+        `crossed_by` asks the same question and answers with the blocks worth
+        cutting.
+        """
+        _blocks_from_surface(self, PointData.assign_from_surface, surface,
+                             name, labels, fraction, uncovered)
+
+    def assign_from_solid(self, solid, name, labels=("outside", "inside"),
+                          fraction=None):
+        """
+        As `Blocks3D.assign_from_solid`, over blocks of several sizes.
+
+        `fraction` holds the share of each block's volume inside the body, and
+        `crossed_by` turns the same test into the blocks worth cutting.
+        """
+        _blocks_from_solid(self, PointData.assign_from_solid, solid, name,
+                           labels, fraction)
+
+    def crossed_by(self, mesh):
+        """Which blocks a mesh passes through, and so which are worth cutting.
+
+        A block is crossed when its sub-blocks fall on **both** sides of the
+        mesh -- the question `needs_splitting` asks of a cut-off, asked of
+        geometry instead. A topography, a vein wall, a lease boundary: a block
+        the surface runs through holds two answers whatever is predicted into
+        it, and no amount of prediction will separate them.
+
+        One entirely above or entirely below is left alone however close it
+        lies, which is what keeps this from refining a whole domain. Blocks
+        already at the finest level are never marked, as elsewhere.
+
+        Hand it to `split`, or give the mesh to `models.refine`, which unions
+        this with the other two criteria and repeats until nothing is left to
+        cut::
+
+            blocks = blocks.split(blocks.crossed_by(topography))
+
+        A sheet that covers only part of the model counts a sub-block past its
+        edge as not below, the way `fraction` does, so a block straddling the
+        sheet's own boundary reads as crossed. That is usually wanted -- the
+        edge is a real feature of the ground being described -- but it is why
+        a sheet should reach across the model when it is not.
+
+        Parameters
+        ----------
+        mesh : Surface3D or Solid3D
+            The sheet or closed body to test against. A `Mesh3D` that is
+            neither has no sides and is refused.
+
+        Returns
+        -------
+        array
+            One boolean per block.
+        """
+        splittable = _np.flatnonzero(self._level < self.max_levels)
+        if len(splittable) == 0:
+            return _np.zeros(self.n_data, dtype=bool)
+
+        shares = _sub_block_shares(self, _mesh_test(mesh), rows=splittable)
+        # nan everywhere else, and a comparison against it is False, so the
+        # blocks that were never asked about answer no on their own
+        with _np.errstate(invalid="ignore"):
+            return (shares > 0) & (shares < 1)
+
+    def unpredicted(self, variable=None):
+        """Which blocks have nothing in them yet.
+
+        What `split` leaves behind: hand it to `predict(..., where=...)` and
+        only the blocks the refinement created are visited. Without a variable
+        it is the blocks the last split made, which is what a container knows
+        without having to be told what was predicted into it; naming one reads
+        its missing values instead, which stays true however the object was
+        arrived at.
+        """
+        if variable is None:
+            return _np.array(self._fresh, dtype=bool)
+        return _np.isnan(_np.asarray(
+            self.variables[variable].prediction.values))
+
+    # ------------------------------------------------------------------ #
+    # what the model asks for
+    # ------------------------------------------------------------------ #
+    def get_batched_coordinates(self, index=None):
+        if index is None:
+            index = _np.arange(self._n_data)
+
+        centres = _np.asarray(self.coordinates[index])
+        size = self.block_size[index]
+        # block-major, one temporary rather than one per block: block b owns
+        # rows b*k to (b+1)*k, which is what `_aggregate` averages back. The
+        # only difference from a fixed-size block model is that the sub-grid
+        # is scaled by each block's own size.
+        coords = centres[:, None, :] + self._sub_grid[None, :, :] \
+            * size[:, None, :]
+        coords = coords.reshape(-1, centres.shape[1])
+
+        splits = None if self.rows_per_location == 1 else len(centres)
+        return coords, splits
+
+    def _batch_rows(self, index=None):
+        n, _ = _PointBased._batch_rows(self, index)
+        k = self.rows_per_location
+        return n * k, (None if k == 1 else n)
+
+    def as_data_frame(self, metadata=True, **kwargs):
+        df = super().as_data_frame(metadata=metadata, **kwargs)
+        for i, label in enumerate(self.coordinate_labels):
+            df["_" + label] = self.block_size[:, i]
+        return df
+
+    # ------------------------------------------------------------------ #
+    # export
+    # ------------------------------------------------------------------ #
+    def as_pyvista(self, simulations=False):
+        """
+        Converts this object to a pyvista one, carrying its variables.
+
+        One hexahedron per block, written out corner by corner, rather than
+        the `ImageData` a regular block model exports: implicit geometry can
+        only say one spacing, and the point here is that there is more than
+        one. The cells are welded, so blocks that touch share the corners they
+        meet at -- which is what lets anything be contoured across them.
+
+        Parameters
+        ----------
+        simulations
+            Which simulations to include: `False` for none (the default, since
+            each one is a full-length array in the exported object), `True` for
+            all of them, an `int` for the first n, or a sequence of indices.
+        """
+        mesh = self._hex_mesh(self._origin, self._size, self.base_step)
+
+        for variable in self.variables.values():
+            variable.fill_pyvista_cells(mesh, simulations=simulations)
+        for name, column in self.metadata.items():
+            column.fill_pyvista_cells(mesh, name)
+        return mesh
+
+    def _hex_mesh(self, origin, size, step):
+        """One welded hexahedron per block, on any lattice of blocks -- the
+        object's own, or the finer one a contour is drawn on. `origin` and
+        `size` count that lattice's own cells, `step` says how big one is."""
+        low = self.box_corner + origin * step
+        size = size * step
+        points = (low[:, None, :]
+                  + _HEX_CORNERS[None, :, :] * size[:, None, :]).reshape(-1, 3)
+
+        connectivity = _np.arange(len(points)).reshape(-1, 8)
+        cells = _np.hstack(
+            [_np.full((len(connectivity), 1), 8), connectivity]).ravel()
+        kinds = _np.full(len(connectivity), _pv.CellType.HEXAHEDRON,
+                         dtype=_np.uint8)
+        # Welded, and it matters: written corner by corner every cell owns its
+        # own eight, so neighbours share nothing, and anything reading values
+        # at a corner sees one block there instead of the several that meet.
+        # A contour over an unwelded mesh comes back empty for that reason.
+        return _pv.UnstructuredGrid(cells, kinds, points).clean(
+            tolerance=1e-9, produce_merge_map=False)
+
+    @staticmethod
+    def _shared_corners(origin, size, shape):
+        """Each block's eight corners, as indices into the distinct lattice
+        points -- the welding of `_hex_mesh`, done in integers."""
+        corners = (origin[:, None, :]
+                   + _HEX_CORNERS[None, :, :] * size[:, None, :])
+        span = shape + 1
+        key = ((corners[..., 0] * span[1] + corners[..., 1]) * span[2]
+               + corners[..., 2])
+        return _np.unique(key.ravel(), return_inverse=True)[1].reshape(-1, 8)
+
+    @staticmethod
+    def _at_corners(corners, values):
+        """The mean over the blocks meeting at each corner, read back per
+        block -- what `cell_data_to_point_data` puts there, and so what decides
+        where the surface runs. A block holding no value contributes nothing,
+        rather than carrying its absence into every corner it touches.
+        """
+        total = _np.zeros(int(corners.max()) + 1)
+        count = _np.zeros(len(total))
+        known = _np.isfinite(values)
+        _np.add.at(total, corners[known].ravel(), _np.repeat(values[known], 8))
+        _np.add.at(count, corners[known].ravel(), 1.0)
+        mean = _np.divide(total, count, out=_np.full(len(total), _np.nan),
+                          where=count > 0)
+        return mean[corners]
+
+    def _cut_to_contour(self, values, value, margin=1, supersample=1):
+        """The blocks a surface runs through, cut small -- in the mesh handed
+        to VTK, not in the model.
+
+        A hexahedron is contoured from its own eight corners, so where a
+        coarse block meets finer ones it cannot see the corners they place in
+        the middle of the shared face. The two sides then draw different
+        curves there and the surface tears along every interface it crosses.
+        Cutting the surface's neighbourhood to one size puts the interfaces
+        out of its way, and one ring of margin covers the surface shifting as
+        the values are read at the finer size.
+
+        Cutting `supersample` levels past the model's own finest also smooths
+        it. What VTK contours is a trilinear reading of the corner averages,
+        continuous but with a crease at every face it crosses, and on a field
+        with structure at a few blocks those creases are what looks blocky.
+        Averaging onto corners again at each finer level composes into a
+        rounder reconstruction, so the surface both turns less sharply and
+        sits closer to the level set it is meant to be: on a rough test field,
+        one level took the mean angle between neighbouring triangles from 9.1
+        to 5.7 degrees and halved the distance from the true surface, matching
+        a model of 3.4 times as many blocks that had to be predicted.
+
+        Nothing is predicted, at any level. A child takes its parent's value
+        plus what the corners say about the shape running across it, and that
+        correction averages to zero over the children, so a block's estimate
+        is exactly the mean of the children standing in for it.
+
+        Returns
+        -------
+        origin, size, step, values
+            The finer lattice: origins and sizes counted in its own cells,
+            and how big one of those is. `(None, None, None, None)` if nothing
+            was cut and the blocks as they stand will do.
+        """
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        offset = _sub_block_index(self.discretization)
+        weights = _trilinear_weights(self.discretization)
+
+        # a lattice `supersample` levels finer than the model's own, so that
+        # cutting below the base cell is still whole numbers of a cell
+        unit = ratio ** int(supersample)
+        origin = self._origin * unit
+        size = self._size * unit
+        step = self.base_step / unit
+        shape = self.lattice_shape * unit
+
+        values = _np.asarray(values, dtype=float)
+        cut = False
+
+        for _ in range(self.max_levels + int(supersample)):
+            corners = self._shared_corners(origin, size, shape)
+            at_corner = self._at_corners(corners, values)
+            # a corner with no value must not decide anything either way
+            low = _np.where(_np.isnan(at_corner), _np.inf, at_corner).min(1)
+            high = _np.where(_np.isnan(at_corner), -_np.inf, at_corner).max(1)
+            near = _grow(corners, (low < value) & (high > value), margin)
+            near &= _np.all(size >= ratio, axis=1)
+            if not _np.any(near):
+                break
+
+            cut = True
+            child_size = size[near] // ratio
+            children = (origin[near][:, None, :]
+                        + offset[None, :, :] * child_size[:, None, :]
+                        ).reshape(-1, 3)
+            shaped = at_corner[near] @ weights.T
+            shaped += (values[near] - at_corner[near].mean(axis=1))[:, None]
+            # a block beside one that was never predicted has no shape to read
+            # off its corners, so it hands its own value down unchanged
+            shaped = _np.where(_np.isfinite(shaped), shaped,
+                               values[near][:, None])
+
+            origin = _np.concatenate([origin[~near], children])
+            size = _np.concatenate(
+                [size[~near], _np.repeat(child_size, len(offset), axis=0)])
+            values = _np.concatenate([values[~near], shaped.ravel()])
+
+        if not cut:
+            return None, None, None, None
+        return origin, size, step, values
+
+    def _variable_or_component(self, name):
+        """The variable called `name`, or the component of a vector one.
+
+        A composition is held as a single variable, so its parts are not among
+        `self.variables` and asking for `Zn` would otherwise mean reaching into
+        `Elements` by hand. Only the parts hold a grade -- the variable itself
+        carries nothing to contour -- so naming one has to work.
+        """
+        if name in self.variables:
+            return self.variables[name]
+
+        for variable in self.variables.values():
+            components = getattr(variable, "components", None) or {}
+            if name in components:
+                return components[name]
+
+        known = set(self.variables)
+        for variable in self.variables.values():
+            known.update(
+                str(label) for label in
+                (getattr(variable, "components", None) or {}))
+        raise ValueError(
+            "no variable or component named %r; found %s"
+            % (name, ", ".join(sorted(known)) or "none"))
+
+    def get_contour(self, variable, value, attribute="prediction",
+                    supersample=1):
+        """
+        Isosurface through blocks of more than one size.
+
+        `marching_cubes` wants a rectangular array and there is none to give
+        it, so the cells are handed to VTK instead, which contours an
+        unstructured grid directly. On a model of one block size the two agree
+        exactly; here the answer is the one a regular grid could not have
+        produced without carrying every block at the finest size.
+
+        Values live on the cells and an isosurface needs them on the corners,
+        so they are averaged onto the corners first -- the blocks meeting at a
+        corner are what decide where the surface passes.
+
+        The blocks the surface runs through are cut to the finest size the
+        lattice allows before any of that, in the mesh handed to VTK and not
+        in the model: a coarse block cannot see the corners its finer
+        neighbours place in the middle of the face they share, so the two
+        sides draw different curves there and the surface tears along every
+        such interface it crosses. Cutting its neighbourhood to one size puts
+        the interfaces out of the way. Nothing is predicted -- a child reads
+        its parent's value and the shape its corners carry -- and the surface
+        comes back the one a model carried at the finest size throughout would
+        have given. See `_cut_to_contour`.
+
+        Parameters
+        ----------
+        variable : str
+            Which variable to contour, or which component of a vector one:
+            only the components of a composition hold a grade, so `"Zn"` is
+            named rather than the `"Elements"` it belongs to.
+        value : float
+            The value to draw the surface at.
+        attribute : str
+            Which of the variable's columns to read; the prediction by
+            default.
+        supersample : int
+            How many levels past the model's own finest block to cut the mesh
+            to. Costs `prod(discretization)` times the cells per level, around
+            the surface only, and buys a rounder and *closer* surface rather
+            than merely a prettier one -- what VTK reads between block corners
+            is trilinear, and creasing at every face is what looks blocky. One
+            level is worth roughly predicting a model several times the size;
+            past that it flattens off. Zero to leave the mesh at the model's
+            own resolution.
+
+        Returns
+        -------
+        surf : Solid3D, Surface3D or Mesh3D
+            Whichever the geometry calls for, as `get_contour` on a grid.
+        """
+        named = self._variable_or_component(variable)
+
+        # the mesh labels a component by its own name, not by its parent's,
+        # so this is the same lookup either way
+        label = "%s - %s" % (named.name, attribute)
+        mesh = self.as_pyvista()
+        if label not in mesh.cell_data:
+            parts = getattr(named, "components", None) or {}
+            if parts:
+                raise ValueError(
+                    "%r is made of components and holds no %r of its own; "
+                    "name one of %s"
+                    % (named.name, attribute,
+                       ", ".join(str(label) for label in parts)))
+            raise ValueError(
+                "%r holds nothing under %r to contour; the mesh carries %s"
+                % (named.name, attribute,
+                   ", ".join(sorted(mesh.cell_data.keys())) or "nothing"))
+
+        value = float(value)
+        values = _np.asarray(mesh.cell_data[label], dtype=float)
+        span = (float(_np.nanmin(values)), float(_np.nanmax(values)))
+
+        origin, size, step, finer = self._cut_to_contour(
+            values, value, supersample=supersample)
+        if origin is not None:
+            # let the coarse mesh go before the finer one is built: a block
+            # model is large enough that holding both is worth avoiding
+            mesh = None
+            mesh = self._hex_mesh(origin, size, step)
+            mesh.cell_data[label] = finer
+
+        surface = mesh.cell_data_to_point_data().contour(
+            [value], scalars=label)
+        if surface.n_cells == 0:
+            raise ValueError(
+                "no surface at %g; %r runs from %g to %g"
+                % (value, label, span[0], span[1]))
+
+        surface = surface.triangulate()
+        verts = _np.asarray(surface.points, dtype=float)
+        faces = _np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
+        return mesh3d(verts, faces, _gmt.vertex_normals(verts, faces))
 
 
 def rotate(data, origin, azimuth=0.0, dip=0.0, rake=0.0, reverse=False):
@@ -5399,6 +6855,19 @@ def _write_container(group, container):
         return {"class": "Section3D",
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "grid_shape": [int(x) for x in container.grid_shape]}
+    if type(container) is BlockSet3D:
+        # the lattice itself, in integers, plus what it is counted in; the
+        # centres are derived from those and are not stored twice
+        write("_origin", container._origin)
+        write("_level", container._level)
+        return {"class": "BlockSet3D",
+                "labels": [str(lb) for lb in container.coordinate_labels],
+                "box_corner": [float(x) for x in container.box_corner],
+                "base_step": [float(x) for x in container.base_step],
+                "lattice_shape": [int(x) for x in container.lattice_shape],
+                "discretization":
+                    [int(d) for d in container.discretization],
+                "max_levels": int(container.max_levels)}
     if isinstance(container, Mesh3D):
         write("_coordinates", container.coordinates)
         write("_triangles", container.triangles)
@@ -5465,6 +6934,28 @@ def _rebuild_container(meta, group):
         section._init_coordinates(read_store("_coordinates"), meta["labels"])
         section.grid_shape = [int(x) for x in meta["grid_shape"]]
         return section
+    if cls_name == "BlockSet3D":
+        # Bypass __init__, which builds a full coarse grid: the lattice that
+        # was saved is whatever it had been refined to since.
+        blocks = BlockSet3D.__new__(BlockSet3D)
+        _PointBased.__init__(blocks)
+        blocks.max_levels = int(meta["max_levels"])
+        blocks.discretization = [int(d) for d in meta["discretization"]]
+        blocks._sub_grid = _unit_sub_grid(blocks.discretization)
+        blocks.base_step = _np.asarray(meta["base_step"], dtype=float)
+        blocks.box_corner = _np.asarray(meta["box_corner"], dtype=float)
+        blocks.lattice_shape = _np.asarray(meta["lattice_shape"],
+                                           dtype=_np.int64)
+        blocks._origin = read("_origin").astype(_np.int64)
+        blocks._level = read("_level").astype(_np.int64)
+        # a saved model is one that was predicted into, not one mid-refinement
+        blocks._fresh = _np.zeros(len(blocks._origin), dtype=bool)
+        blocks._init_coordinates(blocks._centres(), meta["labels"])
+        blocks._bounding_box = BoundingBox(
+            blocks.box_corner,
+            blocks.box_corner + blocks.lattice_shape * blocks.base_step)
+        return blocks
+
     meshes = {"Mesh3D": Mesh3D, "Surface3D": Surface3D, "Solid3D": Solid3D,
               "DTM3D": DTM3D}
     if cls_name in meshes:

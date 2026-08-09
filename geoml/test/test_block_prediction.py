@@ -214,3 +214,101 @@ def test_the_blocks_still_average_their_sub_blocks():
     k = int(np.prod(blocks.discretization))
     assert np.allclose(mean, sub.reshape(blocks.n_data, k).mean(axis=1),
                        atol=1e-8)
+
+
+# --------------------------------------------------------------------------- #
+# within-block dispersion
+# --------------------------------------------------------------------------- #
+def _dispersed(model, n_sim=8, discretization=(3, 3)):
+    """A block model predicted noise-free, and its sub-blocks as points.
+
+    Noise-free on both sides deliberately. With `monte_carlo` the block path
+    draws one noise value per sub-block *position* and shares the pattern
+    across blocks, while a point path draws one per row, so the two would not
+    be looking at the same field and nothing could be checked against
+    anything.
+    """
+    blocks = _blocks(discretization)
+    model.options.prediction_batch_size = 10 ** 9
+    model.predict(blocks, n_sim=n_sim, include_noise=None)
+
+    points = geoml.data.PointData.from_array(
+        blocks.get_batched_coordinates(np.arange(blocks.n_data))[0])
+    model.predict(points, n_sim=n_sim, include_noise=None)
+
+    k = int(np.prod(blocks.discretization))
+    sub = np.asarray(points.variables["v"].simulations)
+    return blocks, sub.reshape(blocks.n_data, k, n_sim)
+
+
+def test_the_dispersion_is_the_spread_of_the_sub_blocks():
+    """What the column claims: the variance over a block's own sub-blocks,
+    averaged over realizations."""
+    model = _model()
+    blocks, grouped = _dispersed(model)
+
+    # the block value being the mean of its sub-blocks is what says both
+    # predictions saw the same field; without it the comparison below proves
+    # nothing
+    assert np.allclose(grouped.mean(axis=1),
+                       np.asarray(blocks.variables["v"].simulations),
+                       atol=1e-10)
+
+    stored = blocks.variables["v"].dispersion.values.to_numpy()
+    assert np.allclose(stored, grouped.var(axis=1).mean(axis=1), atol=1e-12)
+    assert np.all(stored >= 0.0)
+
+
+def test_the_dispersion_is_not_the_model_uncertainty():
+    """Two different questions -- how much the block varies inside itself,
+    against how sure the model is of the block."""
+    model = _model()
+    blocks, _ = _dispersed(model)
+
+    stored = blocks.variables["v"].dispersion.values.to_numpy()
+    latent = blocks.variables["v"].latent_variance.values.to_numpy()
+    assert not np.allclose(stored, latent)
+
+
+def test_a_finer_discretization_sees_more_of_the_block():
+    """A block cut more finely reaches nearer its corners, so it can only
+    find at least as much spread as a coarse cut did."""
+    model = _model()
+    coarse, _ = _dispersed(model, discretization=(2, 2))
+    fine, _ = _dispersed(model, discretization=(6, 6))
+
+    assert np.mean(fine.variables["v"].dispersion.values.to_numpy()) > \
+        np.mean(coarse.variables["v"].dispersion.values.to_numpy())
+
+
+def test_without_a_discretization_there_is_no_dispersion():
+    """A location has no interior, and a block the model treats as its own
+    centre has one it knows nothing about. Neither is zero, which would read
+    as 'uniform inside' -- a claim nobody made."""
+    model = _model()
+    points = geoml.data.Grid2D(start=[0, 0], n=[4, 4], step=[20, 20])
+    model.predict(points, n_sim=4)
+
+    dispersion = points.variables["v"].dispersion
+    assert np.all(np.isnan(dispersion.values.to_numpy()))
+    assert not dispersion._has_content()
+    # and so it stays out of the data frame entirely
+    assert not any("dispersion" in c for c in points.as_data_frame().columns)
+
+    blocks = _blocks(discretization=(1, 1))
+    model.predict(blocks, n_sim=4)
+    assert np.all(np.isnan(
+        blocks.variables["v"].dispersion.values.to_numpy()))
+
+
+def test_the_dispersion_is_carried_around_like_any_other_column(tmp_path):
+    model = _model()
+    blocks, _ = _dispersed(model)
+    stored = blocks.variables["v"].dispersion.values.to_numpy()
+
+    assert any("dispersion" in c for c in blocks.as_data_frame().columns)
+
+    blocks.to_zarr(str(tmp_path / "b.zarr"))
+    reopened = geoml.data.Blocks2D.open(str(tmp_path / "b.zarr"))
+    assert np.allclose(
+        reopened.variables["v"].dispersion.values.to_numpy(), stored)

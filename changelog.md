@@ -1,3 +1,255 @@
+## version 0.5.7
+* `BlockSet3D.index_data` locates sample data in a model of several block
+sizes, and `aggregate_numeric`/`aggregate_categorical`/`aggregate_binary`
+follow from it — the last of the block model's methods that a grid had and it
+did not. It answers with **which block**, not with a cell index per axis:
+blocks of several sizes have no per-axis index to give. The lattice makes it
+cheap, a location's base cell being arithmetic and the block covering it the
+one whose origin is that cell's ancestor at its own level, so one
+`searchsorted` per level settles every location
+* `BlockSet3D.group(mask)` is the inverse of `split`: whole families of
+children back into the parent they came from. The mask must name every child
+of a parent or none — a partial family would average over children that are
+not there, the mass-conservation error the lattice exists to prevent, so it is
+refused rather than approximated. A block that was not grouped keeps what it
+holds, as in `split` and for the same reason; the parents come back missing,
+because coarsening is a change of support and a parent's spread, within-block
+dispersion and categories are not its children's. Metadata crosses from the
+first child, describing the ground rather than the model
+* `refine(..., where="column")` takes the name of a boolean metadata column,
+which is what a stored filter is here — `assign_from_solid` writing one being
+the usual way to come by it
+* A mesh can force the blocks it runs through to split.
+`BlockSet3D.crossed_by(mesh)` marks the blocks whose sub-blocks fall on both
+sides of a surface or a closed body — the question `needs_splitting` asks of a
+cut-off, asked of geometry instead. A block a topography or a vein wall passes
+through holds two answers whatever is predicted into it, and geometry says so
+before any prediction does; one entirely above or entirely below is left alone
+however close it lies, which is what keeps it from refining a whole domain.
+Hand the mask to `split`, or give `models.refine(..., meshes=[...])` the
+meshes and it unions this with the other two criteria. It needs no model at
+all, so a block model can be refined at a topography before anything has been
+predicted into it — the loop is three lines and the docstring has it
+* `BlockSet3D` gained the `assign_from_surface`/`assign_from_solid` overrides
+`Blocks3D` already had, so `fraction=` measures the share of a block below a
+sheet or inside a body over its own sub-blocks. Before this it fell back to
+`PointData`'s, which knows only the block centre, so partial blocks were not
+available on a variable-size model at all. The shared parts of both now live
+in `_sub_block_shares`/`_blocks_from_surface`/`_blocks_from_solid` at module
+level, which `Blocks3D` and `BlockSet3D` both call rather than keeping two
+copies of the geometry
+* `models.refine(..., where=mask)` names the ground worth modelling. The blocks
+left out are never predicted at any pass and never cut either — they hold
+nothing to decide and draw no surface, so cutting them would only make more of
+nothing. This is what a block model has instead of being subsettable: air above
+a topography or ground beyond a lease boundary costs nothing, rather than
+costing a prediction that is then filtered out of the reports. The mask is
+given once, against the blocks as they stand, and carried across each split.
+`predict(..., where=)` was relaxed to make the first pass possible: naming only
+some locations of a container that does not carry the variable yet used to
+raise, and now creates the variable and leaves the rest at `nan` — which is
+what `unpredicted` reads and what the reporting layer already skips. An
+existing variable is still never reallocated under `where`, since that would
+wipe what the untouched locations hold
+* `BlockSet3D` now refuses to be subsetted — `blocks[mask]` and
+`subset_region` raise `TypeError` instead of quietly handing back a plain
+`PointData`. That object had no origin, no level and no block size, so the
+size columns vanished from `as_data_frame`, `as_pyvista` drew points rather
+than blocks and `grade_tonnage` refused it, all while looking like a block
+model. The class is structurally complete by design: every block tiles its box,
+which is what keeps a coarsening group from averaging over children that are
+no longer there. Ground is excluded by value instead, and the message names
+the ways — a metadata column for the exclusion, `predict(..., where=...)` to
+visit part of a model without making a smaller one, and
+`as_data_frame`/`as_pyvista`/`to_zarr` for a handoff, each of which already
+carries the per-block size
+* Fixed: `BlockSet3D.get_contour` tore the surface open wherever it crossed a
+change of block size — on a real refined model, 1455 holes and 13% of the area
+missing. A hexahedron is contoured from its own eight corners, so a coarse
+block cannot see the corners its finer neighbours place in the middle of the
+face they share; the two sides draw different curves there. The blocks a
+surface runs through are now cut to the finest size the lattice allows before
+contouring, in the mesh handed to VTK and not in the model, which puts the
+interfaces out of the surface's way. Nothing is predicted: a child takes its
+parent's value plus what the block's corners say about the shape running
+across it, and since the trilinear weights are symmetric about the centre that
+correction cancels over the children, so a block's estimate stays exactly the
+mean of the children standing in for it. The surface comes back the one a
+model carried at the finest size throughout would have drawn — 0.01% in area
+against 13% before — for 13% more cells in the mesh and none in the model.
+Widening the refinement instead, which `docs/variable-block-models.md` §5.1
+used to recommend, is equally correct and costs five times the blocks to
+predict; §5.1.1 has the comparison
+* `BlockSet3D.get_contour(..., supersample=1)` cuts that mesh a further level
+past the model's finest block, which costs no prediction and makes the surface
+both rounder and closer to the level set it stands for. What VTK reads between
+block corners is trilinear — continuous, but creased at every face it crosses,
+and on a field with structure at a few blocks the creases are what looks
+blocky. Averaging onto corners again at each level composes into a rounder
+reconstruction, so the extra levels converge on the field rather than on the
+trilinear caricature of it: on a rough test field one level took the mean
+angle between neighbouring triangles from 9.1° to 5.7° and halved the distance
+from the true surface, matching a model of 3.4 times as many blocks. Smoothing
+the triangles instead was measured and rejected — Taubin bought a sixth of the
+faceting for 50% more distance from the true surface, which is a rounder
+picture at the price of a less true one. `supersample=0` leaves the mesh at the
+model's own resolution
+* `models.refine` also cuts a block whose neighbour ended up more than one
+level finer than itself, and `BlockSet3D.unbalanced(gap=1)` is what finds
+them. Such a block is undecided by its own reckoning — its sub-blocks agree,
+so `needs_splitting` rightly leaves it alone — but a neighbour cut twice over
+is evidence that the field turns sharply nearby, and that evidence sits
+outside the block where nothing was looking. It shows up in what gets drawn: a
+contour reads a block through its eight corners, so a coarse block beside much
+finer ones lays a crude straight guess right where the surface runs. Levelling
+those jumps measured **three times closer to the true surface for a third more
+blocks**, where refining a whole level deeper without it bought almost nothing
+for 2.6 times as many — deeper refinement widens the jumps as fast as it
+narrows the blocks. The search runs from the fine side, each fine block
+stepping one cell past its faces to name the coarse block covering that point,
+which is exact where asking the coarse block is not and needs no array the
+shape of the base lattice
+* Fixed: `BlockSet3D.get_contour` could not name a component of a vector or
+compositional variable, only the variable holding it — but only the components
+carry a grade, so there was nothing to contour under the name it accepted
+* Fixed: refining a model whose variable has components — a vector or
+compositional one — raised `AttributeError: 'collections.OrderedDict' object
+has no attribute '_has_content'`. `divided` was two different things depending
+on the class, a single column on a category and a dict keyed by cut-off on a
+grade, and the criterion reached in for it from outside and hoped. Each
+variable now reports its own decisions through `split_shares`, so nothing has
+to guess. Cut-offs are declared per component (two grades are judged against
+two different numbers) and travel to the model as a matrix with a row each,
+short rows padded with infinity so the spare columns come back empty
+* Fixed: `VectorVariable.from_variable` built its components afresh and left
+their cut-offs behind, so a model predicted into a new container had none and
+quietly refined nothing
+* `docs/variable-block-models.md` §11 works the whole thing through on the
+Macpass drillholes, from declaring a cut-off to the grade-tonnage curve and
+the grade shell, with the output of an actual run against each snippet
+* `geoml.models.refine(model, blocks)` predicts on a coarse block
+model, works out which blocks cannot decide, cuts those, and predicts on what
+the cutting made — until there is nothing left to cut. It needs no telling how
+many passes that is: each one takes the blocks it splits a level finer and the
+criterion never marks a block already at the lattice's `max_levels`, so it
+runs out on its own within that many passes. How fine the model may go was
+settled when the block set was made, which is the one place it belongs. Only
+the new blocks are visited at each pass, a block that was not split being the
+same block on the same support. On a compact ore body in a barren domain it reached 4309 blocks where
+the equivalent uniform model needed 131 072, the coarse ones sitting where the
+grade is plainly below the cut-off and the fine ones spanning it
+* What decides a split is one question asked of every variable: *what does a
+value have to cross for the decision to change?* A grade crosses the cut-offs
+someone declared — `variable.set_cutoffs([...])`, carried to whatever is
+predicted from that data, and `None` for a variable that takes no part, which
+is the answer for a composition's rest component. A category crosses zero:
+`ind_skew` is its log-odds against its best rival, so the contact between two
+categories is exactly its zero level set. One reduction serves both, and the
+categorical case needs no special handling at all
+* Two numbers come back per cut-off, and they answer different questions.
+`proportions` is how much of the block sits below it — the recoverable share,
+and per category on a categorical variable the partial-block domaining number,
+worth having whether or not anything is ever refined. `divided` is how often
+the cut-off passes *through* the block. Only the second licenses a split, and
+the difference is the whole of what refining can fix: realizations either side
+of a cut-off are the model not knowing, which no amount of cutting will settle
+— that wants another drillhole — while sub-blocks either side *within one
+realization* are two answers in one block, which cutting separates
+* The splitting criterion, and `dispersion` with it, are read from the
+**noise-free** field. Noise is the part of a block's spread that cutting
+cannot resolve, so a block straddling a cut-off only on account of it would be
+cut for nothing, and a dispersion carrying it would report a variability that
+is not the ground's. The predictions themselves still carry noise as
+`include_noise` asks
+* A categorical likelihood now works out its entropy, uncertainty and
+indicators from the sub-blocks and averages afterwards, where it used to
+average the probabilities first and work from those. Averaged first, a block
+half granite and half schist looks like a place where the model cannot decide
+rather than one where it decides differently in different corners. Two of the
+three call sites were also passing block-averaged probabilities alongside
+sub-block variances, which this makes moot
+* Grade-tonnage counts every block at its own size. It used to take one volume
+from `step_size` and multiply the finished curve by it, which a model of one
+block size allows and `BlockSet3D` does not; the volume now goes into each
+block's weight as the bands are read, so a model half refined reports exactly
+the tonnage the coarse one did. `prepare.block_volume` is what asks a
+container how big its blocks are — a number where they are all alike, a column
+where they are not
+* `BlockSet3D.get_contour` draws an isosurface through blocks of more than one
+size. `marching_cubes` needs a rectangular array and there is none to give it,
+so the blocks go to VTK as hexahedra, which contours an unstructured grid
+directly; on a model of one block size it lands within a few percent of what
+marching cubes gives on the equivalent grid, and refining away from the
+surface leaves it exactly where it was. Values live on the blocks and an
+isosurface needs them on the corners, so they are averaged there first — the
+blocks meeting at a corner are what decide where the surface passes. A mesh
+refined right where the surface runs may still come back open, a coarse face
+and the fine faces against it interpolating along their own edges and not
+agreeing, so leave a level or two of margin; a cracked answer arrives as a
+`Surface3D` rather than a `Solid3D`, never as a body quietly enclosing the
+wrong volume, and `heal()` is there for it
+* `BlockSet3D.as_pyvista` writes one hexahedron per block, welded so that
+blocks sharing a face share its corners — implicit `ImageData` can only state
+one spacing, and the point of this container is that there is more than one.
+Cell values come from `_Variable.fill_pyvista_cells`, one implementation
+serving every variable type rather than the per-type methods a structured
+export needs
+* `BlockSet3D` is a block model whose blocks need not all be the same size —
+fine where the ground is worth resolving, coarse everywhere else. On a real
+deposit that is most of the volume: refining to 5 m only around the drillholes
+takes a 29-million-cell model under 700 000, and its simulations from 22 GiB
+to half of one. Every block's position and size are whole numbers of a **base
+cell**, `step / discretization ** max_levels`, and working in those integers
+rather than in
+metres is what makes the arithmetic exact — blocks meet with no tolerance, a
+block is a whole number of its own children, and regrouping conserves mass to
+the last digit. It is built full, as a uniform grid, and `split` keeps it that
+way, so the blocks always tile their box: `is_full()` says so by counting base
+cells, since volume alone cannot tell a gap from an overlap that cancels it.
+`discretization` does two jobs, and they are the same job: it is how finely a
+block is sampled in order to average it, and it is how that block splits —
+each sub-block becomes a child. So the refinement ratio is the
+discretization, per axis and not necessarily two, which means an axis can be
+left alone (`[2, 2, 1]` refines in plan and keeps the bench height) and
+sub-block `j` and child `j` are the same corner of the parent, so what a
+coarse prediction already says about its sub-blocks describes the blocks a
+split would make. Being the same at every level is the reason nothing
+downstream had to change: a block of any size fans out into the same number of
+rows, so `_aggregate` still reshapes, batches need not be sorted by level, and
+the model never learns that levels exist. Splitting keeps what the blocks that were *not*
+split already hold: such a block is the same block on the same support, so its
+value is still the right answer for it and arriving at it again would be work
+for nothing. Only the children start missing — a parent's value is never
+handed down, which would manufacture children agreeing exactly, the one thing
+refining is meant to find out rather than assume. `unpredicted()` names them
+and `predict(..., where=...)` visits only those, which gives bit-identical
+numbers to predicting the whole refined set because a location's simulated
+value does not depend on what else is in its batch. Metadata *is* inherited by
+the children, unlike a prediction: it describes the ground, and a child sits
+on its parent's ground. Per-block sizes are `block_size` and `block_volume`, not
+`step_size`: that name means one size for the whole object, and anything
+reading it would take the product of the array for a volume. Saves and reopens
+through `to_zarr`. The plan it comes from, and the measurements behind it, are
+in `docs/variable-block-models.md`
+* A predicted `ContinuousVariable` now carries a `dispersion` column: how much
+the locations inside each block differ among themselves. It is the variance
+over a block's sub-blocks, averaged over the realizations, and it answers a
+different question from `latent_variance` — that one says how sure the model
+is *of* a block, this one says how much the block varies *within itself*. A
+well-drilled block can still be heterogeneous, and it is the second number,
+not the first, that says whether cutting the block finer would tell anyone
+anything. Nothing in the package reported change of support before this.
+It is taken from the sub-blocks before they are averaged away and *after* the
+warping has been undone, so it is a spread of grades rather than of the latent
+field — the two are not the same thing under a warping and only the first is
+reportable. Where a container does not discretize the column stays missing
+rather than zero: a location has no interior, and a block the model treats as
+its own centre has one it knows nothing about, whereas zero would read as
+"uniform inside", which is a claim nobody made. It follows the variable
+through subsetting, `as_data_frame`, the pyvista exports and `to_zarr`, and a
+vector variable's components each carry their own. See
+`docs/variable-block-models.md`, which is what this is the first step of
+
 ## version 0.5.6
 * `geoml.inducing` builds the inducing points a network is given, which until
 now had to be assembled by hand. `from_kmeans` puts them where the data is,
