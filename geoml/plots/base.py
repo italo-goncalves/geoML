@@ -61,7 +61,8 @@ class Selection(object):
         `"uncertainty"` on a vector or categorical one, or a metadata column
         written alongside -- so it is named rather than guessed at. A bare name
         is looked for on the variable being drawn and on the one containing it,
-        then in the metadata; `"Variable.column"` says exactly where; and an
+        then in the metadata; a path (`"Variable/column"`) says exactly
+        where; and an
         array of one value per location is taken as it comes. See
         `prepare.uncertainty_values`.
     """

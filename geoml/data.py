@@ -2793,6 +2793,33 @@ class _SpatialData(_TreeNode):
             return self.metadata.get(path[1])
         return super()._resolve(path)
 
+    def _variable_or_component(self, name):
+        """The variable called `name`, or the component of a vector one, and
+        the name of whatever owns it -- `None` for a variable of its own.
+
+        A composition is held as a single variable, so its parts are not among
+        `self.variables` and asking for `Zn` would otherwise mean reaching into
+        `Elements` by hand. Only the parts hold a grade -- the variable itself
+        carries nothing to contour -- so naming one has to work. The owner
+        comes back with it because an export labels a component by both names.
+        """
+        if name in self.variables:
+            return self.variables[name], None
+
+        for variable in self.variables.values():
+            components = getattr(variable, "components", None) or {}
+            if name in components:
+                return components[name], variable.name
+
+        known = set(self.variables)
+        for variable in self.variables.values():
+            known.update(
+                str(label) for label in
+                (getattr(variable, "components", None) or {}))
+        raise ValueError(
+            "no variable or component named %r; found %s"
+            % (name, ", ".join(sorted(known)) or "none"))
+
     def _finish_pyvista(self, target, kind, simulations=False, include="**"):
         """Fill a freshly built pyvista object and hand it back.
 
@@ -6589,33 +6616,6 @@ class BlockSet3D(PointData):
         if not cut:
             return None, None, None, None
         return origin, size, step, values
-
-    def _variable_or_component(self, name):
-        """The variable called `name`, or the component of a vector one, and
-        the name of whatever owns it -- `None` for a variable of its own.
-
-        A composition is held as a single variable, so its parts are not among
-        `self.variables` and asking for `Zn` would otherwise mean reaching into
-        `Elements` by hand. Only the parts hold a grade -- the variable itself
-        carries nothing to contour -- so naming one has to work. The owner
-        comes back with it because an export labels a component by both names.
-        """
-        if name in self.variables:
-            return self.variables[name], None
-
-        for variable in self.variables.values():
-            components = getattr(variable, "components", None) or {}
-            if name in components:
-                return components[name], variable.name
-
-        known = set(self.variables)
-        for variable in self.variables.values():
-            known.update(
-                str(label) for label in
-                (getattr(variable, "components", None) or {}))
-        raise ValueError(
-            "no variable or component named %r; found %s"
-            % (name, ", ".join(sorted(known)) or "none"))
 
     def get_contour(self, variable, value, attribute="prediction",
                     supersample=1):

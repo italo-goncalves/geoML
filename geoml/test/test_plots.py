@@ -1272,7 +1272,7 @@ def test_the_uncertainty_may_belong_to_the_variable_that_contains_the_grade(
     assert curves["kept"] == int(np.sum(doubt <= 0.5))
 
 
-def test_a_dotted_name_says_which_variable_to_read_it_from(trained):
+def test_a_path_says_which_variable_to_read_it_from(trained):
     model, point = trained
     grid = geoml.data.Grid2D(start=[0, 0], n=[8, 8], step=[12, 12])
     model.predict(grid, n_sim=6)
@@ -1283,12 +1283,20 @@ def test_a_dotted_name_says_which_variable_to_read_it_from(trained):
                                       uncertainty="uncertainty",
                                       max_uncertainty=0.5)
     by_name = prepare.grade_tonnage(grid, "a", cutoffs=3,
-                                    uncertainty="v.uncertainty",
+                                    uncertainty="v/uncertainty",
                                     max_uncertainty=0.5)
     assert by_name["kept"] == by_search["kept"]
 
-    with pytest.raises(KeyError, match="no column called"):
-        prepare.grade_tonnage(grid, "a", uncertainty="v.nonsense",
+    # a wrong path is answered with what is there
+    with pytest.raises(KeyError, match="'v' holds"):
+        prepare.grade_tonnage(grid, "a", uncertainty="v/nonsense",
+                              max_uncertainty=0.5)
+
+    # the dotted form is refused with the replacement spelled out, never
+    # silently reinterpreted: a `.` inside a label would make a wrong guess
+    # look like a working one
+    with pytest.raises(KeyError, match="use the path 'v/uncertainty'"):
+        prepare.grade_tonnage(grid, "a", uncertainty="v.uncertainty",
                               max_uncertainty=0.5)
 
 
