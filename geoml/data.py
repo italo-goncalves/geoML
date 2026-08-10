@@ -1412,19 +1412,25 @@ class _Variable(_TreeNode):
         this variable -- a cut-off for a grade, a boundary for a category --
         and empty where the variable declares none.
 
-        Asked of the variable rather than worked out from outside, because
-        what carries the answer differs by kind: a graded variable holds one
-        column per cut-off in a dict, a category holds a single column of its
-        own, and a variable made of components has whatever its components
-        have. Reaching in for an attribute called `divided` and hoping finds
-        an `_Attribute` on one and an `OrderedDict` on the other.
+        Asked of the variable rather than worked out from outside, which used
+        to be a necessity (`divided` was an `_Attribute` on a category and an
+        `OrderedDict` on a grade) and is now only about the names: the
+        storage is one shape, but a grade's decision renders `@ 1.5` because
+        someone declared that number, while a category's stays bare -- its
+        zero is an artefact of the log-odds, and `granite @ 0` would read as
+        noise. `_share_label` is that one difference.
         """
         shares = {}
+        for cutoff, attribute in (getattr(self, "divided", None) or {}).items():
+            shares[self._share_label(cutoff)] = attribute.values.to_numpy()
         for label, component in (
                 getattr(self, "components", None) or {}).items():
             for key, values in component.split_shares().items():
                 shares[("%s %s" % (label, key)).strip()] = values
         return shares
+
+    def _share_label(self, cutoff):
+        return "@ %g" % cutoff
 
     def _fill_pyvista(self, write, simulations=False, prefix=None):
         """`write(label, attribute)` for every filled column, named by path.
@@ -1823,10 +1829,6 @@ class ContinuousVariable(_Variable):
         # different question, and the one that says whether cutting the block
         # finer would settle anything. See `likelihood._divided`.
         self.divided = _col.OrderedDict()
-
-    def split_shares(self):
-        return {"@ %g" % cutoff: attr.values.to_numpy()
-                for cutoff, attr in self.divided.items()}
 
     def set_cutoffs(self, cutoffs):
         """The grades this variable is judged against.
@@ -2265,13 +2267,11 @@ class _Category(_Variable):
         self.divided = _col.OrderedDict()
         self.simulations = None
 
-    def split_shares(self):
-        # one boundary, its own, and no cut-off to name it by: the zero is
-        # an artefact of the log-odds, so the share keeps a bare name where a
-        # grade's says `@ 1.5`
-        if 0.0 not in self.divided:
-            return {}
-        return {"": self.divided[0.0].values.to_numpy()}
+    def _share_label(self, cutoff):
+        # the zero is an artefact of the log-odds, not a number anyone
+        # declared, so the share keeps a bare name where a grade's says
+        # `@ 1.5`
+        return ""
 
     def update(self, idx, **kwargs):
         self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
