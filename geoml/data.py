@@ -364,6 +364,49 @@ class VariablePath:
         return VariablePath(self.parts[:-1])
 
 
+def _subset_simulations(store, item):
+    """The `item` rows of a simulations store, without holding it whole.
+
+    `np.asarray(store)[item]` reads every realization of every location into
+    memory before throwing most of them away, which on a block model is
+    hundreds of gigabytes and the end of the session. Dask indexes the chunks
+    instead, so what is materialized is the answer rather than the source.
+    """
+    return _storage.ArrayStore.from_numpy(
+        _np.asarray(store.as_dask()[item]))
+
+
+def _copy_for_subset(variable):
+    """A deep copy of a variable, without what the subset is about to replace.
+
+    Two things a plain `deepcopy` drags in, both of them read in full and both
+    thrown away a line later. Its own simulations, which are the whole
+    `(n_data, n_sim)` array. And, less obviously, *every other variable in the
+    container*: an `_Attribute` holds a reference back to its container, so
+    the copy walks up to it and down again into everything else it holds.
+    Seeding the memo makes the copy share the container instead, and the
+    caller points the result at the new one with `set_coordinates`.
+    """
+    memo = {}
+    coordinates = getattr(variable, "coordinates", None)
+    if coordinates is not None:
+        memo[id(coordinates)] = coordinates
+
+    # the whole subtree, not just this node: a vector variable's realizations
+    # hang off its components
+    stashed = []
+    for _, node in variable.walk():
+        store = getattr(node, "simulations", None)
+        if store is not None:
+            stashed.append((node, store))
+            node.simulations = None
+    try:
+        return _copy.deepcopy(variable, memo)
+    finally:
+        for node, store in stashed:
+            node.simulations = store
+
+
 def _column_detail(attribute, status=True):
     """What a column shows in a printed tree: its type, or that it is empty."""
     detail = str(_np.dtype(attribute.values.dtype))
@@ -499,6 +542,20 @@ class _TreeNode(object):
         for family in self._DICT_FAMILIES:
             for key, attribute in (getattr(self, family, None) or {}).items():
                 yield (family, _path_key(key)), attribute
+
+    def set_coordinates(self, coordinates):
+        """Point this node, and everything under it, at a new container.
+
+        One walk instead of six hand-written lists, four of which had columns
+        missing: a component set only its prediction, a rock type set nothing
+        but its own reference, and every dict family was missed everywhere.
+        A stale reference is quiet until something asks the attribute how many
+        locations it has.
+        """
+        for _, node in self.walk():
+            node.coordinates = coordinates
+            for _, attribute in node.own_leaves():
+                attribute.coordinates = coordinates
 
     def node_attrs(self):
         """The facts describing this node, as `{name: value}`.
@@ -907,7 +964,14 @@ class _Attribute(object):
         return self.values.__array__().__repr__()
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        # A shallow copy, deliberately. An attribute points back at its
+        # container, so `deepcopy` walked up to it and down again into every
+        # other variable -- reading every store in the object, simulations
+        # included, to build a copy thrown away on the next line. The only
+        # thing here worth copying is the values, and those are replaced.
+        new_obj = _copy.copy(self)
+        if self.labels is not None:
+            new_obj.labels = list(self.labels)
         new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
         return new_obj
 
@@ -1406,9 +1470,6 @@ class _Variable(_TreeNode):
     def allocate_simulations(self, n_sim):
         raise NotImplementedError
 
-    def set_coordinates(self, coordinates):
-        raise NotImplementedError
-
     def fill_pyvista_cube(self, cube, prefix=None, simulations=False):
         raise NotImplementedError
 
@@ -1739,7 +1800,7 @@ class ContinuousVariable(_Variable):
         return new_var
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
         # the same list the Zarr round trip and `carry_to` walk, so a column
         # added in one place is subset in this one without being named twice
         for role in self._ZARR_ATTRS:
@@ -1752,8 +1813,7 @@ class ContinuousVariable(_Variable):
             (key, val[item]) for key, val in self.divided.items())
 
         if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
+            new_obj.simulations = _subset_simulations(self.simulations, item)
 
         if len(self.quantiles) > 0:
             for key, val in self.quantiles.items():
@@ -1883,28 +1943,6 @@ class ContinuousVariable(_Variable):
         self.simulations = _storage.ArrayStore.allocate(
             (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
             owner=self.coordinates)
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.measurements.coordinates = coordinates
-        self.latent_mean.coordinates = coordinates
-        self.latent_variance.coordinates = coordinates
-        self.prediction.coordinates = coordinates
-        self.dispersion.coordinates = coordinates
-        self.noise_variance.coordinates = coordinates
-
-        for share in self.proportions.values():
-            share.coordinates = coordinates
-        for share in self.divided.values():
-            share.coordinates = coordinates
-
-        if len(self.quantiles) > 0:
-            for p in self.quantiles.values():
-                p.coordinates = coordinates
-
-        if len(self.probabilities) > 0:
-            for q in self.probabilities.values():
-                q.coordinates = coordinates
 
     def fill_pyvista_cube(self, cube, prefix=None, sigma=None,
                           simulations=False):
@@ -2099,12 +2137,6 @@ class VectorVariable(_Variable):
         pred = _np.stack([self.components[v].get_predictions() for v in self.labels], axis=1)
         return pred
 
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        for comp in self.components.values():
-            comp.set_coordinates(coordinates)
-        self.uncertainty.coordinates = coordinates
-
     @classmethod
     def from_variable(cls, coordinates, variable):
         new_var = cls(
@@ -2132,7 +2164,7 @@ class VectorVariable(_Variable):
         return new_var
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
 
         for name, comp in self.components.items():
             new_obj.components[name] = comp[item]
@@ -2239,7 +2271,7 @@ class _Component(ContinuousVariable):
         self.latent_variance = None
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
         # driven by the list rather than written out: a column named there and
         # forgotten here survives the subset at its old length, and only
         # something that reads it afterwards finds out. A component has no
@@ -2251,8 +2283,7 @@ class _Component(ContinuousVariable):
                 setattr(new_obj, role, column[item])
 
         if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
+            new_obj.simulations = _subset_simulations(self.simulations, item)
 
         if len(self.quantiles) > 0:
             for key, val in self.quantiles.items():
@@ -2263,18 +2294,6 @@ class _Component(ContinuousVariable):
                 new_obj.probabilities[key] = val[item]
 
         return new_obj
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.prediction.coordinates = coordinates
-
-        if len(self.quantiles) > 0:
-            for p in self.quantiles.values():
-                p.coordinates = coordinates
-
-        if len(self.probabilities) > 0:
-            for q in self.probabilities.values():
-                q.coordinates = coordinates
 
     def as_data_frame(self, latent=False, **kwargs):
         # `ContinuousVariable`'s, with the latent space off: a component has
@@ -2443,7 +2462,7 @@ class _Category(_Variable):
         return {"": self.divided.values.to_numpy()}
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
         new_obj.probability = self.probability[item]
         new_obj.indicator = self.indicator[item]
         new_obj.indicator_mean = self.indicator_mean[item]
@@ -2453,19 +2472,9 @@ class _Category(_Variable):
         new_obj.divided = self.divided[item]
 
         if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
+            new_obj.simulations = _subset_simulations(self.simulations, item)
 
         return new_obj
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.probability.coordinates = coordinates
-        self.indicator_mean.coordinates = coordinates
-        self.indicator_variance.coordinates = coordinates
-        self.indicator_predicted.coordinates = coordinates
-        self.proportion.coordinates = coordinates
-        self.divided.coordinates = coordinates
 
     def as_data_frame(self, probability=True, predictions=True,
                       latent=True, simulations=False):
@@ -2641,17 +2650,6 @@ class RockTypeVariable(_Variable):
             self.boundary = self._Attribute(
                 coordinates, measurements_a != measurements_b, dtype=bool)
 
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-
-        for comp in self.components.values():
-            comp.set_coordinates(coordinates)
-
-        self.predicted.coordinates = coordinates
-        self.entropy.coordinates = coordinates
-        self.uncertainty.coordinates = coordinates
-        self.boundary.coordinates = coordinates
-
     def get_measurements(self):
         # not allowing partial missing data
         out = [self.components[label].indicator.values.to_numpy()
@@ -2690,7 +2688,7 @@ class RockTypeVariable(_Variable):
         return new_var
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
 
         new_obj.entropy = self.entropy[item]
         new_obj.uncertainty = self.uncertainty[item]
@@ -3080,7 +3078,7 @@ class BinaryVariable(_Variable):
         return new_var
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
         new_obj.average = self.probability[item]
         new_obj.indicator = self.indicator[item]
         new_obj.latent_mean = self.latent_mean[item]
@@ -3092,22 +3090,10 @@ class BinaryVariable(_Variable):
         new_obj.weights = self.weights[item]
 
         if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
+            new_obj.simulations = _subset_simulations(self.simulations, item)
 
         return new_obj
 
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.probability.coordinates = coordinates
-        self.indicator.coordinates = coordinates
-        self.latent_mean.coordinates = coordinates
-        self.latent_variance.coordinates = coordinates
-        self.predicted.coordinates = coordinates
-        self.entropy.coordinates = coordinates
-        self.uncertainty.coordinates = coordinates
-        self.measurements.coordinates = coordinates
-        self.weights.coordinates = coordinates
 
     def as_data_frame(self, measurements=True, latent=True,
                       predictions=True, simulations=True):
@@ -3789,10 +3775,14 @@ class PointData(_PointBased):
                                     self.coordinate_labels)
 
     def __getitem__(self, item):
-        self_copy = _copy.deepcopy(self)
-        new_obj = self_copy._subset_coordinates(item)
-        self_copy._subset_metadata(new_obj, item)
-        for name, var in self_copy.variables.items():
+        # read straight off this container rather than off a `deepcopy` of it:
+        # the copy duplicated every store -- simulations included -- and every
+        # one of them was then thrown away by the subset that replaced it.
+        # Nothing here mutates the source; each variable's `__getitem__`
+        # builds its own object.
+        new_obj = self._subset_coordinates(item)
+        self._subset_metadata(new_obj, item)
+        for name, var in self.variables.items():
             new_obj.variables[name] = var[item]
             new_obj.variables[name].set_coordinates(new_obj)
         return new_obj
@@ -4175,10 +4165,9 @@ class _GriddedData(_PointBased):
         if not keep.any():
             return None
 
-        self_copy = _copy.deepcopy(self)
         new_obj = PointData.from_array(coords[keep], self.coordinate_labels)
         self._subset_metadata(new_obj, keep)
-        for name, var in self_copy.variables.items():
+        for name, var in self.variables.items():
             new_obj.variables[name] = var[keep]
             new_obj.variables[name].set_coordinates(new_obj)
         return new_obj

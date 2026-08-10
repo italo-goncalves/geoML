@@ -177,6 +177,28 @@ def test_a_missing_path_says_what_is_there():
         point.get("nope")
 
 
+def test_subsetting_never_holds_every_realization_at_once(monkeypatch):
+    """`np.asarray(store)[mask]` reads every realization of every location
+    before throwing most of them away; on a block model that is the end of
+    the session."""
+    import geoml.storage as storage
+    point = _points()
+    grade = point.variables["au"]
+    grade.allocate_simulations(4)
+    grade.simulations[:, :] = np.arange(24.0).reshape(6, 4)
+
+    def explode(self, *args, **kwargs):
+        if len(self.shape) == 2:
+            raise AssertionError("the whole simulations store was read")
+        return np.asarray(self._array)
+
+    monkeypatch.setattr(storage.ArrayStore, "__array__", explode)
+    kept = point[np.array([True, False, True, False, True, False])]
+
+    assert np.allclose(np.asarray(kept.variables["au"].simulations._array),
+                       np.arange(24.0).reshape(6, 4)[::2])
+
+
 def test_simulations_are_a_leaf_of_their_own_shape():
     point = _points()
     grade = point.variables["au"]
