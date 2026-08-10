@@ -3604,6 +3604,203 @@ class GaussianData(PointData):
         return self.variance[index], None
 
 
+def _cover_box(data, step, margin, decimals, n_dim=None, cells=False):
+    """`(start, n, step, labels)` for a lattice covering `data`'s box.
+
+    The box is widened by `margin` (a fraction of its extent, per side or per
+    axis if given as an array), and the lower corner is then *floored* to
+    `decimals` rather than rounded -- a round start reads better on a section,
+    and flooring means the cover never shrinks below what the margin asked
+    for. The count grows to keep the top covered, so the last node or cell
+    always reaches past the margined maximum.
+
+    `cells=True` counts cells instead of nodes: `start` is then the box
+    corner, and the caller places the first centre half a step in.
+    """
+    box = data.bounding_box
+    if n_dim is not None and box.n_dim != n_dim:
+        raise DimensionMismatchError(
+            "%s covers %d-dimensional data; this has %d"
+            % (data.__class__.__name__, n_dim, box.n_dim))
+    n_dim = box.n_dim
+
+    step = _np.broadcast_to(
+        _np.asarray(step, dtype=float).ravel(), (n_dim,))
+    if _np.any(step <= 0):
+        raise ValueError("step must be positive; got %r" % (step,))
+
+    margin = _np.asarray(margin, dtype=float)
+    if margin.shape == ():
+        margin = _np.full([2, n_dim], float(margin))
+    elif margin.shape == (2,):
+        margin = _np.stack([margin] * n_dim, axis=1)
+    elif margin.shape == (n_dim,):
+        margin = _np.stack([margin] * 2, axis=0)
+    elif margin.shape != (2, n_dim):
+        raise ValueError(
+            "margin is a fraction of the box's extent: one number, one per "
+            "side (2,), one per axis (%d,), or one per side and axis "
+            "(2, %d); got shape %s" % (n_dim, n_dim, margin.shape))
+
+    low, high = box.min[0].astype(float), box.max[0].astype(float)
+    extent = high - low
+    low = low - extent * margin[0]
+    high = high + extent * margin[1]
+
+    factor = 10.0 ** decimals
+    start = _np.floor(low * factor) / factor
+    count = _np.ceil((high - start) / step - _TOL_COVER).astype(int)
+    n = _np.maximum(count, 1) if cells else count + 1
+
+    return start, n, _np.array(step), getattr(data, "coordinate_labels", None)
+
+
+# floating arithmetic at a box edge must not buy a whole extra row of cells
+_TOL_COVER = 1e-9
+
+
+def _cell_means(n_cells, cell, values):
+    """The mean of `values` over each cell; NaN where nothing fell."""
+    frame = _pd.DataFrame({
+        "cell": cell, "value": _np.asarray(values, dtype=float)})
+    frame = frame[frame["cell"] >= 0].dropna(subset=["value"])
+    out = _np.full(n_cells, _np.nan)
+    grouped = frame.groupby("cell")["value"].mean()
+    out[grouped.index.to_numpy()] = grouped.to_numpy()
+    return out
+
+
+def _dominant_labels(n_cells, cell, values):
+    """The label most often seen in each cell; blank where two tie.
+
+    A tie has no dominant label -- picking by sort order, which is what the
+    old per-class aggregators did, reports an answer where there is none --
+    so an ambiguous cell comes back empty instead.
+    """
+    frame = _pd.DataFrame({"cell": cell, "value": values})
+    frame = frame[(frame["cell"] >= 0) & frame["value"].notna()
+                  & (frame["value"] != "")]
+    out = _np.full(n_cells, "", dtype=object)
+    if len(frame) == 0:
+        return out
+    counts = frame.groupby(
+        ["cell", "value"]).size().reset_index(name="_n")
+    best = counts.groupby("cell")["_n"].transform("max")
+    winners = counts[counts["_n"] == best].groupby("cell")["value"].agg(
+        ["first", "size"])
+    settled = winners[winners["size"] == 1]
+    out[settled.index.to_numpy()] = settled["first"].to_numpy()
+    return out
+
+
+def _aggregate_onto(target, data, variables=None, metadata=True):
+    """The shared body of `aggregate`: one operation per variable kind.
+
+    `target` says which of its cells holds each sample (`_cell_of`); after
+    that nothing depends on what the target is -- a grid, a rotated grid or a
+    block model of several sizes all aggregate the same way, which is what
+    replaced three near-copies of this logic per class.
+    """
+    cell = target._cell_of(data)
+    n_cells = target.n_data
+
+    if variables is None:
+        chosen = list(data.variables)
+    else:
+        chosen = [str(name) for name in _np.atleast_1d(variables)]
+    for name in chosen:
+        if name not in data.variables:
+            raise ValueError(
+                "no variable named %r to aggregate; found %s"
+                % (name, ", ".join(sorted(data.variables)) or "none"))
+        variable = data.variables[name]
+
+        if isinstance(variable, CompositionalVariable):
+            # averaged part by part, then closed again: means of parts do not
+            # sum to one on their own, and a composition that does not close
+            # is not a composition
+            parts = _np.stack(
+                [_cell_means(n_cells, cell,
+                             part.measurements.values.to_numpy())
+                 for part in variable.components.values()], axis=1)
+            total = parts.sum(axis=1, keepdims=True)
+            with _np.errstate(invalid="ignore"):
+                parts = _np.where(total > 0, parts / total, _np.nan)
+            target.variables[name] = CompositionalVariable(
+                name, target, list(variable.labels), parts)
+        elif isinstance(variable, VectorVariable):
+            parts = _np.stack(
+                [_cell_means(n_cells, cell,
+                             part.measurements.values.to_numpy())
+                 for part in variable.components.values()], axis=1)
+            target.variables[name] = VectorVariable(
+                name, target, list(variable.labels), parts)
+        elif isinstance(variable, RockTypeVariable):
+            # both sides of a contact vote, as they always have: a boundary
+            # measurement names the category either side of it and neither
+            # side is the measurement
+            votes = _dominant_labels(
+                n_cells, _np.tile(cell, 2),
+                _np.concatenate([variable.measurements_a.to_numpy(),
+                                 variable.measurements_b.to_numpy()]))
+            target.variables[name] = CategoricalVariable(
+                name, target, list(variable.labels), votes)
+        elif isinstance(variable, BinaryVariable):
+            target.variables[name] = BinaryVariable(
+                name, target, list(variable.labels),
+                _dominant_labels(n_cells, cell,
+                                 variable.measurements.to_numpy()))
+        elif isinstance(variable, ContinuousVariable):
+            target.variables[name] = ContinuousVariable(
+                name, target,
+                _cell_means(n_cells, cell,
+                            variable.measurements.values.to_numpy()))
+        else:
+            raise TypeError(
+                "%r is a %s, which aggregate does not know how to carry"
+                % (name, type(variable).__name__))
+
+    if metadata:
+        for name, column in data.metadata.items():
+            if column.labels is None:
+                target.add_metadata(
+                    name, _cell_means(n_cells, cell,
+                                      column.values.to_numpy()))
+            else:
+                target.add_metadata(
+                    name, _dominant_labels(n_cells, cell, column.to_numpy()))
+
+
+def _fitted_rotation(data, decimals):
+    """Azimuth, dip and rake fitted to `data`'s points, rounded to `decimals`.
+
+    The angles are rounded *before* anything is built from them -- a grid at
+    47.3182 degrees is nobody's intention -- so the box is measured in the
+    rounded frame and the data stays covered.
+    """
+    coordinates = getattr(data, "coordinates", None)
+    if coordinates is not None:
+        points = _np.asarray(coordinates, dtype=float)
+    elif hasattr(data, "_desurveyed_points"):
+        # drillholes are interval data and expose no `coordinates`; the
+        # cloud their bounding box is measured from serves the fit
+        points = data._desurveyed_points()
+    else:
+        raise TypeError(
+            "%s carries no coordinates to fit a rotation to"
+            % type(data).__name__)
+    if points.shape[1] != 3:
+        raise DimensionMismatchError(
+            "a rotation is fitted to 3-dimensional points; these have %d"
+            % points.shape[1])
+
+    fitted = _gmt.rotation_matrix_from_points(points)
+    azimuth, dip, rake = _gmt.angles_from_rotation_matrix(fitted)
+    azimuth, dip, rake = (float(_np.round(angle, decimals))
+                          for angle in (azimuth, dip, rake))
+    return points, azimuth, dip, rake
+
+
 class _GriddedData(_PointBased):
     """Base class for regular grids; also its own lazy coordinate provider.
 
@@ -3716,6 +3913,79 @@ class _GriddedData(_PointBased):
 
         return _np.stack(cell_id, axis=1)
 
+    # dimension a subclass covers; None reads it off the data (GridND)
+    _GRID_NDIM = None
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0):
+        """
+        A grid covering another object's bounding box.
+
+        Parameters
+        ----------
+        data
+            Any spatial object, drillholes included -- whatever has a
+            bounding box.
+        step
+            The step size, one number or one per direction.
+        margin : float or array
+            How far past the data's box to reach, as a fraction of its
+            extent: one number, one per side ``(low, high)``, one per axis,
+            or one per side and axis with shape ``(2, n_dim)``.
+        decimals : int
+            The box corner is floored to this many decimals -- round numbers
+            read better on a section -- and the number of steps grows to keep
+            the far side covered, so the margin is never eaten by the
+            rounding.
+        """
+        start, n, step, labels = _cover_box(
+            data, step, margin, decimals, n_dim=cls._GRID_NDIM)
+        if len(start) == 1:
+            return cls(start=float(start[0]), n=int(n[0]),
+                       step=float(step[0]),
+                       labels=labels[0] if labels else None)
+        return cls(start=start, n=n, step=step, labels=labels)
+
+    def _cell_of(self, data):
+        """Which cell each of `data`'s locations falls in, as this object's
+        own row index; `-1` outside the grid."""
+        ids = self.index_data(data)
+        shape = _np.asarray(self.grid_size)
+        inside = _np.all((ids >= 0) & (ids < shape), axis=1)
+        flat = _np.full(len(ids), -1, dtype=_np.int64)
+        # the first axis varies fastest in `_generate`, which is Fortran order
+        flat[inside] = _np.ravel_multi_index(
+            ids[inside].T, shape, order="F")
+        return flat
+
+    def aggregate(self, data, variables=None, metadata=True):
+        """Carries another object's measurements onto this object's cells.
+
+        One method instead of one per kind: each variable says what it is and
+        the operation follows. Continuous values (and each part of a vector)
+        average; categories keep the label most often measured in the cell,
+        both sides of a contact voting; a composition is averaged and closed
+        again; numeric metadata averages and coded metadata keeps the
+        dominant label. What is truly ambiguous comes back empty -- two
+        labels tied for a cell name no winner, and a cell nothing fell in
+        holds NaN or blank.
+
+        Parameters
+        ----------
+        data
+            A point-based object whose variables are measured.
+        variables : str or list, optional
+            Which of `data`'s variables to carry; all of them by default.
+        metadata : bool
+            Whether to carry the metadata columns as well.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        _aggregate_onto(self, data, variables, metadata)
+        return self
+
     def as_data_frame(self, metadata=True, **kwargs):
         df = _PointBased.as_data_frame(self, metadata=metadata, **kwargs)
         for i, s in enumerate(self.coordinate_labels):
@@ -3769,6 +4039,8 @@ class _GriddedData(_PointBased):
 
 
 class Grid1D(_GriddedData):
+    _GRID_NDIM = 1
+
     """
     Equally spaced points in 1D.
 
@@ -3819,115 +4091,6 @@ class Grid1D(_GriddedData):
         self.grid_size = [int(n)]
         self.origin = start
 
-    def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
-        cols = ["xid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = \
-            data.variables[variable].measurements_b.to_numpy()
-        raw_data = _pd.concat([raw_data, raw_data_2],
-                              axis=0).reset_index(drop=True)
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
-        cols = ["xid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = BinaryVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.arange(int(self.grid_size[0]))[:, None]
-        cols = ["xid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-
-        # aggregating
-        data_2 = raw_data.groupby(cols).mean()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = grid_full.join(data_2.set_index(cols), on=cols) \
-            .reset_index(drop=False)
-        self.variables[variable] = ContinuousVariable(
-            variable, self, data_3["value"].values
-        )
-
     @classmethod
     def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
         if not isinstance(margin, (list, tuple)):
@@ -3943,6 +4106,8 @@ class Grid1D(_GriddedData):
 
 
 class Grid2D(_GriddedData):
+    _GRID_NDIM = 2
+
     """
     Equally spaced points in 2D.
 
@@ -3999,130 +4164,6 @@ class Grid2D(_GriddedData):
         self.grid_size = [int(num) for num in n]
         self.origin = start
 
-    def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y)
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = \
-            data.variables[variable].measurements_b.to_numpy()
-        raw_data = _pd.concat([raw_data, raw_data_2],
-                              axis=0).reset_index(drop=True)
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y)
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = BinaryVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y)
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-
-        # aggregating
-        data_2 = raw_data.groupby(cols).mean()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = grid_full.join(data_2.set_index(cols), on=cols)\
-            .reset_index(drop=False)
-        self.variables[variable] = ContinuousVariable(
-            variable, self, data_3["value"].values
-        )
-
     @classmethod
     def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
         margin = _np.array(margin)
@@ -4140,6 +4181,8 @@ class Grid2D(_GriddedData):
 
 
 class Grid3D(_GriddedData):
+    _GRID_NDIM = 3
+
     """
     Equally spaced points in 3D.
 
@@ -4198,142 +4241,6 @@ class Grid3D(_GriddedData):
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = [int(num) for num in n]
         self.origin = start
-
-    def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y, z)
-                             for z in range(int(self.grid_size[2]))
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid", "zid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-        raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = \
-            data.variables[variable].measurements_b.to_numpy()
-        raw_data = _pd.concat([raw_data, raw_data_2],
-                              axis=0).reset_index(drop=True)
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y, z)
-                             for z in range(int(self.grid_size[2]))
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid", "zid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = BinaryVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y, z)
-                             for z in range(int(self.grid_size[2]))
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid", "zid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-
-        # aggregating
-        data_2 = raw_data.groupby(cols).mean()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = grid_full.join(data_2.set_index(cols), on=cols) \
-            .reset_index(drop=False)
-        self.variables[variable] = ContinuousVariable(
-            variable, self, data_3["value"].values
-        )
 
     def make_interpolator(self, coordinates):
         return _gint.cubic_conv_3d(coordinates,
@@ -5852,9 +5759,7 @@ class BlockSet3D(PointData):
 
         super().__init__(
             _pd.DataFrame(self._centres(), columns=list(labels)), list(labels))
-        self._bounding_box = BoundingBox(
-            self.box_corner,
-            self.box_corner + self.lattice_shape * self.base_step)
+        self._bounding_box = self._lattice_bounding_box()
 
     # ------------------------------------------------------------------ #
     # geometry
@@ -6013,9 +5918,7 @@ class BlockSet3D(PointData):
         # refining an edge block moves its centre nearer the boundary. Two
         # sets over the same ground would then disagree about their extent.
         # The real box is the lattice, which no refinement changes.
-        new._bounding_box = BoundingBox(
-            self.box_corner,
-            self.box_corner + self.lattice_shape * self.base_step)
+        new._bounding_box = new._lattice_bounding_box()
 
         if carry:
             # A block that was not split is the same block on the same
@@ -6124,9 +6027,7 @@ class BlockSet3D(PointData):
         new.metadata = {}
         new._init_coordinates(new._centres(), list(labels))
         # the lattice is the box, not the spread of the centres -- see `split`
-        new._bounding_box = BoundingBox(
-            self.box_corner,
-            self.box_corner + self.lattice_shape * self.base_step)
+        new._bounding_box = new._lattice_bounding_box()
 
         if carry:
             source = _np.concatenate(
@@ -6287,6 +6188,43 @@ class BlockSet3D(PointData):
 
         return marked & (self._level < self.max_levels)
 
+    def _lattice_bounding_box(self):
+        """The lattice is the box, not the spread of the centres -- see
+        `split`. A rotated subclass answers with the rotated corners."""
+        return BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0,
+                  discretization=(2, 2, 2), max_levels=3):
+        """
+        A block model covering another object's bounding box.
+
+        As `Grid3D.from_data`, counting blocks rather than nodes: the
+        margined box's lower *corner* is floored to `decimals`, and enough
+        blocks follow to cover the far side, so the corner is round and the
+        margin never shrinks.
+
+        Parameters
+        ----------
+        data
+            Any spatial object, drillholes included.
+        step
+            The coarse block size, one number or one per direction.
+        margin : float or array
+            A fraction of the data's extent; see `Grid3D.from_data`.
+        decimals : int
+            Decimals to floor the box corner to.
+        discretization, max_levels
+            As the constructor takes them.
+        """
+        corner, n, step, labels = _cover_box(
+            data, step, margin, decimals, n_dim=3, cells=True)
+        return cls(start=corner + step / 2, n=n, step=step,
+                   discretization=discretization, max_levels=max_levels,
+                   labels=labels if labels else ("X", "Y", "Z"))
+
     # ------------------------------------------------------------------ #
     # sample data
     # ------------------------------------------------------------------ #
@@ -6336,56 +6274,18 @@ class BlockSet3D(PointData):
 
         return found
 
-    @staticmethod
-    def _held_by(block, values):
-        """`values` against the block holding each, the strays dropped."""
-        frame = _pd.DataFrame({"block": block, "value": values})
-        return frame[frame["block"] >= 0].dropna(subset=["value"])
+    def _cell_of(self, data):
+        # which block, already this object's own row index
+        return self.index_data(data)
 
-    def _dominant(self, block, values):
-        """The label most often measured in each block, blank where none was.
+    def aggregate(self, data, variables=None, metadata=True):
+        """Carries another object's measurements onto the blocks holding them.
 
-        The count decides it, as on a grid; ties go to whichever label sorts
-        last, which is arbitrary but has to be something.
+        As `Grid3D.aggregate` -- one method, the operation following each
+        variable's kind -- over blocks of several sizes.
         """
-        counts = self._held_by(block, values).groupby(
-            ["block", "value"]).size().reset_index(name="_n")
-        winner = counts.sort_values("_n").groupby("block").tail(1)
-        out = _np.full(self.n_data, "", dtype=object)
-        out[winner["block"].to_numpy()] = winner["value"].to_numpy()
-        return out
-
-    def aggregate_numeric(self, data, variable):
-        """The mean of `data`'s measurements over the block holding them."""
-        held = self._held_by(
-            self.index_data(data),
-            data.variables[variable].measurements.values.to_numpy())
-        mean = _np.full(self.n_data, _np.nan)
-        grouped = held.groupby("block")["value"].mean()
-        mean[grouped.index.to_numpy()] = grouped.to_numpy()
-        self.variables[variable] = ContinuousVariable(variable, self, mean)
-
-    def aggregate_categorical(self, data, variable):
-        """The dominant category in each block.
-
-        Both sides of a contact vote, as on a grid: a boundary measurement
-        names the category either side of it and neither is the measurement.
-        """
-        source = data.variables[variable]
-        block = self.index_data(data)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, source.labels,
-            self._dominant(_np.tile(block, 2),
-                           _np.concatenate([source.measurements_a.to_numpy(),
-                                            source.measurements_b.to_numpy()])))
-
-    def aggregate_binary(self, data, variable):
-        """The dominant label in each block."""
-        source = data.variables[variable]
-        self.variables[variable] = BinaryVariable(
-            variable, self, source.labels,
-            self._dominant(self.index_data(data),
-                           source.measurements.to_numpy()))
+        _aggregate_onto(self, data, variables, metadata)
+        return self
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
                             fraction=None, uncovered=_np.nan):
@@ -6796,19 +6696,14 @@ class RotatedGrid3D(Grid3D):
         return _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
 
     def index_data(self, data):
-        return super().index_data(self.rotate(data))
-
-    def aggregate_categorical(self, data, variable):
-        raise NotImplementedError
-        # super().aggregate_categorical(self.rotate(data), variable)
-
-    def aggregate_binary(self, data, variable):
-        raise NotImplementedError
-        # super().aggregate_binary(self.rotate(data), variable)
-
-    def aggregate_numeric(self, data, variable):
-        raise NotImplementedError
-        # super().aggregate_numeric(self.rotate(data), variable)
+        # into the lattice frame, so the *inverse* of the map the grid's own
+        # coordinates leave by. It used to apply the forward map -- probed:
+        # only the odd node of the grid landed in its own cell -- and nothing
+        # noticed, because everything downstream of index_data raised
+        # NotImplementedError until the aggregates were unified.
+        return super().index_data(
+            rotate(data, self.origin, self.azimuth, self.dip, self.rake,
+                   reverse=True))
 
     def make_interpolator(self, coordinates):
         raise NotImplementedError
@@ -6841,6 +6736,60 @@ class RotatedGrid3D(Grid3D):
         return NotImplementedError
 
     @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0):
+        """
+        A rotated grid fitted to another object's spread.
+
+        The rotation is fitted to the data's own points (a drillhole's
+        desurveyed cloud serves where there are no point coordinates), and
+        the angles are rounded to `decimals` *before* anything is built from
+        them -- a grid at 47.3182 degrees is nobody's intention -- so the box
+        is measured in the rounded frame and the data stays covered. The
+        world origin is rounded to the same `decimals`.
+
+        Parameters
+        ----------
+        data
+            Any spatial object with 3-dimensional coordinates, drillholes
+            included.
+        step
+            The step size, one number or one per direction.
+        margin : float or array
+            A fraction of the unrotated box's extent; see `Grid3D.from_data`.
+        decimals : int
+            Decimals for the origin *and* for the azimuth, dip and rake, in
+            degrees.
+        """
+        points, azimuth, dip, rake = _fitted_rotation(data, decimals)
+        mat = _gmt.rotation_matrix(azimuth, dip, rake)
+
+        centre = _np.mean(points, axis=0, keepdims=True)
+        unrotated = _np.matmul(points - centre, mat.T)
+
+        margin = _np.asarray(margin, dtype=float)
+        if margin.shape == ():
+            margin = _np.full([2, 3], float(margin))
+        elif margin.shape == (2,):
+            margin = _np.stack([margin] * 3, axis=1)
+
+        low = unrotated.min(axis=0)
+        high = unrotated.max(axis=0)
+        extent = high - low
+        low = low - extent * margin[0]
+        high = high + extent * margin[1]
+
+        step = _np.broadcast_to(
+            _np.asarray(step, dtype=float).ravel(), (3,))
+        n = _np.ceil((high - low) / step - _TOL_COVER).astype(int) + 1
+
+        origin = _np.squeeze(_np.matmul(low[None, :], mat) + centre)
+        origin = _np.round(origin, decimals)
+
+        labels = getattr(data, "coordinate_labels", None)
+        return cls(start=origin, n=n, step=_np.array(step), azimuth=azimuth,
+                   dip=dip, rake=rake, labels=labels)
+
+    @classmethod
     def from_points(cls, points, step, margin=0.1, rounding_decimals=0, labels=None):
         if isinstance(points, _PointBased):
             labels = points.coordinate_labels if labels is None else None
@@ -6870,6 +6819,121 @@ class RotatedGrid3D(Grid3D):
         origin = _np.round(origin, rounding_decimals)
 
         return cls(start=origin, n=n, step=step, azimuth=az, dip=dip, rake=rake, labels=labels)
+
+
+class RotatedBlockSet3D(BlockSet3D):
+    """
+    A variable-size block model rotated about its starting block.
+
+    The lattice is `BlockSet3D`'s, untouched: splitting, grouping, the
+    refinement criteria and the integer arithmetic all happen in the
+    unrotated frame, which is what keeps them exact. The rotation is applied
+    where coordinates *leave* -- the block centres, the sub-block fan-out a
+    prediction reads, the exported hexahedra -- and removed where coordinates
+    *come in* (`index_data`, and so `aggregate`). Every mesh test and
+    assignment reads sub-block positions through `get_batched_coordinates`,
+    so geometry against surfaces and solids works in world coordinates with
+    nothing overridden.
+    """
+
+    def __init__(self, start, n, step, azimuth=0.0, dip=0.0, rake=0.0,
+                 discretization=(2, 2, 2), max_levels=3,
+                 labels=("X", "Y", "Z")):
+        self.azimuth = float(azimuth)
+        self.dip = float(dip)
+        self.rake = float(rake)
+        # the pivot: the first coarse block's centre, as `RotatedGrid3D`
+        # turns about its own origin
+        self._pivot = _np.asarray(start, dtype=float)
+        super().__init__(start, n, step, discretization=discretization,
+                         max_levels=max_levels, labels=labels)
+
+    def rotation_matrix(self):
+        return _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
+
+    def _to_world(self, coordinates):
+        return _np.matmul(coordinates - self._pivot,
+                          self.rotation_matrix()) + self._pivot
+
+    def _centres(self):
+        return self._to_world(super()._centres())
+
+    def _lattice_bounding_box(self):
+        corner = self.box_corner
+        far = corner + self.lattice_shape * self.base_step
+        corners = _np.array(list(_iter.product(
+            *zip(corner, far))), dtype=float)
+        return BoundingBox.from_array(self._to_world(corners))
+
+    def index_data(self, data):
+        # into the lattice frame: the inverse of the map the centres left by
+        return super().index_data(
+            rotate(data, self._pivot, self.azimuth, self.dip, self.rake,
+                   reverse=True))
+
+    def get_batched_coordinates(self, index=None):
+        if index is None:
+            index = _np.arange(self._n_data)
+        # fan out in the lattice frame, where a sub-block is an axis-aligned
+        # offset, then rotate every row: the offsets turn with the blocks
+        centres = BlockSet3D._centres(self)[index]
+        size = self.block_size[index]
+        coords = centres[:, None, :] + self._sub_grid[None, :, :] \
+            * size[:, None, :]
+        coords = self._to_world(coords.reshape(-1, 3))
+        splits = None if self.rows_per_location == 1 else len(centres)
+        return coords, splits
+
+    def _hex_mesh(self, origin, size, step):
+        # built on the lattice, turned as one piece: the welding is by shared
+        # corner indices, which a rotation cannot tear
+        mesh = super()._hex_mesh(origin, size, step)
+        mesh.points = self._to_world(_np.asarray(mesh.points, dtype=float))
+        return mesh
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0,
+                  discretization=(2, 2, 2), max_levels=3):
+        """
+        A rotated block model fitted to another object's spread.
+
+        As `RotatedGrid3D.from_data` -- the rotation fitted to the points and
+        rounded to `decimals` (degrees) before the box is measured -- counting
+        blocks rather than nodes.
+        """
+        points, azimuth, dip, rake = _fitted_rotation(data, decimals)
+        mat = _gmt.rotation_matrix(azimuth, dip, rake)
+
+        centre = _np.mean(points, axis=0, keepdims=True)
+        unrotated = _np.matmul(points - centre, mat.T)
+
+        margin = _np.asarray(margin, dtype=float)
+        if margin.shape == ():
+            margin = _np.full([2, 3], float(margin))
+        elif margin.shape == (2,):
+            margin = _np.stack([margin] * 3, axis=1)
+
+        low = unrotated.min(axis=0)
+        high = unrotated.max(axis=0)
+        extent = high - low
+        low = low - extent * margin[0]
+        high = high + extent * margin[1]
+
+        step = _np.broadcast_to(
+            _np.asarray(step, dtype=float).ravel(), (3,))
+        n = _np.maximum(
+            _np.ceil((high - low) / step - _TOL_COVER).astype(int), 1)
+
+        # `start` is the first block's centre, half a step past the corner
+        start = _np.squeeze(
+            _np.matmul((low + step / 2)[None, :], mat) + centre)
+        start = _np.round(start, decimals)
+
+        labels = getattr(data, "coordinate_labels", None)
+        return cls(start=start, n=n, step=_np.array(step), azimuth=azimuth,
+                   dip=dip, rake=rake, discretization=discretization,
+                   max_levels=max_levels,
+                   labels=labels if labels else ("X", "Y", "Z"))
 
 
 # --------------------------------------------------------------------------- #
@@ -6936,12 +7000,12 @@ def _write_container(group, container):
         return {"class": "Section3D",
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "grid_shape": [int(x) for x in container.grid_shape]}
-    if type(container) is BlockSet3D:
+    if type(container) in (BlockSet3D, RotatedBlockSet3D):
         # the lattice itself, in integers, plus what it is counted in; the
         # centres are derived from those and are not stored twice
         write("_origin", container._origin)
         write("_level", container._level)
-        return {"class": "BlockSet3D",
+        meta = {"class": type(container).__name__,
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "box_corner": [float(x) for x in container.box_corner],
                 "base_step": [float(x) for x in container.base_step],
@@ -6949,6 +7013,12 @@ def _write_container(group, container):
                 "discretization":
                     [int(d) for d in container.discretization],
                 "max_levels": int(container.max_levels)}
+        if type(container) is RotatedBlockSet3D:
+            meta.update(azimuth=float(container.azimuth),
+                        dip=float(container.dip),
+                        rake=float(container.rake),
+                        pivot=[float(x) for x in container._pivot])
+        return meta
     if isinstance(container, Mesh3D):
         write("_coordinates", container.coordinates)
         write("_triangles", container.triangles)
@@ -7015,10 +7085,12 @@ def _rebuild_container(meta, group):
         section._init_coordinates(read_store("_coordinates"), meta["labels"])
         section.grid_shape = [int(x) for x in meta["grid_shape"]]
         return section
-    if cls_name == "BlockSet3D":
+    if cls_name in ("BlockSet3D", "RotatedBlockSet3D"):
         # Bypass __init__, which builds a full coarse grid: the lattice that
         # was saved is whatever it had been refined to since.
-        blocks = BlockSet3D.__new__(BlockSet3D)
+        chosen = RotatedBlockSet3D if cls_name == "RotatedBlockSet3D" \
+            else BlockSet3D
+        blocks = chosen.__new__(chosen)
         _PointBased.__init__(blocks)
         blocks.max_levels = int(meta["max_levels"])
         blocks.discretization = [int(d) for d in meta["discretization"]]
@@ -7027,14 +7099,18 @@ def _rebuild_container(meta, group):
         blocks.box_corner = _np.asarray(meta["box_corner"], dtype=float)
         blocks.lattice_shape = _np.asarray(meta["lattice_shape"],
                                            dtype=_np.int64)
+        if cls_name == "RotatedBlockSet3D":
+            # before the centres: `_centres` turns through these
+            blocks.azimuth = float(meta["azimuth"])
+            blocks.dip = float(meta["dip"])
+            blocks.rake = float(meta["rake"])
+            blocks._pivot = _np.asarray(meta["pivot"], dtype=float)
         blocks._origin = read("_origin").astype(_np.int64)
         blocks._level = read("_level").astype(_np.int64)
         # a saved model is one that was predicted into, not one mid-refinement
         blocks._fresh = _np.zeros(len(blocks._origin), dtype=bool)
         blocks._init_coordinates(blocks._centres(), meta["labels"])
-        blocks._bounding_box = BoundingBox(
-            blocks.box_corner,
-            blocks.box_corner + blocks.lattice_shape * blocks.base_step)
+        blocks._bounding_box = blocks._lattice_bounding_box()
         return blocks
 
     meshes = {"Mesh3D": Mesh3D, "Surface3D": Surface3D, "Solid3D": Solid3D,

@@ -963,7 +963,14 @@ class DrillholeData(_data._SpatialData):
                 f"were taken as vertical")
         return traces
 
-    def _update_bounding_box(self):
+    def _desurveyed_points(self):
+        """The holes as a point cloud: collars, stations, toes, interval ends.
+
+        What the bounding box is measured from, and what a grid fitting a
+        rotation to the drilling (`RotatedGrid3D.from_data`) reads -- the
+        drillholes never expose `coordinates` of their own, being interval
+        data rather than points.
+        """
         points = [self.collar[["X", "Y", "Z"]].values]
         for name, trace in self._traces.items():
             points.append(trace.station_coordinates)
@@ -979,8 +986,11 @@ class DrillholeData(_data._SpatialData):
                                               table.data[TO].values))
 
         points = _np.concatenate(points, axis=0)
-        points = points[_np.all(_np.isfinite(points), axis=1)]
-        self._bounding_box = _data.BoundingBox.from_array(points)
+        return points[_np.all(_np.isfinite(points), axis=1)]
+
+    def _update_bounding_box(self):
+        self._bounding_box = _data.BoundingBox.from_array(
+            self._desurveyed_points())
 
     def __str__(self):
         s = "Object of class " + self.__class__.__name__ + "\n\n"

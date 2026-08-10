@@ -1020,8 +1020,7 @@ def test_measurements_aggregate_into_the_blocks_that_hold_them():
     points.add_categorical_variable(
         "rock", np.where(xyz[:, 2] > 70, "waste", "ore"))
 
-    blocks.aggregate_numeric(points, "g")
-    blocks.aggregate_categorical(points, "rock")
+    blocks.aggregate(points)
 
     held = blocks.index_data(points)
     mean = np.asarray(blocks.variables["g"].measurements.values)

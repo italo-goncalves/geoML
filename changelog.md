@@ -88,6 +88,44 @@ every variable kind the way `get_contour` always did
 walk; the subset, the carry, the frame, the fills, the persistence and the
 repr all run on the same traversal, so a column or a family added to the
 declarations reaches all of them the day it is added
+* **Every grid and block class builds itself around data:
+`from_data(data, step, margin=0.1, decimals=0)`.** `data` is any spatial
+object — drillholes included, whose desurveyed cloud stands in for the
+coordinates they do not have — `margin` a fraction of its extent (one number,
+per side, per axis, or both), and `decimals` how many decimals the box corner
+is floored to: round numbers read better on a section, flooring rather than
+rounding means the margin is never eaten, and the count of steps grows to
+keep the far side covered. On the rotated classes `decimals` also rounds the
+fitted azimuth, dip and rake (degrees) — a grid at 47.3182 degrees is
+nobody's intention — and the rounding happens *before* the box is measured,
+so the data stays covered by the rounded frame
+* **`RotatedBlockSet3D`: the variable-size block model, rotated.** The
+lattice is `BlockSet3D`'s untouched — splitting, grouping, refinement and the
+integer arithmetic all happen in the unrotated frame, which is what keeps
+them exact — and the rotation is applied where coordinates leave (centres,
+the sub-block fan-out a prediction reads, the exported hexahedra) and removed
+where they come in (`index_data`). Every mesh test and assignment reads
+sub-block positions through `get_batched_coordinates`, so geometry against
+surfaces and solids works in world coordinates with nothing overridden;
+`split` keeps the rotation, the Zarr round trip keeps the angles, and a model
+predicts onto it unchanged
+* **One `aggregate(data, variables=None, metadata=True)` replaces the nine
+per-class `aggregate_numeric`/`_categorical`/`_binary`.** Each variable says
+what it is and the operation follows: continuous values (and each part of a
+vector) average; categories keep the label most often measured in the cell,
+both sides of a contact voting; a composition is averaged and *closed again*,
+a cell missing any part coming back missing whole; numeric metadata averages
+and coded metadata keeps the dominant label. **What is truly ambiguous is
+empty**: two labels tied for a cell name no winner, where the old aggregators
+picked whichever sorted last and reported an answer that was not there. Built
+on `index_data`, so a grid, a rotated grid and a block model of several sizes
+all aggregate through the same body — the grids used to re-derive their cell
+ids in near-duplicate pandas per dimension
+* Fixed, pre-existing: `RotatedGrid3D.index_data` applied the forward
+rotation where the inverse was needed, so almost nothing landed in the cell
+that held it — probed: the odd node of the grid's own coordinates found its
+own cell, by luck. Nothing ever noticed because everything downstream of it
+raised `NotImplementedError` until the aggregates were unified
 * **`container.drop(names)` removes variables.** Whole variables only: a
 composition without one part is a different composition, so a component's
 name is refused with its owner named — `'a' is a component of 'assay'` —
