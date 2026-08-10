@@ -2239,9 +2239,9 @@ class CompositionalVariable(VectorVariable):
 
 class _Category(_Variable):
     _ZARR_ATTRS = ("probability", "indicator", "indicator_mean",
-                   "indicator_variance", "indicator_predicted", "proportion",
-                   "divided")
+                   "indicator_variance", "indicator_predicted")
     _ZARR_HAS_SIMS = True
+    _DICT_FAMILIES = ("proportions", "divided")
 
     def __init__(self, name, coordinates, indicator):
         super().__init__(name, coordinates)
@@ -2252,23 +2252,26 @@ class _Category(_Variable):
         self.indicator_mean = self._Attribute(coordinates)
         self.indicator_variance = self._Attribute(coordinates)
         self.indicator_predicted = self._Attribute(coordinates)
-        # How much of each block this category holds, counted over the
-        # sub-blocks: 1 where it takes the whole block, 0 where it takes none,
-        # and in between where the block straddles a contact. A different
-        # thing from `probability`, which is how sure the model is that the
-        # block as a whole belongs here.
-        self.proportion = self._Attribute(coordinates)
-        # And whether the block is cut in two by this category's boundary,
-        # which is the question splitting answers -- see `likelihood._divided`
-        self.divided = self._Attribute(coordinates)
+        # How much of each block this category holds, and whether the block
+        # is cut in two by this category's boundary -- see
+        # `likelihood._divided`. The same dicts a grade keeps, keyed by the
+        # one cut-off a category has: zero on `ind_skew`, its log-odds
+        # against its best rival, which is not a number anyone declared but
+        # the level set the contact *is*. One shape for both kinds, so
+        # nothing downstream asks which it is holding. `proportions` is a
+        # different thing from `probability`, which is how sure the model is
+        # that the block as a whole belongs here.
+        self.proportions = _col.OrderedDict()
+        self.divided = _col.OrderedDict()
         self.simulations = None
 
     def split_shares(self):
-        # one boundary, its own, and no cut-off to name it by: a category's
-        # crossing is always zero
-        if not self.divided._has_content():
+        # one boundary, its own, and no cut-off to name it by: the zero is
+        # an artefact of the log-odds, so the share keeps a bare name where a
+        # grade's says `@ 1.5`
+        if 0.0 not in self.divided:
             return {}
-        return {"": self.divided.values.to_numpy()}
+        return {"": self.divided[0.0].values.to_numpy()}
 
     def update(self, idx, **kwargs):
         self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
@@ -2276,10 +2279,12 @@ class _Category(_Variable):
         self.indicator_variance.values[idx] = kwargs["variance"].numpy()
         self.probability.values[idx] = kwargs["probability"].numpy()
 
-        if "proportion" in kwargs.keys():
-            self.proportion.values[idx] = kwargs["proportion"].numpy()
-        if "divided" in kwargs.keys():
-            self.divided.values[idx] = kwargs["divided"].numpy()
+        for family in ("proportions", "divided"):
+            if family in kwargs.keys():
+                target = getattr(self, family)
+                if 0.0 not in target:
+                    target[0.0] = self._Attribute(self.coordinates)
+                target[0.0].values[idx] = kwargs[family].numpy()
 
         self.simulations[idx, :] = kwargs["simulations"].numpy()
 
@@ -2459,7 +2464,7 @@ class RockTypeVariable(_Variable):
             values = {"mean": m, "variance": v, "indicator": i,
                       "probability": p, "simulations": s}
             if share is not None:
-                values["proportion"] = share
+                values["proportions"] = share
                 values["divided"] = cut
             self.components[lb].update(idx, **values)
 

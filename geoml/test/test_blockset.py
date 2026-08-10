@@ -632,14 +632,19 @@ def test_a_category_splits_a_block_where_its_boundary_runs():
     model.predict(blocks, n_sim=8)
 
     variable = blocks.variables["rock"]
+    # the labels stay bare -- the zero is an artefact of the log-odds, not a
+    # number anyone declared, so `rock granite @ 0` would only read as noise.
+    # Pinned here so a later tidy-up does not "make it consistent".
     assert sorted(blocks.block_shares()) == ["rock granite", "rock schist"]
 
     for component in variable.components.values():
-        share = component.proportion.values.to_numpy()
+        # the same dict a grade keeps, keyed by the one cut-off a category
+        # has: zero on `ind_skew`, whose zero level set the contact is
+        share = component.proportions[0.0].values.to_numpy()
         assert np.all((share >= 0.0) & (share <= 1.0))
         assert np.any(share >= 1.0 - 1e-12)      # blocks wholly one rock
     # the shares of the two categories account for the whole block
-    total = sum(c.proportion.values.to_numpy()
+    total = sum(c.proportions[0.0].values.to_numpy()
                 for c in variable.components.values())
     assert np.allclose(total, 1.0)
 
