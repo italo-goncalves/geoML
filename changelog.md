@@ -1,3 +1,188 @@
+## version 0.5.8
+* **The likelihood noise is integrated out of a prediction rather than drawn.**
+What a prediction reports is `E[g(z + eps)]` — the value the ground would show
+once the measurement error and the variability below the model's resolution
+were averaged over — instead of `g(z + eps)` for some `eps` pulled out of a
+random number generator. There is no point in mapping noise, and a block of
+any size integrates it away in any case; that is the conceptual difference
+from a conventional geostatistical simulation, which conflates signal and
+noise. It matters more than it sounds: on the Macpass assays, not integrating
+costs 2.8% of a standard deviation on silver and 17.3% on a composition, and
+the error is a bias, always in the same direction, because a back-transform
+that bends is convex where grades are skewed
+* **The accuracy plot asks the model what a measurement would read.** Its
+intervals used to come from the stored simulations, which since this release
+hold the ground with the noise integrated out — so scoring them against assays
+compared an interval for one quantity against observations of another, and
+read as wild over-confidence (on the Macpass composition, a spread 4.7 times
+too narrow: G fell to 0.22 where the ensemble's own histogram was matching the
+data well). `model.predict_measurements(newdata)` returns the predictive
+distribution of a *sample* instead — `n_sim * n_nodes` equally likely values
+per location, the same computation `predict` makes but stopped one step
+earlier, before the nodes are averaged. Equal-share nodes rather than
+Gauss-Hermite: a rule built to make an integral exact carries a few far-flung
+points at weights of 1e-4, which is excellent for a mean and useless as a
+picture of a distribution. Nothing is stored, `newdata` is untouched, and
+`variable.simulations` keeps its one meaning. Measured on a synthetic
+reproduction of the Macpass case, this puts G at 0.96-0.99 where the stored
+simulations gave 0.14-0.24, and where widening them by `noise_variance` — the
+cheap alternative, tried and rejected — reached only 0.78-0.87 while
+over-covering in the middle, a symmetric interval being the wrong shape for a
+skewed conditional. `Explorer.accuracy` and `Interactive.accuracy` now need
+the model the selection was built with, and build the array once per
+selection. A likelihood carrying no warping is passed over rather than asked:
+a categorical one keeps its noise in the probabilities and has no value for a
+sample to scatter around, which `_Likelihood.warped` now says out loud instead
+of leaving to whoever reaches for `warping` first
+* **`spread_check`**, a new figure in both backends: what the model claims a
+value's spread is, against what it turned out to be, along the predicted
+value. A residual holds two things at once — how wrong the model was about the
+ground, and how far the assay fell from the ground — so it can only be read
+against the two together, which is why the figure carries three things: the
+noise as a band, the whole claim as a line, and the observed root mean square
+residual as points. On the line is calibrated, below it hedging, above it
+over-confident. The level axis is what says *which* term is at fault: a
+warping bends, so the noise grows with the value while the model's own
+uncertainty does not, and a shortfall widening with the grade is the noise
+where a flat one is the posterior. Points sitting inside the noise band alone
+are the plainest case — the fitted noise over-explains the errors by itself,
+which is what an under-trained model looks like. Unlike `accuracy` it needs no
+model: everything it reads is on the container. `bins` takes a count or the
+positions, as a histogram does; a count gives **equal-count** bins, a
+predicted grade being skewed enough that equal width would leave the top bins
+holding a sample each. The per-bin values are drawn as steps rather than as a
+line through the centres — one number per bin is not a curve — and the points
+span their bin, so a wide bar reads as a thin stretch of data
+* Subsetting a composition carries every column. `_Component.__getitem__`
+listed the ones to cut by hand and stopped at `prediction`, so a held-out set
+came back with `dispersion` and `noise_variance` still at the *original*
+length — wrong only later, in whatever read one against the new length. Both
+it and `ContinuousVariable.__getitem__` now walk `_ZARR_ATTRS`, the list the
+Zarr round trip and `carry_to` already use, so a column added in one place is
+subset without being named a fourth time
+* A composition's parts now carry a `dispersion`, which they never had:
+`CompositionalVariable.update` overrides `VectorVariable`'s and its parts are
+`_Component`, which overrides `ContinuousVariable`'s and reads different keys,
+so the column added when block discretization went in reached every kind of
+variable except this one. A compositional block model reported no within-block
+spread on any part, silently
+* `grade_tonnage(log_mass=True)` puts the tonnage on a logarithmic scale, in
+both backends. Most of a deposit clears the low cut-offs, so on a linear axis
+the high ones are a flat line along the bottom and the spread between the
+realizations there — which is where the decision usually is — cannot be seen
+at all. Only the tonnage: the grade axis spans one order of magnitude at most
+and a log scale there would say nothing
+* A continuous variable gained a third variance, `noise_variance`, and with it
+a third question. `latent_variance` is how sure the model is of the value,
+`dispersion` is how much the ground varies inside a block, and this is how far
+a fresh *measurement* of the value would fall from it — the likelihood noise
+carried into the variable's own units. It is the second moment of the same
+quadrature that produces the value, so it costs nothing beyond an accumulator,
+and it is what has to be added back to compare a prediction with an assay,
+since the prediction itself reports the ground. On a block it averages over
+the sub-blocks, being what a sample taken inside the block would read. Missing
+rather than zero where the prediction was made with `include_noise=False`:
+nobody claimed a measurement there is exact
+* The consequences run through the whole prediction path. There is no longer a
+noisy field and a clean one to keep apart, so a block's cut-off shares, its
+dispersion and its simulations are read from one set of numbers and the
+back-transform runs **once instead of twice**. Nothing is drawn, so the noise
+follows no seed and cannot depend on how a prediction was batched. And the
+noise no longer contributes randomness that refining could not resolve, which
+`refine`'s criteria used to have to look past
+* `include_noise` is now a boolean and defaults to `True`. The `'delta'`
+method is gone: measured against a 40 001-node reference on a Walker-style
+chain it left an error of 7.0% of a standard deviation — *exactly* what not
+correcting at all costs, the third-order terms being the same size as the
+second. `white_noise` and `_add_noise` are gone with it
+* How the integral is done is decided by the warping, and the two cases differ
+only in which array of nodes is used — nothing in `likelihood.py` asks which
+one it got. A warping that works on each component alone gets **eight
+Gauss-Hermite nodes**, the same node applied to every component, so the cost
+does not grow with their number; it is exact to five figures. One that mixes
+them has to be integrated over all of them at once and gets **64 scrambled
+Sobol points**, reaching 0.2-0.6% where plain Monte Carlo of the same size
+gives 4-9%. The scramble is seeded, so the rule is fixed rather than random.
+`_Warping.elementwise` is what picks, `False` for `PCA`/`RobustPCA`,
+`CenteredLogRatio`, `Rotation`, `ScaledSimplex` and
+`ContinuousNormalizingFlow`, and a chain is elementwise only if every link is
+— one mixing link and everything after it sees the mixture, which is worth
+3-4% of a standard deviation on the Macpass chains. A test checks every
+warping's declaration against a numerical Jacobian
+* Non-Gaussian noise needs nothing special. The nodes live in the unit cube
+and reach the noise through the likelihood's own quantile function, which is
+how it was ever drawn, so `Laplace`, `Huber` and `EpsilonInsensitive` go
+through the same code
+* `warping.Center` could not be constructed at all: `_np.ones[size]` where
+`_np.ones(size)` was meant
+* Points made from drillholes remember where they came from. Every conversion
+— `as_point_data`, `get_contacts` and `as_classification_input` — carries the
+hole as the metadata column `HOLEID` and the sample's own length as `LENGTH`.
+Metadata rather than variables, so the models never see them while subsetting,
+`as_data_frame` and `to_zarr` all keep them: `HOLEID` is what a
+leave-one-hole-out split reads, and `LENGTH` is the support each value stands
+for, which any weighting by it needs. A contact has no length, so
+`get_contacts` records none; in `as_classification_input` the contacts come
+through at zero, the zero support being the whole reason they are added
+* **A category is scored against the best of the others in two row maxima.**
+`_CategoricalLikelihood.entropy_and_indicators` built `ind_skew` by masking
+one category out at a time — a scatter over the whole `(n, n_cat)` indicator
+matrix per category, driven by a `tf.map_fn`, so the work grew with the
+number of categories and the loop went through a `while_loop` on the way. It
+is the same quantity read differently: the rival of whoever wins is the
+runner-up and the rival of everybody else is the winner, so the row maximum
+and the row maximum with the winners dropped answer for every category at
+once. Where two categories share the maximum they are each other's rival, so
+both still come out at zero and the contact stays the zero level set — which
+is why the count of winners is taken rather than assumed to be one. Bit for
+bit the same numbers (the old sentinel was -999 and an indicator is at worst
+`log(1e-6)`, so the masking never bound), and on the GPU 4.8x faster at two
+categories, 11.9x at twelve — 0.5-0.8 ms a batch of 20 000 rows against
+2.6-9.7, and flat in the category count where it used to grow with it. This
+matters at every prediction on a discretized block model, where the call
+happens before aggregation and so sees `prod(discretization)` times as many
+rows. A top-2 pass was the obvious replacement and is *not* what went in:
+`tf.math.top_k` costs a flat ~19 ms a call on the GPU whatever its shape,
+dtype or `k`, so it would have been two to seven times slower than the
+scatters it replaced while looking like an optimization on paper
+* The two nested Python loops that built `log_prob_final` in
+`CategoricalGaussianIndicator.predict` and `HierarchicalGaussianIndicator.
+predict` — "the probability of being class i and not being the others",
+assembled a column at a time — are one broadcast: the row of negative
+log-probabilities summed, with each category's own swapped for its positive
+one. **This is a graph-size change, not a speed one**, and it is worth saying
+which: prediction runs 1.0-1.3x faster, because the time goes into the
+`log_prob`/`log_survival_function` pair rather than the summation, but the
+graph drops from 2427 operations to 102 at 24 categories (687 at 12), which
+is 12x less tracing and, with `jit_predict`, a 4.0 s XLA compilation instead
+of 1.6. The reformulation sums the whole row and takes one term back out
+where the loop never added it, so the numbers are no longer bit-identical:
+checked against the pre-change file across every output of `predict` for both
+classes, the worst disagreement is 4e-15 relative, four ulps, and it stays
+there when the variance is small enough to push the log-probabilities to 1e7
+* **A composition's parts export everything the other continuous variables
+do.** `as_data_frame` gave `assay_a_prediction` and stopped there, leaving out
+`dispersion` and `noise_variance`, so a block model's composition reported
+neither — the columns were written, filled and persisted, and only the export
+could not see them. `_Component.as_data_frame` was a copy of
+`ContinuousVariable`'s minus the latent columns, so every column added
+upstream had to be added there too and the omission was silent. It delegates
+now, with `latent=False`, which is what the copy was for; what the parent
+writes is guarded on the attribute being there and holding something, so a
+component's absent latent space and a column no prediction ever filled are
+both simply skipped. This is the fifth bug of that family — `update`,
+`__getitem__` and two rounds of `carry_to` were the others — and the second
+fixed by deleting a duplicate rather than adding to it
+* **An exported component carries the name of the variable it belongs to.**
+`assay - a - prediction` in pyvista, where it used to be `a - prediction`: a
+bare `a` says nothing about which assay it is, and two variables may each hold
+a component so named, in which case one quietly overwrote the other.
+Categories already did this (`rock - granite - probability`) — the continuous
+side accepted a `prefix` argument in all three `fill_pyvista_*` and dropped it
+on the floor. `BlockSet3D.get_contour` reads those labels back, so it now
+takes the owner's name from `_variable_or_component`, which returns it
+alongside the component
+
 ## version 0.5.7
 * `BlockSet3D.index_data` locates sample data in a model of several block
 sizes, and `aggregate_numeric`/`aggregate_categorical`/`aggregate_binary`

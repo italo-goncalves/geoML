@@ -319,11 +319,11 @@ def test_a_refined_block_disperses_less_than_its_parent():
     answer and not a worse one."""
     model = _model()
     blocks = _blockset()
-    model.predict(blocks, n_sim=12, include_noise=None)
+    model.predict(blocks, n_sim=12, include_noise=False)
     coarse = np.nanmean(blocks.variables["y"].dispersion.values.to_numpy())
 
     fine = blocks.split(np.ones(blocks.n_data, dtype=bool))
-    model.predict(fine, n_sim=12, include_noise=None)
+    model.predict(fine, n_sim=12, include_noise=False)
     assert np.nanmean(
         fine.variables["y"].dispersion.values.to_numpy()) < coarse
 
@@ -422,25 +422,29 @@ def test_a_share_of_a_block_is_between_none_and_all_of_it():
     assert np.any(share >= 1.0 - 1e-12)
 
 
-def test_the_criterion_ignores_the_noise():
-    """Noise is the part of a block's spread that cutting cannot resolve, so
-    a block straddling a cut-off only on account of it would be cut for
-    nothing. The simulations still carry it."""
+def test_the_criterion_and_the_prediction_see_one_field():
+    """The noise being integrated out rather than drawn, there is no longer a
+    noisy field and a clean one to choose between: a block's cut-off shares,
+    its dispersion and its simulations are all read from the same numbers, and
+    none of them carries a spread that cutting the block could not resolve.
+
+    This model's warping is the default `ZScore`, which is affine, so the
+    integral has nothing to correct and turning it off changes nothing at
+    all -- `test_noise_integration.py` is where a bending one is measured."""
     model = _ore_model()
 
-    noisy, clean = _ore_blocks(), _ore_blocks()
-    model.predict(noisy, n_sim=8, include_noise='monte_carlo')
-    model.predict(clean, n_sim=8, include_noise=None)
+    integrated, latent = _ore_blocks(), _ore_blocks()
+    model.predict(integrated, n_sim=8)
+    model.predict(latent, n_sim=8, include_noise=False)
 
     for role in ("proportions", "divided"):
         assert np.allclose(
-            getattr(noisy.variables["au"], role)[1.0].values.to_numpy(),
-            getattr(clean.variables["au"], role)[1.0].values.to_numpy())
-    assert np.allclose(noisy.variables["au"].dispersion.values.to_numpy(),
-                       clean.variables["au"].dispersion.values.to_numpy())
-    # the predictions themselves must differ, or the noise did nothing
-    assert not np.allclose(np.asarray(noisy.variables["au"].simulations),
-                           np.asarray(clean.variables["au"].simulations))
+            getattr(integrated.variables["au"], role)[1.0].values.to_numpy(),
+            getattr(latent.variables["au"], role)[1.0].values.to_numpy())
+    assert np.allclose(integrated.variables["au"].dispersion.values.to_numpy(),
+                       latent.variables["au"].dispersion.values.to_numpy())
+    assert np.allclose(np.asarray(integrated.variables["au"].simulations),
+                       np.asarray(latent.variables["au"].simulations))
 
 
 def test_being_unsure_is_not_a_reason_to_split():
@@ -572,6 +576,29 @@ def test_only_the_named_variables_get_a_say():
     assert blocks.block_shares(split_on="au") == blocks.block_shares()
     with pytest.raises(ValueError, match="no variable named"):
         blocks.needs_splitting(split_on="nope")
+
+
+def test_a_category_is_scored_against_the_best_of_the_others():
+    """The rival is the best of the *others*: the runner-up for whoever wins,
+    the winner for everybody else. Two categories that tie are each other's
+    rival, so both come out at zero -- which is what puts the contact on the
+    zero level set instead of a hair to one side of it."""
+    prob = np.array([[0.5, 0.3, 0.2],       # one winner
+                     [0.4, 0.4, 0.2],       # two tied
+                     [1 / 3, 1 / 3, 1 / 3]])  # all tied
+    var = np.ones_like(prob)
+    skew = geoml.likelihood.CategoricalGaussianIndicator \
+        .entropy_and_indicators(prob, var, var)[2].numpy()
+
+    log_p = np.log(prob + 1e-6)
+    expected = np.array(
+        [[log_p[i, j] - max(log_p[i, k] for k in range(3) if k != j)
+          for j in range(3)] for i in range(3)])
+    assert np.allclose(skew, expected)
+
+    assert skew[0, 0] > 0 and np.all(skew[0, 1:] < 0)
+    assert np.all(skew[1, :2] == 0.0) and skew[1, 2] < 0
+    assert np.all(skew[2] == 0.0)
 
 
 def _rock_model(seed=1234):

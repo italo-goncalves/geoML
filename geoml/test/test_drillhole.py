@@ -16,7 +16,8 @@ import pytest
 
 import geoml
 import geoml.drillhole as drillhole
-from geoml.drillhole import DrillholeData, IntervalTable, HOLE, FROM, TO
+from geoml.drillhole import (DrillholeData, IntervalTable, HOLE, FROM, TO,
+                             LENGTH)
 
 
 def _collar(holes=("H1",), x=0.0, y=0.0, z=100.0, length=100.0,
@@ -444,6 +445,38 @@ def test_as_point_data_builds_the_right_variable_types():
     assert isinstance(point.variables["rock"], geoml.data.CategoricalVariable)
 
 
+def _two_holes():
+    """Two holes with intervals of three different lengths."""
+    holes = _drillholes(collar=_collar(holes=("H1", "H2"), dip=90.0,
+                                       azimuth=0.0, length=6.0))
+    holes.add_intervals(
+        "assay",
+        pd.DataFrame({"HoleID": ["H1", "H1", "H2"],
+                      "From": [0.0, 2.0, 0.0], "To": [2.0, 6.0, 3.0],
+                      "grade": [1.0, 2.0, 3.0]}),
+        hole="HoleID", fr="From", to="To")
+    return holes
+
+
+def test_as_point_data_carries_the_hole_and_the_length():
+    point = _two_holes().as_point_data()
+
+    assert list(point.get_metadata(HOLE)) == ["H1", "H1", "H2"]
+    np.testing.assert_allclose(point.get_metadata(LENGTH), [2.0, 4.0, 3.0])
+
+    # metadata, not variables: the model must not see either of them
+    assert HOLE not in point.variables
+    assert LENGTH not in point.variables
+
+
+def test_the_hole_survives_the_conversion_and_a_subset():
+    point = _two_holes().as_point_data()
+    kept = point[np.asarray(point.get_metadata(HOLE)) == "H1"]
+
+    assert list(kept.get_metadata(HOLE)) == ["H1", "H1"]
+    np.testing.assert_allclose(kept.get_metadata(LENGTH), [2.0, 4.0])
+
+
 def test_empty_composites_are_dropped():
     frame = pd.DataFrame({"HoleID": "H1", "From": [0.0, 8.0], "To": [2.0, 10.0],
                           "grade": [1.0, 2.0]})
@@ -652,6 +685,25 @@ def test_classification_input_mixes_interior_points_with_contacts():
     # interior points know only their own rock type
     assert set(first[~boundary]) == {"ore", "waste"}
     assert isinstance(point.variables["rock"], geoml.data.RockTypeVariable)
+
+
+def test_contacts_carry_the_hole_but_no_length():
+    contacts = _two_rock_holes().get_contacts("litho")
+
+    assert list(contacts.get_metadata(HOLE)) == ["H1"]
+    assert LENGTH not in contacts.metadata
+
+
+def test_classification_input_gives_the_contacts_zero_length():
+    point = _two_rock_holes().as_classification_input("litho", length=2.0)
+
+    rock = point.variables["rock"]
+    boundary = rock.measurements_a.to_numpy() != rock.measurements_b.to_numpy()
+
+    length = point.get_metadata(LENGTH)
+    assert set(point.get_metadata(HOLE)) == {"H1"}
+    np.testing.assert_allclose(length[boundary], 0.0)
+    np.testing.assert_allclose(length[~boundary], 2.0)
 
 
 def test_classification_input_accepts_an_order():

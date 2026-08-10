@@ -939,7 +939,7 @@ class VGPNetwork(_GPModel):
         return traced(*args, **kwargs)
 
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
-                     n_sim=1, seed=0, include_noise='delta', n_splits=None):
+                     n_sim=1, seed=0, include_noise=True, n_splits=None):
         # The posterior is refreshed once by `predict` and snapshotted into
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
@@ -967,12 +967,12 @@ class VGPNetwork(_GPModel):
                     lik.predict(
                         mu, var, sim, exp_var,
                         include_noise=include_noise,
-                        n_splits=n_splits, seed=seed, **v_inp
+                        n_splits=n_splits, **v_inp
                     )
                 )
             return output
 
-    def predict(self, newdata, n_sim=20, include_noise='monte_carlo',
+    def predict(self, newdata, n_sim=20, include_noise=True,
                 where=None):
         """
         Makes a prediction on the specified coordinates.
@@ -984,8 +984,14 @@ class VGPNetwork(_GPModel):
             The object's variables will be updated.
         n_sim : int
             Number of predictive samples to draw.
-        include_noise : str
-            The method to handle the noise. Either 'monte_carlo' (default), 'delta', or None to predict without noise.
+        include_noise : bool
+            Whether to account for the likelihood noise, which is *integrated
+            out* rather than drawn: a prediction reports the value the ground
+            would show once the measurement error and the variability below
+            the model's resolution are averaged over. It is a deterministic
+            correction, and a large one on a skewed variable -- leaving it out
+            biases the answer low. Turn it off only to see the latent field
+            itself.
         where : array-like, optional
             One boolean per location, or the indices of the locations to
             predict. The rest are left exactly as they are, variables and
@@ -1022,24 +1028,8 @@ class VGPNetwork(_GPModel):
                 newdata.variables[v].allocate_simulations(n_sim)
             variable_inputs.append(self.data.variables[v].prediction_input())
 
-        # prediction in batches. A discretized block fans out into several rows
-        # before it reaches the model, so the batch is measured in those rows:
-        # otherwise prediction_batch_size would mean prod(discretization) times
-        # as much work here as it does on a grid of points.
-        batch_size = max(1, self.options.prediction_batch_size
-                         // newdata.rows_per_location)
-        rows = _np.arange(newdata.n_data)
-        if where is not None:
-            where = _np.asarray(where)
-            rows = _np.flatnonzero(where) if where.dtype == bool else where
-        # the batches index into the chosen rows, so `update` still writes
-        # each result to the location it came from
-        batch_id = [rows[batch] for batch in
-                    self.options.batch_index(len(rows), batch_size=batch_size)]
-        n_batches = len(batch_id)
-
-        def batch_pred(x, x_var=None, n_splits=None):
-            out = self.predict_raw(
+        def batch_pred(x, x_var, n_splits):
+            return self.predict_raw(
                 x,
                 variable_inputs,
                 x_var=x_var,
@@ -1048,7 +1038,30 @@ class VGPNetwork(_GPModel):
                 include_noise=include_noise,
                 n_splits=n_splits
             )
-            return out
+
+        for batch, output in self._over_batches(newdata, batch_pred, where):
+            for v, upd in zip(self.variables, output):
+                newdata.variables[v].update(batch, **upd)
+
+    def _over_batches(self, newdata, call, where=None):
+        """Runs `call(coordinates, variance, n_splits)` over `newdata`.
+
+        A discretized block fans out into several rows before it reaches the
+        model, so the batch is measured in those rows: otherwise
+        `prediction_batch_size` would mean `prod(discretization)` times as much
+        work here as it does on a grid of points.
+
+        Yields `(rows, result)`, the rows being indices into `newdata` so that
+        a caller can write each result back to the location it came from.
+        """
+        batch_size = max(1, self.options.prediction_batch_size
+                         // newdata.rows_per_location)
+        rows = _np.arange(newdata.n_data)
+        if where is not None:
+            where = _np.asarray(where)
+            rows = _np.flatnonzero(where) if where.dtype == bool else where
+        batch_id = [rows[batch] for batch in
+                    self.options.batch_index(len(rows), batch_size=batch_size)]
 
         # Refresh the posterior once (the parameters are fixed during
         # prediction) and snapshot each node's state into Variables, so the
@@ -1059,29 +1072,86 @@ class VGPNetwork(_GPModel):
             _latent.refresh_cached(self.latent_network, self.options.jitter)
         else:
             self.latent_network.refresh(self.options.jitter)
+
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
                 print("\rProcessing batch %s of %s       "
-                      % (str(i + 1), str(n_batches)), end="")
+                      % (str(i + 1), str(len(batch_id))), end="")
 
             data_coords, splits = newdata.get_batched_coordinates(batch)
             data_var, _ = newdata.get_batched_variance(batch)
 
-            output = batch_pred(
-                _tf.constant(data_coords, _tf.float64),
-                _tf.constant(data_var, _tf.float64),
-                n_splits=splits
-            )
-
-            for v, upd in zip(self.variables, output):
-                newdata.variables[v].update(batch, **upd)
+            yield batch, call(_tf.constant(data_coords, _tf.float64),
+                              _tf.constant(data_var, _tf.float64), splits)
 
         if self.options.verbose:
             print("\n")
 
+    def predict_measurements(self, newdata, n_sim=20, n_nodes=32):
+        """What a *measurement* at each location would read.
+
+        `predict` reports the ground, with the likelihood noise integrated
+        out, so its simulations cannot be scored against an assay: they are
+        intervals for a quantity no sample ever observes. This returns the
+        predictive distribution of a sample instead -- `n_sim * n_nodes`
+        equally likely values per location -- which is what a comparison with
+        measured data needs. It is the same computation `predict` makes,
+        stopped one step earlier.
+
+        Nothing is stored. The answer is returned, `newdata` is not touched,
+        and `variable.simulations` keeps its one meaning everywhere.
+
+        Parameters
+        ----------
+        newdata :
+            Locations to ask about, of compatible dimension. Meant for the few
+            thousand that carry measurements.
+        n_sim : int
+            Latent realizations, as in `predict`.
+        n_nodes : int
+            Values per realization standing for the noise. Equal-share nodes,
+            so the two axes pool into one sample.
+
+        Returns
+        -------
+        dict
+            One `(n_data, size, n_sim * n_nodes)` array per variable whose
+            likelihood carries a warping. A categorical one is skipped: its
+            noise lives in the probabilities, and there is no value for a
+            sample to scatter around.
+        """
+        if newdata.rows_per_location != 1:
+            raise ValueError(
+                "a measurement is of a point, and %s fans each location out "
+                "into %d rows; ask this of the data the model was trained "
+                "from, or of a validation set"
+                % (type(newdata).__name__, newdata.rows_per_location))
+        if self.data.n_dim != newdata.n_dim:
+            raise ValueError("dimension of newdata is incompatible with model")
+
+        # a likelihood with no warping has no measurement to describe, so it
+        # is passed over rather than asked
+        wanted = [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
+                  if lik.warped]
+
+        def batch_measure(x, x_var, n_splits):
+            _, _, sims, _, _ = self.latent_network.predict(
+                x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
+            sims = _tf.split(_tf.transpose(sims, [1, 0, 2]),
+                             self.lik_sizes, axis=1)
+            return [lik.measurement_samples(sim, n_nodes)
+                    for sim, lik in zip(sims, self.likelihoods) if lik.warped]
+
+        chunks = {v: [] for v, _ in wanted}
+        for _, output in self._over_batches(newdata, batch_measure):
+            for (v, _), values in zip(wanted, output):
+                chunks[v].append(_np.asarray(values))
+        return {v: _np.concatenate(parts, axis=0)
+                for v, parts in chunks.items()}
+
 
 def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
-           include_noise='monte_carlo', where=None, meshes=None,
+           include_noise=True, where=None, meshes=None,
            verbose=False):
     """
     Predict on a block model, cutting finer wherever it cannot decide.
@@ -1122,11 +1192,9 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     is what makes this cheaper than predicting a fine model outright rather
     than merely different.
 
-    What decides a split is read from the **noise-free** field. Noise is the
-    part of a block's spread that cutting it cannot resolve, so a block that
-    straddles a cut-off only on account of it would be cut for nothing. The
-    noise is still added to the predictions themselves, as `include_noise`
-    asks.
+    What decides a split carries no noise, because nothing does: the noise is
+    integrated out rather than drawn, so a block never straddles a cut-off on
+    account of a part of its spread that cutting cannot resolve.
 
     To stop part way and look -- at what a pass cost, or at where it went --
     write the loop out instead; it is three calls, and
@@ -1148,7 +1216,7 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
     tolerance : float
         The share of realizations that must find a block divided before it is
         cut.
-    include_noise : str
+    include_noise : bool
         Passed to `predict` for the predictions themselves.
     where : array-like or str, optional
         One boolean per block, the indices of the blocks worth modelling, or

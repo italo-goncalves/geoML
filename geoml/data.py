@@ -257,6 +257,26 @@ def _carry_rows(source, target, keep):
         written += len(inside)
 
 
+def _filled(attribute):
+    """Whether an attribute is there and holds anything worth exporting.
+
+    Two ways it may not be: a component has no latent space of its own and
+    says so with a `None`, and a column nothing ever wrote is all NaN. Asking
+    both is what lets one `as_data_frame` serve a variable and a component
+    alike, instead of a second copy that drifts a column at a time.
+    """
+    return attribute is not None and attribute._has_content()
+
+
+def _export_label(prefix, name):
+    """An exported column's name, carrying the owner's when there is one.
+
+    A component is called `a`; on its own that says nothing about which assay
+    it belongs to, and two variables may each hold one called `a`.
+    """
+    return name if prefix is None else prefix + " - " + name
+
+
 def _selected_simulations(store, selection):
     """The simulations to export, read in a single pass over the store.
 
@@ -803,7 +823,7 @@ class _Variable(object):
                 shares[("%s %s" % (label, key)).strip()] = values
         return shares
 
-    def fill_pyvista_cells(self, mesh, simulations=False):
+    def fill_pyvista_cells(self, mesh, prefix=None, simulations=False):
         """Every filled column of this variable, as cell data.
 
         One implementation for every variable type, rather than the per-type
@@ -811,18 +831,20 @@ class _Variable(object):
         values in the order they are already in, so the roles the variable
         persists are exactly the ones worth exporting.
         """
+        label = _export_label(prefix, self.name)
+
         for role in self._ZARR_ATTRS:
             attribute = getattr(self, role, None)
             if attribute is not None:
-                attribute.fill_pyvista_cells(
-                    mesh, "%s - %s" % (self.name, role))
+                attribute.fill_pyvista_cells(mesh, "%s - %s" % (label, role))
 
         for i, values in _selected_simulations(self.simulations, simulations):
             _Attribute(self.coordinates, values).fill_pyvista_cells(
-                mesh, "%s - simulation %d" % (self.name, i))
+                mesh, "%s - simulation %d" % (label, i))
 
         for component in (getattr(self, "components", None) or {}).values():
-            component.fill_pyvista_cells(mesh, simulations=simulations)
+            component.fill_pyvista_cells(mesh, prefix=label,
+                                         simulations=simulations)
 
     def carry_to(self, coordinates, keep, n_new):
         """This variable on a longer set of locations, keeping what still fits.
@@ -1105,6 +1127,16 @@ class ContinuousVariable(_Variable):
         would tell anyone anything. Filled only where the container
         discretizes; elsewhere a location has no interior and this stays
         missing rather than zero.
+    noise_variance : _Attribute
+        How far a fresh *measurement* here would fall from the value above --
+        the likelihood noise carried into the variable's own units, averaged
+        over the realizations. The third of three variances and the third
+        question: `latent_variance` is how sure the model is of the value,
+        `dispersion` is how much the ground varies inside a block, and this is
+        how much a sample of it would scatter. A prediction reports the ground,
+        with the noise integrated out, so this is what has to be added back to
+        compare against an assay. Missing where the prediction was made with
+        `include_noise=False`, there being no integration to read it from.
     simulations : ArrayStore
         Draws from the variable's posterior distribution, in a single
         `(n_data, n_sim)` array. Use `simulation()` to get one of them as an
@@ -1116,7 +1148,7 @@ class ContinuousVariable(_Variable):
         quantile.
     """
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
-                   "prediction", "dispersion")
+                   "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
     _ZARR_HAS_QUANTILES = True
 
@@ -1137,6 +1169,12 @@ class ContinuousVariable(_Variable):
         # (`latent_variance`). Filled only where the container discretizes;
         # everywhere else a location has no interior and this stays zero.
         self.dispersion = self._Attribute(coordinates)
+
+        # What a sample taken here would read, as against what the ground
+        # holds: the likelihood noise in this variable's units. A prediction
+        # integrates that noise out, so this is the piece to add back before
+        # comparing with an assay.
+        self.noise_variance = self._Attribute(coordinates)
 
         # A single (n_data, n_sim) store (NumPy or Zarr by size); None until
         # ``allocate_simulations`` is called.
@@ -1256,11 +1294,12 @@ class ContinuousVariable(_Variable):
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.measurements = self.measurements[item]
-        new_obj.latent_mean = self.latent_mean[item]
-        new_obj.latent_variance = self.latent_variance[item]
-        new_obj.prediction = self.prediction[item]
-        new_obj.dispersion = self.dispersion[item]
+        # the same list the Zarr round trip and `carry_to` walk, so a column
+        # added in one place is subset in this one without being named twice
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None:
+                setattr(new_obj, role, column[item])
         new_obj.proportions = _col.OrderedDict(
             (key, val[item]) for key, val in self.proportions.items())
         new_obj.divided = _col.OrderedDict(
@@ -1316,16 +1355,25 @@ class ContinuousVariable(_Variable):
 
         if predictions:
             df[self.name + "_prediction"] = self.prediction.values.to_numpy()
-            # only where a container discretizes; elsewhere the column was
-            # never written and every point data set would carry an empty one
-            if self.dispersion._has_content():
+            # dispersion only where a container discretizes, noise variance
+            # only where the noise was integrated: elsewhere neither was ever
+            # written and every point data set would carry an empty column
+            if _filled(self.dispersion):
                 df[self.name + "_dispersion"] = \
                     self.dispersion.values.to_numpy()
+            if _filled(self.noise_variance):
+                df[self.name + "_noise_variance"] = \
+                    self.noise_variance.values.to_numpy()
 
         if latent:
-            df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
-            df[self.name + "_latent_variance"] = \
-                self.latent_variance.values.to_numpy()
+            # a component has none of its own, and nothing is there before a
+            # prediction has run
+            if _filled(self.latent_mean):
+                df[self.name + "_latent_mean"] = \
+                    self.latent_mean.values.to_numpy()
+            if _filled(self.latent_variance):
+                df[self.name + "_latent_variance"] = \
+                    self.latent_variance.values.to_numpy()
 
         for i, values in _selected_simulations(self.simulations,
                                               simulations):
@@ -1352,6 +1400,10 @@ class ContinuousVariable(_Variable):
 
         if "dispersion" in kwargs.keys():
             self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+
+        if "noise_variance" in kwargs.keys():
+            self.noise_variance.values[idx] = \
+                kwargs["noise_variance"].numpy()
 
         for key, target in (("proportions", self.proportions),
                             ("divided", self.divided)):
@@ -1393,6 +1445,7 @@ class ContinuousVariable(_Variable):
         self.latent_variance.coordinates = coordinates
         self.prediction.coordinates = coordinates
         self.dispersion.coordinates = coordinates
+        self.noise_variance.coordinates = coordinates
 
         for share in self.proportions.values():
             share.coordinates = coordinates
@@ -1409,89 +1462,98 @@ class ContinuousVariable(_Variable):
 
     def fill_pyvista_cube(self, cube, prefix=None, sigma=None,
                           simulations=False):
-        self.measurements.fill_pyvista_cube(cube, self.name, sigma=sigma)
+        label = _export_label(prefix, self.name)
+        self.measurements.fill_pyvista_cube(cube, label, sigma=sigma)
 
         if self.latent_mean:
             self.latent_mean.fill_pyvista_cube(
-                cube, self.name + " - latent mean")
+                cube, label + " - latent mean")
         if self.latent_variance:
             self.latent_variance.fill_pyvista_cube(
-                cube, self.name + " - latent variance")
+                cube, label + " - latent variance")
         self.prediction.fill_pyvista_cube(
-            cube, self.name + " - prediction", sigma=sigma)
+            cube, label + " - prediction", sigma=sigma)
         self.dispersion.fill_pyvista_cube(
-            cube, self.name + " - dispersion")
+            cube, label + " - dispersion")
+        self.noise_variance.fill_pyvista_cube(
+            cube, label + " - noise variance")
 
         for i, values in _selected_simulations(self.simulations, simulations):
             col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_cube(cube, self.name + f" - simulation {i}")
+            col.fill_pyvista_cube(cube, label + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_cube(
-                cube, self.name + f" - quantile {p}", sigma=sigma
+                cube, label + f" - quantile {p}", sigma=sigma
             )
 
         for q in self.probabilities.keys():
             self.probabilities[q].fill_pyvista_cube(
-                cube, self.name + f" - probability {q}", sigma=sigma
+                cube, label + f" - probability {q}", sigma=sigma
             )
 
     def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        self.measurements.fill_pyvista_points(points, self.name)
+        label = _export_label(prefix, self.name)
+        self.measurements.fill_pyvista_points(points, label)
 
         if self.latent_mean:
             self.latent_mean.fill_pyvista_points(
-                points, self.name + " - latent mean")
+                points, label + " - latent mean")
         if self.latent_variance:
             self.latent_variance.fill_pyvista_points(
-                points, self.name + " - latent variance")
+                points, label + " - latent variance")
         self.dispersion.fill_pyvista_points(
-            points, self.name + " - dispersion")
+            points, label + " - dispersion")
+        self.noise_variance.fill_pyvista_points(
+            points, label + " - noise variance")
         self.prediction.fill_pyvista_points(
-            points, self.name + " - prediction")
+            points, label + " - prediction")
 
         for i, values in _selected_simulations(self.simulations, simulations):
             col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_points(points, self.name + f" - simulation {i}")
+            col.fill_pyvista_points(points, label + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_points(
-                points, self.name + f" - quantile {p}")
+                points, label + f" - quantile {p}")
 
         for q in self.probabilities.keys():
             self.probabilities[q].fill_pyvista_points(
-                points, self.name + f" - probability {q}")
+                points, label + f" - probability {q}")
 
     def fill_pyvista_blocks(self, cube, prefix=None, sigma=None,
                             simulations=False):
-        self.measurements.fill_pyvista_blocks(cube, self.name, sigma=sigma)
+        label = _export_label(prefix, self.name)
+        self.measurements.fill_pyvista_blocks(cube, label, sigma=sigma)
 
         if self.latent_mean:
             self.latent_mean.fill_pyvista_blocks(
-                cube, self.name + " - latent mean"
+                cube, label + " - latent mean"
             )
         if self.latent_variance:
             self.latent_variance.fill_pyvista_blocks(
-                cube, self.name + " - latent variance"
+                cube, label + " - latent variance"
             )
         self.dispersion.fill_pyvista_blocks(
-            cube, self.name + " - dispersion")
+            cube, label + " - dispersion")
+        self.noise_variance.fill_pyvista_blocks(
+            cube, label + " - noise variance")
         self.prediction.fill_pyvista_blocks(
-            cube, self.name + " - prediction", sigma=sigma
+            cube, label + " - prediction", sigma=sigma
         )
 
         for i, values in _selected_simulations(self.simulations, simulations):
             col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_blocks(cube, self.name + f" - simulation {i}")
+            col.fill_pyvista_blocks(cube, label + f" - simulation {i}")
 
         for p in self.quantiles.keys():
             self.quantiles[p].fill_pyvista_blocks(
-                cube, self.name + f" - quantile {p}", sigma=sigma
+                cube, label + f" - quantile {p}", sigma=sigma
             )
 
         for q in self.probabilities.keys():
             self.probabilities[q].fill_pyvista_blocks(
-                cube, self.name + f" - probability {q}", sigma=sigma
+                cube, label + f" - probability {q}", sigma=sigma
             )
 
     def compute_metrics(self, alpha=0.05):
@@ -1659,17 +1721,21 @@ class VectorVariable(_Variable):
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
-        # each component is dispersed inside a block on its own account
+        # each component is dispersed inside a block, and measured, on its own
+        # account
         dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
+        noise = _tf.unstack(kwargs["noise_variance"], axis=1)
         blank = [None] * len(self.labels)
         shares = {
             key: (_tf.unstack(kwargs[key], axis=1)
                   if key in kwargs.keys() else blank)
             for key in ("proportions", "divided")}
 
-        for i, (lb, p, s, d) in enumerate(zip(self.labels, prediction,
-                                              simulations, dispersion)):
-            values = {"average_sim": p, "simulations": s, "dispersion": d}
+        for i, (lb, p, s, d, nv) in enumerate(zip(self.labels, prediction,
+                                                  simulations, dispersion,
+                                                  noise)):
+            values = {"average_sim": p, "simulations": s, "dispersion": d,
+                      "noise_variance": nv}
             for key, unstacked in shares.items():
                 if unstacked[i] is not None:
                     # the matrix was padded out to the widest component, so
@@ -1728,8 +1794,15 @@ class _Component(ContinuousVariable):
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
-        new_obj.measurements = self.measurements[item]
-        new_obj.prediction = self.prediction[item]
+        # driven by the list rather than written out: a column named there and
+        # forgotten here survives the subset at its old length, and only
+        # something that reads it afterwards finds out. A component has no
+        # latent space of its own and says so with a None, as `_carry_into`
+        # also has to allow for
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None:
+                setattr(new_obj, role, column[item])
 
         if self.simulations is not None:
             new_obj.simulations = _storage.ArrayStore.from_numpy(
@@ -1757,36 +1830,24 @@ class _Component(ContinuousVariable):
             for q in self.probabilities.values():
                 q.coordinates = coordinates
 
-    def as_data_frame(self, measurements=True, predictions=True,
-                      simulations=False, quantiles=True, probability=True, **kwargs):
-        df = _pd.DataFrame({})
-
-        if measurements:
-            df[self.name] = self.measurements.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_prediction"] = \
-                self.prediction.values.to_numpy()
-
-        if quantiles:
-            if len(self.quantiles) > 0:
-                for key, val in self.quantiles.items():
-                    df[self.name + "_q" + str(key)] = val.values.to_numpy()
-
-        if probability:
-            if len(self.probabilities) > 0:
-                for key, val in self.probabilities.items():
-                    df[self.name + "_p" + str(key)] = val.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        return df
+    def as_data_frame(self, latent=False, **kwargs):
+        # `ContinuousVariable`'s, with the latent space off: a component has
+        # none of its own. It used to be a copy of that method minus the
+        # latent columns, which is how it came to be missing `dispersion` and
+        # `noise_variance` -- every column added upstream had to be added here
+        # too, and the omission is silent
+        return super().as_data_frame(latent=False, **kwargs)
 
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
         self.simulations[idx, :] = kwargs["simulations"].numpy()
+
+        if "dispersion" in kwargs.keys():
+            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+
+        if "noise_variance" in kwargs.keys():
+            self.noise_variance.values[idx] = \
+                kwargs["noise_variance"].numpy()
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -1869,13 +1930,18 @@ class CompositionalVariable(VectorVariable):
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
+        # a part varies inside a block, and is assayed, on its own account
+        dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
+        noise = _tf.unstack(kwargs["noise_variance"], axis=1)
 
-        for lb, p, s in zip(
+        for lb, p, s, d, nv in zip(
                 self.labels,
-                prediction, simulations):
+                prediction, simulations, dispersion, noise):
             self.components[lb].update(idx, **{
                 "prediction": p,
-                "simulations": s
+                "simulations": s,
+                "dispersion": d,
+                "noise_variance": nv
             })
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
@@ -6556,20 +6622,22 @@ class BlockSet3D(PointData):
         return origin, size, step, values
 
     def _variable_or_component(self, name):
-        """The variable called `name`, or the component of a vector one.
+        """The variable called `name`, or the component of a vector one, and
+        the name of whatever owns it -- `None` for a variable of its own.
 
         A composition is held as a single variable, so its parts are not among
         `self.variables` and asking for `Zn` would otherwise mean reaching into
         `Elements` by hand. Only the parts hold a grade -- the variable itself
-        carries nothing to contour -- so naming one has to work.
+        carries nothing to contour -- so naming one has to work. The owner
+        comes back with it because an export labels a component by both names.
         """
         if name in self.variables:
-            return self.variables[name]
+            return self.variables[name], None
 
         for variable in self.variables.values():
             components = getattr(variable, "components", None) or {}
             if name in components:
-                return components[name]
+                return components[name], variable.name
 
         known = set(self.variables)
         for variable in self.variables.values():
@@ -6632,11 +6700,11 @@ class BlockSet3D(PointData):
         surf : Solid3D, Surface3D or Mesh3D
             Whichever the geometry calls for, as `get_contour` on a grid.
         """
-        named = self._variable_or_component(variable)
+        named, owner = self._variable_or_component(variable)
 
-        # the mesh labels a component by its own name, not by its parent's,
-        # so this is the same lookup either way
-        label = "%s - %s" % (named.name, attribute)
+        # a component is labelled by its variable's name as well as its own,
+        # so the owner is needed to find it again
+        label = "%s - %s" % (_export_label(owner, named.name), attribute)
         mesh = self.as_pyvista()
         if label not in mesh.cell_data:
             parts = getattr(named, "components", None) or {}

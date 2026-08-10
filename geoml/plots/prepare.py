@@ -609,6 +609,149 @@ def prediction_values(container, name):
             _np.where(both)[0])
 
 
+def _bin_edges(values, bins):
+    """Where to cut, from a count or from the positions themselves."""
+    if _np.ndim(bins) > 0:
+        edges = _np.unique(_np.asarray(bins, dtype=float))
+    else:
+        bins = int(bins)
+        if bins < 1:
+            raise ValueError("bins must be at least 1, got %r" % bins)
+        # equal *count*, not equal width: a predicted grade is skewed, and
+        # equal-width bins would put nine tenths of the data in the first one
+        # and a single sample in the last. Pass the positions for equal width.
+        edges = _np.unique(_np.quantile(values, _np.linspace(0, 1, bins + 1)))
+    if len(edges) < 2:
+        raise ValueError(
+            "there is nothing to bin: every predicted value is %g" % edges[0])
+    return edges
+
+
+def step_path(lo, hi, values):
+    """A per-bin value as a polyline that steps at the edges.
+
+    One number per bin is not a curve, and drawing it through the bin centres
+    says it is. Stepping at the edges shows where the bins are without a
+    second thing on the figure to say so. A gap between bins comes back as a
+    break rather than a line across it.
+    """
+    lo, hi, values = (_np.asarray(a, dtype=float) for a in (lo, hi, values))
+    x, y = [], []
+    for i in range(len(values)):
+        if i > 0 and lo[i] > hi[i - 1]:
+            x.append(_np.nan)
+            y.append(_np.nan)
+        x.extend([lo[i], hi[i]])
+        y.extend([values[i], values[i]])
+    return _np.array(x), _np.array(y)
+
+
+def spread_check(container, name, bins=8):
+    """
+    What a model claims a value's spread is, against what it turned out to be.
+
+    A residual holds two things at once -- how wrong the model was about the
+    ground, and how far the assay fell from the ground -- so it can only be
+    read against the two together. This lays all three out along the predicted
+    value: the noise the model fitted, the whole spread it claims, and the
+    spread the errors actually had.
+
+    Reading it: the observed points on the claimed line means calibrated,
+    below it means hedging, above it means over-confident. The level axis is
+    what says *which* term is at fault. A warping bends, so the noise grows
+    with the value while the model's own uncertainty does not, and a shortfall
+    that widens with the grade is the noise where a flat one is the posterior.
+    Observed points sitting inside the noise band alone are the plainest case
+    of all: the fitted noise over-explains the errors by itself.
+
+    Only honest on data the model has not seen. At a training location the
+    model interpolates its own measurement and the residual is not an error.
+
+    Parameters
+    ----------
+    container :
+        Point data carrying measurements and a prediction.
+    name : str
+        The variable.
+    bins : int or sequence
+        How many bins, or where their edges are. A count gives **equal-count**
+        bins; positions are taken as they come, so `np.linspace(...)` is how
+        to ask for equal width.
+
+    Returns
+    -------
+    list of dict
+        One per component, with `label`, the bin bounds `lo`/`hi`, the mean
+        predicted value in each `centre`, the `count`, the `observed` root
+        mean square residual and its `observed_error`, and the claimed
+        `noise` and `total` spreads.
+    """
+    var = variable(container, name)
+    components = getattr(var, "components", None)
+    parts = [var] if components is None else \
+        [components[label] for label in var.labels]
+
+    panels = []
+    for part in parts:
+        if not part.noise_variance._has_content():
+            raise ValueError(
+                "%r carries no noise variance, so there is nothing to check "
+                "the residuals against; predict with `include_noise=True`, "
+                "which is the default" % str(part.name))
+
+        measured = part.measurements.values.to_numpy().astype(float)
+        predicted = part.prediction.values.to_numpy().astype(float)
+        noise = part.noise_variance.values.to_numpy().astype(float)
+
+        keep = ~(_np.isnan(measured) | _np.isnan(predicted) | _np.isnan(noise))
+        if not _np.any(keep):
+            raise ValueError(
+                "%r has no location carrying both a measurement and a "
+                "prediction; this figure is a comparison against what was "
+                "observed" % str(part.name))
+
+        # the model's own uncertainty, in the variable's units, a band of rows
+        # at a time -- a block model holds more simulations than memory does
+        store = realization_store(part)
+        signal = _np.empty(len(measured), dtype=float)
+        for band in store.row_bands():
+            signal[band] = _np.var(_np.asarray(store[band, :], dtype=float),
+                                   axis=1)
+
+        measured, predicted = measured[keep], predicted[keep]
+        noise, signal = noise[keep], signal[keep]
+        residual = measured - predicted
+
+        edges = _bin_edges(predicted, bins)
+        index = _np.clip(_np.searchsorted(edges, predicted, side="right") - 1,
+                         0, len(edges) - 2)
+
+        panel = {"label": str(part.name), "lo": [], "hi": [], "centre": [],
+                 "count": [], "observed": [], "observed_error": [],
+                 "noise": [], "total": []}
+        for i in range(len(edges) - 1):
+            here = index == i
+            n = int(_np.count_nonzero(here))
+            if n == 0:
+                continue
+            rms = float(_np.sqrt(_np.mean(residual[here] ** 2)))
+            panel["lo"].append(float(edges[i]))
+            panel["hi"].append(float(edges[i + 1]))
+            panel["centre"].append(float(_np.mean(predicted[here])))
+            panel["count"].append(n)
+            panel["observed"].append(rms)
+            # the sampling error of a root mean square over n values, so that
+            # a gap can be read as real rather than as a short bin
+            panel["observed_error"].append(rms / _np.sqrt(2 * n))
+            panel["noise"].append(float(_np.sqrt(_np.mean(noise[here]))))
+            panel["total"].append(
+                float(_np.sqrt(_np.mean(noise[here] + signal[here]))))
+
+        panels.append({key: (val if key == "label" else _np.asarray(val))
+                       for key, val in panel.items()})
+    return panels
+
+
 def moving_average(values, window):
     """
     The running mean of `values`, and where each point belongs.

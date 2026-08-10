@@ -633,6 +633,17 @@ def test_several_components_are_drawn_as_panels(trained):
     assert [a.text for a in figure.layout.annotations] == ["a", "b", "c"]
 
 
+def test_the_spread_check_draws_three_traces_per_component(trained):
+    """The noise band, the whole claim, and what the errors actually did."""
+    _, point = trained
+    figure = geoml.plots.Interactive(point, continuous="v").spread_check(
+        bins=4)
+
+    assert len(figure.data) == 9
+    assert figure.data[2].error_x is not None      # the bins the points span
+    assert sum(t.showlegend is True for t in figure.data) == 3
+
+
 def test_the_accuracy_plot_draws_the_reference_and_a_line_per_component(
         trained):
     model, point = trained
@@ -650,6 +661,16 @@ def test_the_grade_tonnage_curves_are_drawn_on_two_scales(blocks):
     assert {t.yaxis for t in figure.data} == {"y", "y2"}
     assert figure.layout.yaxis2.overlaying == "y"
     assert figure.layout.yaxis2.side == "right"
+    assert figure.layout.yaxis.type == "linear"
+
+
+def test_only_the_tonnage_takes_the_log_scale(blocks):
+    """The grade axis spans one order of magnitude at most, so a log scale
+    there would say nothing."""
+    figure = geoml.plots.Interactive(blocks, continuous="grade") \
+        .grade_tonnage(cutoffs=10, log_mass=True)
+    assert figure.layout.yaxis.type == "log"
+    assert figure.layout.yaxis2.type != "log"
 
 
 def test_each_scale_gets_gridlines_in_the_colour_of_its_curve(blocks):

@@ -1,12 +1,12 @@
-"""Prediction on blocks with discretization: batching, fan-out, noise.
+"""Prediction on blocks with discretization: batching, fan-out, dispersion.
 
 A block fans out into ``prod(discretization)`` sub-blocks that the model
-evaluates before they are averaged back to one value per block. Three things
-have to hold: the batch is measured in the rows the model actually sees, the
-fan-out is the same as taking each block's sub-grid in turn, and the noise is
-drawn per sub-block position — independent within a block, the same pattern in
-every block — so that averaging integrates it instead of adding fresh
-randomness, and the result does not depend on how the prediction was batched.
+evaluates before they are averaged back to one value per block. Two things have
+to hold: the batch is measured in the rows the model actually sees, and the
+fan-out is the same as taking each block's sub-grid in turn. Nothing here is
+random beyond the latent draws — the likelihood noise is integrated out rather
+than drawn (``test_noise_integration.py``) — so a prediction does not depend on
+how it was batched.
 """
 import numpy as np
 import pandas as pd
@@ -118,57 +118,6 @@ def test_the_batch_is_measured_in_sub_blocks(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# the noise
-# --------------------------------------------------------------------------- #
-def _noise(likelihood, n_blocks, k, n_sim=4, seed=1234):
-    import tensorflow as tf
-    zeros = tf.zeros([n_blocks * k, 1, n_sim], dtype=tf.float64)
-    return np.asarray(likelihood._add_noise(zeros, seed=seed,
-                                            n_splits=n_blocks))
-
-
-def test_the_sub_blocks_of_a_block_get_independent_noise():
-    """Averaging independent draws is what integrates the noise over a block."""
-    noise = _noise(geoml.likelihood.Gaussian(), n_blocks=3, k=9)
-    within = noise.reshape(3, 9, -1)[0, :, 0]
-    assert len(np.unique(within)) == 9
-
-
-def test_every_block_gets_the_same_pattern():
-    """So the noise shifts the map instead of roughening it."""
-    noise = _noise(geoml.likelihood.Gaussian(), n_blocks=3, k=9)
-    grouped = noise.reshape(3, 9, 1, -1)
-    assert np.allclose(grouped[0], grouped[1])
-    assert np.allclose(grouped[0], grouped[2])
-
-
-def test_the_noise_shape_does_not_depend_on_the_batch():
-    """The draw is indexed by sub-block, so batching cannot move it."""
-    likelihood = geoml.likelihood.Gaussian()
-    two = _noise(likelihood, n_blocks=2, k=9).reshape(2, 9, 1, -1)
-    five = _noise(likelihood, n_blocks=5, k=9).reshape(5, 9, 1, -1)
-    assert np.allclose(two[0], five[0])
-
-
-def test_the_noise_follows_the_seed():
-    likelihood = geoml.likelihood.Gaussian()
-    same = _noise(likelihood, 2, 9, seed=7)
-    again = _noise(likelihood, 2, 9, seed=7)
-    other = _noise(likelihood, 2, 9, seed=8)
-    assert np.allclose(same, again)
-    assert not np.allclose(same, other)
-
-
-def test_without_discretization_every_row_gets_its_own_noise():
-    likelihood = geoml.likelihood.Gaussian()
-    import tensorflow as tf
-    zeros = tf.zeros([20, 1, 3], dtype=tf.float64)
-    noise = np.asarray(likelihood._add_noise(zeros, seed=1234, n_splits=None))
-    assert noise.shape == (20, 1, 3)
-    assert len(np.unique(noise[:, 0, 0])) == 20
-
-
-# --------------------------------------------------------------------------- #
 # end to end
 # --------------------------------------------------------------------------- #
 def _simulations(model, batch_size, n_sim=6, seed=None):
@@ -220,21 +169,22 @@ def test_the_blocks_still_average_their_sub_blocks():
 # within-block dispersion
 # --------------------------------------------------------------------------- #
 def _dispersed(model, n_sim=8, discretization=(3, 3)):
-    """A block model predicted noise-free, and its sub-blocks as points.
+    """A block model, and its own sub-blocks predicted as points.
 
-    Noise-free on both sides deliberately. With `monte_carlo` the block path
-    draws one noise value per sub-block *position* and shares the pattern
-    across blocks, while a point path draws one per row, so the two would not
-    be looking at the same field and nothing could be checked against
-    anything.
+    With the noise on, as it is by default: the two paths see the same field,
+    because integrating the noise out is a deterministic function of the
+    latent value and does not care whether the row it is applied to belongs to
+    a block. Drawing the noise instead would have given the block path one
+    pattern per sub-block position and the point path one draw per row, and
+    nothing could have been checked against anything.
     """
     blocks = _blocks(discretization)
     model.options.prediction_batch_size = 10 ** 9
-    model.predict(blocks, n_sim=n_sim, include_noise=None)
+    model.predict(blocks, n_sim=n_sim)
 
     points = geoml.data.PointData.from_array(
         blocks.get_batched_coordinates(np.arange(blocks.n_data))[0])
-    model.predict(points, n_sim=n_sim, include_noise=None)
+    model.predict(points, n_sim=n_sim)
 
     k = int(np.prod(blocks.discretization))
     sub = np.asarray(points.variables["v"].simulations)
@@ -257,6 +207,119 @@ def test_the_dispersion_is_the_spread_of_the_sub_blocks():
     stored = blocks.variables["v"].dispersion.values.to_numpy()
     assert np.allclose(stored, grouped.var(axis=1).mean(axis=1), atol=1e-12)
     assert np.all(stored >= 0.0)
+
+
+def test_the_measurement_variance_averages_over_the_sub_blocks():
+    """`noise_variance` answers what a sample taken inside the block would
+    scatter by, so it reduces the same way the value does."""
+    model = _model()
+    blocks = _blocks((3, 3))
+    model.options.prediction_batch_size = 10 ** 9
+    model.predict(blocks, n_sim=8)
+
+    points = geoml.data.PointData.from_array(
+        blocks.get_batched_coordinates(np.arange(blocks.n_data))[0])
+    model.predict(points, n_sim=8)
+
+    k = int(np.prod(blocks.discretization))
+    sub = points.variables["v"].noise_variance.values.to_numpy()
+    assert np.allclose(blocks.variables["v"].noise_variance.values.to_numpy(),
+                       sub.reshape(blocks.n_data, k).mean(axis=1), atol=1e-10)
+
+
+def test_without_the_integration_there_is_no_measurement_variance():
+    """Missing rather than zero: nobody said a measurement here is exact."""
+    model = _model()
+    blocks = _blocks((2, 2))
+    model.predict(blocks, n_sim=4, include_noise=False)
+
+    assert np.all(np.isnan(
+        blocks.variables["v"].noise_variance.values.to_numpy()))
+
+
+def _measurement_points(n=25):
+    return geoml.data.PointData.from_array(
+        np.random.default_rng(3).uniform(0, 100, (n, 2)))
+
+
+def test_the_measurement_set_averages_back_to_the_prediction():
+    """It is the same computation, stopped one step earlier: average the
+    nodes and the prediction comes back."""
+    model = _model()
+    points = _measurement_points()
+    model.predict(points, n_sim=6)
+    samples = model.predict_measurements(points, n_sim=6)["v"]
+
+    assert samples.shape == (points.n_data, 1, 6 * 32)
+    assert np.allclose(samples.mean(axis=2)[:, 0],
+                       points.variables["v"].prediction.values.to_numpy(),
+                       atol=1e-8)
+
+
+def test_a_measurement_scatters_more_than_the_ground():
+    """By its noise variance, which is what the accuracy plot was missing."""
+    model = _model()
+    points = _measurement_points()
+    model.predict(points, n_sim=40)
+    samples = model.predict_measurements(points, n_sim=40)["v"]
+
+    ground = np.var(np.asarray(points.variables["v"].simulations), axis=1)
+    measured = samples[:, 0, :].var(axis=1)
+    noise = points.variables["v"].noise_variance.values.to_numpy()
+
+    assert np.all(measured > ground)
+    assert np.allclose(measured, ground + noise, rtol=0.05)
+
+
+def _mixed_model(seed=1234):
+    """A categorical variable beside a continuous one -- the shape of a real
+    deposit model, and the case where a likelihood carries no warping."""
+    import tensorflow as tf
+    geoml.set_seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+    coords = np.random.uniform(0, 100, (30, 2))
+    df = pd.DataFrame(coords, columns=["c0", "c1"])
+    point = geoml.data.PointData(df, ["c0", "c1"])
+    point.add_continuous_variable("v", np.sin(coords[:, 0] / 25.0))
+    point.add_categorical_variable(
+        "rock", ["a", "b"],
+        measurements=np.where(coords[:, 0] > 50, "a", "b"))
+
+    ind = pd.DataFrame(np.random.uniform(0, 100, (5, 2)), columns=["c0", "c1"])
+    root = geoml.latent.BasicInput(
+        geoml.data.PointData(ind, ["c0", "c1"]),
+        transform=geoml.transform.Isotropic(40))
+    gp = geoml.latent.BasicGP(root, size=3, kernel=geoml.kernels.Gaussian())
+
+    model = geoml.models.VGPNetwork(
+        point, ["v", "rock"],
+        [geoml.likelihood.Gaussian(),
+         geoml.likelihood.CategoricalGaussianIndicator(2)],
+        gp,
+        options=geoml.models.GPOptions(verbose=False, seed=seed,
+                                       training_samples=8))
+    model.train_full(max_iter=2)
+    return model, point
+
+
+def test_a_likelihood_with_no_warping_is_passed_over():
+    """A categorical one has no value for a measurement to scatter around,
+    and asking it for one used to be an AttributeError."""
+    model, point = _mixed_model()
+    samples = model.predict_measurements(point, n_sim=4)
+
+    # the continuous variable is still there to be scored; the categorical one
+    # is simply not part of the question an accuracy plot asks
+    assert set(samples) == {"v"}
+    assert samples["v"].shape == (point.n_data, 1, 4 * 32)
+
+
+def test_a_measurement_is_of_a_point_not_a_block():
+    model = _model()
+    with pytest.raises(ValueError, match="a measurement is of a point"):
+        model.predict_measurements(_blocks(), n_sim=4)
 
 
 def test_the_dispersion_is_not_the_model_uncertainty():
