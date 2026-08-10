@@ -362,6 +362,61 @@ def test_the_path_style_cannot_collide():
 
 
 # --------------------------------------------------------------------------- #
+# the data frame as a fold over the tree
+# --------------------------------------------------------------------------- #
+def test_the_data_frame_is_the_tree_flattened():
+    point = _points()
+    df = point.as_data_frame()
+
+    assert "au_measurements" in df.columns          # named by path now
+    assert "assay_a_measurements" in df.columns
+    assert "fold" in df.columns                     # metadata stays bare
+    assert "X" in df.columns
+    # a column nothing ever wrote is left out rather than exported empty
+    assert "au_prediction" not in df.columns
+
+
+def test_the_frame_takes_an_include_pattern():
+    point = _points()
+    point.variables["au"].prediction.values[:] = np.arange(6.0)
+
+    df = point.as_data_frame(include="**/prediction")
+    assert [c for c in df.columns if c not in
+            ("fold", "X", "Y", "Z")] == ["au_prediction"]
+
+
+def test_a_cutoff_share_reaches_the_frame():
+    """`proportions` and `divided` never reached an export before the fold:
+    the hand-written lists predated them and were never told."""
+    point = _points()
+    grade = point.variables["au"]
+    grade.proportions[1.5] = geoml.data._Attribute(point, np.ones(6))
+    grade.divided[1.5] = geoml.data._Attribute(point, np.zeros(6))
+
+    df = point.as_data_frame()
+    assert "au_proportions_1.5" in df.columns
+    assert "au_divided_1.5" in df.columns
+
+
+def test_a_multiindex_keeps_the_path_whole():
+    point = _points()
+    df = point.as_data_frame(columns="multi")
+
+    assert ("assay", "a", "measurements") in df.columns
+    assert ("au", "measurements", "") in df.columns     # padded to one depth
+    # the flat default is what survives a CSV; multi is for staying in pandas
+    assert df[("assay", "a")].shape[1] >= 1
+
+
+def test_a_variable_frames_itself_the_same_way():
+    point = _points()
+    df = point.variables["assay"].as_data_frame()
+
+    assert "assay_a_measurements" in df.columns
+    assert not any(c in ("X", "fold") for c in df.columns)
+
+
+# --------------------------------------------------------------------------- #
 # printing the tree
 # --------------------------------------------------------------------------- #
 def test_the_tree_shows_the_shape_of_the_container():

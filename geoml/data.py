@@ -364,6 +364,31 @@ class VariablePath:
         return VariablePath(self.parts[:-1])
 
 
+def _frame_from_columns(found, columns):
+    """A data frame from `(path, values)` pairs, named by the chosen style.
+
+    `flat` renders each path with underscores, deduplicated with a warning
+    where two paths land on one name; `multi` keeps the path as one
+    `MultiIndex` level per segment, shorter paths padded with empty strings.
+    """
+    if not found:
+        return _pd.DataFrame({})
+    paths = [path for path, _ in found]
+    if columns == "flat":
+        names = list(render_all(paths, "flat").values())
+    elif columns == "multi":
+        depth = max(len(path) for path in paths)
+        names = _pd.MultiIndex.from_tuples(
+            [path.parts + ("",) * (depth - len(path)) for path in paths])
+    else:
+        raise ValueError(
+            "unknown columns style %r; expected 'flat' or 'multi'"
+            % (columns,))
+    return _pd.DataFrame(
+        dict(zip(range(len(found)), (values for _, values in found)))
+    ).set_axis(names, axis=1)
+
+
 def _subset_simulations(store, item):
     """The `item` rows of a simulations store, without holding it whole.
 
@@ -566,6 +591,58 @@ class _TreeNode(object):
         three that forgot are why they are enumerated here.
         """
         return {name: getattr(self, name, None) for name in self._NODE_ATTRS}
+
+    def _export_columns(self, include="**", simulations=False):
+        """`(path, values)` for every filled column matching `include`.
+
+        The one enumeration behind every tabular export, in place of the
+        fourteen per-class `as_data_frame` bodies that each named their
+        columns again: a filled leaf is a column, a dict family is one column
+        per cut-off, and the realization axis is unrolled only as far as the
+        `simulations` selector asks. Metadata stays out -- it has a root of
+        its own precisely so a fold over the modelled columns can leave it
+        alone.
+        """
+        pattern = VariablePath(include).parts
+        for path, node in self.walk():
+            for leaf_parts, attribute in node.own_leaves():
+                full = path / leaf_parts
+                if full.parts[:1] == (METADATA_ROOT,):
+                    continue
+                if not _match_path(pattern, full.parts):
+                    continue
+                if not attribute._has_content():
+                    continue
+                yield full, attribute.to_numpy()
+            store = getattr(node, "simulations", None)
+            if store is not None:
+                for i, values in _selected_simulations(store, simulations):
+                    full = path / "simulations" / str(i)
+                    if _match_path(pattern, full.parts):
+                        yield full, values
+
+    def as_data_frame(self, include="**", simulations=False, columns="flat",
+                      **kwargs):
+        """This node's filled columns, one data-frame column each.
+
+        Parameters
+        ----------
+        include : str
+            A path pattern choosing what to export: `"**"` for everything,
+            `"**/prediction"` for the predictions alone, `"Zn/**"` for one
+            component. See `select`.
+        simulations : bool, int or sequence
+            Which realizations to include: none by default, `True` for all,
+            an `int` for the first n, or a sequence of indices.
+        columns : str
+            `"flat"` names each column by its path with underscores
+            (`assay_Zn_prediction`), deduplicated with a warning if two paths
+            land on one name. `"multi"` keeps the path as a `MultiIndex`
+            level per segment -- for staying in pandas; written to CSV it
+            makes several header rows, which other software reads as data.
+        """
+        return _frame_from_columns(
+            list(self._export_columns(include, simulations)), columns)
 
     def _copy_attrs_into(self, new):
         """Carry every node's facts into a freshly built copy of this variable.
@@ -1427,9 +1504,6 @@ class _Variable(_TreeNode):
     def __getitem__(self, item):
         raise NotImplementedError
 
-    def as_data_frame(self, **kwargs):
-        raise NotImplementedError
-
     def get_measurements(self):
         raise NotImplementedError
 
@@ -1843,78 +1917,6 @@ class ContinuousVariable(_Variable):
 
         return new_obj
 
-    def as_data_frame(self, measurements=True, predictions=True,
-                      latent=True,
-                      simulations=False, quantiles=True,
-                      probability=True, **kwargs):
-        """
-        Converts the object to a DataFrame.
-
-        Parameters
-        ----------
-        predictions : bool
-            Whether to include the predictions.
-        measurements : bool
-            Whether to include the measurements.
-        latent : bool
-            Whether to include the latent Gaussian variable.
-        simulations : bool
-            Whether to include the simulations.
-        quantiles : bool
-            Whether to include the quantiles.
-        probability : bool
-            Whether to include the probabilities.
-        kwargs : dict
-            Ignored.
-
-        Returns
-        -------
-        df : pd.DataFrame
-            The converted object.
-        """
-        df = _pd.DataFrame({})
-
-        if measurements:
-            df[self.name] = self.measurements.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_prediction"] = self.prediction.values.to_numpy()
-            # dispersion only where a container discretizes, noise variance
-            # only where the noise was integrated: elsewhere neither was ever
-            # written and every point data set would carry an empty column
-            if _filled(self.dispersion):
-                df[self.name + "_dispersion"] = \
-                    self.dispersion.values.to_numpy()
-            if _filled(self.noise_variance):
-                df[self.name + "_noise_variance"] = \
-                    self.noise_variance.values.to_numpy()
-
-        if latent:
-            # a component has none of its own, and nothing is there before a
-            # prediction has run
-            if _filled(self.latent_mean):
-                df[self.name + "_latent_mean"] = \
-                    self.latent_mean.values.to_numpy()
-            if _filled(self.latent_variance):
-                df[self.name + "_latent_variance"] = \
-                    self.latent_variance.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        if quantiles:
-            if len(self.quantiles) > 0:
-                for key, val in self.quantiles.items():
-                    df[self.name + "_q" + str(key)] = val.values.to_numpy()
-
-        if probability:
-            if len(self.probabilities) > 0:
-                for key, val in self.probabilities.items():
-                    df[self.name + "_p" + str(key)] = val.values.to_numpy()
-
-        return df
-
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["average_sim"].numpy()
 
@@ -2183,29 +2185,6 @@ class VectorVariable(_Variable):
 
         return new_obj
 
-    def as_data_frame(self, measurements=True, predictions=True,
-                      simulations=False, quantiles=True,
-                      probability=True, **kwargs):
-        all_dfs = []
-        for key, val in self.components.items():
-            cat_df = val.as_data_frame(
-                measurements=measurements,
-                predictions=predictions,
-                simulations=simulations,
-                quantiles=quantiles,
-                probability=probability,
-                latent=False
-            )
-            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
-            all_dfs.append(cat_df)
-        all_dfs = _pd.concat(all_dfs, axis=1)
-
-        if predictions:
-            all_dfs[self.name + "_uncertainty"] = \
-                self.uncertainty.values.to_numpy()
-
-        return all_dfs
-
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
@@ -2305,14 +2284,6 @@ class _Component(ContinuousVariable):
 
         return new_obj
 
-    def as_data_frame(self, latent=False, **kwargs):
-        # `ContinuousVariable`'s, with the latent space off: a component has
-        # none of its own. It used to be a copy of that method minus the
-        # latent columns, which is how it came to be missing `dispersion` and
-        # `noise_variance` -- every column added upstream had to be added here
-        # too, and the omission is silent
-        return super().as_data_frame(latent=False, **kwargs)
-
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
         self.simulations[idx, :] = kwargs["simulations"].numpy()
@@ -2380,27 +2351,6 @@ class CompositionalVariable(VectorVariable):
             labels=columns,
             measurements=df.loc[:, columns].values)
         return new_var
-
-    def as_data_frame(self, measurements=True, predictions=True,
-                      simulations=False, quantiles=True, probability=True, **kwargs):
-        all_dfs = []
-        for key, val in self.components.items():
-            cat_df = val.as_data_frame(
-                measurements=measurements,
-                predictions=predictions,
-                simulations=simulations,
-                quantiles=quantiles,
-                probability=probability,
-                **kwargs)
-            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
-            all_dfs.append(cat_df)
-        all_dfs = _pd.concat(all_dfs, axis=1)
-
-        if predictions:
-            all_dfs[self.name + "_uncertainty"] = \
-                self.uncertainty.values.to_numpy()
-
-        return all_dfs
 
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
@@ -2485,33 +2435,6 @@ class _Category(_Variable):
             new_obj.simulations = _subset_simulations(self.simulations, item)
 
         return new_obj
-
-    def as_data_frame(self, probability=True, predictions=True,
-                      latent=True, simulations=False):
-        df = _pd.DataFrame({})
-
-        if probability:
-            df[self.name + "_probability"] = self.probability.values.to_numpy()
-            df[self.name + "_indicator"] = self.indicator.values.to_numpy()
-
-        if latent:
-            df[self.name + "_indicator_mean"] = \
-                self.indicator_mean.values.to_numpy()
-            df[self.name + "_indicator_variance"] = \
-                self.indicator_variance.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_indicator_predicted"] = \
-                self.indicator_predicted.values.to_numpy()
-            if self.proportion._has_content():
-                df[self.name + "_proportion"] = \
-                    self.proportion.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        return df
 
     def update(self, idx, **kwargs):
         self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
@@ -2730,31 +2653,6 @@ class RockTypeVariable(_Variable):
         new_obj.predicted = predicted
 
         return new_obj
-
-    def as_data_frame(self, measurements=True, probability=True, predictions=True,
-                      latent=True, simulations=False, **kwargs):
-        all_dfs = []
-        for key, val in self.components.items():
-            cat_df = val.as_data_frame(
-                predictions=predictions,
-                simulations=simulations,
-                latent=latent,
-                probability=probability,
-                **kwargs)
-            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
-            all_dfs.append(cat_df)
-        df = _pd.concat(all_dfs, axis=1)
-
-        if measurements:
-            df[self.name + "_a"] = self.measurements_a.to_numpy()
-            df[self.name + "_b"] = self.measurements_b.to_numpy()
-
-        if predictions:
-            df[self.name + "_predicted"] = self.predicted.to_numpy()
-            df[self.name + "_entropy"] = self.entropy.values.to_numpy()
-            df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
-
-        return df
 
     def update(self, idx, **kwargs):
         self.entropy.values[idx] = kwargs["entropy"].numpy()
@@ -3104,31 +3002,6 @@ class BinaryVariable(_Variable):
 
         return new_obj
 
-
-    def as_data_frame(self, measurements=True, latent=True,
-                      predictions=True, simulations=True):
-        df = _pd.DataFrame({})
-
-        if measurements:
-            df[self.name + "_measurements"] = self.measurements.to_numpy()
-            df[self.name + "_weights"] = self.weights.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_predicted"] = self.predicted.to_numpy()
-            df[self.name + "_probability"] = self.probability.values.to_numpy()
-            df[self.name + "_entropy"] = self.entropy.values.to_numpy()
-            df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
-
-        if latent:
-            df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
-            df[self.name + "_latent_variance"] = \
-                self.latent_variance.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        return df
 
     def update(self, idx, **kwargs):
         prob = kwargs["probability"].numpy()
@@ -3735,28 +3608,28 @@ class PointData(_PointBased):
 
         self.metadata = {}
 
-    def as_data_frame(self, metadata=True, **kwargs):
+    def as_data_frame(self, metadata=True, include="**", simulations=False,
+                      columns="flat"):
         """
         Conversion of a spatial object to a data frame.
 
-        The following kwargs can be used to control the kind of information to include in the DataFrame. They all
-        default to `True`.
-        - `metadata`: miscellaneous information about each data point.
-        - `measurements`: the raw measurements used to create each variable.
-        - `latent`: predicted latent variables mean and variance.
-        - `predictions`: predicted labels and support information like entropy and uncertainty.
-        - `quantiles`: values corresponding to probability thresholds, when applicable.
-        - `probability`: predicted probabilities.
-        - `simulations`: samples from the predictive distribution.
+        Metadata first (bare names, the way `HOLEID` is read back), then the
+        coordinates, then every filled column of every variable, named by its
+        path -- `assay_Zn_prediction`. `include` chooses what comes
+        (`"**/prediction"`, `"assay/**"`), `simulations` how many realizations,
+        and `columns="multi"` keeps the path as one `MultiIndex` level per
+        segment instead of flattening -- for staying in pandas; written to
+        CSV it makes several header rows, which other software reads as data.
         """
-        df = [_pd.DataFrame(_np.asarray(self.coordinates),
-                            columns=self.coordinate_labels)]
-        for variable in self.variables.values():
-            df.append(variable.as_data_frame(**kwargs))
-        df = _pd.concat(df, axis=1)
+        found = []
         if metadata:
-            df = _pd.concat([self._metadata_frame(), df], axis=1)
-        return df
+            found += [(VariablePath((name,)), column.to_numpy())
+                      for name, column in self.metadata.items()]
+        coords = _np.asarray(self.coordinates)
+        found += [(VariablePath((str(label),)), coords[:, i])
+                  for i, label in enumerate(self.coordinate_labels)]
+        found += list(self._export_columns(include, simulations))
+        return _frame_from_columns(found, columns)
 
     @staticmethod
     def default_coordinate_labels(n_dim):
@@ -4126,13 +3999,7 @@ class _GriddedData(_PointBased):
         return _np.stack(cell_id, axis=1)
 
     def as_data_frame(self, metadata=True, **kwargs):
-        df = [_pd.DataFrame(_np.asarray(self.coordinates),
-                            columns=self.coordinate_labels)]
-        for variable in self.variables.values():
-            df.append(variable.as_data_frame(**kwargs))
-        df = _pd.concat(df, axis=1)
-        if metadata:
-            df = _pd.concat([self._metadata_frame(), df], axis=1)
+        df = _PointBased.as_data_frame(self, metadata=metadata, **kwargs)
         for i, s in enumerate(self.coordinate_labels):
             df[f'_{s}'] = self.step_size[i]
         return df
@@ -4887,17 +4754,14 @@ class DirectionalData(PointData):
                                      axis=0)
         self._bounding_box = BoundingBox.from_array(all_coords)
 
-    def as_data_frame(self, full=False):
+    def as_data_frame(self, **kwargs):
         """
         Conversion of a spatial object to a data frame.
         """
-        df = [_pd.DataFrame(_np.asarray(self.coordinates),
-                            columns=self.coordinate_labels),
-              _pd.DataFrame(self.directions, columns=self.direction_labels)]
-        for variable in self.variables.values():
-            df.append(variable.as_data_frame(full))
-        df = _pd.concat(df, axis=1)
-        return df
+        df = _PointBased.as_data_frame(self, **kwargs)
+        directions = _pd.DataFrame(self.directions,
+                                   columns=self.direction_labels)
+        return _pd.concat([directions, df], axis=1)
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)

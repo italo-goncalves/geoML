@@ -172,7 +172,7 @@ def test_the_data_frame_reads_the_store_once_too(monkeypatch):
 
     df = grid.variables["v"].as_data_frame(simulations=True)
     assert len(reads) == 1
-    assert np.allclose(df["v_sim_3"].to_numpy(), values[:, 3])
+    assert np.allclose(df["v_simulations_3"].to_numpy(), values[:, 3])
 
 
 def test_the_data_frame_takes_a_selection_as_well():
@@ -180,15 +180,18 @@ def test_the_data_frame_takes_a_selection_as_well():
     grid, values = _grid()
     variable = grid.variables["v"]
 
-    columns = [c for c in variable.as_data_frame(simulations=False) if "_sim_" in c]
+    columns = [c for c in variable.as_data_frame(simulations=False)
+               if "_simulations_" in c]
     assert columns == []
 
-    columns = [c for c in variable.as_data_frame(simulations=True) if "_sim_" in c]
+    columns = [c for c in variable.as_data_frame(simulations=True)
+               if "_simulations_" in c]
     assert len(columns) == N_SIM
 
     df = variable.as_data_frame(simulations=[2, 6])
-    assert [c for c in df if "_sim_" in c] == ["v_sim_2", "v_sim_6"]
-    assert np.allclose(df["v_sim_6"].to_numpy(), values[:, 6])
+    assert [c for c in df if "_simulations_" in c] == \
+        ["v_simulations_2", "v_simulations_6"]
+    assert np.allclose(df["v_simulations_6"].to_numpy(), values[:, 6])
 
 
 def test_an_empty_attribute_is_still_left_out():

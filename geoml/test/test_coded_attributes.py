@@ -251,5 +251,11 @@ def test_the_exported_frame_reads_as_text():
     rock = _rock()
     df = rock.as_data_frame()
 
-    assert df["rock_a"].tolist() == ["granite", "basalt"] * 3
-    assert df["rock_predicted"].tolist() == [""] * N
+    # named by path now, and decoded on the way out
+    assert df["rock_measurements_a"].tolist() == ["granite", "basalt"] * 3
+    # a column nothing ever wrote is left out rather than exported as ""
+    assert "rock_predicted" not in df.columns
+
+    rock.predicted.values[:] = 0
+    assert rock.as_data_frame()["rock_predicted"].tolist() == \
+        [rock.labels[0]] * N
