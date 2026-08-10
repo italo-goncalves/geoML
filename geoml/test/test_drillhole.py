@@ -1164,3 +1164,107 @@ def test_ararangua_loads_and_converts():
     point = holes.as_classification_input(("lito", "Lito"), length=10.0)
     assert point.n_data > 0
     assert np.all(np.isfinite(np.asarray(point.coordinates)))
+
+
+# --------------------------------------------------------------------------- #
+# renaming and dropping tables
+# --------------------------------------------------------------------------- #
+def test_a_table_can_be_renamed_in_place():
+    holes = _assay_holes()
+    holes.add_intervals(
+        "extra",
+        pd.DataFrame({"HoleID": "H1", "From": [0.0], "To": [10.0],
+                      "d": [2.5]}),
+        hole="HoleID", fr="From", to="To")
+
+    holes.rename_table("assay", "chemistry")
+
+    # same table, new name, same position -- the order is what
+    # `as_point_data` merges by default
+    assert list(holes.intervals) == ["chemistry", "extra"]
+    assert holes.intervals["chemistry"].name == "chemistry"
+    assert holes.intervals["chemistry"].value_columns == \
+        ["Pb_pct_ICP", "rock_code"]
+
+    points = holes.composite(5.0).as_point_data("chemistry")
+    assert "Pb_pct_ICP" in points.variables
+
+
+def test_renaming_refuses_what_is_not_there_and_what_already_is():
+    holes = _assay_holes()
+    with pytest.raises(ValueError, match="no table named"):
+        holes.rename_table("nope", "other")
+
+    holes.add_intervals(
+        "extra",
+        pd.DataFrame({"HoleID": "H1", "From": [0.0], "To": [10.0],
+                      "d": [2.5]}),
+        hole="HoleID", fr="From", to="To")
+    with pytest.raises(ValueError, match="already a table named"):
+        holes.rename_table("assay", "extra")
+    # renaming to itself is a no-op, not a collision
+    holes.rename_table("assay", "assay")
+
+
+def test_a_table_can_be_dropped():
+    holes = _assay_holes()
+    holes.add_intervals(
+        "extra",
+        pd.DataFrame({"HoleID": "H1", "From": [0.0], "To": [10.0],
+                      "d": [2.5]}),
+        hole="HoleID", fr="From", to="To")
+
+    holes.drop_table("extra")
+    assert list(holes.intervals) == ["assay"]
+
+    with pytest.raises(ValueError, match="no table named"):
+        holes.drop_table("extra")
+
+
+# --------------------------------------------------------------------------- #
+# the recovery role
+# --------------------------------------------------------------------------- #
+def _recovery_holes():
+    holes = _drillholes(collar=_collar(dip=90.0, azimuth=0.0, length=10.0))
+    holes.add_intervals(
+        "assay",
+        pd.DataFrame({"HoleID": "H1", "From": [0.0, 5.0], "To": [5.0, 10.0],
+                      "Pb": [1.0, 3.0], "rec": [1.0, 0.5]}),
+        hole="HoleID", fr="From", to="To", recovery="rec")
+    return holes
+
+
+def test_recovery_is_a_role_of_its_own():
+    table = _recovery_holes().intervals["assay"]
+
+    assert table.columns_with_role("recovery") == ["rec"]
+    assert table.columns_with_role("grade") == ["Pb"]   # not swept up
+    assert "recovery" in str(table)
+
+
+def test_recovery_composites_by_length_and_never_weights_the_grade():
+    """A fraction of a length is exactly what length-weighting averages; how
+    much a poorly recovered assay should count is a modelling decision, not a
+    compositing one."""
+    holes = _recovery_holes()
+    table = holes.composite(10.0).intervals["assay"]
+
+    assert np.allclose(table.data["rec"], [0.75])       # (1.0 + 0.5) / 2
+    assert np.allclose(table.data["Pb"], [2.0])         # unweighted by rec
+
+
+def test_recovery_reaches_the_points_as_metadata():
+    """It describes the sample rather than the ground, so it rides beside
+    HOLEID and LENGTH where the models never see it."""
+    points = _recovery_holes().as_point_data()
+
+    assert "rec" not in points.variables
+    assert np.allclose(points.get_metadata("rec"), [1.0, 0.5])
+
+
+def test_recovery_survives_a_column_rename():
+    holes = _recovery_holes()
+    holes.rename("assay", {"rec": "core_recovery"})
+
+    assert holes.intervals["assay"].columns_with_role("recovery") == \
+        ["core_recovery"]

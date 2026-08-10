@@ -88,6 +88,23 @@ every variable kind the way `get_contour` always did
 walk; the subset, the carry, the frame, the fills, the persistence and the
 repr all run on the same traversal, so a column or a family added to the
 declarations reaches all of them the day it is added
+* **`container.drop(names)` removes variables.** Whole variables only: a
+composition without one part is a different composition, so a component's
+name is refused with its owner named — `'a' is a component of 'assay'` —
+rather than half a variable being left behind
+* **Interval tables can be renamed and dropped.**
+`holes.rename_table("assay", "chemistry")` keeps the table's position (the
+order is what `as_point_data` merges by default) and refuses a name already
+taken; `holes.drop_table(name)` removes one and re-derives the bounding box
+* **`recovery` is a column role of its own** in drillhole tables, between
+`density` and `flag`: numeric, the share of each interval actually
+recovered. It composites as a length-weighted mean — a fraction of a length
+is exactly what length-weighting averages — and is never applied as a weight
+to the grades, since how much a poorly recovered assay should count is a
+modelling decision, not a compositing one. `as_point_data` carries it as
+*metadata*, beside `HOLEID` and `LENGTH`: it describes the sample rather
+than the ground, so the models never see it. The `flag` docstring loses
+"recovery" from its examples, that having been the stopgap
 
 ## version 0.5.8
 * **The likelihood noise is integrated out of a prediction rather than drawn.**

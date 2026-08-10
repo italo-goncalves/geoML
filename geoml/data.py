@@ -2900,6 +2900,46 @@ class _SpatialData(_TreeNode):
                 f"found {list(self.metadata.keys())}")
         return self.metadata[name].to_numpy()
 
+    def drop(self, names):
+        """
+        Removes variables from this container.
+
+        Whole variables only: a component belongs to the variable that built
+        it -- a composition without one part is a different composition, and
+        a categorical without one class a different classification -- so a
+        component's name is refused with its owner named, rather than half a
+        variable being left behind.
+
+        Parameters
+        ----------
+        names : str or list
+            The variable(s) to remove.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        for name in ([names] if isinstance(names, str) else list(names)):
+            name = str(name)
+            if name in self.variables:
+                del self.variables[name]
+                continue
+            if PATH_SEP in name:
+                raise ValueError(
+                    "%r is a path; only whole variables can be dropped -- "
+                    "one of %s" % (name, ", ".join(sorted(self.variables))
+                                   or "none"))
+            try:
+                _, owner = self._variable_or_component(name)
+            except ValueError:
+                raise ValueError(
+                    "no variable named %r to drop; found %s"
+                    % (name, ", ".join(sorted(self.variables)) or "none"))
+            raise ValueError(
+                "%r is a component of %r and cannot be dropped on its own; "
+                "drop %r whole" % (name, owner, owner))
+        return self
+
     def _check_three_dimensional(self):
         """A surface can only be assigned to locations that have a height."""
         if self.n_dim != 3:
