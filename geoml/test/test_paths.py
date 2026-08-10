@@ -224,6 +224,31 @@ def test_a_node_reports_the_facts_a_rebuild_has_to_carry():
         {"cutoffs": None}
 
 
+@pytest.mark.parametrize("variable", ["au", "vec", "assay"])
+def test_what_a_node_knows_survives_being_rebuilt(variable):
+    """`from_variable` builds the structure; the facts follow wholesale off
+    `_NODE_ATTRS`. Carrying them by hand per class is how a composition came
+    to lose its components' cut-offs three separate times -- the third time
+    was this test's reason to exist."""
+    point = _points()
+    grade = point.get(variable)
+    parts = getattr(grade, "components", None)
+    (parts["p" if variable == "vec" else "a"] if parts else grade) \
+        .set_cutoffs([1.5])
+
+    target = geoml.data.PointData.from_array(
+        np.zeros((6, 3)), point.coordinate_labels)
+    grade.copy_to(target)
+    copied = target.get(variable)
+
+    carried = grade.carry_to(target, np.ones(6, dtype=bool), 0)
+
+    for rebuilt in (copied, carried):
+        holder = (rebuilt.components["p" if variable == "vec" else "a"]
+                  if parts else rebuilt)
+        assert holder.cutoffs == [1.5]
+
+
 # --------------------------------------------------------------------------- #
 # selecting
 # --------------------------------------------------------------------------- #

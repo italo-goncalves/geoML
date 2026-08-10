@@ -567,6 +567,24 @@ class _TreeNode(object):
         """
         return {name: getattr(self, name, None) for name in self._NODE_ATTRS}
 
+    def _copy_attrs_into(self, new):
+        """Carry every node's facts into a freshly built copy of this variable.
+
+        `from_variable` builds the structure -- the components, the empty
+        columns -- and this walks the two trees in step, copying what each
+        node *knows* rather than what it holds. Wholesale, off `_NODE_ATTRS`,
+        because carrying them by hand per class is how a composition came to
+        lose its components' cut-offs three separate times: whoever adds a
+        fact adds it to the declaration, and every rebuild carries it.
+        """
+        for name, value in self.node_attrs().items():
+            if value is not None:
+                setattr(new, name, _copy.deepcopy(value))
+        theirs = new.child_nodes()
+        for label, child in self.child_nodes().items():
+            if label in theirs:
+                child._copy_attrs_into(theirs[label])
+
     def walk(self, prefix=None):
         """`(path, node)` for this node and every node beneath it."""
         prefix = VariablePath(self._node_name) if prefix is None \
@@ -1368,6 +1386,7 @@ class _Variable(_TreeNode):
         the number already there.
         """
         new = self.__class__.from_variable(coordinates, self)
+        self._copy_attrs_into(new)
         self._carry_into(new, _np.asarray(keep, dtype=bool))
         return new
 
@@ -1460,9 +1479,9 @@ class _Variable(_TreeNode):
         return {}
 
     def copy_to(self, coordinates):
-        coordinates.variables[self.name] = self.__class__.from_variable(
-            coordinates, self
-        )
+        new = self.__class__.from_variable(coordinates, self)
+        self._copy_attrs_into(new)
+        coordinates.variables[self.name] = new
 
     def update(self, idx, **kwargs):
         raise NotImplementedError
@@ -1793,11 +1812,10 @@ class ContinuousVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = cls(variable.name, coordinates)
-        # what the variable is judged against belongs to the variable, not to
-        # the locations, so it follows it onto whatever it is predicted into
-        new_var.cutoffs = variable.cutoffs
-        return new_var
+        # the facts the variable carries -- its cut-offs -- follow separately,
+        # by `_copy_attrs_into` in `copy_to`/`carry_to`, off the `_NODE_ATTRS`
+        # declaration rather than named here again
+        return cls(variable.name, coordinates)
 
     def __getitem__(self, item):
         new_obj = _copy_for_subset(self)
@@ -2139,18 +2157,10 @@ class VectorVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = cls(
-            variable.name,
-            coordinates,
-            variable.labels,
-        )
-        # the components are built fresh by `__init__`, so what belongs to
-        # them rather than to the container has to be brought across by hand:
-        # a cut-off is declared per component and a vector variable is how it
-        # reaches the model
-        for label, component in variable.components.items():
-            new_var.components[label].cutoffs = component.cutoffs
-        return new_var
+        # the components are built fresh by `__init__`; what they *know* --
+        # their cut-offs -- follows by `_copy_attrs_into`, which walks the
+        # two trees in step so nothing is named here again
+        return cls(variable.name, coordinates, variable.labels)
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
