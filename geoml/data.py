@@ -1511,21 +1511,44 @@ class _Variable(_TreeNode):
             new.allocate_simulations(self.simulations.shape[1])
             _carry_rows(self.simulations, new.simulations, keep)
 
-        if self._ZARR_HAS_QUANTILES:
-            for source, target in ((self.quantiles, new.quantiles),
-                                   (self.probabilities, new.probabilities),
-                                   (self.proportions, new.proportions),
-                                   (self.divided, new.divided)):
-                for key, attr in source.items():
-                    fresh = self._Attribute(new.coordinates)
-                    fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
-                    target[key] = fresh
+        for family in self._DICT_FAMILIES:
+            target = getattr(new, family)
+            for key, attr in (getattr(self, family, None) or {}).items():
+                fresh = self._Attribute(new.coordinates)
+                fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
+                target[key] = fresh
 
         for name, component in (getattr(self, "components", None) or {}).items():
             component._carry_into(new.components[name], keep)
 
+    def _subset_into(self, new, item):
+        """Fill a copy with the `item` rows of this node, column by column.
+
+        Driven by the declarations rather than written out per class: a
+        column named in `_ZARR_ATTRS` and forgotten in a hand-written subset
+        survives at its old length, and only whatever reads it afterwards
+        finds out. That is how a `BinaryVariable` shipped a subset whose
+        `probability` was never cut -- the old override wrote it into a dead
+        `average` attribute instead.
+        """
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None:
+                setattr(new, role, column[item])
+        for family in self._DICT_FAMILIES:
+            target = getattr(new, family)
+            for key, attribute in (getattr(self, family, None) or {}).items():
+                target[key] = attribute[item]
+        if getattr(self, "simulations", None) is not None:
+            new.simulations = _subset_simulations(self.simulations, item)
+        theirs = new.child_nodes()
+        for label, child in self.child_nodes().items():
+            child._subset_into(theirs[label], item)
+
     def __getitem__(self, item):
-        raise NotImplementedError
+        new_obj = _copy_for_subset(self)
+        self._subset_into(new_obj, item)
+        return new_obj
 
     def get_measurements(self):
         raise NotImplementedError
@@ -1908,32 +1931,6 @@ class ContinuousVariable(_Variable):
         # declaration rather than named here again
         return cls(variable.name, coordinates)
 
-    def __getitem__(self, item):
-        new_obj = _copy_for_subset(self)
-        # the same list the Zarr round trip and `carry_to` walk, so a column
-        # added in one place is subset in this one without being named twice
-        for role in self._ZARR_ATTRS:
-            column = getattr(self, role, None)
-            if column is not None:
-                setattr(new_obj, role, column[item])
-        new_obj.proportions = _col.OrderedDict(
-            (key, val[item]) for key, val in self.proportions.items())
-        new_obj.divided = _col.OrderedDict(
-            (key, val[item]) for key, val in self.divided.items())
-
-        if self.simulations is not None:
-            new_obj.simulations = _subset_simulations(self.simulations, item)
-
-        if len(self.quantiles) > 0:
-            for key, val in self.quantiles.items():
-                new_obj.quantiles[key] = val[item]
-
-        if len(self.probabilities) > 0:
-            for key, val in self.probabilities.items():
-                new_obj.probabilities[key] = val[item]
-
-        return new_obj
-
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["average_sim"].numpy()
 
@@ -2096,16 +2093,6 @@ class VectorVariable(_Variable):
         )
         return new_var
 
-    def __getitem__(self, item):
-        new_obj = _copy_for_subset(self)
-
-        for name, comp in self.components.items():
-            new_obj.components[name] = comp[item]
-
-        new_obj.uncertainty = self.uncertainty[item]
-
-        return new_obj
-
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
@@ -2159,31 +2146,6 @@ class _Component(ContinuousVariable):
         super().__init__(name, coordinates, measurements)
         self.latent_mean = None
         self.latent_variance = None
-
-    def __getitem__(self, item):
-        new_obj = _copy_for_subset(self)
-        # driven by the list rather than written out: a column named there and
-        # forgotten here survives the subset at its old length, and only
-        # something that reads it afterwards finds out. A component has no
-        # latent space of its own and says so with a None, as `_carry_into`
-        # also has to allow for
-        for role in self._ZARR_ATTRS:
-            column = getattr(self, role, None)
-            if column is not None:
-                setattr(new_obj, role, column[item])
-
-        if self.simulations is not None:
-            new_obj.simulations = _subset_simulations(self.simulations, item)
-
-        if len(self.quantiles) > 0:
-            for key, val in self.quantiles.items():
-                new_obj.quantiles[key] = val[item]
-
-        if len(self.probabilities) > 0:
-            for key, val in self.probabilities.items():
-                new_obj.probabilities[key] = val[item]
-
-        return new_obj
 
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
@@ -2321,21 +2283,6 @@ class _Category(_Variable):
         if not self.divided._has_content():
             return {}
         return {"": self.divided.values.to_numpy()}
-
-    def __getitem__(self, item):
-        new_obj = _copy_for_subset(self)
-        new_obj.probability = self.probability[item]
-        new_obj.indicator = self.indicator[item]
-        new_obj.indicator_mean = self.indicator_mean[item]
-        new_obj.indicator_variance = self.indicator_variance[item]
-        new_obj.indicator_predicted = self.indicator_predicted[item]
-        new_obj.proportion = self.proportion[item]
-        new_obj.divided = self.divided[item]
-
-        if self.simulations is not None:
-            new_obj.simulations = _subset_simulations(self.simulations, item)
-
-        return new_obj
 
     def update(self, idx, **kwargs):
         self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
@@ -2739,24 +2686,6 @@ class BinaryVariable(_Variable):
     def from_variable(cls, coordinates, variable):
         new_var = cls(variable.name, coordinates, variable.labels)
         return new_var
-
-    def __getitem__(self, item):
-        new_obj = _copy_for_subset(self)
-        new_obj.average = self.probability[item]
-        new_obj.indicator = self.indicator[item]
-        new_obj.latent_mean = self.latent_mean[item]
-        new_obj.latent_variance = self.latent_variance[item]
-        new_obj.predicted = self.predicted[item]
-        new_obj.entropy = self.entropy[item]
-        new_obj.uncertainty = self.uncertainty[item]
-        new_obj.measurements = self.measurements[item]
-        new_obj.weights = self.weights[item]
-
-        if self.simulations is not None:
-            new_obj.simulations = _subset_simulations(self.simulations, item)
-
-        return new_obj
-
 
     def update(self, idx, **kwargs):
         prob = kwargs["probability"].numpy()
