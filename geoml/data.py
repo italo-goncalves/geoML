@@ -277,6 +277,244 @@ def _export_label(prefix, name):
     return name if prefix is None else prefix + " - " + name
 
 
+PATH_SEP = "/"
+METADATA_ROOT = "_metadata"
+
+
+def _path_key(key):
+    """A dict family's key as a path segment.
+
+    `str` on a float is the shortest string that reads back as the same
+    number, which is what makes `quantiles/1.5` and `quantiles/1.50` the same
+    address without any tolerance being involved: both parse to `1.5`. A key
+    that is not a number is its own segment.
+    """
+    try:
+        return str(float(key))
+    except (TypeError, ValueError):
+        return str(key)
+
+
+class VariablePath:
+    """Where a piece of data sits inside a container.
+
+    A container holds variables, a variable holds components or attributes,
+    and an attribute holds one array per location. This names a place in that
+    tree the way a file system names a file --
+    ``assay/Zn/noise_variance`` -- so that one string can serve the lookup,
+    the persistence key and the exported column name.
+
+    Built from a string, from parts, or from another path; `/` composes, as it
+    does for `pathlib`:
+
+    >>> VariablePath("assay") / "Zn" / "prediction"
+    VariablePath('assay/Zn/prediction')
+    """
+    __slots__ = ("parts",)
+
+    def __init__(self, parts=()):
+        if isinstance(parts, VariablePath):
+            parts = parts.parts
+        elif isinstance(parts, str):
+            parts = tuple(p for p in parts.split(PATH_SEP) if p != "")
+        else:
+            parts = tuple(str(p) for p in parts)
+        for part in parts:
+            if PATH_SEP in part:
+                raise ValueError(
+                    "%r cannot be a path segment: %r is the separator"
+                    % (part, PATH_SEP))
+        self.parts = parts
+
+    def __truediv__(self, other):
+        return VariablePath(self.parts + VariablePath(other).parts)
+
+    def __str__(self):
+        return PATH_SEP.join(self.parts)
+
+    def __repr__(self):
+        return "VariablePath(%r)" % str(self)
+
+    def __eq__(self, other):
+        if isinstance(other, (str, tuple, list)):
+            other = VariablePath(other)
+        return isinstance(other, VariablePath) and self.parts == other.parts
+
+    def __hash__(self):
+        return hash(self.parts)
+
+    def __len__(self):
+        return len(self.parts)
+
+    def __iter__(self):
+        return iter(self.parts)
+
+    def __getitem__(self, item):
+        return self.parts[item]
+
+    @property
+    def name(self):
+        """The last segment, or `''` for the root."""
+        return self.parts[-1] if self.parts else ""
+
+    @property
+    def parent(self):
+        return VariablePath(self.parts[:-1])
+
+
+class _TreeNode(object):
+    """One traversal of the container tree, shared by every node in it.
+
+    A container is a node, a variable is a node, a component is a node, and
+    each of them holds *leaves* -- one array per location -- plus *attrs*, the
+    facts describing the node itself. Everything that reads a container whole
+    (persistence, the data frame, the pyvista exports, subsetting, carrying to
+    a new container) is a fold over `leaves()`, so a column added in one place
+    reaches all of them. Writing those lists out per class is what put the
+    same bug in the code seven times.
+
+    A subclass says what it holds by declaring `_ZARR_ATTRS` (scalar columns),
+    `_DICT_FAMILIES` (columns keyed by a cut-off) and `_NODE_ATTRS` (the
+    facts), and by answering `child_nodes`. Nothing else is per class.
+    """
+    _NODE_ATTRS = ()      # facts a rebuild must carry across; not arrays
+    _DICT_FAMILIES = ()   # attribute families keyed by a cut-off
+    _ZARR_ATTRS = ()
+
+    @property
+    def _node_name(self):
+        return getattr(self, "name", "")
+
+    def child_nodes(self):
+        """The nodes directly beneath this one, by name."""
+        return dict(getattr(self, "components", None) or {})
+
+    def own_leaves(self):
+        """`(parts, attribute)` for the columns this node owns directly.
+
+        Not its children's, and not `simulations`: that one carries a
+        realization axis, so it is a leaf of a different shape and is reached
+        by name (`get`) rather than swept up by everything that walks columns.
+        """
+        for role in self._ZARR_ATTRS:
+            attribute = getattr(self, role, None)
+            if attribute is not None:
+                yield (role,), attribute
+        for family in self._DICT_FAMILIES:
+            for key, attribute in (getattr(self, family, None) or {}).items():
+                yield (family, _path_key(key)), attribute
+
+    def node_attrs(self):
+        """The facts describing this node, as `{name: value}`.
+
+        Cut-offs and the like: not arrays, not rebuilt from anything else, and
+        therefore invisible to any code that only knows about columns. Every
+        method that builds a fresh variable has to carry them across, and the
+        three that forgot are why they are enumerated here.
+        """
+        return {name: getattr(self, name, None) for name in self._NODE_ATTRS}
+
+    def walk(self, prefix=None):
+        """`(path, node)` for this node and every node beneath it."""
+        prefix = VariablePath(self._node_name) if prefix is None \
+            else VariablePath(prefix)
+        yield prefix, self
+        for name, child in self.child_nodes().items():
+            for item in child.walk(prefix / name):
+                yield item
+
+    def leaves(self, prefix=None):
+        """`(path, attribute)` for every column at or beneath this node."""
+        for path, node in self.walk(prefix):
+            for parts, attribute in node.own_leaves():
+                yield path / parts, attribute
+
+    def get(self, path, key=None):
+        """The node or attribute at `path`, relative to this one.
+
+        `container.get("assay/Zn/noise_variance")` is the column,
+        `container.get("assay/Zn")` the component, `container.get("")` the
+        container. A dict family takes its key as the next segment --
+        `"assay/Zn/quantiles/1.5"` -- and `get(path, key)` is accepted as
+        shorthand for the same thing.
+        """
+        path = VariablePath(path)
+        if key is not None:
+            path = path / _path_key(key)
+        found = self._resolve(path)
+        if found is None:
+            # report from as deep as the path did reach: told that `au` holds
+            # no `nope`, the reader knows where to look, where a list of the
+            # container's variables only says the first segment was fine
+            node = self._deepest(path)
+            raise KeyError(
+                "nothing at %r; %s holds %s"
+                % (str(path),
+                   "%r" % node._node_name if node._node_name
+                   else "the container",
+                   ", ".join(node._tree_names()) or "nothing"))
+        return found
+
+    def _deepest(self, path):
+        """The last node `path` reaches before it stops matching."""
+        node = self
+        for segment in path:
+            children = node.child_nodes()
+            if segment not in children:
+                return node
+            node = children[segment]
+        return node
+
+    def values(self, path, key=None):
+        """The array at `path`, decoded if it is coded."""
+        found = self.get(path, key)
+        if isinstance(found, _Attribute):
+            return found.to_numpy()
+        return _np.asarray(found)
+
+    def _tree_names(self):
+        """What could follow this node, for an error message."""
+        names = sorted(self.child_nodes())
+        names += sorted(str(VariablePath(parts))
+                        for parts, _ in self.own_leaves())
+        if getattr(self, "simulations", None) is not None:
+            names.append("simulations")
+        return names
+
+    def _resolve(self, path):
+        """The node or attribute at `path`, or None. Never raises."""
+        if len(path) == 0:
+            return self
+
+        head, rest = path[0], VariablePath(path[1:])
+
+        children = self.child_nodes()
+        if head in children:
+            return children[head]._resolve(rest)
+
+        if head == "simulations" \
+                and getattr(self, "simulations", None) is not None:
+            if len(rest) == 0:
+                return self.simulations
+            try:
+                return self.simulation(int(rest[0]))
+            except (ValueError, IndexError, NoDataError):
+                return None
+
+        if len(rest) == 0:
+            attribute = getattr(self, head, None)
+            if isinstance(attribute, _Attribute):
+                return attribute
+
+        if len(rest) == 1 and head in self._DICT_FAMILIES:
+            wanted = _path_key(rest[0])
+            for key, attribute in (getattr(self, head, None) or {}).items():
+                if _path_key(key) == wanted:
+                    return attribute
+
+        return None
+
+
 def _selected_simulations(store, selection):
     """The simulations to export, read in a single pass over the store.
 
@@ -735,7 +973,7 @@ class _Attribute(object):
             **kwargs)
 
 
-class _Variable(object):
+class _Variable(_TreeNode):
     """Representation of a dependent random variable."""
 
     # Subclasses that can be simulated replace this with an (n_data, n_sim)
@@ -1151,6 +1389,8 @@ class ContinuousVariable(_Variable):
                    "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
     _ZARR_HAS_QUANTILES = True
+    _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided")
+    _NODE_ATTRS = ("cutoffs",)
 
     def __init__(self, name, coordinates, measurements=None):
         super().__init__(name, coordinates)
@@ -2817,7 +3057,7 @@ class AnomalyVariable(BinaryVariable):
         return new_var
 
 
-class _SpatialData(object):
+class _SpatialData(_TreeNode):
     """Abstract class for spatial data in general"""
 
     def __init__(self):
@@ -2830,6 +3070,33 @@ class _SpatialData(object):
 
     def __repr__(self):
         return self.__str__()
+
+    # ------------------------------------------------------------------ #
+    # the container as a node (see `_TreeNode`)
+    # ------------------------------------------------------------------ #
+    @property
+    def _node_name(self):
+        # the container is the root, whatever else it may call itself
+        return ""
+
+    def child_nodes(self):
+        return dict(self.variables)
+
+    def own_leaves(self):
+        """The metadata columns, under a root of their own.
+
+        `_metadata` is reserved rather than mixed in with the variables: a
+        fold that means to write every modelled column must be able to leave
+        the air/rock code and the cross-validation fold out of it, and a
+        metadata column may legitimately share a name with a variable.
+        """
+        for name, column in self.metadata.items():
+            yield (METADATA_ROOT, name), column
+
+    def _resolve(self, path):
+        if len(path) == 2 and path[0] == METADATA_ROOT:
+            return self.metadata.get(path[1])
+        return super()._resolve(path)
 
     @property
     def rows_per_location(self):
