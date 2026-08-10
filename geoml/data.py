@@ -1618,7 +1618,6 @@ class _Variable(_TreeNode):
     # Scalar ``_Attribute`` roles to persist; overridden per subclass.
     _ZARR_ATTRS = ()
     _ZARR_HAS_SIMS = False        # has a (n_data, n_sim) simulations store
-    _ZARR_HAS_QUANTILES = False   # has quantiles / probabilities dicts
 
     def _save_attr(self, group, prefix, role):
         """Write one ``_Attribute``'s store into ``group``; None-valued -> skip.
@@ -1672,26 +1671,21 @@ class _Variable(_TreeNode):
             key = prefix + "/simulations"
             self.simulations.write_into(group, key)
             meta["simulations"] = key
-        if self._ZARR_HAS_QUANTILES:
-            meta["quantiles"] = []
-            for p, attr in self.quantiles.items():
-                key = prefix + "/quantile_" + str(p)
+        # the dict families and the node's own facts, off the declarations,
+        # with the Zarr key spelling the same string `get` takes:
+        # `assay/Zn/quantiles/0.5`
+        for family in self._DICT_FAMILIES:
+            entries = []
+            for at, attr in (getattr(self, family, None) or {}).items():
+                key = prefix + "/" + family + "/" + _path_key(at)
                 attr.values.write_into(group, key)
-                meta["quantiles"].append({"key": key, "p": float(p)})
-            meta["probabilities"] = []
-            for q, attr in self.probabilities.items():
-                key = prefix + "/probability_" + str(q)
-                attr.values.write_into(group, key)
-                meta["probabilities"].append({"key": key, "q": float(q)})
-            for role, source in (("proportions", "proportion"),
-                                 ("divided", "divided")):
-                meta[role] = []
-                for c, attr in getattr(self, role, {}).items():
-                    key = prefix + "/" + source + "_" + str(c)
-                    attr.values.write_into(group, key)
-                    meta[role].append({"key": key, "c": float(c)})
-            if getattr(self, "cutoffs", None) is not None:
-                meta["cutoffs"] = [float(c) for c in self.cutoffs]
+                entries.append({"key": key, "at": float(at)})
+            if entries:
+                meta.setdefault("dicts", {})[family] = entries
+        facts = {name: value for name, value in self.node_attrs().items()
+                 if value is not None}
+        if facts:
+            meta["node_attrs"] = facts
         if getattr(self, "components", None):
             meta["components"] = {}
             for cname, comp in self.components.items():
@@ -1718,21 +1712,14 @@ class _Variable(_TreeNode):
         if meta.get("simulations") is not None:
             self.simulations = _storage.ArrayStore.wrap_zarr(
                 group[meta["simulations"]])
-        for info in meta.get("quantiles", []):
-            attr = self._Attribute(self.coordinates)
-            attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-            self.quantiles[info["p"]] = attr
-        for info in meta.get("probabilities", []):
-            attr = self._Attribute(self.coordinates)
-            attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-            self.probabilities[info["q"]] = attr
-        for role in ("proportions", "divided"):
-            for info in meta.get(role, []):
+        for family, entries in meta.get("dicts", {}).items():
+            target = getattr(self, family)
+            for info in entries:
                 attr = self._Attribute(self.coordinates)
                 attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-                getattr(self, role)[info["c"]] = attr
-        if meta.get("cutoffs") is not None:
-            self.cutoffs = [float(c) for c in meta["cutoffs"]]
+                target[info["at"]] = attr
+        for name, value in meta.get("node_attrs", {}).items():
+            setattr(self, name, value)
         for cname, cmeta in meta.get("components", {}).items():
             self.components[cname]._zarr_load(
                 group, prefix + "/" + str(cname), cmeta)
@@ -1788,7 +1775,6 @@ class ContinuousVariable(_Variable):
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
                    "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
-    _ZARR_HAS_QUANTILES = True
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided")
     _NODE_ATTRS = ("cutoffs",)
 
@@ -3014,6 +3000,15 @@ class _SpatialData(_TreeNode):
         """
         group = _zarr.open_group(path, mode="r+")
         meta = dict(group.attrs["geoml"])
+        written = meta.get("geoml_format", 1)
+        if written != _GEOML_ZARR_FORMAT:
+            # refused outright rather than half-loaded with quiet gaps: the
+            # dict families and cut-offs moved when the keys aligned with the
+            # paths, and a format-1 store would open with those missing
+            raise ValueError(
+                "%r was written at geoml store format %d and this version "
+                "reads %d; re-create it by predicting again"
+                % (path, written, _GEOML_ZARR_FORMAT))
         container = _rebuild_container(meta["container"], group)
         _rebuild_metadata(container, group, meta.get("metadata", {}))
         for vmeta in meta["variables"].values():
@@ -6828,7 +6823,11 @@ class RotatedGrid3D(Grid3D):
 # --------------------------------------------------------------------------- #
 # Zarr persistence (see _SpatialData.to_zarr / _SpatialData.open)
 # --------------------------------------------------------------------------- #
-_GEOML_ZARR_FORMAT = 1
+# 2: the dict families and the node facts persist off the declarations, with
+# the Zarr key spelling the same string `get` takes (`quantiles/0.5`, not
+# `quantile_0.5`). Stores written at format 1 are not read back -- agreed at
+# the time of the change, everything in use being refreshed after it.
+_GEOML_ZARR_FORMAT = 2
 
 
 def _write_container(group, container):

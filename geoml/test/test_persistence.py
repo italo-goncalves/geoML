@@ -210,3 +210,43 @@ def test_unsupported_variable_type_raises(tmp_path):
     point.variables["u"] = _Unsupported("u", point)
     with pytest.raises(NotImplementedError):
         point.to_zarr(str(tmp_path / "u.zarr"))
+
+
+def test_a_store_written_at_another_format_is_refused(tmp_path):
+    """Refused outright rather than half-loaded with quiet gaps: the dict
+    families and cut-offs moved when the Zarr keys aligned with the paths."""
+    import zarr
+
+    point = geoml.data.PointData(
+        pd.DataFrame({"c0": [1.0, 2.0], "c1": [3.0, 4.0]}), ["c0", "c1"])
+    point.add_continuous_variable("v", np.array([1.0, 2.0]))
+    path = str(tmp_path / "old.zarr")
+    point.to_zarr(path)
+
+    group = zarr.open_group(path, mode="r+")
+    meta = dict(group.attrs["geoml"])
+    meta["geoml_format"] = 1
+    group.attrs["geoml"] = meta
+
+    with pytest.raises(ValueError, match="format 1.*reads 2"):
+        geoml.data.PointData.open(path)
+
+
+def test_cutoffs_and_shares_survive_the_round_trip(tmp_path):
+    """Persisted off the declarations now, under the same keys `get` takes."""
+    point = geoml.data.PointData(
+        pd.DataFrame({"c0": [1.0, 2.0], "c1": [3.0, 4.0]}), ["c0", "c1"])
+    point.add_continuous_variable("v", np.array([1.0, 2.0]))
+    grade = point.variables["v"]
+    grade.set_cutoffs([1.5])
+    grade.proportions[1.5] = geoml.data._Attribute(point, np.array([0.2, 0.8]))
+    grade.divided[1.5] = geoml.data._Attribute(point, np.array([1.0, 0.0]))
+
+    path = str(tmp_path / "shares.zarr")
+    point.to_zarr(path)
+    back = geoml.data.PointData.open(path)
+
+    reloaded = back.variables["v"]
+    assert reloaded.cutoffs == [1.5]
+    assert np.allclose(back.values("v/proportions/1.5"), [0.2, 0.8])
+    assert np.allclose(back.values("v/divided/1.5"), [1.0, 0.0])
