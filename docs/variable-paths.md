@@ -1,7 +1,32 @@
 # Naming, reaching and exporting a variable's parts — analysis and plan
 
-Nothing in `geoml/` has been changed. Everything below is read off the current
-`master` (0.5.8).
+**Status: executed, 0.5.9** — thirteen commits, one per step of §7, each
+tested against the files it reached and the full suite at the end. Three
+deviations from the plan as written, all recorded here because the reasoning
+changed, not just the order:
+
+- **Step 10 folded into step 6's persistence commit, with no shim.** The plan
+  paired the Zarr key alignment with the `_Category` format bump and required
+  a read shim plus a fixture store. Before the work started the user ruled
+  that old stores need not reopen ("everything will be refreshed"), which
+  made the shim dead weight; instead `open` now *checks*
+  `_GEOML_ZARR_FORMAT` — it never did — and refuses a mismatched store
+  outright rather than half-loading it.
+- **The `split_shares` fold ran after step 7, not inside step 6.** Folding it
+  first would have meant one implementation handling both the scalar and the
+  dict shape of a category's `divided`, deleted a commit later when the dict
+  promotion landed. Order within the plan was by blast radius; these two
+  steps interact, and doing 7 first made 6's last piece three lines.
+- **Two repairs surfaced by the folds were taken as part of them.**
+  `set_coordinates` was six hand-written lists with four missing columns and
+  became a walk (step 4); subsetting a `BinaryVariable` had never cut its
+  `probability` — the override wrote the subset into a dead `average`
+  attribute — and the generic `_subset_into` fixed it by construction
+  (step 6).
+
+The section below is the analysis as it stood before the work, on `master`
+at 0.5.8, kept because the bug table and the prior art are why the design is
+what it is.
 
 A container holds variables, a variable holds other variables or attributes,
 and an attribute holds one array per location. That tree is deliberate — it is

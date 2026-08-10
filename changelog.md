@@ -1,3 +1,94 @@
+## version 0.5.9
+* **A piece of data inside a container has an address.** A container holds
+variables, a variable holds components or attributes, and an attribute holds
+one array per location; that tree can now be named the way a file system
+names a file. `container.get("assay/Zn/noise_variance")` is the column,
+`get("assay/Zn")` the component, `get("")` the container itself;
+`values(path)` is the array, decoded; `get("assay/Zn/quantiles/1.5")` reaches
+into a dict family, with `get(path, 1.5)` as sugar; `_metadata/HOLEID` is a
+metadata column, under a reserved root so a fold over the modelled columns
+can leave it alone; `assay/Zn/simulations/7` is one realization, read by
+indexing the store rather than materializing it. The scheme is not new — the
+Zarr persistence has composed exactly these strings since it was written;
+this promotes them out of the store and into the API. Design and prior art in
+`docs/variable-paths.md`
+* `select(pattern)` asks the tree for a set at once: `**/prediction` is every
+prediction anywhere, `assay/*` one segment down, `assay/**` a subtree. `*`
+does not cross a `/`; `**` spans zero or more segments; `filled=True` keeps
+only columns holding something — the one thing no pattern can express. A bare
+`**` deliberately does not unroll the realization axis, or a default export
+of a simulated model would emit a hundred arrays per variable
+* `container.tree()` prints the whole thing — every variable, component and
+column, its dtype, and `empty` where nothing was ever written, which is the
+question that used to take a session of reading a ParaView array list.
+`status=False` skips the filled check on disk-backed models
+* **One enumeration behind every export, and one spelling.** The four ways of
+naming the same quantity — `assay/Zn/noise_variance` in Zarr,
+`assay - Zn - noise_variance` in one pyvista path, `assay - Zn - noise
+variance` in another, `assay_Zn_noise_variance` in a frame — collapse to
+`render(path, style)` over one walk. Thirty-five per-class export bodies
+(fourteen `as_data_frame`, twenty-one `fill_pyvista_*`) become one fold each,
+which is where seven of the eight bugs in the components family lived: a
+hand-written list cannot miss half of itself once it is not written by hand.
+`proportions` and `divided` reach the exports for the first time, on every
+path; the measured column is `au_measurements` now, not bare `au`; a column
+nothing wrote is left out instead of exported empty; a collision made by
+flattening (`noise/variance` beside `noise_variance`) is resolved
+deterministically and warned about
+* `as_data_frame(include="**/prediction")` and
+`as_pyvista(include="assay/**")` choose what leaves the container with one
+pattern instead of a flag per family; `simulations=` keeps its selector
+meaning and composes with it. `columns="multi"` returns a `MultiIndex` level
+per path segment for whoever is staying in pandas — off by default, because
+written to CSV it makes several header rows that other software reads as data
+* Every pyvista export now carries the metadata columns (only the block set
+did before — an air code or a fold is as useful draped over a grid) and
+`field_data["geoml_paths"]`, a JSON table from each array's label back to the
+path that produced it: the flat spellings are not invertible, so the file
+carries the mapping instead of anyone guessing
+* **Subsetting no longer reads every realization of everything.** Three
+nested `deepcopy`s each read whole stores — the container copied all its
+variables before subsetting them, a variable its `(n_data, n_sim)`
+simulations, and an attribute's back-reference dragged in every other
+variable of the container. On a block model whose simulations live on disk
+precisely because they do not fit in memory, any one of the three was the end
+of the session. A test now watches a subset go through with a store that
+raises on any whole read
+* **A rebuilt variable keeps what its nodes know.** Cut-offs declared on a
+composition's components were dropped by `from_variable`, so a block model
+predicted from one could not compute its shares and `refine` had nothing to
+split on — the third time cut-offs specifically were the casualty. Node facts
+are declared (`_NODE_ATTRS`) and carried wholesale by every rebuild, so the
+next fact added is carried the day it is declared
+* **A category keeps the same share dicts a grade does.** `proportions` and
+`divided`, keyed by the one cut-off a category has: zero on `ind_skew`, whose
+zero level set the contact is. The last storage asymmetry between the two
+kinds of decision, and with it `split_shares` collapses to one body and one
+naming hook — a grade renders `@ 1.5` because someone declared that number, a
+category stays bare because its zero is an artefact of the log-odds.
+`block_shares()` labels are pinned unchanged by a test
+* Subsetting a `BinaryVariable` never cut its `probability`: the old override
+wrote the subset into a dead `average` attribute nothing ever read. Fixed by
+the fold rather than by hand
+* **The Zarr store format moves to 2** — the dict families and node facts
+persist off the declarations, under the same keys `get` takes
+(`v/quantiles/0.5`, not `quantile_0.5`) — and `open` now checks the format,
+refusing a mismatched store with what was written and what it reads rather
+than half-loading it. No shim: agreed before the work started, everything in
+use being refreshed after it
+* **`plots.prepare` takes paths, and the dotted form is gone.**
+`"Elements/uncertainty"` where `"Elements.uncertainty"` used to be — removed
+rather than aliased, refused with the replacement spelled out, since a `.`
+inside a label would make a wrong guess look like a working one. The
+duplicate component search in `prepare` (a near-copy of `data.py`'s, and the
+original symptom of the whole problem) is deleted; the one resolver lives on
+`_SpatialData`, every container inherits it, and the plots see components of
+every variable kind the way `get_contour` always did
+* `set_coordinates` — six hand-written lists, four missing columns — is one
+walk; the subset, the carry, the frame, the fills, the persistence and the
+repr all run on the same traversal, so a column or a family added to the
+declarations reaches all of them the day it is added
+
 ## version 0.5.8
 * **The likelihood noise is integrated out of a prediction rather than drawn.**
 What a prediction reports is `E[g(z + eps)]` — the value the ground would show
