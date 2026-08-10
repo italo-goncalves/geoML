@@ -6,11 +6,13 @@ tree, `walk`/`leaves` enumerate it once, and everything that reads a container
 whole is a fold over that one traversal rather than a list of columns written
 out per class. Design and reasoning in `docs/variable-paths.md`.
 """
+import warnings
+
 import numpy as np
 import pytest
 
 import geoml
-from geoml.data import VariablePath
+from geoml.data import VariablePath, render, render_all
 
 
 def _points(n=6):
@@ -198,3 +200,123 @@ def test_a_node_reports_the_facts_a_rebuild_has_to_carry():
     assert point.variables["au"].node_attrs() == {"cutoffs": [1.0, 2.0]}
     assert point.variables["assay"].components["a"].node_attrs() == \
         {"cutoffs": None}
+
+
+# --------------------------------------------------------------------------- #
+# selecting
+# --------------------------------------------------------------------------- #
+def test_one_star_stops_at_a_segment_boundary():
+    """One segment down, whatever is there — a component or a column of the
+    variable's own, since both are addressed the same way."""
+    point = _points()
+    chosen = [str(p) for p in point.select("assay/*")]
+    assert sorted(chosen) == ["assay/a", "assay/b", "assay/uncertainty"]
+
+    assert [str(p) for p in point.select("assay/*/prediction")] == \
+        ["assay/a/prediction", "assay/b/prediction"]
+
+
+def test_two_stars_cross_any_number_of_segments():
+    point = _points()
+    chosen = [str(p) for p in point.select("**/prediction")]
+
+    assert "au/prediction" in chosen
+    assert "assay/a/prediction" in chosen
+    assert "vec/p/prediction" in chosen
+    assert all(p.endswith("/prediction") for p in chosen)
+
+
+def test_two_stars_match_nothing_as_well_as_something():
+    point = _points()
+    chosen = [str(p) for p in point.select("assay/**/prediction")]
+    assert "assay/a/prediction" in chosen        # one segment between
+    assert "au/prediction" not in chosen         # a different variable
+
+
+def test_a_subtree_comes_whole():
+    point = _points()
+    chosen = [str(p) for p in point.select("assay/**")]
+
+    assert "assay" in chosen                      # the node itself
+    assert "assay/a" in chosen                    # its component
+    assert "assay/a/prediction" in chosen         # and the columns
+    assert not any(p.startswith("au") for p in chosen)
+
+
+def test_filled_keeps_columns_only_and_says_which():
+    point = _points()
+    filled = point.select("au/**", filled=True)
+    empty = point.select("au/**", filled=False)
+
+    assert [str(p) for p in filled] == ["au/measurements"]
+    assert "au/prediction" in [str(p) for p in empty]
+    # a node is neither filled nor empty, so it is left out of both
+    assert "au" not in [str(p) for p in filled] + [str(p) for p in empty]
+
+
+def test_a_bare_double_star_leaves_the_realizations_alone():
+    """The store is one name; unrolling it into a hundred is something you
+    have to ask for, or a default export of a simulated model emits a hundred
+    arrays per variable."""
+    point = _points()
+    point.variables["au"].allocate_simulations(3)
+
+    everything = [str(p) for p in point.select("**")]
+    assert "au/simulations" in everything
+    assert "au/simulations/0" not in everything
+
+    unrolled = [str(p) for p in point.select("**/simulations/*")]
+    assert unrolled == ["au/simulations/0", "au/simulations/1",
+                        "au/simulations/2"]
+
+
+# --------------------------------------------------------------------------- #
+# rendering
+# --------------------------------------------------------------------------- #
+def test_the_three_styles_are_the_segments_joined():
+    path = "assay/Zn/noise_variance"
+
+    assert render(path, "path") == "assay/Zn/noise_variance"
+    assert render(path, "flat") == "assay_Zn_noise_variance"
+    assert render(path, "pretty") == "assay - Zn - noise_variance"
+
+
+def test_an_unknown_style_says_what_there_is():
+    with pytest.raises(ValueError, match="'path', 'flat' or 'pretty'"):
+        render("a/b", "fancy")
+
+
+def test_a_namespace_with_no_collision_renders_straight_through():
+    names = render_all(["au/prediction", "assay/a/prediction"], "flat")
+
+    assert list(names.values()) == ["au_prediction", "assay_a_prediction"]
+
+
+def test_a_flat_collision_is_resolved_by_path_order_and_warned_about():
+    clash = ["noise_variance/prediction", "noise/variance/prediction"]
+
+    with pytest.warns(UserWarning, match="render to the column name"):
+        names = render_all(clash, "flat")
+
+    # sorted by path, so the answer does not depend on the order asked for
+    assert names[VariablePath("noise/variance/prediction")] == \
+        "noise_variance_prediction"
+    assert names[VariablePath("noise_variance/prediction")] == \
+        "noise_variance_prediction_2"
+    with pytest.warns(UserWarning):
+        # same answer whichever order they were handed over in
+        assert dict(render_all(clash[::-1], "flat")) == dict(names)
+
+
+def test_the_path_style_cannot_collide():
+    names = render_all(
+        ["noise_variance/prediction", "noise/variance/prediction"], "path")
+    assert len(set(names.values())) == 2
+
+
+def test_a_containers_own_namespace_renders_without_a_warning():
+    point = _points()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        names = render_all([p for p, _ in point.leaves()], "flat")
+    assert len(set(names.values())) == len(names)

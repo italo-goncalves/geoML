@@ -29,6 +29,8 @@ import pandas as _pd
 import numpy as _np
 import copy as _copy
 import collections as _col
+import fnmatch as _fnmatch
+import warnings as _warnings
 import pyvista as _pv
 import itertools as _iter
 import sklearn.metrics as _skmetrics
@@ -362,6 +364,90 @@ class VariablePath:
         return VariablePath(self.parts[:-1])
 
 
+def _match_path(pattern, parts):
+    """Whether `parts` matches a glob `pattern`, segment by segment.
+
+    `*` stands for one segment and does not cross a `/`; `**` stands for zero
+    or more, so `assay/**/prediction` finds `assay/prediction` and
+    `assay/Zn/prediction` alike. Within a segment the usual shell wildcards
+    apply, and matching is case-sensitive because labels are.
+    """
+    if not pattern:
+        return not parts
+    head = pattern[0]
+    if head == "**":
+        return any(_match_path(pattern[1:], parts[i:])
+                   for i in range(len(parts) + 1))
+    if not parts:
+        return False
+    if not _fnmatch.fnmatchcase(parts[0], head):
+        return False
+    return _match_path(pattern[1:], parts[1:])
+
+
+def render(path, style="path"):
+    """An addressable path as a name in some flat namespace.
+
+    Purely mechanical -- the segments joined, nothing else. That is the point:
+    the four spellings this replaced each had rules of their own about which
+    role was abbreviated and which was dropped, and no two agreed.
+
+    `path` is what the store and every internal caller use, `flat` is for
+    data-frame columns, CSV and mining software (identifier-safe), and
+    `pretty` is for pyvista and ParaView, where the name is read by a person.
+    """
+    parts = VariablePath(path).parts
+    if style == "path":
+        return PATH_SEP.join(parts)
+    if style == "flat":
+        return "_".join(parts)
+    if style == "pretty":
+        return " - ".join(parts)
+    raise ValueError(
+        "unknown render style %r; expected 'path', 'flat' or 'pretty'"
+        % (style,))
+
+
+def render_all(paths, style="flat"):
+    """`{path: name}` for a whole namespace at once, every name distinct.
+
+    A path cannot collide -- `/` is refused inside a segment -- so a collision
+    is made by the *join*, and only `flat` makes one readily: `_` is in nearly
+    every role name, so a variable `noise` with a component `variance` lands on
+    the same column as a leaf called `noise_variance`.
+
+    The rule has to be deterministic or an export changes shape between runs,
+    so a colliding group is sorted **by path** and the ones after the first
+    take a suffix. Only the group is touched: suffixing all of them would
+    penalize the innocent column to spare the pathological one. Adding a
+    variable can therefore rename a column inside a colliding group, which is
+    why this warns rather than quietly putting it right.
+    """
+    grouped = _col.OrderedDict()
+    order = []
+    for path in paths:
+        path = VariablePath(path)
+        order.append(path)
+        grouped.setdefault(render(path, style), []).append(path)
+
+    names = {}
+    for name, group in grouped.items():
+        if len(group) == 1:
+            names[group[0]] = name
+            continue
+        group = sorted(group, key=lambda p: p.parts)
+        chosen = [name] + ["%s_%d" % (name, i)
+                           for i in range(2, len(group) + 1)]
+        names.update(zip(group, chosen))
+        _warnings.warn(
+            "%d paths render to the column name %r and were made distinct: %s"
+            % (len(group), name,
+               ", ".join("%s -> %s" % (p, names[p]) for p in group)),
+            stacklevel=2)
+
+    return _col.OrderedDict((path, names[path]) for path in order)
+
+
 class _TreeNode(object):
     """One traversal of the container tree, shared by every node in it.
 
@@ -428,6 +514,61 @@ class _TreeNode(object):
         for path, node in self.walk(prefix):
             for parts, attribute in node.own_leaves():
                 yield path / parts, attribute
+
+    def addressable(self, prefix=None, realizations=False):
+        """`(path, thing)` for everything a path can name here -- nodes and
+        columns alike, each node before the columns it owns.
+
+        `realizations` unrolls a simulations store into one entry per
+        realization. Off by default: on a hundred-realization model that is a
+        hundred extra names per variable, and they are wanted only when
+        something asked for them by name.
+        """
+        for path, node in self.walk(prefix):
+            yield path, node
+            for parts, attribute in node.own_leaves():
+                yield path / parts, attribute
+            store = getattr(node, "simulations", None)
+            if store is not None:
+                yield path / "simulations", store
+                if realizations:
+                    for i in range(store.shape[1]):
+                        yield path / "simulations" / str(i), node.simulation(i)
+
+    def select(self, pattern="**", filled=None):
+        """`{path: thing}` for everything matching a glob pattern.
+
+        `select("**/prediction")` is every prediction in the tree,
+        `select("assay/*")` the components of one variable, `select("assay/**")`
+        that variable and everything under it.
+
+        `filled` is the one thing no pattern can express and every export
+        needs: `True` keeps only columns that hold something, `False` only the
+        empty ones, and either way nodes are left out, since a node is neither.
+        A `role=` keyword was considered and rejected -- `role="prediction"` is
+        exactly `**/prediction`, and a second way to say the same thing is the
+        disease this addressing was built to cure.
+
+        A bare `**` does not unroll the realization axis: the leaf is
+        `assay/Zn/simulations`, and `assay/Zn/simulations/7` is reached by
+        naming it (`get`) or by asking for it (`**/simulations/*`).
+        """
+        parts = VariablePath(pattern).parts
+        # unrolled only when the pattern names the axis and then asks for
+        # something past it: `**/simulations/*` yes, `**` and
+        # `**/simulations` no
+        realizations = "simulations" in parts[:-1]
+        chosen = _col.OrderedDict()
+        for path, thing in self.addressable(realizations=realizations):
+            if not _match_path(parts, path.parts):
+                continue
+            if filled is not None:
+                if not isinstance(thing, _Attribute):
+                    continue
+                if thing._has_content() != filled:
+                    continue
+            chosen[path] = thing
+        return chosen
 
     def get(self, path, key=None):
         """The node or attribute at `path`, relative to this one.
