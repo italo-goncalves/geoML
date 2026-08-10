@@ -143,8 +143,21 @@ modelling decision, not a compositing one. `as_point_data` carries it as
 *metadata*, beside `HOLEID` and `LENGTH`: it describes the sample rather
 than the ground, so the models never see it. The `flag` docstring loses
 "recovery" from its examples, that having been the stopgap
-
-## version 0.5.8
+* **`GPOptions(qmc_simulations=True)` draws the posterior simulations from a
+seeded-scramble Sobol sequence** — each simulation one point of a
+`size x inducing`-dimensional sequence pushed through the normal quantile, so
+the ensemble covers the posterior evenly rather than by chance. Measured on
+the Walker Lake model at 16-256 simulations: the ensemble mean lands 7-37x
+closer to the exact posterior mean the same call reports (converging at
+~N^-1.1 against Monte Carlo's N^-0.5), proportions below a cut-off and the
+outer quantiles about a quarter closer — the accuracy of half again to twice
+the simulations — while the ensemble's own spread and the correlation between
+nearby locations gain nothing, and the wall time is identical. Off by
+default. The rule is settled by the seed at trace time, so it stays
+deterministic, batch-invariant and XLA-compatible; the traced-function cache
+now keys on (jit, qmc), one graph per combination, and `predict_measurements`
+follows the same option. Monte Carlo remains exactly what it was, down to the
+drawn numbers
 * **The likelihood noise is integrated out of a prediction rather than drawn.**
 What a prediction reports is `E[g(z + eps)]` — the value the ground would show
 once the measurement error and the variability below the model's resolution
