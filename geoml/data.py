@@ -30,6 +30,7 @@ import numpy as _np
 import copy as _copy
 import collections as _col
 import fnmatch as _fnmatch
+import json as _json
 import warnings as _warnings
 import pyvista as _pv
 import itertools as _iter
@@ -592,11 +593,11 @@ class _TreeNode(object):
         """
         return {name: getattr(self, name, None) for name in self._NODE_ATTRS}
 
-    def _export_columns(self, include="**", simulations=False):
-        """`(path, values)` for every filled column matching `include`.
+    def _export_leaves(self, include="**", simulations=False, prefix=None):
+        """`(path, attribute)` for every filled column matching `include`.
 
-        The one enumeration behind every tabular export, in place of the
-        fourteen per-class `as_data_frame` bodies that each named their
+        The one enumeration behind every export -- tabular and pyvista alike,
+        in place of the thirty-five per-class bodies that each named their
         columns again: a filled leaf is a column, a dict family is one column
         per cut-off, and the realization axis is unrolled only as far as the
         `simulations` selector asks. Metadata stays out -- it has a root of
@@ -604,7 +605,7 @@ class _TreeNode(object):
         alone.
         """
         pattern = VariablePath(include).parts
-        for path, node in self.walk():
+        for path, node in self.walk(prefix):
             for leaf_parts, attribute in node.own_leaves():
                 full = path / leaf_parts
                 if full.parts[:1] == (METADATA_ROOT,):
@@ -613,13 +614,18 @@ class _TreeNode(object):
                     continue
                 if not attribute._has_content():
                     continue
-                yield full, attribute.to_numpy()
+                yield full, attribute
             store = getattr(node, "simulations", None)
             if store is not None:
                 for i, values in _selected_simulations(store, simulations):
                     full = path / "simulations" / str(i)
                     if _match_path(pattern, full.parts):
-                        yield full, values
+                        yield full, _Attribute(node.coordinates, values)
+
+    def _export_columns(self, include="**", simulations=False):
+        """`(path, values)` for the frame: the leaves, decoded."""
+        for path, attribute in self._export_leaves(include, simulations):
+            yield path, attribute.to_numpy()
 
     def as_data_frame(self, include="**", simulations=False, columns="flat",
                       **kwargs):
@@ -1432,51 +1438,48 @@ class _Variable(_TreeNode):
     def _share_label(self, cutoff):
         return "@ %g" % cutoff
 
-    def _fill_pyvista(self, write, simulations=False, prefix=None):
+    def _fill_pyvista(self, write, simulations=False, prefix=None,
+                      include="**"):
         """`write(label, attribute)` for every filled column, named by path.
 
-        The one enumeration behind all four pyvista exports, in place of the
-        twenty-one per-class methods that each named their columns again --
-        and no two of which agreed on the spelling. A label is
-        `render(path, "pretty")`: `assay - Zn - noise_variance`, the same
-        segments every other export uses.
+        The same enumeration the data frame reads (`_export_leaves`), handed
+        to a writer instead of a frame -- in place of the twenty-one
+        per-class methods that each named their columns again, no two
+        agreeing on the spelling. A label is `render(path, "pretty")`:
+        `assay - Zn - noise_variance`, the same segments every other export
+        uses.
         """
         root = None if prefix is None \
             else VariablePath(prefix) / self._node_name
-        for path, attribute in self.leaves(root):
-            if attribute._has_content():
-                write(render(path, "pretty"), attribute)
-        for path, node in self.walk(root):
-            store = getattr(node, "simulations", None)
-            if store is not None:
-                for i, values in _selected_simulations(store, simulations):
-                    write(render(path / "simulations" / str(i), "pretty"),
-                          _Attribute(node.coordinates, values))
+        for path, attribute in self._export_leaves(include, simulations, root):
+            write(render(path, "pretty"), attribute)
 
     def fill_pyvista_cube(self, cube, prefix=None, sigma=None,
-                          simulations=False):
+                          simulations=False, include="**"):
         self._fill_pyvista(
             lambda label, attribute: attribute.fill_pyvista_cube(
                 cube, label, sigma=sigma),
-            simulations, prefix)
+            simulations, prefix, include)
 
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
+    def fill_pyvista_points(self, points, prefix=None, simulations=False,
+                            include="**"):
         self._fill_pyvista(
             lambda label, attribute: attribute.fill_pyvista_points(
                 points, label),
-            simulations, prefix)
+            simulations, prefix, include)
 
     def fill_pyvista_blocks(self, cube, prefix=None, sigma=None,
-                            simulations=False):
+                            simulations=False, include="**"):
         self._fill_pyvista(
             lambda label, attribute: attribute.fill_pyvista_blocks(
                 cube, label, sigma=sigma),
-            simulations, prefix)
+            simulations, prefix, include)
 
-    def fill_pyvista_cells(self, mesh, prefix=None, simulations=False):
+    def fill_pyvista_cells(self, mesh, prefix=None, simulations=False,
+                           include="**"):
         self._fill_pyvista(
             lambda label, attribute: attribute.fill_pyvista_cells(mesh, label),
-            simulations, prefix)
+            simulations, prefix, include)
 
     def carry_to(self, coordinates, keep, n_new):
         """This variable on a longer set of locations, keeping what still fits.
@@ -2790,6 +2793,36 @@ class _SpatialData(_TreeNode):
             return self.metadata.get(path[1])
         return super()._resolve(path)
 
+    def _finish_pyvista(self, target, kind, simulations=False, include="**"):
+        """Fill a freshly built pyvista object and hand it back.
+
+        Every variable through the one enumeration, the metadata columns
+        under their bare names (they were only ever exported by the block
+        set before -- an air code or a fold is as useful draped over a grid),
+        and `field_data["geoml_paths"]`: a JSON table from each array's label
+        back to the path that produced it. The label alone cannot be parsed
+        back -- `flat` and `pretty` are not invertible -- so anything reading
+        an export and wanting to ask geoML about a column reads the table
+        instead of guessing. Recorded by the writer rather than enumerated a
+        second time, which would read every selected realization twice.
+        """
+        table = {}
+        writer = "fill_pyvista_" + kind
+        for variable in self.variables.values():
+            for path, attribute in variable._export_leaves(
+                    include, simulations):
+                label = render(path, "pretty")
+                getattr(attribute, writer)(target, label)
+                table[label] = str(path)
+        for name, column in self.metadata.items():
+            getattr(column, writer)(target, name)
+            table[name] = METADATA_ROOT + PATH_SEP + name
+
+        if table:
+            target.field_data["geoml_paths"] = _np.array(
+                [_json.dumps(table)])
+        return target
+
     @property
     def rows_per_location(self):
         """Rows the model evaluates for each location of this object.
@@ -3332,7 +3365,7 @@ class PointData(_PointBased):
 
         return self[keep] if sum(keep) > 0 else None
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -3348,12 +3381,7 @@ class PointData(_PointBased):
                              "for 3-dimensional data")
 
         pv_points = _pv.PolyData(_np.asarray(self.coordinates))
-
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_points(
-                pv_points, simulations=simulations)
-
-        return pv_points
+        return self._finish_pyvista(pv_points, "points", simulations, include)
 
     def spatial_k_fold(self, test_data, k=5, bins=50):
         raise NotImplementedError("under development")
@@ -4244,7 +4272,7 @@ class Grid3D(_GriddedData):
         return _gint.cubic_conv_3d(coordinates,
                                    self.grid[0], self.grid[1], self.grid[2])
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -4260,12 +4288,7 @@ class Grid3D(_GriddedData):
             spacing=self.step_size,
             origin=self.origin
         )
-
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_cube(
-                pv_grid, simulations=simulations)
-
-        return pv_grid
+        return self._finish_pyvista(pv_grid, "cube", simulations, include)
 
     def rotation_matrix(self):
         return _np.eye(3)
@@ -4544,7 +4567,7 @@ class Section3D(PointData):
         super().__init__(df, coordinate_labels)
         self.grid_shape = [n_x, n_y]
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -4568,11 +4591,7 @@ class Section3D(PointData):
 
         pv_surf = _pv.PolyData(_np.asarray(self.coordinates), faces)
 
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_points(
-                pv_surf, simulations=simulations)
-
-        return pv_surf
+        return self._finish_pyvista(pv_surf, "points", simulations, include)
 
 
 def _sheet_interpolator(surface):
@@ -4946,7 +4965,7 @@ class Mesh3D(_PointBased):
             self.triangles, columns=["PointId1", "PointId2", "PointId3"])
         triangles_df.to_csv(triangles_filename + ".csv", index=False)
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -4964,11 +4983,7 @@ class Mesh3D(_PointBased):
 
         pv_surf = _pv.PolyData(self.coordinates, faces.ravel())
 
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_points(
-                pv_surf, simulations=simulations)
-
-        return pv_surf
+        return self._finish_pyvista(pv_surf, "points", simulations, include)
 
 
 class Surface3D(Mesh3D):
@@ -5575,7 +5590,7 @@ class Blocks2D(Grid2D):
 
 @_blockdata
 class Blocks3D(Grid3D):
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -5592,11 +5607,8 @@ class Blocks3D(Grid3D):
             origin=_np.array([ax[0] for ax in self.grid]) - _np.array(self.step_size) / 2
         )
 
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_blocks(
-                pv_blocks, simulations=simulations)
-
-        return pv_blocks
+        return self._finish_pyvista(pv_blocks, "blocks", simulations,
+                                    include)
 
 
 def _sub_block_index(discretization):
@@ -6428,7 +6440,7 @@ class BlockSet3D(PointData):
     # ------------------------------------------------------------------ #
     # export
     # ------------------------------------------------------------------ #
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -6446,12 +6458,7 @@ class BlockSet3D(PointData):
             all of them, an `int` for the first n, or a sequence of indices.
         """
         mesh = self._hex_mesh(self._origin, self._size, self.base_step)
-
-        for variable in self.variables.values():
-            variable.fill_pyvista_cells(mesh, simulations=simulations)
-        for name, column in self.metadata.items():
-            column.fill_pyvista_cells(mesh, name)
-        return mesh
+        return self._finish_pyvista(mesh, "cells", simulations, include)
 
     def _hex_mesh(self, origin, size, step):
         """One welded hexahedron per block, on any lattice of blocks -- the
@@ -6766,7 +6773,7 @@ class RotatedGrid3D(Grid3D):
     def make_interpolator(self, coordinates):
         raise NotImplementedError
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -6777,7 +6784,7 @@ class RotatedGrid3D(Grid3D):
             each one is a full-length array in the exported object), `True` for
             all of them, an `int` for the first n, or a sequence of indices.
         """
-        pv_grid = super().as_pyvista(simulations=simulations)
+        pv_grid = super().as_pyvista(simulations=simulations, include=include)
 
         mat = _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
         transf = _np.eye(4)

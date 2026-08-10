@@ -417,6 +417,47 @@ def test_a_variable_frames_itself_the_same_way():
 
 
 # --------------------------------------------------------------------------- #
+# the pyvista export carries its own map back to the tree
+# --------------------------------------------------------------------------- #
+def test_the_export_takes_the_same_include_pattern():
+    import pyvista  # noqa: F401 -- skip cleanly where VTK is broken
+    point = _points()
+    point.variables["au"].prediction.values[:] = np.arange(6.0)
+
+    everything = point.as_pyvista()
+    chosen = point.as_pyvista(include="**/prediction")
+
+    assert "au - prediction" in chosen.point_data
+    assert "au - measurements" not in chosen.point_data
+    assert "au - measurements" in everything.point_data
+
+
+def test_the_export_carries_a_table_from_label_back_to_path():
+    """`flat` and `pretty` cannot be parsed back into a path, so the file
+    carries the mapping instead of anyone guessing: `field_data` holds a JSON
+    table from each array's label to the path that produced it."""
+    import json
+    point = _points()
+
+    exported = point.as_pyvista()
+    table = json.loads(str(exported.field_data["geoml_paths"][0]))
+
+    assert table["au - measurements"] == "au/measurements"
+    assert table["assay - a - measurements"] == "assay/a/measurements"
+    assert table["fold"] == "_metadata/fold"
+    assert set(table) == set(exported.point_data.keys())
+
+
+def test_every_export_now_carries_the_metadata():
+    """Only the block set exported metadata before; an air code or a fold is
+    as useful draped over a grid."""
+    grid = geoml.data.Grid3D(start=[0, 0, 0], n=[2, 2, 2], step=[1, 1, 1])
+    grid.add_metadata("fold", np.arange(8) % 2)
+
+    assert "fold" in grid.as_pyvista().point_data
+
+
+# --------------------------------------------------------------------------- #
 # printing the tree
 # --------------------------------------------------------------------------- #
 def test_the_tree_shows_the_shape_of_the_container():
