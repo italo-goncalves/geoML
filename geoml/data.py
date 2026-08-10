@@ -364,6 +364,16 @@ class VariablePath:
         return VariablePath(self.parts[:-1])
 
 
+def _column_detail(attribute, status=True):
+    """What a column shows in a printed tree: its type, or that it is empty."""
+    detail = str(_np.dtype(attribute.values.dtype))
+    if attribute.labels is not None:
+        detail = "%s codes, %d labels" % (detail, len(attribute.labels))
+    if status and not attribute._has_content():
+        return "empty"
+    return detail
+
+
 def _match_path(pattern, parts):
     """Whether `parts` matches a glob `pattern`, segment by segment.
 
@@ -595,6 +605,61 @@ class _TreeNode(object):
                    else "the container",
                    ", ".join(node._tree_names()) or "nothing"))
         return found
+
+    # ------------------------------------------------------------------ #
+    # printing the tree
+    # ------------------------------------------------------------------ #
+    def tree(self, status=True):
+        """This node and everything beneath it, as a printable tree.
+
+        Separate from `str`, which stays one line per variable on purpose: a
+        container's summary should not grow every time a variable does. This
+        is the diagnostic -- what is here, and which of it holds anything.
+
+        `status` reads each column once to say whether it is filled, which is
+        the question worth asking (a column allocated and never written is
+        the shape of most of the bugs this addressing was built to stop). On
+        a disk-backed block model that is a pass over every column, so
+        `status=False` prints the structure alone.
+        """
+        lines = [self._tree_root_label()]
+        self._tree_rows(lines, "", status)
+        return "\n".join(lines)
+
+    def _tree_root_label(self):
+        name = self._node_name
+        return "%s%s" % (type(self).__name__, " %r" % name if name else "")
+
+    def _node_detail(self):
+        facts = ", ".join(
+            "%s=%s" % (name, value)
+            for name, value in self.node_attrs().items() if value is not None)
+        return type(self).__name__ + ("  " + facts if facts else "")
+
+    def _tree_entries(self, status):
+        """`(label, detail, child)` under this node, in printing order."""
+        rows = [(str(VariablePath(parts)), _column_detail(attribute, status),
+                 None)
+                for parts, attribute in self.own_leaves()]
+        store = getattr(self, "simulations", None)
+        if store is not None:
+            rows.append(("simulations", "%s %s" % (tuple(store.shape),
+                                                   _np.dtype(store.dtype)),
+                         None))
+        rows += [(name, child._node_detail(), child)
+                 for name, child in self.child_nodes().items()]
+        return rows
+
+    def _tree_rows(self, lines, prefix, status):
+        rows = self._tree_entries(status)
+        width = max(8, 26 - len(prefix))
+        for i, (label, detail, child) in enumerate(rows):
+            last = i == len(rows) - 1
+            lines.append("%s%s%s %s" % (prefix, "`-- " if last else "|-- ",
+                                        label.ljust(width), detail))
+            if child is not None:
+                child._tree_rows(lines, prefix + ("    " if last else "|   "),
+                                 status)
 
     def _deepest(self, path):
         """The last node `path` reaches before it stops matching."""
@@ -3219,6 +3284,9 @@ class _SpatialData(_TreeNode):
     def _node_name(self):
         # the container is the root, whatever else it may call itself
         return ""
+
+    def _tree_root_label(self):
+        return "%s - %s locations" % (type(self).__name__, self.n_data)
 
     def child_nodes(self):
         return dict(self.variables)

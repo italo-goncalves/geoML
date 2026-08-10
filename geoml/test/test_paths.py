@@ -314,6 +314,64 @@ def test_the_path_style_cannot_collide():
     assert len(set(names.values())) == 2
 
 
+# --------------------------------------------------------------------------- #
+# printing the tree
+# --------------------------------------------------------------------------- #
+def test_the_tree_shows_the_shape_of_the_container():
+    point = _points()
+    text = point.tree()
+
+    assert text.startswith("PointData - 6 locations")
+    assert "|-- au" in text
+    assert "|   |-- measurements" in text          # a column of that variable
+    assert "|   |-- a " in text or "|   `-- a " in text   # a component
+    assert "_metadata/fold" in text               # one line, not a subtree
+
+
+def test_the_tree_says_which_columns_hold_something():
+    """The question worth asking of a prediction: a column allocated and never
+    written is the shape of most of the bugs this addressing was built to
+    stop."""
+    point = _points()
+    empty_before = point.tree().count("empty")
+
+    assert "|-- measurements           float64" in point.tree()
+    assert "|-- prediction             empty" in point.tree()
+
+    point.variables["au"].prediction.values[:] = np.arange(6.0)
+    assert "|-- prediction             float64" in point.tree()
+    assert point.tree().count("empty") == empty_before - 1
+
+
+def test_the_structure_can_be_printed_without_reading_the_columns(monkeypatch):
+    """`status=True` reads each column once, which on a disk-backed block
+    model is a pass over the lot; `status=False` is the structure alone."""
+    import geoml.storage as storage
+    point = _points()
+
+    def explode(self, *args, **kwargs):
+        raise AssertionError("the backing array was read")
+
+    monkeypatch.setattr(storage.ArrayStore, "__array__", explode)
+    text = point.tree(status=False)
+    assert "au" in text and "empty" not in text
+
+
+def test_a_node_prints_its_own_facts():
+    point = _points()
+    point.variables["au"].set_cutoffs([1.5])
+
+    assert "cutoffs=[1.5]" in point.tree()
+
+
+def test_a_variable_prints_its_own_tree():
+    point = _points()
+    text = point.variables["assay"].tree()
+
+    assert text.startswith("CompositionalVariable 'assay'")
+    assert "|-- a" in text or "`-- a" in text
+
+
 def test_a_containers_own_namespace_renders_without_a_warning():
     point = _points()
     with warnings.catch_warnings():
