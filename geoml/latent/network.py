@@ -16,12 +16,12 @@
 import numpy as np
 
 import geoml.parameter as _gpr
-import geoml.tftools as _tftools
+import geoml.math.tf as _tftools
 import geoml.kernels as _kr
 import geoml.transform as _tr
-import geoml.interpolation as _gint
+import geoml.math.interpolate as _gint
 import geoml.data as _data
-import geoml.random as _rnd
+import geoml.stats.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
@@ -237,7 +237,7 @@ class _LatentVariable(_gpr.Parametric):
         See `geoml.graphviz.to_dot`, which draws a whole model when given one.
         """
         # imported here because that module reads this one
-        import geoml.graphviz as _gv
+        import geoml.viz.graphviz as _gv
         return _gv.to_dot(self, legend=legend, rankdir=rankdir)
 
     def get_node(self, name):

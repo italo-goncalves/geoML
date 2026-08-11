@@ -24,7 +24,7 @@
 #            "SelectVariables"]
 
 import geoml.parameter as _gpr
-import geoml.random as _rnd
+import geoml.stats.random as _rnd
 # import geoml.interpolation as _gint
 # import geoml.tftools as _tftools
 

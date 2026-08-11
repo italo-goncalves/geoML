@@ -13,6 +13,10 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Deprecated alias: this module moved to `geoml.viz.graphviz` in 0.6.0.
-This shim keeps the old path importable for one release."""
-from geoml.viz.graphviz import *
+"""
+Visualization backends the containers and models export through: `plotly`
+(figure dicts), `pyvista` (VTK objects) and `graphviz` (DOT text -- written,
+never rendered, so Graphviz itself is not a dependency). The figures
+themselves live in `geoml.plots`.
+"""
+from geoml.viz import graphviz, plotly, pyvista

@@ -13,6 +13,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Deprecated alias: this module moved to `geoml.viz.graphviz` in 0.6.0.
-This shim keeps the old path importable for one release."""
-from geoml.viz.graphviz import *
+"""
+Probability machinery: `probability` (custom TFP distributions) and
+`random` (the package RNG behind `geoml.set_seed`).
+"""
+from geoml.stats import probability, random

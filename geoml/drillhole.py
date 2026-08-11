@@ -23,7 +23,7 @@ import warnings as _warnings
 import pyvista as _pv
 
 import geoml.data as _data
-import geoml.plotly as _py
+import geoml.viz.plotly as _py
 
 
 # canonical names for the three columns every interval table must have

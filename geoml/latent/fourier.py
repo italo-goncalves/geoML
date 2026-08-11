@@ -15,12 +15,12 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import geoml.parameter as _gpr
-import geoml.tftools as _tftools
+import geoml.math.tf as _tftools
 import geoml.kernels as _kr
 import geoml.transform as _tr
 # import geoml.interpolation as _gint
 import geoml.data as _data
-import geoml.random as _rnd
+import geoml.stats.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf

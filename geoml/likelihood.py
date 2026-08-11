@@ -19,9 +19,9 @@ import copy as _copy
 
 import geoml.warping as _warp
 import geoml.parameter as _gpr
-import geoml.tftools as _tftools
-import geoml.interpolation as _gint
-import geoml.probability as _gmp
+import geoml.math.tf as _tftools
+import geoml.math.interpolate as _gint
+import geoml.stats.probability as _gmp
 
 import numpy as _np
 import tensorflow as _tf

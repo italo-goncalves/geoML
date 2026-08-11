@@ -24,7 +24,7 @@ import geoml.parameter as _gpr
 import geoml.latent as _latent
 import geoml.likelihood as _lk
 import geoml.warping as _warp
-import geoml.tftools as _tftools
+import geoml.math.tf as _tftools
 import geoml
 
 import numpy as _np
@@ -712,7 +712,7 @@ class VGPNetwork(_GPModel):
         See `geoml.graphviz.to_dot`.
         """
         # imported here because that module reads the modules this one needs
-        import geoml.graphviz as _gv
+        import geoml.viz.graphviz as _gv
         return _gv.to_dot(self, legend=legend, rankdir=rankdir)
 
     def set_learning_rate(self, rate):

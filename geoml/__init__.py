@@ -11,6 +11,7 @@ __all__ = [
     'kernels',
     'likelihood',
     'latent',
+    'math',
     'metrics',
     'models',
     'persistence',
@@ -19,11 +20,13 @@ __all__ = [
     'probability',
     'pyvista',
     'random',
+    'stats',
     'storage',
     'tftools',
     'transform',
+    'viz',
     'warping',
 ]
 
 from . import *
-from .random import set_seed
+from .stats.random import set_seed

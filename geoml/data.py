@@ -43,11 +43,11 @@ from skimage import filters as _filters
 import ezdxf as _ezdxf
 from ezdxf.render import MeshVertexMerger as _MeshVertexMerger
 
-import geoml.interpolation as _gint
-import geoml.plotly as _py
-import geoml.tftools as _tftools
+import geoml.math.interpolate as _gint
+import geoml.viz.plotly as _py
+import geoml.math.tf as _tftools
 import geoml.metrics as _gmlmetrics
-import geoml.geometry as _gmt
+import geoml.math.geometry as _gmt
 import geoml.storage as _storage
 
 import dask.array as _da
