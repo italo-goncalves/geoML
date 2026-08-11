@@ -13,6 +13,16 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Deprecated alias: this module moved to `geoml.data.inducing` in 0.6.0.
-This shim keeps the old path importable for one release."""
-from geoml.data.inducing import *
+"""
+Spatial data: the containers and their variables (`core`), drillholes and
+their conversion to point data (`drillhole`), and the helpers that build
+inducing-point sets (`inducing`).
+
+This facade re-exports everything `geoml.data` held when it was one module,
+so `geoml.data.PointData` keeps resolving -- in user code and in every
+saved store.
+"""
+from geoml.data.core import *
+# The private bases other modules and user code hold instances of.
+from geoml.data.core import _Attribute, _SpatialData, _Variable
+from geoml.data import core, drillhole, inducing

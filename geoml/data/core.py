@@ -14,16 +14,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["PointData",
-           "Grid1D", "Grid2D", "Grid3D",
-           "DirectionalData",
-           "batch_index",
-           "export_planes",
-           "RotatedGrid3D", "Section3D",
-           "Mesh3D", "Surface3D", "Solid3D", "DTM3D", "mesh3d",
-           "Blocks1D", "Blocks2D", "Blocks3D"]
-
-
 import tensorflow as _tf
 import pandas as _pd
 import numpy as _np
