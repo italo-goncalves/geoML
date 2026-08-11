@@ -1,28 +1,19 @@
 __version__ = '0.5.9'
 __author__ = 'Ítalo Gomes Gonçalves'
+# The public surface: the modules a user reaches for. Internal machinery
+# (parameter, persistence, storage) and the one-release deprecation shims
+# stay importable but unadvertised.
 __all__ = [
     'data',
     'datasets',
-    'drillhole',
-    'geometry',
-    'graphviz',
-    'inducing',
-    'interpolation',
     'kernels',
     'likelihood',
     'latent',
     'math',
     'metrics',
     'models',
-    'persistence',
-    'plotly',
     'plots',
-    'probability',
-    'pyvista',
-    'random',
     'stats',
-    'storage',
-    'tftools',
     'transform',
     'viz',
     'warping',
@@ -30,3 +21,21 @@ __all__ = [
 
 from . import *
 from .stats.random import set_seed
+
+# Deprecated shims (moved in 0.6.0), imported so the old attribute paths
+# keep working for one release: geoml.drillhole -> geoml.data.drillhole,
+# geoml.inducing -> geoml.data.inducing, geoml.geometry / interpolation /
+# tftools -> geoml.math.*, geoml.probability / random -> geoml.stats.*,
+# geoml.plotly / pyvista / graphviz -> geoml.viz.*.
+from geoml import (drillhole, geometry, graphviz, inducing, interpolation,
+                   plotly, probability, pyvista, random, tftools)
+# Internal, unadvertised, but kept reachable as attributes: parameter and
+# storage arrive through the import graph regardless; persistence does not.
+from geoml import persistence
+
+# The everyday names, one import up: containers and models. Kernels,
+# likelihoods and warpings stay module-qualified -- `Gaussian` alone names
+# three different things.
+from geoml.data import (PointData, Grid1D, Grid2D, Grid3D, BlockSet3D,
+                        DrillholeData)
+from geoml.models import VGPNetwork

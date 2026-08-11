@@ -14,8 +14,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-__all__ = ["GP", "GPEnsemble", "StructuralField", "GPOptions",
-           "VGPNetwork"]
+# ProjectedVGP stays out on purpose: importable for old saves, unadvertised
+# until its latent side (geoml.latent.fourier) earns tests.
+__all__ = ["GP", "GPEnsemble", "Normalizer", "StructuralField", "GPOptions",
+           "VGPNetwork", "refine"]
 
 import numpy as np
 

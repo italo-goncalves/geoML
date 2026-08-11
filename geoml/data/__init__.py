@@ -38,3 +38,4 @@ from geoml.data.variables import _Variable
 from geoml.data.containers import _SpatialData
 from geoml.data import (base, variables, containers, grids, meshes, blocks,
                         io, drillhole, inducing)
+from geoml.data.drillhole import DrillholeData, IntervalTable
