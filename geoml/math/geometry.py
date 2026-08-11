@@ -15,6 +15,8 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
+import itertools as _iter
+
 import numpy as _np
 import pyvista as _pv
 from sklearn.decomposition import PCA as _PCA
@@ -481,3 +483,87 @@ def inside_solid(mesh, coordinates):
     cloud = _pv.PolyData(_np.ascontiguousarray(coordinates))
     selected = cloud.select_interior_points(mesh, check_surface=False)
     return _np.asarray(selected["selected_points"]).astype(bool)
+
+
+def bounding_box(points):
+    """
+    Computes a point set's bounding box and its diagonal.
+
+    Parameters
+    ----------
+    points : array
+        A set of coordinates.
+
+    Returns
+    -------
+    bbox : array-like
+        Array with the box's minimum and maximum values in each direction.
+    d : float
+        The box's diagonal length.
+    """
+    if len(points.shape) < 2:
+        points = _np.expand_dims(points, axis=0)
+    bbox = _np.array([[_np.min(points[:, i]) for i in range(points.shape[1])],
+                      [_np.max(points[:, i]) for i in range(points.shape[1])]])
+    d = _np.sqrt(sum([
+        _np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
+    d = _np.squeeze(d)
+    return bbox, d
+
+
+def sub_block_index(discretization):
+    """Which sub-block sits where, as integer counts along each axis.
+
+    Axis 0 varies fastest, the order `_blockdata` has always used and the one
+    the likelihood's noise is indexed by. Both the sub-block offsets and, in a
+    `BlockSet3D`, the children of a split are built from this, so sub-block
+    `j` of a block and child `j` of that same block are the same corner of it.
+    """
+    return _np.array(
+        list(_iter.product(*[_np.arange(d) for d in discretization[::-1]])),
+        dtype=_np.int64)[:, ::-1]
+
+
+def unit_sub_grid(discretization):
+    """Sub-block offsets from a block's centre, as fractions of its size.
+
+    The same layout `_blockdata` builds, but divided through by the block so
+    that one array serves every size. Scaling it per block is the whole of
+    what a variable-size block model has to do differently when it fans out.
+    """
+    counts = _np.array(discretization)[None, :]
+    return (sub_block_index(discretization) - (counts - 1) / 2) / counts
+
+
+# a hexahedron's eight corners, in the order VTK reads them
+HEX_CORNERS = _np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                         [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+                        dtype=_np.int64)
+
+
+def trilinear_weights(discretization):
+    """What each of a block's eight corners is worth at each sub-block centre.
+
+    A corner carries what the blocks meeting there say, so reading the corners
+    at the sub-blocks is how a child learns the shape running across its
+    parent. The layout is symmetric about the centre, so the weights average
+    to an eighth apiece and a correction built from them cancels over the
+    children -- which is what keeps a block's own estimate the mean of the
+    children standing in for it.
+    """
+    t = unit_sub_grid(discretization) + 0.5
+    return _np.prod(_np.where(HEX_CORNERS[None, :, :] == 1,
+                              t[:, None, :], 1.0 - t[:, None, :]), axis=2)
+
+
+def grow(corners, marked, rings):
+    """Add `rings` of neighbouring blocks, through the corners blocks share.
+
+    Sparse on purpose: dilating a mask over the base lattice would cost a cell
+    for every one the model exists to avoid carrying.
+    """
+    for _ in range(rings):
+        touched = _np.zeros(int(corners.max()) + 1, dtype=bool)
+        touched[corners[marked].ravel()] = True
+        marked = touched[corners].any(axis=1)
+    return marked

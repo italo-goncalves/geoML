@@ -38,6 +38,9 @@ import geoml.viz.plotly as _py
 import geoml.math.tf as _tftools
 import geoml.metrics as _gmlmetrics
 import geoml.math.geometry as _gmt
+# Re-exported: it lived here before the pure geometry moved out, and both
+# user code and `latent` still reach it as `geoml.data.bounding_box`.
+from geoml.math.geometry import bounding_box
 import geoml.storage as _storage
 
 import dask.array as _da
@@ -73,32 +76,6 @@ class MeshTypeError(ValueError):
 class DimensionMismatchError(Exception):
     """Exception raised when the dimensionality of objects does not match."""
     pass
-
-
-def bounding_box(points):
-    """
-    Computes a point set's bounding box and its diagonal.
-
-    Parameters
-    ----------
-    points : array
-        A set of coordinates.
-
-    Returns
-    -------
-    bbox : array-like
-        Array with the box's minimum and maximum values in each direction.
-    d : float
-        The box's diagonal length.
-    """
-    if len(points.shape) < 2:
-        points = _np.expand_dims(points, axis=0)
-    bbox = _np.array([[_np.min(points[:, i]) for i in range(points.shape[1])],
-                      [_np.max(points[:, i]) for i in range(points.shape[1])]])
-    d = _np.sqrt(sum([
-        _np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
-    d = _np.squeeze(d)
-    return bbox, d
 
 
 class BoundingBox(object):
@@ -5587,64 +5564,6 @@ class Blocks3D(Grid3D):
                                     include)
 
 
-def _sub_block_index(discretization):
-    """Which sub-block sits where, as integer counts along each axis.
-
-    Axis 0 varies fastest, the order `_blockdata` has always used and the one
-    the likelihood's noise is indexed by. Both the sub-block offsets and, in a
-    `BlockSet3D`, the children of a split are built from this, so sub-block
-    `j` of a block and child `j` of that same block are the same corner of it.
-    """
-    return _np.array(
-        list(_iter.product(*[_np.arange(d) for d in discretization[::-1]])),
-        dtype=_np.int64)[:, ::-1]
-
-
-def _unit_sub_grid(discretization):
-    """Sub-block offsets from a block's centre, as fractions of its size.
-
-    The same layout `_blockdata` builds, but divided through by the block so
-    that one array serves every size. Scaling it per block is the whole of
-    what a variable-size block model has to do differently when it fans out.
-    """
-    counts = _np.array(discretization)[None, :]
-    return (_sub_block_index(discretization) - (counts - 1) / 2) / counts
-
-
-# a hexahedron's eight corners, in the order VTK reads them
-_HEX_CORNERS = _np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-                          [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
-                         dtype=_np.int64)
-
-
-def _trilinear_weights(discretization):
-    """What each of a block's eight corners is worth at each sub-block centre.
-
-    A corner carries what the blocks meeting there say, so reading the corners
-    at the sub-blocks is how a child learns the shape running across its
-    parent. The layout is symmetric about the centre, so the weights average
-    to an eighth apiece and a correction built from them cancels over the
-    children -- which is what keeps a block's own estimate the mean of the
-    children standing in for it.
-    """
-    t = _unit_sub_grid(discretization) + 0.5
-    return _np.prod(_np.where(_HEX_CORNERS[None, :, :] == 1,
-                              t[:, None, :], 1.0 - t[:, None, :]), axis=2)
-
-
-def _grow(corners, marked, rings):
-    """Add `rings` of neighbouring blocks, through the corners blocks share.
-
-    Sparse on purpose: dilating a mask over the base lattice would cost a cell
-    for every one the model exists to avoid carrying.
-    """
-    for _ in range(rings):
-        touched = _np.zeros(int(corners.max()) + 1, dtype=bool)
-        touched[corners[marked].ravel()] = True
-        marked = touched[corners].any(axis=1)
-    return marked
-
-
 class BlockSet3D(PointData):
     """
     Blocks of several sizes, on one integer lattice.
@@ -5757,7 +5676,7 @@ class BlockSet3D(PointData):
         # nothing has been predicted yet, so every block is new
         self._fresh = _np.ones(len(cells), dtype=bool)
 
-        self._sub_grid = _unit_sub_grid(self.discretization)
+        self._sub_grid = _gmt.unit_sub_grid(self.discretization)
 
         super().__init__(
             _pd.DataFrame(self._centres(), columns=list(labels)), list(labels))
@@ -5896,7 +5815,7 @@ class BlockSet3D(PointData):
                 % (int(_np.count_nonzero(mask & finest)), self.max_levels))
 
         # one child per sub-block, in the sub-blocks' own order
-        corner = _sub_block_index(self.discretization)
+        corner = _gmt.sub_block_index(self.discretization)
         child_size = self._size[mask] // _np.array(self.discretization)
         children = (self._origin[mask][:, None, :]
                     + corner[None, :, :] * child_size[:, None, :]
@@ -6436,7 +6355,7 @@ class BlockSet3D(PointData):
         low = self.box_corner + origin * step
         size = size * step
         points = (low[:, None, :]
-                  + _HEX_CORNERS[None, :, :] * size[:, None, :]).reshape(-1, 3)
+                  + _gmt.HEX_CORNERS[None, :, :] * size[:, None, :]).reshape(-1, 3)
 
         connectivity = _np.arange(len(points)).reshape(-1, 8)
         cells = _np.hstack(
@@ -6455,7 +6374,7 @@ class BlockSet3D(PointData):
         """Each block's eight corners, as indices into the distinct lattice
         points -- the welding of `_hex_mesh`, done in integers."""
         corners = (origin[:, None, :]
-                   + _HEX_CORNERS[None, :, :] * size[:, None, :])
+                   + _gmt.HEX_CORNERS[None, :, :] * size[:, None, :])
         span = shape + 1
         key = ((corners[..., 0] * span[1] + corners[..., 1]) * span[2]
                + corners[..., 2])
@@ -6513,8 +6432,8 @@ class BlockSet3D(PointData):
             was cut and the blocks as they stand will do.
         """
         ratio = _np.array(self.discretization, dtype=_np.int64)
-        offset = _sub_block_index(self.discretization)
-        weights = _trilinear_weights(self.discretization)
+        offset = _gmt.sub_block_index(self.discretization)
+        weights = _gmt.trilinear_weights(self.discretization)
 
         # a lattice `supersample` levels finer than the model's own, so that
         # cutting below the base cell is still whole numbers of a cell
@@ -6533,7 +6452,7 @@ class BlockSet3D(PointData):
             # a corner with no value must not decide anything either way
             low = _np.where(_np.isnan(at_corner), _np.inf, at_corner).min(1)
             high = _np.where(_np.isnan(at_corner), -_np.inf, at_corner).max(1)
-            near = _grow(corners, (low < value) & (high > value), margin)
+            near = _gmt.grow(corners, (low < value) & (high > value), margin)
             near &= _np.all(size >= ratio, axis=1)
             if not _np.any(near):
                 break
@@ -7096,7 +7015,7 @@ def _rebuild_container(meta, group):
         _PointBased.__init__(blocks)
         blocks.max_levels = int(meta["max_levels"])
         blocks.discretization = [int(d) for d in meta["discretization"]]
-        blocks._sub_grid = _unit_sub_grid(blocks.discretization)
+        blocks._sub_grid = _gmt.unit_sub_grid(blocks.discretization)
         blocks.base_step = _np.asarray(meta["base_step"], dtype=float)
         blocks.box_corner = _np.asarray(meta["box_corner"], dtype=float)
         blocks.lattice_shape = _np.asarray(meta["lattice_shape"],
