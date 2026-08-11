@@ -1,4 +1,4 @@
-__version__ = '0.5.9'
+__version__ = '0.6.0'
 __author__ = 'Ítalo Gomes Gonçalves'
 # The public surface: the modules a user reaches for. Internal machinery
 # (parameter, persistence, storage) and the one-release deprecation shims
