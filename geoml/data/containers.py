@@ -276,7 +276,7 @@ class _SpatialData(_TreeNode):
         """
         # imported late: the mesh adapters live beside the mesh classes,
         # which subclass the containers defined here
-        from geoml.data.core import (_sheet_interpolator, _check_covered,
+        from geoml.data.meshes import (_sheet_interpolator, _check_covered,
                                      _side_codes)
         self._check_three_dimensional()
         coordinates = _np.asarray(self.coordinates, dtype=float)
@@ -314,7 +314,7 @@ class _SpatialData(_TreeNode):
         labels : tuple
             What to call the two sides, in the order (outside, inside).
         """
-        from geoml.data.core import _closed_body
+        from geoml.data.meshes import _closed_body
         self._check_three_dimensional()
         coordinates = _np.asarray(self.coordinates, dtype=float)
         inside = _gmt.inside_solid(_closed_body(solid), coordinates)

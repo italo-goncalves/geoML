@@ -712,7 +712,7 @@ class Grid3D(_GriddedData):
         takes the general path.
         """
         # imported late: the mesh adapters live beside the mesh classes
-        from geoml.data.core import (_sheet_interpolator, _check_covered,
+        from geoml.data.meshes import (_sheet_interpolator, _check_covered,
                                      _side_codes)
         self._check_three_dimensional()
         if self._transform is not None:
