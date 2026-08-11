@@ -71,14 +71,23 @@ def test_something_must_describe_the_ground():
             geoml.warping.ZScore(1), contamination=[True, True])
 
 
-def test_component_sizes_must_agree():
-    """The mixture's size is the warping's -- the one place it can honestly
-    come from, the components' own warpings being inert."""
-    with pytest.raises(ValueError, match="size"):
-        geoml.likelihood.Mixture(
-            [geoml.likelihood.Gaussian(),
-             geoml.likelihood.MultivariateGaussian(3)],
-            geoml.warping.ZScore(1))
+def test_scalar_components_serve_a_wider_mixture():
+    """The mixture's size is the warping's, and a component's parameters
+    broadcast over the columns: scalar components need not be rebuilt as
+    sized twins to serve a multivariate mixture."""
+    mix = geoml.likelihood.Mixture(
+        [geoml.likelihood.Gaussian(), geoml.likelihood.Gaussian()],
+        geoml.warping.ZScore(2))
+    mix.parameters["weights"].set_value(np.array([0.9, 0.1]))
+    mix.components[0].parameters["noise"].set_value(np.full([1, 1, 1], 0.25))
+    mix.components[1].parameters["noise"].set_value(np.full([1, 1, 1], 9.0))
+
+    sims = tf.zeros([5, 2, 3], tf.float64)
+    value, noise_var = mix.integrated_backward(sims)
+    assert value.shape == (5, 2, 3)
+    assert np.allclose(value.numpy(), 0.0, atol=1e-9)
+    # the shared inlier noise reaches both columns
+    assert np.allclose(noise_var.numpy(), 0.25, rtol=1e-6)
 
 
 def test_component_warpings_are_inert():

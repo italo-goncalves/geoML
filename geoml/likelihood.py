@@ -838,8 +838,11 @@ class Mixture(_ContinuousLikelihood):
         Parameters
         ----------
         components : list of _ContinuousLikelihood
-            The noise mechanisms, of the same kind or not. Their sizes must
-            agree with the warping's; their own warpings are ignored.
+            The noise mechanisms, of the same kind or not. A component's
+            parameters are `[1, size, 1]`-shaped and broadcast, so scalar
+            components serve a mixture of any width -- one noise per
+            mechanism across the columns -- while sized components keep a
+            parameter per column. Their own warpings are ignored.
         warping : geoml.warping.Warping
             The mixture's own warping, applied once to the data. Required:
             the components' warpings play no part, so this is the one place
@@ -856,12 +859,7 @@ class Mixture(_ContinuousLikelihood):
             raise ValueError("a mixture needs at least two components")
         super().__init__(warping, sharpness)
 
-        for i, component in enumerate(components):
-            # CLAUDE: the below check is not needed anymore
-            # if component.size != self.size:
-            #     raise ValueError(
-            #         "component %d has size %d where the mixture has %d"
-            #         % (i, component.size, self.size))
+        for component in components:
             # the component's own warping plays no part; freeze it so its
             # parameters do not drift in training
             for parameter in component.warping._all_parameters:
