@@ -26,7 +26,7 @@ import numpy as _np
 import pickle as _pickle
 import functools as _functools
 
-import geoml.random as _rnd
+import geoml.stats.random as _rnd
 
 
 def describe(obj, depth=1, **extra):

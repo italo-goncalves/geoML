@@ -1,3 +1,48 @@
+## version 0.6.0
+* **The package has a shape.** What was twenty-two flat modules is now five
+subpackages and the flat survivors. `geoml/data/` holds the 7,200-line
+monolith split into seven modules, each answering one question — `base` (the
+container tree: errors, paths, the traversal, the attribute), `variables`,
+`containers`, `grids`, `meshes`, `blocks`, `io` (the Zarr writers) — plus
+`drillhole` and `inducing`, which moved in beside them because both are
+data. `geoml/latent/` holds the modelling paradigms side by side:
+`network.py` is latent.py as it was, `fourier.py` is projnet.py — dark on
+purpose: unadvertised, untested, imported only by name. `geoml/math/` holds
+`geometry` (now also owning the sub-block lattice arithmetic and
+`bounding_box`, drained from the monolith under the arrays-in/arrays-out
+rule), `interpolate`, and the tftools split — `tf.py` the four helpers in
+everyday use, `linalg.py` the seventeen solvers parked for future work.
+`geoml/stats/` holds `probability` and `random`; `geoml/viz/` holds
+`plotly`, `pyvista` and `graphviz`, ending three modules shadowing the
+packages they build for. Where a mesh method names a container class or a
+container names the Zarr writers, the import happens late and says why.
+* **Nothing a user or a saved model holds breaks.** Every old dotted path
+resolves: the subpackage facades re-export what the flat modules held
+(`geoml.data.PointData`, `geoml.latent.BasicGP` — the paths saved models
+replay), and a one-line shim sits at each old flat path (`geoml.tftools`,
+`geoml.drillhole`, ...) for one release. Saves written from here on record
+the new module paths, so older geoML versions will not open them — the
+reverse direction is guaranteed, that one is not.
+* **The public surface is curated.** `geoml.__all__` names the thirteen
+modules a user reaches for; the shims and the internals (`parameter`,
+`persistence`, `storage`) stay importable but unadvertised. The everyday
+names sit at the root: `geoml.PointData`, `geoml.Grid1D/2D/3D`,
+`geoml.BlockSet3D`, `geoml.DrillholeData`, `geoml.VGPNetwork`, `set_seed`.
+Kernels, likelihoods and warpings stay module-qualified — `Gaussian` alone
+names three different things. `models.__all__` gains `refine` and
+`Normalizer`, which were always public in practice; `ProjectedVGP` stays
+out deliberately, keeping `fourier`'s company until it earns tests.
+* **Packaging is declared once.** `pyproject.toml` (PEP 621) replaces
+`setup.py`: same metadata, same dependencies, but subpackages are
+discovered instead of hand-listed — the list that had to be edited on every
+addition and would have been wrong five times over in this release alone.
+* Removed on the way: `data.py`'s stale `__all__`, which named 15 of its
+~40 public classes (no `VectorVariable`, no `BlockSet3D`, no
+`GaussianData`, none of the errors). It filtered nothing while the module
+was reached by attribute and broke the facade the day a star import became
+load-bearing; with every import underscore-aliased, bare star semantics
+exposes exactly the public surface, with nothing left to drift.
+
 ## version 0.5.9
 * **A piece of data inside a container has an address.** A container holds
 variables, a variable holds components or attributes, and an attribute holds

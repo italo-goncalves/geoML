@@ -20,7 +20,7 @@ import pandas as _pd
 import numpy as _np
 
 import geoml.data as _data
-import geoml.drillhole as _drillhole
+import geoml.data.drillhole as _drillhole
 
 
 def walker():

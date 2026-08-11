@@ -13,6 +13,14 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Deprecated alias: this module moved to `geoml.data.inducing` in 0.6.0.
-This shim keeps the old path importable for one release."""
-from geoml.data.inducing import *
+"""
+Latent-variable networks: the modelling paradigms a `VGPNetwork` composes.
+
+`network` is the inducing-point paradigm and the one this namespace
+re-exports -- `geoml.latent.BasicGP` and its siblings resolve here, which is
+also what lets a saved model rebuild. `fourier` (variational Fourier
+features) is an orthogonal paradigm kept alongside it; import it explicitly
+as `geoml.latent.fourier` -- it is not re-exported.
+"""
+from geoml.latent.network import *
+from geoml.latent import network

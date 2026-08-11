@@ -13,6 +13,9 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Deprecated alias: this module moved to `geoml.data.inducing` in 0.6.0.
-This shim keeps the old path importable for one release."""
-from geoml.data.inducing import *
+"""
+Numerics: `geometry` (triangulated surfaces, rotations -- arrays in, arrays
+out), `interpolate` (cubic interpolators in TF), `tf` (the everyday TF
+helpers) and `linalg` (solvers and decompositions held for future use).
+"""
+from geoml.math import geometry, interpolate, linalg, tf

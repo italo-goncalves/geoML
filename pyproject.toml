@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geoml"
+version = "0.6.0"
+description = "Machine learning for spatial data"
+authors = [
+    {name = "Ítalo Gomes Gonçalves", email = "italogoncalves.igg@gmail.com"},
+]
+license = {text = "GPL3"}
+keywords = ["machine learning", "spatial data", "gaussian process"]
+dependencies = [
+    "scikit-image",
+    "pandas",
+    "numpy",
+    "pyvista",
+    "tensorflow",
+    "tensorflow-probability",
+    "scipy",
+    "scikit-learn",
+    "zarr",
+    "xarray",
+    "dask",
+    "matplotlib",
+    "plotly",
+    "ezdxf",
+]
+
+[project.urls]
+Homepage = "http://github.com/italo-goncalves/geoML"
+
+# Subpackages are discovered automatically -- no hand-maintained list.
+[tool.setuptools.packages.find]
+include = ["geoml*"]
+exclude = ["geoml.test*"]
+
+[tool.setuptools.package-data]
+geoml = ["sample_data/*.dat", "sample_data/*.csv", "sample_data/*.xlsx"]

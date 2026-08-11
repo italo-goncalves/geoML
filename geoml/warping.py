@@ -29,11 +29,11 @@ __all__ = ["Identity",
            "RobustPCA"
            ]
 
-import geoml.interpolation as _gint
+import geoml.math.interpolate as _gint
 import geoml.parameter as _gpr
-import geoml.tftools as _tftools
+import geoml.math.tf as _tftools
 import geoml.data as _data
-import geoml.random as _rnd
+import geoml.stats.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
