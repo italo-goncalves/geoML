@@ -381,7 +381,7 @@ class _SpatialData(_TreeNode):
         """
         # imported late: the Zarr writers name every container class, and
         # those classes subclass what this module defines
-        from geoml.data.core import (
+        from geoml.data.io import (
             _GEOML_ZARR_FORMAT, _write_container, _write_metadata,
             _write_variable)
         group = _zarr.open_group(path, mode="w")
@@ -402,7 +402,7 @@ class _SpatialData(_TreeNode):
         is called on. Variable arrays are reopened on disk (read/write), so the
         result can be inspected or predicted into again without recomputing.
         """
-        from geoml.data.core import (
+        from geoml.data.io import (
             _GEOML_ZARR_FORMAT, _rebuild_container, _rebuild_metadata,
             _rebuild_variable)
         group = _zarr.open_group(path, mode="r+")

@@ -20,7 +20,6 @@ its own columns for the tree machinery in `base` to fold over. Constructed
 by a container's `add_*_variable` methods, never directly.
 """
 import collections as _col
-import copy as _copy
 
 import numpy as _np
 import pandas as _pd

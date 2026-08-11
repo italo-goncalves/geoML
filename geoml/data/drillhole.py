@@ -22,7 +22,7 @@ import copy as _copy
 import warnings as _warnings
 import pyvista as _pv
 
-import geoml.data.core as _data
+import geoml.data.containers as _data
 import geoml.viz.plotly as _py
 
 

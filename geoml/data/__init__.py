@@ -14,15 +14,27 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
-Spatial data: the containers and their variables (`core`), drillholes and
-their conversion to point data (`drillhole`), and the helpers that build
-inducing-point sets (`inducing`).
+Spatial data, one module per concern: `base` the container tree (errors,
+paths, traversal, the attribute), `variables` the variable family,
+`containers` the point-based containers, `grids` the regular grids,
+`meshes` the triangulated surfaces and solids, `blocks` the block models,
+`io` the Zarr persistence, `drillhole` the drilling databases and
+`inducing` the inducing-point helpers.
 
-This facade re-exports everything `geoml.data` held when it was one module,
-so `geoml.data.PointData` keeps resolving -- in user code and in every
-saved store.
+This facade re-exports everything `geoml.data` held when it was one
+module, so `geoml.data.PointData` keeps resolving -- in user code and in
+every saved store.
 """
-from geoml.data.core import *
+from geoml.data.base import *
+from geoml.data.variables import *
+from geoml.data.containers import *
+from geoml.data.grids import *
+from geoml.data.meshes import *
+from geoml.data.blocks import *
+from geoml.data.io import *
 # The private bases other modules and user code hold instances of.
-from geoml.data.core import _Attribute, _SpatialData, _Variable
-from geoml.data import core, drillhole, inducing
+from geoml.data.base import _Attribute
+from geoml.data.variables import _Variable
+from geoml.data.containers import _SpatialData
+from geoml.data import (base, variables, containers, grids, meshes, blocks,
+                        io, drillhole, inducing)

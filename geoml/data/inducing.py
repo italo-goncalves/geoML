@@ -48,7 +48,7 @@ __all__ = ["from_kmeans", "from_grid", "combine", "grid_experts", "experts"]
 import numpy as _np
 from sklearn.cluster import KMeans as _KMeans
 
-import geoml.data.core as _data
+import geoml.data.containers as _data
 
 
 def _coordinates(source):
