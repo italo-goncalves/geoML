@@ -1,5 +1,14 @@
 __version__ = '0.6.0'
 __author__ = 'Ítalo Gomes Gonçalves'
+
+# TensorFlow's C++ INFO wall -- device initialization, XLA compilation,
+# ptxas register spills -- is noise to a modelling session. Filtered here
+# because it only works before TensorFlow is first imported, which the
+# imports below do; `setdefault` leaves a user's own setting alone, and an
+# explicit TF_CPP_MIN_LOG_LEVEL=0 brings everything back.
+import os as _os
+_os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+
 # The public surface: the modules a user reaches for. Internal machinery
 # (parameter, persistence, storage) and the one-release deprecation shims
 # stay importable but unadvertised.

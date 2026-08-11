@@ -20,6 +20,7 @@ and the sub-block geometry behind the mesh assignments and `crossed_by`.
 """
 import copy as _copy
 import itertools as _iter
+import json as _json
 
 import numpy as _np
 import pandas as _pd
@@ -28,7 +29,7 @@ import pyvista as _pv
 import geoml.math.geometry as _gmt
 
 from geoml.data.base import *
-from geoml.data.base import _Attribute, _export_label
+from geoml.data.base import _Attribute, _closing_value
 from geoml.data.variables import *
 from geoml.data.variables import _Variable
 from geoml.data.containers import *
@@ -267,6 +268,81 @@ class Blocks3D(Grid3D):
 
         return self._finish_pyvista(pv_blocks, "blocks", simulations,
                                     include)
+
+
+def _ghost_shell(origin, size, shape):
+    """Mirror images of the boundary cells, one per box face they touch.
+
+    A ghost is its partner's reflection across the shared face, so their
+    corners coincide exactly and the corner averaging cannot tear along the
+    box surface -- the mismatch between neighbouring ghosts of different
+    sizes does not matter, the fill value being one constant no surface
+    runs through. Edge and corner diagonals get no ghost: no crossing can
+    happen there either.
+    """
+    ghost_origin, ghost_size = [], []
+    for axis in range(3):
+        at_low = origin[:, axis] == 0
+        if at_low.any():
+            mirrored = origin[at_low].copy()
+            mirrored[:, axis] -= size[at_low][:, axis]
+            ghost_origin.append(mirrored)
+            ghost_size.append(size[at_low])
+        at_high = origin[:, axis] + size[:, axis] == shape[axis]
+        if at_high.any():
+            mirrored = origin[at_high].copy()
+            mirrored[:, axis] += size[at_high][:, axis]
+            ghost_origin.append(mirrored)
+            ghost_size.append(size[at_high])
+    if not ghost_origin:
+        return (_np.zeros([0, 3], dtype=origin.dtype),
+                _np.zeros([0, 3], dtype=size.dtype))
+    return _np.concatenate(ghost_origin), _np.concatenate(ghost_size)
+
+
+def _contour_column(blocks, path):
+    """The column a contour path names, and that path in full.
+
+    A path naming a column (`"metals/zn/prediction"`) is taken as it stands;
+    one naming a variable or component defaults to its `prediction`. A bare
+    segment that resolves to nothing on its own is searched for anywhere in
+    the tree, which is what lets a component be named without spelling its
+    owner -- refused when the name belongs to more than one place.
+    """
+    path = VariablePath(str(path))
+    try:
+        found = blocks.get(path)
+    except KeyError as err:
+        if len(path.parts) != 1:
+            raise ValueError(str(err))
+        matches = {p: thing
+                   for p, thing in blocks.select("**/" + path.parts[0]).items()
+                   if not isinstance(thing, _Attribute)}
+        if len(matches) > 1:
+            raise ValueError(
+                "%r sits in more than one place: %s; give the full path"
+                % (str(path), ", ".join(str(p) for p in matches)))
+        if len(matches) == 0:
+            # raises with the canonical listing of what there is to name
+            blocks._variable_or_component(path.parts[0])
+            raise ValueError(
+                "no variable or component named %r" % str(path))
+        (path, found), = matches.items()
+
+    if isinstance(found, _Attribute):
+        return path, found
+
+    try:
+        column = blocks.get(path / "prediction")
+    except KeyError:
+        parts = getattr(found, "components", None) or {}
+        if parts:
+            raise ValueError(
+                "%r is made of components and holds no prediction of its "
+                "own; name one of %s"
+                % (str(path), ", ".join(str(name) for name in parts)))
+        raise ValueError("%r holds no prediction to contour" % str(path))
+    return path / "prediction", column
 
 
 class BlockSet3D(PointData):
@@ -1101,7 +1177,8 @@ class BlockSet3D(PointData):
                           where=count > 0)
         return mean[corners]
 
-    def _cut_to_contour(self, values, value, margin=1, supersample=1):
+    def _cut_to_contour(self, values, value, margin=1, supersample=1,
+                        cap=None):
         """The blocks a surface runs through, cut small -- in the mesh handed
         to VTK, not in the model.
 
@@ -1157,7 +1234,17 @@ class BlockSet3D(PointData):
             # a corner with no value must not decide anything either way
             low = _np.where(_np.isnan(at_corner), _np.inf, at_corner).min(1)
             high = _np.where(_np.isnan(at_corner), -_np.inf, at_corner).max(1)
-            near = _gmt.grow(corners, (low < value) & (high > value), margin)
+            marked = (low < value) & (high > value)
+            if cap is not None:
+                # a closing cap runs through the boundary cells the kept
+                # region touches, and it tears between mismatched sizes like
+                # any other piece of the surface -- so those cells are cut
+                # with the rest (the cap side: +1 keeps above, -1 below)
+                at_face = _np.any(
+                    (origin == 0) | (origin + size == shape), axis=1)
+                kept = values > value if cap > 0 else values < value
+                marked |= at_face & kept
+            near = _gmt.grow(corners, marked, margin)
             near &= _np.all(size >= ratio, axis=1)
             if not _np.any(near):
                 break
@@ -1183,8 +1270,8 @@ class BlockSet3D(PointData):
             return None, None, None, None
         return origin, size, step, values
 
-    def get_contour(self, variable, value, attribute="prediction",
-                    supersample=1):
+    def get_contour(self, path, value, supersample=1, simplify=None,
+                    close=False):
         """
         Isosurface through blocks of more than one size.
 
@@ -1211,15 +1298,16 @@ class BlockSet3D(PointData):
 
         Parameters
         ----------
-        variable : str
-            Which variable to contour, or which component of a vector one:
-            only the components of a composition hold a grade, so `"Zn"` is
-            named rather than the `"Elements"` it belongs to.
+        path : str
+            The column to contour, named the way the tree names it:
+            `"grade/prediction"` is that column, `"grade"` alone defaults to
+            the variable's prediction, and `"Elements/Zn"` reaches a
+            component (only the components of a composition hold a grade). A
+            single bare segment that is no variable of its own is searched
+            for anywhere in the tree, so `"Zn"` still finds `"Elements/Zn"`
+            as long as only one variable holds a `Zn`.
         value : float
             The value to draw the surface at.
-        attribute : str
-            Which of the variable's columns to read; the prediction by
-            default.
         supersample : int
             How many levels past the model's own finest block to cut the mesh
             to. Costs `prod(discretization)` times the cells per level, around
@@ -1229,43 +1317,74 @@ class BlockSet3D(PointData):
             level is worth roughly predicting a model several times the size;
             past that it flattens off. Zero to leave the mesh at the model's
             own resolution.
+        simplify : float, optional
+            A geometric error budget, in coordinate units: the surface is
+            simplified until pushing further would move it more than this
+            (see `Mesh3D.simplify`). Pairs naturally with `supersample`,
+            which buys accuracy in triangles this then spends back where
+            the surface is flat. None returns the full triangulation.
+        close : bool or str
+            Whether to close the surface where it runs out of the model, so
+            that what comes back is a body rather than a sheet with a hole
+            in the side -- `"above"` (or `True`) keeps the region where the
+            values exceed `value`, a grade shell, and `"below"` the region
+            under it, as on a grid. Done with a shell of ghost cells
+            mirroring the boundary blocks, each its partner's own size, so
+            the closing cap cannot tear whatever the refinement did to the
+            boundary.
 
         Returns
         -------
         surf : Solid3D, Surface3D or Mesh3D
             Whichever the geometry calls for, as `get_contour` on a grid.
         """
-        named, owner = self._variable_or_component(variable)
+        path, _ = _contour_column(self, path)
 
-        # a component is labelled by its variable's name as well as its own,
-        # so the owner is needed to find it again
-        label = "%s - %s" % (_export_label(owner, named.name), attribute)
+        # the export records each column's label beside its path, so the
+        # label is looked up rather than reconstructed -- rebuilding it by
+        # hand is what used to break whenever the spelling changed
         mesh = self.as_pyvista()
-        if label not in mesh.cell_data:
-            parts = getattr(named, "components", None) or {}
-            if parts:
-                raise ValueError(
-                    "%r is made of components and holds no %r of its own; "
-                    "name one of %s"
-                    % (named.name, attribute,
-                       ", ".join(str(label) for label in parts)))
+        table = {}
+        if "geoml_paths" in mesh.field_data:
+            table = _json.loads(str(mesh.field_data["geoml_paths"][0]))
+        label = {p: lb for lb, p in table.items()}.get(str(path))
+        if label is None or label not in mesh.cell_data:
             raise ValueError(
-                "%r holds nothing under %r to contour; the mesh carries %s"
-                % (named.name, attribute,
+                "nothing under %r to contour; the mesh carries %s"
+                % (str(path),
                    ", ".join(sorted(mesh.cell_data.keys())) or "nothing"))
 
         value = float(value)
         values = _np.asarray(mesh.cell_data[label], dtype=float)
         span = (float(_np.nanmin(values)), float(_np.nanmax(values)))
+        fill = cap = None
+        if close:
+            fill = _closing_value(close, values)
+            cap = 1 if fill < value else -1
 
-        origin, size, step, finer = self._cut_to_contour(
-            values, value, supersample=supersample)
-        if origin is not None:
+        origin, size, step, cell_values = self._cut_to_contour(
+            values, value, supersample=supersample, cap=cap)
+        if origin is None:
+            origin, size = self._origin, self._size
+            step, cell_values = self.base_step, values
+        else:
             # let the coarse mesh go before the finer one is built: a block
             # model is large enough that holding both is worth avoiding
             mesh = None
+
+        if close:
+            # the box measured in whichever lattice the mesh is drawn on
+            shape = _np.asarray(self.lattice_shape) * _np.round(
+                self.base_step / step).astype(int)
+            ghost_origin, ghost_size = _ghost_shell(origin, size, shape)
+            origin = _np.concatenate([origin, ghost_origin])
+            size = _np.concatenate([size, ghost_size])
+            cell_values = _np.concatenate(
+                [cell_values, _np.full(len(ghost_origin), fill)])
+
+        if close or mesh is None:
             mesh = self._hex_mesh(origin, size, step)
-            mesh.cell_data[label] = finer
+            mesh.cell_data[label] = cell_values
 
         surface = mesh.cell_data_to_point_data().contour(
             [value], scalars=label)
@@ -1277,7 +1396,10 @@ class BlockSet3D(PointData):
         surface = surface.triangulate()
         verts = _np.asarray(surface.points, dtype=float)
         faces = _np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
-        return mesh3d(verts, faces, _gmt.vertex_normals(verts, faces))
+        surface = mesh3d(verts, faces, _gmt.vertex_normals(verts, faces))
+        if simplify is not None:
+            surface = surface.simplify(simplify)
+        return surface
 
 
 class RotatedBlockSet3D(BlockSet3D):

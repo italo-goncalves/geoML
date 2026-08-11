@@ -1186,6 +1186,40 @@ def test_a_component_of_a_vector_variable_can_be_contoured():
         blocks.get_contour("nickel", middle)
 
 
+def test_a_contour_is_named_by_its_path():
+    """The tree path names the column outright -- `metals/zn` the component,
+    `metals/zn/prediction` the column itself -- and the bare component name
+    stays as sugar over the same tree."""
+    model = _vector_model()
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                                   discretization=(2, 2, 2), max_levels=1)
+    model.predict(blocks, n_sim=6)
+    middle = float(np.nanmean(blocks.values("metals/zn/prediction")))
+
+    by_name = blocks.get_contour("zn", middle)
+    by_path = blocks.get_contour("metals/zn", middle)
+    by_column = blocks.get_contour("metals/zn/prediction", middle)
+
+    assert np.allclose(by_path.coordinates, by_name.coordinates)
+    assert np.allclose(by_column.coordinates, by_name.coordinates)
+
+
+def test_a_name_in_two_places_needs_its_path():
+    """The bare-name sugar only works while the name is unique; a component
+    held by two variables has to be reached by its full path."""
+    blocks = _blockset()
+    blocks.add_vector_variable("a", labels=["zn", "pb"])
+    blocks.add_vector_variable("b", labels=["zn", "cu"])
+
+    with pytest.raises(ValueError, match="more than one place"):
+        blocks.get_contour("zn", 0.5)
+    # the full path never is ambiguous; nothing is written yet, but the
+    # complaint must be about that, not about the name
+    with pytest.raises(ValueError) as err:
+        blocks.get_contour("a/zn/prediction", 0.5)
+    assert "more than one place" not in str(err.value)
+
+
 def test_a_contour_says_when_there_is_nothing_to_draw():
     blocks = _blockset()
     _graded(blocks, np.linspace(0.0, 1.0, blocks.n_data))
@@ -1195,7 +1229,7 @@ def test_a_contour_says_when_there_is_nothing_to_draw():
     with pytest.raises(ValueError, match="no variable or component named"):
         blocks.get_contour("nope", 0.5)
     with pytest.raises(ValueError, match="nothing under"):
-        blocks.get_contour("g", 0.5, attribute="measurements")
+        blocks.get_contour("g/measurements", 0.5)
 
 
 def test_it_refuses_a_lattice_it_cannot_count_in():
@@ -1205,3 +1239,61 @@ def test_it_refuses_a_lattice_it_cannot_count_in():
         geoml.data.BlockSet3D(START, N, STEP, discretization=(2, 2))
     with pytest.raises(ValueError, match="three numbers each"):
         geoml.data.BlockSet3D([0, 0], N, STEP)
+
+
+def _ball_blocks(centre):
+    """A cubic model graded by distance to `centre`, negated so 'above' is
+    the inside of a ball."""
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
+                                   discretization=(2, 2, 2), max_levels=1)
+    radius = np.linalg.norm(np.asarray(blocks.coordinates)
+                            - np.asarray([centre]), axis=1)
+    return _graded(blocks, -radius)
+
+
+def test_a_contour_running_out_of_the_model_can_close():
+    """A shell reaching the box edge is open there; `close=` mirrors ghost
+    cells beyond the boundary so it shuts against the box, as on a grid."""
+    blocks = _ball_blocks([10.0, 80.0, 80.0])
+
+    open_shell = blocks.get_contour("g", -50.0)
+    closed = blocks.get_contour("g", -50.0, close="above")
+
+    assert not open_shell.closed
+    assert isinstance(closed, geoml.data.Solid3D)
+    assert closed.volume > 0
+
+
+def test_closing_leaves_an_interior_shell_alone():
+    blocks = _ball_blocks([80.0, 80.0, 80.0])
+
+    plain = blocks.get_contour("g", -50.0)
+    closed = blocks.get_contour("g", -50.0, close="above")
+
+    assert isinstance(plain, geoml.data.Solid3D)
+    assert np.isclose(closed.volume, plain.volume, rtol=0.01)
+
+
+def test_a_closed_contour_survives_a_refined_boundary():
+    """The ghosts mirror whatever sizes the boundary blocks ended at, so a
+    split along the box face must not tear the closing cap."""
+    centre = np.array([10.0, 80.0, 80.0])
+    blocks = _ball_blocks(centre)
+
+    crossed = blocks.variables["g"].prediction.values.to_numpy() > -50.0
+    touched = np.zeros(blocks.n_data, dtype=bool)
+    touched[np.where(crossed)[0][:6]] = True
+    fine = blocks.split(touched)
+    radius = np.linalg.norm(np.asarray(fine.coordinates) - centre[None],
+                            axis=1)
+    fine.variables["g"].prediction.values[:] = -radius
+
+    closed = fine.get_contour("g", -50.0, close="above")
+    assert isinstance(closed, geoml.data.Solid3D)
+
+
+def test_close_wants_a_side():
+    blocks = _blockset()
+    _graded(blocks, np.linspace(0.0, 1.0, blocks.n_data))
+    with pytest.raises(ValueError, match="close takes"):
+        blocks.get_contour("g", 0.5, close="outside")
