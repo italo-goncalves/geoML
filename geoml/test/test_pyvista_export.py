@@ -61,7 +61,7 @@ def test_the_selection_says_which_ones(selection, expected):
     grid, _ = _grid()
     exported = grid.as_pyvista(simulations=selection)
     assert _simulation_arrays(exported) == \
-        sorted("v - simulation %d" % i for i in expected)
+        sorted("v - simulations - %d" % i for i in expected)
 
 
 def test_asking_for_more_than_there_are_takes_what_exists():
@@ -80,7 +80,7 @@ def test_the_exported_values_are_the_stored_ones():
     grid, values = _grid()
     exported = grid.as_pyvista(simulations=[1, 4])
     for i in (1, 4):
-        got = np.asarray(exported.point_data["v - simulation %d" % i])
+        got = np.asarray(exported.point_data["v - simulations - %d" % i])
         # a cube is written in pyvista's own axis order
         assert np.allclose(np.sort(got), np.sort(values[:, i]))
 
@@ -115,7 +115,7 @@ def test_it_works_the_same_on_the_zarr_backend(monkeypatch):
     assert grid.variables["v"].simulations.backend == "zarr"
 
     exported = grid.as_pyvista(simulations=[2])
-    got = np.asarray(exported.point_data["v - simulation 2"])
+    got = np.asarray(exported.point_data["v - simulations - 2"])
     assert np.allclose(np.sort(got), np.sort(values[:, 2]))
 
 
@@ -154,7 +154,7 @@ def test_a_categorical_variable_passes_the_argument_to_its_categories():
 
     assert _simulation_arrays(point.as_pyvista()) == []
     assert _simulation_arrays(point.as_pyvista(simulations=1)) == \
-        sorted("rock - %s - simulation 0" % label for label in categories)
+        sorted("rock - %s - simulations - 0" % label for label in categories)
 
 
 def test_the_data_frame_reads_the_store_once_too(monkeypatch):
@@ -172,7 +172,7 @@ def test_the_data_frame_reads_the_store_once_too(monkeypatch):
 
     df = grid.variables["v"].as_data_frame(simulations=True)
     assert len(reads) == 1
-    assert np.allclose(df["v_sim_3"].to_numpy(), values[:, 3])
+    assert np.allclose(df["v_simulations_3"].to_numpy(), values[:, 3])
 
 
 def test_the_data_frame_takes_a_selection_as_well():
@@ -180,25 +180,29 @@ def test_the_data_frame_takes_a_selection_as_well():
     grid, values = _grid()
     variable = grid.variables["v"]
 
-    columns = [c for c in variable.as_data_frame(simulations=False) if "_sim_" in c]
+    columns = [c for c in variable.as_data_frame(simulations=False)
+               if "_simulations_" in c]
     assert columns == []
 
-    columns = [c for c in variable.as_data_frame(simulations=True) if "_sim_" in c]
+    columns = [c for c in variable.as_data_frame(simulations=True)
+               if "_simulations_" in c]
     assert len(columns) == N_SIM
 
     df = variable.as_data_frame(simulations=[2, 6])
-    assert [c for c in df if "_sim_" in c] == ["v_sim_2", "v_sim_6"]
-    assert np.allclose(df["v_sim_6"].to_numpy(), values[:, 6])
+    assert [c for c in df if "_simulations_" in c] == \
+        ["v_simulations_2", "v_simulations_6"]
+    assert np.allclose(df["v_simulations_6"].to_numpy(), values[:, 6])
 
 
 def test_an_empty_attribute_is_still_left_out():
     """The all-NaN guard is now vectorized; it must decide the same way."""
     grid, _ = _grid()
     exported = grid.as_pyvista()
-    assert "v" not in exported.point_data          # measurements are all NaN
+    # measurements are all NaN, and named by path like everything else
+    assert "v - measurements" not in exported.point_data
 
     grid.variables["v"].measurements.values[0] = 1.0
-    assert "v" in grid.as_pyvista().point_data
+    assert "v - measurements" in grid.as_pyvista().point_data
 
 
 def _three_kinds(container):

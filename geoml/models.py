@@ -58,16 +58,17 @@ class _ModelOptions:
 
 
 class GPOptions(_ModelOptions):
-    # Class default, so that a model saved before this option existed still
+    # Class defaults, so that a model saved before these options existed still
     # opens: `persistence` rebuilds options with `__new__` plus a `vars()`
     # update, never calling `__init__`, so the instance dict has no entry and
     # the lookup falls through to here.
     jit_predict = False
+    qmc_simulations = False
 
     def __init__(self, verbose=True, prediction_batch_size=20000,
                  seed=1234, jitter=1e-9,
                  training_batch_size=2000, training_samples=20,
-                 jit_predict=False):
+                 jit_predict=False, qmc_simulations=False):
         """
         Configuration of Gaussian process models.
 
@@ -95,12 +96,26 @@ class GPOptions(_ModelOptions):
             pays that cost twice) and refuses to run anything it cannot
             compile, rather than falling back. Prediction only: the same
             treatment makes training both slower and unstable.
+        qmc_simulations : bool
+            Whether to draw the posterior simulations from a seeded-scramble
+            Sobol sequence instead of pseudo-random normals, so the same
+            number of them covers the predictive distribution evenly rather
+            than by chance. Measured on the Walker Lake model at 16-256
+            simulations: the ensemble mean lands 7-37x closer to the exact
+            posterior mean, proportions below a cut-off and the outer
+            quantiles about a quarter closer -- the accuracy of half again to
+            twice the simulations -- while the ensemble's own spread and the
+            correlation between locations gain nothing, and the cost is not
+            measurable. Deterministic given `seed`, batch-invariant either
+            way. The sequence covers at most 21201 dimensions (`size` times
+            the inducing points of a node), beyond which scipy refuses.
         """
         super().__init__(verbose, prediction_batch_size,
                          training_batch_size, seed)
         self.jitter = jitter
         self.training_samples = training_samples
         self.jit_predict = jit_predict
+        self.qmc_simulations = qmc_simulations
 
 
 class _GPModel(_gpr.Parametric):
@@ -926,17 +941,23 @@ class VGPNetwork(_GPModel):
     def predict_raw(self, *args, **kwargs):
         """`_predict_raw` in a graph, XLA-compiled when the options ask for it.
 
-        `jit_compile` is settled when a `tf.function` is built, so honouring an
-        option means holding one function per setting rather than a flag on a
-        single one. Each is traced at most once per model, and `None` (rather
-        than `False`) leaves the uncompiled path exactly as it was.
+        `jit_compile` is settled when a `tf.function` is built, and the
+        simulation draws are baked into the graph, so honouring either option
+        means holding one function per combination of settings rather than a
+        flag on a single one. Each is traced at most once per model, and
+        `None` (rather than `False`) leaves the uncompiled path exactly as it
+        was. The `simulation_rule` context wraps the call rather than the
+        trace because a retrace (a new batch shape, a new `n_sim`) can happen
+        on any call, and has to see the flag the cache key promised.
         """
         jit = bool(self.options.jit_predict)
-        traced = self._compiled.get(jit)
+        qmc = bool(self.options.qmc_simulations)
+        traced = self._compiled.get((jit, qmc))
         if traced is None:
             traced = _tf.function(self._predict_raw, jit_compile=jit or None)
-            self._compiled[jit] = traced
-        return traced(*args, **kwargs)
+            self._compiled[(jit, qmc)] = traced
+        with _latent.simulation_rule(qmc):
+            return traced(*args, **kwargs)
 
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
                      n_sim=1, seed=0, include_noise=True, n_splits=None):
@@ -1135,8 +1156,9 @@ class VGPNetwork(_GPModel):
                   if lik.warped]
 
         def batch_measure(x, x_var, n_splits):
-            _, _, sims, _, _ = self.latent_network.predict(
-                x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
+            with _latent.simulation_rule(self.options.qmc_simulations):
+                _, _, sims, _, _ = self.latent_network.predict(
+                    x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
             sims = _tf.split(_tf.transpose(sims, [1, 0, 2]),
                              self.lik_sizes, axis=1)
             return [lik.measurement_samples(sim, n_nodes)

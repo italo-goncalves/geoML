@@ -46,21 +46,15 @@ def variable_or_component(container, name):
 
     A composition is held as one variable, so its parts are not in
     `container.variables` and asking for `"Zn"` would otherwise mean reaching
-    into `Elements` by hand.
+    into `Elements` by hand. The search is the container's own -- this module
+    kept a near-copy of it for years, which is the duplication the path work
+    was started to remove.
     """
-    if name in container.variables:
-        return container.variables[name]
-
-    for var in container.variables.values():
-        if isinstance(var, _data.VectorVariable) and name in var.components:
-            return var.components[name]
-
-    names = set(container.variables)
-    for var in container.variables.values():
-        if isinstance(var, _data.VectorVariable):
-            names.update(str(label) for label in var.components)
-    raise KeyError("nothing named %r here; found %s"
-                   % (name, ", ".join(sorted(names)) or "nothing"))
+    try:
+        named, _ = container._variable_or_component(str(name))
+    except ValueError as err:
+        raise KeyError(str(err))
+    return named
 
 
 def numeric_values(var):
@@ -927,9 +921,11 @@ def uncertainty_values(container, name, variables=()):
     - **an array**, one value per location. Whatever the number is and wherever
       it came from, it can always be handed over directly, which is the way out
       of every case the names below do not reach.
-    - **`"Variable.column"`**, naming exactly where to read it --
-      `"Elements.uncertainty"` while the grade is one of its components, or a
-      column belonging to some other variable entirely.
+    - **a path**, naming exactly where to read it -- `"Elements/uncertainty"`
+      while the grade is one of its components, or a column belonging to some
+      other variable entirely. (The old dotted `"Variable.column"` is refused
+      with the replacement spelled out: a `.` inside a label would make a
+      wrong guess look like a working one.)
     - **a bare name**, looked for on each of `variables` in turn and then among
       the metadata columns.
 
@@ -947,12 +943,22 @@ def uncertainty_values(container, name, variables=()):
                 "location: got %d for %d" % (len(values), container.n_data))
         return values
 
+    if _data.PATH_SEP in name:
+        found = container.get(name)      # says what is there when it is not
+        if not isinstance(found, _data._Attribute):
+            raise KeyError(
+                "%r is a %s, not a column of values"
+                % (name, type(found).__name__))
+        values = _np.asarray(found.values.to_numpy(), dtype=float)
+        if _np.all(_np.isnan(values)):
+            raise KeyError("%r was never filled" % name)
+        return values
+
     if "." in name:
         owner, _, column = name.partition(".")
-        values = _column_of(variable_or_component(container, owner), column)
-        if values is None:
-            raise KeyError("%r carries no column called %r" % (owner, column))
-        return values
+        raise KeyError(
+            "%r is no longer accepted; use the path %r"
+            % (name, "%s/%s" % (owner, column)))
 
     for var in variables:
         values = _column_of(var, name)
@@ -967,7 +973,7 @@ def uncertainty_values(container, name, variables=()):
     raise KeyError(
         "nothing named %r to take an uncertainty from. The variables in hand "
         "carry %s; the metadata holds %s. Name a column on another variable "
-        "as 'Variable.column', or pass the values themselves"
+        "by its path, 'Variable/column', or pass the values themselves"
         % (name, ", ".join(carried) or "no columns",
            ", ".join(sorted(container.metadata)) or "nothing"))
 
@@ -1075,7 +1081,7 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
         range of the data.
     uncertainty : str or array
         Where to read how sure the model is at each block: a column name, a
-        `"Variable.column"` naming which variable it belongs to, or the values
+        a path (`"Variable/column"`) naming which variable it belongs to, or the values
         themselves. See `uncertainty_values`. A bare name is looked for on the
         grade, then on the variable containing it, then in the metadata.
     max_uncertainty : float

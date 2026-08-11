@@ -34,7 +34,7 @@ TO = "TO"
 # what a sample's own length is called once it is a point
 LENGTH = "LENGTH"
 
-ROLES = ("grade", "categorical", "density", "flag", "ignore")
+ROLES = ("grade", "categorical", "density", "recovery", "flag", "ignore")
 
 # what to divide a column by to turn it into a fraction of the whole
 UNITS = {"fraction": 1.0, "ratio": 1.0, "1": 1.0,
@@ -330,8 +330,16 @@ class IntervalTable(object):
     ``density``
         Numeric, and also the weight applied to the grades. Composited as a
         length-weighted mean of its own.
+    ``recovery``
+        Numeric: the share of each interval actually recovered. Composited as
+        a length-weighted mean, like the density -- a fraction of a length is
+        exactly what length-weighting averages -- and never applied as a
+        weight to anything: how much a poorly recovered assay should count is
+        a modelling decision, not a compositing one. Conversion carries it as
+        *metadata* rather than as a variable, beside `HOLEID` and `LENGTH`:
+        it describes the sample, and the models must not see it.
     ``flag``
-        A categorical marker (recovery, method) treated like a category.
+        A categorical marker (drilling method, say) treated like a category.
     ``ignore``
         Carried through untouched: a composite takes the value of its single
         longest contributing interval. Free-text columns land here.
@@ -352,8 +360,8 @@ class IntervalTable(object):
     """
 
     def __init__(self, data, hole="HOLEID", fr="FROM", to="TO",
-                 grades=None, categorical=None, density=None, flags=None,
-                 ignore=None, name=None):
+                 grades=None, categorical=None, density=None, recovery=None,
+                 flags=None, ignore=None, name=None):
         """
         Initializer for IntervalTable.
 
@@ -365,7 +373,7 @@ class IntervalTable(object):
             Column with the hole name.
         fr, to : str
             Columns with the start and end depths of each interval.
-        grades, categorical, density, flags, ignore : str or list
+        grades, categorical, density, recovery, flags, ignore : str or list
             Columns to assign to each role.
         name : str
             A label for the table.
@@ -390,8 +398,8 @@ class IntervalTable(object):
                 "grade" if _pd.api.types.is_numeric_dtype(self.data[column]) \
                 else "ignore"
         for role, columns in (("grade", grades), ("categorical", categorical),
-                              ("density", density), ("flag", flags),
-                              ("ignore", ignore)):
+                              ("density", density), ("recovery", recovery),
+                              ("flag", flags), ("ignore", ignore)):
             for column in _as_list(columns):
                 self.set_role(column, role)
 
@@ -775,10 +783,15 @@ class IntervalTable(object):
             out[column] = _weighted_mean(
                 source[column].values, target_index, source_index,
                 grade_weight, n_target)
-        for column in self.columns_with_role("density"):
-            out[column] = _weighted_mean(
-                source[column].values, target_index, source_index,
-                overlap, n_target)
+        # the density and the recovery are only ever weighted by length: the
+        # first is what the mass weighting is built from, and the second is a
+        # fraction of a length, which is exactly what length-weighting
+        # averages
+        for role in ("density", "recovery"):
+            for column in self.columns_with_role(role):
+                out[column] = _weighted_mean(
+                    source[column].values, target_index, source_index,
+                    overlap, n_target)
         for role in ("categorical", "flag"):
             for column in self.columns_with_role(role):
                 out[column] = _weighted_majority(
@@ -950,7 +963,14 @@ class DrillholeData(_data._SpatialData):
                 f"were taken as vertical")
         return traces
 
-    def _update_bounding_box(self):
+    def _desurveyed_points(self):
+        """The holes as a point cloud: collars, stations, toes, interval ends.
+
+        What the bounding box is measured from, and what a grid fitting a
+        rotation to the drilling (`RotatedGrid3D.from_data`) reads -- the
+        drillholes never expose `coordinates` of their own, being interval
+        data rather than points.
+        """
         points = [self.collar[["X", "Y", "Z"]].values]
         for name, trace in self._traces.items():
             points.append(trace.station_coordinates)
@@ -966,8 +986,11 @@ class DrillholeData(_data._SpatialData):
                                               table.data[TO].values))
 
         points = _np.concatenate(points, axis=0)
-        points = points[_np.all(_np.isfinite(points), axis=1)]
-        self._bounding_box = _data.BoundingBox.from_array(points)
+        return points[_np.all(_np.isfinite(points), axis=1)]
+
+    def _update_bounding_box(self):
+        self._bounding_box = _data.BoundingBox.from_array(
+            self._desurveyed_points())
 
     def __str__(self):
         s = "Object of class " + self.__class__.__name__ + "\n\n"
@@ -1057,6 +1080,57 @@ class DrillholeData(_data._SpatialData):
                 f"there is no table named {table}; found "
                 f"{list(self.intervals.keys())}")
         self.intervals[table].rename(columns)
+        return self
+
+    def rename_table(self, name, new_name):
+        """
+        Renames an interval table, keeping its position.
+
+        Parameters
+        ----------
+        name : str
+            The table's current name.
+        new_name : str
+            What to call it instead.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        if name not in self.intervals:
+            raise ValueError(
+                f"there is no table named {name}; found "
+                f"{list(self.intervals.keys())}")
+        if new_name != name and new_name in self.intervals:
+            raise ValueError(
+                f"there is already a table named {new_name}; drop it first "
+                f"if it is to be replaced")
+        # rebuilt rather than popped back in, so the table keeps its place --
+        # the order is what `as_point_data` merges by default
+        self.intervals = {new_name if key == name else key: table
+                          for key, table in self.intervals.items()}
+        self.intervals[new_name].name = new_name
+        return self
+
+    def drop_table(self, name):
+        """
+        Removes an interval table.
+
+        Parameters
+        ----------
+        name : str
+            The table to remove.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        if name not in self.intervals:
+            raise ValueError(
+                f"there is no table named {name}; found "
+                f"{list(self.intervals.keys())}")
+        del self.intervals[name]
+        self._update_bounding_box()
         return self
 
     def validate(self, on_error="warn"):
@@ -1513,7 +1587,8 @@ class DrillholeData(_data._SpatialData):
         The hole each point came from and the length it stands for are carried
         as the metadata columns `HOLEID` and `LENGTH`, which the models never
         see: they are what a leave-one-hole-out split and a support-weighted
-        statistic read.
+        statistic read. Columns with the ``recovery`` role ride beside them,
+        for the same reason -- they describe the sample, not the ground.
 
         Parameters
         ----------
@@ -1585,9 +1660,15 @@ class DrillholeData(_data._SpatialData):
 
         # where the sample came from, which the models never see: the hole is
         # what a leave-one-hole-out split needs, and the length is the support
-        # the value stands for
+        # the value stands for. The recovery is of the same kind -- it
+        # describes the sample rather than the ground, so it rides beside
+        # them instead of becoming a variable
         point.add_metadata(HOLE, merged[HOLE].values)
         point.add_metadata(LENGTH, merged[TO].values - merged[FROM].values)
+        for table in tables:
+            for column in table.columns_with_role("recovery"):
+                point.add_metadata(column,
+                                   frame[column].values.astype(float))
 
         for column in numeric:
             point.add_continuous_variable(

@@ -25,6 +25,57 @@ import geoml.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
+import contextlib as _contextlib
+import warnings as _warnings
+from scipy import special as _special
+from scipy.stats import qmc as _qmc
+
+
+# Which rule draws the posterior simulations. Set through `simulation_rule`
+# by the model around its prediction call, never directly: the choice lives
+# in `GPOptions`, and threading it through every node's `predict` signature
+# would touch each of them to serve three draw sites.
+_QMC_SIMULATIONS = False
+
+
+@_contextlib.contextmanager
+def simulation_rule(qmc):
+    """Chooses how the posterior simulations are drawn while active."""
+    global _QMC_SIMULATIONS
+    previous = _QMC_SIMULATIONS
+    _QMC_SIMULATIONS = bool(qmc)
+    try:
+        yield
+    finally:
+        _QMC_SIMULATIONS = previous
+
+
+def _simulation_normals(shape, seed):
+    """Standard normals shaped `[size, n, n_sim]` for the posterior draws.
+
+    Monte Carlo is a stateless draw. Under `simulation_rule(True)` the same
+    numbers come instead from a seeded-scramble Sobol sequence pushed through
+    the normal quantile: each simulation is one point of a `size * n`-
+    dimensional sequence, so the ensemble covers the posterior evenly rather
+    than by chance. `shape` and `seed` are Python values at trace time, which
+    is what lets the points be computed once and embedded as a constant.
+    Either way the numbers are fixed by the seed, so a value does not depend
+    on the batch that computed it.
+    """
+    if not _QMC_SIMULATIONS:
+        return _tf.random.stateless_normal(
+            shape=shape, seed=seed, dtype=_tf.float64)
+
+    size, n, n_sim = (int(s) for s in shape)
+    rng = _np.random.default_rng([abs(int(s)) for s in seed])
+    with _warnings.catch_warnings():
+        # scipy warns unless n_sim is a power of two; the balance it asks
+        # for helps but is not required
+        _warnings.simplefilter("ignore")
+        points = _qmc.Sobol(size * n, scramble=True, seed=rng).random(n_sim)
+    normals = _special.ndtri(_np.clip(points, 1e-6, 1 - 1e-6))
+    return _tf.constant(
+        normals.reshape([n_sim, size, n]).transpose([1, 2, 0]), _tf.float64)
 
 
 def _graph_state(node):
@@ -950,10 +1001,7 @@ class BasicGP(_GPNode):
 
             if n_sim > 0:
                 rnd = [
-                    _tf.random.stateless_normal(
-                        shape=[self.size, n, n_sim],
-                        seed=seed, dtype=_tf.float64
-                    )
+                    _simulation_normals([self.size, n, n_sim], seed)
                     for n in self.root.n_ip
                 ]
                 sims = [
@@ -2112,10 +2160,7 @@ class GPWalk(_FunctionalLatentVariable):
         explained_var = _tf.zeros_like(var)
 
         # samples are coherent among data points
-        rnd = _tf.random.stateless_normal(
-            shape=[self.size, 1, n_sim],
-            seed=seed, dtype=_tf.float64
-        )
+        rnd = _simulation_normals([self.size, 1, n_sim], seed)
         sims = mu + rnd * _tf.sqrt(var[:, :, None])
 
         influence = _tf.zeros_like(var)
@@ -2599,10 +2644,7 @@ class GradientConstrainedInput(_RootLatentVariable):
 
             if n_sim > 0:
                 rnd = [
-                    _tf.random.stateless_normal(
-                        shape=[self.size, n + d, n_sim],
-                        seed=seed, dtype=_tf.float64
-                    )
+                    _simulation_normals([self.size, n + d, n_sim], seed)
                     for n, d in zip(self.n_ip, self.n_dir)
                 ]
                 sims = [

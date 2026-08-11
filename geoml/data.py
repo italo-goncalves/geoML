@@ -29,6 +29,9 @@ import pandas as _pd
 import numpy as _np
 import copy as _copy
 import collections as _col
+import fnmatch as _fnmatch
+import json as _json
+import warnings as _warnings
 import pyvista as _pv
 import itertools as _iter
 import sklearn.metrics as _skmetrics
@@ -277,6 +280,605 @@ def _export_label(prefix, name):
     return name if prefix is None else prefix + " - " + name
 
 
+PATH_SEP = "/"
+METADATA_ROOT = "_metadata"
+
+
+def _path_key(key):
+    """A dict family's key as a path segment.
+
+    `str` on a float is the shortest string that reads back as the same
+    number, which is what makes `quantiles/1.5` and `quantiles/1.50` the same
+    address without any tolerance being involved: both parse to `1.5`. A key
+    that is not a number is its own segment.
+    """
+    try:
+        return str(float(key))
+    except (TypeError, ValueError):
+        return str(key)
+
+
+class VariablePath:
+    """Where a piece of data sits inside a container.
+
+    A container holds variables, a variable holds components or attributes,
+    and an attribute holds one array per location. This names a place in that
+    tree the way a file system names a file --
+    ``assay/Zn/noise_variance`` -- so that one string can serve the lookup,
+    the persistence key and the exported column name.
+
+    Built from a string, from parts, or from another path; `/` composes, as it
+    does for `pathlib`:
+
+    >>> VariablePath("assay") / "Zn" / "prediction"
+    VariablePath('assay/Zn/prediction')
+    """
+    __slots__ = ("parts",)
+
+    def __init__(self, parts=()):
+        if isinstance(parts, VariablePath):
+            parts = parts.parts
+        elif isinstance(parts, str):
+            parts = tuple(p for p in parts.split(PATH_SEP) if p != "")
+        else:
+            parts = tuple(str(p) for p in parts)
+        for part in parts:
+            if PATH_SEP in part:
+                raise ValueError(
+                    "%r cannot be a path segment: %r is the separator"
+                    % (part, PATH_SEP))
+        self.parts = parts
+
+    def __truediv__(self, other):
+        return VariablePath(self.parts + VariablePath(other).parts)
+
+    def __str__(self):
+        return PATH_SEP.join(self.parts)
+
+    def __repr__(self):
+        return "VariablePath(%r)" % str(self)
+
+    def __eq__(self, other):
+        if isinstance(other, (str, tuple, list)):
+            other = VariablePath(other)
+        return isinstance(other, VariablePath) and self.parts == other.parts
+
+    def __hash__(self):
+        return hash(self.parts)
+
+    def __len__(self):
+        return len(self.parts)
+
+    def __iter__(self):
+        return iter(self.parts)
+
+    def __getitem__(self, item):
+        return self.parts[item]
+
+    @property
+    def name(self):
+        """The last segment, or `''` for the root."""
+        return self.parts[-1] if self.parts else ""
+
+    @property
+    def parent(self):
+        return VariablePath(self.parts[:-1])
+
+
+def _frame_from_columns(found, columns):
+    """A data frame from `(path, values)` pairs, named by the chosen style.
+
+    `flat` renders each path with underscores, deduplicated with a warning
+    where two paths land on one name; `multi` keeps the path as one
+    `MultiIndex` level per segment, shorter paths padded with empty strings.
+    """
+    if not found:
+        return _pd.DataFrame({})
+    paths = [path for path, _ in found]
+    if columns == "flat":
+        names = list(render_all(paths, "flat").values())
+    elif columns == "multi":
+        depth = max(len(path) for path in paths)
+        names = _pd.MultiIndex.from_tuples(
+            [path.parts + ("",) * (depth - len(path)) for path in paths])
+    else:
+        raise ValueError(
+            "unknown columns style %r; expected 'flat' or 'multi'"
+            % (columns,))
+    return _pd.DataFrame(
+        dict(zip(range(len(found)), (values for _, values in found)))
+    ).set_axis(names, axis=1)
+
+
+def _subset_simulations(store, item):
+    """The `item` rows of a simulations store, without holding it whole.
+
+    `np.asarray(store)[item]` reads every realization of every location into
+    memory before throwing most of them away, which on a block model is
+    hundreds of gigabytes and the end of the session. Dask indexes the chunks
+    instead, so what is materialized is the answer rather than the source.
+    """
+    return _storage.ArrayStore.from_numpy(
+        _np.asarray(store.as_dask()[item]))
+
+
+def _copy_for_subset(variable):
+    """A deep copy of a variable, without what the subset is about to replace.
+
+    Two things a plain `deepcopy` drags in, both of them read in full and both
+    thrown away a line later. Its own simulations, which are the whole
+    `(n_data, n_sim)` array. And, less obviously, *every other variable in the
+    container*: an `_Attribute` holds a reference back to its container, so
+    the copy walks up to it and down again into everything else it holds.
+    Seeding the memo makes the copy share the container instead, and the
+    caller points the result at the new one with `set_coordinates`.
+    """
+    memo = {}
+    coordinates = getattr(variable, "coordinates", None)
+    if coordinates is not None:
+        memo[id(coordinates)] = coordinates
+
+    # the whole subtree, not just this node: a vector variable's realizations
+    # hang off its components
+    stashed = []
+    for _, node in variable.walk():
+        store = getattr(node, "simulations", None)
+        if store is not None:
+            stashed.append((node, store))
+            node.simulations = None
+    try:
+        return _copy.deepcopy(variable, memo)
+    finally:
+        for node, store in stashed:
+            node.simulations = store
+
+
+def _column_detail(attribute, status=True):
+    """What a column shows in a printed tree: its type, or that it is empty."""
+    detail = str(_np.dtype(attribute.values.dtype))
+    if attribute.labels is not None:
+        detail = "%s codes, %d labels" % (detail, len(attribute.labels))
+    if status and not attribute._has_content():
+        return "empty"
+    return detail
+
+
+def _match_path(pattern, parts):
+    """Whether `parts` matches a glob `pattern`, segment by segment.
+
+    `*` stands for one segment and does not cross a `/`; `**` stands for zero
+    or more, so `assay/**/prediction` finds `assay/prediction` and
+    `assay/Zn/prediction` alike. Within a segment the usual shell wildcards
+    apply, and matching is case-sensitive because labels are.
+    """
+    if not pattern:
+        return not parts
+    head = pattern[0]
+    if head == "**":
+        return any(_match_path(pattern[1:], parts[i:])
+                   for i in range(len(parts) + 1))
+    if not parts:
+        return False
+    if not _fnmatch.fnmatchcase(parts[0], head):
+        return False
+    return _match_path(pattern[1:], parts[1:])
+
+
+def render(path, style="path"):
+    """An addressable path as a name in some flat namespace.
+
+    Purely mechanical -- the segments joined, nothing else. That is the point:
+    the four spellings this replaced each had rules of their own about which
+    role was abbreviated and which was dropped, and no two agreed.
+
+    `path` is what the store and every internal caller use, `flat` is for
+    data-frame columns, CSV and mining software (identifier-safe), and
+    `pretty` is for pyvista and ParaView, where the name is read by a person.
+    """
+    parts = VariablePath(path).parts
+    if style == "path":
+        return PATH_SEP.join(parts)
+    if style == "flat":
+        return "_".join(parts)
+    if style == "pretty":
+        return " - ".join(parts)
+    raise ValueError(
+        "unknown render style %r; expected 'path', 'flat' or 'pretty'"
+        % (style,))
+
+
+def render_all(paths, style="flat"):
+    """`{path: name}` for a whole namespace at once, every name distinct.
+
+    A path cannot collide -- `/` is refused inside a segment -- so a collision
+    is made by the *join*, and only `flat` makes one readily: `_` is in nearly
+    every role name, so a variable `noise` with a component `variance` lands on
+    the same column as a leaf called `noise_variance`.
+
+    The rule has to be deterministic or an export changes shape between runs,
+    so a colliding group is sorted **by path** and the ones after the first
+    take a suffix. Only the group is touched: suffixing all of them would
+    penalize the innocent column to spare the pathological one. Adding a
+    variable can therefore rename a column inside a colliding group, which is
+    why this warns rather than quietly putting it right.
+    """
+    grouped = _col.OrderedDict()
+    order = []
+    for path in paths:
+        path = VariablePath(path)
+        order.append(path)
+        grouped.setdefault(render(path, style), []).append(path)
+
+    names = {}
+    for name, group in grouped.items():
+        if len(group) == 1:
+            names[group[0]] = name
+            continue
+        group = sorted(group, key=lambda p: p.parts)
+        chosen = [name] + ["%s_%d" % (name, i)
+                           for i in range(2, len(group) + 1)]
+        names.update(zip(group, chosen))
+        _warnings.warn(
+            "%d paths render to the column name %r and were made distinct: %s"
+            % (len(group), name,
+               ", ".join("%s -> %s" % (p, names[p]) for p in group)),
+            stacklevel=2)
+
+    return _col.OrderedDict((path, names[path]) for path in order)
+
+
+class _TreeNode(object):
+    """One traversal of the container tree, shared by every node in it.
+
+    A container is a node, a variable is a node, a component is a node, and
+    each of them holds *leaves* -- one array per location -- plus *attrs*, the
+    facts describing the node itself. Everything that reads a container whole
+    (persistence, the data frame, the pyvista exports, subsetting, carrying to
+    a new container) is a fold over `leaves()`, so a column added in one place
+    reaches all of them. Writing those lists out per class is what put the
+    same bug in the code seven times.
+
+    A subclass says what it holds by declaring `_ZARR_ATTRS` (scalar columns),
+    `_DICT_FAMILIES` (columns keyed by a cut-off) and `_NODE_ATTRS` (the
+    facts), and by answering `child_nodes`. Nothing else is per class.
+    """
+    _NODE_ATTRS = ()      # facts a rebuild must carry across; not arrays
+    _DICT_FAMILIES = ()   # attribute families keyed by a cut-off
+    _ZARR_ATTRS = ()
+
+    @property
+    def _node_name(self):
+        return getattr(self, "name", "")
+
+    def child_nodes(self):
+        """The nodes directly beneath this one, by name."""
+        return dict(getattr(self, "components", None) or {})
+
+    def own_leaves(self):
+        """`(parts, attribute)` for the columns this node owns directly.
+
+        Not its children's, and not `simulations`: that one carries a
+        realization axis, so it is a leaf of a different shape and is reached
+        by name (`get`) rather than swept up by everything that walks columns.
+        """
+        for role in self._ZARR_ATTRS:
+            attribute = getattr(self, role, None)
+            if attribute is not None:
+                yield (role,), attribute
+        for family in self._DICT_FAMILIES:
+            for key, attribute in (getattr(self, family, None) or {}).items():
+                yield (family, _path_key(key)), attribute
+
+    def set_coordinates(self, coordinates):
+        """Point this node, and everything under it, at a new container.
+
+        One walk instead of six hand-written lists, four of which had columns
+        missing: a component set only its prediction, a rock type set nothing
+        but its own reference, and every dict family was missed everywhere.
+        A stale reference is quiet until something asks the attribute how many
+        locations it has.
+        """
+        for _, node in self.walk():
+            node.coordinates = coordinates
+            for _, attribute in node.own_leaves():
+                attribute.coordinates = coordinates
+
+    def node_attrs(self):
+        """The facts describing this node, as `{name: value}`.
+
+        Cut-offs and the like: not arrays, not rebuilt from anything else, and
+        therefore invisible to any code that only knows about columns. Every
+        method that builds a fresh variable has to carry them across, and the
+        three that forgot are why they are enumerated here.
+        """
+        return {name: getattr(self, name, None) for name in self._NODE_ATTRS}
+
+    def _export_leaves(self, include="**", simulations=False, prefix=None):
+        """`(path, attribute)` for every filled column matching `include`.
+
+        The one enumeration behind every export -- tabular and pyvista alike,
+        in place of the thirty-five per-class bodies that each named their
+        columns again: a filled leaf is a column, a dict family is one column
+        per cut-off, and the realization axis is unrolled only as far as the
+        `simulations` selector asks. Metadata stays out -- it has a root of
+        its own precisely so a fold over the modelled columns can leave it
+        alone.
+        """
+        pattern = VariablePath(include).parts
+        for path, node in self.walk(prefix):
+            for leaf_parts, attribute in node.own_leaves():
+                full = path / leaf_parts
+                if full.parts[:1] == (METADATA_ROOT,):
+                    continue
+                if not _match_path(pattern, full.parts):
+                    continue
+                if not attribute._has_content():
+                    continue
+                yield full, attribute
+            store = getattr(node, "simulations", None)
+            if store is not None:
+                for i, values in _selected_simulations(store, simulations):
+                    full = path / "simulations" / str(i)
+                    if _match_path(pattern, full.parts):
+                        yield full, _Attribute(node.coordinates, values)
+
+    def _export_columns(self, include="**", simulations=False):
+        """`(path, values)` for the frame: the leaves, decoded."""
+        for path, attribute in self._export_leaves(include, simulations):
+            yield path, attribute.to_numpy()
+
+    def as_data_frame(self, include="**", simulations=False, columns="flat",
+                      **kwargs):
+        """This node's filled columns, one data-frame column each.
+
+        Parameters
+        ----------
+        include : str
+            A path pattern choosing what to export: `"**"` for everything,
+            `"**/prediction"` for the predictions alone, `"Zn/**"` for one
+            component. See `select`.
+        simulations : bool, int or sequence
+            Which realizations to include: none by default, `True` for all,
+            an `int` for the first n, or a sequence of indices.
+        columns : str
+            `"flat"` names each column by its path with underscores
+            (`assay_Zn_prediction`), deduplicated with a warning if two paths
+            land on one name. `"multi"` keeps the path as a `MultiIndex`
+            level per segment -- for staying in pandas; written to CSV it
+            makes several header rows, which other software reads as data.
+        """
+        return _frame_from_columns(
+            list(self._export_columns(include, simulations)), columns)
+
+    def _copy_attrs_into(self, new):
+        """Carry every node's facts into a freshly built copy of this variable.
+
+        `from_variable` builds the structure -- the components, the empty
+        columns -- and this walks the two trees in step, copying what each
+        node *knows* rather than what it holds. Wholesale, off `_NODE_ATTRS`,
+        because carrying them by hand per class is how a composition came to
+        lose its components' cut-offs three separate times: whoever adds a
+        fact adds it to the declaration, and every rebuild carries it.
+        """
+        for name, value in self.node_attrs().items():
+            if value is not None:
+                setattr(new, name, _copy.deepcopy(value))
+        theirs = new.child_nodes()
+        for label, child in self.child_nodes().items():
+            if label in theirs:
+                child._copy_attrs_into(theirs[label])
+
+    def walk(self, prefix=None):
+        """`(path, node)` for this node and every node beneath it."""
+        prefix = VariablePath(self._node_name) if prefix is None \
+            else VariablePath(prefix)
+        yield prefix, self
+        for name, child in self.child_nodes().items():
+            for item in child.walk(prefix / name):
+                yield item
+
+    def leaves(self, prefix=None):
+        """`(path, attribute)` for every column at or beneath this node."""
+        for path, node in self.walk(prefix):
+            for parts, attribute in node.own_leaves():
+                yield path / parts, attribute
+
+    def addressable(self, prefix=None, realizations=False):
+        """`(path, thing)` for everything a path can name here -- nodes and
+        columns alike, each node before the columns it owns.
+
+        `realizations` unrolls a simulations store into one entry per
+        realization. Off by default: on a hundred-realization model that is a
+        hundred extra names per variable, and they are wanted only when
+        something asked for them by name.
+        """
+        for path, node in self.walk(prefix):
+            yield path, node
+            for parts, attribute in node.own_leaves():
+                yield path / parts, attribute
+            store = getattr(node, "simulations", None)
+            if store is not None:
+                yield path / "simulations", store
+                if realizations:
+                    for i in range(store.shape[1]):
+                        yield path / "simulations" / str(i), node.simulation(i)
+
+    def select(self, pattern="**", filled=None):
+        """`{path: thing}` for everything matching a glob pattern.
+
+        `select("**/prediction")` is every prediction in the tree,
+        `select("assay/*")` the components of one variable, `select("assay/**")`
+        that variable and everything under it.
+
+        `filled` is the one thing no pattern can express and every export
+        needs: `True` keeps only columns that hold something, `False` only the
+        empty ones, and either way nodes are left out, since a node is neither.
+        A `role=` keyword was considered and rejected -- `role="prediction"` is
+        exactly `**/prediction`, and a second way to say the same thing is the
+        disease this addressing was built to cure.
+
+        A bare `**` does not unroll the realization axis: the leaf is
+        `assay/Zn/simulations`, and `assay/Zn/simulations/7` is reached by
+        naming it (`get`) or by asking for it (`**/simulations/*`).
+        """
+        parts = VariablePath(pattern).parts
+        # unrolled only when the pattern names the axis and then asks for
+        # something past it: `**/simulations/*` yes, `**` and
+        # `**/simulations` no
+        realizations = "simulations" in parts[:-1]
+        chosen = _col.OrderedDict()
+        for path, thing in self.addressable(realizations=realizations):
+            if not _match_path(parts, path.parts):
+                continue
+            if filled is not None:
+                if not isinstance(thing, _Attribute):
+                    continue
+                if thing._has_content() != filled:
+                    continue
+            chosen[path] = thing
+        return chosen
+
+    def get(self, path, key=None):
+        """The node or attribute at `path`, relative to this one.
+
+        `container.get("assay/Zn/noise_variance")` is the column,
+        `container.get("assay/Zn")` the component, `container.get("")` the
+        container. A dict family takes its key as the next segment --
+        `"assay/Zn/quantiles/1.5"` -- and `get(path, key)` is accepted as
+        shorthand for the same thing.
+        """
+        path = VariablePath(path)
+        if key is not None:
+            path = path / _path_key(key)
+        found = self._resolve(path)
+        if found is None:
+            # report from as deep as the path did reach: told that `au` holds
+            # no `nope`, the reader knows where to look, where a list of the
+            # container's variables only says the first segment was fine
+            node = self._deepest(path)
+            raise KeyError(
+                "nothing at %r; %s holds %s"
+                % (str(path),
+                   "%r" % node._node_name if node._node_name
+                   else "the container",
+                   ", ".join(node._tree_names()) or "nothing"))
+        return found
+
+    # ------------------------------------------------------------------ #
+    # printing the tree
+    # ------------------------------------------------------------------ #
+    def tree(self, status=True):
+        """This node and everything beneath it, as a printable tree.
+
+        Separate from `str`, which stays one line per variable on purpose: a
+        container's summary should not grow every time a variable does. This
+        is the diagnostic -- what is here, and which of it holds anything.
+
+        `status` reads each column once to say whether it is filled, which is
+        the question worth asking (a column allocated and never written is
+        the shape of most of the bugs this addressing was built to stop). On
+        a disk-backed block model that is a pass over every column, so
+        `status=False` prints the structure alone.
+        """
+        lines = [self._tree_root_label()]
+        self._tree_rows(lines, "", status)
+        return "\n".join(lines)
+
+    def _tree_root_label(self):
+        name = self._node_name
+        return "%s%s" % (type(self).__name__, " %r" % name if name else "")
+
+    def _node_detail(self):
+        facts = ", ".join(
+            "%s=%s" % (name, value)
+            for name, value in self.node_attrs().items() if value is not None)
+        return type(self).__name__ + ("  " + facts if facts else "")
+
+    def _tree_entries(self, status):
+        """`(label, detail, child)` under this node, in printing order."""
+        rows = [(str(VariablePath(parts)), _column_detail(attribute, status),
+                 None)
+                for parts, attribute in self.own_leaves()]
+        store = getattr(self, "simulations", None)
+        if store is not None:
+            rows.append(("simulations", "%s %s" % (tuple(store.shape),
+                                                   _np.dtype(store.dtype)),
+                         None))
+        rows += [(name, child._node_detail(), child)
+                 for name, child in self.child_nodes().items()]
+        return rows
+
+    def _tree_rows(self, lines, prefix, status):
+        rows = self._tree_entries(status)
+        width = max(8, 26 - len(prefix))
+        for i, (label, detail, child) in enumerate(rows):
+            last = i == len(rows) - 1
+            lines.append("%s%s%s %s" % (prefix, "`-- " if last else "|-- ",
+                                        label.ljust(width), detail))
+            if child is not None:
+                child._tree_rows(lines, prefix + ("    " if last else "|   "),
+                                 status)
+
+    def _deepest(self, path):
+        """The last node `path` reaches before it stops matching."""
+        node = self
+        for segment in path:
+            children = node.child_nodes()
+            if segment not in children:
+                return node
+            node = children[segment]
+        return node
+
+    def values(self, path, key=None):
+        """The array at `path`, decoded if it is coded."""
+        found = self.get(path, key)
+        if isinstance(found, _Attribute):
+            return found.to_numpy()
+        return _np.asarray(found)
+
+    def _tree_names(self):
+        """What could follow this node, for an error message."""
+        names = sorted(self.child_nodes())
+        names += sorted(str(VariablePath(parts))
+                        for parts, _ in self.own_leaves())
+        if getattr(self, "simulations", None) is not None:
+            names.append("simulations")
+        return names
+
+    def _resolve(self, path):
+        """The node or attribute at `path`, or None. Never raises."""
+        if len(path) == 0:
+            return self
+
+        head, rest = path[0], VariablePath(path[1:])
+
+        children = self.child_nodes()
+        if head in children:
+            return children[head]._resolve(rest)
+
+        if head == "simulations" \
+                and getattr(self, "simulations", None) is not None:
+            if len(rest) == 0:
+                return self.simulations
+            try:
+                return self.simulation(int(rest[0]))
+            except (ValueError, IndexError, NoDataError):
+                return None
+
+        if len(rest) == 0:
+            attribute = getattr(self, head, None)
+            if isinstance(attribute, _Attribute):
+                return attribute
+
+        if len(rest) == 1 and head in self._DICT_FAMILIES:
+            wanted = _path_key(rest[0])
+            for key, attribute in (getattr(self, head, None) or {}).items():
+                if _path_key(key) == wanted:
+                    return attribute
+
+        return None
+
+
 def _selected_simulations(store, selection):
     """The simulations to export, read in a single pass over the store.
 
@@ -463,7 +1065,14 @@ class _Attribute(object):
         return self.values.__array__().__repr__()
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        # A shallow copy, deliberately. An attribute points back at its
+        # container, so `deepcopy` walked up to it and down again into every
+        # other variable -- reading every store in the object, simulations
+        # included, to build a copy thrown away on the next line. The only
+        # thing here worth copying is the values, and those are replaced.
+        new_obj = _copy.copy(self)
+        if self.labels is not None:
+            new_obj.labels = list(self.labels)
         new_obj.values = _np.array(_np.asarray(self.values)[item], ndmin=1)
         return new_obj
 
@@ -735,7 +1344,7 @@ class _Attribute(object):
             **kwargs)
 
 
-class _Variable(object):
+class _Variable(_TreeNode):
     """Representation of a dependent random variable."""
 
     # Subclasses that can be simulated replace this with an (n_data, n_sim)
@@ -809,42 +1418,68 @@ class _Variable(object):
         this variable -- a cut-off for a grade, a boundary for a category --
         and empty where the variable declares none.
 
-        Asked of the variable rather than worked out from outside, because
-        what carries the answer differs by kind: a graded variable holds one
-        column per cut-off in a dict, a category holds a single column of its
-        own, and a variable made of components has whatever its components
-        have. Reaching in for an attribute called `divided` and hoping finds
-        an `_Attribute` on one and an `OrderedDict` on the other.
+        Asked of the variable rather than worked out from outside, which used
+        to be a necessity (`divided` was an `_Attribute` on a category and an
+        `OrderedDict` on a grade) and is now only about the names: the
+        storage is one shape, but a grade's decision renders `@ 1.5` because
+        someone declared that number, while a category's stays bare -- its
+        zero is an artefact of the log-odds, and `granite @ 0` would read as
+        noise. `_share_label` is that one difference.
         """
         shares = {}
+        for cutoff, attribute in (getattr(self, "divided", None) or {}).items():
+            shares[self._share_label(cutoff)] = attribute.values.to_numpy()
         for label, component in (
                 getattr(self, "components", None) or {}).items():
             for key, values in component.split_shares().items():
                 shares[("%s %s" % (label, key)).strip()] = values
         return shares
 
-    def fill_pyvista_cells(self, mesh, prefix=None, simulations=False):
-        """Every filled column of this variable, as cell data.
+    def _share_label(self, cutoff):
+        return "@ %g" % cutoff
 
-        One implementation for every variable type, rather than the per-type
-        `fill_pyvista_*` above: a mesh of one cell per location wants the
-        values in the order they are already in, so the roles the variable
-        persists are exactly the ones worth exporting.
+    def _fill_pyvista(self, write, simulations=False, prefix=None,
+                      include="**"):
+        """`write(label, attribute)` for every filled column, named by path.
+
+        The same enumeration the data frame reads (`_export_leaves`), handed
+        to a writer instead of a frame -- in place of the twenty-one
+        per-class methods that each named their columns again, no two
+        agreeing on the spelling. A label is `render(path, "pretty")`:
+        `assay - Zn - noise_variance`, the same segments every other export
+        uses.
         """
-        label = _export_label(prefix, self.name)
+        root = None if prefix is None \
+            else VariablePath(prefix) / self._node_name
+        for path, attribute in self._export_leaves(include, simulations, root):
+            write(render(path, "pretty"), attribute)
 
-        for role in self._ZARR_ATTRS:
-            attribute = getattr(self, role, None)
-            if attribute is not None:
-                attribute.fill_pyvista_cells(mesh, "%s - %s" % (label, role))
+    def fill_pyvista_cube(self, cube, prefix=None, sigma=None,
+                          simulations=False, include="**"):
+        self._fill_pyvista(
+            lambda label, attribute: attribute.fill_pyvista_cube(
+                cube, label, sigma=sigma),
+            simulations, prefix, include)
 
-        for i, values in _selected_simulations(self.simulations, simulations):
-            _Attribute(self.coordinates, values).fill_pyvista_cells(
-                mesh, "%s - simulation %d" % (label, i))
+    def fill_pyvista_points(self, points, prefix=None, simulations=False,
+                            include="**"):
+        self._fill_pyvista(
+            lambda label, attribute: attribute.fill_pyvista_points(
+                points, label),
+            simulations, prefix, include)
 
-        for component in (getattr(self, "components", None) or {}).values():
-            component.fill_pyvista_cells(mesh, prefix=label,
-                                         simulations=simulations)
+    def fill_pyvista_blocks(self, cube, prefix=None, sigma=None,
+                            simulations=False, include="**"):
+        self._fill_pyvista(
+            lambda label, attribute: attribute.fill_pyvista_blocks(
+                cube, label, sigma=sigma),
+            simulations, prefix, include)
+
+    def fill_pyvista_cells(self, mesh, prefix=None, simulations=False,
+                           include="**"):
+        self._fill_pyvista(
+            lambda label, attribute: attribute.fill_pyvista_cells(mesh, label),
+            simulations, prefix, include)
 
     def carry_to(self, coordinates, keep, n_new):
         """This variable on a longer set of locations, keeping what still fits.
@@ -860,6 +1495,7 @@ class _Variable(object):
         the number already there.
         """
         new = self.__class__.from_variable(coordinates, self)
+        self._copy_attrs_into(new)
         self._carry_into(new, _np.asarray(keep, dtype=bool))
         return new
 
@@ -884,24 +1520,44 @@ class _Variable(object):
             new.allocate_simulations(self.simulations.shape[1])
             _carry_rows(self.simulations, new.simulations, keep)
 
-        if self._ZARR_HAS_QUANTILES:
-            for source, target in ((self.quantiles, new.quantiles),
-                                   (self.probabilities, new.probabilities),
-                                   (self.proportions, new.proportions),
-                                   (self.divided, new.divided)):
-                for key, attr in source.items():
-                    fresh = self._Attribute(new.coordinates)
-                    fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
-                    target[key] = fresh
+        for family in self._DICT_FAMILIES:
+            target = getattr(new, family)
+            for key, attr in (getattr(self, family, None) or {}).items():
+                fresh = self._Attribute(new.coordinates)
+                fresh.values[:n_kept] = _np.asarray(attr.values)[keep]
+                target[key] = fresh
 
         for name, component in (getattr(self, "components", None) or {}).items():
             component._carry_into(new.components[name], keep)
 
-    def __getitem__(self, item):
-        raise NotImplementedError
+    def _subset_into(self, new, item):
+        """Fill a copy with the `item` rows of this node, column by column.
 
-    def as_data_frame(self, **kwargs):
-        raise NotImplementedError
+        Driven by the declarations rather than written out per class: a
+        column named in `_ZARR_ATTRS` and forgotten in a hand-written subset
+        survives at its old length, and only whatever reads it afterwards
+        finds out. That is how a `BinaryVariable` shipped a subset whose
+        `probability` was never cut -- the old override wrote it into a dead
+        `average` attribute instead.
+        """
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None:
+                setattr(new, role, column[item])
+        for family in self._DICT_FAMILIES:
+            target = getattr(new, family)
+            for key, attribute in (getattr(self, family, None) or {}).items():
+                target[key] = attribute[item]
+        if getattr(self, "simulations", None) is not None:
+            new.simulations = _subset_simulations(self.simulations, item)
+        theirs = new.child_nodes()
+        for label, child in self.child_nodes().items():
+            child._subset_into(theirs[label], item)
+
+    def __getitem__(self, item):
+        new_obj = _copy_for_subset(self)
+        self._subset_into(new_obj, item)
+        return new_obj
 
     def get_measurements(self):
         raise NotImplementedError
@@ -952,23 +1608,14 @@ class _Variable(object):
         return {}
 
     def copy_to(self, coordinates):
-        coordinates.variables[self.name] = self.__class__.from_variable(
-            coordinates, self
-        )
+        new = self.__class__.from_variable(coordinates, self)
+        self._copy_attrs_into(new)
+        coordinates.variables[self.name] = new
 
     def update(self, idx, **kwargs):
         raise NotImplementedError
 
     def allocate_simulations(self, n_sim):
-        raise NotImplementedError
-
-    def set_coordinates(self, coordinates):
-        raise NotImplementedError
-
-    def fill_pyvista_cube(self, cube, prefix=None, simulations=False):
-        raise NotImplementedError
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
         raise NotImplementedError
 
     def compute_metrics(self, **kwargs):
@@ -980,7 +1627,6 @@ class _Variable(object):
     # Scalar ``_Attribute`` roles to persist; overridden per subclass.
     _ZARR_ATTRS = ()
     _ZARR_HAS_SIMS = False        # has a (n_data, n_sim) simulations store
-    _ZARR_HAS_QUANTILES = False   # has quantiles / probabilities dicts
 
     def _save_attr(self, group, prefix, role):
         """Write one ``_Attribute``'s store into ``group``; None-valued -> skip.
@@ -1034,26 +1680,21 @@ class _Variable(object):
             key = prefix + "/simulations"
             self.simulations.write_into(group, key)
             meta["simulations"] = key
-        if self._ZARR_HAS_QUANTILES:
-            meta["quantiles"] = []
-            for p, attr in self.quantiles.items():
-                key = prefix + "/quantile_" + str(p)
+        # the dict families and the node's own facts, off the declarations,
+        # with the Zarr key spelling the same string `get` takes:
+        # `assay/Zn/quantiles/0.5`
+        for family in self._DICT_FAMILIES:
+            entries = []
+            for at, attr in (getattr(self, family, None) or {}).items():
+                key = prefix + "/" + family + "/" + _path_key(at)
                 attr.values.write_into(group, key)
-                meta["quantiles"].append({"key": key, "p": float(p)})
-            meta["probabilities"] = []
-            for q, attr in self.probabilities.items():
-                key = prefix + "/probability_" + str(q)
-                attr.values.write_into(group, key)
-                meta["probabilities"].append({"key": key, "q": float(q)})
-            for role, source in (("proportions", "proportion"),
-                                 ("divided", "divided")):
-                meta[role] = []
-                for c, attr in getattr(self, role, {}).items():
-                    key = prefix + "/" + source + "_" + str(c)
-                    attr.values.write_into(group, key)
-                    meta[role].append({"key": key, "c": float(c)})
-            if getattr(self, "cutoffs", None) is not None:
-                meta["cutoffs"] = [float(c) for c in self.cutoffs]
+                entries.append({"key": key, "at": float(at)})
+            if entries:
+                meta.setdefault("dicts", {})[family] = entries
+        facts = {name: value for name, value in self.node_attrs().items()
+                 if value is not None}
+        if facts:
+            meta["node_attrs"] = facts
         if getattr(self, "components", None):
             meta["components"] = {}
             for cname, comp in self.components.items():
@@ -1080,21 +1721,14 @@ class _Variable(object):
         if meta.get("simulations") is not None:
             self.simulations = _storage.ArrayStore.wrap_zarr(
                 group[meta["simulations"]])
-        for info in meta.get("quantiles", []):
-            attr = self._Attribute(self.coordinates)
-            attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-            self.quantiles[info["p"]] = attr
-        for info in meta.get("probabilities", []):
-            attr = self._Attribute(self.coordinates)
-            attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-            self.probabilities[info["q"]] = attr
-        for role in ("proportions", "divided"):
-            for info in meta.get(role, []):
+        for family, entries in meta.get("dicts", {}).items():
+            target = getattr(self, family)
+            for info in entries:
                 attr = self._Attribute(self.coordinates)
                 attr.values = _storage.ArrayStore.wrap_zarr(group[info["key"]])
-                getattr(self, role)[info["c"]] = attr
-        if meta.get("cutoffs") is not None:
-            self.cutoffs = [float(c) for c in meta["cutoffs"]]
+                target[info["at"]] = attr
+        for name, value in meta.get("node_attrs", {}).items():
+            setattr(self, name, value)
         for cname, cmeta in meta.get("components", {}).items():
             self.components[cname]._zarr_load(
                 group, prefix + "/" + str(cname), cmeta)
@@ -1150,7 +1784,8 @@ class ContinuousVariable(_Variable):
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
                    "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
-    _ZARR_HAS_QUANTILES = True
+    _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided")
+    _NODE_ATTRS = ("cutoffs",)
 
     def __init__(self, name, coordinates, measurements=None):
         super().__init__(name, coordinates)
@@ -1197,10 +1832,6 @@ class ContinuousVariable(_Variable):
         # different question, and the one that says whether cutting the block
         # finer would settle anything. See `likelihood._divided`.
         self.divided = _col.OrderedDict()
-
-    def split_shares(self):
-        return {"@ %g" % cutoff: attr.values.to_numpy()
-                for cutoff, attr in self.divided.items()}
 
     def set_cutoffs(self, cutoffs):
         """The grades this variable is judged against.
@@ -1286,130 +1917,39 @@ class ContinuousVariable(_Variable):
 
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = cls(variable.name, coordinates)
-        # what the variable is judged against belongs to the variable, not to
-        # the locations, so it follows it onto whatever it is predicted into
-        new_var.cutoffs = variable.cutoffs
-        return new_var
-
-    def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
-        # the same list the Zarr round trip and `carry_to` walk, so a column
-        # added in one place is subset in this one without being named twice
-        for role in self._ZARR_ATTRS:
-            column = getattr(self, role, None)
-            if column is not None:
-                setattr(new_obj, role, column[item])
-        new_obj.proportions = _col.OrderedDict(
-            (key, val[item]) for key, val in self.proportions.items())
-        new_obj.divided = _col.OrderedDict(
-            (key, val[item]) for key, val in self.divided.items())
-
-        if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
-
-        if len(self.quantiles) > 0:
-            for key, val in self.quantiles.items():
-                new_obj.quantiles[key] = val[item]
-
-        if len(self.probabilities) > 0:
-            for key, val in self.probabilities.items():
-                new_obj.probabilities[key] = val[item]
-
-        return new_obj
-
-    def as_data_frame(self, measurements=True, predictions=True,
-                      latent=True,
-                      simulations=False, quantiles=True,
-                      probability=True, **kwargs):
-        """
-        Converts the object to a DataFrame.
-
-        Parameters
-        ----------
-        predictions : bool
-            Whether to include the predictions.
-        measurements : bool
-            Whether to include the measurements.
-        latent : bool
-            Whether to include the latent Gaussian variable.
-        simulations : bool
-            Whether to include the simulations.
-        quantiles : bool
-            Whether to include the quantiles.
-        probability : bool
-            Whether to include the probabilities.
-        kwargs : dict
-            Ignored.
-
-        Returns
-        -------
-        df : pd.DataFrame
-            The converted object.
-        """
-        df = _pd.DataFrame({})
-
-        if measurements:
-            df[self.name] = self.measurements.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_prediction"] = self.prediction.values.to_numpy()
-            # dispersion only where a container discretizes, noise variance
-            # only where the noise was integrated: elsewhere neither was ever
-            # written and every point data set would carry an empty column
-            if _filled(self.dispersion):
-                df[self.name + "_dispersion"] = \
-                    self.dispersion.values.to_numpy()
-            if _filled(self.noise_variance):
-                df[self.name + "_noise_variance"] = \
-                    self.noise_variance.values.to_numpy()
-
-        if latent:
-            # a component has none of its own, and nothing is there before a
-            # prediction has run
-            if _filled(self.latent_mean):
-                df[self.name + "_latent_mean"] = \
-                    self.latent_mean.values.to_numpy()
-            if _filled(self.latent_variance):
-                df[self.name + "_latent_variance"] = \
-                    self.latent_variance.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        if quantiles:
-            if len(self.quantiles) > 0:
-                for key, val in self.quantiles.items():
-                    df[self.name + "_q" + str(key)] = val.values.to_numpy()
-
-        if probability:
-            if len(self.probabilities) > 0:
-                for key, val in self.probabilities.items():
-                    df[self.name + "_p" + str(key)] = val.values.to_numpy()
-
-        return df
+        # the facts the variable carries -- its cut-offs -- follow separately,
+        # by `_copy_attrs_into` in `copy_to`/`carry_to`, off the `_NODE_ATTRS`
+        # declaration rather than named here again
+        return cls(variable.name, coordinates)
 
     def update(self, idx, **kwargs):
-        self.prediction.values[idx] = kwargs["average_sim"].numpy()
+        # The likelihood speaks in `(rows, components, ...)` whatever the
+        # number of components; a scalar variable takes its single column.
+        # Flat arrays still arrive from the legacy closed-form model and from
+        # a vector variable distributing columns to its parts.
+        def column(key):
+            arr = kwargs[key].numpy()
+            return arr[:, 0] if arr.ndim > 1 else arr
+
+        self.prediction.values[idx] = column("average_sim")
 
         if "mean" in kwargs.keys():
-            self.latent_mean.values[idx] = kwargs["mean"].numpy()
-            self.latent_variance.values[idx] = kwargs["variance"].numpy()
+            self.latent_mean.values[idx] = column("mean")
+            self.latent_variance.values[idx] = column("variance")
 
         if "dispersion" in kwargs.keys():
-            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+            self.dispersion.values[idx] = column("dispersion")
 
         if "noise_variance" in kwargs.keys():
-            self.noise_variance.values[idx] = \
-                kwargs["noise_variance"].numpy()
+            self.noise_variance.values[idx] = column("noise_variance")
 
         for key, target in (("proportions", self.proportions),
                             ("divided", self.divided)):
             if key not in kwargs.keys():
                 continue
             values = kwargs[key].numpy()
+            if values.ndim == 3:
+                values = values[:, 0, :]
             cutoffs = self.cutoffs or []
             if values.shape[1] == 0:
                 # a component of a vector variable that declared none, whose
@@ -1431,130 +1971,15 @@ class ContinuousVariable(_Variable):
 
         if "simulations" in kwargs.keys():
             # Whole (batch, n_sim) block written as one region into the store.
-            self.simulations[idx, :] = kwargs["simulations"].numpy()
+            sims = kwargs["simulations"].numpy()
+            if sims.ndim == 3:
+                sims = sims[:, 0, :]
+            self.simulations[idx, :] = sims
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
             (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
             owner=self.coordinates)
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.measurements.coordinates = coordinates
-        self.latent_mean.coordinates = coordinates
-        self.latent_variance.coordinates = coordinates
-        self.prediction.coordinates = coordinates
-        self.dispersion.coordinates = coordinates
-        self.noise_variance.coordinates = coordinates
-
-        for share in self.proportions.values():
-            share.coordinates = coordinates
-        for share in self.divided.values():
-            share.coordinates = coordinates
-
-        if len(self.quantiles) > 0:
-            for p in self.quantiles.values():
-                p.coordinates = coordinates
-
-        if len(self.probabilities) > 0:
-            for q in self.probabilities.values():
-                q.coordinates = coordinates
-
-    def fill_pyvista_cube(self, cube, prefix=None, sigma=None,
-                          simulations=False):
-        label = _export_label(prefix, self.name)
-        self.measurements.fill_pyvista_cube(cube, label, sigma=sigma)
-
-        if self.latent_mean:
-            self.latent_mean.fill_pyvista_cube(
-                cube, label + " - latent mean")
-        if self.latent_variance:
-            self.latent_variance.fill_pyvista_cube(
-                cube, label + " - latent variance")
-        self.prediction.fill_pyvista_cube(
-            cube, label + " - prediction", sigma=sigma)
-        self.dispersion.fill_pyvista_cube(
-            cube, label + " - dispersion")
-        self.noise_variance.fill_pyvista_cube(
-            cube, label + " - noise variance")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_cube(cube, label + f" - simulation {i}")
-
-        for p in self.quantiles.keys():
-            self.quantiles[p].fill_pyvista_cube(
-                cube, label + f" - quantile {p}", sigma=sigma
-            )
-
-        for q in self.probabilities.keys():
-            self.probabilities[q].fill_pyvista_cube(
-                cube, label + f" - probability {q}", sigma=sigma
-            )
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        label = _export_label(prefix, self.name)
-        self.measurements.fill_pyvista_points(points, label)
-
-        if self.latent_mean:
-            self.latent_mean.fill_pyvista_points(
-                points, label + " - latent mean")
-        if self.latent_variance:
-            self.latent_variance.fill_pyvista_points(
-                points, label + " - latent variance")
-        self.dispersion.fill_pyvista_points(
-            points, label + " - dispersion")
-        self.noise_variance.fill_pyvista_points(
-            points, label + " - noise variance")
-        self.prediction.fill_pyvista_points(
-            points, label + " - prediction")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_points(points, label + f" - simulation {i}")
-
-        for p in self.quantiles.keys():
-            self.quantiles[p].fill_pyvista_points(
-                points, label + f" - quantile {p}")
-
-        for q in self.probabilities.keys():
-            self.probabilities[q].fill_pyvista_points(
-                points, label + f" - probability {q}")
-
-    def fill_pyvista_blocks(self, cube, prefix=None, sigma=None,
-                            simulations=False):
-        label = _export_label(prefix, self.name)
-        self.measurements.fill_pyvista_blocks(cube, label, sigma=sigma)
-
-        if self.latent_mean:
-            self.latent_mean.fill_pyvista_blocks(
-                cube, label + " - latent mean"
-            )
-        if self.latent_variance:
-            self.latent_variance.fill_pyvista_blocks(
-                cube, label + " - latent variance"
-            )
-        self.dispersion.fill_pyvista_blocks(
-            cube, label + " - dispersion")
-        self.noise_variance.fill_pyvista_blocks(
-            cube, label + " - noise variance")
-        self.prediction.fill_pyvista_blocks(
-            cube, label + " - prediction", sigma=sigma
-        )
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_blocks(cube, label + f" - simulation {i}")
-
-        for p in self.quantiles.keys():
-            self.quantiles[p].fill_pyvista_blocks(
-                cube, label + f" - quantile {p}", sigma=sigma
-            )
-
-        for q in self.probabilities.keys():
-            self.probabilities[q].fill_pyvista_blocks(
-                cube, label + f" - probability {q}", sigma=sigma
-            )
 
     def compute_metrics(self, alpha=0.05):
         y_true, has_value = self.get_measurements()
@@ -1653,26 +2078,12 @@ class VectorVariable(_Variable):
         pred = _np.stack([self.components[v].get_predictions() for v in self.labels], axis=1)
         return pred
 
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        for comp in self.components.values():
-            comp.set_coordinates(coordinates)
-        self.uncertainty.coordinates = coordinates
-
     @classmethod
     def from_variable(cls, coordinates, variable):
-        new_var = cls(
-            variable.name,
-            coordinates,
-            variable.labels,
-        )
-        # the components are built fresh by `__init__`, so what belongs to
-        # them rather than to the container has to be brought across by hand:
-        # a cut-off is declared per component and a vector variable is how it
-        # reaches the model
-        for label, component in variable.components.items():
-            new_var.components[label].cutoffs = component.cutoffs
-        return new_var
+        # the components are built fresh by `__init__`; what they *know* --
+        # their cut-offs -- follows by `_copy_attrs_into`, which walks the
+        # two trees in step so nothing is named here again
+        return cls(variable.name, coordinates, variable.labels)
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
@@ -1684,39 +2095,6 @@ class VectorVariable(_Variable):
             measurements=df.loc[:, columns].values,
         )
         return new_var
-
-    def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
-
-        for name, comp in self.components.items():
-            new_obj.components[name] = comp[item]
-
-        new_obj.uncertainty = self.uncertainty[item]
-
-        return new_obj
-
-    def as_data_frame(self, measurements=True, predictions=True,
-                      simulations=False, quantiles=True,
-                      probability=True, **kwargs):
-        all_dfs = []
-        for key, val in self.components.items():
-            cat_df = val.as_data_frame(
-                measurements=measurements,
-                predictions=predictions,
-                simulations=simulations,
-                quantiles=quantiles,
-                probability=probability,
-                latent=False
-            )
-            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
-            all_dfs.append(cat_df)
-        all_dfs = _pd.concat(all_dfs, axis=1)
-
-        if predictions:
-            all_dfs[self.name + "_uncertainty"] = \
-                self.uncertainty.values.to_numpy()
-
-        return all_dfs
 
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
@@ -1758,26 +2136,6 @@ class VectorVariable(_Variable):
         for el in self.labels:
             self.components[el].reset_probabilities(quantiles)
 
-    def fill_pyvista_cube(self, cube, prefix=None, sigma=None,
-                          simulations=False):
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_cube(
-                cube, self.name, sigma=sigma, simulations=simulations)
-        self.uncertainty.fill_pyvista_cube(cube, self.name, sigma=sigma)
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_points(
-                points, self.name, simulations=simulations)
-        self.uncertainty.fill_pyvista_points(points, self.name)
-
-    def fill_pyvista_blocks(self, cube, prefix=None, sigma=None,
-                            simulations=False):
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_blocks(
-                cube, self.name, sigma=sigma, simulations=simulations)
-        self.uncertainty.fill_pyvista_blocks(cube, self.name, sigma=sigma)
-
     def compute_metrics(self, alpha=0.05):
         metrics = [self.components[comp].compute_metrics(alpha) for comp in self.labels]
         metrics = _pd.concat(metrics, axis=1)
@@ -1791,52 +2149,6 @@ class _Component(ContinuousVariable):
         super().__init__(name, coordinates, measurements)
         self.latent_mean = None
         self.latent_variance = None
-
-    def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
-        # driven by the list rather than written out: a column named there and
-        # forgotten here survives the subset at its old length, and only
-        # something that reads it afterwards finds out. A component has no
-        # latent space of its own and says so with a None, as `_carry_into`
-        # also has to allow for
-        for role in self._ZARR_ATTRS:
-            column = getattr(self, role, None)
-            if column is not None:
-                setattr(new_obj, role, column[item])
-
-        if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
-
-        if len(self.quantiles) > 0:
-            for key, val in self.quantiles.items():
-                new_obj.quantiles[key] = val[item]
-
-        if len(self.probabilities) > 0:
-            for key, val in self.probabilities.items():
-                new_obj.probabilities[key] = val[item]
-
-        return new_obj
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.prediction.coordinates = coordinates
-
-        if len(self.quantiles) > 0:
-            for p in self.quantiles.values():
-                p.coordinates = coordinates
-
-        if len(self.probabilities) > 0:
-            for q in self.probabilities.values():
-                q.coordinates = coordinates
-
-    def as_data_frame(self, latent=False, **kwargs):
-        # `ContinuousVariable`'s, with the latent space off: a component has
-        # none of its own. It used to be a copy of that method minus the
-        # latent columns, which is how it came to be missing `dispersion` and
-        # `noise_variance` -- every column added upstream had to be added here
-        # too, and the omission is silent
-        return super().as_data_frame(latent=False, **kwargs)
 
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
@@ -1906,27 +2218,6 @@ class CompositionalVariable(VectorVariable):
             measurements=df.loc[:, columns].values)
         return new_var
 
-    def as_data_frame(self, measurements=True, predictions=True,
-                      simulations=False, quantiles=True, probability=True, **kwargs):
-        all_dfs = []
-        for key, val in self.components.items():
-            cat_df = val.as_data_frame(
-                measurements=measurements,
-                predictions=predictions,
-                simulations=simulations,
-                quantiles=quantiles,
-                probability=probability,
-                **kwargs)
-            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
-            all_dfs.append(cat_df)
-        all_dfs = _pd.concat(all_dfs, axis=1)
-
-        if predictions:
-            all_dfs[self.name + "_uncertainty"] = \
-                self.uncertainty.values.to_numpy()
-
-        return all_dfs
-
     def update(self, idx, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
@@ -1965,9 +2256,9 @@ class CompositionalVariable(VectorVariable):
 
 class _Category(_Variable):
     _ZARR_ATTRS = ("probability", "indicator", "indicator_mean",
-                   "indicator_variance", "indicator_predicted", "proportion",
-                   "divided")
+                   "indicator_variance", "indicator_predicted")
     _ZARR_HAS_SIMS = True
+    _DICT_FAMILIES = ("proportions", "divided")
 
     def __init__(self, name, coordinates, indicator):
         super().__init__(name, coordinates)
@@ -1978,75 +2269,24 @@ class _Category(_Variable):
         self.indicator_mean = self._Attribute(coordinates)
         self.indicator_variance = self._Attribute(coordinates)
         self.indicator_predicted = self._Attribute(coordinates)
-        # How much of each block this category holds, counted over the
-        # sub-blocks: 1 where it takes the whole block, 0 where it takes none,
-        # and in between where the block straddles a contact. A different
-        # thing from `probability`, which is how sure the model is that the
-        # block as a whole belongs here.
-        self.proportion = self._Attribute(coordinates)
-        # And whether the block is cut in two by this category's boundary,
-        # which is the question splitting answers -- see `likelihood._divided`
-        self.divided = self._Attribute(coordinates)
+        # How much of each block this category holds, and whether the block
+        # is cut in two by this category's boundary -- see
+        # `likelihood._divided`. The same dicts a grade keeps, keyed by the
+        # one cut-off a category has: zero on `ind_skew`, its log-odds
+        # against its best rival, which is not a number anyone declared but
+        # the level set the contact *is*. One shape for both kinds, so
+        # nothing downstream asks which it is holding. `proportions` is a
+        # different thing from `probability`, which is how sure the model is
+        # that the block as a whole belongs here.
+        self.proportions = _col.OrderedDict()
+        self.divided = _col.OrderedDict()
         self.simulations = None
 
-    def split_shares(self):
-        # one boundary, its own, and no cut-off to name it by: a category's
-        # crossing is always zero
-        if not self.divided._has_content():
-            return {}
-        return {"": self.divided.values.to_numpy()}
-
-    def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
-        new_obj.probability = self.probability[item]
-        new_obj.indicator = self.indicator[item]
-        new_obj.indicator_mean = self.indicator_mean[item]
-        new_obj.indicator_variance = self.indicator_variance[item]
-        new_obj.indicator_predicted = self.indicator_predicted[item]
-        new_obj.proportion = self.proportion[item]
-        new_obj.divided = self.divided[item]
-
-        if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
-
-        return new_obj
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.probability.coordinates = coordinates
-        self.indicator_mean.coordinates = coordinates
-        self.indicator_variance.coordinates = coordinates
-        self.indicator_predicted.coordinates = coordinates
-        self.proportion.coordinates = coordinates
-        self.divided.coordinates = coordinates
-
-    def as_data_frame(self, probability=True, predictions=True,
-                      latent=True, simulations=False):
-        df = _pd.DataFrame({})
-
-        if probability:
-            df[self.name + "_probability"] = self.probability.values.to_numpy()
-            df[self.name + "_indicator"] = self.indicator.values.to_numpy()
-
-        if latent:
-            df[self.name + "_indicator_mean"] = \
-                self.indicator_mean.values.to_numpy()
-            df[self.name + "_indicator_variance"] = \
-                self.indicator_variance.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_indicator_predicted"] = \
-                self.indicator_predicted.values.to_numpy()
-            if self.proportion._has_content():
-                df[self.name + "_proportion"] = \
-                    self.proportion.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        return df
+    def _share_label(self, cutoff):
+        # the zero is an artefact of the log-odds, not a number anyone
+        # declared, so the share keeps a bare name where a grade's says
+        # `@ 1.5`
+        return ""
 
     def update(self, idx, **kwargs):
         self.indicator_predicted.values[idx] = kwargs["indicator"].numpy()
@@ -2054,10 +2294,12 @@ class _Category(_Variable):
         self.indicator_variance.values[idx] = kwargs["variance"].numpy()
         self.probability.values[idx] = kwargs["probability"].numpy()
 
-        if "proportion" in kwargs.keys():
-            self.proportion.values[idx] = kwargs["proportion"].numpy()
-        if "divided" in kwargs.keys():
-            self.divided.values[idx] = kwargs["divided"].numpy()
+        for family in ("proportions", "divided"):
+            if family in kwargs.keys():
+                target = getattr(self, family)
+                if 0.0 not in target:
+                    target[0.0] = self._Attribute(self.coordinates)
+                target[0.0].values[idx] = kwargs[family].numpy()
 
         self.simulations[idx, :] = kwargs["simulations"].numpy()
 
@@ -2065,61 +2307,6 @@ class _Category(_Variable):
         self.simulations = _storage.ArrayStore.allocate(
             (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
             owner=self.coordinates)
-
-    def fill_pyvista_cube(self, cube, prefix=None, simulations=False):
-        label = prefix + " - " + self.name
-
-        self.indicator.fill_pyvista_cube(
-            cube, label + " - indicator")
-        self.indicator_mean.fill_pyvista_cube(
-            cube, label + " - indicator mean")
-        self.indicator_variance.fill_pyvista_cube(
-            cube, label + " - indicator variance")
-        self.indicator_predicted.fill_pyvista_cube(
-            cube, label + " - indicator predicted")
-        self.probability.fill_pyvista_cube(
-            cube, label + " - probability")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_cube(cube, label + " - simulation %d" % i)
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        label = prefix + " - " + self.name
-
-        self.indicator.fill_pyvista_points(
-            points, label + " - indicator")
-        self.indicator_mean.fill_pyvista_points(
-            points, label + " - indicator mean")
-        self.indicator_variance.fill_pyvista_points(
-            points, label + " - indicator variance")
-        self.indicator_predicted.fill_pyvista_points(
-            points, label + " - indicator predicted")
-        self.probability.fill_pyvista_points(
-            points, label + " - probability")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_points(points, label + " - simulation %d" % i)
-
-    def fill_pyvista_blocks(self, cube, prefix=None, simulations=False):
-        label = prefix + " - " + self.name
-
-        self.indicator.fill_pyvista_blocks(
-            cube, label + " - indicator")
-        self.indicator_mean.fill_pyvista_blocks(
-            cube, label + " - indicator mean")
-        self.indicator_variance.fill_pyvista_blocks(
-            cube, label + " - indicator variance")
-        self.indicator_predicted.fill_pyvista_blocks(
-            cube, label + " - indicator predicted")
-        self.probability.fill_pyvista_blocks(
-            cube, label + " - probability")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_blocks(cube, label + " - simulation %d" % i)
-
 
 class RockTypeVariable(_Variable):
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
@@ -2195,17 +2382,6 @@ class RockTypeVariable(_Variable):
             self.boundary = self._Attribute(
                 coordinates, measurements_a != measurements_b, dtype=bool)
 
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-
-        for comp in self.components.values():
-            comp.set_coordinates(coordinates)
-
-        self.predicted.coordinates = coordinates
-        self.entropy.coordinates = coordinates
-        self.uncertainty.coordinates = coordinates
-        self.boundary.coordinates = coordinates
-
     def get_measurements(self):
         # not allowing partial missing data
         out = [self.components[label].indicator.values.to_numpy()
@@ -2244,7 +2420,7 @@ class RockTypeVariable(_Variable):
         return new_var
 
     def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
+        new_obj = _copy_for_subset(self)
 
         new_obj.entropy = self.entropy[item]
         new_obj.uncertainty = self.uncertainty[item]
@@ -2277,31 +2453,6 @@ class RockTypeVariable(_Variable):
 
         return new_obj
 
-    def as_data_frame(self, measurements=True, probability=True, predictions=True,
-                      latent=True, simulations=False, **kwargs):
-        all_dfs = []
-        for key, val in self.components.items():
-            cat_df = val.as_data_frame(
-                predictions=predictions,
-                simulations=simulations,
-                latent=latent,
-                probability=probability,
-                **kwargs)
-            cat_df.columns = [self.name + "_" + col for col in cat_df.columns]
-            all_dfs.append(cat_df)
-        df = _pd.concat(all_dfs, axis=1)
-
-        if measurements:
-            df[self.name + "_a"] = self.measurements_a.to_numpy()
-            df[self.name + "_b"] = self.measurements_b.to_numpy()
-
-        if predictions:
-            df[self.name + "_predicted"] = self.predicted.to_numpy()
-            df[self.name + "_entropy"] = self.entropy.values.to_numpy()
-            df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
-
-        return df
-
     def update(self, idx, **kwargs):
         self.entropy.values[idx] = kwargs["entropy"].numpy()
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
@@ -2328,7 +2479,7 @@ class RockTypeVariable(_Variable):
             values = {"mean": m, "variance": v, "indicator": i,
                       "probability": p, "simulations": s}
             if share is not None:
-                values["proportion"] = share
+                values["proportions"] = share
                 values["divided"] = cut
             self.components[lb].update(idx, **values)
 
@@ -2337,54 +2488,6 @@ class RockTypeVariable(_Variable):
             idx = _np.arange(self.coordinates.n_data)
         return {"is_boundary": _tf.constant(
             self.boundary.values.to_numpy()[idx, None], _tf.bool)}
-
-    def fill_pyvista_cube(self, cube, prefix=None, simulations=False):
-        self.measurements_a.fill_pyvista_cube(
-            cube, self.name + " - measurements_a")
-        self.measurements_b.fill_pyvista_cube(
-            cube, self.name + " - measurements_b")
-        self.predicted.fill_pyvista_cube(
-            cube, self.name + " - predicted")
-        self.entropy.fill_pyvista_cube(
-            cube, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_cube(
-            cube, self.name + " - uncertainty")
-
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_cube(
-                cube, self.name, simulations=simulations)
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        self.measurements_a.fill_pyvista_points(
-            points, self.name + " - measurements_a")
-        self.measurements_b.fill_pyvista_points(
-            points, self.name + " - measurements_b")
-        self.predicted.fill_pyvista_points(
-            points, self.name + " - predicted")
-        self.entropy.fill_pyvista_points(
-            points, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_points(
-            points, self.name + " - uncertainty")
-
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_points(
-                points, self.name, simulations=simulations)
-
-    def fill_pyvista_blocks(self, cube, prefix=None, simulations=False):
-        self.measurements_a.fill_pyvista_blocks(
-            cube, self.name + " - measurements_a")
-        self.measurements_b.fill_pyvista_blocks(
-            cube, self.name + " - measurements_b")
-        self.predicted.fill_pyvista_blocks(
-            cube, self.name + " - predicted")
-        self.entropy.fill_pyvista_blocks(
-            cube, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_blocks(
-            cube, self.name + " - uncertainty")
-
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_blocks(
-                cube, self.name, simulations=simulations)
 
     def compute_metrics(self, **kwargs):
         y_pred = self.predicted.to_numpy()
@@ -2424,49 +2527,6 @@ class CategoricalVariable(RockTypeVariable):
         new_var = cls(name, coordinates, labels,
                       measurements=df[measurements_col].values)
         return new_var
-
-    def fill_pyvista_cube(self, cube, prefix=None, simulations=False):
-        self.measurements_a.fill_pyvista_cube(
-            cube, self.name + " - measurements")
-        self.predicted.fill_pyvista_cube(
-            cube, self.name + " - predicted")
-        self.entropy.fill_pyvista_cube(
-            cube, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_cube(
-            cube, self.name + " - uncertainty")
-
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_cube(
-                cube, self.name, simulations=simulations)
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        self.measurements_a.fill_pyvista_points(
-            points, self.name + " - measurements")
-        self.predicted.fill_pyvista_points(
-            points, self.name + " - predicted")
-        self.entropy.fill_pyvista_points(
-            points, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_points(
-            points, self.name + " - uncertainty")
-
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_points(
-                points, self.name, simulations=simulations)
-
-    def fill_pyvista_blocks(self, cube, prefix=None, simulations=False):
-        self.measurements_a.fill_pyvista_blocks(
-            cube, self.name + " - measurements")
-        self.predicted.fill_pyvista_blocks(
-            cube, self.name + " - predicted")
-        self.entropy.fill_pyvista_blocks(
-            cube, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_blocks(
-            cube, self.name + " - uncertainty")
-
-        for comp in self.labels:
-            self.components[comp].fill_pyvista_blocks(
-                cube, self.name, simulations=simulations)
-
 
 class OrderedRockType(RockTypeVariable):
     _ZARR_ATTRS = RockTypeVariable._ZARR_ATTRS + ("implicit_values",)
@@ -2633,61 +2693,6 @@ class BinaryVariable(_Variable):
         new_var = cls(variable.name, coordinates, variable.labels)
         return new_var
 
-    def __getitem__(self, item):
-        new_obj = _copy.deepcopy(self)
-        new_obj.average = self.probability[item]
-        new_obj.indicator = self.indicator[item]
-        new_obj.latent_mean = self.latent_mean[item]
-        new_obj.latent_variance = self.latent_variance[item]
-        new_obj.predicted = self.predicted[item]
-        new_obj.entropy = self.entropy[item]
-        new_obj.uncertainty = self.uncertainty[item]
-        new_obj.measurements = self.measurements[item]
-        new_obj.weights = self.weights[item]
-
-        if self.simulations is not None:
-            new_obj.simulations = _storage.ArrayStore.from_numpy(
-                _np.asarray(self.simulations)[item])
-
-        return new_obj
-
-    def set_coordinates(self, coordinates):
-        self.coordinates = coordinates
-        self.probability.coordinates = coordinates
-        self.indicator.coordinates = coordinates
-        self.latent_mean.coordinates = coordinates
-        self.latent_variance.coordinates = coordinates
-        self.predicted.coordinates = coordinates
-        self.entropy.coordinates = coordinates
-        self.uncertainty.coordinates = coordinates
-        self.measurements.coordinates = coordinates
-        self.weights.coordinates = coordinates
-
-    def as_data_frame(self, measurements=True, latent=True,
-                      predictions=True, simulations=True):
-        df = _pd.DataFrame({})
-
-        if measurements:
-            df[self.name + "_measurements"] = self.measurements.to_numpy()
-            df[self.name + "_weights"] = self.weights.values.to_numpy()
-
-        if predictions:
-            df[self.name + "_predicted"] = self.predicted.to_numpy()
-            df[self.name + "_probability"] = self.probability.values.to_numpy()
-            df[self.name + "_entropy"] = self.entropy.values.to_numpy()
-            df[self.name + "_uncertainty"] = self.uncertainty.values.to_numpy()
-
-        if latent:
-            df[self.name + "_latent_mean"] = self.latent_mean.values.to_numpy()
-            df[self.name + "_latent_variance"] = \
-                self.latent_variance.values.to_numpy()
-
-        for i, values in _selected_simulations(self.simulations,
-                                              simulations):
-            df[self.name + "_sim_" + str(i)] = values
-
-        return df
-
     def update(self, idx, **kwargs):
         prob = kwargs["probability"].numpy()
         mean = kwargs["mean"].numpy()
@@ -2739,67 +2744,6 @@ class BinaryVariable(_Variable):
                       measurements=df[col].values)
         return new_var
 
-    def fill_pyvista_cube(self, cube, prefix=None, simulations=False):
-        self.indicator.fill_pyvista_cube(
-            cube, self.name + " - indicator")
-        self.latent_mean.fill_pyvista_cube(
-            cube, self.name + " - latent mean")
-        self.latent_variance.fill_pyvista_cube(
-            cube, self.name + " - latent variance")
-        self.predicted.fill_pyvista_cube(
-            cube, self.name + " - predicted")
-        self.probability.fill_pyvista_cube(
-            cube, self.name + " - probability")
-        self.entropy.fill_pyvista_cube(
-            cube, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_cube(
-            cube, self.name + " - uncertainty")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_cube(cube, self.name + " - simulation %d" % i)
-
-    def fill_pyvista_points(self, points, prefix=None, simulations=False):
-        self.indicator.fill_pyvista_points(
-            points, self.name + " - indicator")
-        self.latent_mean.fill_pyvista_points(
-            points, self.name + " - latent mean")
-        self.latent_variance.fill_pyvista_points(
-            points, self.name + " - latent variance")
-        self.predicted.fill_pyvista_points(
-            points, self.name + " - predicted")
-        self.probability.fill_pyvista_points(
-            points, self.name + " - probability")
-        self.entropy.fill_pyvista_points(
-            points, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_points(
-            points, self.name + " - uncertainty")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_points(points, self.name + " - simulation %d" % i)
-
-    def fill_pyvista_blocks(self, cube, prefix=None, simulations=False):
-        self.indicator.fill_pyvista_blocks(
-            cube, self.name + " - indicator")
-        self.latent_mean.fill_pyvista_blocks(
-            cube, self.name + " - latent mean")
-        self.latent_variance.fill_pyvista_blocks(
-            cube, self.name + " - latent variance")
-        self.predicted.fill_pyvista_blocks(
-            cube, self.name + " - predicted")
-        self.probability.fill_pyvista_blocks(
-            cube, self.name + " - probability")
-        self.entropy.fill_pyvista_blocks(
-            cube, self.name + " - entropy")
-        self.uncertainty.fill_pyvista_blocks(
-            cube, self.name + " - uncertainty")
-
-        for i, values in _selected_simulations(self.simulations, simulations):
-            col = self._Attribute(self.coordinates, values)
-            col.fill_pyvista_blocks(cube, self.name + " - simulation %d" % i)
-
-
 class AnomalyVariable(BinaryVariable):
     def __init__(self, name, coordinates, label, measurements=None):
         labels = [label, "_dummy"]
@@ -2817,7 +2761,7 @@ class AnomalyVariable(BinaryVariable):
         return new_var
 
 
-class _SpatialData(object):
+class _SpatialData(_TreeNode):
     """Abstract class for spatial data in general"""
 
     def __init__(self):
@@ -2830,6 +2774,93 @@ class _SpatialData(object):
 
     def __repr__(self):
         return self.__str__()
+
+    # ------------------------------------------------------------------ #
+    # the container as a node (see `_TreeNode`)
+    # ------------------------------------------------------------------ #
+    @property
+    def _node_name(self):
+        # the container is the root, whatever else it may call itself
+        return ""
+
+    def _tree_root_label(self):
+        return "%s - %s locations" % (type(self).__name__, self.n_data)
+
+    def child_nodes(self):
+        return dict(self.variables)
+
+    def own_leaves(self):
+        """The metadata columns, under a root of their own.
+
+        `_metadata` is reserved rather than mixed in with the variables: a
+        fold that means to write every modelled column must be able to leave
+        the air/rock code and the cross-validation fold out of it, and a
+        metadata column may legitimately share a name with a variable.
+        """
+        for name, column in self.metadata.items():
+            yield (METADATA_ROOT, name), column
+
+    def _resolve(self, path):
+        if len(path) == 2 and path[0] == METADATA_ROOT:
+            return self.metadata.get(path[1])
+        return super()._resolve(path)
+
+    def _variable_or_component(self, name):
+        """The variable called `name`, or the component of a vector one, and
+        the name of whatever owns it -- `None` for a variable of its own.
+
+        A composition is held as a single variable, so its parts are not among
+        `self.variables` and asking for `Zn` would otherwise mean reaching into
+        `Elements` by hand. Only the parts hold a grade -- the variable itself
+        carries nothing to contour -- so naming one has to work. The owner
+        comes back with it because an export labels a component by both names.
+        """
+        if name in self.variables:
+            return self.variables[name], None
+
+        for variable in self.variables.values():
+            components = getattr(variable, "components", None) or {}
+            if name in components:
+                return components[name], variable.name
+
+        known = set(self.variables)
+        for variable in self.variables.values():
+            known.update(
+                str(label) for label in
+                (getattr(variable, "components", None) or {}))
+        raise ValueError(
+            "no variable or component named %r; found %s"
+            % (name, ", ".join(sorted(known)) or "none"))
+
+    def _finish_pyvista(self, target, kind, simulations=False, include="**"):
+        """Fill a freshly built pyvista object and hand it back.
+
+        Every variable through the one enumeration, the metadata columns
+        under their bare names (they were only ever exported by the block
+        set before -- an air code or a fold is as useful draped over a grid),
+        and `field_data["geoml_paths"]`: a JSON table from each array's label
+        back to the path that produced it. The label alone cannot be parsed
+        back -- `flat` and `pretty` are not invertible -- so anything reading
+        an export and wanting to ask geoML about a column reads the table
+        instead of guessing. Recorded by the writer rather than enumerated a
+        second time, which would read every selected realization twice.
+        """
+        table = {}
+        writer = "fill_pyvista_" + kind
+        for variable in self.variables.values():
+            for path, attribute in variable._export_leaves(
+                    include, simulations):
+                label = render(path, "pretty")
+                getattr(attribute, writer)(target, label)
+                table[label] = str(path)
+        for name, column in self.metadata.items():
+            getattr(column, writer)(target, name)
+            table[name] = METADATA_ROOT + PATH_SEP + name
+
+        if table:
+            target.field_data["geoml_paths"] = _np.array(
+                [_json.dumps(table)])
+        return target
 
     @property
     def rows_per_location(self):
@@ -2880,6 +2911,46 @@ class _SpatialData(object):
                 f"there is no metadata column named {name}; "
                 f"found {list(self.metadata.keys())}")
         return self.metadata[name].to_numpy()
+
+    def drop(self, names):
+        """
+        Removes variables from this container.
+
+        Whole variables only: a component belongs to the variable that built
+        it -- a composition without one part is a different composition, and
+        a categorical without one class a different classification -- so a
+        component's name is refused with its owner named, rather than half a
+        variable being left behind.
+
+        Parameters
+        ----------
+        names : str or list
+            The variable(s) to remove.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        for name in ([names] if isinstance(names, str) else list(names)):
+            name = str(name)
+            if name in self.variables:
+                del self.variables[name]
+                continue
+            if PATH_SEP in name:
+                raise ValueError(
+                    "%r is a path; only whole variables can be dropped -- "
+                    "one of %s" % (name, ", ".join(sorted(self.variables))
+                                   or "none"))
+            try:
+                _, owner = self._variable_or_component(name)
+            except ValueError:
+                raise ValueError(
+                    "no variable named %r to drop; found %s"
+                    % (name, ", ".join(sorted(self.variables)) or "none"))
+            raise ValueError(
+                "%r is a component of %r and cannot be dropped on its own; "
+                "drop %r whole" % (name, owner, owner))
+        return self
 
     def _check_three_dimensional(self):
         """A surface can only be assigned to locations that have a height."""
@@ -3046,6 +3117,15 @@ class _SpatialData(object):
         """
         group = _zarr.open_group(path, mode="r+")
         meta = dict(group.attrs["geoml"])
+        written = meta.get("geoml_format", 1)
+        if written != _GEOML_ZARR_FORMAT:
+            # refused outright rather than half-loaded with quiet gaps: the
+            # dict families and cut-offs moved when the keys aligned with the
+            # paths, and a format-1 store would open with those missing
+            raise ValueError(
+                "%r was written at geoml store format %d and this version "
+                "reads %d; re-create it by predicting again"
+                % (path, written, _GEOML_ZARR_FORMAT))
         container = _rebuild_container(meta["container"], group)
         _rebuild_metadata(container, group, meta.get("metadata", {}))
         for vmeta in meta["variables"].values():
@@ -3263,28 +3343,28 @@ class PointData(_PointBased):
 
         self.metadata = {}
 
-    def as_data_frame(self, metadata=True, **kwargs):
+    def as_data_frame(self, metadata=True, include="**", simulations=False,
+                      columns="flat"):
         """
         Conversion of a spatial object to a data frame.
 
-        The following kwargs can be used to control the kind of information to include in the DataFrame. They all
-        default to `True`.
-        - `metadata`: miscellaneous information about each data point.
-        - `measurements`: the raw measurements used to create each variable.
-        - `latent`: predicted latent variables mean and variance.
-        - `predictions`: predicted labels and support information like entropy and uncertainty.
-        - `quantiles`: values corresponding to probability thresholds, when applicable.
-        - `probability`: predicted probabilities.
-        - `simulations`: samples from the predictive distribution.
+        Metadata first (bare names, the way `HOLEID` is read back), then the
+        coordinates, then every filled column of every variable, named by its
+        path -- `assay_Zn_prediction`. `include` chooses what comes
+        (`"**/prediction"`, `"assay/**"`), `simulations` how many realizations,
+        and `columns="multi"` keeps the path as one `MultiIndex` level per
+        segment instead of flattening -- for staying in pandas; written to
+        CSV it makes several header rows, which other software reads as data.
         """
-        df = [_pd.DataFrame(_np.asarray(self.coordinates),
-                            columns=self.coordinate_labels)]
-        for variable in self.variables.values():
-            df.append(variable.as_data_frame(**kwargs))
-        df = _pd.concat(df, axis=1)
+        found = []
         if metadata:
-            df = _pd.concat([self._metadata_frame(), df], axis=1)
-        return df
+            found += [(VariablePath((name,)), column.to_numpy())
+                      for name, column in self.metadata.items()]
+        coords = _np.asarray(self.coordinates)
+        found += [(VariablePath((str(label),)), coords[:, i])
+                  for i, label in enumerate(self.coordinate_labels)]
+        found += list(self._export_columns(include, simulations))
+        return _frame_from_columns(found, columns)
 
     @staticmethod
     def default_coordinate_labels(n_dim):
@@ -3313,10 +3393,14 @@ class PointData(_PointBased):
                                     self.coordinate_labels)
 
     def __getitem__(self, item):
-        self_copy = _copy.deepcopy(self)
-        new_obj = self_copy._subset_coordinates(item)
-        self_copy._subset_metadata(new_obj, item)
-        for name, var in self_copy.variables.items():
+        # read straight off this container rather than off a `deepcopy` of it:
+        # the copy duplicated every store -- simulations included -- and every
+        # one of them was then thrown away by the subset that replaced it.
+        # Nothing here mutates the source; each variable's `__getitem__`
+        # builds its own object.
+        new_obj = self._subset_coordinates(item)
+        self._subset_metadata(new_obj, item)
+        for name, var in self.variables.items():
             new_obj.variables[name] = var[item]
             new_obj.variables[name].set_coordinates(new_obj)
         return new_obj
@@ -3360,7 +3444,7 @@ class PointData(_PointBased):
 
         return self[keep] if sum(keep) > 0 else None
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -3376,12 +3460,7 @@ class PointData(_PointBased):
                              "for 3-dimensional data")
 
         pv_points = _pv.PolyData(_np.asarray(self.coordinates))
-
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_points(
-                pv_points, simulations=simulations)
-
-        return pv_points
+        return self._finish_pyvista(pv_points, "points", simulations, include)
 
     def spatial_k_fold(self, test_data, k=5, bins=50):
         raise NotImplementedError("under development")
@@ -3537,6 +3616,203 @@ class GaussianData(PointData):
         return self.variance[index], None
 
 
+def _cover_box(data, step, margin, decimals, n_dim=None, cells=False):
+    """`(start, n, step, labels)` for a lattice covering `data`'s box.
+
+    The box is widened by `margin` (a fraction of its extent, per side or per
+    axis if given as an array), and the lower corner is then *floored* to
+    `decimals` rather than rounded -- a round start reads better on a section,
+    and flooring means the cover never shrinks below what the margin asked
+    for. The count grows to keep the top covered, so the last node or cell
+    always reaches past the margined maximum.
+
+    `cells=True` counts cells instead of nodes: `start` is then the box
+    corner, and the caller places the first centre half a step in.
+    """
+    box = data.bounding_box
+    if n_dim is not None and box.n_dim != n_dim:
+        raise DimensionMismatchError(
+            "%s covers %d-dimensional data; this has %d"
+            % (data.__class__.__name__, n_dim, box.n_dim))
+    n_dim = box.n_dim
+
+    step = _np.broadcast_to(
+        _np.asarray(step, dtype=float).ravel(), (n_dim,))
+    if _np.any(step <= 0):
+        raise ValueError("step must be positive; got %r" % (step,))
+
+    margin = _np.asarray(margin, dtype=float)
+    if margin.shape == ():
+        margin = _np.full([2, n_dim], float(margin))
+    elif margin.shape == (2,):
+        margin = _np.stack([margin] * n_dim, axis=1)
+    elif margin.shape == (n_dim,):
+        margin = _np.stack([margin] * 2, axis=0)
+    elif margin.shape != (2, n_dim):
+        raise ValueError(
+            "margin is a fraction of the box's extent: one number, one per "
+            "side (2,), one per axis (%d,), or one per side and axis "
+            "(2, %d); got shape %s" % (n_dim, n_dim, margin.shape))
+
+    low, high = box.min[0].astype(float), box.max[0].astype(float)
+    extent = high - low
+    low = low - extent * margin[0]
+    high = high + extent * margin[1]
+
+    factor = 10.0 ** decimals
+    start = _np.floor(low * factor) / factor
+    count = _np.ceil((high - start) / step - _TOL_COVER).astype(int)
+    n = _np.maximum(count, 1) if cells else count + 1
+
+    return start, n, _np.array(step), getattr(data, "coordinate_labels", None)
+
+
+# floating arithmetic at a box edge must not buy a whole extra row of cells
+_TOL_COVER = 1e-9
+
+
+def _cell_means(n_cells, cell, values):
+    """The mean of `values` over each cell; NaN where nothing fell."""
+    frame = _pd.DataFrame({
+        "cell": cell, "value": _np.asarray(values, dtype=float)})
+    frame = frame[frame["cell"] >= 0].dropna(subset=["value"])
+    out = _np.full(n_cells, _np.nan)
+    grouped = frame.groupby("cell")["value"].mean()
+    out[grouped.index.to_numpy()] = grouped.to_numpy()
+    return out
+
+
+def _dominant_labels(n_cells, cell, values):
+    """The label most often seen in each cell; blank where two tie.
+
+    A tie has no dominant label -- picking by sort order, which is what the
+    old per-class aggregators did, reports an answer where there is none --
+    so an ambiguous cell comes back empty instead.
+    """
+    frame = _pd.DataFrame({"cell": cell, "value": values})
+    frame = frame[(frame["cell"] >= 0) & frame["value"].notna()
+                  & (frame["value"] != "")]
+    out = _np.full(n_cells, "", dtype=object)
+    if len(frame) == 0:
+        return out
+    counts = frame.groupby(
+        ["cell", "value"]).size().reset_index(name="_n")
+    best = counts.groupby("cell")["_n"].transform("max")
+    winners = counts[counts["_n"] == best].groupby("cell")["value"].agg(
+        ["first", "size"])
+    settled = winners[winners["size"] == 1]
+    out[settled.index.to_numpy()] = settled["first"].to_numpy()
+    return out
+
+
+def _aggregate_onto(target, data, variables=None, metadata=True):
+    """The shared body of `aggregate`: one operation per variable kind.
+
+    `target` says which of its cells holds each sample (`_cell_of`); after
+    that nothing depends on what the target is -- a grid, a rotated grid or a
+    block model of several sizes all aggregate the same way, which is what
+    replaced three near-copies of this logic per class.
+    """
+    cell = target._cell_of(data)
+    n_cells = target.n_data
+
+    if variables is None:
+        chosen = list(data.variables)
+    else:
+        chosen = [str(name) for name in _np.atleast_1d(variables)]
+    for name in chosen:
+        if name not in data.variables:
+            raise ValueError(
+                "no variable named %r to aggregate; found %s"
+                % (name, ", ".join(sorted(data.variables)) or "none"))
+        variable = data.variables[name]
+
+        if isinstance(variable, CompositionalVariable):
+            # averaged part by part, then closed again: means of parts do not
+            # sum to one on their own, and a composition that does not close
+            # is not a composition
+            parts = _np.stack(
+                [_cell_means(n_cells, cell,
+                             part.measurements.values.to_numpy())
+                 for part in variable.components.values()], axis=1)
+            total = parts.sum(axis=1, keepdims=True)
+            with _np.errstate(invalid="ignore"):
+                parts = _np.where(total > 0, parts / total, _np.nan)
+            target.variables[name] = CompositionalVariable(
+                name, target, list(variable.labels), parts)
+        elif isinstance(variable, VectorVariable):
+            parts = _np.stack(
+                [_cell_means(n_cells, cell,
+                             part.measurements.values.to_numpy())
+                 for part in variable.components.values()], axis=1)
+            target.variables[name] = VectorVariable(
+                name, target, list(variable.labels), parts)
+        elif isinstance(variable, RockTypeVariable):
+            # both sides of a contact vote, as they always have: a boundary
+            # measurement names the category either side of it and neither
+            # side is the measurement
+            votes = _dominant_labels(
+                n_cells, _np.tile(cell, 2),
+                _np.concatenate([variable.measurements_a.to_numpy(),
+                                 variable.measurements_b.to_numpy()]))
+            target.variables[name] = CategoricalVariable(
+                name, target, list(variable.labels), votes)
+        elif isinstance(variable, BinaryVariable):
+            target.variables[name] = BinaryVariable(
+                name, target, list(variable.labels),
+                _dominant_labels(n_cells, cell,
+                                 variable.measurements.to_numpy()))
+        elif isinstance(variable, ContinuousVariable):
+            target.variables[name] = ContinuousVariable(
+                name, target,
+                _cell_means(n_cells, cell,
+                            variable.measurements.values.to_numpy()))
+        else:
+            raise TypeError(
+                "%r is a %s, which aggregate does not know how to carry"
+                % (name, type(variable).__name__))
+
+    if metadata:
+        for name, column in data.metadata.items():
+            if column.labels is None:
+                target.add_metadata(
+                    name, _cell_means(n_cells, cell,
+                                      column.values.to_numpy()))
+            else:
+                target.add_metadata(
+                    name, _dominant_labels(n_cells, cell, column.to_numpy()))
+
+
+def _fitted_rotation(data, decimals):
+    """Azimuth, dip and rake fitted to `data`'s points, rounded to `decimals`.
+
+    The angles are rounded *before* anything is built from them -- a grid at
+    47.3182 degrees is nobody's intention -- so the box is measured in the
+    rounded frame and the data stays covered.
+    """
+    coordinates = getattr(data, "coordinates", None)
+    if coordinates is not None:
+        points = _np.asarray(coordinates, dtype=float)
+    elif hasattr(data, "_desurveyed_points"):
+        # drillholes are interval data and expose no `coordinates`; the
+        # cloud their bounding box is measured from serves the fit
+        points = data._desurveyed_points()
+    else:
+        raise TypeError(
+            "%s carries no coordinates to fit a rotation to"
+            % type(data).__name__)
+    if points.shape[1] != 3:
+        raise DimensionMismatchError(
+            "a rotation is fitted to 3-dimensional points; these have %d"
+            % points.shape[1])
+
+    fitted = _gmt.rotation_matrix_from_points(points)
+    azimuth, dip, rake = _gmt.angles_from_rotation_matrix(fitted)
+    azimuth, dip, rake = (float(_np.round(angle, decimals))
+                          for angle in (azimuth, dip, rake))
+    return points, azimuth, dip, rake
+
+
 class _GriddedData(_PointBased):
     """Base class for regular grids; also its own lazy coordinate provider.
 
@@ -3649,14 +3925,81 @@ class _GriddedData(_PointBased):
 
         return _np.stack(cell_id, axis=1)
 
+    # dimension a subclass covers; None reads it off the data (GridND)
+    _GRID_NDIM = None
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0):
+        """
+        A grid covering another object's bounding box.
+
+        Parameters
+        ----------
+        data
+            Any spatial object, drillholes included -- whatever has a
+            bounding box.
+        step
+            The step size, one number or one per direction.
+        margin : float or array
+            How far past the data's box to reach, as a fraction of its
+            extent: one number, one per side ``(low, high)``, one per axis,
+            or one per side and axis with shape ``(2, n_dim)``.
+        decimals : int
+            The box corner is floored to this many decimals -- round numbers
+            read better on a section -- and the number of steps grows to keep
+            the far side covered, so the margin is never eaten by the
+            rounding.
+        """
+        start, n, step, labels = _cover_box(
+            data, step, margin, decimals, n_dim=cls._GRID_NDIM)
+        if len(start) == 1:
+            return cls(start=float(start[0]), n=int(n[0]),
+                       step=float(step[0]),
+                       labels=labels[0] if labels else None)
+        return cls(start=start, n=n, step=step, labels=labels)
+
+    def _cell_of(self, data):
+        """Which cell each of `data`'s locations falls in, as this object's
+        own row index; `-1` outside the grid."""
+        ids = self.index_data(data)
+        shape = _np.asarray(self.grid_size)
+        inside = _np.all((ids >= 0) & (ids < shape), axis=1)
+        flat = _np.full(len(ids), -1, dtype=_np.int64)
+        # the first axis varies fastest in `_generate`, which is Fortran order
+        flat[inside] = _np.ravel_multi_index(
+            ids[inside].T, shape, order="F")
+        return flat
+
+    def aggregate(self, data, variables=None, metadata=True):
+        """Carries another object's measurements onto this object's cells.
+
+        One method instead of one per kind: each variable says what it is and
+        the operation follows. Continuous values (and each part of a vector)
+        average; categories keep the label most often measured in the cell,
+        both sides of a contact voting; a composition is averaged and closed
+        again; numeric metadata averages and coded metadata keeps the
+        dominant label. What is truly ambiguous comes back empty -- two
+        labels tied for a cell name no winner, and a cell nothing fell in
+        holds NaN or blank.
+
+        Parameters
+        ----------
+        data
+            A point-based object whose variables are measured.
+        variables : str or list, optional
+            Which of `data`'s variables to carry; all of them by default.
+        metadata : bool
+            Whether to carry the metadata columns as well.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        _aggregate_onto(self, data, variables, metadata)
+        return self
+
     def as_data_frame(self, metadata=True, **kwargs):
-        df = [_pd.DataFrame(_np.asarray(self.coordinates),
-                            columns=self.coordinate_labels)]
-        for variable in self.variables.values():
-            df.append(variable.as_data_frame(**kwargs))
-        df = _pd.concat(df, axis=1)
-        if metadata:
-            df = _pd.concat([self._metadata_frame(), df], axis=1)
+        df = _PointBased.as_data_frame(self, metadata=metadata, **kwargs)
         for i, s in enumerate(self.coordinate_labels):
             df[f'_{s}'] = self.step_size[i]
         return df
@@ -3699,16 +4042,17 @@ class _GriddedData(_PointBased):
         if not keep.any():
             return None
 
-        self_copy = _copy.deepcopy(self)
         new_obj = PointData.from_array(coords[keep], self.coordinate_labels)
         self._subset_metadata(new_obj, keep)
-        for name, var in self_copy.variables.items():
+        for name, var in self.variables.items():
             new_obj.variables[name] = var[keep]
             new_obj.variables[name].set_coordinates(new_obj)
         return new_obj
 
 
 class Grid1D(_GriddedData):
+    _GRID_NDIM = 1
+
     """
     Equally spaced points in 1D.
 
@@ -3759,115 +4103,6 @@ class Grid1D(_GriddedData):
         self.grid_size = [int(n)]
         self.origin = start
 
-    def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
-        cols = ["xid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = \
-            data.variables[variable].measurements_b.to_numpy()
-        raw_data = _pd.concat([raw_data, raw_data_2],
-                              axis=0).reset_index(drop=True)
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([x for x in range(int(self.grid_size[0]))])
-        cols = ["xid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = BinaryVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.arange(int(self.grid_size[0]))[:, None]
-        cols = ["xid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-
-        # aggregating
-        data_2 = raw_data.groupby(cols).mean()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = grid_full.join(data_2.set_index(cols), on=cols) \
-            .reset_index(drop=False)
-        self.variables[variable] = ContinuousVariable(
-            variable, self, data_3["value"].values
-        )
-
     @classmethod
     def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
         if not isinstance(margin, (list, tuple)):
@@ -3883,6 +4118,8 @@ class Grid1D(_GriddedData):
 
 
 class Grid2D(_GriddedData):
+    _GRID_NDIM = 2
+
     """
     Equally spaced points in 2D.
 
@@ -3939,130 +4176,6 @@ class Grid2D(_GriddedData):
         self.grid_size = [int(num) for num in n]
         self.origin = start
 
-    def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y)
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = \
-            data.variables[variable].measurements_b.to_numpy()
-        raw_data = _pd.concat([raw_data, raw_data_2],
-                              axis=0).reset_index(drop=True)
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y)
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = BinaryVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y)
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-
-        # aggregating
-        data_2 = raw_data.groupby(cols).mean()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = grid_full.join(data_2.set_index(cols), on=cols)\
-            .reset_index(drop=False)
-        self.variables[variable] = ContinuousVariable(
-            variable, self, data_3["value"].values
-        )
-
     @classmethod
     def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
         margin = _np.array(margin)
@@ -4080,6 +4193,8 @@ class Grid2D(_GriddedData):
 
 
 class Grid3D(_GriddedData):
+    _GRID_NDIM = 3
+
     """
     Equally spaced points in 3D.
 
@@ -4139,147 +4254,11 @@ class Grid3D(_GriddedData):
         self.grid_size = [int(num) for num in n]
         self.origin = start
 
-    def aggregate_categorical(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y, z)
-                             for z in range(int(self.grid_size[2]))
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid", "zid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements_a.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-        raw_data_2 = raw_data.copy()
-        raw_data_2["value"] = \
-            data.variables[variable].measurements_b.to_numpy()
-        raw_data = _pd.concat([raw_data, raw_data_2],
-                              axis=0).reset_index(drop=True)
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_binary(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y, z)
-                             for z in range(int(self.grid_size[2]))
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid", "zid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-
-        # counting values inside cells
-        raw_data["dummy"] = 0
-        data_2 = raw_data.groupby(cols + ["value"]).count()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # determining dominant label
-        data_3 = data_2.groupby(cols).idxmax()
-        data_3 = data_2.loc[data_3.iloc[:, 0], :]
-
-        # output
-        data_4 = grid_full.set_index(cols) \
-            .join(data_3.set_index(cols)) \
-            .reset_index(drop=True)
-        self.variables[variable] = BinaryVariable(
-            variable, self, data.variables[variable].labels,
-            data_4["value"].values
-        )
-
-    def aggregate_numeric(self, data, variable):
-        data = data.subset_region(self.bounding_box.min[0],
-                                  self.bounding_box.max[0])
-
-        grid_id = _np.array([(x, y, z)
-                             for z in range(int(self.grid_size[2]))
-                             for y in range(int(self.grid_size[1]))
-                             for x in range(int(self.grid_size[0]))])
-        cols = ["xid", "yid", "zid"]
-
-        grid_full = _pd.DataFrame(
-            _np.concatenate([self.coordinates, grid_id], axis=1),
-            columns=self.coordinate_labels + cols)
-
-        # identifying cell id
-        raw_data = _pd.DataFrame({
-            "value": data.variables[variable].measurements.values.to_numpy(),
-        })
-        raw_data["xid"] = _np.round(
-            (data.coordinates[:, 0] - self.grid[0][0]
-             - self.step_size[0] / 2) / self.step_size[0])
-        raw_data["yid"] = _np.round(
-            (data.coordinates[:, 1] - self.grid[1][0]
-             - self.step_size[1] / 2) / self.step_size[1])
-        raw_data["zid"] = _np.round(
-            (data.coordinates[:, 2] - self.grid[2][0]
-             - self.step_size[2] / 2) / self.step_size[2])
-
-        # aggregating
-        data_2 = raw_data.groupby(cols).mean()
-        data_2.reset_index(level=data_2.index.names, inplace=True)
-
-        # output
-        data_3 = grid_full.join(data_2.set_index(cols), on=cols) \
-            .reset_index(drop=False)
-        self.variables[variable] = ContinuousVariable(
-            variable, self, data_3["value"].values
-        )
-
     def make_interpolator(self, coordinates):
         return _gint.cubic_conv_3d(coordinates,
                                    self.grid[0], self.grid[1], self.grid[2])
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -4295,12 +4274,7 @@ class Grid3D(_GriddedData):
             spacing=self.step_size,
             origin=self.origin
         )
-
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_cube(
-                pv_grid, simulations=simulations)
-
-        return pv_grid
+        return self._finish_pyvista(pv_grid, "cube", simulations, include)
 
     def rotation_matrix(self):
         return _np.eye(3)
@@ -4412,17 +4386,14 @@ class DirectionalData(PointData):
                                      axis=0)
         self._bounding_box = BoundingBox.from_array(all_coords)
 
-    def as_data_frame(self, full=False):
+    def as_data_frame(self, **kwargs):
         """
         Conversion of a spatial object to a data frame.
         """
-        df = [_pd.DataFrame(_np.asarray(self.coordinates),
-                            columns=self.coordinate_labels),
-              _pd.DataFrame(self.directions, columns=self.direction_labels)]
-        for variable in self.variables.values():
-            df.append(variable.as_data_frame(full))
-        df = _pd.concat(df, axis=1)
-        return df
+        df = _PointBased.as_data_frame(self, **kwargs)
+        directions = _pd.DataFrame(self.directions,
+                                   columns=self.direction_labels)
+        return _pd.concat([directions, df], axis=1)
 
     def __getitem__(self, item):
         new_obj = _copy.deepcopy(self)
@@ -4582,7 +4553,7 @@ class Section3D(PointData):
         super().__init__(df, coordinate_labels)
         self.grid_shape = [n_x, n_y]
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -4606,11 +4577,7 @@ class Section3D(PointData):
 
         pv_surf = _pv.PolyData(_np.asarray(self.coordinates), faces)
 
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_points(
-                pv_surf, simulations=simulations)
-
-        return pv_surf
+        return self._finish_pyvista(pv_surf, "points", simulations, include)
 
 
 def _sheet_interpolator(surface):
@@ -4984,7 +4951,7 @@ class Mesh3D(_PointBased):
             self.triangles, columns=["PointId1", "PointId2", "PointId3"])
         triangles_df.to_csv(triangles_filename + ".csv", index=False)
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -5002,11 +4969,7 @@ class Mesh3D(_PointBased):
 
         pv_surf = _pv.PolyData(self.coordinates, faces.ravel())
 
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_points(
-                pv_surf, simulations=simulations)
-
-        return pv_surf
+        return self._finish_pyvista(pv_surf, "points", simulations, include)
 
 
 class Surface3D(Mesh3D):
@@ -5613,7 +5576,7 @@ class Blocks2D(Grid2D):
 
 @_blockdata
 class Blocks3D(Grid3D):
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -5630,11 +5593,8 @@ class Blocks3D(Grid3D):
             origin=_np.array([ax[0] for ax in self.grid]) - _np.array(self.step_size) / 2
         )
 
-        for var in self.variables.keys():
-            self.variables[var].fill_pyvista_blocks(
-                pv_blocks, simulations=simulations)
-
-        return pv_blocks
+        return self._finish_pyvista(pv_blocks, "blocks", simulations,
+                                    include)
 
 
 def _sub_block_index(discretization):
@@ -5811,9 +5771,7 @@ class BlockSet3D(PointData):
 
         super().__init__(
             _pd.DataFrame(self._centres(), columns=list(labels)), list(labels))
-        self._bounding_box = BoundingBox(
-            self.box_corner,
-            self.box_corner + self.lattice_shape * self.base_step)
+        self._bounding_box = self._lattice_bounding_box()
 
     # ------------------------------------------------------------------ #
     # geometry
@@ -5972,9 +5930,7 @@ class BlockSet3D(PointData):
         # refining an edge block moves its centre nearer the boundary. Two
         # sets over the same ground would then disagree about their extent.
         # The real box is the lattice, which no refinement changes.
-        new._bounding_box = BoundingBox(
-            self.box_corner,
-            self.box_corner + self.lattice_shape * self.base_step)
+        new._bounding_box = new._lattice_bounding_box()
 
         if carry:
             # A block that was not split is the same block on the same
@@ -6083,9 +6039,7 @@ class BlockSet3D(PointData):
         new.metadata = {}
         new._init_coordinates(new._centres(), list(labels))
         # the lattice is the box, not the spread of the centres -- see `split`
-        new._bounding_box = BoundingBox(
-            self.box_corner,
-            self.box_corner + self.lattice_shape * self.base_step)
+        new._bounding_box = new._lattice_bounding_box()
 
         if carry:
             source = _np.concatenate(
@@ -6246,6 +6200,43 @@ class BlockSet3D(PointData):
 
         return marked & (self._level < self.max_levels)
 
+    def _lattice_bounding_box(self):
+        """The lattice is the box, not the spread of the centres -- see
+        `split`. A rotated subclass answers with the rotated corners."""
+        return BoundingBox(
+            self.box_corner,
+            self.box_corner + self.lattice_shape * self.base_step)
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0,
+                  discretization=(2, 2, 2), max_levels=3):
+        """
+        A block model covering another object's bounding box.
+
+        As `Grid3D.from_data`, counting blocks rather than nodes: the
+        margined box's lower *corner* is floored to `decimals`, and enough
+        blocks follow to cover the far side, so the corner is round and the
+        margin never shrinks.
+
+        Parameters
+        ----------
+        data
+            Any spatial object, drillholes included.
+        step
+            The coarse block size, one number or one per direction.
+        margin : float or array
+            A fraction of the data's extent; see `Grid3D.from_data`.
+        decimals : int
+            Decimals to floor the box corner to.
+        discretization, max_levels
+            As the constructor takes them.
+        """
+        corner, n, step, labels = _cover_box(
+            data, step, margin, decimals, n_dim=3, cells=True)
+        return cls(start=corner + step / 2, n=n, step=step,
+                   discretization=discretization, max_levels=max_levels,
+                   labels=labels if labels else ("X", "Y", "Z"))
+
     # ------------------------------------------------------------------ #
     # sample data
     # ------------------------------------------------------------------ #
@@ -6295,56 +6286,18 @@ class BlockSet3D(PointData):
 
         return found
 
-    @staticmethod
-    def _held_by(block, values):
-        """`values` against the block holding each, the strays dropped."""
-        frame = _pd.DataFrame({"block": block, "value": values})
-        return frame[frame["block"] >= 0].dropna(subset=["value"])
+    def _cell_of(self, data):
+        # which block, already this object's own row index
+        return self.index_data(data)
 
-    def _dominant(self, block, values):
-        """The label most often measured in each block, blank where none was.
+    def aggregate(self, data, variables=None, metadata=True):
+        """Carries another object's measurements onto the blocks holding them.
 
-        The count decides it, as on a grid; ties go to whichever label sorts
-        last, which is arbitrary but has to be something.
+        As `Grid3D.aggregate` -- one method, the operation following each
+        variable's kind -- over blocks of several sizes.
         """
-        counts = self._held_by(block, values).groupby(
-            ["block", "value"]).size().reset_index(name="_n")
-        winner = counts.sort_values("_n").groupby("block").tail(1)
-        out = _np.full(self.n_data, "", dtype=object)
-        out[winner["block"].to_numpy()] = winner["value"].to_numpy()
-        return out
-
-    def aggregate_numeric(self, data, variable):
-        """The mean of `data`'s measurements over the block holding them."""
-        held = self._held_by(
-            self.index_data(data),
-            data.variables[variable].measurements.values.to_numpy())
-        mean = _np.full(self.n_data, _np.nan)
-        grouped = held.groupby("block")["value"].mean()
-        mean[grouped.index.to_numpy()] = grouped.to_numpy()
-        self.variables[variable] = ContinuousVariable(variable, self, mean)
-
-    def aggregate_categorical(self, data, variable):
-        """The dominant category in each block.
-
-        Both sides of a contact vote, as on a grid: a boundary measurement
-        names the category either side of it and neither is the measurement.
-        """
-        source = data.variables[variable]
-        block = self.index_data(data)
-        self.variables[variable] = CategoricalVariable(
-            variable, self, source.labels,
-            self._dominant(_np.tile(block, 2),
-                           _np.concatenate([source.measurements_a.to_numpy(),
-                                            source.measurements_b.to_numpy()])))
-
-    def aggregate_binary(self, data, variable):
-        """The dominant label in each block."""
-        source = data.variables[variable]
-        self.variables[variable] = BinaryVariable(
-            variable, self, source.labels,
-            self._dominant(self.index_data(data),
-                           source.measurements.to_numpy()))
+        _aggregate_onto(self, data, variables, metadata)
+        return self
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
                             fraction=None, uncovered=_np.nan):
@@ -6466,7 +6419,7 @@ class BlockSet3D(PointData):
     # ------------------------------------------------------------------ #
     # export
     # ------------------------------------------------------------------ #
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -6484,12 +6437,7 @@ class BlockSet3D(PointData):
             all of them, an `int` for the first n, or a sequence of indices.
         """
         mesh = self._hex_mesh(self._origin, self._size, self.base_step)
-
-        for variable in self.variables.values():
-            variable.fill_pyvista_cells(mesh, simulations=simulations)
-        for name, column in self.metadata.items():
-            column.fill_pyvista_cells(mesh, name)
-        return mesh
+        return self._finish_pyvista(mesh, "cells", simulations, include)
 
     def _hex_mesh(self, origin, size, step):
         """One welded hexahedron per block, on any lattice of blocks -- the
@@ -6620,33 +6568,6 @@ class BlockSet3D(PointData):
         if not cut:
             return None, None, None, None
         return origin, size, step, values
-
-    def _variable_or_component(self, name):
-        """The variable called `name`, or the component of a vector one, and
-        the name of whatever owns it -- `None` for a variable of its own.
-
-        A composition is held as a single variable, so its parts are not among
-        `self.variables` and asking for `Zn` would otherwise mean reaching into
-        `Elements` by hand. Only the parts hold a grade -- the variable itself
-        carries nothing to contour -- so naming one has to work. The owner
-        comes back with it because an export labels a component by both names.
-        """
-        if name in self.variables:
-            return self.variables[name], None
-
-        for variable in self.variables.values():
-            components = getattr(variable, "components", None) or {}
-            if name in components:
-                return components[name], variable.name
-
-        known = set(self.variables)
-        for variable in self.variables.values():
-            known.update(
-                str(label) for label in
-                (getattr(variable, "components", None) or {}))
-        raise ValueError(
-            "no variable or component named %r; found %s"
-            % (name, ", ".join(sorted(known)) or "none"))
 
     def get_contour(self, variable, value, attribute="prediction",
                     supersample=1):
@@ -6787,24 +6708,19 @@ class RotatedGrid3D(Grid3D):
         return _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
 
     def index_data(self, data):
-        return super().index_data(self.rotate(data))
-
-    def aggregate_categorical(self, data, variable):
-        raise NotImplementedError
-        # super().aggregate_categorical(self.rotate(data), variable)
-
-    def aggregate_binary(self, data, variable):
-        raise NotImplementedError
-        # super().aggregate_binary(self.rotate(data), variable)
-
-    def aggregate_numeric(self, data, variable):
-        raise NotImplementedError
-        # super().aggregate_numeric(self.rotate(data), variable)
+        # into the lattice frame, so the *inverse* of the map the grid's own
+        # coordinates leave by. It used to apply the forward map -- probed:
+        # only the odd node of the grid landed in its own cell -- and nothing
+        # noticed, because everything downstream of index_data raised
+        # NotImplementedError until the aggregates were unified.
+        return super().index_data(
+            rotate(data, self.origin, self.azimuth, self.dip, self.rake,
+                   reverse=True))
 
     def make_interpolator(self, coordinates):
         raise NotImplementedError
 
-    def as_pyvista(self, simulations=False):
+    def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
 
@@ -6815,7 +6731,7 @@ class RotatedGrid3D(Grid3D):
             each one is a full-length array in the exported object), `True` for
             all of them, an `int` for the first n, or a sequence of indices.
         """
-        pv_grid = super().as_pyvista(simulations=simulations)
+        pv_grid = super().as_pyvista(simulations=simulations, include=include)
 
         mat = _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
         transf = _np.eye(4)
@@ -6830,6 +6746,60 @@ class RotatedGrid3D(Grid3D):
     @classmethod
     def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
         return NotImplementedError
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0):
+        """
+        A rotated grid fitted to another object's spread.
+
+        The rotation is fitted to the data's own points (a drillhole's
+        desurveyed cloud serves where there are no point coordinates), and
+        the angles are rounded to `decimals` *before* anything is built from
+        them -- a grid at 47.3182 degrees is nobody's intention -- so the box
+        is measured in the rounded frame and the data stays covered. The
+        world origin is rounded to the same `decimals`.
+
+        Parameters
+        ----------
+        data
+            Any spatial object with 3-dimensional coordinates, drillholes
+            included.
+        step
+            The step size, one number or one per direction.
+        margin : float or array
+            A fraction of the unrotated box's extent; see `Grid3D.from_data`.
+        decimals : int
+            Decimals for the origin *and* for the azimuth, dip and rake, in
+            degrees.
+        """
+        points, azimuth, dip, rake = _fitted_rotation(data, decimals)
+        mat = _gmt.rotation_matrix(azimuth, dip, rake)
+
+        centre = _np.mean(points, axis=0, keepdims=True)
+        unrotated = _np.matmul(points - centre, mat.T)
+
+        margin = _np.asarray(margin, dtype=float)
+        if margin.shape == ():
+            margin = _np.full([2, 3], float(margin))
+        elif margin.shape == (2,):
+            margin = _np.stack([margin] * 3, axis=1)
+
+        low = unrotated.min(axis=0)
+        high = unrotated.max(axis=0)
+        extent = high - low
+        low = low - extent * margin[0]
+        high = high + extent * margin[1]
+
+        step = _np.broadcast_to(
+            _np.asarray(step, dtype=float).ravel(), (3,))
+        n = _np.ceil((high - low) / step - _TOL_COVER).astype(int) + 1
+
+        origin = _np.squeeze(_np.matmul(low[None, :], mat) + centre)
+        origin = _np.round(origin, decimals)
+
+        labels = getattr(data, "coordinate_labels", None)
+        return cls(start=origin, n=n, step=_np.array(step), azimuth=azimuth,
+                   dip=dip, rake=rake, labels=labels)
 
     @classmethod
     def from_points(cls, points, step, margin=0.1, rounding_decimals=0, labels=None):
@@ -6863,10 +6833,129 @@ class RotatedGrid3D(Grid3D):
         return cls(start=origin, n=n, step=step, azimuth=az, dip=dip, rake=rake, labels=labels)
 
 
+class RotatedBlockSet3D(BlockSet3D):
+    """
+    A variable-size block model rotated about its starting block.
+
+    The lattice is `BlockSet3D`'s, untouched: splitting, grouping, the
+    refinement criteria and the integer arithmetic all happen in the
+    unrotated frame, which is what keeps them exact. The rotation is applied
+    where coordinates *leave* -- the block centres, the sub-block fan-out a
+    prediction reads, the exported hexahedra -- and removed where coordinates
+    *come in* (`index_data`, and so `aggregate`). Every mesh test and
+    assignment reads sub-block positions through `get_batched_coordinates`,
+    so geometry against surfaces and solids works in world coordinates with
+    nothing overridden.
+    """
+
+    def __init__(self, start, n, step, azimuth=0.0, dip=0.0, rake=0.0,
+                 discretization=(2, 2, 2), max_levels=3,
+                 labels=("X", "Y", "Z")):
+        self.azimuth = float(azimuth)
+        self.dip = float(dip)
+        self.rake = float(rake)
+        # the pivot: the first coarse block's centre, as `RotatedGrid3D`
+        # turns about its own origin
+        self._pivot = _np.asarray(start, dtype=float)
+        super().__init__(start, n, step, discretization=discretization,
+                         max_levels=max_levels, labels=labels)
+
+    def rotation_matrix(self):
+        return _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
+
+    def _to_world(self, coordinates):
+        return _np.matmul(coordinates - self._pivot,
+                          self.rotation_matrix()) + self._pivot
+
+    def _centres(self):
+        return self._to_world(super()._centres())
+
+    def _lattice_bounding_box(self):
+        corner = self.box_corner
+        far = corner + self.lattice_shape * self.base_step
+        corners = _np.array(list(_iter.product(
+            *zip(corner, far))), dtype=float)
+        return BoundingBox.from_array(self._to_world(corners))
+
+    def index_data(self, data):
+        # into the lattice frame: the inverse of the map the centres left by
+        return super().index_data(
+            rotate(data, self._pivot, self.azimuth, self.dip, self.rake,
+                   reverse=True))
+
+    def get_batched_coordinates(self, index=None):
+        if index is None:
+            index = _np.arange(self._n_data)
+        # fan out in the lattice frame, where a sub-block is an axis-aligned
+        # offset, then rotate every row: the offsets turn with the blocks
+        centres = BlockSet3D._centres(self)[index]
+        size = self.block_size[index]
+        coords = centres[:, None, :] + self._sub_grid[None, :, :] \
+            * size[:, None, :]
+        coords = self._to_world(coords.reshape(-1, 3))
+        splits = None if self.rows_per_location == 1 else len(centres)
+        return coords, splits
+
+    def _hex_mesh(self, origin, size, step):
+        # built on the lattice, turned as one piece: the welding is by shared
+        # corner indices, which a rotation cannot tear
+        mesh = super()._hex_mesh(origin, size, step)
+        mesh.points = self._to_world(_np.asarray(mesh.points, dtype=float))
+        return mesh
+
+    @classmethod
+    def from_data(cls, data, step, margin=0.1, decimals=0,
+                  discretization=(2, 2, 2), max_levels=3):
+        """
+        A rotated block model fitted to another object's spread.
+
+        As `RotatedGrid3D.from_data` -- the rotation fitted to the points and
+        rounded to `decimals` (degrees) before the box is measured -- counting
+        blocks rather than nodes.
+        """
+        points, azimuth, dip, rake = _fitted_rotation(data, decimals)
+        mat = _gmt.rotation_matrix(azimuth, dip, rake)
+
+        centre = _np.mean(points, axis=0, keepdims=True)
+        unrotated = _np.matmul(points - centre, mat.T)
+
+        margin = _np.asarray(margin, dtype=float)
+        if margin.shape == ():
+            margin = _np.full([2, 3], float(margin))
+        elif margin.shape == (2,):
+            margin = _np.stack([margin] * 3, axis=1)
+
+        low = unrotated.min(axis=0)
+        high = unrotated.max(axis=0)
+        extent = high - low
+        low = low - extent * margin[0]
+        high = high + extent * margin[1]
+
+        step = _np.broadcast_to(
+            _np.asarray(step, dtype=float).ravel(), (3,))
+        n = _np.maximum(
+            _np.ceil((high - low) / step - _TOL_COVER).astype(int), 1)
+
+        # `start` is the first block's centre, half a step past the corner
+        start = _np.squeeze(
+            _np.matmul((low + step / 2)[None, :], mat) + centre)
+        start = _np.round(start, decimals)
+
+        labels = getattr(data, "coordinate_labels", None)
+        return cls(start=start, n=n, step=_np.array(step), azimuth=azimuth,
+                   dip=dip, rake=rake, discretization=discretization,
+                   max_levels=max_levels,
+                   labels=labels if labels else ("X", "Y", "Z"))
+
+
 # --------------------------------------------------------------------------- #
 # Zarr persistence (see _SpatialData.to_zarr / _SpatialData.open)
 # --------------------------------------------------------------------------- #
-_GEOML_ZARR_FORMAT = 1
+# 2: the dict families and the node facts persist off the declarations, with
+# the Zarr key spelling the same string `get` takes (`quantiles/0.5`, not
+# `quantile_0.5`). Stores written at format 1 are not read back -- agreed at
+# the time of the change, everything in use being refreshed after it.
+_GEOML_ZARR_FORMAT = 2
 
 
 def _write_container(group, container):
@@ -6923,12 +7012,12 @@ def _write_container(group, container):
         return {"class": "Section3D",
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "grid_shape": [int(x) for x in container.grid_shape]}
-    if type(container) is BlockSet3D:
+    if type(container) in (BlockSet3D, RotatedBlockSet3D):
         # the lattice itself, in integers, plus what it is counted in; the
         # centres are derived from those and are not stored twice
         write("_origin", container._origin)
         write("_level", container._level)
-        return {"class": "BlockSet3D",
+        meta = {"class": type(container).__name__,
                 "labels": [str(lb) for lb in container.coordinate_labels],
                 "box_corner": [float(x) for x in container.box_corner],
                 "base_step": [float(x) for x in container.base_step],
@@ -6936,6 +7025,12 @@ def _write_container(group, container):
                 "discretization":
                     [int(d) for d in container.discretization],
                 "max_levels": int(container.max_levels)}
+        if type(container) is RotatedBlockSet3D:
+            meta.update(azimuth=float(container.azimuth),
+                        dip=float(container.dip),
+                        rake=float(container.rake),
+                        pivot=[float(x) for x in container._pivot])
+        return meta
     if isinstance(container, Mesh3D):
         write("_coordinates", container.coordinates)
         write("_triangles", container.triangles)
@@ -7002,10 +7097,12 @@ def _rebuild_container(meta, group):
         section._init_coordinates(read_store("_coordinates"), meta["labels"])
         section.grid_shape = [int(x) for x in meta["grid_shape"]]
         return section
-    if cls_name == "BlockSet3D":
+    if cls_name in ("BlockSet3D", "RotatedBlockSet3D"):
         # Bypass __init__, which builds a full coarse grid: the lattice that
         # was saved is whatever it had been refined to since.
-        blocks = BlockSet3D.__new__(BlockSet3D)
+        chosen = RotatedBlockSet3D if cls_name == "RotatedBlockSet3D" \
+            else BlockSet3D
+        blocks = chosen.__new__(chosen)
         _PointBased.__init__(blocks)
         blocks.max_levels = int(meta["max_levels"])
         blocks.discretization = [int(d) for d in meta["discretization"]]
@@ -7014,14 +7111,18 @@ def _rebuild_container(meta, group):
         blocks.box_corner = _np.asarray(meta["box_corner"], dtype=float)
         blocks.lattice_shape = _np.asarray(meta["lattice_shape"],
                                            dtype=_np.int64)
+        if cls_name == "RotatedBlockSet3D":
+            # before the centres: `_centres` turns through these
+            blocks.azimuth = float(meta["azimuth"])
+            blocks.dip = float(meta["dip"])
+            blocks.rake = float(meta["rake"])
+            blocks._pivot = _np.asarray(meta["pivot"], dtype=float)
         blocks._origin = read("_origin").astype(_np.int64)
         blocks._level = read("_level").astype(_np.int64)
         # a saved model is one that was predicted into, not one mid-refinement
         blocks._fresh = _np.zeros(len(blocks._origin), dtype=bool)
         blocks._init_coordinates(blocks._centres(), meta["labels"])
-        blocks._bounding_box = BoundingBox(
-            blocks.box_corner,
-            blocks.box_corner + blocks.lattice_shape * blocks.base_step)
+        blocks._bounding_box = blocks._lattice_bounding_box()
         return blocks
 
     meshes = {"Mesh3D": Mesh3D, "Surface3D": Surface3D, "Solid3D": Solid3D,

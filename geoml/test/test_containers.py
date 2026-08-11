@@ -260,3 +260,42 @@ def test_from_data_frame_builds_the_class_it_is_called_on(cls, kwargs):
     if hasattr(variable, "measurements_a"):
         assert list(variable.measurements_a.to_numpy()) == \
             list(df["rock_a" if "col_a" in kwargs else "cat"])
+
+
+# --------------------------------------------------------------------------- #
+# dropping variables
+# --------------------------------------------------------------------------- #
+def _stocked_point():
+    point = geoml.data.PointData(
+        pd.DataFrame({"X": [0.0, 1.0, 2.0], "Y": [0.0] * 3, "Z": [0.0] * 3}),
+        ["X", "Y", "Z"])
+    point.add_continuous_variable("au", np.arange(3.0))
+    point.add_compositional_variable("assay", ["a", "b"],
+                                     np.tile([0.6, 0.4], (3, 1)))
+    return point
+
+
+def test_variables_can_be_dropped_by_name():
+    point = _stocked_point()
+    point.drop("au")
+    assert list(point.variables) == ["assay"]
+
+    point = _stocked_point().drop(["au", "assay"])
+    assert list(point.variables) == []
+
+
+def test_a_component_cannot_be_dropped_on_its_own():
+    """A composition without one part is a different composition, so the
+    refusal names the owner rather than leaving half a variable behind."""
+    point = _stocked_point()
+    with pytest.raises(ValueError, match="component of 'assay'"):
+        point.drop("a")
+    with pytest.raises(ValueError, match="is a path"):
+        point.drop("assay/a")
+    assert sorted(point.variables) == ["assay", "au"]
+
+
+def test_dropping_what_is_not_there_says_what_is():
+    point = _stocked_point()
+    with pytest.raises(ValueError, match="no variable named 'ag'.*assay, au"):
+        point.drop("ag")

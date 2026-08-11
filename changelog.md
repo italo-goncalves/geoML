@@ -1,4 +1,213 @@
-## version 0.5.8
+## version 0.5.9
+* **A piece of data inside a container has an address.** A container holds
+variables, a variable holds components or attributes, and an attribute holds
+one array per location; that tree can now be named the way a file system
+names a file. `container.get("assay/Zn/noise_variance")` is the column,
+`get("assay/Zn")` the component, `get("")` the container itself;
+`values(path)` is the array, decoded; `get("assay/Zn/quantiles/1.5")` reaches
+into a dict family, with `get(path, 1.5)` as sugar; `_metadata/HOLEID` is a
+metadata column, under a reserved root so a fold over the modelled columns
+can leave it alone; `assay/Zn/simulations/7` is one realization, read by
+indexing the store rather than materializing it. The scheme is not new — the
+Zarr persistence has composed exactly these strings since it was written;
+this promotes them out of the store and into the API. Design and prior art in
+`docs/variable-paths.md`
+* `select(pattern)` asks the tree for a set at once: `**/prediction` is every
+prediction anywhere, `assay/*` one segment down, `assay/**` a subtree. `*`
+does not cross a `/`; `**` spans zero or more segments; `filled=True` keeps
+only columns holding something — the one thing no pattern can express. A bare
+`**` deliberately does not unroll the realization axis, or a default export
+of a simulated model would emit a hundred arrays per variable
+* `container.tree()` prints the whole thing — every variable, component and
+column, its dtype, and `empty` where nothing was ever written, which is the
+question that used to take a session of reading a ParaView array list.
+`status=False` skips the filled check on disk-backed models
+* **One enumeration behind every export, and one spelling.** The four ways of
+naming the same quantity — `assay/Zn/noise_variance` in Zarr,
+`assay - Zn - noise_variance` in one pyvista path, `assay - Zn - noise
+variance` in another, `assay_Zn_noise_variance` in a frame — collapse to
+`render(path, style)` over one walk. Thirty-five per-class export bodies
+(fourteen `as_data_frame`, twenty-one `fill_pyvista_*`) become one fold each,
+which is where seven of the eight bugs in the components family lived: a
+hand-written list cannot miss half of itself once it is not written by hand.
+`proportions` and `divided` reach the exports for the first time, on every
+path; the measured column is `au_measurements` now, not bare `au`; a column
+nothing wrote is left out instead of exported empty; a collision made by
+flattening (`noise/variance` beside `noise_variance`) is resolved
+deterministically and warned about
+* `as_data_frame(include="**/prediction")` and
+`as_pyvista(include="assay/**")` choose what leaves the container with one
+pattern instead of a flag per family; `simulations=` keeps its selector
+meaning and composes with it. `columns="multi"` returns a `MultiIndex` level
+per path segment for whoever is staying in pandas — off by default, because
+written to CSV it makes several header rows that other software reads as data
+* Every pyvista export now carries the metadata columns (only the block set
+did before — an air code or a fold is as useful draped over a grid) and
+`field_data["geoml_paths"]`, a JSON table from each array's label back to the
+path that produced it: the flat spellings are not invertible, so the file
+carries the mapping instead of anyone guessing
+* **Subsetting no longer reads every realization of everything.** Three
+nested `deepcopy`s each read whole stores — the container copied all its
+variables before subsetting them, a variable its `(n_data, n_sim)`
+simulations, and an attribute's back-reference dragged in every other
+variable of the container. On a block model whose simulations live on disk
+precisely because they do not fit in memory, any one of the three was the end
+of the session. A test now watches a subset go through with a store that
+raises on any whole read
+* **A rebuilt variable keeps what its nodes know.** Cut-offs declared on a
+composition's components were dropped by `from_variable`, so a block model
+predicted from one could not compute its shares and `refine` had nothing to
+split on — the third time cut-offs specifically were the casualty. Node facts
+are declared (`_NODE_ATTRS`) and carried wholesale by every rebuild, so the
+next fact added is carried the day it is declared
+* **A category keeps the same share dicts a grade does.** `proportions` and
+`divided`, keyed by the one cut-off a category has: zero on `ind_skew`, whose
+zero level set the contact is. The last storage asymmetry between the two
+kinds of decision, and with it `split_shares` collapses to one body and one
+naming hook — a grade renders `@ 1.5` because someone declared that number, a
+category stays bare because its zero is an artefact of the log-odds.
+`block_shares()` labels are pinned unchanged by a test
+* Subsetting a `BinaryVariable` never cut its `probability`: the old override
+wrote the subset into a dead `average` attribute nothing ever read. Fixed by
+the fold rather than by hand
+* **The Zarr store format moves to 2** — the dict families and node facts
+persist off the declarations, under the same keys `get` takes
+(`v/quantiles/0.5`, not `quantile_0.5`) — and `open` now checks the format,
+refusing a mismatched store with what was written and what it reads rather
+than half-loading it. No shim: agreed before the work started, everything in
+use being refreshed after it
+* **`plots.prepare` takes paths, and the dotted form is gone.**
+`"Elements/uncertainty"` where `"Elements.uncertainty"` used to be — removed
+rather than aliased, refused with the replacement spelled out, since a `.`
+inside a label would make a wrong guess look like a working one. The
+duplicate component search in `prepare` (a near-copy of `data.py`'s, and the
+original symptom of the whole problem) is deleted; the one resolver lives on
+`_SpatialData`, every container inherits it, and the plots see components of
+every variable kind the way `get_contour` always did
+* `set_coordinates` — six hand-written lists, four missing columns — is one
+walk; the subset, the carry, the frame, the fills, the persistence and the
+repr all run on the same traversal, so a column or a family added to the
+declarations reaches all of them the day it is added
+* **Every grid and block class builds itself around data:
+`from_data(data, step, margin=0.1, decimals=0)`.** `data` is any spatial
+object — drillholes included, whose desurveyed cloud stands in for the
+coordinates they do not have — `margin` a fraction of its extent (one number,
+per side, per axis, or both), and `decimals` how many decimals the box corner
+is floored to: round numbers read better on a section, flooring rather than
+rounding means the margin is never eaten, and the count of steps grows to
+keep the far side covered. On the rotated classes `decimals` also rounds the
+fitted azimuth, dip and rake (degrees) — a grid at 47.3182 degrees is
+nobody's intention — and the rounding happens *before* the box is measured,
+so the data stays covered by the rounded frame
+* **`RotatedBlockSet3D`: the variable-size block model, rotated.** The
+lattice is `BlockSet3D`'s untouched — splitting, grouping, refinement and the
+integer arithmetic all happen in the unrotated frame, which is what keeps
+them exact — and the rotation is applied where coordinates leave (centres,
+the sub-block fan-out a prediction reads, the exported hexahedra) and removed
+where they come in (`index_data`). Every mesh test and assignment reads
+sub-block positions through `get_batched_coordinates`, so geometry against
+surfaces and solids works in world coordinates with nothing overridden;
+`split` keeps the rotation, the Zarr round trip keeps the angles, and a model
+predicts onto it unchanged
+* **One `aggregate(data, variables=None, metadata=True)` replaces the nine
+per-class `aggregate_numeric`/`_categorical`/`_binary`.** Each variable says
+what it is and the operation follows: continuous values (and each part of a
+vector) average; categories keep the label most often measured in the cell,
+both sides of a contact voting; a composition is averaged and *closed again*,
+a cell missing any part coming back missing whole; numeric metadata averages
+and coded metadata keeps the dominant label. **What is truly ambiguous is
+empty**: two labels tied for a cell name no winner, where the old aggregators
+picked whichever sorted last and reported an answer that was not there. Built
+on `index_data`, so a grid, a rotated grid and a block model of several sizes
+all aggregate through the same body — the grids used to re-derive their cell
+ids in near-duplicate pandas per dimension
+* Fixed, pre-existing: `RotatedGrid3D.index_data` applied the forward
+rotation where the inverse was needed, so almost nothing landed in the cell
+that held it — probed: the odd node of the grid's own coordinates found its
+own cell, by luck. Nothing ever noticed because everything downstream of it
+raised `NotImplementedError` until the aggregates were unified
+* **`container.drop(names)` removes variables.** Whole variables only: a
+composition without one part is a different composition, so a component's
+name is refused with its owner named — `'a' is a component of 'assay'` —
+rather than half a variable being left behind
+* **Interval tables can be renamed and dropped.**
+`holes.rename_table("assay", "chemistry")` keeps the table's position (the
+order is what `as_point_data` merges by default) and refuses a name already
+taken; `holes.drop_table(name)` removes one and re-derives the bounding box
+* **`recovery` is a column role of its own** in drillhole tables, between
+`density` and `flag`: numeric, the share of each interval actually
+recovered. It composites as a length-weighted mean — a fraction of a length
+is exactly what length-weighting averages — and is never applied as a weight
+to the grades, since how much a poorly recovered assay should count is a
+modelling decision, not a compositing one. `as_point_data` carries it as
+*metadata*, beside `HOLEID` and `LENGTH`: it describes the sample rather
+than the ground, so the models never see it. The `flag` docstring loses
+"recovery" from its examples, that having been the stopgap
+* **`Mixture`: a likelihood whose noise comes from one of several
+mechanisms.** Component likelihoods of any kind share the latent location
+with a trainable simplex of proportions; the classic pair is a narrow
+component for the natural short-range variability and a wide one for
+contaminated measurements, which one nugget cannot tell apart — a handful
+of bad assays inflates it and blurs every prediction — and which a
+heavy-tailed likelihood can absorb but never *name*. The mixture names them
+(`responsibilities`, AUC 0.94-0.97 on planted contamination), counts them
+(the weight recovered 0.03-0.08 against a true 0.05), and recovers
+clean-data accuracy from contaminated data where a Gaussian loses 30-140%
+and a Student-t half of that. Every component after the first is taken as
+contamination unless said otherwise, and what that means sits entirely at
+prediction: training and `measurement_samples` keep the full mixture — the
+data must be explained as it is, and a fresh assay can be a bad one — while
+`integrated_backward` averages the ground over the genuine components
+alone, a contaminated reading replacing the measurement and saying nothing
+about the ground it displaced. On a nonlinear warping that exclusion is
+worth +6 to +17% of bias; zeroing the contamination's variance instead of
+dropping it was measured within 0.15 pp and rejected as the muddier
+statement. The noise integral runs each component on its own quadrature
+nodes (the new `_noise_values` hook — exact, where a joint quantile would
+need root-finding), and the mixture quantile that `measurement_samples`
+does need is sixty bisections of the closed-form CDF, once per trace
+* **The scalar/multivariate likelihood split is gone.** One
+`_ContinuousLikelihood` serves any number of components — `size` is the
+warping's — and everywhere the two classes genuinely differed is decided by
+`warping.elementwise`, the same flag that already chose the noise nodes:
+the training expectation is Gauss-Hermite quadrature when it holds and
+Monte Carlo over the latent samples when the warping mixes, and a row
+missing a component is dropped whole only in that same case. The
+`Multivariate*` twins remain as thin subclasses that only size the default
+warping, keeping their historical parameter names and initial values so a
+saved model still loads. A vector variable with an elementwise warping now
+trains through quadrature rather than sampling — a better integral at the
+same cost. `use_monte_carlo` is removed everywhere, having selected nothing
+a user should choose; a save that explicitly recorded it no longer replays
+* **`ZScore(size, robust=True)` initializes from a winsorized copy of the
+data** (clipped at its [1%, 99%] quantiles, the clipped points still
+counting from the fence), so a gross outlier cannot set the scale
+everything else is normalized by — one was measured compressing the genuine
+values into a sliver of a trainable Spline's working window before training
+began, and no amount of refinement recovers from that start. Built for the
+warping under a `Mixture`, whose docstring prescribes the pairing: the
+pathological contamination draw went from 4.3x the clean-data error to 1.3x
+with it, the healthy draws and clean data unchanged to three decimals.
+Median/IQR initialization was measured and rejected — the same rescue, but
+10-16% worse on clean skewed data, legitimate skew being exactly what it
+misreads. `Mixture`'s warping is a required argument: the components' own
+warpings are inert (frozen at registration), so the mixture's size can only
+honestly come from its own
+* **`GPOptions(qmc_simulations=True)` draws the posterior simulations from a
+seeded-scramble Sobol sequence** — each simulation one point of a
+`size x inducing`-dimensional sequence pushed through the normal quantile, so
+the ensemble covers the posterior evenly rather than by chance. Measured on
+the Walker Lake model at 16-256 simulations: the ensemble mean lands 7-37x
+closer to the exact posterior mean the same call reports (converging at
+~N^-1.1 against Monte Carlo's N^-0.5), proportions below a cut-off and the
+outer quantiles about a quarter closer — the accuracy of half again to twice
+the simulations — while the ensemble's own spread and the correlation between
+nearby locations gain nothing, and the wall time is identical. Off by
+default. The rule is settled by the seed at trace time, so it stays
+deterministic, batch-invariant and XLA-compatible; the traced-function cache
+now keys on (jit, qmc), one graph per combination, and `predict_measurements`
+follows the same option. Monte Carlo remains exactly what it was, down to the
+drawn numbers
 * **The likelihood noise is integrated out of a prediction rather than drawn.**
 What a prediction reports is `E[g(z + eps)]` — the value the ground would show
 once the measurement error and the variability below the model's resolution
