@@ -223,7 +223,12 @@ class ZScore(_Warping):
     """
     A Warping that simply normalizes the values to z-scores.
     """
-    def __init__(self, size, mean=None, std=None):
+
+    # The quantile band a robust initialization trusts; what lies outside is
+    # clipped to the fence before the moments are taken.
+    _ROBUST_QUANTILES = (0.01, 0.99)
+
+    def __init__(self, size, mean=None, std=None, robust=False):
         """
         Initializer for ZScore.
 
@@ -233,6 +238,14 @@ class ZScore(_Warping):
             The desired mean of the data.
         std : double
             The desired standard deviation of the data.
+        robust : bool
+            Whether to initialize from a winsorized copy of the data, so a
+            handful of gross outliers cannot set the scale everything else
+            is normalized by -- one was measured squashing the genuine
+            values into a sliver of a trainable warp's working window. The
+            clipped points still count, at the fence, so clean data fits
+            the same moments. Meant for the warping under a `Mixture`
+            likelihood, whose contamination component expects such values.
 
         The mean and standard deviation can be computed from the data
         (if omitted) or specified.
@@ -240,6 +253,7 @@ class ZScore(_Warping):
         super().__init__()
         self._size_in = size
         self._size_out = size
+        self.robust = bool(robust)
 
         self._add_parameter(
             "mean",
@@ -279,9 +293,17 @@ class ZScore(_Warping):
         # x = _tftools.ensure_rank_2(x)
         return x * std + mean
 
+    def _trusted(self, x):
+        """The data the initialization believes: winsorized when robust."""
+        if not self.robust:
+            return x
+        lo, hi = _np.quantile(x, self._ROBUST_QUANTILES, axis=0)
+        return _np.clip(x, lo, hi)
+
     def initialize(self, x):
-        mean = _np.mean(x, axis=0)
-        std = _np.std(x, axis=0)
+        fit = self._trusted(x)
+        mean = _np.mean(fit, axis=0)
+        std = _np.std(fit, axis=0)
 
         if not self.parameters["mean"].fixed:
             self.parameters["mean"].set_value(mean)

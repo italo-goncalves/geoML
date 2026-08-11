@@ -1923,24 +1923,33 @@ class ContinuousVariable(_Variable):
         return cls(variable.name, coordinates)
 
     def update(self, idx, **kwargs):
-        self.prediction.values[idx] = kwargs["average_sim"].numpy()
+        # The likelihood speaks in `(rows, components, ...)` whatever the
+        # number of components; a scalar variable takes its single column.
+        # Flat arrays still arrive from the legacy closed-form model and from
+        # a vector variable distributing columns to its parts.
+        def column(key):
+            arr = kwargs[key].numpy()
+            return arr[:, 0] if arr.ndim > 1 else arr
+
+        self.prediction.values[idx] = column("average_sim")
 
         if "mean" in kwargs.keys():
-            self.latent_mean.values[idx] = kwargs["mean"].numpy()
-            self.latent_variance.values[idx] = kwargs["variance"].numpy()
+            self.latent_mean.values[idx] = column("mean")
+            self.latent_variance.values[idx] = column("variance")
 
         if "dispersion" in kwargs.keys():
-            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+            self.dispersion.values[idx] = column("dispersion")
 
         if "noise_variance" in kwargs.keys():
-            self.noise_variance.values[idx] = \
-                kwargs["noise_variance"].numpy()
+            self.noise_variance.values[idx] = column("noise_variance")
 
         for key, target in (("proportions", self.proportions),
                             ("divided", self.divided)):
             if key not in kwargs.keys():
                 continue
             values = kwargs[key].numpy()
+            if values.ndim == 3:
+                values = values[:, 0, :]
             cutoffs = self.cutoffs or []
             if values.shape[1] == 0:
                 # a component of a vector variable that declared none, whose
@@ -1962,7 +1971,10 @@ class ContinuousVariable(_Variable):
 
         if "simulations" in kwargs.keys():
             # Whole (batch, n_sim) block written as one region into the store.
-            self.simulations[idx, :] = kwargs["simulations"].numpy()
+            sims = kwargs["simulations"].numpy()
+            if sims.ndim == 3:
+                sims = sims[:, 0, :]
+            self.simulations[idx, :] = sims
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(

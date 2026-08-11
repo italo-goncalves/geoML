@@ -143,6 +143,56 @@ modelling decision, not a compositing one. `as_point_data` carries it as
 *metadata*, beside `HOLEID` and `LENGTH`: it describes the sample rather
 than the ground, so the models never see it. The `flag` docstring loses
 "recovery" from its examples, that having been the stopgap
+* **`Mixture`: a likelihood whose noise comes from one of several
+mechanisms.** Component likelihoods of any kind share the latent location
+with a trainable simplex of proportions; the classic pair is a narrow
+component for the natural short-range variability and a wide one for
+contaminated measurements, which one nugget cannot tell apart — a handful
+of bad assays inflates it and blurs every prediction — and which a
+heavy-tailed likelihood can absorb but never *name*. The mixture names them
+(`responsibilities`, AUC 0.94-0.97 on planted contamination), counts them
+(the weight recovered 0.03-0.08 against a true 0.05), and recovers
+clean-data accuracy from contaminated data where a Gaussian loses 30-140%
+and a Student-t half of that. Every component after the first is taken as
+contamination unless said otherwise, and what that means sits entirely at
+prediction: training and `measurement_samples` keep the full mixture — the
+data must be explained as it is, and a fresh assay can be a bad one — while
+`integrated_backward` averages the ground over the genuine components
+alone, a contaminated reading replacing the measurement and saying nothing
+about the ground it displaced. On a nonlinear warping that exclusion is
+worth +6 to +17% of bias; zeroing the contamination's variance instead of
+dropping it was measured within 0.15 pp and rejected as the muddier
+statement. The noise integral runs each component on its own quadrature
+nodes (the new `_noise_values` hook — exact, where a joint quantile would
+need root-finding), and the mixture quantile that `measurement_samples`
+does need is sixty bisections of the closed-form CDF, once per trace
+* **The scalar/multivariate likelihood split is gone.** One
+`_ContinuousLikelihood` serves any number of components — `size` is the
+warping's — and everywhere the two classes genuinely differed is decided by
+`warping.elementwise`, the same flag that already chose the noise nodes:
+the training expectation is Gauss-Hermite quadrature when it holds and
+Monte Carlo over the latent samples when the warping mixes, and a row
+missing a component is dropped whole only in that same case. The
+`Multivariate*` twins remain as thin subclasses that only size the default
+warping, keeping their historical parameter names and initial values so a
+saved model still loads. A vector variable with an elementwise warping now
+trains through quadrature rather than sampling — a better integral at the
+same cost. `use_monte_carlo` is removed everywhere, having selected nothing
+a user should choose; a save that explicitly recorded it no longer replays
+* **`ZScore(size, robust=True)` initializes from a winsorized copy of the
+data** (clipped at its [1%, 99%] quantiles, the clipped points still
+counting from the fence), so a gross outlier cannot set the scale
+everything else is normalized by — one was measured compressing the genuine
+values into a sliver of a trainable Spline's working window before training
+began, and no amount of refinement recovers from that start. Built for the
+warping under a `Mixture`, whose docstring prescribes the pairing: the
+pathological contamination draw went from 4.3x the clean-data error to 1.3x
+with it, the healthy draws and clean data unchanged to three decimals.
+Median/IQR initialization was measured and rejected — the same rescue, but
+10-16% worse on clean skewed data, legitimate skew being exactly what it
+misreads. `Mixture`'s warping is a required argument: the components' own
+warpings are inert (frozen at registration), so the mixture's size can only
+honestly come from its own
 * **`GPOptions(qmc_simulations=True)` draws the posterior simulations from a
 seeded-scramble Sobol sequence** — each simulation one point of a
 `size x inducing`-dimensional sequence pushed through the normal quantile, so
