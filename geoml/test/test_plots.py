@@ -1526,3 +1526,112 @@ def test_the_palette_is_one_list_for_the_whole_package():
     # it cycles rather than running out
     assert geoml.plots.style.color(len(geoml.plots.PALETTE)) == \
         geoml.plots.PALETTE[0]
+
+
+# --------------------------------------------------------------------------- #
+# the variogram
+# --------------------------------------------------------------------------- #
+def _line_points(values):
+    coords = np.stack([np.arange(len(values), dtype=float),
+                       np.zeros(len(values))], axis=1)
+    point = geoml.data.PointData.from_array(coords)
+    point.add_continuous_variable("z", np.asarray(values, dtype=float))
+    return point
+
+
+def test_the_variogram_on_a_worked_example():
+    """Three points on a line, every pair by hand."""
+    point = _line_points([0.0, 1.0, 4.0])
+    panel = prepare.variogram(point, "z", n_lags=1, max_lag=3.0)[0]
+
+    assert panel["count"][0] == 3
+    assert panel["data"][0] == pytest.approx(0.5 * (1 + 9 + 16) / 3)
+    assert panel["sill"] == pytest.approx(np.var([0.0, 1.0, 4.0]))
+    assert panel["realizations"] is None
+
+
+def test_iid_values_lie_flat_and_a_smooth_field_rises():
+    """The two shapes the figure exists to tell apart: pure nugget sits at
+    the sill from the first lag, a continuous field climbs to it."""
+    rng = np.random.default_rng(5)
+    n = 400
+    coords = rng.uniform(0, 100, size=[n, 2])
+    point = geoml.data.PointData.from_array(coords)
+    point.add_continuous_variable("iid", rng.normal(size=n))
+    point.add_continuous_variable(
+        "smooth", np.sin(coords[:, 0] / 20.0) + np.cos(coords[:, 1] / 25.0))
+
+    flat = prepare.variogram(point, "iid", n_lags=8)[0]
+    busy = flat["count"] > 30
+    assert np.all(np.abs(flat["data"][busy] - flat["sill"])
+                  < 0.35 * flat["sill"])
+
+    rising = prepare.variogram(point, "smooth", n_lags=8)[0]
+    assert rising["data"][0] < 0.25 * rising["sill"]
+    assert np.nanmax(rising["data"]) > 0.75 * rising["sill"]
+
+
+def test_a_directional_variogram_keeps_the_pairs_along_its_direction():
+    coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    point = geoml.data.PointData.from_array(coords)
+    point.add_continuous_variable("z", coords[:, 0])
+
+    panel = prepare.variogram(point, "z", n_lags=1, max_lag=2.0,
+                              direction=[1, 0], tolerance=10.0)[0]
+    # the two horizontal pairs; the vertical and diagonal ones are out
+    assert panel["count"][0] == 2
+    assert panel["data"][0] == pytest.approx(0.5)
+
+
+def test_the_fan_is_the_variogram_of_each_realization(trained):
+    _, point = trained
+    panel = prepare.variogram(point, "v", n_lags=5)[0]
+    fan = panel["realizations"]
+    part = point.variables["v"].components["a"]
+    assert fan.shape == (part.simulations.shape[1], 5)
+
+    column = np.asarray(part.simulations[:, 7]).ravel()
+    check = geoml.data.PointData.from_array(np.asarray(point.coordinates))
+    check.add_continuous_variable("r", column)
+    alone = prepare.variogram(check, "r", n_lags=5)[0]["data"]
+    assert np.allclose(fan[7], alone, equal_nan=True)
+
+
+def test_the_residual_variogram_reads_the_prediction_and_drops_the_fan(
+        trained):
+    _, point = trained
+    panel = prepare.variogram(point, "v", n_lags=4, residuals=True)[0]
+    assert panel["realizations"] is None
+
+    part = point.variables["v"].components["a"]
+    residual = part.measurements.values.to_numpy() \
+        - part.prediction.values.to_numpy()
+    assert panel["sill"] == pytest.approx(np.var(residual))
+
+
+def test_the_variogram_reads_realizations_one_column_at_a_time(
+        trained, monkeypatch):
+    """A block model's store does not fit in memory whole; a column does."""
+    _, point = trained
+    read = []
+    materialize = geoml.storage.ArrayStore.__array__
+    monkeypatch.setattr(
+        geoml.storage.ArrayStore, "__array__",
+        lambda self, *args, **kwargs: (read.append(self.shape),
+                                       materialize(self, *args, **kwargs))[1])
+
+    prepare.variogram(point, "v", n_lags=4)
+    assert point.variables["v"].components["a"].simulations.shape not in read
+
+
+def test_the_variogram_figure_draws_a_panel_per_component_with_its_fan(
+        trained):
+    _, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v").variogram(n_lags=5)
+
+    drawn = [ax for ax in figure.axes if ax.lines]
+    assert len(drawn) == 3
+    n_sim = point.variables["v"].components["a"].simulations.shape[1]
+    for ax in drawn:
+        # the fan, the sill and the data curve
+        assert len(ax.lines) == n_sim + 2

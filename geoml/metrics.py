@@ -117,6 +117,50 @@ def crps(y_true, y_pred):
     return float(_np.mean(error - spread))
 
 
+def variogram_score(y_true, y_pred, p=0.5, max_pairs=50000):
+    """
+    How well the ensemble reproduces the differences between locations.
+
+    Scheuerer and Hamill's (2015) proper score over pairs: for every pair of
+    locations, the truth's absolute difference to the power `p` against the
+    ensemble's mean one, squared and averaged. `crps` judges each location's
+    marginal and cannot see dependence; this is the score that punishes an
+    ensemble whose realizations have the right histograms and the wrong
+    spatial structure -- the numeric side of the variogram-fan figure. Pairs
+    are unweighted, and past the budget they are strided down
+    deterministically.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples, n_predictions)
+        Realizations at the same locations -- simulations, not measurement
+        samples: dependence between locations is the thing under test.
+    p : float
+        The power. 0.5 is the authors' recommendation.
+    max_pairs : int
+        The pair budget.
+
+    Returns
+    -------
+    score : float
+        Lower is better.
+    """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float)
+
+    i_idx, j_idx = _np.triu_indices(y_true.size, k=1)
+    if i_idx.size > max_pairs:
+        stride = int(_np.ceil(i_idx.size / max_pairs))
+        i_idx, j_idx = i_idx[::stride], j_idx[::stride]
+
+    truth = _np.abs(y_true[i_idx] - y_true[j_idx]) ** p
+    ensemble = _np.mean(
+        _np.abs(y_pred[i_idx, :] - y_pred[j_idx, :]) ** p, axis=1)
+    return float(_np.mean((truth - ensemble) ** 2))
+
+
 def interval_score(y_true, y_pred, alpha=0.05):
     """
     Interval score, based on confidence intervals estimated from `y_pred`.

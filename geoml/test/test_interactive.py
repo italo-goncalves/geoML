@@ -979,3 +979,23 @@ def test_a_dashboard_written_to_a_file_is_the_page(tmp_path, eda):
         str(tmp_path / "board.html"))
     with open(path, encoding="utf-8") as file:
         assert file.read().startswith("<!DOCTYPE html>")
+
+
+def test_the_variogram_twin_carries_fan_sill_and_data(trained):
+    _, point = trained
+    figure = geoml.plots.Interactive(point, continuous="v").variogram(
+        n_lags=4)
+
+    assert {trace.name for trace in figure.data} == \
+        {"realizations", "data variance", "data"}
+    n_sim = point.variables["v"].components["a"].simulations.shape[1]
+    assert len(figure.data) == 3 * (n_sim + 2)
+    # one legend entry per meaning, on the first panel alone
+    assert sum(bool(trace.showlegend) for trace in figure.data) == 3
+
+
+def test_the_residual_variogram_twin_drops_the_fan(trained):
+    _, point = trained
+    figure = geoml.plots.Interactive(point, continuous="v").variogram(
+        n_lags=4, residuals=True)
+    assert {trace.name for trace in figure.data} == {"data variance", "data"}

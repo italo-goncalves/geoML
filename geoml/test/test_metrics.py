@@ -103,3 +103,31 @@ def test_crps_is_proper():
     score = metrics.crps(y_true, honest)
     assert score < metrics.crps(y_true, hedged)
     assert score < metrics.crps(y_true, overconfident)
+
+
+def test_variogram_score_on_a_worked_example():
+    """Three locations, one realization, every pair by hand at p=1."""
+    y_true = np.array([0.0, 1.0, 3.0])
+    y_pred = np.array([[0.0], [2.0], [3.0]])
+
+    truth = np.array([1.0, 3.0, 2.0])
+    ensemble = np.array([2.0, 3.0, 1.0])
+    expected = np.mean((truth - ensemble) ** 2)
+    assert np.isclose(metrics.variogram_score(y_true, y_pred, p=1.0),
+                      expected)
+
+
+def test_variogram_score_punishes_broken_spatial_structure():
+    """Same values at every location, dependence destroyed: `crps` cannot
+    tell the two ensembles apart, and this score is the number that can."""
+    rng = np.random.default_rng(6)
+    n, m = 60, 200
+    honest = np.cumsum(rng.normal(size=(n, m)), axis=0)
+    y_true = np.cumsum(rng.normal(size=n))
+
+    shuffled = honest.copy()
+    for i in range(n):
+        shuffled[i] = shuffled[i, rng.permutation(m)]
+
+    assert metrics.variogram_score(y_true, honest) < \
+        metrics.variogram_score(y_true, shuffled)
