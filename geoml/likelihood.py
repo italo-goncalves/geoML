@@ -402,12 +402,18 @@ class _Likelihood(_gpr.Parametric):
         overhead, not memory -- measured at 96% of a noise-free 100-
         simulation prediction -- and under `integrated_backward` it was
         paid again per noise node.
+
+        The backward can change the width: a chain holding a PCA takes
+        `size_out` latent columns to `size_in` data components (a Macpass
+        composition maps 3 to 4), so the reshape takes its width from the
+        warping rather than from the input.
         """
         shape = _tf.shape(sims)
         rows = _tf.transpose(sims, [2, 0, 1])
         flat = _tf.reshape(rows, [shape[2] * shape[0], shape[1]])
         values = self.warping.backward(flat)
-        values = _tf.reshape(values, [shape[2], shape[0], shape[1]])
+        values = _tf.reshape(values,
+                             [shape[2], shape[0], self.warping.size_in])
         return _tf.transpose(values, [1, 2, 0])
 
     def _values_and_noise(self, sims, include_noise):

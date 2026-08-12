@@ -221,6 +221,38 @@ def test_the_likelihood_decides_the_noise_law():
     assert not np.allclose(_integrated(gaussian, z), _integrated(laplace, z))
 
 
+def test_a_width_changing_warping_comes_back_at_the_data_width():
+    """A chain holding a PCA takes the latent columns back to *more* data
+    components than it was handed -- the Macpass composition maps 3 to 4.
+    The vectorized back-transform used to reshape by the input width and
+    crash there; the width is the warping's to declare, not the input's."""
+    import tensorflow as tf
+
+    rng = np.random.default_rng(2)
+    positive = rng.lognormal(size=[200, 4])
+    composition = positive / positive.sum(axis=1, keepdims=True)
+
+    chain = wp.ChainedWarping(wp.CenteredLogRatio(4), wp.PCA(4, 3))
+    likelihood = geoml.likelihood.MultivariateGaussian(3, chain)
+    likelihood.initialize(composition)
+
+    sims = tf.constant(rng.normal(size=[30, 3, 7]) * 0.3)
+
+    values = np.asarray(likelihood._back_transform(sims))
+    assert values.shape == (30, 4, 7)
+    # exact against the one-realization-at-a-time path it replaced
+    for r in range(7):
+        alone = np.asarray(chain.backward(sims[:, :, r]))
+        assert np.allclose(values[:, :, r], alone)
+
+    mean, variance = likelihood.integrated_backward(sims)
+    assert tuple(mean.shape) == (30, 4, 7)
+    assert tuple(variance.shape) == (30, 4, 7)
+    # every integrated value is a composition again: positive and closed
+    assert np.all(np.asarray(mean) > 0)
+    assert np.allclose(np.asarray(mean).sum(axis=1), 1.0)
+
+
 # --------------------------------------------------------------------------- #
 # the nodes
 # --------------------------------------------------------------------------- #

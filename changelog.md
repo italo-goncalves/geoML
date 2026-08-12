@@ -13,7 +13,11 @@ Measured on the Walker 78k grid: `n_sim=100` with noise **14.1 s to
 0.40 s**, without 6.6 to 0.36; `n_sim=20` with noise 6.7 to 0.26.
 Integrating the noise now costs a tenth on top of a prediction instead
 of multiplying it, and the node-by-node fold keeps its memory promise
-untouched.
+untouched. One regression caught on the real Macpass model and fixed the
+next day: the reshape assumed the backward keeps its width, which a chain
+holding a PCA does not (3 latent columns back to 4 composition parts) --
+the width now comes from the warping's own declaration, and a test pins
+the width-changing case the suite's square fixtures had missed.
 * **Experts may keep their own counsel.**
 `GPOptions(expert_propagation="independent")` lets each expert of a deep
 network predict its own inducing set alone, where the default
