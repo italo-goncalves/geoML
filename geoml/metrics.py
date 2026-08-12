@@ -18,6 +18,105 @@
 import numpy as _np
 
 
+def rmse(y_true, y_pred):
+    """
+    Root mean squared error.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples,)
+        Predicted values.
+
+    Returns
+    -------
+    error : float
+        The error, in the variable's units.
+    """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float).ravel()
+    return float(_np.sqrt(_np.mean((y_pred - y_true) ** 2)))
+
+
+def mae(y_true, y_pred):
+    """
+    Mean absolute error.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples,)
+        Predicted values.
+
+    Returns
+    -------
+    error : float
+        The error, in the variable's units.
+    """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float).ravel()
+    return float(_np.mean(_np.abs(y_pred - y_true)))
+
+
+def bias(y_true, y_pred):
+    """
+    Mean error, prediction minus truth. Positive means overestimation.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples,)
+        Predicted values.
+
+    Returns
+    -------
+    error : float
+        The signed error, in the variable's units.
+    """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float).ravel()
+    return float(_np.mean(y_pred - y_true))
+
+
+def crps(y_true, y_pred):
+    """
+    Continuous ranked probability score, from samples. Lower is better.
+
+    The proper score for a probabilistic prediction against a measured value:
+    it rewards putting probability near the truth and nothing else, so neither
+    hedging with wide intervals nor feigning precision can improve it. With a
+    single sample per location it reduces to the absolute error, which is the
+    scale to read it on. Estimated by the energy form
+    ``E|X - y| - E|X - X'| / 2``, the pairwise term taken from the sorted
+    samples in one pass.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples, n_predictions)
+        Candidate predictions (e.g. measurement samples).
+
+    Returns
+    -------
+    score : float
+        The average score, in the variable's units.
+    """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float)
+
+    m = y_pred.shape[1]
+    ordered = _np.sort(y_pred, axis=1)
+    position = 2 * _np.arange(1, m + 1) - m - 1
+    spread = (ordered * position).sum(axis=1) / m ** 2
+
+    error = _np.mean(_np.abs(y_pred - y_true[:, None]), axis=1)
+    return float(_np.mean(error - spread))
+
+
 def interval_score(y_true, y_pred, alpha=0.05):
     """
     Interval score, based on confidence intervals estimated from `y_pred`.
