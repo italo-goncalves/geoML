@@ -1,3 +1,15 @@
+## version 0.6.2
+* **The tests now run themselves.** A GitHub Actions workflow
+(`.github/workflows/tests.yml`) runs the structural test files -- the 600
+tests that train no real model, two and a half minutes locally -- on every
+push, and the full suite on release tags and on demand from the Actions
+tab, minus the one test that downloads from sidc.be (a release gate should
+not depend on a third-party server being up). Every run starts from a
+machine with nothing on it, so `pip install -e .` is re-proved from
+`pyproject.toml` alone each time, and a pyvista or TensorFlow release that
+breaks something turns a commit red before any user hits it. A new test
+file runs on every push until it earns its way onto the heavy list.
+
 ## version 0.6.1
 * **Everything below the topography, in one call.** Three pieces, built
 for the grade-shells-under-the-DTM workflow. A sheet can now be cut by a

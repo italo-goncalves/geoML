@@ -1,0 +1,68 @@
+# Two tiers: the structural test files on every push, the full suite on
+# release tags (and on demand, from the Actions tab). The files ignored by
+# the structural job are the ones that train real models or sweep whole
+# figure sets; a new test file runs on every push until it earns its way
+# onto that list. The sunspot test is deselected even from the full suite
+# because it downloads from sidc.be -- a release gate should not depend on
+# a third-party server being up.
+
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  structural:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: VTK system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
+      - name: Install the package
+        run: pip install -e . pytest
+      - name: Structural tests
+        run: >-
+          python -m pytest -q geoml/test
+          --ignore=geoml/test/test_real_cases.py
+          --ignore=geoml/test/test_vgp.py
+          --ignore=geoml/test/test_experts.py
+          --ignore=geoml/test/test_qmc.py
+          --ignore=geoml/test/test_mixture.py
+          --ignore=geoml/test/test_model_persistence.py
+          --ignore=geoml/test/test_noise_integration.py
+          --ignore=geoml/test/test_plots.py
+          --ignore=geoml/test/test_interactive.py
+          --ignore=geoml/test/test_block_prediction.py
+
+  full:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: VTK system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
+      - name: Install the package
+        run: pip install -e . pytest
+      - name: Full suite
+        run: >-
+          python -m pytest -q geoml/test
+          --deselect geoml/test/test_real_cases.py::test_sunspot_deep_model
