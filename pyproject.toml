@@ -26,6 +26,7 @@ dependencies = [
     "matplotlib",
     "plotly",
     "ezdxf",
+    "openpyxl",
 ]
 
 [project.urls]
