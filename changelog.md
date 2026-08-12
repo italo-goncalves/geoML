@@ -1,4 +1,17 @@
 ## version 0.6.2
+* **Float64 earned its keep.** The mixed-precision idea — kernel
+arithmetic in float32, Choleskys kept in float64 — was measured on the
+Walker VGP and rejected, with the trail in `docs/mixed-precision.md`.
+The gradients do flow through the casts (median deviation 2.6%, loss
+identical to 8 digits at the same parameters), but the scheme needs
+local coordinates as a matter of arithmetic (covariance errors of 1e-2
+at UTM scale against 6e-7 in a local frame), needs the jitter raised to
+1e-5 to survive training (1e-9 dies at once, 1e-6 halfway) -- and that
+jitter moves the model sixteen times further than float32 itself does.
+For all that it buys 1.1-1.2x end to end and nothing on top of XLA,
+which already removed the memory traffic float32 would have halved. The
+one real speed lever for prediction remains `jit_predict`: exact, 3-5x,
+already shipped.
 * **The tests now run themselves.** A GitHub Actions workflow
 (`.github/workflows/tests.yml`) runs the structural test files -- the 600
 tests that train no real model, two and a half minutes locally -- on every
