@@ -1,4 +1,39 @@
 ## version 0.6.2
+* **A variable can be derived from others, realization by realization.**
+`container.derive(names, function, arguments)` builds `DerivedVariable`s --
+the middle ground between metadata (a constant the models never see) and a
+modelled variable: full simulations and everything built on them, with all
+of the uncertainty inherited. The function is applied once per realization
+-- which is what keeps a nonlinear one honest, `f(E[grades])` not being
+`E[f(grades)]` -- and the prediction column is the mean of the derived
+realizations. One derived variable per output name; metadata paths
+(`"_metadata/density"`) come in as per-location constants; a variable
+without simulations is refused, everything being realization-wise; and a
+function that accepts a `simulation=` keyword receives the realization's
+index, which is how a per-realization price scenario knows which draw it
+is in. The walk is banded, so a block model's stores are never held whole
+(pinned by the same tripwire as everywhere else). Being a
+`ContinuousVariable` underneath, cut-offs, quantiles, contours,
+grade-tonnage curves, subsetting and the Zarr round trip all come free --
+the recipe itself is not persisted (a function does not survive a store
+honestly): a reloaded derived variable is data, and rerunning the script
+that derived it is the refresh. Models refuse it by name at every door
+(`training_input`, `get_measurements`, `update`).
+* **One realization at a time, guaranteed.** A block model's simulations
+are hundreds of gigabytes, and the workflows coming (a random NSR per
+realization, and anything else that walks the realizations sequentially)
+need one of them without paying for all of them. `variable.simulation(i)`
+already read a single column out of the store; it is now *pinned* to stay
+that way -- the same tripwire that guards subsetting fails any read of a
+whole `(n_data, n_sim)` store -- and its docstring carries the cost
+model: only one column is ever in memory, but the store is chunked by
+location, so a column read visits every chunk and walking all
+realizations costs one pass per realization; anything that decomposes
+over locations should read row bands instead. `compute_metrics`, the
+last consumer that materialized the store (to keep only its measured
+rows), now indexes those rows out of the chunks the way subsetting has
+since 0.5.9, and the `get_simulations` methods say in-source that they
+are the materializers, for data that fits.
 * **One seed to rule them all.** `geoml.set_seed` was already what made
 the initial parameters reproducible; now it is the only knob. A model's
 options draw their `seed` -- the number training's Monte Carlo and the

@@ -19,6 +19,7 @@ The point-based containers: `_SpatialData` (what every container is),
 `Section3D`, with the batching contract the models read.
 """
 import copy as _copy
+import inspect as _inspect
 import json as _json
 
 import numpy as _np
@@ -188,6 +189,117 @@ class _SpatialData(_TreeNode):
                 f"there is no metadata column named {name}; "
                 f"found {list(self.metadata.keys())}")
         return self.metadata[name].to_numpy()
+
+    def derive(self, names, function, arguments):
+        """
+        Computes new variables from existing ones, realization by realization.
+
+        The function is applied once per realization: for realization `j` it
+        receives realization `j` of every simulated argument (metadata
+        arguments come in whole, being constant), and its outputs become
+        realization `j` of the new variables. Summarizing *after* applying
+        the function is what keeps a nonlinear one honest -- the prediction
+        column is the mean of the derived realizations, not the function of
+        the parents' predictions. If the function accepts a keyword named
+        ``simulation``, it also receives the realization's index, which is
+        how anything drawn per realization -- a price scenario, say -- knows
+        which draw to use.
+
+        The stores are read and written a band of locations at a time, so a
+        block model's simulations are never held whole. Deriving a name that
+        already exists replaces it: the recipe lives in the calling script,
+        and running it again is the refresh.
+
+        Parameters
+        ----------
+        names : str or list of str
+            Name(s) of the variable(s) to create. The function must return
+            one array per name (a tuple where there are several).
+        function
+            Called as ``function(*columns)``, each column an array over the
+            locations; must return array(s) of the same length.
+        arguments : list of str
+            Paths of the inputs, resolved by `get`. Every variable named must
+            carry simulations, all with the same count -- `derive` is
+            realization-wise, and a variable without realizations has no
+            place in it. A per-location constant comes in as metadata:
+            ``"_metadata/density"``.
+
+        Returns
+        -------
+        DerivedVariable, or a list of them matching `names`.
+        """
+        single = isinstance(names, str)
+        names = [names] if single else list(names)
+
+        columns = []
+        n_sim = None
+        for path in arguments:
+            parts = VariablePath(path).parts
+            if parts[:1] == (METADATA_ROOT,):
+                columns.append(
+                    ("constant", _np.asarray(self.get_metadata(parts[1]))))
+                continue
+            node = self.get(path)
+            store = getattr(node, "simulations", None)
+            if store is None:
+                raise ValueError(
+                    "%r has no simulations; `derive` is realization-wise, "
+                    "so every variable argument needs them (a per-location "
+                    "constant can come in as '_metadata/<name>')" % str(path))
+            if n_sim is None:
+                reference, n_sim = store, int(store.shape[1])
+            elif int(store.shape[1]) != n_sim:
+                raise ValueError(
+                    "%r carries %d realizations where %r carries %d; "
+                    "`derive` walks them in step"
+                    % (str(path), int(store.shape[1]),
+                       str(arguments[0]), n_sim))
+            columns.append(("simulated", store))
+        if n_sim is None:
+            raise ValueError(
+                "every argument is metadata; at least one simulated "
+                "variable is needed to walk")
+
+        wants_index = "simulation" in _inspect.signature(function).parameters
+
+        new_vars = []
+        for name in names:
+            variable = DerivedVariable(
+                name, self, parents=[str(p) for p in arguments])
+            variable.allocate_simulations(n_sim)
+            self.variables[name] = variable
+            new_vars.append(variable)
+
+        for band in reference.row_bands():
+            loaded = [data[band] if kind == "constant"
+                      else _np.asarray(data[band])
+                      for kind, data in columns]
+            n_rows = int(band.stop - band.start)
+            out = [_np.empty((n_rows, n_sim)) for _ in names]
+            for j in range(n_sim):
+                args = [c[:, j] if kind == "simulated" else c
+                        for (kind, _), c in zip(columns, loaded)]
+                kwargs = {"simulation": j} if wants_index else {}
+                result = function(*args, **kwargs)
+                if not isinstance(result, (tuple, list)):
+                    result = (result,)
+                if len(result) != len(names):
+                    raise ValueError(
+                        "the function returned %d output(s) for %d name(s)"
+                        % (len(result), len(names)))
+                for target, values in zip(out, result):
+                    values = _np.asarray(values, dtype=float).reshape(-1)
+                    if len(values) != n_rows:
+                        raise ValueError(
+                            "the function returned %d values for a band of "
+                            "%d locations" % (len(values), n_rows))
+                    target[:, j] = values
+            for variable, block in zip(new_vars, out):
+                variable.simulations[band, :] = block
+                variable.prediction.values[band] = block.mean(axis=1)
+
+        return new_vars[0] if single else new_vars
 
     def drop(self, names):
         """
