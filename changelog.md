@@ -1,3 +1,133 @@
+## version 0.6.1
+* **Everything below the topography, in one call.** Three pieces, built
+for the grade-shells-under-the-DTM workflow. A sheet can now be cut by a
+terrain: it has no inside, but a single-valued sheet has an *underneath*,
+so `surface.intersection(topo)` keeps the piece lying under it (and
+`difference` the piece above), through the same extruded ground a body is
+cut with -- a folded sheet still refuses, `"below"` not being one region.
+`BlockSet3D.get_contour` gained `close=` -- `"above"`/`"below"`/`True`,
+the grid's own argument -- closing a shell that runs out of the model
+against its box: a shell of ghost cells mirrors the boundary blocks, each
+its partner's exact size so the cap cannot tear at the box face, and the
+boundary cells the cap covers join the fine-cutting like any other piece
+of the surface (the first attempt left the cap tearing between
+mismatched ghost sizes exactly as the method's own docstring predicts for
+hanging nodes; cutting the cap's cells is the same cure the interior
+always had). And `topo.clip_meshes([...])` is the batch form: one ground
+body extruded once serves every cut, bodies coming back closed bodies,
+sheets coming back sheets, in input order.
+* **The console belongs to the user again.** A boolean the exact engine is
+*allowed* to fail -- falling back is the design -- no longer prints VTK's
+wall of red on the way: the error catcher keeps the messages off the
+Python log (`send_to_logging=False`) and the VTK logger is held off
+stderr for the attempt, restored after. What remains is the one honest
+`UserWarning` naming the implicit grid's step. And importing geoml sets
+`TF_CPP_MIN_LOG_LEVEL=1` (via `setdefault`, so a user's own choice wins
+and `0` brings everything back), which silences TensorFlow's C++ INFO
+wall -- oneDNN notices, XLA compilation, ptxas register spills -- from
+about twenty-five lines at import and first prediction down to two: the
+absl preamble, and the one line saying which GPU came up with how much
+memory, which is the line worth keeping.
+* **A mesh can be simplified to an error budget, and smoothed with its
+eyes open.** `Mesh3D.simplify(max_error)` decimates to the fewest
+triangles a *geometric* budget allows -- how far, in the mesh's own units,
+the simplified surface may sit from the original -- so the same call means
+the same thing on a coarse shell and a fine one, which a fraction of
+triangles would not. The budget is enforced by measurement: vtkDecimatePro
+carries the only error-bounded decimator and its own metric was measured
+running 7x loose at tight budgets, so the simplified faces are probed
+against the original and the internal bound tightened until the promise
+holds. Measured on a contoured shell (unit steps): budget 0.02 gives 1.2x
+fewer triangles at true deviation 0.017, budget 0.5 gives 9x at 0.306,
+budget 2 gives 13x at 0.404 -- closed at every level, the caller's kind
+kept, the kind's own invariants refusing a reduction that breaks its
+promise. `get_contour(..., simplify=budget)` applies it on the way out, on
+grids and block sets both. `Mesh3D.smooth(iterations, pass_band)` is
+Taubin's non-shrinking filter (0.04% volume drift measured), priced
+honestly in its docstring: on a block-model contour it was measured to
+take a sixth of the faceting and move the surface 50% further from the
+true level set, which is why no contour smooths itself and `supersample`
+remains the accuracy-preserving route. `simplify` scales: a mesh past
+100k triangles takes a fast quadric pre-pass first -- verified against
+the original like every other step and given half the budget, so the
+error contract stays global -- and the error-bounded decimator then works
+a fraction of the triangles; the distance function behind the
+measurements is built once per call rather than per loop pass. Measured
+on an 835k-triangle shell: 17 s to 7 s, with the pre-pass leaving
+better-conditioned input and the output smaller at the same budget (4.8k
+against 7.8k triangles). Decimation can also leave a few triangles wound
+against their neighbours -- reported from a real model as an
+`InconsistentMeshError` at the rebuild -- and winding is bookkeeping, not
+shape: on that error alone the triangles are made to agree and face
+outward, as `heal()` would, and the build is retried once. A mesh failing
+for any other reason (a solid opened, a terrain folded) still refuses,
+since closing a hole or unfolding a sheet would be inventing geometry.
+* **The booleans gained a second engine, and the failing cases now come
+back right.** Found while measuring: VTK's exact filter produces
+structurally wrong *output* on contour-derived meshes -- a contoured shell
+against a box came back with 21 open and 305 reversed edges, and the
+damage is not a repairable seam: not T-junctions (measured directly -- no
+vertex rests on any broken edge), not coincidence (an offset cut fails the
+same), not slivers (simplified inputs fail the same); the filter drops or
+fabricates entire patches, beyond `heal` at any hole size and welding at
+any tolerance. So wherever the exact engine fails -- errors alongside
+output, a product failing the `Solid3D` invariants, or an empty answer
+when the vertex-sides test says the surfaces genuinely cross --
+`_implicit_combine` answers instead: each body's signed distance sampled
+on a ~2M-cell grid over the region the answer can occupy, `max`/`min`/
+`max(a,-b)` for intersection/union/difference, and the zero surface
+contoured back. There is no seam geometry to walk, which is what makes it
+robust; the price is honest (exact to the grid's step) and said out loud
+in a `UserWarning` naming the step. The previously failing shell-vs-box
+cut now returns a closed body within 0.11% of a Monte-Carlo reference.
+The fields are evaluated in a *band*: a distance field is 1-Lipschitz, so
+a coarse pre-pass (one sample per 4x4x4 fine cells) proves which fine
+points can hold no zero crossing and settles their signs without a query
+-- exact values survive everywhere they can matter, measured at perfect
+sign agreement and zero in-band error. Each body's band is further masked
+by the other's coarse field, so a small shell against a whole topography
+resolves the topography around the shell alone. Measured on a 21k-triangle
+shell cut by a 29k-triangle terrain: the distance sweeps went from 68 s to
+under 4 s, the whole intersection from 72 s to 8 s, bit-identical output.
+A simplified-proxy variant (evaluating against decimated inputs) measured
+2.5x more on top and was rejected: it trades the answer's exactness at
+grid resolution for speed the banding already found.
+`get_contour`'s own output was never the defect -- everything it returns
+passes the closed/consistent invariants at construction.
+* **`BlockSet3D.get_contour` takes the tree path.** The pair of string
+arguments (`variable`, `attribute="prediction"`) collapsed into the one
+address the container already understands: `get_contour("metals/zn", 1.5)`
+contours the component's prediction, `get_contour("g/average_sim", 1.5)`
+names another column outright, and a bare `get_contour("zn", 1.5)` stays as
+sugar over the same tree — resolved by a `select("**/zn")` search, and
+refused with the candidates listed when the name sits in more than one
+place. The `attribute=` keyword is gone (breaking; the path carries it).
+Underneath, the pyvista label is looked up in the `geoml_paths` table the
+export itself writes rather than reconstructed from name and role — the
+last constructed-label reader in the package, which is what used to break
+whenever a label's spelling changed. Errors ride the tree too: a wrong
+path reports from as deep as it reached, and a composition still says
+"made of components; name one of ...".
+* **The mesh booleans survive mine-grid coordinates, and a failed boolean is
+refused rather than guessed at.** Reported on a real case: `intersection` on
+a solid with a DTM logged VTK errors ("No cell with correct orientation
+found") and handed the solid back unchanged. Two defects compounded. VTK's
+intersection filter works to absolute tolerances, so at UTM-scale
+coordinates (~1e6) it fails on geometry that cuts cleanly at the origin —
+the booleans and the sheet clip now run in a local frame (both meshes
+translated by their shared box corner, rounded so the shift costs nothing,
+and translated back). And a failed boolean answers with an empty mesh,
+exactly what two non-crossing bodies answer — with VTK logging errors in
+the legitimate cases too, so the errors cannot arbitrate. The vertices can:
+a surface crossing another has vertices on both sides of it, so the
+containment fallback now tests every vertex (it read one), returns the
+nested/disjoint answers as before when each body lies wholly on one side,
+and hands mixed sides — the case that used to come back as a wrong body
+with no remark — to the implicit engine above. Regression tests cut
+the same irregular terrain at the origin and at (500 000, 7 000 000):
+volumes agree to VTK's own cut-line noise (~2e-6), where the old code came
+back empty or unclosed.
+
 ## version 0.6.0
 * **The package has a shape.** What was twenty-two flat modules is now five
 subpackages and the flat survivors. `geoml/data/` holds the 7,200-line

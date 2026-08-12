@@ -873,6 +873,23 @@ def _selected_simulations(store, selection):
     return list(zip(index, values.T))
 
 
+def _closing_value(close, values):
+    """The value the outside reads as, for a contour asked to close.
+
+    `"above"` (or True) keeps the region where the values exceed the level
+    -- a grade shell -- so everything beyond the data must read below it;
+    `"below"` the reverse. One spelling of the argument for the grid path,
+    which pads its cube, and the block path, which mirrors ghost cells.
+    """
+    kept = "above" if close is True else close
+    if kept not in ("above", "below"):
+        raise ValueError(
+            "close takes 'above', 'below' or True (meaning 'above'); "
+            "got %r" % close)
+    return (_np.nanmin(values) - 1 if kept == "above"
+            else _np.nanmax(values) + 1)
+
+
 def _code_dtype(n_labels):
     """Smallest integer type holding `n_labels` codes and the missing one.
 
@@ -1130,7 +1147,7 @@ class _Attribute(object):
         else:
             raise NotGriddedDataError("method only available for gridded data")
 
-    def get_contour(self, value, sigma=None, close=False):
+    def get_contour(self, value, sigma=None, close=False, simplify=None):
         """
         Isosurface extraction.
 
@@ -1150,6 +1167,11 @@ class _Attribute(object):
             the side. `"above"` (or `True`) keeps the region where the values
             exceed `value` — a grade shell — and `"below"` the region under
             it. False leaves the surface open at the boundary.
+        simplify : float, optional
+            A geometric error budget, in coordinate units: the contour is
+            simplified until pushing further would move the surface more
+            than this (see `Mesh3D.simplify`). None returns the full
+            triangulation.
 
         Returns
         -------
@@ -1165,14 +1187,8 @@ class _Attribute(object):
             # cube ending before the surface does. One cell of "well outside"
             # all the way round gives it somewhere to close, and costs one
             # cell of offset, the padded cube starting a step earlier.
-            kept = "above" if close is True else close
-            if kept not in ("above", "below"):
-                raise ValueError(
-                    "close takes 'above', 'below' or True (meaning 'above'); "
-                    "got %r" % close)
-            beyond = (_np.nanmin(cube) - 1 if kept == "above"
-                      else _np.nanmax(cube) + 1)
-            cube = _np.pad(cube, 1, constant_values=beyond)
+            cube = _np.pad(cube, 1,
+                           constant_values=_closing_value(close, cube))
 
         verts, faces, normals, values = _measure.marching_cubes(
             cube, value, gradient_direction="ascent",
@@ -1191,7 +1207,10 @@ class _Attribute(object):
         # a contour that closes inside the grid is a body; one the grid cuts
         # off is a sheet, and `mesh3d` is what tells them apart
         from geoml.data import mesh3d
-        return mesh3d(verts, faces, normals)
+        surface = mesh3d(verts, faces, normals)
+        if simplify is not None:
+            surface = surface.simplify(simplify)
+        return surface
 
     def export_contour(self, value, filename, triangles=True,
                        offset=None, sigma=None):

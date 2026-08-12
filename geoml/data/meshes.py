@@ -21,9 +21,12 @@ the DXF round trip, and the adapters every container's assignments read
 itself is `geoml.math.geometry`; what lives here is what touches a
 container or holds an error message.
 """
+import warnings as _warnings
+
 import numpy as _np
 import pandas as _pd
 import pyvista as _pv
+import vtk as _vtk
 import ezdxf as _ezdxf
 from ezdxf.render import MeshVertexMerger as _MeshVertexMerger
 
@@ -277,6 +280,143 @@ class Mesh3D(_PointBased):
         return mesh3d(points, triangles,
                       _gmt.vertex_normals(points, triangles))
 
+    def simplify(self, max_error):
+        """
+        The same shape on as few triangles as the error budget allows.
+
+        Built for what `get_contour` returns: a contoured surface carries a
+        triangle for every block corner it crosses, most of them slivers
+        saying nothing the budget would miss. The argument is geometric --
+        how far, in the mesh's own units, the simplified surface may sit
+        from the original -- so the same call means the same thing on a
+        coarse shell and a fine one, which a fraction of triangles does not.
+
+        The caller's kind is kept: a body stays a body, a terrain a terrain.
+        If the reduction breaks the kind's own promise -- a solid opened, a
+        terrain folded over -- the constructor refuses as it always does;
+        allow less error and try again.
+
+        Parameters
+        ----------
+        max_error : float
+            The largest distance the simplified surface may sit from the
+            original, in the mesh's own units. Enforced by measurement: the
+            simplified faces are probed against the original surface, and
+            the decimation tightened until the promise holds.
+
+        Returns
+        -------
+        mesh : the same class as this one.
+        """
+        max_error = float(max_error)
+        if max_error <= 0:
+            raise ValueError(
+                "max_error is a distance in the mesh's own units and must "
+                "be positive; got %g" % max_error)
+        if self.n_data == 0:
+            return self
+
+        box = self.bounding_box
+        diagonal = float(_np.linalg.norm(
+            _np.ravel(box.max) - _np.ravel(box.min)))
+        original = self._polydata()
+
+        # one distance function for every measurement in the loop: the
+        # locator over the original is the expensive part of a probe
+        measure = _vtk.vtkImplicitPolyDataDistance()
+        measure.SetInput(original)
+
+        def deviation_of(mesh):
+            # probed on the simplified faces -- centroids and edge midpoints;
+            # the surviving vertices lie on the original by construction and
+            # would measure nothing
+            pts = _np.asarray(mesh.points, dtype=float)
+            tri = mesh.faces.reshape(-1, 4)[:, 1:]
+            probes = _np.concatenate([
+                pts[tri].mean(axis=1),
+                (pts[tri[:, 0]] + pts[tri[:, 1]]) / 2,
+                (pts[tri[:, 1]] + pts[tri[:, 2]]) / 2,
+                (pts[tri[:, 2]] + pts[tri[:, 0]]) / 2])
+            cloud = _pv.PolyData(_np.ascontiguousarray(probes))
+            out = _vtk.vtkDoubleArray()
+            measure.FunctionValue(cloud.GetPoints().GetData(), out)
+            return float(_np.abs(_pv.convert_array(out)).max())
+
+        # A large mesh takes a fast quadric pre-pass first, so the
+        # error-bounded decimator works a fraction of the triangles: on an
+        # 835k-triangle shell this is most of a 4x speedup. The pre-pass is
+        # verified against the original like everything else, and given half
+        # the budget; where it overspends, the mesh is taken as it came.
+        working = original
+        n_triangles = original.n_cells
+        if n_triangles > 100_000:
+            rough = original.decimate(1.0 - 50_000.0 / n_triangles,
+                                      volume_preservation=True)
+            rough = rough.clean().triangulate()
+            if deviation_of(rough) <= 0.5 * max_error:
+                working = rough
+
+        def cut_at(bound):
+            # vtkDecimatePro is the one decimator that takes an error bound,
+            # as a fraction of the bounding-box diagonal; preserving topology
+            # is what keeps a closed body closed, and the error accumulates
+            # against its input rather than being re-granted per collapse
+            decimate = _vtk.vtkDecimatePro()
+            decimate.SetInputData(working)
+            decimate.SetTargetReduction(1.0)
+            decimate.SetMaximumError(bound / diagonal)
+            decimate.AccumulateErrorOn()
+            decimate.PreserveTopologyOn()
+            decimate.BoundaryVertexDeletionOff()
+            decimate.Update()
+            return _pv.wrap(decimate.GetOutput()).clean().triangulate()
+
+        # the decimator's own error metric runs loose at tight budgets
+        # (measured 7x over at 0.02 of a unit step on a contoured shell), so
+        # the true deviation -- always against the original, whatever the
+        # pre-pass did -- is measured and the internal bound tightened until
+        # the promise holds
+        bound = max_error
+        for _ in range(4):
+            mesh = cut_at(bound)
+            deviation = deviation_of(mesh)
+            if deviation <= max_error:
+                break
+            bound *= 0.5 * max_error / deviation
+
+        return _rebuilt_as(type(self), mesh)
+
+    def smooth(self, iterations=20, pass_band=0.1):
+        """
+        A smoothed copy, by Taubin's non-shrinking filter.
+
+        Cosmetic, and priced honestly: applied to a block-model contour this
+        was measured to take away a sixth of the faceting while moving the
+        surface 50% further from the true level set -- the creases go, and
+        accuracy goes with them, which is why no contour smooths itself. For
+        a surface that is both rounder and *closer* to the truth, contour
+        with `supersample` instead; smooth when the look of the mesh is what
+        matters.
+
+        The caller's kind is kept, as in `simplify`.
+
+        Parameters
+        ----------
+        iterations : int
+            Passes of the filter; more is smoother.
+        pass_band : float
+            The filter's pass band, in (0, 2): lower smooths more.
+
+        Returns
+        -------
+        mesh : the same class as this one.
+        """
+        if self.n_data == 0:
+            return self
+        mesh = self._polydata().smooth_taubin(
+            n_iter=int(iterations), pass_band=float(pass_band)).triangulate()
+        return _rebuilt_as(type(self), mesh)
+
     @classmethod
     def from_dxf(cls, filename):
         """
@@ -447,60 +587,121 @@ class Surface3D(Mesh3D):
                 "single elevation above a location; build a Solid3D, or "
                 "mesh3d(...) for whichever the geometry calls for")
 
-    def intersection(self, solid):
+    def intersection(self, other):
         """
-        The part of this sheet lying inside a body.
+        The part of this sheet lying inside a body, or under a terrain.
 
-        The sheet is cut where it crosses the body's surface, so what comes
-        back follows the body's shape rather than the triangles' — the piece
-        of a fault plane inside an ore envelope, say. A sheet lying wholly
-        outside comes back empty.
+        Against a body, the sheet is cut where it crosses the body's
+        surface, so what comes back follows the body's shape rather than
+        the triangles' — the piece of a fault plane inside an ore envelope,
+        say. Against a single-valued sheet — a topography — the cut is
+        against the ground below it, keeping what lies under. A sheet lying
+        wholly outside comes back empty.
 
         Parameters
         ----------
-        solid : Solid3D
-            The body to cut against.
+        other : Solid3D or Surface3D
+            The body to cut against, or the terrain whose underneath to
+            keep.
 
         Returns
         -------
         surface : Surface3D
         """
-        return self._clipped(solid, inside=True)
+        return self._clipped(other, inside=True)
 
-    def difference(self, solid):
+    def difference(self, other):
         """
-        The part of this sheet lying outside a body.
+        The part of this sheet lying outside a body, or over a terrain.
 
         The complement of `intersection`: together the two hold the whole
         sheet. A sheet lying wholly inside comes back empty.
 
         Parameters
         ----------
-        solid : Solid3D
-            The body to cut away.
+        other : Solid3D or Surface3D
+            The body to cut away, or the terrain whose underneath to cut
+            away.
 
         Returns
         -------
         surface : Surface3D
         """
-        return self._clipped(solid, inside=False)
+        return self._clipped(other, inside=False)
 
-    def _clipped(self, solid, inside):
+    def clip_meshes(self, meshes):
+        """
+        Everything below this sheet, each mesh cut to its own kind.
+
+        The batch form of cutting against a terrain: one ground body is
+        extruded under the sheet and serves every cut, where cutting one by
+        one would rebuild it per mesh. A body comes back a closed body (the
+        boolean engines see to it), a sheet comes back a sheet — a shell
+        that runs out of its model is open, and stays open here; contour it
+        with `close=` first if a body is what is wanted.
+
+        Parameters
+        ----------
+        meshes : sequence of Mesh3D
+            Bodies and sheets to cut below this one.
+
+        Returns
+        -------
+        list
+            One cut mesh per input, in the same order.
+        """
+        meshes = list(meshes)
+        if len(meshes) == 0:
+            return []
+        for mesh in meshes:
+            if not isinstance(mesh, (Solid3D, Surface3D)):
+                raise MeshTypeError(
+                    "clip_meshes cuts bodies and sheets; got %s"
+                    % type(mesh).__name__)
+            if mesh.n_data > 0:
+                _reaches_across(self, mesh.bounding_box)
+
+        full = [mesh for mesh in meshes if mesh.n_data > 0]
+        if len(full) == 0:
+            return meshes
+        low = _np.min([_np.ravel(m.bounding_box.min) for m in full], axis=0)
+        high = _np.max([_np.ravel(m.bounding_box.max) for m in full], axis=0)
+        ground = _ground_under(
+            self, BoundingBox.from_array(_np.stack([low, high])))
+
+        return [mesh._combine(ground, "intersection")
+                if isinstance(mesh, Solid3D)
+                else mesh._clipped(ground, inside=True)
+                for mesh in meshes]
+
+    def _clipped(self, other, inside):
         """The sheet cut by a body, keeping one side of it."""
-        if not isinstance(solid, Solid3D):
+        if isinstance(other, Solid3D):
+            solid = other
+        elif isinstance(other, Surface3D):
+            # a sheet has no inside, but a single-valued one has an
+            # underneath: the ground below it is the body to cut against,
+            # exactly as when it divides a Solid3D
+            if other.n_data == 0:
+                return self if inside is False else _empty_surface()
+            solid = _ground_under(other, self.bounding_box)
+        else:
             raise MeshTypeError(
-                "a sheet can only be cut by a Solid3D, a body being what has "
-                "an inside to cut against; got %s" % type(solid).__name__)
+                "a sheet can only be cut by a Solid3D, a body being what "
+                "has an inside to cut against, or by a single-valued sheet, "
+                "whose underneath is one; got %s" % type(other).__name__)
 
         if self.n_data == 0 or solid.n_data == 0:
             return self if inside is False else _empty_surface()
 
-        clipped = self._polydata().clip_surface(solid._polydata(),
-                                                invert=inside)
+        # the same local frame as the booleans, for the same numerics
+        shift = _local_frame(self, solid)
+        clipped = self._polydata().translate(-shift).clip_surface(
+            solid._polydata().translate(-shift), invert=inside)
         if clipped.n_points == 0 or clipped.n_cells == 0:
             return _empty_surface()
 
-        clipped = clipped.triangulate()
+        clipped = clipped.triangulate().translate(shift)
         points = _np.asarray(clipped.points, dtype=float)
         triangles = clipped.faces.reshape(-1, 4)[:, 1:]
         return Surface3D(points, triangles,
@@ -593,18 +794,55 @@ class Solid3D(Mesh3D):
                 "a Surface3D; got %s" % type(other).__name__)
 
         if self.n_data > 0 and other.n_data > 0:
-            combined = getattr(self._polydata(),
-                               "boolean_" + operation)(other._polydata())
+            # The boolean runs in a local frame: VTK's intersection filter
+            # works to absolute tolerances, and at mine-grid coordinates
+            # (~1e6) the precision left is too coarse -- measured to fail,
+            # empty or unclosed, on geometry that succeeds at the origin.
+            shift = _local_frame(self, other)
+            # The exact filter is allowed to fail here -- falling back is
+            # the design -- so a failure must not print a wall of errors:
+            # the catcher keeps VTK's messages off the Python log and the
+            # VTK logger is held off stderr for the attempt.
+            before = _vtk.vtkLogger.GetCurrentVerbosityCutoff()
+            _vtk.vtkLogger.SetStderrVerbosity(_vtk.vtkLogger.VERBOSITY_OFF)
+            try:
+                with _pv.VtkErrorCatcher(send_to_logging=False) as caught:
+                    combined = getattr(
+                        self._polydata().translate(-shift),
+                        "boolean_" + operation)(
+                            other._polydata().translate(-shift))
+            finally:
+                _vtk.vtkLogger.SetStderrVerbosity(before)
             if combined.n_points > 0:
-                points = _np.asarray(combined.points, dtype=float)
-                triangles = combined.triangulate().faces.reshape(-1, 4)[:, 1:]
-                return Solid3D(points, triangles,
-                               _gmt.vertex_normals(points, triangles))
+                if not caught.error_events:
+                    combined = combined.translate(shift)
+                    points = _np.asarray(combined.points, dtype=float)
+                    triangles = combined.triangulate() \
+                        .faces.reshape(-1, 4)[:, 1:]
+                    try:
+                        return Solid3D(points, triangles,
+                                       _gmt.vertex_normals(points, triangles))
+                    except ValueError:
+                        # the filter answered without complaint and still
+                        # left a broken shell -- measured to happen on
+                        # contour-derived meshes, whole patches dropped
+                        pass
+                # errored mid-way or produced debris either way: the exact
+                # engine has nothing more to give
+                return _implicit_combine(self, other, operation)
 
         return self._without_crossing(other, operation)
 
     def _without_crossing(self, other, operation):
-        """The answer where neither surface cuts the other."""
+        """The answer where neither surface cuts the other.
+
+        VTK answers an empty mesh both when that is true (bodies apart, or
+        one inside the other) and when the boolean simply failed -- logging
+        errors in every case, so the errors cannot tell the two apart. The
+        vertices can: a surface crossing another has vertices on both sides
+        of it. Mixed sides mean the empty answer was a failure, and the
+        implicit engine answers instead of a guess.
+        """
         here, there = _empty_solid(), _empty_solid()
         if self.n_data > 0:
             here = self
@@ -613,10 +851,18 @@ class Solid3D(Mesh3D):
 
         mine_inside = theirs_inside = False
         if here.n_data > 0 and there.n_data > 0:
-            mine_inside = bool(_gmt.inside_solid(
-                there._polydata(), _np.asarray(here.coordinates)[:1])[0])
-            theirs_inside = bool(_gmt.inside_solid(
-                here._polydata(), _np.asarray(there.coordinates)[:1])[0])
+            shift = _local_frame(here, there)
+            mine = _gmt.inside_solid(
+                there._polydata().translate(-shift),
+                _np.asarray(here.coordinates) - shift)
+            theirs = _gmt.inside_solid(
+                here._polydata().translate(-shift),
+                _np.asarray(there.coordinates) - shift)
+            if (mine.any() and not mine.all()) \
+                    or (theirs.any() and not theirs.all()):
+                return _implicit_combine(here, there, operation)
+            mine_inside = bool(mine.all())
+            theirs_inside = bool(theirs.all())
 
         if operation == "union":
             if mine_inside:
@@ -664,27 +910,204 @@ class Solid3D(Mesh3D):
         if self.n_data == 0:
             return _empty_solid()
 
-        if not _gmt.single_valued(sheet.coordinates, sheet.triangles):
-            raise NotSingleValuedError(
-                "this sheet folds over, so 'below' and 'above' it are not "
-                "one region each and a body cannot be divided by it; a DTM3D "
-                "is the kind of surface this works with")
+        return self._combine(
+            _ground_under(sheet, self.bounding_box), operation)
 
-        here = self.bounding_box
-        there = sheet.bounding_box
-        low, high = _np.ravel(here.min), _np.ravel(here.max)
-        sheet_low, sheet_high = _np.ravel(there.min), _np.ravel(there.max)
-        if _np.any(sheet_low[:2] > low[:2]) \
-                or _np.any(sheet_high[:2] < high[:2]):
-            raise MeshTypeError(
-                "the sheet does not reach across the whole body -- it spans "
-                "x %g to %g and y %g to %g, against the body's x %g to %g "
-                "and y %g to %g -- so it would cut at its own edge and leave "
-                "a face that means nothing; extend it, or trim the body first"
-                % (sheet_low[0], sheet_high[0], sheet_low[1], sheet_high[1],
-                   low[0], high[0], low[1], high[1]))
 
-        return self._combine(_ground_below(sheet, here), operation)
+def _rebuilt_as(cls, mesh):
+    """A pyvista mesh back as `cls`, the winding repaired if it must be.
+
+    Decimation can leave a few triangles wound against their neighbours,
+    which the constructor rightly refuses. That artifact is repairable
+    without touching the geometry -- winding is bookkeeping, not shape --
+    so on an inconsistency the triangles are made to agree and face
+    outward, as `heal()` would, and the build is tried once more. A mesh
+    that fails for any other reason (a solid opened, a terrain folded)
+    fails the second time too, and that error stands: closing a hole or
+    unfolding a sheet would be inventing geometry.
+    """
+    points = _np.asarray(mesh.points, dtype=float)
+    triangles = mesh.faces.reshape(-1, 4)[:, 1:]
+    try:
+        return cls(points, triangles,
+                   _gmt.vertex_normals(points, triangles))
+    except InconsistentMeshError:
+        repaired = mesh.compute_normals(
+            consistent_normals=True, auto_orient_normals=True).triangulate()
+        points = _np.asarray(repaired.points, dtype=float)
+        triangles = repaired.faces.reshape(-1, 4)[:, 1:]
+        return cls(points, triangles,
+                   _gmt.vertex_normals(points, triangles))
+
+
+# the cell budget of the implicit fallback: the step is chosen so the grid
+# stays near this many cells whatever the bodies span
+_IMPLICIT_CELLS = 2_000_000
+
+# how many fine steps a coarse cell spans in the Lipschitz pre-pass
+_IMPLICIT_COARSE = 4
+
+
+def _signed_distance(body, points):
+    """Each point's signed distance to the body, negative inside."""
+    cloud = _pv.PolyData(_np.ascontiguousarray(points))
+    return _np.asarray(cloud.compute_implicit_distance(
+        body._polydata())["implicit_distance"], dtype=float)
+
+
+def _banded_distance(body, points, shape, low, step, relevant):
+    """The signed field, exact wherever `relevant` allows a zero crossing.
+
+    A distance field is 1-Lipschitz, so a coarse sample bounds every fine
+    value near it: where the nearest coarse value stands further from zero
+    than the anchor distance plus a cell's diagonal, the fine sign is
+    settled without a query. The exact queries collapse to a band around
+    the body's surface -- measured at 29% of the lattice on a contoured
+    shell, for 12x the speed at zero error, since inside the band the
+    values are the same queries they always were. `relevant` narrows the
+    band further to where the *combined* field can cross at all, which is
+    what spares a vast terrain's field being resolved far from a small
+    body.
+    """
+    k = _IMPLICIT_COARSE
+    axes = [low[i] + k * step * _np.arange(shape[i] // k + 2)
+            for i in range(3)]
+    gz, gy, gx = _np.meshgrid(axes[2], axes[1], axes[0], indexing="ij")
+    coarse = _signed_distance(body, _np.column_stack(
+        [gx.ravel(), gy.ravel(), gz.ravel()]))
+
+    index = [_np.clip(_np.round((points[:, i] - low[i]) / (k * step))
+                      .astype(int), 0, len(axes[i]) - 1) for i in range(3)]
+    field = coarse.reshape(len(axes[2]), len(axes[1]), len(axes[0]))[
+        index[2], index[1], index[0]]
+
+    reach = _implicit_reach(step)
+    band = (_np.abs(field) <= reach) & relevant
+    if band.any():
+        field = field.copy()
+        field[band] = _signed_distance(body, points[band])
+    return field
+
+
+def _implicit_reach(step):
+    """How far from zero an anchored coarse value may sit and still leave a
+    fine crossing possible: the anchor offset plus two cell diagonals."""
+    return (_IMPLICIT_COARSE / 2.0 + 2.0) * _np.sqrt(3.0) * step
+
+
+def _implicit_combine(here, there, operation):
+    """The boolean as signed fields on a grid, contoured back to a body.
+
+    The engine of last resort, for the meshes VTK's exact filter fails on
+    (measured on contour-derived shells: whole patches dropped or
+    fabricated, unrepairable after the fact). Each body becomes its signed
+    distance sampled on a grid over the region the answer can occupy;
+    `max` of the fields is the intersection, `min` the union, `max(a, -b)`
+    the difference; the zero surface of the combined field is the answer.
+    There is no seam geometry to walk, which is what makes it robust, and
+    the price is honest: the surface is exact to the grid's step rather
+    than to the inputs' triangles.
+
+    The fields are evaluated in a band (see `_banded_distance`), and each
+    body's band is masked by the other's coarse field, so that neither is
+    resolved where the other has already decided the outcome -- a small
+    shell against a whole topography queries the topography around the
+    shell alone.
+    """
+    # imported late: the grids subclass the containers meshes sit beside
+    from geoml.data import Grid3D
+
+    a_low, a_high = (_np.ravel(here.bounding_box.min),
+                     _np.ravel(here.bounding_box.max))
+    b_low, b_high = (_np.ravel(there.bounding_box.min),
+                     _np.ravel(there.bounding_box.max))
+    if operation == "intersection":
+        low, high = _np.maximum(a_low, b_low), _np.minimum(a_high, b_high)
+        if _np.any(high <= low):
+            return _empty_solid()
+    elif operation == "union":
+        low, high = _np.minimum(a_low, b_low), _np.maximum(a_high, b_high)
+    else:
+        low, high = a_low, a_high
+
+    span = high - low
+    step = float((span.prod() / _IMPLICIT_CELLS) ** (1.0 / 3.0))
+    _warnings.warn(
+        "VTK could not work the %s of these meshes out exactly; answering "
+        "on an implicit grid instead, exact to its step of %.3g"
+        % (operation, step))
+
+    # two cells of margin, so the zero surface closes inside the grid
+    low = low - 2 * step
+    n = _np.ceil((span + 4 * step) / step).astype(int) + 1
+    grid = Grid3D(start=low, n=n, step=[step, step, step])
+    points = _np.asarray(grid.coordinates, dtype=float)
+
+    # each body is only exact where the other leaves the outcome open; the
+    # first pass has no other field to ask, so it answers everywhere
+    reach = _implicit_reach(step)
+    everywhere = _np.ones(len(points), dtype=bool)
+    field_a = _banded_distance(here, points, n, low, step, everywhere)
+    if operation == "intersection":
+        field_b = _banded_distance(there, points, n, low, step,
+                                   field_a <= reach)
+        field = _np.maximum(field_a, field_b)
+    elif operation == "union":
+        field_b = _banded_distance(there, points, n, low, step,
+                                   field_a >= -reach)
+        field = _np.minimum(field_a, field_b)
+    else:
+        field_b = _banded_distance(there, points, n, low, step,
+                                   field_a <= reach)
+        field = _np.maximum(field_a, -field_b)
+
+    grid.add_continuous_variable("distance", field)
+    if _np.all(field > 0):
+        return _empty_solid()
+    return grid.variables["distance"].measurements.get_contour(0.0)
+
+
+def _local_frame(mine, theirs):
+    """The corner both meshes are translated by before VTK sees them.
+
+    Rounded so the shift itself costs no precision on the way back.
+    """
+    corner = _np.minimum(_np.ravel(mine.bounding_box.min),
+                         _np.ravel(theirs.bounding_box.min))
+    return _np.round(corner)
+
+
+def _reaches_across(sheet, box):
+    """Refuses a sheet whose footprint does not span `box`.
+
+    A sheet cutting a region it does not cover would cut at its own edge
+    and leave a face that means nothing.
+    """
+    low, high = _np.ravel(box.min), _np.ravel(box.max)
+    there = sheet.bounding_box
+    sheet_low, sheet_high = _np.ravel(there.min), _np.ravel(there.max)
+    if _np.any(sheet_low[:2] > low[:2]) \
+            or _np.any(sheet_high[:2] < high[:2]):
+        raise MeshTypeError(
+            "the sheet does not reach across the whole mesh -- it spans "
+            "x %g to %g and y %g to %g, against the mesh's x %g to %g "
+            "and y %g to %g -- so it would cut at its own edge and leave "
+            "a face that means nothing; extend it, or trim the mesh first"
+            % (sheet_low[0], sheet_high[0], sheet_low[1], sheet_high[1],
+               low[0], high[0], low[1], high[1]))
+
+
+def _ground_under(sheet, box):
+    """The extruded ground below a sheet, after the checks every cut
+    against a sheet makes: it must not fold over -- 'below' has to be one
+    region -- and it must reach across everything it is to divide."""
+    if not _gmt.single_valued(sheet.coordinates, sheet.triangles):
+        raise NotSingleValuedError(
+            "this sheet folds over, so 'below' and 'above' it are not "
+            "one region each and nothing can be divided by it; a DTM3D "
+            "is the kind of surface this works with")
+    _reaches_across(sheet, box)
+    return _ground_below(sheet, box)
 
 
 def _ground_below(sheet, box):
