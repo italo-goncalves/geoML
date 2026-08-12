@@ -50,7 +50,7 @@ def _model(likelihood, x, y, seed=1234, max_iter=200):
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         point, "v", likelihood, gp,
-        options=geoml.models.GPOptions(verbose=False, seed=seed))
+        options=geoml.models.GPOptions(verbose=False))
     model.train_full(max_iter=max_iter)
     return model, point
 

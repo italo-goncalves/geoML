@@ -27,6 +27,7 @@ import geoml.latent as _latent
 import geoml.likelihood as _lk
 import geoml.warping as _warp
 import geoml.math.tf as _tftools
+import geoml.stats.random as _srandom
 import geoml
 
 import numpy as _np
@@ -41,12 +42,17 @@ _tfd = _tfp.distributions
 
 class _ModelOptions:
     def __init__(self, verbose=True, prediction_batch_size=20000,
-                 training_batch_size=2000,
-                 seed=1234):
+                 training_batch_size=2000):
         self.verbose = verbose
         self.training_batch_size = training_batch_size
         self.prediction_batch_size = prediction_batch_size
-        self.seed = seed
+        # Drawn, not taken: `geoml.set_seed` is the one knob, so the same call
+        # that fixes the initial parameters must fix training's Monte Carlo
+        # draws and the simulation stream, which read this number through
+        # stateless TensorFlow sampling. A saved model keeps the number it
+        # drew (`persistence` restores the options `vars` wholesale, skipping
+        # this constructor), so its simulations replay exactly on reload.
+        self.seed = int(_srandom.rng().integers(2 ** 31 - 1))
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, ", ".join(
@@ -68,7 +74,7 @@ class GPOptions(_ModelOptions):
     qmc_simulations = False
 
     def __init__(self, verbose=True, prediction_batch_size=20000,
-                 seed=1234, jitter=1e-9,
+                 jitter=1e-9,
                  training_batch_size=2000, training_samples=20,
                  jit_predict=False, qmc_simulations=False):
         """
@@ -77,14 +83,18 @@ class GPOptions(_ModelOptions):
         This object can be passed on to models based on the Gaussian process in order to
         control their behavior.
 
+        The `seed` that training and the simulations read is not a parameter:
+        it is drawn from the package generator when the object is built, so
+        `geoml.set_seed` before construction governs it the way it already
+        governs parameter initialization, and a saved model keeps the number
+        it drew.
+
         Parameters
         ----------
         verbose
             Whether to show the training process on screen.
         prediction_batch_size : int
             Batch size for prediction/inference.
-        seed : int
-            Seed to control random number generation.
         jitter : float
             Small value added to covariance matrices for numerical stability.
         training_batch_size : int
@@ -113,7 +123,7 @@ class GPOptions(_ModelOptions):
             the inducing points of a node), beyond which scipy refuses.
         """
         super().__init__(verbose, prediction_batch_size,
-                         training_batch_size, seed)
+                         training_batch_size)
         self.jitter = jitter
         self.training_samples = training_samples
         self.jit_predict = jit_predict

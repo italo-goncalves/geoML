@@ -11,22 +11,30 @@ authors = [
 ]
 license = {text = "GPL3"}
 keywords = ["machine learning", "spatial data", "gaussian process"]
+requires-python = ">=3.10"
+# Hard floors are API facts: zarr 3 (zarr.create_array), pyvista 0.47
+# (select_interior_points, added 0.47.0), tensorflow-probability[tf] 0.24
+# (the extra that brings tf-keras), vtk 9.1 (vtkLogger control; imported
+# directly by data/meshes.py). The rest are era markers -- versions
+# comfortably older than anything verified, so a truly ancient environment
+# fails at pip with a legible message instead of at runtime.
 dependencies = [
-    "scikit-image",
-    "pandas",
-    "numpy",
-    "pyvista",
-    "tensorflow",
-    "tensorflow-probability[tf]",
-    "scipy",
-    "scikit-learn",
-    "zarr",
-    "xarray",
-    "dask",
-    "matplotlib",
-    "plotly",
-    "ezdxf",
-    "openpyxl",
+    "scikit-image>=0.22",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "pyvista>=0.47",
+    "vtk>=9.1",
+    "tensorflow>=2.16",
+    "tensorflow-probability[tf]>=0.24",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    "zarr>=3.0",
+    "xarray>=2024.1",
+    "dask>=2024.1",
+    "matplotlib>=3.8",
+    "plotly>=5.18",
+    "ezdxf>=1.1",
+    "openpyxl>=3.1",
 ]
 
 [project.urls]

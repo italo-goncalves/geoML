@@ -174,9 +174,9 @@ def test_parameters_and_variables_identify_themselves():
 
 
 def test_options_report_their_settings():
-    text = repr(geoml.models.GPOptions(seed=7, jitter=1e-6))
+    text = repr(geoml.models.GPOptions(jitter=1e-6))
     assert text.startswith("GPOptions(")
-    assert "seed=7" in text and "jitter=1e-06" in text
+    assert "seed=" in text and "jitter=1e-06" in text
 
 
 def test_printing_does_not_read_the_stored_arrays(monkeypatch):

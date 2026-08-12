@@ -1,12 +1,15 @@
 """The seed that makes a build reproducible.
 
-Parameters are drawn when an object is constructed — before any model exists to
-carry ``options.seed`` — so the draws come from the package generator that
-``geoml.set_seed`` seeds. These tests pin both halves of that contract: the same
-seed gives the same starting parameters, and building a model never disturbs the
-generator the caller is using for their own work.
+Parameters are drawn when an object is constructed, from the package generator
+that ``geoml.set_seed`` seeds — and a model's options draw their own ``seed``
+from the same generator when built, so the one call governs the initial
+parameters, the training draws and the simulation stream alike. These tests pin
+that contract: the same seed gives the same starting parameters and the same
+training seed, and building a model never disturbs the generator the caller is
+using for their own work.
 """
 import numpy as np
+import pytest
 
 import geoml
 import geoml.parameter as gpr
@@ -84,6 +87,25 @@ def test_building_leaves_the_callers_generator_alone():
     geoml.transform.RandomProjections(3, 5, seed=99)
 
     assert np.array_equal(np.random.normal(size=5), expected)
+
+
+def test_the_training_seed_is_drawn_from_the_package_generator():
+    """``options.seed`` is no longer an argument: it is drawn when the options
+    are built, so ``set_seed`` is the one knob and there is no second one to
+    forget. A saved model keeps the number it drew — persistence restores the
+    options ``vars`` wholesale, never calling the constructor."""
+    with pytest.raises(TypeError):
+        geoml.models.GPOptions(seed=1)
+
+    geoml.set_seed(101)
+    first = geoml.models.GPOptions(verbose=False).seed
+    geoml.set_seed(101)
+    second = geoml.models.GPOptions(verbose=False).seed
+    geoml.set_seed(202)
+    other = geoml.models.GPOptions(verbose=False).seed
+
+    assert first == second
+    assert first != other
 
 
 def test_training_leaves_the_callers_generator_alone():

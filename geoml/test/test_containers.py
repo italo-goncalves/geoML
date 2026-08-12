@@ -37,7 +37,7 @@ def _synth_point_model(n_dim, seed=1234, n_train=40, n_ip=6, max_iter=5):
     inducing = geoml.data.PointData(ind_df, cols)
     root = geoml.latent.BasicInput(inducing, transform=geoml.transform.Isotropic(40))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
-    options = geoml.models.GPOptions(verbose=False, seed=seed, training_samples=8)
+    options = geoml.models.GPOptions(verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), gp, options=options)
     model.train_full(max_iter=max_iter)

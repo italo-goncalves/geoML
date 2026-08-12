@@ -32,9 +32,12 @@ Building the same objects again after the same call gives the same starting
 parameters. Left alone, the generator is seeded from the operating system, so
 each run differs — as it did before.
 
-Training and prediction do not draw from here: their Monte Carlo sampling is
-already reproducible from `options.seed` through stateless TensorFlow
-sampling.
+Training and prediction reach this generator through one more step: a model's
+options draw their `seed` from here when built, and stateless TensorFlow
+sampling turns that one number into every training draw and simulation. So
+the call above is the single knob — it fixes the initial parameters, the
+training trajectory and the simulation stream alike, and a saved model keeps
+the seed it drew.
 """
 
 import numpy as _np

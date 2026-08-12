@@ -1,4 +1,29 @@
 ## version 0.6.2
+* **One seed to rule them all.** `geoml.set_seed` was already what made
+the initial parameters reproducible; now it is the only knob. A model's
+options draw their `seed` -- the number training's Monte Carlo and the
+simulation stream read through stateless sampling -- from the package
+generator when they are built, so the same call that fixes the starting
+parameters fixes the training trajectory and every simulation, and there
+is no second seed to forget. `GPOptions(seed=...)` is gone (a
+`TypeError` now -- set the attribute directly in the unlikely case a
+training seed must be forced), while `options.seed` itself remains: a
+saved model keeps the number it drew, since persistence restores the
+options `vars` wholesale, so old saves keep their stored seed and any
+saved model replays its simulations exactly on reload. A model built
+without `set_seed` now varies its training draws from run to run -- as
+its initialization always did, so nothing that was reproducible before
+has stopped being reproducible. Every
+dependency carries a lower bound, and the package declares
+`requires-python >= 3.10`. Four floors are API facts: zarr 3
+(`zarr.create_array` is the v3 surface the stores are built on), pyvista
+0.47 (`select_interior_points`, added there as the replacement for the
+filter whose rename once bit), `tensorflow-probability[tf]` 0.24 (the
+extra that brings tf-keras), and vtk 9.1 -- declared as a dependency for
+the first time, because `data/meshes.py` imports vtk directly rather
+than through pyvista. The remaining floors are era markers, versions
+comfortably older than anything verified, so a truly ancient environment
+gets a legible refusal from pip instead of a strange crash later.
 * **Float64 earned its keep.** The mixed-precision idea — kernel
 arithmetic in float32, Choleskys kept in float64 — was measured on the
 Walker VGP and rejected, with the trail in `docs/mixed-precision.md`.

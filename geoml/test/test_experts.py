@@ -37,7 +37,7 @@ def build_model(n_experts=3, n_ip=10, seed=1234, depth=1):
     model = geoml.models.VGPNetwork(
         walker_point, "V", geoml.likelihood.Gaussian(), node,
         options=geoml.models.GPOptions(
-            verbose=False, seed=seed, training_samples=6))
+            verbose=False, training_samples=6))
     return model, walker_grid, root, node
 
 
