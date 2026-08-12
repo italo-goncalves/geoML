@@ -1,4 +1,41 @@
 ## version 0.6.2
+* **The back-transform takes all realizations at once.** Prediction with
+`include_noise=True` at high `n_sim` had become the slow step, and the
+arithmetic was innocent: the warping's backward ran through a `map_fn`,
+one realization at a time -- a sequential loop whose per-step launch
+overhead was measured at 96% of a noise-free 100-simulation prediction
+-- and the noise integration paid that loop again for every quadrature
+node, 8 elementwise and 64 for a mixing warping: 6400 sequential little
+ops at `n_sim=100`. The realization axis is now folded into the row
+axis, so the backward runs once over `n x n_sim` rows -- exact, a
+warping acting on each row alone, and the peak tensor unchanged.
+Measured on the Walker 78k grid: `n_sim=100` with noise **14.1 s to
+0.40 s**, without 6.6 to 0.36; `n_sim=20` with noise 6.7 to 0.26.
+Integrating the noise now costs a tenth on top of a prediction instead
+of multiplying it, and the node-by-node fold keeps its memory promise
+untouched.
+* **Experts may keep their own counsel.**
+`GPOptions(expert_propagation="independent")` lets each expert of a deep
+network predict its own inducing set alone, where the default
+(`"consensus"`, the historical behavior) predicts every set from every
+expert and combines by precision weighting -- the network's one O(K^2)
+step. Measured on a deep Walker model and a 3000-point synthetic:
+training 1.6x faster at 5 experts growing to 6.3x at 40 (the consensus
+cost quadruples per doubling of K, the independent cost doubles), and
+prediction up to 8x (54 s down to 6.8 s on a 6.4k grid at K=40).
+Duplicated inducing points in overlapping sets do genuinely diverge --
+several latent standard deviations, where the consensus made them
+identical by construction -- and the data-side weighting in
+`interpolate`, which is untouched, arbitrates: quality lands within a
+few percent of consensus on Walker (four seeds) and ahead of it on the
+synthetic at 20 experts, where the consensus coupling of every expert's
+parameters appears to slow optimization. One option in `GPOptions`
+governs every `BasicGP` in the network at once, read at trace time
+through the same context-flag pattern as `qmc_simulations`; the traced
+refresh and the prediction dispatcher are keyed by it, so flipping the
+option on a live model takes effect at the next call and flipping it
+back reproduces the original numbers. Single-layer networks are
+untouched -- below a terminal node the propagation never runs.
 * **`RobustPCA` initializes quietly.** scikit-learn's FastMCD chatters on
 its concentration steps ("Determinant has increased" on perfectly normal
 iterations) and flags a not-full-rank estimate on the way out; neither is

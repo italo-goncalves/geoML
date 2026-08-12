@@ -259,16 +259,18 @@ def test_jit_holds_one_traced_function_per_setting():
     model.train_full(max_iter=5)
 
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False)}
-    first = model._compiled[(False, False)]
+    assert set(model._compiled) == {(False, False, "consensus")}
+    first = model._compiled[(False, False, "consensus")]
 
     model.options.jit_predict = True
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False), (True, False)}
+    assert set(model._compiled) == {(False, False, "consensus"),
+                                    (True, False, "consensus")}
 
     model.options.jit_predict = False
     model.predict(grid, n_sim=4)
-    assert model._compiled[(False, False)] is first    # reused, not rebuilt
+    assert model._compiled[(False, False, "consensus")] is first
+    # reused, not rebuilt
 
 
 def test_jit_prediction_is_batch_invariant():
