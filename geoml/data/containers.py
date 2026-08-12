@@ -28,6 +28,10 @@ import pyvista as _pv
 import tensorflow as _tf
 import dask.array as _da
 import zarr as _zarr
+import scipy.cluster.hierarchy as _hierarchy
+import scipy.spatial as _spatial
+import scipy.stats as _sstats
+from sklearn.cluster import KMeans as _KMeans
 
 import geoml.math.geometry as _gmt
 import geoml.math.tf as _tftools
@@ -38,6 +42,23 @@ from geoml.math.geometry import bounding_box
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _TreeNode, _frame_from_columns
 from geoml.data.variables import *
+
+
+def _balanced_assignment(cluster, sizes, k):
+    """Deals clusters to `k` folds, largest first, each to the emptiest.
+
+    `cluster` labels each atom, `sizes` counts each atom's points; the answer
+    is a fold per atom. With at least `k` clusters every fold gets one.
+    """
+    cluster_size = _np.bincount(cluster, weights=sizes)
+    fold_of_cluster = _np.zeros(cluster_size.size, dtype=int)
+    load = _np.zeros(k)
+    for c in _np.argsort(cluster_size)[::-1]:
+        f = int(_np.argmin(load))
+        fold_of_cluster[c] = f
+        load[f] += cluster_size[c]
+    return fold_of_cluster[cluster]
+
 
 class _SpatialData(_TreeNode):
     """Abstract class for spatial data in general"""
@@ -864,99 +885,116 @@ class PointData(_PointBased):
         pv_points = _pv.PolyData(_np.asarray(self.coordinates))
         return self._finish_pyvista(pv_points, "points", simulations, include)
 
-    def spatial_k_fold(self, test_data, k=5, bins=50):
-        raise NotImplementedError("under development")
-        # setup
-        test_dist = _tftools.pairwise_dist(self.coordinates, test_data.coordinates).numpy()
-        data_dist = _tftools.pairwise_dist(self.coordinates, self.coordinates)
+    def spatial_k_fold(self, test_data, k=5, groups=None, seed=None):
+        """
+        Builds cross-validation folds that mimic a prediction task.
 
-        dist_bins = _np.linspace(0, _np.max(test_dist), bins)
+        A random fold is answered by its neighbours and flatters every
+        score; folds pushed as far from the training data as possible
+        overshoot the other way, testing an extrapolation nobody asked
+        for. What decides how hard a location is to predict is how far its
+        nearest training point sits, so the folds chosen here are the ones
+        whose held-out-to-training distances are distributed like the
+        distances from `test_data` -- the object the model is actually
+        meant to predict -- to this data. This is the nearest-neighbour
+        distance matching idea of Linnenbrink et al. (2024), built on
+        discrete groups: continuous per-sample weightings can match the
+        distributions perfectly while the folds are spatially wrong.
 
-        # test_dist = _np.ravel(test_dist)
-        test_hist = _np.histogram(_np.ravel(test_dist), dist_bins)[0]
-        test_ecdf = _np.cumsum(test_hist) / _np.sum(test_hist)
+        The data is first gathered into small groups that are never split
+        across folds -- the samples of one drill hole stand or fall
+        together -- and the candidate partitions come from cutting a Ward
+        dendrogram of the group centroids at every count from `k` clusters
+        up to one cluster per group, each cut's clusters dealt to the
+        emptiest fold largest-first. The cut whose Wasserstein distance to
+        the target distribution is smallest wins, and the result is
+        written to a metadata column named ``"fold"``.
 
-        data_hist = _np.histogram(_np.ravel(data_dist), dist_bins)[0]
-        data_ecdf = _np.cumsum(data_hist) / _np.sum(data_hist)
+        Parameters
+        ----------
+        test_data
+            The spatial object the model is meant to predict -- a grid, a
+            block model, or any container with coordinates.
+        k : int
+            Number of folds.
+        groups : str, optional
+            Name of a metadata column whose labels must never be split
+            across folds (a drill hole id). Without one, the data is
+            pre-clustered into many small spatial groups.
+        seed : int
+            Passed to `sklearn.cluster.KMeans` for a reproducible
+            pre-clustering when `groups` is not given. The rest of the
+            search is deterministic.
 
-        point_hist = _np.stack(
-            [_np.histogram(line, dist_bins)[0] for line in data_dist]
-        )
-        point_ecdf = _np.cumsum(point_hist, axis=1) / _np.sum(point_hist, axis=1, keepdims=True)
+        Returns
+        -------
+        w : float
+            The Wasserstein distance between the two distributions below,
+            in coordinate units. Zero is a perfect match.
+        target_distances : array
+            Distance from each of `test_data`'s locations to its nearest
+            data point -- the prediction task.
+        fold_distances : array
+            Distance from each data point to its nearest training point
+            when its fold is held out -- the task the cross-validation
+            poses.
+        """
+        coords = _np.asarray(self.coordinates, dtype=float)
+        n = coords.shape[0]
+        if k < 2:
+            raise ValueError("k must be at least 2")
 
-        # optimization
-        weights = _tf.Variable(_np.random.normal(scale=0.0001, size=[self.n_data, k]))
-        mask = _tf.Variable(_np.random.normal(loc=-3, scale=0.0001, size=[self.n_data, 1]))
+        if groups is None:
+            n_atoms = min(n, 25 * k)
+            atom = _KMeans(n_atoms, n_init=10, random_state=seed).fit(
+                coords).labels_
+        else:
+            _, atom = _np.unique(self.get_metadata(groups),
+                                 return_inverse=True)
+            n_atoms = int(atom.max()) + 1
+        if n_atoms < k:
+            raise ValueError(f"cannot build {k} folds from {n_atoms} groups")
 
-        def get_fold_ecdf():
-            w = _tf.nn.softmax(weights, axis=1)
-            m = _tf.nn.sigmoid(mask)
+        atom_sizes = _np.bincount(atom, minlength=n_atoms)
+        centroids = _np.stack(
+            [coords[atom == i].mean(axis=0) for i in range(n_atoms)])
 
-            total_weight = _tf.reduce_sum(w * (1 - m), axis=0)
-            total_m = _tf.reduce_sum(1 - m)
+        # the prediction task's own distances
+        test_coords = _np.asarray(test_data.coordinates, dtype=float)
+        if test_coords.shape[0] > 10000:
+            stride = int(_np.ceil(test_coords.shape[0] / 10000))
+            test_coords = test_coords[::stride]
+        target = _spatial.cKDTree(coords).query(test_coords, k=1)[0]
 
-            # total_weight = _tf.reduce_sum(w, axis=0)
+        if n_atoms > k:
+            link = _hierarchy.linkage(centroids, method="ward")
+        candidates = _np.arange(k, n_atoms + 1)
+        if candidates.size > 50:
+            candidates = _np.unique(
+                _np.geomspace(k, n_atoms, 50).round().astype(int))
 
-            fold_ecdf = _tf.stack(
-                [_tf.reduce_sum((1 - w[:, i, None]) * point_ecdf * (1 - m), axis=0) / (total_m - total_weight[i]) for i
-                 in range(k)],
-                axis=1
-            )
-            # fold_ecdf = _tf.stack(
-            #     [_tf.reduce_sum((1 - w[:, i, None]) * point_ecdf, axis=0) / (self.n_data - total_weight[i])
-            #      for i in range(k)],
-            #     axis=1
-            # )
+        best = None
+        for n_clusters in candidates:
+            if n_clusters == n_atoms:
+                cluster = _np.arange(n_atoms)
+            else:
+                cluster = _hierarchy.fcluster(
+                    link, t=n_clusters, criterion="maxclust") - 1
+            if cluster.max() + 1 < k:
+                continue
+            fold = _balanced_assignment(cluster, atom_sizes, k)[atom]
 
-            return fold_ecdf
+            pooled = _np.concatenate([
+                _spatial.cKDTree(coords[fold != f]).query(
+                    coords[fold == f], k=1)[0]
+                for f in range(k)])
+            w = _sstats.wasserstein_distance(pooled, target)
+            if best is None or w < best[0]:
+                best = (w, fold, pooled)
 
-        def loss():
-            fold_ecdf = get_fold_ecdf()
-
-            w_dist = _tf.reduce_sum(_tf.math.abs(fold_ecdf - test_ecdf[:, None])) / k
-
-            w = _tf.nn.softmax(weights, axis=1)
-            entropy = - _tf.reduce_mean(_tf.reduce_sum(w * _tf.math.log(w + 1e-6), axis=1)) * 0.1
-
-            m = _tf.nn.sigmoid(mask)
-
-            avg_weight = _tf.reduce_sum(w * (1 - m), axis=0) / _tf.reduce_sum(1 - m)
-            # avg_weight = _tf.reduce_sum(w, axis=0)
-            penalty = _tf.reduce_sum(avg_weight ** 2) + _tf.reduce_mean(m ** 2)
-
-            # entropy_2 = - _tf.reduce_sum(avg_weight * _tf.math.log(avg_weight + 1e-6))
-            # penalty = - entropy_2 + _tf.reduce_mean(m ** 2)
-
-            # silhouette
-            avg_dist_in_cluster = _tf.matmul(data_dist**2, weights) / _tf.reduce_sum(weights, axis=0, keepdims=True)
-            avg_dist_out_cluster = _tf.matmul(data_dist**2, 1 - weights) / _tf.reduce_sum(1 - weights, axis=0, keepdims=True)
-            silhouette = (avg_dist_out_cluster - avg_dist_in_cluster) / _tf.maximum(avg_dist_in_cluster, avg_dist_out_cluster)
-            avg_s = _tf.reduce_sum(_tf.reduce_sum(silhouette * weights, axis=1, keepdims=True) * (1 - m)) / _tf.reduce_sum(1 - m)
-
-            return w_dist + entropy + penalty - avg_s * 0.1
-
-        optimizer = _tf.keras.optimizers.Adam(1e-3)
-
-        n_iter = 1000
-        history = []
-        for _ in range(n_iter):
-            _tftools.training_step(optimizer, loss, [weights, mask])
-            history.append(loss().numpy())
-
-        # output
-        final_w = _tf.nn.softmax(weights, axis=1).numpy()
-        final_mask = _tf.nn.sigmoid(mask).numpy()
-        total_weight = _np.sum(final_w * (1 - final_mask), axis=0)
-        # total_weight = _np.sum(final_w, axis=0)
-        final_folds = _np.argmax(final_w, axis=1)
-
-        final_ecdf = get_fold_ecdf().numpy()
-
-        self.add_metadata('spatial_fold', final_folds)
-        self.add_metadata('sample_weight', 1 - final_mask)
-        n_points = _np.array([_np.sum(self.get_metadata('spatial_fold') == i) for i in range(k)])
-
-        return history, n_points, dist_bins[:-1], test_ecdf, final_ecdf
+        w, fold, pooled = best
+        self.add_metadata("fold", fold)
+        return w, target, pooled
 
 
 class GaussianData(PointData):
