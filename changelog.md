@@ -1,4 +1,45 @@
 ## version 0.6.2
+* **Cross-validation, whole: folds that mimic the task, a driver that
+never retrains from scratch, and intervals held to their word.** Four
+pieces, one pipeline (design record and measurements in
+`docs/cross-validation.md`):
+  - `spatial_k_fold(test_data, k, groups=...)` works now, and differently
+  from the prototype it replaces: discrete groups that are never split (a
+  drill hole stands or falls together; k-means atoms otherwise),
+  agglomerated by cutting a Ward dendrogram of group centroids at every
+  count and keeping the cut whose held-out-to-training nearest-neighbour
+  distances best match -- Wasserstein -- the distances from the *actual
+  prediction target* to the data (Linnenbrink et al., 2024). The
+  soft-membership optimizer matched the distributions perfectly while the
+  folds were spatially wrong; ~n·k continuous degrees of freedom was the
+  overfit, and discreteness is the fix. Writes a `"fold"` metadata column.
+  - `models.cross_validate` is the VGP translation of kriging's
+  fixed-variogram cross-validation: the trained model saved once, each
+  fold a copy rebuilt around the reduced data, its variational state --
+  where the data lives -- re-initialized so it is *structurally* ignorant
+  of the held-out rows, everything else frozen, a short refit, and the
+  held-out rows predicted into one shared container that ends the loop
+  fully out-of-fold. Scored on measurements, per fold and pooled (rmse,
+  mae, bias, crps, goodness). Measured on Walker, 5 spatial folds:
+  fresh-variational at 200 iterations matches a 400-iteration scratch
+  retrain within a few percent (rmse 238 vs 245) at 2.3x less cost --
+  while *warm-starting* scores better than the honest gold itself (231),
+  which is the residual memory of the held-out data surviving 200
+  iterations of supposed forgetting, and is why fresh initialization is
+  the default rather than a knob.
+  - `models.conformalize` on top: split conformal on the out-of-fold PITs
+  the driver leaves behind, a monotone map from the coverage an interval
+  should have to the level it must be cut at, with the finite-sample
+  guarantee -- and its limits said out loud: folds that mimic deployment
+  are what the exchangeability is worth, the intervals are of
+  measurements, and no repair reaches past the ensemble's own range.
+  - The variogram joins the figures, in both backends: the data's curve
+  with one thin curve per realization on the same pairs -- the
+  spatial-continuity check the marginal figures cannot make -- with
+  directions, `residuals=True` for what the model missed, deterministic
+  pair budgeting, and realizations read one column at a time.
+  `metrics.variogram_score` (Scheuerer & Hamill) is its number, and
+  `rmse`/`mae`/`bias`/`crps` join the metrics for the fold reports.
 * **The back-transform takes all realizations at once.** Prediction with
 `include_noise=True` at high `n_sim` had become the slow step, and the
 arithmetic was innocent: the warping's backward ran through a `map_fn`,

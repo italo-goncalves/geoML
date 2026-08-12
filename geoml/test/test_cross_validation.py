@@ -1,5 +1,7 @@
 """Cross-validation: the folds, the driver, and the calibration.
 
+Design record and the E1 refit measurements: docs/cross-validation.md.
+
 A random fold on spatial data is answered by its neighbours, so the folds
 here are built to mimic the prediction task instead: held-out points should
 sit as far from the training data as the prediction locations do
