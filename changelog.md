@@ -1,4 +1,10 @@
 ## version 0.6.2
+* **`RobustPCA` initializes quietly.** scikit-learn's FastMCD chatters on
+its concentration steps ("Determinant has increased" on perfectly normal
+iterations) and flags a not-full-rank estimate on the way out; neither is
+actionable during an initialization, so exactly those two warnings are
+filtered around the fit alone, and anything else sklearn says still comes
+through.
 * **A variable can be derived from others, realization by realization.**
 `container.derive(names, function, arguments)` builds `DerivedVariable`s --
 the middle ground between metadata (a constant the models never see) and a
