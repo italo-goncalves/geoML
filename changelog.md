@@ -8,7 +8,11 @@ not depend on a third-party server being up). Every run starts from a
 machine with nothing on it, so `pip install -e .` is re-proved from
 `pyproject.toml` alone each time, and a pyvista or TensorFlow release that
 breaks something turns a commit red before any user hits it. A new test
-file runs on every push until it earns its way onto the heavy list.
+file runs on every push until it earns its way onto the heavy list. Its
+very first run earned its keep: recent tensorflow-probability does not
+install Keras support by itself, so a fresh `pip install geoml` could not
+import the package -- the dependency is now `tensorflow-probability[tf]`,
+which every environment built by hand already had by accident.
 
 ## version 0.6.1
 * **Everything below the topography, in one call.** Three pieces, built

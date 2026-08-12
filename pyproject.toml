@@ -17,7 +17,7 @@ dependencies = [
     "numpy",
     "pyvista",
     "tensorflow",
-    "tensorflow-probability",
+    "tensorflow-probability[tf]",
     "scipy",
     "scikit-learn",
     "zarr",
