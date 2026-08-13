@@ -20,6 +20,7 @@ its own columns for the tree machinery in `base` to fold over. Constructed
 by a container's `add_*_variable` methods, never directly.
 """
 import collections as _col
+from typing import Any as _Any
 
 import numpy as _np
 import pandas as _pd
@@ -35,6 +36,11 @@ from geoml.data.base import (
     _Attribute, _TreeNode, _carry_rows, _copy_for_subset, _encode,
     _path_key, _subset_simulations)
 
+# `_Variable._Attribute` is the leaf class under another name (bound at
+# the end of this module). Annotations use `_Attr` so that a return type
+# inside the class is not read as that alias.
+_Attr = _Attribute
+
 class _Variable(_TreeNode):
     """Representation of a dependent random variable."""
 
@@ -43,6 +49,13 @@ class _Variable(_TreeNode):
     simulations: "_storage.ArrayStore | None" = None
     name: str
     metrics: "_pd.DataFrame | None"
+    # Bound at the end of the module (`_Variable._Attribute = _Attribute`),
+    # which is what keeps the historical `self._Attribute(...)` call sites
+    # working; declared here so that reading one is not an archaeology.
+    _Attribute: "type[_Attr]"
+    # not every kind has components; declaring is not assigning, so the
+    # `getattr` tests that ask still answer as before
+    components: "dict[str, _Any]"
 
     def __init__(self, name: str, coordinates):
         self.name = name
@@ -281,6 +294,19 @@ class _Variable(_TreeNode):
             self.responsibilities[k] = attribute
         return self
 
+    def _sim_store(self) -> "_storage.ArrayStore":
+        """The simulations store, or a legible error where there is none.
+
+        Every writer goes through this rather than indexing the attribute:
+        a variable that was never allocated has no store, and saying so is
+        better than a `NoneType` error from inside a batch loop.
+        """
+        if self.simulations is None:
+            raise NoDataError(
+                "variable %r has no simulations; call "
+                "`allocate_simulations` first" % str(self.name))
+        return self.simulations
+
     def get_measurements(self):
         raise NotImplementedError
 
@@ -292,7 +318,7 @@ class _Variable(_TreeNode):
         """Number of simulations available, or 0 if none were drawn."""
         return 0 if self.simulations is None else self.simulations.shape[1]
 
-    def simulation(self, index: int) -> _Attribute:
+    def simulation(self, index: int) -> _Attr:
         """
         A single simulation, in the form of an `_Attribute`.
 
@@ -403,8 +429,9 @@ class _Variable(_TreeNode):
         # hand over as a NumPy integer, and this is JSON
         meta = {"class": type(self).__name__, "name": str(self.name),
                 "attrs": {}}
-        if hasattr(self, "labels"):
-            meta["labels"] = [str(x) for x in self.labels]
+        own_labels = getattr(self, "labels", None)
+        if own_labels is not None:
+            meta["labels"] = [str(x) for x in own_labels]
         for role in self._ZARR_ATTRS:
             info = self._save_attr(group, prefix, role)
             if info is not None:
@@ -635,6 +662,8 @@ class ContinuousVariable(_Variable):
 
         self.quantiles = _col.OrderedDict()
         if probabilities is not None:
+            probabilities = _np.atleast_1d(
+                _np.asarray(probabilities, dtype=float))
             # All quantiles are computed lazily in a single chunk-by-chunk
             # pass over the simulations; the (n_data, n_sim) array is never
             # fully materialized.
@@ -662,6 +691,8 @@ class ContinuousVariable(_Variable):
 
         self.probabilities = _col.OrderedDict()
         if quantiles is not None:
+            quantiles = _np.atleast_1d(
+                _np.asarray(quantiles, dtype=float))
             # Empirical CDF, the inverse of reset_quantiles: for each cutoff,
             # the fraction of simulations at or below it, in (0, 1). Computed
             # lazily in a single chunk-by-chunk pass. (The previous
@@ -734,7 +765,7 @@ class ContinuousVariable(_Variable):
             sims = kwargs["simulations"].numpy()
             if sims.ndim == 3:
                 sims = sims[:, 0, :]
-            self.simulations[idx, :] = sims
+            self._sim_store()[idx, :] = sims
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -754,7 +785,7 @@ class ContinuousVariable(_Variable):
         # Only the measured rows, indexed out of the chunks: materializing the
         # store to cut a sliver from it is what kills a session on a large
         # model (same reasoning as `_subset_simulations`).
-        sims = _np.asarray(self.simulations.as_dask()[has_value == 1])
+        sims = _np.asarray(self._sim_store().as_dask()[has_value == 1])
 
         metrics = {
             'Root Mean Square Error (prediction)': _skmetrics.root_mean_squared_error(y_true, y_pred),
@@ -846,7 +877,8 @@ class VectorVariable(_Variable):
     def __init__(self, name, coordinates, labels, measurements=None):
         super().__init__(name, coordinates)
 
-        if isinstance(measurements, _pd.DataFrame):
+        if measurements is not None \
+                and isinstance(measurements, _pd.DataFrame):
             measurements = measurements.values
 
         self.labels = labels
@@ -941,11 +973,12 @@ class VectorVariable(_Variable):
             values = {"average_sim": p, "simulations": s, "dispersion": d,
                       "noise_variance": nv}
             for key, unstacked in shares.items():
-                if unstacked[i] is not None:
+                column = unstacked[i]
+                if column is not None:
                     # the matrix was padded out to the widest component, so
                     # this one takes only the cut-offs it declared
                     declared = len(self.components[lb].cutoffs or [])
-                    values[key] = unstacked[i][:, :declared]
+                    values[key] = column[:, :declared]
             self.components[lb].update(idx, **values)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
@@ -971,6 +1004,11 @@ class VectorVariable(_Variable):
 
 
 class _Component(ContinuousVariable):
+    # a component reads the composition's latent field rather than one of
+    # its own, so these two stay empty where its parent fills them
+    latent_mean: "_Attr | None"
+    latent_variance: "_Attr | None"
+
     def __init__(self, name, coordinates, measurements=None):
         super().__init__(name, coordinates, measurements)
         self.latent_mean = None
@@ -978,7 +1016,7 @@ class _Component(ContinuousVariable):
 
     def update(self, idx, **kwargs):
         self.prediction.values[idx] = kwargs["prediction"].numpy()
-        self.simulations[idx, :] = kwargs["simulations"].numpy()
+        self._sim_store()[idx, :] = kwargs["simulations"].numpy()
 
         if "dispersion" in kwargs.keys():
             self.dispersion.values[idx] = kwargs["dispersion"].numpy()
@@ -1135,7 +1173,7 @@ class _Category(_Variable):
                     target[0.0] = self._Attribute(self.coordinates)
                 target[0.0].values[idx] = kwargs[family].numpy()
 
-        self.simulations[idx, :] = kwargs["simulations"].numpy()
+        self._sim_store()[idx, :] = kwargs["simulations"].numpy()
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -1572,7 +1610,7 @@ class BinaryVariable(_Variable):
         self.uncertainty.values[idx] = uncertainty
         self.probability.values[idx] = prob
 
-        self.simulations[idx, :] = sims
+        self._sim_store()[idx, :] = sims
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
