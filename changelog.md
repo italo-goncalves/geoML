@@ -30,6 +30,12 @@ without being asked, which docstrings are not.
   accumulated in them -- addressed to a maintainer, and read by users in an
   IDE tooltip -- moved to code comments, the changelog and the design
   records. `models.py` is done; the rest follow module by module.
+  - Annotated and rewritten so far: `models.py`, `metrics.py`,
+  `data/inducing.py`, and `likelihood.Mixture` with its `responsibilities`
+  -- the docstrings that had most narrative in them. Two more real findings
+  on the way: `metrics.interval_score` and `bias_variance_decomposition`
+  never converted their arguments, so the "array-like" they documented would
+  have failed on a list.
   - **The documentation site is rebuilt.** The five-file `sphinx-quickstart`
   skeleton and the 94 tracked build artifacts (a stale HTML build of the
   pre-0.6.0 layout, with a vendored theme and its fonts) are gone. Sphinx +

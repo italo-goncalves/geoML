@@ -16,7 +16,9 @@
 
 from scipy.linalg import helmert as _helmert
 import copy as _copy
+from collections.abc import Sequence
 
+import geoml._types as _types
 import geoml.warping as _warp
 import geoml.parameter as _gpr
 import geoml.math.tf as _tftools
@@ -915,75 +917,99 @@ def _separate(component, factor):
 class Mixture(_ContinuousLikelihood):
     """A likelihood whose noise is a mixture of scales.
 
-    One family, several widths, trainable proportions: the noise a
-    measurement carries is drawn from one of `n_components` copies of
-    `family`, all sharing the latent location and differing only in how
-    wide they are. It is the honest shape for data where the scatter is not
-    one number -- a careful assay and a rushed one, a fresh core and a
-    weathered one -- which a single nugget cannot tell apart and a heavy
-    tail cannot *name*. `responsibilities` names it, per row.
+    The noise on a measurement comes from one of `n_components` copies of
+    `family`, all sharing the latent location and differing in width, with
+    trainable proportions. It fits data whose scatter is not one number -- a
+    careful assay and a rushed one, a fresh core and a weathered one -- and,
+    unlike a heavy-tailed likelihood, it says which mechanism each
+    measurement came from (:meth:`responsibilities`).
 
-    **The mixture is over the row.** In a vector or compositional variable
-    the columns are one observation in sample space, so a measurement that
-    is wrong in one component is a wrong measurement: the densities are
-    multiplied across the columns before the components are weighted, and
-    there is one responsibility per location, not one per element. The
-    components' scales are still per column, so the wide one can be wide
-    only where it needs to be. Because that density does not factorize, the
-    latent expectation for a vector variable runs over the joint posterior
-    samples rather than each column's quadrature.
+    Parameters
+    ----------
+    warping : geoml.warping.Warping
+        The mixture's own warping, applied once to the data. It sizes the
+        mixture, and the components with it.
+    n_components : int
+        How many noise scales, at least two.
+    family : str
+        The distribution every component takes: `"gaussian"`, `"laplace"`,
+        `"studentt"`, `"epsiloninsensitive"` or `"huber"`.
+    separation : float
+        How much wider each component is than the one before it, at
+        construction. Only the family's width parameters move.
+    weights : array-like, optional
+        Initial mixing proportions, one per component, summing to one.
+        Default: 0.95 on the narrowest, the rest split evenly.
+    contamination : list of bool, optional
+        Which components describe error rather than ground. Default: none of
+        them. At least one component must be genuine.
+    sharpness : int
+        Data augmentation factor, as in every likelihood.
 
-    **Contamination is declared, not assumed.** By default every component
-    describes the ground: the prediction is averaged over all of them, and
-    the mixture is a noise model, nothing more. Marking a component as
-    contamination says its readings *replace* a measurement rather than
-    reporting one, and then `integrated_backward` leaves it out of the value
-    while keeping it in the spread beside it -- a fresh assay can still be a
-    bad one. Training and `measurement_samples` always use the full mixture:
-    the data has to be explained as it is. On a nonlinear warping the choice
-    is not academic -- integrating a wide contamination component into a
-    block value biases it the way the contamination is skewed (measured at
-    +6 to +17% on a lognormal-like synthetic case).
+    Attributes
+    ----------
+    components : list of _ContinuousLikelihood
+        The noise scales, narrowest first.
+    contamination : list of bool
+        Which of them describe error rather than ground.
 
-    Two things make it fit. The components are separated at construction
-    (see `separation`), because components of equal width never pull apart;
-    and the warping should be led by `ZScore(size, robust=True)`, which
-    initializes on a winsorized copy of the data so a gross outlier cannot
-    set the scale everything else is normalized by. Measured together, the
-    two carried a pathological contamination draw from 4.3x the clean-data
-    error to 1.3x.
+    Raises
+    ------
+    ValueError
+        If fewer than two components are asked for, if `family` is not one of
+        the names above, if the contamination flags do not match the
+        components, or if every component is marked as contamination.
+
+    See Also
+    --------
+    responsibilities : which component each measurement came from.
+    geoml.warping.ZScore : pair the mixture with `robust=True`.
+
+    Notes
+    -----
+    The mixture is over the **row**. In a vector or compositional variable
+    the columns are one observation, so the densities are multiplied across
+    them before the components are weighted, giving one responsibility per
+    location rather than one per element. The components' scales stay per
+    column. That density does not factorize, so a vector mixture takes its
+    latent expectation over the joint posterior samples rather than each
+    column's quadrature.
+
+    Contamination is declared, not assumed. By default every component
+    describes the ground and the mixture is a noise model. Marking a
+    component as contamination says its readings replace a measurement
+    rather than report one: :meth:`integrated_backward` then leaves it out of
+    the value while keeping it in the spread reported beside it. Training and
+    :meth:`measurement_samples` always use the full mixture.
+
+    Components of equal width do not pull apart in training, which is why
+    `separation` spreads them at construction. Pair the mixture with a
+    warping led by `ZScore(size, robust=True)`, so that a gross outlier
+    cannot set the scale everything else is normalized by.
+
+    References
+    ----------
+    Kuss, M. (2006) *Gaussian Process Models for Robust Regression,
+    Classification, and Reinforcement Learning*. PhD thesis, TU Darmstadt.
+
+    Stegle, O., Fallert, S. V., MacKay, D. J. C. and Brage, S. (2008)
+    Gaussian process robust regression for noisy heart rate data.
+    *IEEE Transactions on Biomedical Engineering* 55(9), 2143-2151.
+
+    Examples
+    --------
+    >>> warping = geoml.warping.ChainedWarping(
+    ...     geoml.warping.ZScore(1, robust=True),
+    ...     geoml.warping.Spline(1))
+    >>> likelihood = geoml.likelihood.Mixture(
+    ...     warping, n_components=2, contamination=[False, True])
     """
 
-    def __init__(self, warping, n_components=2, family="gaussian",
-                 separation=3.0, weights=None, contamination=None,
-                 sharpness=1):
-        """
-        Parameters
-        ----------
-        warping : geoml.warping.Warping
-            The mixture's own warping, applied once to the data. It is what
-            sizes the mixture, and the components with it.
-        n_components : int
-            How many noise scales, at least two.
-        family : str
-            The distribution every component takes: `"gaussian"`,
-            `"laplace"`, `"studentt"`, `"epsiloninsensitive"` or `"huber"`.
-            One family throughout is deliberate -- components differing in
-            scale are the classical scale-mixture construction, while
-            components differing in *shape* duplicate what the warping is
-            for and stop being identifiable (a Student's t is itself a
-            scale mixture of Gaussians).
-        separation : double
-            How much wider each component is than the one before it, at
-            construction. Only the family's width parameters move; a
-            Student's degrees of freedom, say, do not.
-        weights : array-like, optional
-            Initial mixing proportions, one per component, summing to one.
-            Default: 0.95 on the narrowest, the rest split evenly.
-        contamination : list of bool, optional
-            Which components describe error rather than ground. Default:
-            none of them. At least one component must be genuine.
-        """
+    def __init__(self, warping: "_warp._Warping", n_components: int = 2,
+                 family: str = "gaussian", separation: float = 3.0,
+                 weights: "_types.ArrayLike | None" = None,
+                 contamination: "Sequence[bool] | None" = None,
+                 sharpness: int = 1):
         n_components = int(n_components)
         if n_components < 2:
             raise ValueError("a mixture needs at least two components")
@@ -1094,33 +1120,38 @@ class Mixture(_ContinuousLikelihood):
             hi = _tf.where(below, hi, mid)
         return 0.5 * (lo + hi)
 
-    def responsibilities(self, latent_mean, latent_variance, values):
-        """How likely each row is to have come from each component.
+    def responsibilities(self, latent_mean: _types.ArrayLike,
+                         latent_variance: _types.ArrayLike,
+                         values: _types.ArrayLike) -> _types.FloatArray:
+        """Posterior probability that each row came from each component.
 
-        The mixture's unique diagnostic: a heavy-tailed likelihood can
-        absorb an outlier, only a mixture can point at it. One answer per
-        row, matching the model training fits -- the columns' densities
-        multiplied first, the components weighted after.
-
-        The latent expectation is taken column by column, off the marginals
-        a prediction stores; where several columns are involved that treats
-        them as independent, which is what those marginals say and all a
-        stored prediction can support. `models.VGPNetwork.responsibilities`
-        is the way in from a container, and the honest reading is on data
-        the model has not seen -- at a training location the model
-        interpolates its own measurement, which flatters every row.
+        One answer per row: the densities are multiplied across the columns
+        before the components are weighted, as the likelihood fits them.
 
         Parameters
         ----------
-        latent_mean, latent_variance : (n,) or (n, size)
-            The model's posterior at the measured locations, as `predict`
-            stores them.
-        values : (n,) or (n, size)
-            The measurements, in their own units.
+        latent_mean, latent_variance
+            The model's posterior at the measured locations, of shape
+            `(n_data,)` or `(n_data, size)`, as `predict` stores them.
+        values
+            The measurements, in their own units, of the same shape.
 
         Returns
         -------
-        (n, n_components), rows summing to one.
+        ndarray
+            Of shape `(n_data, n_components)`, rows summing to one.
+
+        See Also
+        --------
+        geoml.models.VGPNetwork.responsibilities : the way in from a
+            container, which also files the answer on the variable.
+
+        Notes
+        -----
+        The latent expectation is taken column by column, off the marginals
+        a prediction stores, so several columns are treated as independent.
+        Read the result on data the model has not seen: at a training
+        location the model interpolates its own measurement.
         """
         mu = _tf.constant(_np.atleast_2d(_np.transpose(latent_mean)).T,
                           _tf.float64)

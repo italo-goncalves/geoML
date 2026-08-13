@@ -10,6 +10,7 @@ without notice.
 :maxdepth: 1
 
 models
+likelihood
 ```
 
 ## Data
@@ -18,6 +19,7 @@ models
 :maxdepth: 1
 
 datasets
+inducing
 ```
 
 ## Support

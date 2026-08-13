@@ -59,6 +59,8 @@ Homepage = "http://github.com/italo-goncalves/geoML"
 include = [
     "geoml/_types.py",
     "geoml/models.py",
+    "geoml/metrics.py",
+    "geoml/data/inducing.py",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"

@@ -17,17 +17,19 @@
 
 import numpy as _np
 
+import geoml._types as _types
 
-def rmse(y_true, y_pred):
+
+def rmse(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
     """
     Root mean squared error.
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        True values.
-    y_pred : array-like of shape (n_samples,)
-        Predicted values.
+    y_true
+        True values, one per location.
+    y_pred
+        Predicted values, one per location.
 
     Returns
     -------
@@ -39,7 +41,7 @@ def rmse(y_true, y_pred):
     return float(_np.sqrt(_np.mean((y_pred - y_true) ** 2)))
 
 
-def mae(y_true, y_pred):
+def mae(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
     """
     Mean absolute error.
 
@@ -60,7 +62,7 @@ def mae(y_true, y_pred):
     return float(_np.mean(_np.abs(y_pred - y_true)))
 
 
-def bias(y_true, y_pred):
+def bias(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
     """
     Mean error, prediction minus truth. Positive means overestimation.
 
@@ -81,7 +83,7 @@ def bias(y_true, y_pred):
     return float(_np.mean(y_pred - y_true))
 
 
-def crps(y_true, y_pred):
+def crps(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
     """
     Continuous ranked probability score, from samples. Lower is better.
 
@@ -95,10 +97,11 @@ def crps(y_true, y_pred):
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        True values.
-    y_pred : array-like of shape (n_samples, n_predictions)
-        Candidate predictions (e.g. measurement samples).
+    y_true
+        True values, one per location.
+    y_pred
+        Candidate predictions per location, of shape
+        `(n_data, n_predictions)` -- measurement samples, normally.
 
     Returns
     -------
@@ -117,7 +120,8 @@ def crps(y_true, y_pred):
     return float(_np.mean(error - spread))
 
 
-def variogram_score(y_true, y_pred, p=0.5, max_pairs=50000):
+def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
+                    p: float = 0.5, max_pairs: int = 50000) -> float:
     """
     How well the ensemble reproduces the differences between locations.
 
@@ -132,14 +136,15 @@ def variogram_score(y_true, y_pred, p=0.5, max_pairs=50000):
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        True values.
-    y_pred : array-like of shape (n_samples, n_predictions)
-        Realizations at the same locations -- simulations, not measurement
+    y_true
+        True values, one per location.
+    y_pred
+        Realizations at the same locations, of shape
+        `(n_data, n_realizations)` -- simulations, not measurement
         samples: dependence between locations is the thing under test.
-    p : float
+    p
         The power. 0.5 is the authors' recommendation.
-    max_pairs : int
+    max_pairs
         The pair budget.
 
     Returns
@@ -161,24 +166,29 @@ def variogram_score(y_true, y_pred, p=0.5, max_pairs=50000):
     return float(_np.mean((truth - ensemble) ** 2))
 
 
-def interval_score(y_true, y_pred, alpha=0.05):
+def interval_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
+                   alpha: float = 0.05) -> float:
     """
     Interval score, based on confidence intervals estimated from `y_pred`.
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        True values.
-    y_pred : array-like of shape (n_samples, n_predictions)
-        Candidate predictions.
-    alpha : float
-        Confidence interval.
+    y_true
+        True values, one per location.
+    y_pred
+        Candidate predictions per location, of shape
+        `(n_data, n_predictions)`.
+    alpha
+        One minus the interval's nominal coverage.
 
     Returns
     -------
     isc : float
         Interval score.
     """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float)
+
     lower = _np.quantile(y_pred, alpha / 2, axis=1)
     upper = _np.quantile(y_pred, 1 - alpha / 2, axis=1)
 
@@ -187,10 +197,12 @@ def interval_score(y_true, y_pred, alpha=0.05):
         + 2 / alpha * _np.maximum(lower - y_true, 0.0)
         + 2 / alpha * _np.maximum(y_true - upper, 0.0)
     )
-    return isc
+    return float(isc)
 
 
-def bias_variance_decomposition(y_true, y_pred):
+def bias_variance_decomposition(y_true: _types.ArrayLike,
+                                y_pred: _types.ArrayLike
+                                ) -> tuple[float, float]:
     """
     Compute bias and variance from predictions and true values.
 
@@ -198,10 +210,11 @@ def bias_variance_decomposition(y_true, y_pred):
 
     Parameters
     ----------
-    y_true: array-like, shape (n_samples,)
-        True values.
-    y_pred: array-like, shape (n_samples, n_predictions)
-        Candidate predictions.
+    y_true
+        True values, one per location.
+    y_pred
+        Candidate predictions per location, of shape
+        `(n_data, n_predictions)`.
 
     Returns
     -------
@@ -210,6 +223,11 @@ def bias_variance_decomposition(y_true, y_pred):
     var: float
         Mean variance.
     """
+    # taken as arrays first, as every other function here does: the docstring
+    # accepts anything array-like, and a list would not survive the arithmetic
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float)
+
     # Mean prediction across models
     y_pred_mean = _np.mean(y_pred, axis=1)
 
@@ -219,10 +237,12 @@ def bias_variance_decomposition(y_true, y_pred):
     # Variance: variability of predictions across models
     variance = _np.mean(_np.var(y_pred, axis=1))
 
-    return bias_squared, variance
+    return float(bias_squared), float(variance)
 
 
-def coverage(y_true, y_pred, probabilities=None):
+def coverage(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
+             probabilities: _types.ArrayLike | None = None
+             ) -> tuple[_types.FloatArray, _types.FloatArray]:
     """
     How often the truth falls inside an interval of a given probability.
 
@@ -234,11 +254,12 @@ def coverage(y_true, y_pred, probabilities=None):
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        True values.
-    y_pred : array-like of shape (n_samples, n_predictions)
-        Simulated values at the same locations.
-    probabilities : array-like
+    y_true
+        True values, one per location.
+    y_pred
+        Simulated values at the same locations, of shape
+        `(n_data, n_realizations)`.
+    probabilities
         The nominal probabilities to check. Defaults to 0.05 to 0.95.
 
     Returns
@@ -264,7 +285,8 @@ def coverage(y_true, y_pred, probabilities=None):
     return probabilities, observed
 
 
-def goodness(probabilities, observed):
+def goodness(probabilities: _types.ArrayLike,
+             observed: _types.ArrayLike) -> float:
     """
     How close an accuracy plot sits to the 1:1 line. One is perfect.
 
@@ -275,10 +297,10 @@ def goodness(probabilities, observed):
 
     Parameters
     ----------
-    probabilities : array-like
-        Nominal probabilities, as returned by `coverage`.
-    observed : array-like
-        Observed shares, as returned by `coverage`.
+    probabilities
+        Nominal probabilities, as :func:`coverage` returns them.
+    observed
+        Observed shares, as :func:`coverage` returns them.
 
     Returns
     -------
@@ -300,11 +322,31 @@ def goodness(probabilities, observed):
     return 1.0 - area / span if span > 0 else 1.0
 
 
-def aitchison_distance(comp_true, comp_pred):
+def aitchison_distance(comp_true: _types.ArrayLike,
+                       comp_pred: _types.ArrayLike) -> float:
+    """
+    Mean distance between two compositions, in the simplex's own geometry.
+
+    The Euclidean distance between the centred log-ratios, which is what
+    "close" means for parts of a whole: it ignores the closure and answers in
+    ratios rather than in percentage points.
+
+    Parameters
+    ----------
+    comp_true
+        True compositions, of shape `(n_data, n_parts)`, strictly positive.
+    comp_pred
+        Predicted compositions, of the same shape.
+
+    Returns
+    -------
+    float
+        The distance, averaged over the locations.
+    """
     clr_true = _np.log(comp_true)
     clr_true = clr_true - _np.mean(clr_true, axis=1, keepdims=True)
     clr_pred = _np.log(comp_pred)
     clr_pred = clr_pred - _np.mean(clr_pred, axis=1, keepdims=True)
 
     dist = _np.sqrt(_np.sum((clr_true - clr_pred)**2, axis=1))
-    return _np.mean(dist)
+    return float(_np.mean(dist))
