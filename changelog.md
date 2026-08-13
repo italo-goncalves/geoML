@@ -12,7 +12,8 @@ pieces, one pipeline (design record and measurements in
   prediction target* to the data (Linnenbrink et al., 2024). The
   soft-membership optimizer matched the distributions perfectly while the
   folds were spatially wrong; ~n·k continuous degrees of freedom was the
-  overfit, and discreteness is the fix. Writes a `"fold"` metadata column.
+  overfit, and discreteness is the fix. Writes a `"fold"` metadata column
+  (`name=` renames it, so two labellings can sit side by side).
   - `models.cross_validate` is the VGP translation of kriging's
   fixed-variogram cross-validation: the trained model saved once, each
   fold a copy rebuilt around the reduced data, its variational state --
@@ -40,6 +41,9 @@ pieces, one pipeline (design record and measurements in
   pair budgeting, and realizations read one column at a time.
   `metrics.variogram_score` (Scheuerer & Hamill) is its number, and
   `rmse`/`mae`/`bias`/`crps` join the metrics for the fold reports.
+  `ContinuousVariable.compute_metrics` now reports the probabilistic
+  scores beside the point errors it always had: bias, CRPS, goodness and
+  the variogram score, all off the stored simulations.
 * **The back-transform takes all realizations at once.** Prediction with
 `include_noise=True` at high `n_sim` had become the slow step, and the
 arithmetic was innocent: the warping's backward ran through a `map_fn`,

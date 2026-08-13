@@ -704,17 +704,25 @@ class ContinuousVariable(_Variable):
             'Root Mean Square Error (prediction)': _skmetrics.root_mean_squared_error(y_true, y_pred),
             'Mean Absolute Error (prediction)': _skmetrics.mean_absolute_error(y_true, y_pred),
             'Median Absolute Error (prediction)': _skmetrics.median_absolute_error(y_true, y_pred),
+            'Bias (prediction)': _gmlmetrics.bias(y_true, y_pred),
             'Root Mean Square Error (simulations)': _skmetrics.root_mean_squared_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
             'Mean Absolute Error (simulations)': _skmetrics.mean_absolute_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
             'Median Absolute Error (simulations)': _skmetrics.median_absolute_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
+            'CRPS (simulations)': _gmlmetrics.crps(y_true, sims),
+            'Variogram score (simulations)': _gmlmetrics.variogram_score(
+                y_true, sims),
         }
 
         bias_2, variance = _gmlmetrics.bias_variance_decomposition(y_true, sims)
         metrics['Bias squared (simulations)'] = bias_2
         metrics['Variance (simulations)'] = variance
+
+        nominal, observed = _gmlmetrics.coverage(y_true, sims)
+        metrics['Goodness (simulations)'] = _gmlmetrics.goodness(
+            nominal, observed)
 
         if not isinstance(alpha, (list, tuple)):
             alpha = [alpha]

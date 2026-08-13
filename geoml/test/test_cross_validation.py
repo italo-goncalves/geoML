@@ -77,6 +77,14 @@ def test_the_fold_column_is_written_with_every_fold_present():
     assert set(np.unique(fold)) == {0, 1, 2, 3}
 
 
+def test_the_fold_column_takes_the_name_it_is_given():
+    points = _clustered_points()
+    points.spatial_k_fold(_grid(), k=4, groups="hole", name="cv_scheme")
+
+    assert "cv_scheme" in points.metadata
+    assert "fold" not in points.metadata
+
+
 def test_grouped_folds_are_deterministic():
     a = _clustered_points()
     b = _clustered_points()

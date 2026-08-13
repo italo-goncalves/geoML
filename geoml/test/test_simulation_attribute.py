@@ -163,3 +163,7 @@ def test_metrics_read_only_the_measured_rows(monkeypatch):
     _explode_on_whole_store(monkeypatch)
     metrics = var.compute_metrics()
     assert np.all(np.isfinite(metrics.to_numpy(dtype=float)))
+    # the probabilistic scores sit beside the point errors
+    for key in ("Bias (prediction)", "CRPS (simulations)",
+                "Goodness (simulations)", "Variogram score (simulations)"):
+        assert key in metrics.index

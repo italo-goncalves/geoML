@@ -885,7 +885,8 @@ class PointData(_PointBased):
         pv_points = _pv.PolyData(_np.asarray(self.coordinates))
         return self._finish_pyvista(pv_points, "points", simulations, include)
 
-    def spatial_k_fold(self, test_data, k=5, groups=None, seed=None):
+    def spatial_k_fold(self, test_data, k=5, groups=None, seed=None,
+                       name="fold"):
         """
         Builds cross-validation folds that mimic a prediction task.
 
@@ -908,7 +909,9 @@ class PointData(_PointBased):
         up to one cluster per group, each cut's clusters dealt to the
         emptiest fold largest-first. The cut whose Wasserstein distance to
         the target distribution is smallest wins, and the result is
-        written to a metadata column named ``"fold"``.
+        written to a metadata column -- ``"fold"`` unless `name` says
+        otherwise, which is also what `models.cross_validate` reads by
+        default.
 
         Parameters
         ----------
@@ -925,6 +928,10 @@ class PointData(_PointBased):
             Passed to `sklearn.cluster.KMeans` for a reproducible
             pre-clustering when `groups` is not given. The rest of the
             search is deterministic.
+        name : str
+            The metadata column to write the folds to. An existing column
+            with this name is replaced, so two calls with two names give
+            two labellings to compare.
 
         Returns
         -------
@@ -993,7 +1000,7 @@ class PointData(_PointBased):
                 best = (w, fold, pooled)
 
         w, fold, pooled = best
-        self.add_metadata("fold", fold)
+        self.add_metadata(name, fold)
         return w, target, pooled
 
 
