@@ -67,6 +67,7 @@ include = [
     "geoml/data/inducing.py",
     "geoml/data/containers.py",
     "geoml/data/variables.py",
+    "geoml/data/blocks.py",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
