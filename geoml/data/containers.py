@@ -21,6 +21,8 @@ The point-based containers: `_SpatialData` (what every container is),
 import copy as _copy
 import inspect as _inspect
 import json as _json
+from collections.abc import Sequence
+from typing import Any as _Any
 
 import numpy as _np
 import pandas as _pd
@@ -35,6 +37,7 @@ from sklearn.cluster import KMeans as _KMeans
 
 import geoml.math.geometry as _gmt
 import geoml.math.tf as _tftools
+import geoml._types as _types
 import geoml.storage as _storage
 import geoml.viz.plotly as _py
 from geoml.math.geometry import bounding_box
@@ -42,6 +45,7 @@ from geoml.math.geometry import bounding_box
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _TreeNode, _frame_from_columns
 from geoml.data.variables import *
+from geoml.data.variables import _Variable
 
 
 def _balanced_assignment(cluster, sizes, k):
@@ -63,10 +67,25 @@ def _balanced_assignment(cluster, sizes, k):
 class _SpatialData(_TreeNode):
     """Abstract class for spatial data in general"""
 
+    # Declared for the reader and the checker: `variables` and `metadata`
+    # are what a container holds, and `coordinates` is what every concrete
+    # one carries under its own arrangement -- a point cloud stores them,
+    # a grid generates them, a mesh keeps its vertices.
+    variables: "dict[str, _Variable]"
+    metadata: "dict[str, _Attribute]"
+    coordinates: _Any
+
+    _n_dim: int
+    _n_data: int
+    _bounding_box: _Any
+
     def __init__(self):
-        self._n_dim = None
+        # zero rather than None: an empty container has no locations and
+        # no dimensions, which is a count, not the absence of one, and
+        # every subclass overwrites both before anything reads them
+        self._n_dim = 0
         self._bounding_box = None
-        self._n_data = None
+        self._n_data = 0
         self._diagonal = None
         self.variables = {}
         self.metadata = {}
@@ -172,7 +191,8 @@ class _SpatialData(_TreeNode):
         """
         return 1
 
-    def add_metadata(self, name, values, labels=None):
+    def add_metadata(self, name: str, values: _types.ArrayLike,
+                     labels: _types.Labels | None = None) -> None:
         """
         Attaches point-wise information to this object's locations.
 
@@ -183,11 +203,11 @@ class _SpatialData(_TreeNode):
 
         Parameters
         ----------
-        name : str
+        name
             Column name. An existing column with this name is replaced.
-        values : array-like
+        values
             One value per data location. Text is stored as integer codes.
-        labels : list, optional
+        labels
             The categories `values` indexes into, when the codes are given
             directly rather than the text they stand for.
         """
@@ -197,7 +217,7 @@ class _SpatialData(_TreeNode):
         else:
             self.metadata[name] = _Attribute.encoded(self, values, labels)
 
-    def get_metadata(self, name):
+    def get_metadata(self, name: str) -> _np.ndarray:
         """
         The values of a metadata column, as an array.
 
@@ -322,7 +342,7 @@ class _SpatialData(_TreeNode):
 
         return new_vars[0] if single else new_vars
 
-    def drop(self, names):
+    def drop(self, names: "str | Sequence[str]") -> "_SpatialData":
         """
         Removes variables from this container.
 
@@ -474,16 +494,33 @@ class _SpatialData(_TreeNode):
         return self._bounding_box
 
     @property
-    def n_data(self):
+    def n_data(self) -> int:
+        """How many locations this container holds."""
         return self._n_data
 
     @property
-    def diagonal(self):
+    def diagonal(self) -> float:
+        """The length of the bounding box's diagonal."""
         return self._bounding_box.diagonal
 
-    def aspect_ratio(self, vertical_exaggeration=1):
-        """
-        Returns a list with plotly layout data.
+    def aspect_ratio(self, vertical_exaggeration: float = 1) -> dict:
+        """Plotly layout data keeping the axes in proportion.
+
+        Parameters
+        ----------
+        vertical_exaggeration
+            How much to stretch the vertical axis.
+
+        Returns
+        -------
+        dict
+            A `layout` fragment for a plotly figure.
+
+        Raises
+        ------
+        ValueError
+            In one dimension, where there is nothing to keep in
+            proportion.
         """
         if self._n_dim == 2:
             return _py.aspect_ratio_2d(vertical_exaggeration)
@@ -502,7 +539,7 @@ class _SpatialData(_TreeNode):
             raise ValueError("bounding_box only available for 2- and "
                              "3-dimensional data objects")
 
-    def to_zarr(self, path):
+    def to_zarr(self, path: _types.PathLike) -> _types.PathLike:
         """Persist this container to a single on-disk Zarr store.
 
         Coordinates and every variable's arrays are written into one Zarr group
@@ -528,7 +565,7 @@ class _SpatialData(_TreeNode):
         return path
 
     @classmethod
-    def open(cls, path):
+    def open(cls, path: _types.PathLike) -> "_SpatialData":
         """Rebuild a container previously saved with :meth:`to_zarr`.
 
         The stored container type is honoured regardless of which class ``open``
@@ -573,26 +610,32 @@ class _PointBased(_SpatialData):
                 s += "    %s: %s\n" % (name, var.__class__.__name__)
         return s
 
-    def add_continuous_variable(self, name, measurements=None):
+    def add_continuous_variable(
+            self, name: str,
+            measurements: _types.ArrayLike | None = None) -> None:
         """
         Adds a continuous variable to this point set.
 
         Parameters
         ----------
-        name : str
+        name
             Variable name.
-        measurements : array-like
-            The variable values. Its length must correspond to the number of data locations.
+        measurements
+            The variable's values, one per data location.
         """
         # self.variables[name] = ContinuousVariable(
         #     name, self, measurements, quantiles=quantiles,
         #     probabilities=probabilities)
         self.variables[name] = ContinuousVariable(name, self, measurements)
 
-    def add_vector_variable(self, name, labels=None, measurements=None):
+    def add_vector_variable(
+            self, name: str, labels: _types.Labels | None = None,
+            measurements: _types.ArrayLike | None = None) -> None:
         self.variables[name] = VectorVariable(name, self, labels, measurements)
 
-    def add_categorical_variable(self, name, labels=None, measurements=None):
+    def add_categorical_variable(
+            self, name: str, labels: _types.Labels | None = None,
+            measurements: _types.ArrayLike | None = None) -> None:
         """
         Adds a categorical variable to this point set.
 
@@ -639,7 +682,9 @@ class _PointBased(_SpatialData):
             self.variables[name] = RockTypeVariable(
                 name, self, labels, measurements_a, measurements_b)
 
-    def add_binary_variable(self, name, labels=None, measurements=None):
+    def add_binary_variable(
+            self, name: str, labels: _types.Labels | None = None,
+            measurements: _types.ArrayLike | None = None) -> None:
         """
         Adds a binary variable to this point set.
 
@@ -654,7 +699,9 @@ class _PointBased(_SpatialData):
         """
         self.variables[name] = BinaryVariable(name, self, labels, measurements)
 
-    def add_anomaly_variable(self, name, label, measurements=None):
+    def add_anomaly_variable(
+            self, name: str, label: str,
+            measurements: _types.ArrayLike | None = None) -> None:
         """
         Adds an anomaly variable to this point set.
 
@@ -671,7 +718,9 @@ class _PointBased(_SpatialData):
         """
         self.variables[name] = AnomalyVariable(name, self, label, measurements)
 
-    def add_compositional_variable(self, name, labels, measurements=None):
+    def add_compositional_variable(
+            self, name: str, labels: _types.Labels,
+            measurements: _types.ArrayLike | None = None) -> None:
         """
         Adds a compositional variable to this data set.
 
@@ -790,7 +839,7 @@ class PointData(_PointBased):
         return _frame_from_columns(found, columns)
 
     @staticmethod
-    def default_coordinate_labels(n_dim):
+    def default_coordinate_labels(n_dim: int) -> list[str]:
         if n_dim <= 3:
             return ["X", "Y", "Z"][0:n_dim]
         return ["V" + str(i) for i in range(n_dim)]
@@ -999,6 +1048,7 @@ class PointData(_PointBased):
             if best is None or w < best[0]:
                 best = (w, fold, pooled)
 
+        assert best is not None    # at least one cut is always tried
         w, fold, pooled = best
         self.add_metadata(name, fold)
         return w, target, pooled

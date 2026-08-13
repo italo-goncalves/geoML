@@ -1,0 +1,2 @@
+```{include} ../../variable-paths.md
+```

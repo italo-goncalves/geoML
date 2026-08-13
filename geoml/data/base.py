@@ -927,7 +927,7 @@ class _Attribute(object):
     """
 
     # An attribute is coded only when `encoded` says so; the rest are plain.
-    labels = None
+    labels: "list | None" = None
 
     def __init__(self, coordinates, values=None, dtype=None):
         self.coordinates = coordinates

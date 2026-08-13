@@ -32,7 +32,7 @@ def _deep_update(d, u):
     return d
 
 
-def aspect_ratio_2d(vertical_exaggeration=1):
+def aspect_ratio_2d(vertical_exaggeration: float = 1) -> dict:
     return {"xaxis": {"constrain": "domain",
                       "showexponent": "none",
                       "exponentformat": "none"},
@@ -42,7 +42,7 @@ def aspect_ratio_2d(vertical_exaggeration=1):
                       "scaleratio": vertical_exaggeration}}
 
 
-def aspect_ratio_3d(bounding_box, vertical_exaggeration=1):
+def aspect_ratio_3d(bounding_box, vertical_exaggeration: float = 1) -> dict:
     # aspect ratio
     aspect = bounding_box.max[0] - bounding_box.min[0]
     aspect = aspect / aspect[0]

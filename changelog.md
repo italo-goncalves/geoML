@@ -1,3 +1,145 @@
+## version 0.6.3
+* **Type annotations, and the documentation site rebuilt around them.** One
+workstream, because one pass over a signature does both. The reason for
+annotating at all is editor completion: hints are what an IDE surfaces
+without being asked, which docstrings are not.
+  - The scope is the **user-facing surface**, and the tensor internals are
+  left bare deliberately: `tf.Tensor` in and `tf.Tensor` out says nothing
+  about the rank, dtype or axis order that actually goes wrong in there, and
+  tensorflow-probability ships no stubs, so a checker could not verify that
+  half anyway. `typings/tensorflow/__init__.pyi` says so out loud -- it
+  declares TensorFlow untyped, which took the first `pyright` run on
+  `models.py` from 127 diagnostics (mostly `tf.matmul` overloads) to 24 that
+  were all about geoML's own code.
+  - `geoml/_types.py` holds the aliases the API's several-shapes arguments
+  needed: `Where` (a mask, indices, or the name of a metadata column),
+  `Cutoffs`, `Bins`, `PathLike`, `FloatArray`, `Labels`.
+  - **The declarations paid better than the signatures.** Declaring
+  `_SpatialData._n_data: int` and the `ContinuousVariable` columns closed
+  nineteen of the remaining diagnostics at once, since every `np.zeros(
+  container.n_data)` downstream had been reading a `None`. `models.py` is
+  now clean, and three things the checker found were real: `save()` returns
+  the path it wrote rather than `None`, `VGPNetwork` wants a `PointData`
+  rather than any container (it reads `coordinates` and
+  `get_batched_variance`), and the `variables`/`likelihoods` arguments now
+  normalize on `isinstance(str)` / `isinstance(_Likelihood)`, so a tuple or
+  any other sequence of names is accepted rather than silently wrapped.
+  - **Docstrings are technical now**, scikit-learn style: summary,
+  description, parameters, returns, raises, see-also, a brief notes,
+  references, examples. The design notes and measured comparisons that had
+  accumulated in them -- addressed to a maintainer, and read by users in an
+  IDE tooltip -- moved to code comments, the changelog and the design
+  records. `models.py` is done; the rest follow module by module.
+  - **Sixteen modules are annotated and type-checked**: `models`,
+  `metrics`, `storage`, `likelihood`, `kernels`, `transform`,
+  `plots/prepare`, `plots/explorer`, `plots/interactive`, `data/inducing`,
+  `data/containers`, `data/variables`, `data/blocks`, `data/drillhole`.
+  `data/grids` and `warping` are annotated but not yet checked -- the
+  first still has numpy-stub and scalar-arithmetic diagnostics, the second
+  has its base declared and its families to go.
+  - **The checker found thirteen defects, and every one was a promise the
+  code did not keep** -- not a type slip, and not one a test would have
+  caught, because in each case no test called that path with that input:
+  `save()` returns the path it wrote rather than None; `ArrayStore.copy()`
+  returns an array, not a store; `metrics.interval_score` and
+  `bias_variance_decomposition` never converted the array-likes they
+  document, and three metrics returned NumPy scalars where they promised
+  floats; `VGPNetwork` wants a `PointData` rather than any container;
+  `BlockSet3D.unpredicted` read a prediction column off variables that may
+  have none; `IntervalTable.rename` keyed its roles by a value that need
+  not be a string; `add_intervals` handed a set to a method taking a
+  sequence, so dropped holes reordered the rest; `_Warping.forward` and
+  `backward` returned None instead of refusing, so an unimplemented warping
+  failed three frames away; `OrderedGaussianIndicator` takes a *count* of
+  levels; `Anisotropy3DMath` declared integer angles that
+  `Anisotropy3DDynamic` computes as floats; and `Grid3D.make_interpolator`
+  calls a function that does not exist (left as found, filed with the RBF
+  item -- wiring it to `CubicConv3DSeparable` or deleting it is a decision).
+  - Two design changes came out of it. `prepare.continuous_parts` names the
+  kind of variable a figure needs, in place of four copies of a `getattr`
+  idiom; and `_Variable._sim_store()` is the one place that asks for a
+  simulations store, so a variable that was never allocated says so instead
+  of raising from `NoneType` inside a batch loop. The grid constructors keep
+  their `step` argument and their `step_vector` apart, which is what makes
+  the argument's type stateable at all.
+  - **The documentation site is rebuilt.** The five-file `sphinx-quickstart`
+  skeleton and the 94 tracked build artifacts (a stale HTML build of the
+  pre-0.6.0 layout, with a vendored theme and its fonts) are gone. Sphinx +
+  MyST + autodoc: a Markdown front page with a worked Walker example, an API
+  reference that grows as modules are annotated, and the design records
+  included from `docs/*.md` rather than copied. A new `docs` workflow builds
+  it with warnings as errors on every push, runs `pyright` beside it, and
+  publishes to GitHub Pages on a release tag; the README carries the badge
+  and the worked example.
+
+* **The mixture likelihood, settled: one family, several scales, and the
+mixture taken over the row.** Four changes, all of them decisions the
+first implementation left open or got half right:
+  - **It was fitting one model and diagnosing another.** `log_lik` took
+  the mixture per *cell* -- a component chosen independently for each
+  column, sharing one weight -- while `responsibilities` took it per
+  *row*. The two coincide on one column, which is everything that had
+  been measured; on a two-column toy they differ by 1.14 nats, one
+  calling a row bad and the other calling one of its columns bad. The row
+  is right for a vector or compositional variable, whose columns are one
+  observation in sample space: a measurement wrong in one component is a
+  wrong measurement. So the densities are multiplied across the columns
+  before the components are weighted, and because that no longer
+  factorizes, a mixture on a vector variable takes its latent expectation
+  over the joint posterior samples rather than each column's own
+  quadrature (`_column_quadrature`; a scalar mixture keeps Gauss-Hermite,
+  where the two readings are the same thing and the quadrature is exact).
+  - **One family, built by the mixture.**
+  `Mixture(warping, n_components=2, family="gaussian", separation=3.0)`
+  replaces the list of hand-built component likelihoods -- a **breaking
+  change**, taken deliberately. Mixing families was never sound: a
+  Student's t is itself a scale mixture of Gaussians, so a
+  Gaussian-plus-Student mixture is an unidentifiable reparameterization
+  of a scale mixture, and shape is the warping's job in this package
+  anyway. Every contaminated-noise GP in the literature (Kuss 2006,
+  Stegle et al. 2008, and the 2024 sparse variational version) is
+  same-family scale inflation. With the family known, the sharp edge that
+  needed a docstring warning -- symmetric components never pull apart --
+  is closed by construction: each family declares which parameters carry
+  its width and with which exponent (`_WIDTH_PARAMETERS`: a Gaussian's
+  `noise` is a variance, so it moves with the square; an
+  epsilon-insensitive `c_rate` is a rate, so it moves with the inverse;
+  a Student's `df` is shape and does not move), and the components are
+  spread by `separation` at construction, bounds moving with them where a
+  ceiling chosen for one noise would clamp the wide one back. The
+  contamination test that used to hand-set `noise=9.0` now passes on the
+  default construction alone. `Gamma` is refused as a family, with the
+  reason: its spread is tied to its mean.
+  - **Contamination is declared, not assumed.** The default is now
+  `contamination=[False] * n_components` -- the mixture is a noise model
+  first, and nothing is silently excluded from the ground. Marking a
+  component says its readings replace a measurement rather than report
+  one, and only then does the ground part company with the measurement.
+  - **`noise_variance` is of a measurement again**, as its own docstring
+  always claimed. It was the inlier-only spread, so `spread_check` scored
+  a model as over-confident for correctly calling a row contaminated. The
+  nodes now carry two weightings through one fold -- the genuine
+  components renormalized for the value, the mixture's own for the spread
+  -- and the second moment is taken **about the reported value**, which
+  is what a residual is measured from (`E[(y - prediction)^2]`, exactly
+  the extra `(mean_full - mean_genuine)^2` the contamination shifts by).
+  With nothing declared as contamination the two weightings are equal and
+  this is the ordinary noise integral. Cross-validation was never
+  affected: it scores through `predict_measurements`, which always kept
+  the full mixture.
+* **Responsibilities are filed on the variable**, as a dict family keyed
+by component (`assay/responsibilities/0`, `.../1`) -- the same shape as
+quantiles and cut-off shares, so the data frame, the pyvista export, the
+Zarr round trip, subsetting and `select("**/responsibilities/*")` all
+have it off one declaration. `VGPNetwork.responsibilities(newdata)`
+computes the latent moments itself (no prior `predict`, no stale-column
+trap), skips every variable whose likelihood is not a mixture, leaves a
+row without a measurement missing, and takes `store=False` to look
+without writing. Read it out-of-fold: at a training location the model
+interpolates its own measurement, so a row's own responsibility
+understates it -- the honest version is the container `cross_validate`
+returns.
+
 ## version 0.6.2
 * **Cross-validation, whole: folds that mimic the task, a driver that
 never retrains from scratch, and intervals held to their word.** Four

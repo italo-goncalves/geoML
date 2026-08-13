@@ -42,14 +42,21 @@ __all__ = ["save_model", "load_model"]
 import os as _os
 import importlib as _importlib
 import inspect as _inspect
+from typing import TYPE_CHECKING
 
 import numpy as _np
 import tensorflow as _tf
 import zarr as _zarr
 
+import geoml._types as _types
 import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.storage as _storage
+
+if TYPE_CHECKING:
+    # only for the annotations: importing the models at run time would close
+    # the circle, since that is the module calling these functions
+    import geoml.models as _models
 
 
 _GEOML_MODEL_FORMAT = 1
@@ -212,7 +219,8 @@ def _write_parameters(group, model):
     return {"shapes": shapes, "fixed": fixed}
 
 
-def save_model(model, path):
+def save_model(model: "_models._GPModel",
+               path: _types.PathLike) -> _types.PathLike:
     """
     Saves a trained model to a single Zarr store.
 
@@ -361,7 +369,9 @@ def _substitute_data(spec, data, reader):
         spec["kwargs"]["data"] = node
 
 
-def load_model(path, data=None):
+def load_model(path: _types.PathLike,
+               data: "_data._SpatialData | None" = None
+               ) -> "_models._GPModel":
     """
     Loads a model saved with `save_model()`.
 

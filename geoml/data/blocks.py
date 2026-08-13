@@ -21,11 +21,13 @@ and the sub-block geometry behind the mesh assignments and `crossed_by`.
 import copy as _copy
 import itertools as _iter
 import json as _json
+from collections.abc import Sequence
 
 import numpy as _np
 import pandas as _pd
 import pyvista as _pv
 
+import geoml._types as _types
 import geoml.math.geometry as _gmt
 
 from geoml.data.base import *
@@ -509,7 +511,7 @@ class BlockSet3D(PointData):
     def rows_per_location(self):
         return int(_np.prod(self.discretization))
 
-    def is_full(self):
+    def is_full(self) -> bool:
         """Whether the blocks tile their box exactly -- no gap, no overlap.
 
         Volume alone cannot answer: a gap and an overlap of the same size
@@ -554,7 +556,9 @@ class BlockSet3D(PointData):
     # ------------------------------------------------------------------ #
     # refinement
     # ------------------------------------------------------------------ #
-    def split(self, mask, carry=True, labels=("X", "Y", "Z")):
+    def split(self, mask: _types.ArrayLike, carry: bool = True,
+              labels: _types.Labels = ("X", "Y", "Z")
+              ) -> "BlockSet3D":
         """A new block set with each marked block cut into its own sub-blocks.
 
         A block becomes `prod(discretization)` children, one per sub-block and
@@ -641,7 +645,9 @@ class BlockSet3D(PointData):
                 new.metadata[name] = fresh
         return new
 
-    def group(self, mask, carry=True, labels=("X", "Y", "Z")):
+    def group(self, mask: _types.ArrayLike, carry: bool = True,
+              labels: _types.Labels = ("X", "Y", "Z")
+              ) -> "BlockSet3D":
         """The inverse of `split`: whole families of children, back into the
         parent they came from.
 
@@ -744,7 +750,8 @@ class BlockSet3D(PointData):
                 new.metadata[name] = fresh
         return new
 
-    def block_shares(self, split_on=None):
+    def block_shares(self, split_on: "str | Sequence[str] | None" = None
+                     ) -> "dict[str, _np.ndarray]":
         """How often each decision cuts a block in two.
 
         A continuous variable contributes one column per cut-off it declares,
@@ -770,7 +777,8 @@ class BlockSet3D(PointData):
                 shares[("%s %s" % (name, key)).strip()] = values
         return shares
 
-    def needs_splitting(self, split_on=None, tolerance=0.05):
+    def needs_splitting(self, split_on: "str | Sequence[str] | None" = None,
+                        tolerance: float = 0.05) -> _np.ndarray:
         """Which blocks hold more than one answer, and so are worth cutting.
 
         A block whose sub-blocks agree, realization by realization, holds one
@@ -823,7 +831,7 @@ class BlockSet3D(PointData):
             tables.append((key[order], rows[order]))
         return tables
 
-    def unbalanced(self, gap=1):
+    def unbalanced(self, gap: int = 1) -> _np.ndarray:
         """Blocks with a neighbour more than `gap` levels finer than they are.
 
         A block whose own sub-blocks agree is never marked by
@@ -930,7 +938,7 @@ class BlockSet3D(PointData):
     # ------------------------------------------------------------------ #
     # sample data
     # ------------------------------------------------------------------ #
-    def index_data(self, data):
+    def index_data(self, data: "_SpatialData") -> _np.ndarray:
         """Which block each of `data`'s locations falls in.
 
         One row index per location, `-1` for anything outside the box. Note
@@ -1014,7 +1022,7 @@ class BlockSet3D(PointData):
         _blocks_from_solid(self, PointData.assign_from_solid, solid, name,
                            labels, fraction)
 
-    def crossed_by(self, mesh):
+    def crossed_by(self, mesh) -> _np.ndarray:
         """Which blocks a mesh passes through, and so which are worth cutting.
 
         A block is crossed when its sub-blocks fall on **both** sides of the
@@ -1060,7 +1068,7 @@ class BlockSet3D(PointData):
         with _np.errstate(invalid="ignore"):
             return (shares > 0) & (shares < 1)
 
-    def unpredicted(self, variable=None):
+    def unpredicted(self, variable: str | None = None) -> _np.ndarray:
         """Which blocks have nothing in them yet.
 
         What `split` leaves behind: hand it to `predict(..., where=...)` and
@@ -1072,8 +1080,13 @@ class BlockSet3D(PointData):
         """
         if variable is None:
             return _np.array(self._fresh, dtype=bool)
-        return _np.isnan(_np.asarray(
-            self.variables[variable].prediction.values))
+        prediction = getattr(self.variables[variable], "prediction", None)
+        if prediction is None:
+            raise ValueError(
+                "%r has no prediction column to read; name a continuous "
+                "variable, or ask without one for the blocks the last "
+                "split made" % variable)
+        return _np.isnan(_np.asarray(prediction.values))
 
     # ------------------------------------------------------------------ #
     # what the model asks for
@@ -1100,7 +1113,8 @@ class BlockSet3D(PointData):
         k = self.rows_per_location
         return n * k, (None if k == 1 else n)
 
-    def as_data_frame(self, metadata=True, **kwargs):
+    def as_data_frame(self, metadata: bool = True,
+                      **kwargs) -> _pd.DataFrame:
         df = super().as_data_frame(metadata=metadata, **kwargs)
         for i, label in enumerate(self.coordinate_labels):
             df["_" + label] = self.block_size[:, i]
@@ -1375,12 +1389,16 @@ class BlockSet3D(PointData):
         if close:
             # the box measured in whichever lattice the mesh is drawn on
             shape = _np.asarray(self.lattice_shape) * _np.round(
-                self.base_step / step).astype(int)
+                _np.asarray(self.base_step) / _np.asarray(step)
+            ).astype(int)
             ghost_origin, ghost_size = _ghost_shell(origin, size, shape)
-            origin = _np.concatenate([origin, ghost_origin])
-            size = _np.concatenate([size, ghost_size])
+            origin = _np.concatenate(
+                [_np.asarray(origin), _np.asarray(ghost_origin)])
+            size = _np.concatenate(
+                [_np.asarray(size), _np.asarray(ghost_size)])
             cell_values = _np.concatenate(
-                [cell_values, _np.full(len(ghost_origin), fill)])
+                [_np.asarray(cell_values),
+                 _np.full(len(ghost_origin), fill)])
 
         if close or mesh is None:
             mesh = self._hex_mesh(origin, size, step)

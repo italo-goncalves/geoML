@@ -1,0 +1,2 @@
+```{include} ../../mixed-precision.md
+```

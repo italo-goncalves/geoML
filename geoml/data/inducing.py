@@ -48,6 +48,7 @@ __all__ = ["from_kmeans", "from_grid", "combine", "grid_experts", "experts"]
 import numpy as _np
 from sklearn.cluster import KMeans as _KMeans
 
+import geoml._types as _types
 import geoml.data.containers as _data
 
 
@@ -63,20 +64,22 @@ def _as_points(coordinates, labels=None):
         _np.ascontiguousarray(coordinates, dtype=float), labels)
 
 
-def from_kmeans(data, n, seed=None):
+def from_kmeans(data: "_data._SpatialData | _types.ArrayLike", n: int,
+                seed: int | None = None) -> "_data.PointData":
     """
     Inducing points at the k-means centroids of the data.
 
     Parameters
     ----------
     data
-        A spatial container, or an (n_data, n_dim) array of coordinates.
-    n : int
-        Number of inducing points. Must not exceed the number of data points.
-    seed : int
-        Passed to `sklearn.cluster.KMeans` for a reproducible result. Note that
-        this is separate from `geoml.set_seed`, which governs the model's
-        parameter initialization.
+        A spatial container, or an `(n_data, n_dim)` array of coordinates.
+    n
+        Number of inducing points. Must not exceed the number of data
+        points.
+    seed
+        Passed to `sklearn.cluster.KMeans` for a reproducible result. This
+        is separate from :func:`geoml.set_seed`, which governs the
+        model's parameter initialization.
 
     Returns
     -------
@@ -136,17 +139,18 @@ def _step_vector(step, n_dim):
     return step
 
 
-def from_grid(data, step):
+def from_grid(data: "_data._SpatialData | _types.ArrayLike",
+              step: "float | _types.ArrayLike") -> "_data.PointData":
     """
     Inducing points on a regular lattice covering the data.
 
     Parameters
     ----------
     data
-        A spatial container, or an (n_data, n_dim) array of coordinates.
-    step : float or array
-        Spacing between neighbouring inducing points, one value per dimension
-        or a single value for all of them.
+        A spatial container, or an `(n_data, n_dim)` array of coordinates.
+    step
+        Spacing between neighbouring inducing points, one value per
+        dimension or a single value for all of them.
 
     Returns
     -------
@@ -159,7 +163,8 @@ def from_grid(data, step):
     return _as_points(nodes, getattr(data, "coordinate_labels", None))
 
 
-def combine(*sources, tolerance=0.0):
+def combine(*sources: "_data._SpatialData | _types.ArrayLike",
+            tolerance: float = 0.0) -> "_data.PointData":
     """
     One inducing point set out of several, dropping duplicates.
 
@@ -169,10 +174,11 @@ def combine(*sources, tolerance=0.0):
     Parameters
     ----------
     sources
-        Spatial containers or coordinate arrays, all of the same dimension.
-    tolerance : float
-        Points closer than this to one already kept are dropped. The default
-        of zero removes only exact repeats.
+        Spatial containers or coordinate arrays, all of the same
+        dimension.
+    tolerance
+        Points closer than this to one already kept are dropped. The
+        default of zero removes only exact repeats.
 
     Returns
     -------
@@ -200,7 +206,9 @@ def combine(*sources, tolerance=0.0):
     return _as_points(merged[_np.sort(keep)], labels)
 
 
-def grid_experts(data, step, block=4):
+def grid_experts(data: "_data._SpatialData | _types.ArrayLike",
+                 step: "float | _types.ArrayLike",
+                 block: int = 4) -> "list[_data.PointData]":
     """
     Experts laid out as overlapping blocks of a regular lattice.
 
@@ -217,10 +225,10 @@ def grid_experts(data, step, block=4):
     Parameters
     ----------
     data
-        A spatial container, or an (n_data, n_dim) array of coordinates.
-    step : float or array
+        A spatial container, or an `(n_data, n_dim)` array of coordinates.
+    step
         Spacing between neighbouring inducing points.
-    block : int
+    block
         Inducing points per block side, before the margin is added.
 
     Returns
@@ -312,7 +320,9 @@ def _mahalanobis(points, center, covariance):
     return _np.sqrt((solved ** 2).sum(axis=0))
 
 
-def experts(points, n_experts, overlap=0.1, seed=None):
+def experts(points: "_data._SpatialData | _types.ArrayLike",
+            n_experts: int, overlap: float = 0.1,
+            seed: int | None = None) -> "list[_data.PointData]":
     """
     Experts from overlapping clusters of an unstructured point set.
 
@@ -338,15 +348,15 @@ def experts(points, n_experts, overlap=0.1, seed=None):
     ----------
     points
         The inducing points to divide: a spatial container, or an
-        (n_points, n_dim) array.
-    n_experts : int
+        `(n_points, n_dim)` array.
+    n_experts
         Number of experts. Must not exceed the number of points.
-    overlap : float
+    overlap
         How many points each expert borrows from its neighbours, as a fraction
         of its own count, so an expert ends up with about `1 + overlap` times
         the points its cluster holds. Zero leaves the experts a strict
         partition, sharing nothing.
-    seed : int
+    seed
         Passed to `sklearn.cluster.KMeans` for a reproducible result.
 
     Returns
