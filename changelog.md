@@ -30,12 +30,38 @@ without being asked, which docstrings are not.
   accumulated in them -- addressed to a maintainer, and read by users in an
   IDE tooltip -- moved to code comments, the changelog and the design
   records. `models.py` is done; the rest follow module by module.
-  - Annotated and rewritten so far: `models.py`, `metrics.py`,
-  `data/inducing.py`, and `likelihood.Mixture` with its `responsibilities`
-  -- the docstrings that had most narrative in them. Two more real findings
-  on the way: `metrics.interval_score` and `bias_variance_decomposition`
-  never converted their arguments, so the "array-like" they documented would
-  have failed on a list.
+  - **Sixteen modules are annotated and type-checked**: `models`,
+  `metrics`, `storage`, `likelihood`, `kernels`, `transform`,
+  `plots/prepare`, `plots/explorer`, `plots/interactive`, `data/inducing`,
+  `data/containers`, `data/variables`, `data/blocks`, `data/drillhole`.
+  `data/grids` and `warping` are annotated but not yet checked -- the
+  first still has numpy-stub and scalar-arithmetic diagnostics, the second
+  has its base declared and its families to go.
+  - **The checker found thirteen defects, and every one was a promise the
+  code did not keep** -- not a type slip, and not one a test would have
+  caught, because in each case no test called that path with that input:
+  `save()` returns the path it wrote rather than None; `ArrayStore.copy()`
+  returns an array, not a store; `metrics.interval_score` and
+  `bias_variance_decomposition` never converted the array-likes they
+  document, and three metrics returned NumPy scalars where they promised
+  floats; `VGPNetwork` wants a `PointData` rather than any container;
+  `BlockSet3D.unpredicted` read a prediction column off variables that may
+  have none; `IntervalTable.rename` keyed its roles by a value that need
+  not be a string; `add_intervals` handed a set to a method taking a
+  sequence, so dropped holes reordered the rest; `_Warping.forward` and
+  `backward` returned None instead of refusing, so an unimplemented warping
+  failed three frames away; `OrderedGaussianIndicator` takes a *count* of
+  levels; `Anisotropy3DMath` declared integer angles that
+  `Anisotropy3DDynamic` computes as floats; and `Grid3D.make_interpolator`
+  calls a function that does not exist (left as found, filed with the RBF
+  item -- wiring it to `CubicConv3DSeparable` or deleting it is a decision).
+  - Two design changes came out of it. `prepare.continuous_parts` names the
+  kind of variable a figure needs, in place of four copies of a `getattr`
+  idiom; and `_Variable._sim_store()` is the one place that asks for a
+  simulations store, so a variable that was never allocated says so instead
+  of raising from `NoneType` inside a batch loop. The grid constructors keep
+  their `step` argument and their `step_vector` apart, which is what makes
+  the argument's type stateable at all.
   - **The documentation site is rebuilt.** The five-file `sphinx-quickstart`
   skeleton and the 94 tracked build artifacts (a stale HTML build of the
   pre-0.6.0 layout, with a vendored theme and its fonts) are gone. Sphinx +
