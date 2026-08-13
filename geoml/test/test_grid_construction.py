@@ -349,8 +349,7 @@ def test_a_model_predicts_onto_the_rotated_blocks():
         size=1, kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), network,
-        options=geoml.models.GPOptions(verbose=False, seed=42,
-                                       training_samples=4))
+        options=geoml.models.GPOptions(verbose=False, training_samples=4))
     model.train_full(max_iter=2)
 
     blocks = geoml.data.RotatedBlockSet3D.from_data(

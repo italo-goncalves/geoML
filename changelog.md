@@ -1,3 +1,186 @@
+## version 0.6.2
+* **Cross-validation, whole: folds that mimic the task, a driver that
+never retrains from scratch, and intervals held to their word.** Four
+pieces, one pipeline (design record and measurements in
+`docs/cross-validation.md`):
+  - `spatial_k_fold(test_data, k, groups=...)` works now, and differently
+  from the prototype it replaces: discrete groups that are never split (a
+  drill hole stands or falls together; k-means atoms otherwise),
+  agglomerated by cutting a Ward dendrogram of group centroids at every
+  count and keeping the cut whose held-out-to-training nearest-neighbour
+  distances best match -- Wasserstein -- the distances from the *actual
+  prediction target* to the data (Linnenbrink et al., 2024). The
+  soft-membership optimizer matched the distributions perfectly while the
+  folds were spatially wrong; ~n·k continuous degrees of freedom was the
+  overfit, and discreteness is the fix. Writes a `"fold"` metadata column
+  (`name=` renames it, so two labellings can sit side by side).
+  - `models.cross_validate` is the VGP translation of kriging's
+  fixed-variogram cross-validation: the trained model saved once, each
+  fold a copy rebuilt around the reduced data, its variational state --
+  where the data lives -- re-initialized so it is *structurally* ignorant
+  of the held-out rows, everything else frozen, a short refit, and the
+  held-out rows predicted into one shared container that ends the loop
+  fully out-of-fold. Scored on measurements, per fold and pooled (rmse,
+  mae, bias, crps, goodness). Measured on Walker, 5 spatial folds:
+  fresh-variational at 200 iterations matches a 400-iteration scratch
+  retrain within a few percent (rmse 238 vs 245) at 2.3x less cost --
+  while *warm-starting* scores better than the honest gold itself (231),
+  which is the residual memory of the held-out data surviving 200
+  iterations of supposed forgetting, and is why fresh initialization is
+  the default rather than a knob.
+  - `models.conformalize` on top: split conformal on the out-of-fold PITs
+  the driver leaves behind, a monotone map from the coverage an interval
+  should have to the level it must be cut at, with the finite-sample
+  guarantee -- and its limits said out loud: folds that mimic deployment
+  are what the exchangeability is worth, the intervals are of
+  measurements, and no repair reaches past the ensemble's own range.
+  - The variogram joins the figures, in both backends: the data's curve
+  with one thin curve per realization on the same pairs -- the
+  spatial-continuity check the marginal figures cannot make -- with
+  directions, `residuals=True` for what the model missed, deterministic
+  pair budgeting, and realizations read one column at a time.
+  `metrics.variogram_score` (Scheuerer & Hamill) is its number, and
+  `rmse`/`mae`/`bias`/`crps` join the metrics for the fold reports.
+  `ContinuousVariable.compute_metrics` now reports the probabilistic
+  scores beside the point errors it always had: bias, CRPS, goodness and
+  the variogram score, all off the stored simulations.
+* **The back-transform takes all realizations at once.** Prediction with
+`include_noise=True` at high `n_sim` had become the slow step, and the
+arithmetic was innocent: the warping's backward ran through a `map_fn`,
+one realization at a time -- a sequential loop whose per-step launch
+overhead was measured at 96% of a noise-free 100-simulation prediction
+-- and the noise integration paid that loop again for every quadrature
+node, 8 elementwise and 64 for a mixing warping: 6400 sequential little
+ops at `n_sim=100`. The realization axis is now folded into the row
+axis, so the backward runs once over `n x n_sim` rows -- exact, a
+warping acting on each row alone, and the peak tensor unchanged.
+Measured on the Walker 78k grid: `n_sim=100` with noise **14.1 s to
+0.40 s**, without 6.6 to 0.36; `n_sim=20` with noise 6.7 to 0.26.
+Integrating the noise now costs a tenth on top of a prediction instead
+of multiplying it, and the node-by-node fold keeps its memory promise
+untouched. One regression caught on the real Macpass model and fixed the
+next day: the reshape assumed the backward keeps its width, which a chain
+holding a PCA does not (3 latent columns back to 4 composition parts) --
+the width now comes from the warping's own declaration, and a test pins
+the width-changing case the suite's square fixtures had missed.
+* **Experts may keep their own counsel.**
+`GPOptions(expert_propagation="independent")` lets each expert of a deep
+network predict its own inducing set alone, where the default
+(`"consensus"`, the historical behavior) predicts every set from every
+expert and combines by precision weighting -- the network's one O(K^2)
+step. Measured on a deep Walker model and a 3000-point synthetic:
+training 1.6x faster at 5 experts growing to 6.3x at 40 (the consensus
+cost quadruples per doubling of K, the independent cost doubles), and
+prediction up to 8x (54 s down to 6.8 s on a 6.4k grid at K=40).
+Duplicated inducing points in overlapping sets do genuinely diverge --
+several latent standard deviations, where the consensus made them
+identical by construction -- and the data-side weighting in
+`interpolate`, which is untouched, arbitrates: quality lands within a
+few percent of consensus on Walker (four seeds) and ahead of it on the
+synthetic at 20 experts, where the consensus coupling of every expert's
+parameters appears to slow optimization. One option in `GPOptions`
+governs every `BasicGP` in the network at once, read at trace time
+through the same context-flag pattern as `qmc_simulations`; the traced
+refresh and the prediction dispatcher are keyed by it, so flipping the
+option on a live model takes effect at the next call and flipping it
+back reproduces the original numbers. Single-layer networks are
+untouched -- below a terminal node the propagation never runs.
+* **`RobustPCA` initializes quietly.** scikit-learn's FastMCD chatters on
+its concentration steps ("Determinant has increased" on perfectly normal
+iterations) and flags a not-full-rank estimate on the way out; neither is
+actionable during an initialization, so exactly those two warnings are
+filtered around the fit alone, and anything else sklearn says still comes
+through.
+* **A variable can be derived from others, realization by realization.**
+`container.derive(names, function, arguments)` builds `DerivedVariable`s --
+the middle ground between metadata (a constant the models never see) and a
+modelled variable: full simulations and everything built on them, with all
+of the uncertainty inherited. The function is applied once per realization
+-- which is what keeps a nonlinear one honest, `f(E[grades])` not being
+`E[f(grades)]` -- and the prediction column is the mean of the derived
+realizations. One derived variable per output name; metadata paths
+(`"_metadata/density"`) come in as per-location constants; a variable
+without simulations is refused, everything being realization-wise; and a
+function that accepts a `simulation=` keyword receives the realization's
+index, which is how a per-realization price scenario knows which draw it
+is in. The walk is banded, so a block model's stores are never held whole
+(pinned by the same tripwire as everywhere else). Being a
+`ContinuousVariable` underneath, cut-offs, quantiles, contours,
+grade-tonnage curves, subsetting and the Zarr round trip all come free --
+the recipe itself is not persisted (a function does not survive a store
+honestly): a reloaded derived variable is data, and rerunning the script
+that derived it is the refresh. Models refuse it by name at every door
+(`training_input`, `get_measurements`, `update`).
+* **One realization at a time, guaranteed.** A block model's simulations
+are hundreds of gigabytes, and the workflows coming (a random NSR per
+realization, and anything else that walks the realizations sequentially)
+need one of them without paying for all of them. `variable.simulation(i)`
+already read a single column out of the store; it is now *pinned* to stay
+that way -- the same tripwire that guards subsetting fails any read of a
+whole `(n_data, n_sim)` store -- and its docstring carries the cost
+model: only one column is ever in memory, but the store is chunked by
+location, so a column read visits every chunk and walking all
+realizations costs one pass per realization; anything that decomposes
+over locations should read row bands instead. `compute_metrics`, the
+last consumer that materialized the store (to keep only its measured
+rows), now indexes those rows out of the chunks the way subsetting has
+since 0.5.9, and the `get_simulations` methods say in-source that they
+are the materializers, for data that fits.
+* **One seed to rule them all.** `geoml.set_seed` was already what made
+the initial parameters reproducible; now it is the only knob. A model's
+options draw their `seed` -- the number training's Monte Carlo and the
+simulation stream read through stateless sampling -- from the package
+generator when they are built, so the same call that fixes the starting
+parameters fixes the training trajectory and every simulation, and there
+is no second seed to forget. `GPOptions(seed=...)` is gone (a
+`TypeError` now -- set the attribute directly in the unlikely case a
+training seed must be forced), while `options.seed` itself remains: a
+saved model keeps the number it drew, since persistence restores the
+options `vars` wholesale, so old saves keep their stored seed and any
+saved model replays its simulations exactly on reload. A model built
+without `set_seed` now varies its training draws from run to run -- as
+its initialization always did, so nothing that was reproducible before
+has stopped being reproducible. Every
+dependency carries a lower bound, and the package declares
+`requires-python >= 3.10`. Four floors are API facts: zarr 3
+(`zarr.create_array` is the v3 surface the stores are built on), pyvista
+0.47 (`select_interior_points`, added there as the replacement for the
+filter whose rename once bit), `tensorflow-probability[tf]` 0.24 (the
+extra that brings tf-keras), and vtk 9.1 -- declared as a dependency for
+the first time, because `data/meshes.py` imports vtk directly rather
+than through pyvista. The remaining floors are era markers, versions
+comfortably older than anything verified, so a truly ancient environment
+gets a legible refusal from pip instead of a strange crash later.
+* **Float64 earned its keep.** The mixed-precision idea — kernel
+arithmetic in float32, Choleskys kept in float64 — was measured on the
+Walker VGP and rejected, with the trail in `docs/mixed-precision.md`.
+The gradients do flow through the casts (median deviation 2.6%, loss
+identical to 8 digits at the same parameters), but the scheme needs
+local coordinates as a matter of arithmetic (covariance errors of 1e-2
+at UTM scale against 6e-7 in a local frame), needs the jitter raised to
+1e-5 to survive training (1e-9 dies at once, 1e-6 halfway) -- and that
+jitter moves the model sixteen times further than float32 itself does.
+For all that it buys 1.1-1.2x end to end and nothing on top of XLA,
+which already removed the memory traffic float32 would have halved. The
+one real speed lever for prediction remains `jit_predict`: exact, 3-5x,
+already shipped.
+* **The tests now run themselves.** A GitHub Actions workflow
+(`.github/workflows/tests.yml`) runs the structural test files -- the 600
+tests that train no real model, two and a half minutes locally -- on every
+push, and the full suite on release tags and on demand from the Actions
+tab, minus the one test that downloads from sidc.be (a release gate should
+not depend on a third-party server being up). Every run starts from a
+machine with nothing on it, so `pip install -e .` is re-proved from
+`pyproject.toml` alone each time, and a pyvista or TensorFlow release that
+breaks something turns a commit red before any user hits it. A new test
+file runs on every push until it earns its way onto the heavy list. Its
+very first runs earned their keep: recent tensorflow-probability does
+not install Keras support by itself, so a fresh `pip install geoml`
+could not import the package, and pandas treats the Excel engine behind
+`datasets.ararangua()` as optional -- the dependencies are now
+`tensorflow-probability[tf]` and `openpyxl`, both of which every
+environment built by hand already had by accident.
+
 ## version 0.6.1
 * **Everything below the topography, in one call.** Three pieces, built
 for the grade-shells-under-the-DTM workflow. A sheet can now be cut by a

@@ -63,21 +63,23 @@ def test_the_flag_flips_on_a_live_model():
     model.predict(grid, n_sim=8)
     monte_carlo = _sims(grid)
     mean_mc = np.array(grid.variables["V"].latent_mean.values, copy=True)
-    first = model._compiled[(False, False)]
+    first = model._compiled[(False, False, "consensus")]
 
     model.options.qmc_simulations = True
     model.predict(grid, n_sim=8)
     quasi = _sims(grid)
     mean_qmc = np.array(grid.variables["V"].latent_mean.values, copy=True)
 
-    assert set(model._compiled) == {(False, False), (False, True)}
+    assert set(model._compiled) == {(False, False, "consensus"),
+                                    (False, True, "consensus")}
     assert not np.allclose(monte_carlo, quasi)
     # the deterministic outputs do not depend on how the ensemble is drawn
     assert np.allclose(mean_mc, mean_qmc, atol=1e-8)
 
     model.options.qmc_simulations = False
     model.predict(grid, n_sim=8)
-    assert model._compiled[(False, False)] is first  # reused, not rebuilt
+    assert model._compiled[(False, False, "consensus")] is first
+    # reused, not rebuilt
     assert np.allclose(_sims(grid), monte_carlo, atol=1e-8)
 
 
@@ -95,8 +97,8 @@ def test_qmc_is_unchanged_by_xla():
     model.predict(grid, n_sim=8)
     compiled = _sims(grid)
 
-    assert (False, True) in model._compiled
-    assert (True, True) in model._compiled
+    assert (False, True, "consensus") in model._compiled
+    assert (True, True, "consensus") in model._compiled
     assert np.allclose(plain, compiled, atol=1e-8)
 
 

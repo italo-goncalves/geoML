@@ -50,6 +50,25 @@ def simulation_rule(qmc):
         _QMC_SIMULATIONS = previous
 
 
+# How a deep network's experts see each other's inducing sets. Set through
+# `propagation_rule` by the model around training and prediction, never
+# directly: the choice lives in `GPOptions.expert_propagation`, and it is
+# read at trace time by `BasicGP.refresh`.
+_EXPERT_PROPAGATION = "consensus"
+
+
+@_contextlib.contextmanager
+def propagation_rule(rule):
+    """Chooses how experts propagate their inducing sets while active."""
+    global _EXPERT_PROPAGATION
+    previous = _EXPERT_PROPAGATION
+    _EXPERT_PROPAGATION = rule
+    try:
+        yield
+    finally:
+        _EXPERT_PROPAGATION = previous
+
+
 def _simulation_normals(shape, seed):
     """Standard normals shaped `[size, n, n_sim]` for the posterior draws.
 
@@ -117,8 +136,11 @@ def refresh_cached(network, jitter=1e-6):
     jitter : float
         Small value added to the covariance matrices for numerical stability.
     """
+    # the propagation rule is a Python-level branch inside `refresh`, so it
+    # is baked into the trace and must key the cache with the jitter
+    key = (jitter, _EXPERT_PROPAGATION)
     cached = network._refresh_graph
-    if cached is None or cached[0] != jitter:
+    if cached is None or cached[0] != key:
         # fixed once, so that the values coming back keep lining up with the
         # nodes they belong to
         nodes = list(set(network.get_unique_parents()) | {network})
@@ -127,7 +149,7 @@ def refresh_cached(network, jitter=1e-6):
             network.refresh(jitter)
             return [_graph_state(node) for node in nodes]
 
-        cached = (jitter, _tf.function(traced), nodes)
+        cached = (key, _tf.function(traced), nodes)
         network._refresh_graph = cached
 
     _, traced_refresh, nodes = cached
@@ -922,39 +944,65 @@ class BasicGP(_GPNode):
             )
 
             # inducing points, for whatever is built on top of this node.
-            # Every expert's set is predicted from every other, so this is the
-            # one quadratic step in the network: with a terminal node it is
-            # also pure waste, since nothing ever reads the result.
+            # Under the default rule every expert's set is predicted from
+            # every other and combined by precision weighting -- the one
+            # quadratic step in the network; with a terminal node it is pure
+            # waste, since nothing ever reads the result. Under
+            # `GPOptions(expert_propagation="independent")` each expert
+            # speaks for its own set alone: duplicated points in overlapping
+            # sets are then free to disagree (measured at several latent
+            # standard deviations), and the data-side weighting in
+            # `interpolate` arbitrates. That trades the consensus for O(K)
+            # cost -- measured 6.3x training and 8x prediction at 40 experts,
+            # with quality within a few percent either way.
             if len(self.children) > 0:
                 bias = [self.parameters[f'bias_{i}'].get_value() for i in range(self.root.n_experts)]
 
                 self.inducing_points = []
                 self.inducing_points_variance = []
-                for i in range(self.root.n_experts):
-                    ip_i = self.parent.inducing_points[i]
-                    ipv_i = self.parent.inducing_points_variance[i]
-                    means = []
-                    pred_vars = []
-                    for j in range(self.root.n_experts):
-                        ip_j = self.parent.inducing_points[j]
-                        ipv_j = self.parent.inducing_points_variance[j]
-                        cov = self.covariance_matrix(ip_i, ip_j, ipv_i, ipv_j)
-                        means.append(_tf.einsum("ab,sbc->sac", cov, self.alpha[j]) + bias[j])
-                        pred_vars.append(
-                            1.0 - _tf.reduce_sum(
-                                _tf.einsum("ab,sbc->sac", cov, self.cov_smooth_inv[j]) * cov[None, :, :],
-                                axis=2, keepdims=False
-                            )
+                if _EXPERT_PROPAGATION == "independent":
+                    for i in range(self.root.n_experts):
+                        ip_i = self.parent.inducing_points[i]
+                        ipv_i = self.parent.inducing_points_variance[i]
+                        cov = self.covariance_matrix(ip_i, ip_i, ipv_i, ipv_i)
+                        mean = _tf.einsum(
+                            "ab,sbc->sac", cov, self.alpha[i]) + bias[i]
+                        pred_var = 1.0 - _tf.reduce_sum(
+                            _tf.einsum("ab,sbc->sac", cov,
+                                       self.cov_smooth_inv[i])
+                            * cov[None, :, :],
+                            axis=2, keepdims=False
                         )
-                    means = _tf.stack(means, axis=0)  # [n_experts, n_latent, n_data, 1]
-                    pred_vars = _tf.stack(pred_vars, axis=0)  # [n_experts, n_latent, n_data]
-                    weights = _GPNode.get_expert_weights(pred_vars)
-                    self.inducing_points.append(
-                        _tf.transpose(_tf.reduce_sum(means[:, :, :, 0] * weights, axis=0))
-                    )
-                    self.inducing_points_variance.append(
-                        _tf.transpose(_tf.reduce_sum(pred_vars * weights, axis=0))
-                    )
+                        self.inducing_points.append(
+                            _tf.transpose(mean[:, :, 0]))
+                        self.inducing_points_variance.append(
+                            _tf.transpose(pred_var))
+                else:
+                    for i in range(self.root.n_experts):
+                        ip_i = self.parent.inducing_points[i]
+                        ipv_i = self.parent.inducing_points_variance[i]
+                        means = []
+                        pred_vars = []
+                        for j in range(self.root.n_experts):
+                            ip_j = self.parent.inducing_points[j]
+                            ipv_j = self.parent.inducing_points_variance[j]
+                            cov = self.covariance_matrix(ip_i, ip_j, ipv_i, ipv_j)
+                            means.append(_tf.einsum("ab,sbc->sac", cov, self.alpha[j]) + bias[j])
+                            pred_vars.append(
+                                1.0 - _tf.reduce_sum(
+                                    _tf.einsum("ab,sbc->sac", cov, self.cov_smooth_inv[j]) * cov[None, :, :],
+                                    axis=2, keepdims=False
+                                )
+                            )
+                        means = _tf.stack(means, axis=0)  # [n_experts, n_latent, n_data, 1]
+                        pred_vars = _tf.stack(pred_vars, axis=0)  # [n_experts, n_latent, n_data]
+                        weights = _GPNode.get_expert_weights(pred_vars)
+                        self.inducing_points.append(
+                            _tf.transpose(_tf.reduce_sum(means[:, :, :, 0] * weights, axis=0))
+                        )
+                        self.inducing_points_variance.append(
+                            _tf.transpose(_tf.reduce_sum(pred_vars * weights, axis=0))
+                        )
 
     def cache_prediction_state(self):
         super().cache_prediction_state()

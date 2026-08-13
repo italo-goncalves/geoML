@@ -27,7 +27,7 @@ def build_model(n_ip=12, samples=10, seed=1234):
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     likelihood = geoml.likelihood.Gaussian()
     options = geoml.models.GPOptions(
-        verbose=False, seed=seed, training_samples=samples)
+        verbose=False, training_samples=samples)
     model = geoml.models.VGPNetwork(
         walker_point, "V", likelihood, gp, options=options)
     return model, walker_grid
@@ -185,7 +185,7 @@ def build_gradient_constrained_model(seed=1234):
         geoml.kernels.Gaussian(), geoml.transform.Isotropic(30))
     root = geoml.latent.GradientConstrainedInput(ip, dirs, covariance, size=1)
     options = geoml.models.GPOptions(
-        verbose=False, seed=seed, training_samples=8)
+        verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "rock_num", geoml.likelihood.Gaussian(), root, options=options)
     grid = geoml.data.Grid2D(start=[5, 5], n=[40, 40], step=[2, 2])
@@ -259,16 +259,18 @@ def test_jit_holds_one_traced_function_per_setting():
     model.train_full(max_iter=5)
 
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False)}
-    first = model._compiled[(False, False)]
+    assert set(model._compiled) == {(False, False, "consensus")}
+    first = model._compiled[(False, False, "consensus")]
 
     model.options.jit_predict = True
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False), (True, False)}
+    assert set(model._compiled) == {(False, False, "consensus"),
+                                    (True, False, "consensus")}
 
     model.options.jit_predict = False
     model.predict(grid, n_sim=4)
-    assert model._compiled[(False, False)] is first    # reused, not rebuilt
+    assert model._compiled[(False, False, "consensus")] is first
+    # reused, not rebuilt
 
 
 def test_jit_prediction_is_batch_invariant():

@@ -37,7 +37,7 @@ def build_model(n_experts=3, n_ip=10, seed=1234, depth=1):
     model = geoml.models.VGPNetwork(
         walker_point, "V", geoml.likelihood.Gaussian(), node,
         options=geoml.models.GPOptions(
-            verbose=False, seed=seed, training_samples=6))
+            verbose=False, training_samples=6))
     return model, walker_grid, root, node
 
 
@@ -345,3 +345,77 @@ def test_multi_expert_model_round_trips(tmp_path):
     reloaded.predict(grid2, n_sim=4)
     after = np.asarray(grid2.variables["V"].latent_mean.values)
     assert np.allclose(before, after)
+
+
+# --------------------------------------------------------------------------- #
+# the propagation rule
+# --------------------------------------------------------------------------- #
+def test_the_default_propagation_is_consensus():
+    assert geoml.models.GPOptions().expert_propagation == "consensus"
+
+    # options saved before the rule existed fall back to the class default
+    old = geoml.models.GPOptions.__new__(geoml.models.GPOptions)
+    vars(old).update({"verbose": False})
+    assert old.expert_propagation == "consensus"
+
+    with pytest.raises(ValueError, match="expert_propagation"):
+        geoml.models.GPOptions(expert_propagation="sideways")
+
+
+def _small_grid():
+    return geoml.data.Grid2D(start=[1, 1], end=[256, 291], n=[12, 12])
+
+
+def test_independent_experts_change_a_deep_network():
+    """The rules genuinely differ where the propagation runs: same seed,
+    same training, different predictions."""
+    outputs = {}
+    for rule in ("consensus", "independent"):
+        model, _, _, _ = build_model(n_experts=3, n_ip=10, depth=2)
+        model.options.expert_propagation = rule
+        model.train_full(3)
+        grid = _small_grid()
+        model.predict(grid, n_sim=2)
+        outputs[rule] = np.asarray(
+            grid.variables["V"].latent_mean.values).copy()
+
+    assert not np.allclose(outputs["consensus"], outputs["independent"])
+
+
+def test_a_single_layer_network_is_untouched_by_the_rule():
+    """Below a terminal node the propagation never runs (the childless
+    guard), so the option must change nothing there."""
+    outputs = {}
+    for rule in ("consensus", "independent"):
+        model, _, _, _ = build_model(n_experts=3, n_ip=10, depth=1)
+        model.options.expert_propagation = rule
+        model.train_full(3)
+        grid = _small_grid()
+        model.predict(grid, n_sim=2)
+        outputs[rule] = np.asarray(
+            grid.variables["V"].latent_mean.values).copy()
+
+    assert np.allclose(outputs["consensus"], outputs["independent"])
+
+
+def test_the_rule_flips_on_a_live_model():
+    """The traced refresh is keyed by the rule, so flipping the option on a
+    trained model takes effect on the next predict -- and flipping it back
+    reproduces the original numbers from the re-keyed caches."""
+    model, _, _, _ = build_model(n_experts=3, n_ip=10, depth=2)
+    model.train_full(3)
+
+    grid = _small_grid()
+    model.predict(grid, n_sim=2)
+    consensus = np.asarray(grid.variables["V"].latent_mean.values).copy()
+
+    model.options.expert_propagation = "independent"
+    model.predict(grid, n_sim=2)
+    independent = np.asarray(grid.variables["V"].latent_mean.values).copy()
+
+    model.options.expert_propagation = "consensus"
+    model.predict(grid, n_sim=2)
+    back = np.asarray(grid.variables["V"].latent_mean.values).copy()
+
+    assert not np.allclose(consensus, independent)
+    assert np.allclose(consensus, back)

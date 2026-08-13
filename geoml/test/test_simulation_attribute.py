@@ -121,3 +121,49 @@ def test_simulation_after_a_real_prediction():
     assert np.all(np.isfinite(cube))
     assert np.allclose(cube.ravel(order="F"),
                        np.asarray(var.simulations[:, 1]))
+
+
+def _explode_on_whole_store(monkeypatch):
+    """Fail the test if any (n_data, n_sim) store is materialized whole --
+    the same tripwire the subsetting watchdog in test_paths uses."""
+    def explode(self, *args, **kwargs):
+        if len(self.shape) == 2:
+            raise AssertionError("the whole simulations store was read")
+        return np.asarray(self._array)
+
+    monkeypatch.setattr(storage.ArrayStore, "__array__", explode)
+
+
+def test_a_single_simulation_never_reads_the_whole_store(monkeypatch):
+    """The column is indexed out of the store, so one realization of a block
+    model costs one column in memory -- which is what makes processing the
+    realizations sequentially viable at scale."""
+    grid, var, sims = _grid2d_with_simulations()
+    _explode_on_whole_store(monkeypatch)
+
+    attr = var.simulation(3)
+    assert np.allclose(np.asarray(attr.values), sims[:, 3])
+
+
+def test_metrics_read_only_the_measured_rows(monkeypatch):
+    """`compute_metrics` wants the simulations at the measured locations -- a
+    sliver of the store -- and must not hold the rest to cut them out."""
+    rng = np.random.default_rng(1)
+    xy = rng.uniform(0, 10, size=(30, 2))
+    measured = np.full(30, np.nan)
+    measured[:12] = rng.normal(size=12)
+
+    point = geoml.data.PointData.from_array(xy)
+    point.add_continuous_variable("v", measured)
+    var = point.variables["v"]
+    var.prediction.values[:] = rng.normal(size=30)
+    var.allocate_simulations(5)
+    var.simulations[:, :] = rng.normal(size=(30, 5))
+
+    _explode_on_whole_store(monkeypatch)
+    metrics = var.compute_metrics()
+    assert np.all(np.isfinite(metrics.to_numpy(dtype=float)))
+    # the probabilistic scores sit beside the point errors
+    for key in ("Bias (prediction)", "CRPS (simulations)",
+                "Goodness (simulations)", "Variogram score (simulations)"):
+        assert key in metrics.index

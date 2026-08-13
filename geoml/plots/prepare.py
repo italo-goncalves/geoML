@@ -24,6 +24,7 @@ composition looks like once it is opened up -- can be tested against numbers
 instead of against pictures.
 """
 import numpy as _np
+import scipy.spatial as _spatial
 import scipy.stats as _stats
 
 import geoml.data as _data
@@ -743,6 +744,143 @@ def spread_check(container, name, bins=8):
 
         panels.append({key: (val if key == "label" else _np.asarray(val))
                        for key, val in panel.items()})
+    return panels
+
+
+def variogram(container, name, n_lags=15, max_lag=None, direction=None,
+              tolerance=45.0, max_pairs=2_000_000, residuals=False):
+    """
+    The data's spatial structure, against the fan the simulations reproduce.
+
+    The experimental semivariogram of the measured values, and one curve per
+    realization computed on the same pairs: a model that learned the spatial
+    structure scatters its realizations *around* the data's curve, a kernel
+    too smooth sags below it at short lags, and a nugget fitted into the
+    range lifts it there. Neither shows in the marginal checks
+    (`accuracy`, `spread_check`), which is what this figure exists for.
+
+    With `residuals=True` the variogram is of `measured - predicted` instead
+    and the fan is omitted: structure left in the residuals is structure the
+    model missed, and on cross-validated predictions (`models.cross_validate`)
+    it is honest. Whatever the flag, at a training location a model
+    interpolates its own measurement, so the fan is only worth reading
+    against data the model has not seen or with the data curve as the anchor.
+
+    Parameters
+    ----------
+    container :
+        Point data carrying measurements (and simulations, for the fan).
+    name : str
+        The variable.
+    n_lags : int
+        Number of equal-width lag bins between zero and `max_lag`.
+    max_lag : float, optional
+        The longest separation considered. Half the bounding-box diagonal by
+        default.
+    direction : array-like, optional
+        A direction vector for a directional variogram. Omnidirectional when
+        absent. Call once per direction to compare them -- the anisotropy
+        ellipsoid's principal axes are the ones worth asking about.
+    tolerance : float
+        Angular tolerance around `direction`, in degrees.
+    max_pairs : int
+        The pair budget. Past it the locations are strided down --
+        deterministic, so two calls agree.
+    residuals : bool
+        Variogram of `measured - predicted` rather than of the measurements,
+        with no fan.
+
+    Returns
+    -------
+    list of dict
+        One per component, with `label`, the bin centres `lag`, the pair
+        `count` per bin, the data curve `data`, the sample variance `sill`,
+        and `realizations` -- an `(n_realizations, n_lags)` array, or None
+        when there is nothing simulated or `residuals` was asked.
+    """
+    var = variable(container, name)
+    components = getattr(var, "components", None)
+    parts = [var] if components is None else \
+        [components[label] for label in var.labels]
+
+    coords = _np.asarray(container.coordinates, dtype=float)
+    n = coords.shape[0]
+
+    # the pair budget, met by striding the locations down -- deterministic,
+    # where sampling pairs at random would put a seed inside a figure
+    most = int(_np.floor(_np.sqrt(2 * max_pairs))) + 1
+    stride = max(1, int(_np.ceil(n / most)))
+    rows = _np.arange(0, n, stride)
+    points = coords[rows]
+
+    if max_lag is None:
+        box = container.bounding_box
+        span = _np.asarray(box.max, dtype=float).ravel() \
+            - _np.asarray(box.min, dtype=float).ravel()
+        max_lag = 0.5 * float(_np.sqrt((span ** 2).sum()))
+
+    distance = _spatial.distance.pdist(points)
+    i_idx, j_idx = _np.triu_indices(len(points), k=1)
+    keep = distance <= max_lag
+    if direction is not None:
+        u = _np.asarray(direction, dtype=float).ravel()
+        u = u / _np.linalg.norm(u)
+        separation = points[j_idx] - points[i_idx]
+        along = _np.abs(separation @ u) / _np.maximum(distance, 1e-30)
+        keep &= along >= _np.cos(_np.deg2rad(tolerance))
+    i_idx, j_idx, distance = i_idx[keep], j_idx[keep], distance[keep]
+
+    edges = _np.linspace(0.0, max_lag, n_lags + 1)
+    lag_bin = _np.clip(_np.searchsorted(edges, distance, side="right") - 1,
+                       0, n_lags - 1)
+    centre = 0.5 * (edges[:-1] + edges[1:])
+
+    def curve(values):
+        ok = _np.isfinite(values)
+        pair_ok = ok[i_idx] & ok[j_idx]
+        pi, pj, pb = i_idx[pair_ok], j_idx[pair_ok], lag_bin[pair_ok]
+        count = _np.bincount(pb, minlength=n_lags)
+        gamma = 0.5 * _np.bincount(
+            pb, weights=(values[pi] - values[pj]) ** 2, minlength=n_lags) \
+            / _np.maximum(count, 1)
+        gamma[count == 0] = _np.nan
+        return gamma, count
+
+    panels = []
+    for part in parts:
+        measured = part.measurements.values.to_numpy().astype(float)[rows]
+        if residuals:
+            predicted = part.prediction.values.to_numpy().astype(float)[rows]
+            values = measured - predicted
+        else:
+            values = measured
+        if not _np.any(_np.isfinite(values)):
+            raise ValueError(
+                "%r has nothing to compute a variogram from"
+                % str(part.name))
+
+        gamma, count = curve(values)
+
+        fan = None
+        store = getattr(part, "simulations", None)
+        if not residuals and store is not None \
+                and len(getattr(store, "shape", ())) == 2 \
+                and store.shape[1] > 1:
+            fan = _np.full((store.shape[1], n_lags), _np.nan)
+            for r in range(store.shape[1]):
+                # one realization is one column, read without materializing
+                # the store -- the same discipline as everywhere else here
+                column = _np.asarray(store[:, r], dtype=float).ravel()[rows]
+                fan[r] = curve(column)[0]
+
+        panels.append({
+            "label": str(part.name),
+            "lag": centre,
+            "count": count,
+            "data": gamma,
+            "sill": float(_np.var(values[_np.isfinite(values)])),
+            "realizations": fan,
+        })
     return panels
 
 

@@ -33,7 +33,7 @@ def _model(n_dim=2, seed=1234, n_train=30, n_ip=5, max_iter=3):
         transform=geoml.transform.Isotropic(40))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     options = geoml.models.GPOptions(
-        verbose=False, seed=seed, training_samples=8)
+        verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), gp, options=options)
     model.train_full(max_iter=max_iter)
@@ -298,8 +298,7 @@ def _mixed_model(seed=1234):
         [geoml.likelihood.Gaussian(),
          geoml.likelihood.CategoricalGaussianIndicator(2)],
         gp,
-        options=geoml.models.GPOptions(verbose=False, seed=seed,
-                                       training_samples=8))
+        options=geoml.models.GPOptions(verbose=False, training_samples=8))
     model.train_full(max_iter=2)
     return model, point
 

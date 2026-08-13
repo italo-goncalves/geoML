@@ -17,7 +17,8 @@
 # ProjectedVGP stays out on purpose: importable for old saves, unadvertised
 # until its latent side (geoml.latent.fourier) earns tests.
 __all__ = ["GP", "GPEnsemble", "Normalizer", "StructuralField", "GPOptions",
-           "VGPNetwork", "refine"]
+           "VGPNetwork", "refine", "cross_validate", "conformalize",
+           "ConformalCalibration"]
 
 import numpy as np
 
@@ -27,12 +28,19 @@ import geoml.latent as _latent
 import geoml.likelihood as _lk
 import geoml.warping as _warp
 import geoml.math.tf as _tftools
+import geoml.metrics as _metrics
+import geoml.persistence as _persistence
+import geoml.stats.random as _srandom
 import geoml
 
 import numpy as _np
+import pandas as _pd
 import tensorflow as _tf
 import copy as _copy
 import itertools as _iter
+import os as _os
+import shutil as _shutil
+import tempfile as _tempfile
 import warnings
 
 import tensorflow_probability as _tfp
@@ -41,12 +49,17 @@ _tfd = _tfp.distributions
 
 class _ModelOptions:
     def __init__(self, verbose=True, prediction_batch_size=20000,
-                 training_batch_size=2000,
-                 seed=1234):
+                 training_batch_size=2000):
         self.verbose = verbose
         self.training_batch_size = training_batch_size
         self.prediction_batch_size = prediction_batch_size
-        self.seed = seed
+        # Drawn, not taken: `geoml.set_seed` is the one knob, so the same call
+        # that fixes the initial parameters must fix training's Monte Carlo
+        # draws and the simulation stream, which read this number through
+        # stateless TensorFlow sampling. A saved model keeps the number it
+        # drew (`persistence` restores the options `vars` wholesale, skipping
+        # this constructor), so its simulations replay exactly on reload.
+        self.seed = int(_srandom.rng().integers(2 ** 31 - 1))
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, ", ".join(
@@ -66,16 +79,24 @@ class GPOptions(_ModelOptions):
     # the lookup falls through to here.
     jit_predict = False
     qmc_simulations = False
+    expert_propagation = "consensus"
 
     def __init__(self, verbose=True, prediction_batch_size=20000,
-                 seed=1234, jitter=1e-9,
+                 jitter=1e-9,
                  training_batch_size=2000, training_samples=20,
-                 jit_predict=False, qmc_simulations=False):
+                 jit_predict=False, qmc_simulations=False,
+                 expert_propagation="consensus"):
         """
         Configuration of Gaussian process models.
 
         This object can be passed on to models based on the Gaussian process in order to
         control their behavior.
+
+        The `seed` that training and the simulations read is not a parameter:
+        it is drawn from the package generator when the object is built, so
+        `geoml.set_seed` before construction governs it the way it already
+        governs parameter initialization, and a saved model keeps the number
+        it drew.
 
         Parameters
         ----------
@@ -83,8 +104,6 @@ class GPOptions(_ModelOptions):
             Whether to show the training process on screen.
         prediction_batch_size : int
             Batch size for prediction/inference.
-        seed : int
-            Seed to control random number generation.
         jitter : float
             Small value added to covariance matrices for numerical stability.
         training_batch_size : int
@@ -111,13 +130,33 @@ class GPOptions(_ModelOptions):
             measurable. Deterministic given `seed`, batch-invariant either
             way. The sequence covers at most 21201 dimensions (`size` times
             the inducing points of a node), beyond which scipy refuses.
+        expert_propagation : str
+            How a deep network's experts see each other's inducing sets,
+            for every `BasicGP` in the network at once. `"consensus"` (the
+            default, and the historical behavior) predicts every expert's
+            set from every other and combines by precision weighting --
+            O(K^2) in the expert count. `"independent"` lets each expert
+            speak for its own set alone -- O(K) -- so duplicated points in
+            overlapping sets may disagree, and the data-side weighting
+            arbitrates. Measured (Walker deep model and a 3000-point
+            synthetic, K = 5-40): training 1.6x to 6.3x faster and
+            prediction up to 8x as K grows; quality within a few percent of
+            consensus and sometimes ahead, the consensus coupling appearing
+            to slow optimization at large K. Only deep (multi-layer)
+            networks are affected: below a terminal node the propagation
+            never runs.
         """
+        if expert_propagation not in ("consensus", "independent"):
+            raise ValueError(
+                "expert_propagation must be 'consensus' or 'independent', "
+                "got %r" % (expert_propagation,))
         super().__init__(verbose, prediction_batch_size,
-                         training_batch_size, seed)
+                         training_batch_size)
         self.jitter = jitter
         self.training_samples = training_samples
         self.jit_predict = jit_predict
         self.qmc_simulations = qmc_simulations
+        self.expert_propagation = expert_propagation
 
 
 class _GPModel(_gpr.Parametric):
@@ -871,18 +910,21 @@ class VGPNetwork(_GPModel):
         has_value = _tf.constant(self.has_value, _tf.float64)
         x_var = _tf.constant(self.data.get_batched_variance()[0], _tf.float64)
 
-        for i in range(max_iter):
-            step(x, y, has_value, x_var)
+        # the propagation rule is read when the step traces (and re-traces),
+        # which happens inside the loop
+        with _latent.propagation_rule(self.options.expert_propagation):
+            for i in range(max_iter):
+                step(x, y, has_value, x_var)
 
-            for pr in self._all_parameters:
-                pr.refresh()
+                for pr in self._all_parameters:
+                    pr.refresh()
 
-            current_elbo = self.elbo.numpy()
-            self.training_log.append(current_elbo)
+                current_elbo = self.elbo.numpy()
+                self.training_log.append(current_elbo)
 
-            if self.options.verbose:
-                print("\rIteration %s | ELBO: %s" %
-                      (str(i+1), str(current_elbo)), end="")
+                if self.options.verbose:
+                    print("\rIteration %s | ELBO: %s" %
+                          (str(i+1), str(current_elbo)), end="")
 
         if self.options.verbose:
             print("\n")
@@ -908,34 +950,35 @@ class VGPNetwork(_GPModel):
         # a generator of its own, so the batch order is reproducible from
         # options.seed without reaching any draw made outside training
         rng = _np.random.default_rng(self.options.seed)
-        for i in range(epochs):
-            current_elbo = []
+        with _latent.propagation_rule(self.options.expert_propagation):
+            for i in range(epochs):
+                current_elbo = []
 
-            shuffled = rng.choice(
-                self.data.n_data, self.data.n_data, replace=False)
-            batches = self.options.batch_index(self.data.n_data)
+                shuffled = rng.choice(
+                    self.data.n_data, self.data.n_data, replace=False)
+                batches = self.options.batch_index(self.data.n_data)
 
-            for batch in batches:
-                # training_inputs = [
-                #     self.data.variables[v].training_input(idx)
-                #     for v in self.variables]
-                idx = shuffled[batch]
-                step(_tf.constant(self.data.coordinates[idx], _tf.float64),
-                     _tf.constant(self.y[idx], _tf.float64),
-                     _tf.constant(self.has_value[idx], _tf.float64),
-                     _tf.constant(self.data.get_batched_variance(idx)[0],
-                                  _tf.float64))
+                for batch in batches:
+                    # training_inputs = [
+                    #     self.data.variables[v].training_input(idx)
+                    #     for v in self.variables]
+                    idx = shuffled[batch]
+                    step(_tf.constant(self.data.coordinates[idx], _tf.float64),
+                         _tf.constant(self.y[idx], _tf.float64),
+                         _tf.constant(self.has_value[idx], _tf.float64),
+                         _tf.constant(self.data.get_batched_variance(idx)[0],
+                                      _tf.float64))
 
-                for pr in self._all_parameters:
-                    pr.refresh()
+                    for pr in self._all_parameters:
+                        pr.refresh()
 
-                current_elbo.append(self.elbo.numpy())
-                self.training_log.append(current_elbo[-1])
+                    current_elbo.append(self.elbo.numpy())
+                    self.training_log.append(current_elbo[-1])
 
-            total_elbo = _np.mean(current_elbo)
-            if self.options.verbose:
-                print("\rEpoch %s | ELBO: %s" %
-                      (str(i + 1), str(total_elbo)), end="")
+                total_elbo = _np.mean(current_elbo)
+                if self.options.verbose:
+                    print("\rEpoch %s | ELBO: %s" %
+                          (str(i + 1), str(total_elbo)), end="")
 
         if self.options.verbose:
             print("\n")
@@ -948,17 +991,21 @@ class VGPNetwork(_GPModel):
         means holding one function per combination of settings rather than a
         flag on a single one. Each is traced at most once per model, and
         `None` (rather than `False`) leaves the uncompiled path exactly as it
-        was. The `simulation_rule` context wraps the call rather than the
-        trace because a retrace (a new batch shape, a new `n_sim`) can happen
-        on any call, and has to see the flag the cache key promised.
+        was. The `simulation_rule`/`propagation_rule` contexts wrap the call
+        rather than the trace because a retrace (a new batch shape, a new
+        `n_sim`) can happen on any call, and has to see the flags the cache
+        key promised. The propagation rule joins the key for the networks
+        whose graphs refresh internally (`ProjectedVGP`); on this class the
+        graph reads snapshotted state, and the extra key is merely unused.
         """
         jit = bool(self.options.jit_predict)
         qmc = bool(self.options.qmc_simulations)
-        traced = self._compiled.get((jit, qmc))
+        rule = self.options.expert_propagation
+        traced = self._compiled.get((jit, qmc, rule))
         if traced is None:
             traced = _tf.function(self._predict_raw, jit_compile=jit or None)
-            self._compiled[(jit, qmc)] = traced
-        with _latent.simulation_rule(qmc):
+            self._compiled[(jit, qmc, rule)] = traced
+        with _latent.simulation_rule(qmc), _latent.propagation_rule(rule):
             return traced(*args, **kwargs)
 
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
@@ -1091,10 +1138,12 @@ class VGPNetwork(_GPModel):
         # cached `predict_raw` graph reads current values without recomputing the
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
-        if hasattr(self.latent_network, "cache_prediction_state"):
-            _latent.refresh_cached(self.latent_network, self.options.jitter)
-        else:
-            self.latent_network.refresh(self.options.jitter)
+        with _latent.propagation_rule(self.options.expert_propagation):
+            if hasattr(self.latent_network, "cache_prediction_state"):
+                _latent.refresh_cached(self.latent_network,
+                                       self.options.jitter)
+            else:
+                self.latent_network.refresh(self.options.jitter)
 
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
@@ -1325,6 +1374,339 @@ def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
                      int(_np.count_nonzero(crossed & ~undecided)),
                      int(_np.count_nonzero(uneven & ~undecided & ~crossed)),
                      blocks.n_data))
+
+
+# What encodes the data in a trained VGP, and how each piece starts over.
+# Every node of the latent network registers these per inducing set (see
+# `BasicGP._set_parameters`); everything else is a hyperparameter.
+_VARIATIONAL_STATE = {
+    "alpha_white_": lambda shape: _srandom.rng().normal(scale=1e-3,
+                                                        size=shape),
+    "delta_": _np.ones,
+    "bias_": _np.zeros,
+}
+
+
+def _fresh_variational_state(model):
+    """Freeze what one fold cannot change; forget what it can.
+
+    The variational state -- `alpha_white_*`, `delta_*` and `bias_*` on every
+    node of the latent network -- is where the data lives in a trained VGP, so
+    a fold model gets it factory-fresh: re-initialized, it is structurally
+    ignorant of the held-out rows, and no iterations are spent forgetting
+    them. Everything else (kernels, warpings, likelihood noise) is fixed where
+    it stands -- the concession kriging cross-validation makes when it keeps
+    the fitted variogram, made once and said out loud in `cross_validate`'s
+    docstring. The fresh values are drawn from the package generator, so
+    `geoml.set_seed` makes the whole procedure reproducible.
+    """
+    for parameter in model._all_parameters:
+        parameter.fix()
+
+    network = model.latent_network
+    for node in [network] + network.get_unique_parents():
+        for name, parameter in node.parameters.items():
+            for prefix, init in _VARIATIONAL_STATE.items():
+                if name.startswith(prefix):
+                    shape = _np.asarray(parameter.get_value()).shape
+                    parameter.set_value(init(shape))
+                    parameter.unfix()
+                    break
+
+
+def cross_validate(model, folds="fold", refit="variational", iterations=200,
+                   n_sim=20, n_nodes=32, path=None):
+    """
+    Scores a model on folds it never saw, one short refit per fold.
+
+    A VGP has no closed-form leave-one-out: the posterior is fitted, not
+    solved, and retraining from scratch once per fold is what this exists to
+    avoid. The translation of the kriging practice of cross-validating with a
+    fixed variogram: the trained model is saved once, and each fold gets a
+    copy rebuilt around the data with its fold removed
+    (`persistence.load_model(..., data=...)`), its variational state -- the
+    part of a trained model that encodes the data -- re-initialized so it is
+    structurally ignorant of the held-out rows, every other parameter frozen,
+    and a short refit of that state alone, which is the fast, well-behaved
+    part of the optimization. The fold model then predicts the held-out rows,
+    and only those, into one shared copy of the training data. Folds
+    partition the data, so when the loop ends every location holds a
+    prediction made by a model that never saw it.
+
+    What is conceded, said plainly: the hyperparameters and the warping were
+    fitted on all the data, including each fold's -- the same concession
+    kriging cross-validation makes when it keeps the variogram. `refit="all"`
+    trades the other way: nothing is re-initialized and nothing newly frozen,
+    every parameter the model was training warm-starts from its trained value
+    and continues on the reduced data -- fewer guarantees, all the
+    flexibility.
+
+    The scores are of *measurements*: the held-out values are assays, so each
+    fold model is asked through `predict_measurements`, whose samples carry
+    the noise a real sample carries. A categorical variable has no
+    measurement distribution and gets no rows here -- subset the returned
+    container by fold and use the variable's own `compute_metrics`.
+
+    Folds come from a metadata column: `spatial_k_fold` writes one that
+    mimics a prediction task, and any labelling works -- a drill hole id
+    column gives leave-one-hole-out directly, at one refit per hole.
+
+    Parameters
+    ----------
+    model : VGPNetwork
+        A trained model. It is saved, copied and left untouched.
+    folds : str
+        Name of the metadata column holding the fold labels. Every location
+        must have one.
+    refit : str
+        `"variational"` (the default) or `"all"`, as above.
+    iterations : int
+        Training iterations per fold (full-batch Adam, `train_full`).
+    n_sim : int
+        Latent realizations, for the out-of-fold predictions and the
+        measurement samples alike.
+    n_nodes : int
+        Noise values per realization in the measurement samples.
+    path : str, optional
+        Where to keep the saved model and its fold copies. A temporary
+        directory, removed at the end, unless one is given.
+
+    Returns
+    -------
+    oof : container
+        A copy of the training data with out-of-fold predictions and
+        simulations on every variable -- what `accuracy`, `spread_check` and
+        the residual figures are honest on. It also carries one metadata
+        column per scored component (`pit_<variable>` or
+        `pit_<variable>_<component>`): where each assay fell inside its own
+        out-of-fold predictive distribution, which is what `conformalize`
+        calibrates on.
+    scores : pandas.DataFrame
+        One row per variable component and fold, plus a pooled `"all"` row:
+        `rmse`, `mae`, `bias` (of the predictive mean), `crps` and
+        `goodness`, all against the held-out measurements.
+    """
+    data = model.data
+    labels = _np.asarray(data.get_metadata(folds))
+    if _pd.isna(labels).any():
+        raise ValueError(
+            "every location needs a fold; column '%s' has missing entries"
+            % folds)
+    fold_names = _np.unique(labels)
+    if fold_names.size < 2:
+        raise ValueError(
+            "cross-validation needs at least 2 folds; column '%s' holds %d"
+            % (folds, fold_names.size))
+    if refit not in ("variational", "all"):
+        raise ValueError(
+            "refit must be 'variational' or 'all', got %r" % (refit,))
+
+    cleanup = path is None
+    if cleanup:
+        path = _tempfile.mkdtemp(prefix="geoml_cv_")
+    saved = _os.path.join(path, "model")
+
+    # one shared answer sheet: every fold writes only the rows it held out,
+    # and the folds partition the data, so nothing stale survives the loop
+    oof = data[_np.ones(data.n_data, dtype=bool)]
+    for v in model.variables:
+        oof.variables[v].allocate_simulations(n_sim)
+
+    rows = []
+    acc = {}
+    pit = {}
+    try:
+        _persistence.save_model(model, saved)
+        for fold in fold_names:
+            held = labels == fold
+            fold_model = _persistence.load_model(saved, data=data[~held])
+            if refit == "variational":
+                _fresh_variational_state(fold_model)
+            fold_model.train_full(max_iter=iterations)
+            fold_model.predict(oof, n_sim=n_sim, include_noise=True,
+                               where=held)
+
+            held_points = oof[held]
+            samples = fold_model.predict_measurements(
+                held_points, n_sim=n_sim, n_nodes=n_nodes)
+            for v, sample in samples.items():
+                y_true, has_value = \
+                    held_points.variables[v].get_measurements()
+                y_true = _np.asarray(y_true, dtype=float)
+                has_value = _np.asarray(has_value)
+                if y_true.ndim == 1:
+                    y_true = y_true[:, None]
+                if has_value.ndim == 1:
+                    has_value = has_value[:, None]
+
+                components = getattr(held_points.variables[v], "labels", None)
+                components = [v] if components is None else list(components)
+                for c, component in enumerate(components):
+                    measured = has_value[:, min(c, has_value.shape[1] - 1)] \
+                        == 1
+                    if not measured.any():
+                        continue
+                    truth = y_true[measured, c]
+                    draw = sample[measured, c, :]
+                    point = draw.mean(axis=1)
+                    nominal, observed = _metrics.coverage(truth, draw)
+                    n = int(measured.sum())
+                    score_crps = _metrics.crps(truth, draw)
+
+                    # where each assay fell inside its own predictive
+                    # distribution (mid-rank, so ties split evenly) --
+                    # what `conformalize` calibrates on
+                    u = (draw < truth[:, None]).mean(axis=1) \
+                        + 0.5 * (draw == truth[:, None]).mean(axis=1)
+                    column = pit.setdefault(
+                        (v, component),
+                        _np.full(data.n_data, _np.nan))
+                    column[_np.flatnonzero(held)[measured]] = u
+                    rows.append({
+                        "variable": v, "component": component, "fold": fold,
+                        "n": n,
+                        "rmse": _metrics.rmse(truth, point),
+                        "mae": _metrics.mae(truth, point),
+                        "bias": _metrics.bias(truth, point),
+                        "crps": score_crps,
+                        "goodness": _metrics.goodness(nominal, observed),
+                    })
+
+                    # sufficient statistics, so the pooled row needs no
+                    # second pass over the samples
+                    a = acc.setdefault((v, component), {
+                        "n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0,
+                        "crps": 0.0,
+                        "observed": _np.zeros_like(observed),
+                        "nominal": nominal,
+                    })
+                    a["n"] += n
+                    a["sse"] += float(((point - truth) ** 2).sum())
+                    a["sae"] += float(_np.abs(point - truth).sum())
+                    a["se"] += float((point - truth).sum())
+                    a["crps"] += score_crps * n
+                    a["observed"] = a["observed"] + observed * n
+    finally:
+        if cleanup:
+            _shutil.rmtree(path, ignore_errors=True)
+
+    for (v, component), a in acc.items():
+        n = a["n"]
+        rows.append({
+            "variable": v, "component": component, "fold": "all", "n": n,
+            "rmse": float(_np.sqrt(a["sse"] / n)),
+            "mae": a["sae"] / n,
+            "bias": a["se"] / n,
+            "crps": a["crps"] / n,
+            "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
+        })
+
+    for (v, component), column in pit.items():
+        oof.add_metadata(_pit_column(v, component), column)
+
+    return oof, _pd.DataFrame(rows)
+
+
+def _pit_column(name, component):
+    """Where `cross_validate` keeps a component's out-of-fold PITs."""
+    if component is None or component == name:
+        return "pit_%s" % name
+    return "pit_%s_%s" % (name, component)
+
+
+class ConformalCalibration:
+    """A finite-sample repair of interval coverage, from out-of-fold PITs.
+
+    Split conformal prediction on the score `|u - 1/2|`, where `u` is where a
+    held-out assay fell inside its own predictive measurement distribution.
+    `nominal(q)` answers: at what level must a central interval be cut so
+    that it covers a share `q` of fresh measurements? For a calibrated model
+    the answer is `q` itself; an overconfident one is told to cut wider, a
+    hedging one narrower, and the conformal quantile (the `(n+1)q`-th
+    smallest score) carries the standard finite-sample guarantee -- coverage
+    at least `q` -- under exchangeability of the calibration scores with the
+    prediction's.
+
+    Spatial data is not exchangeable point by point, which is why the folds
+    matter: built by `spatial_k_fold` they mimic the prediction task, so the
+    out-of-fold scores are drawn from conditions like deployment's, which is
+    what the guarantee is worth here. The intervals are of *measurements* --
+    the ground is never observed, so there is nothing to calibrate a ground
+    interval against.
+
+    The repair is bounded by what samples can express: an interval cut from
+    an ensemble can never reach past the ensemble's own range, so
+    `nominal(q) == 1.0` means the model was too sure for its samples to say
+    how much wider the interval must be -- raise `n_sim`/`n_nodes`, or fix
+    the model rather than the interval.
+    """
+
+    def __init__(self, pit):
+        pit = _np.asarray(pit, dtype=float).ravel()
+        pit = pit[_np.isfinite(pit)]
+        if pit.size == 0:
+            raise ValueError("there are no PIT values to calibrate on")
+        self._scores = _np.sort(_np.abs(pit - 0.5))
+
+    def nominal(self, coverage):
+        """The level to cut a central interval at, so it covers `coverage`."""
+        n = self._scores.size
+        k = int(_np.ceil((n + 1) * float(coverage)))
+        if k > n:
+            return 1.0
+        return min(1.0, 2.0 * float(self._scores[k - 1]))
+
+    def interval(self, samples, coverage=0.9):
+        """A calibrated central interval per row of measurement samples.
+
+        Parameters
+        ----------
+        samples : array-like of shape (n_data, n_samples)
+            One component's measurement samples, as
+            `predict_measurements` returns them (sliced to the component).
+        coverage : float
+            The share of fresh measurements the interval should cover.
+
+        Returns
+        -------
+        lower, upper : arrays of shape (n_data,)
+        """
+        level = self.nominal(coverage)
+        samples = _np.asarray(samples, dtype=float)
+        lower = _np.quantile(samples, max(0.0, 0.5 - level / 2), axis=-1)
+        upper = _np.quantile(samples, min(1.0, 0.5 + level / 2), axis=-1)
+        return lower, upper
+
+
+def conformalize(oof, name, component=None):
+    """
+    The conformal calibration of one variable, from a cross-validation.
+
+    Reads the out-of-fold PIT column `cross_validate` stored on its returned
+    container and hands back the `ConformalCalibration` built on it: the
+    monotone map from the coverage an interval should have to the level it
+    must be cut at, with the split-conformal finite-sample guarantee. Use it
+    on fresh measurement samples::
+
+        oof, scores = geoml.models.cross_validate(model)
+        calibration = geoml.models.conformalize(oof, "grade")
+        samples = model.predict_measurements(new_points)["grade"]
+        lower, upper = calibration.interval(samples[:, 0, :], coverage=0.9)
+
+    Parameters
+    ----------
+    oof :
+        The container `cross_validate` returned.
+    name : str
+        The variable.
+    component : str, optional
+        Which component, when the variable is a vector one.
+
+    Returns
+    -------
+    ConformalCalibration
+    """
+    return ConformalCalibration(oof.get_metadata(_pit_column(name, component)))
 
 
 class StructuralField(_GPModel):

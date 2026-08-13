@@ -47,7 +47,7 @@ def _model(point=None, max_iter=5, seed=1234):
         _inducing(), transform=geoml.transform.Isotropic(40))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     options = geoml.models.GPOptions(
-        verbose=False, seed=seed, training_samples=8)
+        verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), gp, options=options)
     model.train_full(max_iter=max_iter)
@@ -132,7 +132,7 @@ def test_loaded_model_remembers_variable_types(tmp_path):
         _inducing(), transform=geoml.transform.Isotropic(40))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     options = geoml.models.GPOptions(
-        verbose=False, seed=1234, training_samples=8)
+        verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "b", geoml.likelihood.Bernoulli(), gp, options=options)
     model.train_full(max_iter=3)
@@ -179,7 +179,7 @@ def test_categorical_variable_definition_survives(tmp_path):
     gp = geoml.latent.BasicGP(root, size=len(labels),
                               kernel=geoml.kernels.Gaussian())
     options = geoml.models.GPOptions(
-        verbose=False, seed=1234, training_samples=8)
+        verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "rt",
         geoml.likelihood.CategoricalGaussianIndicator(len(labels)),
@@ -230,7 +230,7 @@ def test_shared_nodes_are_not_duplicated(tmp_path):
     gp_b = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Cubic())
     network = geoml.latent.Add(gp_a, gp_b)
     options = geoml.models.GPOptions(
-        verbose=False, seed=1234, training_samples=8)
+        verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), network, options=options)
     model.train_full(max_iter=3)
@@ -281,8 +281,7 @@ def test_fix_transform_flag_survives(tmp_path):
         _inducing(), transform=geoml.transform.Isotropic(40),
         fix_transform=True)
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
-    options = geoml.models.GPOptions(verbose=False, seed=1234,
-                                     training_samples=8)
+    options = geoml.models.GPOptions(verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), gp, options=options)
 

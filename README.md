@@ -5,6 +5,8 @@
 
 # Spatial modeling using machine learning concepts
 
+[![tests](https://github.com/italo-goncalves/geoML/actions/workflows/tests.yml/badge.svg)](https://github.com/italo-goncalves/geoML/actions/workflows/tests.yml)
+
 Geoscientific data is becoming increasingly larger and more complex. Multiple variables, structural constraints, etc. are becoming the norm rather than the exception.
 
 Conventional modelling approaches are very labour-intensive, subjective, and hard to reproduce. CAD-drawn orebodies, variograms, pre- and post-processing steps can result in workflows so complicated that even professionals can become lost within their own work. geoML is being designed to simplify geomodelling and empower the user with advanced machine larning tools that respect geology. 

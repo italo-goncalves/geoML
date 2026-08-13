@@ -27,7 +27,7 @@ def _model_and_grid(seed=1234):
         pd.DataFrame(np.random.uniform(0, 100, (6, 2)), columns=cols), cols)
     root = geoml.latent.BasicInput(ind, transform=geoml.transform.Isotropic(40))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
-    options = geoml.models.GPOptions(verbose=False, seed=seed, training_samples=8)
+    options = geoml.models.GPOptions(verbose=False, training_samples=8)
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), gp, options=options)
     model.train_full(max_iter=8)

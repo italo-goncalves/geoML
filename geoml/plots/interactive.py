@@ -932,6 +932,94 @@ class Interactive(_base.Selection):
                           "<br>observed/claimed %{customdata[1]:.2f}"
                           "<extra></extra>"), row=row, col=column)
 
+    def variogram(self, n_lags=15, max_lag=None, direction=None,
+                  tolerance=45.0, residuals=False, height=None, width=None):
+        """
+        The data's spatial structure, against the fan the simulations make.
+
+        The experimental semivariogram of the measurements, with one thin
+        curve per realization on the same pairs. A model that learned the
+        spatial structure scatters its fan *around* the data's curve; a
+        kernel too smooth sags below it at short lags, and a nugget fitted
+        into the range lifts it there. Neither shows in `accuracy` or
+        `spread_check`, which judge one location at a time.
+
+        With `residuals=True` it is the variogram of `measured - predicted`
+        and the fan is dropped: structure left in the residuals is structure
+        the model missed -- honest on cross-validated predictions
+        (`models.cross_validate`).
+
+        Parameters
+        ----------
+        n_lags : int
+            Number of equal-width lag bins.
+        max_lag : float, optional
+            Longest separation considered; half the bounding-box diagonal by
+            default.
+        direction : array-like, optional
+            Direction vector for a directional variogram; omnidirectional
+            when absent.
+        tolerance : float
+            Angular tolerance around `direction`, in degrees.
+        residuals : bool
+            Variogram of the residuals instead, without the fan.
+        """
+        var = self._require_continuous("variogram")
+        panels = _prep.variogram(
+            self.data, var.name, n_lags=n_lags, max_lag=max_lag,
+            direction=direction, tolerance=tolerance, residuals=residuals)
+        labels = [panel["label"] for panel in panels]
+
+        rows, columns = _prep.grid_shape(len(panels))
+        figure = _subplots(rows=rows, cols=columns, subplot_titles=labels,
+                           horizontal_spacing=0.1)
+        for i, panel in enumerate(panels):
+            row, column = divmod(i, columns)
+            self._variogram_panel(figure, panel, row + 1, column + 1,
+                                  legend=i == 0)
+        figure.update_xaxes(title_text="lag distance", row=rows)
+        figure.update_yaxes(title_text="semivariance", col=1,
+                            rangemode="tozero")
+
+        what = "residual variogram" if residuals else \
+            "variogram and simulation fan"
+        return self._finish(
+            figure, title="%s: %s" % (var.name, what),
+            height=height or 120 + 320 * rows, width=width,
+            legend={"orientation": "h", "x": 0.5, "xanchor": "center",
+                    "y": 1.0, "yanchor": "bottom"})
+
+    def _variogram_panel(self, figure, panel, row, column, legend):
+        """One component of `variogram`."""
+        fan = panel["realizations"]
+        if fan is not None:
+            for r in range(fan.shape[0]):
+                figure.add_trace(_go.Scatter(
+                    x=panel["lag"], y=fan[r], mode="lines",
+                    line={"color": self._color(0, "realizations"),
+                          "width": 0.7},
+                    opacity=0.25, name="realizations",
+                    legendgroup="realizations",
+                    showlegend=legend and r == 0,
+                    hoverinfo="skip"), row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=[panel["lag"][0], panel["lag"][-1]],
+            y=[panel["sill"], panel["sill"]], mode="lines",
+            line={"color": self._color(2, "sill"), "width": 1.0,
+                  "dash": "dash"},
+            name="data variance", showlegend=legend,
+            hovertemplate="variance %{y:.4g}<extra></extra>"),
+            row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=panel["lag"], y=panel["data"], mode="lines+markers",
+            marker={"size": 6, "color": self._color(3, "data")},
+            line={"color": self._color(3, "data"), "width": 1.6},
+            customdata=panel["count"],
+            name="data", showlegend=legend,
+            hovertemplate="lag %{x:.4g}<br>semivariance %{y:.4g}"
+                          "<br>%{customdata} pairs<extra></extra>"),
+            row=row, col=column)
+
     def grade_tonnage(self, component=None, density=None, cutoffs=30,
                       max_uncertainty=None, log_mass=False, height=None,
                       width=None):

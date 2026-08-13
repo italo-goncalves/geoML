@@ -281,6 +281,17 @@ class _Variable(_TreeNode):
             instance) does not affect the stored simulations; assign it back
             with `variable.simulations[:, index] = attribute.values` if that is
             the intention.
+
+        Notes
+        -----
+        Only this column is ever held in memory, however large the store --
+        which is what makes processing realizations sequentially viable on a
+        block model. The store is chunked by location, though, so extracting
+        a column still visits every chunk on disk: walking all realizations
+        this way costs one full pass over the store *per realization*. A
+        computation that decomposes over locations is cheaper the other way
+        around -- read row bands (`ArrayStore.row_bands`) and take every
+        realization of each band at once.
         """
         if self.simulations is None:
             raise NoDataError(
@@ -545,6 +556,9 @@ class ContinuousVariable(_Variable):
         return values, has_value
 
     def get_simulations(self):
+        # Materializes the whole (n_data, n_sim) array -- fine on point data,
+        # ruinous on a block model. At scale, read `simulation(i)` for one
+        # realization or the store itself in row bands.
         return _np.asarray(self.simulations)
 
     def get_predictions(self):
@@ -677,28 +691,38 @@ class ContinuousVariable(_Variable):
             raise ValueError('No measurements available')
 
         y_pred = self.prediction.values.to_numpy()
-        sims = self.get_simulations()
 
         has_value = has_value[:, 0]
         y_true = y_true[has_value == 1]
         y_pred = y_pred[has_value == 1]
-        sims = sims[has_value == 1]
+        # Only the measured rows, indexed out of the chunks: materializing the
+        # store to cut a sliver from it is what kills a session on a large
+        # model (same reasoning as `_subset_simulations`).
+        sims = _np.asarray(self.simulations.as_dask()[has_value == 1])
 
         metrics = {
             'Root Mean Square Error (prediction)': _skmetrics.root_mean_squared_error(y_true, y_pred),
             'Mean Absolute Error (prediction)': _skmetrics.mean_absolute_error(y_true, y_pred),
             'Median Absolute Error (prediction)': _skmetrics.median_absolute_error(y_true, y_pred),
+            'Bias (prediction)': _gmlmetrics.bias(y_true, y_pred),
             'Root Mean Square Error (simulations)': _skmetrics.root_mean_squared_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
             'Mean Absolute Error (simulations)': _skmetrics.mean_absolute_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
             'Median Absolute Error (simulations)': _skmetrics.median_absolute_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
+            'CRPS (simulations)': _gmlmetrics.crps(y_true, sims),
+            'Variogram score (simulations)': _gmlmetrics.variogram_score(
+                y_true, sims),
         }
 
         bias_2, variance = _gmlmetrics.bias_variance_decomposition(y_true, sims)
         metrics['Bias squared (simulations)'] = bias_2
         metrics['Variance (simulations)'] = variance
+
+        nominal, observed = _gmlmetrics.coverage(y_true, sims)
+        metrics['Goodness (simulations)'] = _gmlmetrics.goodness(
+            nominal, observed)
 
         if not isinstance(alpha, (list, tuple)):
             alpha = [alpha]
@@ -707,6 +731,49 @@ class ContinuousVariable(_Variable):
 
         self.metrics = _pd.Series(metrics, name=self.name)
         return self.metrics
+
+
+class DerivedVariable(ContinuousVariable):
+    """
+    A variable computed from others, realization by realization.
+
+    The middle ground between metadata (a constant the models never see) and
+    a modelled variable (measured, likelihooded, written by a model): it
+    carries a full set of simulations and everything built on them --
+    quantiles, cut-offs, contours, grade-tonnage -- but every bit of its
+    uncertainty is inherited from the variables it was derived from. Built by
+    `derive` on the container, never fed to a model. Applying the function to
+    each realization and summarizing afterwards is what keeps a nonlinear
+    function honest: `f(E[grades])` is not `E[f(grades)]`, and the second is
+    the answer.
+
+    The recipe -- the function itself -- lives in the script that ran
+    `derive`, not here: functions do not survive a Zarr store honestly. A
+    reloaded container has the values, fully usable; re-deriving is running
+    the script again. `parents` records which paths it came from.
+    """
+    _NODE_ATTRS = ContinuousVariable._NODE_ATTRS + ("parents",)
+
+    def __init__(self, name, coordinates, parents=None):
+        super().__init__(name, coordinates)
+        self.parents = list(parents) if parents is not None else None
+
+    def _from(self):
+        return ("derived from %s" % ", ".join(map(repr, self.parents))
+                if self.parents else "a derived variable")
+
+    def training_input(self, idx=None):
+        raise TypeError("%r is %s; a model cannot train on it"
+                        % (self.name, self._from()))
+
+    def get_measurements(self):
+        raise TypeError("%r is %s; it holds no measurements"
+                        % (self.name, self._from()))
+
+    def update(self, idx, **kwargs):
+        raise TypeError("%r is %s; a model cannot predict into it -- "
+                        "derive it again after predicting its parents"
+                        % (self.name, self._from()))
 
 
 class VectorVariable(_Variable):
@@ -761,6 +828,8 @@ class VectorVariable(_Variable):
                             for row in declared]}
 
     def get_simulations(self):
+        # Materializes every component at once -- n_data x n_sim x n_comp in
+        # RAM. At scale, take one component's `simulation(i)` at a time.
         sims = _np.stack([self.components[v].get_simulations() for v in self.labels], axis=2)
         return sims
 

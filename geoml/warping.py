@@ -37,6 +37,7 @@ import geoml.stats.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
+import warnings as _warnings
 
 from sklearn.covariance import MinCovDet as _MCD
 from sklearn.cluster import KMeans as _KMeans
@@ -755,7 +756,19 @@ class RobustPCA(PCA):
         self.support_fraction = support_fraction
 
     def initialize(self, x):
-        mcd = _MCD(support_fraction=self.support_fraction).fit(x)
+        with _warnings.catch_warnings():
+            # FastMCD chatters while it searches: "Determinant has increased"
+            # on its concentration steps, and a not-full-rank notice on the
+            # final estimate. Neither is actionable here -- the fit is an
+            # initialization -- so only these two stay off the console;
+            # anything else sklearn says still comes through.
+            _warnings.filterwarnings(
+                "ignore", message="Determinant has increased")
+            _warnings.filterwarnings(
+                "ignore",
+                message="The covariance matrix associated to your dataset "
+                        "is not full rank")
+            mcd = _MCD(support_fraction=self.support_fraction).fit(x)
         self.mean = _tf.constant(mcd.location_[None, :], _tf.float64)
         cov = mcd.covariance_
         vals, vecs = _np.linalg.eigh(cov)

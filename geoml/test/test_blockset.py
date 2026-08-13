@@ -36,8 +36,7 @@ def _model(seed=1234):
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         point, "y", geoml.likelihood.Gaussian(), gp,
-        options=geoml.models.GPOptions(verbose=False, seed=seed,
-                                       training_samples=8))
+        options=geoml.models.GPOptions(verbose=False, training_samples=8))
     model.train_full(max_iter=4)
     return model
 
@@ -387,9 +386,11 @@ def _ore_model(seed=1234):
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         point, "au", geoml.likelihood.Gaussian(), gp,
-        options=geoml.models.GPOptions(verbose=False, seed=seed,
-                                       training_samples=10))
-    model.train_full(max_iter=60)
+        options=geoml.models.GPOptions(verbose=False, training_samples=10))
+    # To convergence, not to a lucky snapshot: the tests below assert that
+    # refinement follows the cut-off, which the fitted surface only crosses
+    # reliably -- whatever seed the options drew -- once the fit is settled.
+    model.train_full(max_iter=150)
     return model
 
 
@@ -538,8 +539,7 @@ def _vector_model(seed=1234):
     gp = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         point, "metals", geoml.likelihood.MultivariateGaussian(2), gp,
-        options=geoml.models.GPOptions(verbose=False, seed=seed,
-                                       training_samples=10))
+        options=geoml.models.GPOptions(verbose=False, training_samples=10))
     model.train_full(max_iter=30)
     return model
 
@@ -617,8 +617,7 @@ def _rock_model(seed=1234):
     gp = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         point, "rock", geoml.likelihood.CategoricalGaussianIndicator(2), gp,
-        options=geoml.models.GPOptions(verbose=False, seed=seed,
-                                       training_samples=10))
+        options=geoml.models.GPOptions(verbose=False, training_samples=10))
     model.train_full(max_iter=30)
     return model
 

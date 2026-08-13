@@ -752,6 +752,82 @@ class Explorer(_base.Selection):
                       label="observed: rms residual")
         axes.set_ylim(bottom=0.0)
 
+    def variogram(self, n_lags=15, max_lag=None, direction=None,
+                  tolerance=45.0, residuals=False, figsize=None):
+        """
+        The data's spatial structure, against the fan the simulations make.
+
+        The experimental semivariogram of the measurements, with one thin
+        curve per realization on the same pairs. A model that learned the
+        spatial structure scatters its fan *around* the data's curve; a
+        kernel too smooth sags below it at short lags, and a nugget fitted
+        into the range lifts it there. Neither shows in `accuracy` or
+        `spread_check`, which judge one location at a time.
+
+        With `residuals=True` it is the variogram of `measured - predicted`
+        and the fan is dropped: structure left in the residuals is structure
+        the model missed -- honest on cross-validated predictions
+        (`models.cross_validate`).
+
+        Parameters
+        ----------
+        n_lags : int
+            Number of equal-width lag bins.
+        max_lag : float, optional
+            Longest separation considered; half the bounding-box diagonal by
+            default.
+        direction : array-like, optional
+            Direction vector for a directional variogram; omnidirectional
+            when absent. The anisotropy ellipsoid's principal axes are the
+            directions worth asking about.
+        tolerance : float
+            Angular tolerance around `direction`, in degrees.
+        residuals : bool
+            Variogram of the residuals instead, without the fan.
+        """
+        var = self._require_continuous("variogram")
+        panels = _prep.variogram(
+            self.data, var.name, n_lags=n_lags, max_lag=max_lag,
+            direction=direction, tolerance=tolerance, residuals=residuals)
+
+        rows, columns = _prep.grid_shape(len(panels))
+        with _style.context():
+            size = figsize or (4.2 * columns, 0.6 + 3.4 * rows)
+            figure, axes_grid = _plt.subplots(
+                rows, columns, figsize=size, squeeze=False)
+            for i, panel in enumerate(panels):
+                row, column = divmod(i, columns)
+                axes = axes_grid[row][column]
+                self._draw_variogram(axes, panel)
+                axes.set_title(panel["label"])
+                axes.set_xlabel("lag distance")
+                axes.set_ylabel("semivariance")
+            for i in range(len(panels), rows * columns):
+                row, column = divmod(i, columns)
+                axes_grid[row][column].axis("off")
+            axes_grid[0][0].legend(loc="lower right", fontsize="small",
+                                   frameon=False)
+            what = "residual variogram" if residuals else \
+                "variogram and simulation fan"
+            figure.suptitle("%s: %s" % (var.name, what))
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+        return figure
+
+    def _draw_variogram(self, axes, panel):
+        """One component of `variogram`."""
+        fan = panel["realizations"]
+        if fan is not None:
+            for r in range(fan.shape[0]):
+                axes.plot(panel["lag"], fan[r],
+                          color=self._color(0, "realizations"),
+                          alpha=0.2, linewidth=0.7,
+                          label="realizations" if r == 0 else None)
+        axes.axhline(panel["sill"], color=self._color(2, "sill"),
+                     linestyle="--", linewidth=1.0, label="data variance")
+        axes.plot(panel["lag"], panel["data"], "o-", markersize=4,
+                  linewidth=1.4, color=self._color(3, "data"), label="data")
+        axes.set_ylim(bottom=0.0)
+
     def grade_tonnage(self, component=None, density=None, cutoffs=30,
                       max_uncertainty=None, log_mass=False, figsize=None):
         """
