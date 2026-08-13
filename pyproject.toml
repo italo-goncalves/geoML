@@ -69,6 +69,7 @@ include = [
     "geoml/data/containers.py",
     "geoml/data/variables.py",
     "geoml/data/blocks.py",
+    "geoml/data/drillhole.py",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"

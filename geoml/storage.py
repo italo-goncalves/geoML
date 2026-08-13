@@ -137,7 +137,14 @@ def store_columns(columns, stores: "Sequence[ArrayStore]") -> None:
     """Write each column of a lazy 2-D dask array into its target store.
 
     All columns are computed in a single chunk-by-chunk pass over the source;
-    targets may be NumPy- or Zarr-backed ``ArrayStore``s.
+    the targets may be NumPy- or Zarr-backed.
+
+    Parameters
+    ----------
+    columns
+        A two-dimensional dask array, one column per target.
+    stores
+        One store per column, in the same order.
     """
     _da.store([columns[:, i] for i in range(columns.shape[1])],
               [s._array for s in stores], lock=False)

@@ -21,6 +21,7 @@ likelihood
 datasets
 data
 inducing
+drillhole
 ```
 
 ## Support
@@ -29,6 +30,7 @@ inducing
 :maxdepth: 1
 
 metrics
+storage
 ```
 
 ```{note}

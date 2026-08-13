@@ -16,12 +16,16 @@
 
 __all__ = ["DrillholeData", "IntervalTable"]
 
+from collections.abc import Sequence
+from typing import cast as _cast
+
 import numpy as _np
 import pandas as _pd
 import copy as _copy
 import warnings as _warnings
 import pyvista as _pv
 
+import geoml._types as _types
 import geoml.data.containers as _data
 import geoml.viz.plotly as _py
 
@@ -451,12 +455,12 @@ class IntervalTable(object):
                 f"{columns}")
         return columns[0] if len(columns) == 1 else None
 
-    def columns_with_role(self, role):
+    def columns_with_role(self, role: str) -> list[str]:
         if role not in ROLES:
             raise ValueError(f"unknown role {role}; expected one of {ROLES}")
         return [c for c in self.value_columns if self.roles.get(c) == role]
 
-    def set_role(self, column, role):
+    def set_role(self, column: str, role: str) -> "IntervalTable":
         """Declares (or redeclares) how a column is to be composited."""
         if role not in ROLES:
             raise ValueError(f"unknown role {role}; expected one of {ROLES}")
@@ -469,7 +473,7 @@ class IntervalTable(object):
         self.roles[column] = role
         return self
 
-    def rename(self, columns):
+    def rename(self, columns: "dict[str, str]") -> "IntervalTable":
         """
         Renames value columns, carrying their roles with them.
 
@@ -516,7 +520,7 @@ class IntervalTable(object):
                 f"more than one column")
 
         self.data = self.data.rename(columns=columns)
-        self.roles = {columns.get(name, name): role
+        self.roles = {columns.get(str(name), name): role
                       for name, role in self.roles.items()}
         return self
 
@@ -602,13 +606,13 @@ class IntervalTable(object):
             raise ValueError(message)
         _warnings.warn(message, stacklevel=3)
 
-    def subset_holes(self, holes):
+    def subset_holes(self, holes: "Sequence[str]") -> "IntervalTable":
         """A copy of this table containing the given holes only."""
         keep = self.data[HOLE].isin(list(holes))
         return self._from_canonical(
             self.data.loc[keep].reset_index(drop=True), self.roles, self.name)
 
-    def category_legend(self, column):
+    def category_legend(self, column: str) -> _pd.DataFrame:
         """
         The distinct values of a column, and how much of the hole each holds.
 
@@ -1022,7 +1026,9 @@ class DrillholeData(_data._SpatialData):
     def _survey_count(self):
         return sum(1 for t in self._traces.values() if len(t.depth) > 1)
 
-    def add_intervals(self, name, data, on_error="warn", **kwargs):
+    def add_intervals(self, name: str, data: _pd.DataFrame,
+                      on_error: str = "warn",
+                      **kwargs) -> "DrillholeData":
         """
         Adds an interval table.
 
@@ -1049,7 +1055,8 @@ class DrillholeData(_data._SpatialData):
             _warnings.warn(
                 f"{len(unknown)} hole(s) in table {name} have no collar and "
                 f"were dropped: {sorted(unknown)[:5]}")
-            table = table.subset_holes(set(table.holes) - unknown)
+            table = table.subset_holes(
+                sorted(set(table.holes) - unknown))
 
         table.validate(on_error=on_error, collar=self.collar)
         self.intervals[name] = table
@@ -1082,7 +1089,7 @@ class DrillholeData(_data._SpatialData):
         self.intervals[table].rename(columns)
         return self
 
-    def rename_table(self, name, new_name):
+    def rename_table(self, name: str, new_name: str) -> "DrillholeData":
         """
         Renames an interval table, keeping its position.
 
@@ -1112,7 +1119,7 @@ class DrillholeData(_data._SpatialData):
         self.intervals[new_name].name = new_name
         return self
 
-    def drop_table(self, name):
+    def drop_table(self, name: str) -> "DrillholeData":
         """
         Removes an interval table.
 
@@ -1146,7 +1153,8 @@ class DrillholeData(_data._SpatialData):
                 columns=[HOLE, FROM, TO, "issue", "severity", "table"])
         return _pd.concat(found, ignore_index=True)
 
-    def coordinates_at(self, holes, depths):
+    def coordinates_at(self, holes: _types.ArrayLike,
+                       depths: _types.ArrayLike) -> _np.ndarray:
         """
         The coordinates of the given depths in the given holes.
 
@@ -1209,7 +1217,8 @@ class DrillholeData(_data._SpatialData):
         extent = covered.groupby(HOLE, sort=True).agg({FROM: "min", TO: "max"})
         return extent.reset_index()
 
-    def composite(self, length=1.0, domain=None):
+    def composite(self, length: float = 1.0,
+                  domain: str | None = None) -> "DrillholeData":
         """
         Composites every interval table onto a common support.
 
@@ -1245,7 +1254,7 @@ class DrillholeData(_data._SpatialData):
 
         return self._composite_onto(_fixed_runs(zones, length))
 
-    def composite_fixed(self, length=1.0):
+    def composite_fixed(self, length: float = 1.0) -> "DrillholeData":
         """
         Composites onto runs of fixed length, ignoring any geology.
 
@@ -1254,7 +1263,7 @@ class DrillholeData(_data._SpatialData):
         """
         return self.composite(length=length, domain=None)
 
-    def composite_to(self, table):
+    def composite_to(self, table: str) -> "DrillholeData":
         """
         Composites every table onto the intervals of one of them.
 
@@ -1697,7 +1706,8 @@ class DrillholeData(_data._SpatialData):
         return [self.intervals[t] if isinstance(t, str) else t
                 for t in tables]
 
-    def get_contacts(self, domain):
+    def get_contacts(self, domain: "str | tuple[str, str]"
+                     ) -> "_data.PointData":
         """
         The points where the category changes, as a rock type variable.
 
@@ -1744,7 +1754,10 @@ class DrillholeData(_data._SpatialData):
             measurements_b=value[below][keep])
         return point
 
-    def as_classification_input(self, domain, length=5.0, label_order=None):
+    def as_classification_input(self, domain: "str | tuple[str, str]",
+                                length: float = 5.0,
+                                label_order: "Sequence[str] | None" = None
+                                ) -> "_data.PointData":
         """
         Converts a categorical column to point data for a classification model.
 
@@ -1791,10 +1804,14 @@ class DrillholeData(_data._SpatialData):
         contacts = self.get_contacts(domain)
         contact_frame = _pd.DataFrame(_np.asarray(contacts.coordinates),
                                       columns=["X", "Y", "Z"])
+        # `get_contacts` builds a rock-type variable, which is the one
+        # kind holding the pair of classes a contact lies between
+        contact_variable = _cast("_data.RockTypeVariable",
+                                 contacts.variables[column])
         contact_frame[column + "_a"] = \
-            contacts.variables[column].measurements_a.to_numpy()
+            contact_variable.measurements_a.to_numpy()
         contact_frame[column + "_b"] = \
-            contacts.variables[column].measurements_b.to_numpy()
+            contact_variable.measurements_b.to_numpy()
         contact_frame[HOLE] = contacts.get_metadata(HOLE)
         # a contact is a point, not an interval — the zero support is the
         # whole reason it is added
