@@ -351,17 +351,24 @@ class _Likelihood(_gpr.Parametric):
         return _tf.constant(_np.clip(points, 1e-6, 1 - 1e-6), _tf.float64)
 
     def _noise_values(self):
-        """The noise nodes with the quantile applied: `(eps, weights)`.
+        """The noise nodes with the quantile applied.
 
-        `eps` is `(nodes, size, 1)` in warped space, `weights` sums to one.
-        The single override point for a likelihood whose noise is not one
-        distribution: a mixture integrates each mechanism on its own nodes
-        and weights them, which is exact where a joint quantile would need
-        root-finding.
+        `eps` is `(nodes, size, 1)` in warped space, and the two weight
+        vectors both sum to one: the first is what the reported value is
+        averaged over, the second what the spread beside it is taken over.
+        For one noise distribution they are the same vector. They part only
+        in a mixture that declares contamination, where the ground is the
+        genuine components' business and a *measurement* is everything's --
+        which is the single reason this is an override point.
+
+        Returns
+        -------
+        eps : (nodes, size, 1)
+        value_weights, spread_weights : (nodes,), each summing to one
         """
         u, weights = self._noise_nodes()
         dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
-        return dist.quantile(u[:, :, None]), weights
+        return dist.quantile(u[:, :, None]), weights, weights
 
     def _measurement_values(self, n_nodes):
         """Equal-share noise values standing for a fresh measurement."""
@@ -443,7 +450,10 @@ class _Likelihood(_gpr.Parametric):
         The second moment comes off the same nodes for nothing, and answers a
         different question: how far a fresh *measurement* of this value would
         scatter. The first is what the ground holds, the second what a sample
-        of it would read.
+        of it would read. It is taken **about the reported value** rather than
+        about a mean of its own, which is what makes it comparable with a
+        residual: the two coincide unless the value is averaged over fewer
+        components than the spread is (`Mixture` with contamination declared).
 
         The nodes are consumed one at a time, so the largest tensor in the
         pipeline is never copied: the cost is in time, not in memory.
@@ -453,21 +463,28 @@ class _Likelihood(_gpr.Parametric):
         mean : the integrated value, in the variable's own units
         variance : the spread of a measurement of it, same units
         """
-        noise, weights = self._noise_values()
+        noise, value_weights, spread_weights = self._noise_values()
 
         blank = _tf.zeros(
             [_tf.shape(sims)[0], self.warping.size_in, _tf.shape(sims)[2]],
             dtype=sims.dtype)
 
         def accumulate(carry, node):
-            eps, weight = node
+            eps, weight, spread = node
             value = self._back_transform(sims + eps[None])
             return (carry[0] + weight * value,
-                    carry[1] + weight * value ** 2)
+                    carry[1] + spread * value,
+                    carry[2] + spread * value ** 2)
 
-        mean, second = _tf.foldl(accumulate, (noise, weights),
-                                 initializer=(blank, blank))
-        return mean, _tf.maximum(second - mean ** 2, 0.0)
+        # three sums, one pass: the reported value, and the first two moments
+        # of a measurement. The spread is taken about the *reported* value --
+        # `E[(v - mean)^2]` expanded -- which collapses to the familiar
+        # `second - mean^2` whenever the two weightings agree, as they do
+        # everywhere but a mixture declaring contamination
+        mean, drawn, second = _tf.foldl(
+            accumulate, (noise, value_weights, spread_weights),
+            initializer=(blank, blank, blank))
+        return mean, _tf.maximum(second - 2 * drawn * mean + mean ** 2, 0.0)
 
     def initialize(self, y):
         pass
@@ -489,6 +506,15 @@ class _ContinuousLikelihood(_Likelihood):
     """
     warped = True
 
+    # Which parameters set how wide this noise is, and how they carry it: the
+    # exponent by which each moves when the width is multiplied. A Gaussian's
+    # `noise` is a variance, so it goes with the square; an epsilon-
+    # insensitive `c_rate` is a rate, so it goes with the inverse; a
+    # Student's `df` is shape rather than width and is left out. `Mixture`
+    # reads this to separate its components, which is the only thing that
+    # does -- a family declaring none cannot be mixed.
+    _WIDTH_PARAMETERS = {}
+
     def __init__(self, warping=None, sharpness=1):
         """
         Initializer for continuous likelihoods.
@@ -508,6 +534,17 @@ class _ContinuousLikelihood(_Likelihood):
     def initialize(self, y):
         self.warping.initialize(y)
 
+    def _column_quadrature(self):
+        """Whether the latent expectation can be taken one column at a time.
+
+        Gauss-Hermite over each column's own marginal is exact while the
+        density factorizes over the columns, which it does whenever the
+        warping keeps them apart. A warping that mixes them has to be
+        integrated over the joint latent vector -- and so does a row-level
+        mixture, whose density does not factorize either.
+        """
+        return self.warping.elementwise
+
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
         y_warped, log_derivative = self.warping.forward(y)
@@ -518,7 +555,7 @@ class _ContinuousLikelihood(_Likelihood):
             # weighed whole
             has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
 
-        if not self.warping.elementwise:
+        if not self._column_quadrature():
             distribution = self._make_distribution(samples)
 
             log_density = distribution.log_prob(y_warped[:, :, None])
@@ -588,6 +625,8 @@ class Gaussian(_ContinuousLikelihood):
     Equivalent to a squared error model. The latent variable maps to the mean,
     while the noise variance is a parameter.
     """
+    _WIDTH_PARAMETERS = {"noise": 2}   # a variance
+
     def __init__(self, warping=None, sharpness=1):
         super().__init__(warping, sharpness)
         self._add_parameter(
@@ -610,6 +649,8 @@ class Laplace(_ContinuousLikelihood):
     Equivalent to a linear error model. The latent variable maps to the mean,
     while the distribution's scale factor is a parameter.
     """
+    _WIDTH_PARAMETERS = {"scale": 1}
+
     def __init__(self, warping=None, sharpness=1):
         super().__init__(warping, sharpness)
         self._add_parameter(
@@ -657,6 +698,8 @@ class StudentT(_ContinuousLikelihood):
     A heavy-tailed distribution. The latent variable maps to the mean,
     while the scale and degrees of freedom are parameters.
     """
+    _WIDTH_PARAMETERS = {"scale": 1}   # `df` is shape, not width
+
     def __init__(self, warping=None, sharpness=1):
         super().__init__(warping, sharpness)
         self._add_parameter(
@@ -691,6 +734,10 @@ class EpsilonInsensitive(_ContinuousLikelihood):
     below which error are not penalized. Can be used to obtain a model similar
     to the Support Vector Machine.
     """
+    # `c_rate` is a rate -- the tail decays as exp(-c_rate * z) -- so the
+    # width goes with its inverse, while `epsilon` is in the data's own units
+    _WIDTH_PARAMETERS = {"c_rate": -1, "epsilon": 1}
+
     def __init__(self, warping=None, sharpness=1):
         super().__init__(warping, sharpness)
         self._add_parameter(
@@ -724,6 +771,10 @@ class Huber(_ContinuousLikelihood):
 
     Based on the Huber loss.
     """
+    # `threshold` is measured in units of `std`, so widening moves the scale
+    # alone and the shape of the loss is preserved
+    _WIDTH_PARAMETERS = {"std": 1}
+
     def __init__(self, warping=None, sharpness=1):
         super().__init__(warping, sharpness)
         self._add_parameter(
@@ -763,6 +814,8 @@ class MultivariateGaussian(Gaussian):
 
 
 class MultivariateLaplace(_ContinuousLikelihood):
+    _WIDTH_PARAMETERS = {"rate": 1}   # the name is historical; it is a scale
+
     def __init__(self, n_components, warping=None, sharpness=1):
         if warping is None:
             warping = _warp.ZScore(n_components)
@@ -794,6 +847,19 @@ class MultivariateHuber(Huber):
         self.parameters["std"].set_value(_np.ones([1, self.size, 1]) * 0.1)
 
 
+# The families a `Mixture` can be built from: every continuous likelihood
+# whose parameters set a width. `Gamma` is absent because its spread is tied
+# to its mean, so its components could not differ in scale alone.
+_MIXTURE_FAMILIES = {
+    "gaussian": Gaussian,
+    "laplace": Laplace,
+    "studentt": StudentT,
+    "student_t": StudentT,
+    "epsiloninsensitive": EpsilonInsensitive,
+    "huber": Huber,
+}
+
+
 class _MixtureDensity:
     """The density of a weighted mixture, for the training expectation.
 
@@ -801,6 +867,14 @@ class _MixtureDensity:
     the prediction side never touches this object -- the noise integral runs
     each component on its own nodes (`Mixture._noise_values`), which is exact
     where a joint quantile would need root-finding.
+
+    The mixture is over the **row**: the columns' densities are multiplied
+    first and the components weighted afterwards, so one component explains
+    a whole measurement. Taking it the other way round -- a component per
+    column, sharing one weight -- is a different model (cellwise
+    contamination) and not the one a vector variable describes, where the
+    columns are one observation in sample space. On a single column the two
+    coincide, which is why the answer comes back with the column axis kept.
     """
 
     def __init__(self, distributions, weights):
@@ -810,85 +884,134 @@ class _MixtureDensity:
     def log_prob(self, x):
         log_w = _tf.math.log(self.weights)
         parts = _tf.stack([d.log_prob(x) for d in self.distributions], axis=0)
+        parts = _tf.reduce_sum(parts, axis=2, keepdims=True)
         return _tf.reduce_logsumexp(
             parts + log_w[:, None, None, None], axis=0)
 
 
+def _separate(component, factor):
+    """Widen a component to `factor` times the family's own default.
+
+    A family declares which parameters carry its width and how (see
+    `_ContinuousLikelihood._WIDTH_PARAMETERS`): a variance moves with the
+    square of the factor, a rate with its inverse. The bounds move with the
+    value where they would otherwise clamp it -- a ceiling chosen for one
+    noise has no say over a component built to be the wide one, and a value
+    silently clamped back would leave the components identical, which is the
+    one thing this exists to prevent.
+    """
+    for name, exponent in component._WIDTH_PARAMETERS.items():
+        parameter = component.parameters[name]
+        value = _np.asarray(parameter.get_value().numpy()) * factor ** exponent
+        low = _np.asarray(
+            parameter._back_transform(parameter.min_transformed).numpy())
+        high = _np.asarray(
+            parameter._back_transform(parameter.max_transformed).numpy())
+        parameter.set_limits(min_val=_np.minimum(value, low),
+                             max_val=_np.maximum(value, high))
+        parameter.set_value(value)
+
+
 class Mixture(_ContinuousLikelihood):
-    """A likelihood whose noise comes from one of several mechanisms.
+    """A likelihood whose noise is a mixture of scales.
 
-    Each measurement is drawn from one of the `components` -- continuous
-    likelihoods of any kind, sharing the latent location -- with trainable
-    proportions. The classic use is two: a narrow one for the natural
-    short-range variability and a wide one for contaminated measurements,
-    which a single number cannot tell apart. A heavy-tailed likelihood
-    downweights an outlier; a mixture also *names* it (`responsibilities`),
-    says how often it happens (the weight), and keeps it out of the ground.
+    One family, several widths, trainable proportions: the noise a
+    measurement carries is drawn from one of `n_components` copies of
+    `family`, all sharing the latent location and differing only in how
+    wide they are. It is the honest shape for data where the scatter is not
+    one number -- a careful assay and a rushed one, a fresh core and a
+    weathered one -- which a single nugget cannot tell apart and a heavy
+    tail cannot *name*. `responsibilities` names it, per row.
 
-    Every component after the first is taken to describe contamination
-    unless `contamination` says otherwise. What that means sits entirely at
-    prediction: `log_lik` and `measurement_samples` use the full mixture --
-    training must explain the data as it is, and a fresh assay can be a bad
-    one -- while `integrated_backward` averages the prediction over the
-    genuine components alone, because a contaminated reading replaces the
-    measurement and says nothing about the ground it displaced. On a
-    nonlinear warping the difference is not academic: integrating the wide
-    component into a block value biases it the way the contamination is
-    skewed (measured at +6 to +17% on a lognormal-like synthetic case).
+    **The mixture is over the row.** In a vector or compositional variable
+    the columns are one observation in sample space, so a measurement that
+    is wrong in one component is a wrong measurement: the densities are
+    multiplied across the columns before the components are weighted, and
+    there is one responsibility per location, not one per element. The
+    components' scales are still per column, so the wide one can be wide
+    only where it needs to be. Because that density does not factorize, the
+    latent expectation for a vector variable runs over the joint posterior
+    samples rather than each column's quadrature.
 
-    The component choice applies to a row as a whole -- a bad sample is bad
-    across its columns -- so the weights are one simplex, not one per
-    column. A component's own warping is inert (the mixture's is the one
-    applied, once) and its parameters are fixed on registration.
+    **Contamination is declared, not assumed.** By default every component
+    describes the ground: the prediction is averaged over all of them, and
+    the mixture is a noise model, nothing more. Marking a component as
+    contamination says its readings *replace* a measurement rather than
+    reporting one, and then `integrated_backward` leaves it out of the value
+    while keeping it in the spread beside it -- a fresh assay can still be a
+    bad one. Training and `measurement_samples` always use the full mixture:
+    the data has to be explained as it is. On a nonlinear warping the choice
+    is not academic -- integrating a wide contamination component into a
+    block value biases it the way the contamination is skewed (measured at
+    +6 to +17% on a lognormal-like synthetic case).
 
-    Initialize the contamination component *wide*: its job is to be the
-    cheaper explanation for a tail value before a trainable warping bends
-    itself to accommodate one. Guard the other flank of the same fight with
-    `ZScore(size, robust=True)` in the warping: it initializes on a
-    winsorized copy of the data, so a gross outlier cannot set the scale
-    everything else is normalized by. Measured together, the two carried
-    the pathological contamination draw from 4.3x the clean-data error to
-    1.3x.
+    Two things make it fit. The components are separated at construction
+    (see `separation`), because components of equal width never pull apart;
+    and the warping should be led by `ZScore(size, robust=True)`, which
+    initializes on a winsorized copy of the data so a gross outlier cannot
+    set the scale everything else is normalized by. Measured together, the
+    two carried a pathological contamination draw from 4.3x the clean-data
+    error to 1.3x.
     """
 
-    def __init__(self, components, warping, weights=None, contamination=None,
+    def __init__(self, warping, n_components=2, family="gaussian",
+                 separation=3.0, weights=None, contamination=None,
                  sharpness=1):
         """
         Parameters
         ----------
-        components : list of _ContinuousLikelihood
-            The noise mechanisms, of the same kind or not. A component's
-            parameters are `[1, size, 1]`-shaped and broadcast, so scalar
-            components serve a mixture of any width -- one noise per
-            mechanism across the columns -- while sized components keep a
-            parameter per column. Their own warpings are ignored.
         warping : geoml.warping.Warping
-            The mixture's own warping, applied once to the data. Required:
-            the components' warpings play no part, so this is the one place
-            the mixture's size can honestly come from.
+            The mixture's own warping, applied once to the data. It is what
+            sizes the mixture, and the components with it.
+        n_components : int
+            How many noise scales, at least two.
+        family : str
+            The distribution every component takes: `"gaussian"`,
+            `"laplace"`, `"studentt"`, `"epsiloninsensitive"` or `"huber"`.
+            One family throughout is deliberate -- components differing in
+            scale are the classical scale-mixture construction, while
+            components differing in *shape* duplicate what the warping is
+            for and stop being identifiable (a Student's t is itself a
+            scale mixture of Gaussians).
+        separation : double
+            How much wider each component is than the one before it, at
+            construction. Only the family's width parameters move; a
+            Student's degrees of freedom, say, do not.
         weights : array-like, optional
             Initial mixing proportions, one per component, summing to one.
-            Default: 0.95 on the first, the rest split evenly.
+            Default: 0.95 on the narrowest, the rest split evenly.
         contamination : list of bool, optional
             Which components describe error rather than ground. Default:
-            every one but the first. At least one component must be genuine.
+            none of them. At least one component must be genuine.
         """
-        components = list(components)
-        if len(components) < 2:
+        n_components = int(n_components)
+        if n_components < 2:
             raise ValueError("a mixture needs at least two components")
+        try:
+            component_class = _MIXTURE_FAMILIES[str(family).lower()]
+        except KeyError:
+            raise ValueError(
+                "unknown mixture family %r; it takes one of %s. A family is "
+                "eligible when its parameters set a width, which Gamma's do "
+                "not -- its spread is tied to its mean"
+                % (family, ", ".join(sorted(_MIXTURE_FAMILIES))))
         super().__init__(warping, sharpness)
 
-        for component in components:
-            # the component's own warping plays no part; freeze it so its
-            # parameters do not drift in training
+        self.components = []
+        for i in range(n_components):
+            # the component's own warping plays no part -- the mixture's is
+            # the one applied, once -- but it is what sizes its parameters,
+            # so it is built at the mixture's width and then frozen
+            component = component_class(_warp.ZScore(self.size))
             for parameter in component.warping._all_parameters:
                 parameter.fix()
-        self.components = [self._register(c) for c in components]
+            _separate(component, separation ** i)
+            self.components.append(self._register(component))
 
         if contamination is None:
-            contamination = [False] + [True] * (len(components) - 1)
+            contamination = [False] * n_components
         contamination = [bool(c) for c in contamination]
-        if len(contamination) != len(components):
+        if len(contamination) != n_components:
             raise ValueError("one contamination flag per component")
         if all(contamination):
             raise ValueError("at least one component must describe the "
@@ -896,12 +1019,17 @@ class Mixture(_ContinuousLikelihood):
         self.contamination = contamination
 
         if weights is None:
-            n = len(components)
-            weights = _np.full([n], 0.05 / (n - 1))
+            weights = _np.full([n_components], 0.05 / (n_components - 1))
             weights[0] = 0.95
         self._add_parameter(
             "weights",
             _gpr.CompositionalParameter(_np.asarray(weights, dtype=float)))
+
+    def _column_quadrature(self):
+        # the row-level mixture does not factorize over the columns, so the
+        # latent expectation runs over the joint samples; on one column the
+        # two readings are the same and the quadrature is exact and cheaper
+        return self.size == 1 and self.warping.elementwise
 
     def _component_distributions(self):
         zero = _tf.constant(0.0, _tf.float64)
@@ -913,24 +1041,31 @@ class Mixture(_ContinuousLikelihood):
             [c._make_distribution(loc) for c in self.components], w)
 
     def _noise_values(self):
-        """The genuine components' nodes, weighted by their share.
+        """Every component's nodes, carrying two weightings.
 
-        The contamination components are left out and the remaining weights
-        renormalized: a contaminated reading replaces the measurement, so it
-        has no place in the average that says what the ground holds.
+        The value is averaged over the genuine components alone -- a
+        contaminated reading replaces the measurement and says nothing about
+        the ground it displaced -- with their weights renormalized, while the
+        spread reported beside it is of a *measurement*, which can be a bad
+        one, and so keeps the mixture's own weights. With nothing declared as
+        contamination, which is the default, the two vectors are equal and
+        this is an ordinary noise integral.
         """
         u, node_w = self._noise_nodes()
         w = self.parameters["weights"].get_value()
-        keep = [i for i, bad in enumerate(self.contamination) if not bad]
-        w_kept = _tf.gather(w, keep)
-        w_kept = w_kept / _tf.reduce_sum(w_kept)
+        genuine = _tf.constant([0.0 if bad else 1.0
+                                for bad in self.contamination], _tf.float64)
+        w_value = w * genuine
+        w_value = w_value / _tf.reduce_sum(w_value)
 
         distributions = self._component_distributions()
-        eps = _tf.concat(
-            [distributions[i].quantile(u[:, :, None]) for i in keep], axis=0)
-        weights = _tf.concat(
-            [node_w * w_kept[j] for j in range(len(keep))], axis=0)
-        return eps, weights
+        eps = _tf.concat([d.quantile(u[:, :, None]) for d in distributions],
+                         axis=0)
+        value = _tf.concat([node_w * w_value[k]
+                            for k in range(len(distributions))], axis=0)
+        spread = _tf.concat([node_w * w[k]
+                             for k in range(len(distributions))], axis=0)
+        return eps, value, spread
 
     def _measurement_values(self, n_nodes):
         """Equal-share nodes of the full mixture, contamination included.
@@ -963,8 +1098,17 @@ class Mixture(_ContinuousLikelihood):
         """How likely each row is to have come from each component.
 
         The mixture's unique diagnostic: a heavy-tailed likelihood can
-        absorb an outlier, only a mixture can point at it. Row-wise, since
-        the component choice applies to the row as a whole.
+        absorb an outlier, only a mixture can point at it. One answer per
+        row, matching the model training fits -- the columns' densities
+        multiplied first, the components weighted after.
+
+        The latent expectation is taken column by column, off the marginals
+        a prediction stores; where several columns are involved that treats
+        them as independent, which is what those marginals say and all a
+        stored prediction can support. `models.VGPNetwork.responsibilities`
+        is the way in from a container, and the honest reading is on data
+        the model has not seen -- at a training location the model
+        interpolates its own measurement, which flatters every row.
 
         Parameters
         ----------

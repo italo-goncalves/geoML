@@ -1222,6 +1222,87 @@ class VGPNetwork(_GPModel):
         return {v: _np.concatenate(parts, axis=0)
                 for v, parts in chunks.items()}
 
+    def responsibilities(self, newdata, store=True):
+        """Which noise component each measurement is likely to have come from.
+
+        The diagnostic only a mixture can give: a heavy-tailed likelihood
+        downweights a bad sample, this one *names* it. One answer per
+        location, since the mixture is over the row -- a measurement wrong in
+        one component of a vector variable is a wrong measurement.
+
+        Read it where the model has not seen the data. At a training location
+        the model interpolates its own measurement, so an outlier is partly
+        absorbed into the fit and its own responsibility understates it; the
+        honest version is the out-of-fold container `cross_validate` returns,
+        whose fold models never saw the row they scored.
+
+        Parameters
+        ----------
+        newdata :
+            Point data carrying the variable's measurements -- the data the
+            model was trained from, or a validation set. Meant for the few
+            thousand locations that have them.
+        store : bool
+            Whether to file the answer on the variable as well as return it
+            (`assay/responsibilities/0`, `.../1`, ...). Turn it off to look
+            without writing.
+
+        Returns
+        -------
+        dict
+            One `(n_data, n_components)` array per variable whose likelihood
+            is a mixture, rows summing to one and missing where the location
+            carries no measurement.
+        """
+        if newdata.rows_per_location != 1:
+            raise ValueError(
+                "a measurement is of a point, and %s fans each location out "
+                "into %d rows; ask this of the data the model was trained "
+                "from, or of a validation set"
+                % (type(newdata).__name__, newdata.rows_per_location))
+        if self.data.n_dim != newdata.n_dim:
+            raise ValueError("dimension of newdata is incompatible with model")
+
+        wanted = [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
+                  if isinstance(lik, _lk.Mixture)]
+        if not wanted:
+            raise ValueError(
+                "no variable in this model has a mixture likelihood, and "
+                "responsibilities are a mixture's answer: with one noise "
+                "mechanism every measurement came from it")
+        absent = [v for v, _ in wanted if v not in newdata.variables.keys()]
+        if absent:
+            raise ValueError(
+                "responsibilities are of measurements, and %s carries no %s"
+                % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
+
+        def batch_moments(x, x_var, n_splits):
+            mu, var, _, _, _ = self.latent_network.predict(
+                x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
+            mu = _tf.split(_tf.transpose(mu[:, :, 0]), self.lik_sizes, axis=1)
+            var = _tf.split(_tf.transpose(var), self.lik_sizes, axis=1)
+            return [(m, v) for m, v, lik
+                    in zip(mu, var, self.likelihoods)
+                    if isinstance(lik, _lk.Mixture)]
+
+        chunks = {v: ([], []) for v, _ in wanted}
+        for _, output in self._over_batches(newdata, batch_moments):
+            for (v, _), (mu, var) in zip(wanted, output):
+                chunks[v][0].append(_np.asarray(mu))
+                chunks[v][1].append(_np.asarray(var))
+
+        out = {}
+        for v, lik in wanted:
+            mu = _np.concatenate(chunks[v][0], axis=0)
+            var = _np.concatenate(chunks[v][1], axis=0)
+            y, has_value = newdata.variables[v].get_measurements()
+            answer = lik.responsibilities(mu, var, y)
+            answer[~_np.all(has_value == 1.0, axis=1)] = _np.nan
+            if store:
+                newdata.variables[v].set_responsibilities(answer)
+            out[v] = answer
+        return out
+
 
 def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
            include_noise=True, where=None, meshes=None,

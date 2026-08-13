@@ -1,3 +1,72 @@
+## version 0.6.3
+* **The mixture likelihood, settled: one family, several scales, and the
+mixture taken over the row.** Four changes, all of them decisions the
+first implementation left open or got half right:
+  - **It was fitting one model and diagnosing another.** `log_lik` took
+  the mixture per *cell* -- a component chosen independently for each
+  column, sharing one weight -- while `responsibilities` took it per
+  *row*. The two coincide on one column, which is everything that had
+  been measured; on a two-column toy they differ by 1.14 nats, one
+  calling a row bad and the other calling one of its columns bad. The row
+  is right for a vector or compositional variable, whose columns are one
+  observation in sample space: a measurement wrong in one component is a
+  wrong measurement. So the densities are multiplied across the columns
+  before the components are weighted, and because that no longer
+  factorizes, a mixture on a vector variable takes its latent expectation
+  over the joint posterior samples rather than each column's own
+  quadrature (`_column_quadrature`; a scalar mixture keeps Gauss-Hermite,
+  where the two readings are the same thing and the quadrature is exact).
+  - **One family, built by the mixture.**
+  `Mixture(warping, n_components=2, family="gaussian", separation=3.0)`
+  replaces the list of hand-built component likelihoods -- a **breaking
+  change**, taken deliberately. Mixing families was never sound: a
+  Student's t is itself a scale mixture of Gaussians, so a
+  Gaussian-plus-Student mixture is an unidentifiable reparameterization
+  of a scale mixture, and shape is the warping's job in this package
+  anyway. Every contaminated-noise GP in the literature (Kuss 2006,
+  Stegle et al. 2008, and the 2024 sparse variational version) is
+  same-family scale inflation. With the family known, the sharp edge that
+  needed a docstring warning -- symmetric components never pull apart --
+  is closed by construction: each family declares which parameters carry
+  its width and with which exponent (`_WIDTH_PARAMETERS`: a Gaussian's
+  `noise` is a variance, so it moves with the square; an
+  epsilon-insensitive `c_rate` is a rate, so it moves with the inverse;
+  a Student's `df` is shape and does not move), and the components are
+  spread by `separation` at construction, bounds moving with them where a
+  ceiling chosen for one noise would clamp the wide one back. The
+  contamination test that used to hand-set `noise=9.0` now passes on the
+  default construction alone. `Gamma` is refused as a family, with the
+  reason: its spread is tied to its mean.
+  - **Contamination is declared, not assumed.** The default is now
+  `contamination=[False] * n_components` -- the mixture is a noise model
+  first, and nothing is silently excluded from the ground. Marking a
+  component says its readings replace a measurement rather than report
+  one, and only then does the ground part company with the measurement.
+  - **`noise_variance` is of a measurement again**, as its own docstring
+  always claimed. It was the inlier-only spread, so `spread_check` scored
+  a model as over-confident for correctly calling a row contaminated. The
+  nodes now carry two weightings through one fold -- the genuine
+  components renormalized for the value, the mixture's own for the spread
+  -- and the second moment is taken **about the reported value**, which
+  is what a residual is measured from (`E[(y - prediction)^2]`, exactly
+  the extra `(mean_full - mean_genuine)^2` the contamination shifts by).
+  With nothing declared as contamination the two weightings are equal and
+  this is the ordinary noise integral. Cross-validation was never
+  affected: it scores through `predict_measurements`, which always kept
+  the full mixture.
+* **Responsibilities are filed on the variable**, as a dict family keyed
+by component (`assay/responsibilities/0`, `.../1`) -- the same shape as
+quantiles and cut-off shares, so the data frame, the pyvista export, the
+Zarr round trip, subsetting and `select("**/responsibilities/*")` all
+have it off one declaration. `VGPNetwork.responsibilities(newdata)`
+computes the latent moments itself (no prior `predict`, no stale-column
+trap), skips every variable whose likelihood is not a mixture, leaves a
+row without a measurement missing, and takes `store=False` to look
+without writing. Read it out-of-fold: at a training location the model
+interpolates its own measurement, so a row's own responsibility
+understates it -- the honest version is the container `cross_validate`
+returns.
+
 ## version 0.6.2
 * **Cross-validation, whole: folds that mimic the task, a driver that
 never retrains from scratch, and intervals held to their word.** Four

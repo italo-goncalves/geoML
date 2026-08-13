@@ -249,6 +249,35 @@ class _Variable(_TreeNode):
         self._subset_into(new_obj, item)
         return new_obj
 
+    def set_responsibilities(self, values):
+        """File which noise component each measurement is likely to be from.
+
+        One column per component of a `Mixture` likelihood, keyed by its
+        position, so `assay/responsibilities/1` is how often the second
+        (wider) component would explain the row. One answer per location:
+        the mixture is over the row, not over the columns of a vector
+        variable.
+
+        Written by `models.VGPNetwork.responsibilities`, never by a
+        prediction -- it takes measurements, which a grid does not have.
+
+        Parameters
+        ----------
+        values : (n_data, n_components)
+            Rows summing to one, or all missing where the location carries
+            no measurement.
+        """
+        values = _np.asarray(values, dtype=float)
+        if values.ndim != 2:
+            raise ValueError("responsibilities come one row per location and "
+                             "one column per component")
+        self.responsibilities = _col.OrderedDict()
+        for k in range(values.shape[1]):
+            attribute = self._Attribute(self.coordinates)
+            attribute.values[:] = values[:, k]
+            self.responsibilities[k] = attribute
+        return self
+
     def get_measurements(self):
         raise NotImplementedError
 
@@ -481,11 +510,16 @@ class ContinuousVariable(_Variable):
     probabilities : dict
         Cumulative distribution probabilities, indexed by the corresponding
         quantile.
+    responsibilities : dict
+        Under a `Mixture` likelihood, how likely each measurement is to have
+        come from each of its noise components, indexed by the component's
+        position. Empty otherwise; written by `set_responsibilities`.
     """
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
                    "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
-    _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided")
+    _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
+                      "responsibilities")
     _NODE_ATTRS = ("cutoffs",)
 
     def __init__(self, name, coordinates, measurements=None):
@@ -533,6 +567,10 @@ class ContinuousVariable(_Variable):
         # different question, and the one that says whether cutting the block
         # finer would settle anything. See `likelihood._divided`.
         self.divided = _col.OrderedDict()
+
+        # Which noise component each measurement came from, under a mixture
+        # likelihood; empty under every other one. See `set_responsibilities`.
+        self.responsibilities = _col.OrderedDict()
 
     def set_cutoffs(self, cutoffs):
         """The grades this variable is judged against.
@@ -778,6 +816,9 @@ class DerivedVariable(ContinuousVariable):
 
 class VectorVariable(_Variable):
     _ZARR_ATTRS = ("uncertainty",)
+    # the mixture is over the row, so the responsibilities belong to the
+    # variable rather than to its components -- one answer per location
+    _DICT_FAMILIES = ("responsibilities",)
     _LABEL_KIND = "components"
 
     def __init__(self, name, coordinates, labels, measurements=None):
@@ -798,6 +839,10 @@ class VectorVariable(_Variable):
             )
 
         self.uncertainty = self._Attribute(coordinates)
+
+        # Which noise component each measurement came from, under a mixture
+        # likelihood; empty under every other one.
+        self.responsibilities = _col.OrderedDict()
 
     def get_measurements(self):
         # not allowing partial missing data
