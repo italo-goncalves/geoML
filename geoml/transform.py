@@ -54,7 +54,7 @@ class Identity(_Transform):
 
 class Isotropic(_Transform):
     """Isotropic range"""
-    def __init__(self, r=1.0):
+    def __init__(self, r: float = 1.0):
         """
         Initializer for Isotropic.
 
@@ -101,7 +101,8 @@ class _Ellipsoidal(_Transform):
 
 class Anisotropy2D(_Ellipsoidal):
     """Anisotropy in two dimensions"""
-    def __init__(self, maxrange=1.0, minrange_fct=1, azimuth=0):
+    def __init__(self, maxrange: float = 1.0, minrange_fct: float = 1,
+                 azimuth: float = 0):
         """
         Builds an anisotropy matrix, to be multiplied by a coordinate matrix
         from the right.
@@ -156,7 +157,8 @@ class Anisotropy2D(_Ellipsoidal):
 class Anisotropy2DMath(_Ellipsoidal):
     """Anisotropy in two dimensions"""
 
-    def __init__(self, range_x=1.0, range_y=1.0, theta=0):
+    def __init__(self, range_x: float = 1.0, range_y: float = 1.0,
+                 theta: float = 0):
         """
         Anisotropy matrix in mathematical parametrization.
 
@@ -209,7 +211,7 @@ class Anisotropy2DMath(_Ellipsoidal):
 
 
 class Anisotropy2DDynamic(_Ellipsoidal):
-    def __init__(self, n_directions=9):
+    def __init__(self, n_directions: int = 9):
         super().__init__()
         self._base_transforms = []
         for i in range(n_directions):
@@ -335,8 +337,9 @@ class Anisotropy3D(_Ellipsoidal):
 class Anisotropy3DMath(_Ellipsoidal):
     """Anisotropy in two dimensions"""
 
-    def __init__(self, range_x=1.0, range_y=1.0, range_z=1.0,
-                 theta_x=0, theta_y=0, theta_z=0):
+    def __init__(self, range_x: float = 1.0, range_y: float = 1.0,
+                 range_z: float = 1.0, theta_x: float = 0,
+                 theta_y: float = 0, theta_z: float = 0):
         """
         Anisotropy matrix in mathematical parametrization.
 

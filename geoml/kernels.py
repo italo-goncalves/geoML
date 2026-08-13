@@ -74,7 +74,7 @@ class Gaussian(_Kernel):
 
 class Spherical(_Kernel):
     """Spherical kernel"""
-    def __init__(self, epsilon=1e-12):
+    def __init__(self, epsilon: float = 1e-12):
         super().__init__()
         self._has_compact_support = True
         self.epsilon = epsilon  # required to be able to compute gradients
@@ -88,7 +88,7 @@ class Spherical(_Kernel):
 
 class Exponential(_Kernel):
     """Exponential kernel"""
-    def __init__(self, epsilon=1e-12):
+    def __init__(self, epsilon: float = 1e-12):
         super().__init__()
         self.epsilon = epsilon  # required to be able to compute gradients
 
@@ -144,7 +144,7 @@ class Matern52(_Kernel):
 
 class RationalQuadratic(_Kernel):
     """Rational quadratic (a.k.a. Cauchy) kernel."""
-    def __init__(self, scale=1):
+    def __init__(self, scale: float = 1):
         super().__init__()
         self._add_parameter("scale", _gpr.PositiveParameter(scale, 1e-3, 100))
 
@@ -353,7 +353,8 @@ class _AbstractCovariance(_gpr.Parametric):
 class Covariance(_AbstractCovariance):
     """Covariance function."""
 
-    def __init__(self, kernel, transform=_gt.Identity()):
+    def __init__(self, kernel: "_Kernel",
+                 transform: "_gt._Transform" = _gt.Identity()):
         """
         Initializer for Covariance.
 
