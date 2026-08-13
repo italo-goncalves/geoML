@@ -20,6 +20,7 @@ variable) and the `from_data` box-fitting shared with the block classes.
 """
 import copy as _copy
 import itertools as _iter
+from typing import Any as _Any
 from collections.abc import Sequence
 
 import numpy as _np
@@ -234,6 +235,11 @@ def _fitted_rotation(data, decimals):
 
 
 class _GriddedData(_PointBased):
+    grid: "list[_np.ndarray]"
+    grid_size: "list[int]"
+    step_size: "list[float]"
+    origin: _Any
+
     """Base class for regular grids; also its own lazy coordinate provider.
 
     A regular grid's coordinates are the Cartesian product of its per-axis node
@@ -273,9 +279,13 @@ class _GriddedData(_PointBased):
         self.metadata = {}
 
         # grid geometry, filled in by the concrete subclasses
-        self.grid = None
-        self.grid_size = None
-        self.step_size = None
+        # Empty rather than None: a grid with no axes has no nodes,
+        # which is a length, and every subclass fills all four in its
+        # own constructor before anything reads them. The three local
+        # `grid is None` tests elsewhere are on other objects.
+        self.grid = []
+        self.grid_size = []
+        self.step_size = []
         self.origin = None
 
     # -- lazy coordinate surface ------------------------------------------- #
@@ -349,7 +359,9 @@ class _GriddedData(_PointBased):
     _GRID_NDIM = None
 
     @classmethod
-    def from_data(cls, data, step, margin=0.1, decimals=0):
+    def from_data(cls, data: "_SpatialData",
+                  step: "float | _types.ArrayLike",
+                  margin: float = 0.1, decimals: int = 0):
         """
         A grid covering another object's bounding box.
 
@@ -373,10 +385,13 @@ class _GriddedData(_PointBased):
         start, n, step, labels = _cover_box(
             data, step, margin, decimals, n_dim=cls._GRID_NDIM)
         if len(start) == 1:
-            return cls(start=float(start[0]), n=int(n[0]),
+            # the concrete grids take start/n/step; the base takes the
+            # axes it builds from them, so this call is theirs to answer
+            return cls(start=float(start[0]), n=int(n[0]),  # type: ignore[call-arg]
                        step=float(step[0]),
                        labels=labels[0] if labels else None)
-        return cls(start=start, n=n, step=step, labels=labels)
+        return cls(start=start, n=n, step=step,  # type: ignore[call-arg]
+                   labels=labels)
 
     def _cell_of(self, data):
         """Which cell each of `data`'s locations falls in, as this object's
@@ -488,7 +503,9 @@ class Grid1D(_GriddedData):
         The number of points in grid.
     """
 
-    def __init__(self, start, n, step=None, end=None, labels=None):
+    def __init__(self, start, n,
+                 step: "float | _types.ArrayLike | None" = None,
+                 end=None, labels=None):
         """
         Initializer for Grid1D.
 
@@ -511,23 +528,25 @@ class Grid1D(_GriddedData):
         if (step is None) & (end is None):
             raise ValueError("one of step or end must be given")
         if step is not None:
-            end = start + (n - 1) * step
+            step_vector = float(step)
+            end = start + (n - 1) * step_vector
         else:
-            step = (end - start) / (n - 1)
+            step_vector = (end - start) / (n - 1)
         grid = _np.linspace(start, end, n, dtype=float)
 
         if labels is None:
             labels = "X"
 
         super().__init__([grid], labels)
-        self.step_size = [step]
+        self.step_size = [step_vector]
         self.grid = [grid]
         self.grid_size = [int(n)]
         self.origin = start
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1,
-                          rounding_decimals=0):
+    def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
+                          margin: float = 0.1,
+                          rounding_decimals: int = 0):
         if not isinstance(margin, (list, tuple)):
             margin = (margin, margin)
 
@@ -556,7 +575,9 @@ class Grid2D(_GriddedData):
         The number of points in grid.
     """
 
-    def __init__(self, start, n, step=None, end=None, labels=None):
+    def __init__(self, start, n,
+                 step: "float | _types.ArrayLike | None" = None,
+                 end=None, labels=None):
         """
         Initializer for Grid2D.
 
@@ -581,11 +602,11 @@ class Grid2D(_GriddedData):
         start = _np.array(start)
         n = _np.array(n)
         if step is not None:
-            step = _np.array(step)
-            end = start + (n - 1) * step
+            step_vector = _np.array(step)
+            end = start + (n - 1) * step_vector
         else:
             end = _np.array(end)
-            step = _np.array([(end[0] - start[0]) / (n[0] - 1),
+            step_vector = _np.array([(end[0] - start[0]) / (n[0] - 1),
                               (end[1] - start[1]) / (n[1] - 1)])
         grid_x = _np.linspace(start[0], end[0], n[0])
         grid_y = _np.linspace(start[1], end[1], n[1])
@@ -594,14 +615,15 @@ class Grid2D(_GriddedData):
             labels = ["X", "Y"]
 
         super().__init__([grid_x, grid_y], labels)
-        self.step_size = step.tolist()
+        self.step_size = step_vector.tolist()
         self.grid = [grid_x, grid_y]
         self.grid_size = [int(num) for num in n]
         self.origin = start
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1,
-                          rounding_decimals=0):
+    def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
+                          margin: float = 0.1,
+                          rounding_decimals: int = 0):
         margin = _np.array(margin)
         if margin.shape == ():
             margin = _np.full([2, 2], margin)
@@ -632,7 +654,9 @@ class Grid3D(_GriddedData):
         The number of points in grid.
     """
 
-    def __init__(self, start, n, step=None, end=None, labels=None):
+    def __init__(self, start, n,
+                 step: "float | _types.ArrayLike | None" = None,
+                 end=None, labels=None):
         """
         Initializer for Grid3D.
 
@@ -657,11 +681,11 @@ class Grid3D(_GriddedData):
         start = _np.array(start)
         n = _np.array(n)
         if step is not None:
-            step = _np.array(step)
-            end = start + (n - 1) * step
+            step_vector = _np.array(step)
+            end = start + (n - 1) * step_vector
         else:
             end = _np.array(end)
-            step = _np.array([(end[0] - start[0]) / (n[0] - 1),
+            step_vector = _np.array([(end[0] - start[0]) / (n[0] - 1),
                               (end[1] - start[1]) / (n[1] - 1),
                               (end[2] - start[2]) / (n[2] - 1)])
 
@@ -673,7 +697,7 @@ class Grid3D(_GriddedData):
             labels = ["X", "Y", "Z"]
 
         super().__init__([grid_x, grid_y, grid_z], labels)
-        self.step_size = step.tolist()
+        self.step_size = step_vector.tolist()
         self.grid = [grid_x, grid_y, grid_z]
         self.grid_size = [int(num) for num in n]
         self.origin = start
@@ -735,8 +759,9 @@ class Grid3D(_GriddedData):
                           labels=list(labels))
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1,
-                          rounding_decimals=0):
+    def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
+                          margin: float = 0.1,
+                          rounding_decimals: int = 0):
         margin = _np.array(margin)
         if margin.shape == ():
             margin = _np.full([2, 3], margin)
@@ -755,17 +780,19 @@ class GridND(_GriddedData):
     """
     Implicit grid in N dimensions.
     """
-    def __init__(self, start, n, step=None, end=None, labels=None):
+    def __init__(self, start, n,
+                 step: "float | _types.ArrayLike | None" = None,
+                 end=None, labels=None):
         if (step is None) & (end is None):
             raise ValueError("one of step or end must be given")
         start = _np.array(start)
         n = _np.array(n)
         if step is not None:
-            step = _np.array(step)
-            end = start + (n - 1) * step
+            step_vector = _np.array(step)
+            end = start + (n - 1) * step_vector
         else:
             end = _np.array(end)
-            step = _np.array([(e - st) / (n_ - 1)
+            step_vector = _np.array([(e - st) / (n_ - 1)
                               for st, e, n_ in zip(start, end, n)])
 
         grids = []
@@ -777,7 +804,7 @@ class GridND(_GriddedData):
 
         super().__init__(grids, labels)
 
-        self.step_size = step.tolist()
+        self.step_size = step_vector.tolist()
         self.grid = grids
         self.grid_size = [int(num) for num in n]
         self.labels = labels
@@ -867,12 +894,15 @@ class RotatedGrid3D(Grid3D):
         return pv_grid
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1,
-                          rounding_decimals=0):
+    def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
+                          margin: float = 0.1,
+                          rounding_decimals: int = 0):
         return NotImplementedError
 
     @classmethod
-    def from_data(cls, data, step, margin=0.1, decimals=0):
+    def from_data(cls, data: "_SpatialData",
+                  step: "float | _types.ArrayLike",
+                  margin: float = 0.1, decimals: int = 0):
         """
         A rotated grid fitted to another object's spread.
 
