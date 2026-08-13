@@ -26,6 +26,7 @@ import pandas as _pd
 import tensorflow as _tf
 import sklearn.metrics as _skmetrics
 
+import geoml._types as _types
 import geoml.metrics as _gmlmetrics
 import geoml.storage as _storage
 
@@ -39,9 +40,11 @@ class _Variable(_TreeNode):
 
     # Subclasses that can be simulated replace this with an (n_data, n_sim)
     # store; declared here so the accessors below work on every variable.
-    simulations = None
+    simulations: "_storage.ArrayStore | None" = None
+    name: str
+    metrics: "_pd.DataFrame | None"
 
-    def __init__(self, name, coordinates):
+    def __init__(self, name: str, coordinates):
         self.name = name
         self.coordinates = coordinates
         self._length = 1
@@ -249,7 +252,7 @@ class _Variable(_TreeNode):
         self._subset_into(new_obj, item)
         return new_obj
 
-    def set_responsibilities(self, values):
+    def set_responsibilities(self, values: _types.ArrayLike) -> "_Variable":
         """File which noise component each measurement is likely to be from.
 
         One column per component of a `Mixture` likelihood, keyed by its
@@ -263,9 +266,9 @@ class _Variable(_TreeNode):
 
         Parameters
         ----------
-        values : (n_data, n_components)
-            Rows summing to one, or all missing where the location carries
-            no measurement.
+        values
+            Of shape `(n_data, n_components)`, rows summing to one, or
+            missing where the location carries no measurement.
         """
         values = _np.asarray(values, dtype=float)
         if values.ndim != 2:
@@ -289,7 +292,7 @@ class _Variable(_TreeNode):
         """Number of simulations available, or 0 if none were drawn."""
         return 0 if self.simulations is None else self.simulations.shape[1]
 
-    def simulation(self, index):
+    def simulation(self, index: int) -> _Attribute:
         """
         A single simulation, in the form of an `_Attribute`.
 
@@ -300,7 +303,7 @@ class _Variable(_TreeNode):
 
         Parameters
         ----------
-        index : int
+        index
             Position of the simulation, from 0 to `n_sim - 1`.
 
         Returns
@@ -586,7 +589,7 @@ class ContinuousVariable(_Variable):
         # likelihood; empty under every other one. See `set_responsibilities`.
         self.responsibilities = _col.OrderedDict()
 
-    def set_cutoffs(self, cutoffs):
+    def set_cutoffs(self, cutoffs: _types.Cutoffs) -> "ContinuousVariable":
         """The grades this variable is judged against.
 
         They travel with the variable, so a model trained on data that
@@ -616,15 +619,16 @@ class ContinuousVariable(_Variable):
     def get_predictions(self):
         return self.prediction.values.to_numpy()
 
-    def reset_quantiles(self, probabilities=None):
+    def reset_quantiles(
+            self, probabilities: _types.ArrayLike | None = None) -> None:
         """
         Resets the variable's quantiles.
 
         Parameters
         ----------
-        probabilities : array
-            An array of probabilities, ordered values from 0 to 1 (exclusive),
-            on which to compute the corresponding quantiles.
+        probabilities
+            Probabilities between 0 and 1, exclusive, at which to take
+            the quantiles.
         """
         if self.simulations is None:
             raise NoDataError(f'No simulations available for variable {self.name}.')
@@ -642,16 +646,16 @@ class ContinuousVariable(_Variable):
                 targets.append(attr.values)
             _storage.store_columns(columns, targets)
 
-    def reset_probabilities(self, quantiles=None):
+    def reset_probabilities(
+            self, quantiles: _types.ArrayLike | None = None) -> None:
         """
         Resets the variable's probabilities.
 
         Parameters
         ----------
-        quantiles : array
-            An array of quantiles (cutoff values in the variable's units),
-            ordered, on which to compute the corresponding cumulative
-            probabilities in the (0, 1) interval.
+        quantiles
+            Values in the variable's own units, at which to take the
+            cumulative probabilities.
         """
         if self.simulations is None:
             raise NoDataError(f'No simulations available for variable {self.name}.')
@@ -829,6 +833,10 @@ class DerivedVariable(ContinuousVariable):
 
 
 class VectorVariable(_Variable):
+    uncertainty: _Attribute
+    components: "dict[str, ContinuousVariable]"
+    responsibilities: "dict[int, _Attribute]"
+
     _ZARR_ATTRS = ("uncertainty",)
     # the mixture is over the row, so the responsibilities belong to the
     # variable rather than to its components -- one answer per location
@@ -1073,6 +1081,14 @@ class CompositionalVariable(VectorVariable):
 
 
 class _Category(_Variable):
+    probability: _Attribute
+    indicator: _Attribute
+    indicator_mean: _Attribute
+    indicator_variance: _Attribute
+    indicator_predicted: _Attribute
+    proportions: "dict[float, _Attribute]"
+    divided: "dict[float, _Attribute]"
+
     _ZARR_ATTRS = ("probability", "indicator", "indicator_mean",
                    "indicator_variance", "indicator_predicted")
     _ZARR_HAS_SIMS = True
@@ -1127,6 +1143,14 @@ class _Category(_Variable):
             owner=self.coordinates)
 
 class RockTypeVariable(_Variable):
+    predicted: _Attribute
+    entropy: _Attribute
+    uncertainty: _Attribute
+    measurements_a: _Attribute
+    measurements_b: _Attribute
+    boundary: _Attribute
+    components: "dict[str, _Category]"
+
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
                    "measurements_a", "measurements_b", "boundary")
     _LABEL_KIND = "categories"
@@ -1439,6 +1463,16 @@ class OrderedRockType(RockTypeVariable):
 
 
 class BinaryVariable(_Variable):
+    indicator: _Attribute
+    measurements: _Attribute
+    weights: _Attribute
+    predicted: _Attribute
+    probability: _Attribute
+    entropy: _Attribute
+    uncertainty: _Attribute
+    latent_mean: _Attribute
+    latent_variance: _Attribute
+
     _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
                    "probability", "entropy", "uncertainty",
                    "latent_mean", "latent_variance")

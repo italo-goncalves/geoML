@@ -51,6 +51,10 @@ dev = [
 Homepage = "http://github.com/italo-goncalves/geoML"
 
 # The type check covers the annotated public interface and grows with it.
+# `data/variables.py` is annotated but not yet listed: its columns are
+# declared, which is what the editor reads, and the ~20 sites that guard a
+# missing simulations store by hand have still to be made legible to the
+# checker.
 # The tensor internals are deliberately unannotated -- a `tf.Tensor` in and
 # a `tf.Tensor` out says nothing about the rank, dtype or axis order that
 # actually goes wrong there, and tensorflow-probability ships no stubs, so
