@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from typing import Any as _Any
 
 import geoml._types as _types
+import geoml.stats.random as _rnd
 import geoml.warping as _warp
 import geoml.parameter as _gpr
 import geoml.math.tf as _tftools
@@ -29,7 +30,6 @@ import geoml.stats.probability as _gmp
 import numpy as _np
 import tensorflow as _tf
 import tensorflow_probability as _tfp
-from scipy.stats import qmc as _qmc
 
 _tfd = _tfp.distributions
 
@@ -331,8 +331,8 @@ class _Likelihood(_gpr.Parametric):
                 _ROOTS_8 * _np.sqrt(2.0))
             return _tf.tile(u[:, None], [1, self.size]), _WEIGHTS_8
 
-        points = _qmc.Sobol(self.size, scramble=True,
-                            seed=_SOBOL_SEED).random(_SOBOL_NODES)
+        points = _rnd.sobol_engine(self.size, _SOBOL_SEED).random(
+            _SOBOL_NODES)
         return (_tf.constant(_np.clip(points, 1e-6, 1 - 1e-6), _tf.float64),
                 _tf.fill([_SOBOL_NODES],
                          _tf.constant(1 / _SOBOL_NODES, _tf.float64)))
@@ -354,8 +354,7 @@ class _Likelihood(_gpr.Parametric):
             return _tf.constant(_np.tile(u[:, None], [1, self.size]),
                                 _tf.float64)
 
-        points = _qmc.Sobol(self.size, scramble=True,
-                            seed=_SOBOL_SEED).random(n_nodes)
+        points = _rnd.sobol_engine(self.size, _SOBOL_SEED).random(n_nodes)
         return _tf.constant(_np.clip(points, 1e-6, 1 - 1e-6), _tf.float64)
 
     def _noise_values(self):

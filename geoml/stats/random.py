@@ -41,6 +41,7 @@ the seed it drew.
 """
 
 import numpy as _np
+from scipy.stats import qmc as _qmc
 
 _rng = _np.random.default_rng()
 
@@ -74,3 +75,31 @@ def rng():
     numpy.random.Generator
     """
     return _rng
+
+
+def sobol_engine(dimension, seed):
+    """A scrambled Sobol engine, however SciPy spells its seed argument.
+
+    SciPy is renaming that argument from `seed` to `rng` (SPEC 7): the new
+    name works today and the old one is on its way out, so both are tried
+    here and the same call runs either side of the change. The sequence a
+    given SciPy produces is unaffected -- the scramble is drawn from the
+    same seed by the same construction under either name.
+
+    Parameters
+    ----------
+    dimension : int
+        How many dimensions the points have.
+    seed : int or numpy.random.Generator
+        What the scramble is drawn from, so that the rule is fixed rather
+        than random.
+
+    Returns
+    -------
+    scipy.stats.qmc.Sobol
+    """
+    try:
+        return _qmc.Sobol(dimension, scramble=True, rng=seed)
+    except TypeError:
+        # SciPy older than the rename
+        return _qmc.Sobol(dimension, scramble=True, seed=seed)

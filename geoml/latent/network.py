@@ -28,7 +28,6 @@ import tensorflow as _tf
 import contextlib as _contextlib
 import warnings as _warnings
 from scipy import special as _special
-from scipy.stats import qmc as _qmc
 
 
 # Which rule draws the posterior simulations. Set through `simulation_rule`
@@ -91,7 +90,7 @@ def _simulation_normals(shape, seed):
         # scipy warns unless n_sim is a power of two; the balance it asks
         # for helps but is not required
         _warnings.simplefilter("ignore")
-        points = _qmc.Sobol(size * n, scramble=True, seed=rng).random(n_sim)
+        points = _rnd.sobol_engine(size * n, rng).random(n_sim)
     normals = _special.ndtri(_np.clip(points, 1e-6, 1 - 1e-6))
     return _tf.constant(
         normals.reshape([n_sim, size, n]).transpose([1, 2, 0]), _tf.float64)
