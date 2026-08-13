@@ -19,3 +19,6 @@
 
 # The user manual, kept out of the tree until it is ready to ship.
 /docs/manual/
+
+# The built documentation site: CI builds it, and publishes it on a tag.
+/docs/build/

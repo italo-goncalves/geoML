@@ -37,8 +37,38 @@ dependencies = [
     "openpyxl>=3.1",
 ]
 
+[project.optional-dependencies]
+# What the documentation site and the type check need, and nothing a user
+# does: `pip install -e .[dev]`.
+dev = [
+    "pyright>=1.1.400",
+    "sphinx>=8.0",
+    "myst-parser>=4.0",
+    "sphinx-rtd-theme>=3.0",
+]
+
 [project.urls]
 Homepage = "http://github.com/italo-goncalves/geoML"
+
+# The type check covers the annotated public interface and grows with it.
+# The tensor internals are deliberately unannotated -- a `tf.Tensor` in and
+# a `tf.Tensor` out says nothing about the rank, dtype or axis order that
+# actually goes wrong there, and tensorflow-probability ships no stubs, so
+# a checker could not verify that half of the package anyway.
+[tool.pyright]
+include = [
+    "geoml/_types.py",
+    "geoml/models.py",
+]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+useLibraryCodeForTypes = true
+reportMissingTypeStubs = false
+reportMissingImports = false
+reportMissingModuleSource = false
+# `typings/tensorflow` declares that module untyped on purpose -- see the
+# comment in it.
+stubPath = "typings"
 
 # Subpackages are discovered automatically -- no hand-maintained list.
 [tool.setuptools.packages.find]

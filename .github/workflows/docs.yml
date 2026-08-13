@@ -1,0 +1,83 @@
+# The documentation site, in two halves. `build` runs on every push with
+# warnings as errors, so a broken reference or a malformed docstring fails
+# where it was written; `publish` runs on a release tag and puts the built
+# site on GitHub Pages, so what is published is never staler than the last
+# release. The type check rides along: it covers the annotated public
+# interface listed in pyproject's [tool.pyright], and grows with it.
+
+name: docs
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: VTK system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
+      - name: Install the package
+        run: pip install -e .[dev]
+      - name: Type check
+        run: pyright
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: VTK system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
+      # autodoc imports the package, and `stats/probability.py` subclasses a
+      # tensorflow-probability distribution, so the real dependencies are
+      # installed rather than mocked
+      - name: Install the package
+        run: pip install -e .[dev]
+      - name: Build the site
+        run: sphinx-build -W --keep-going -b html docs/source docs/build/html
+      - name: Keep the built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: docs/build/html
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

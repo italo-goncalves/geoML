@@ -21,7 +21,10 @@ __all__ = ["GP", "GPEnsemble", "Normalizer", "StructuralField", "GPOptions",
            "ConformalCalibration"]
 
 import numpy as np
+from collections.abc import Sequence
+from typing import Any as _Any, cast as _cast
 
+import geoml._types as _types
 import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.latent as _latent
@@ -190,36 +193,51 @@ class _GPModel(_gpr.Parametric):
         """
         raise NotImplementedError
 
-    def save(self, path):
-        """
-        Saves this model, with its structure, parameters and training data.
-
-        See `geoml.persistence.save_model()`.
+    def save(self, path: _types.PathLike) -> _types.PathLike:
+        """Save the model's structure, parameters and training data.
 
         Parameters
         ----------
-        path : str
+        path
             Directory to write to, overwritten if it already exists.
+
+        Returns
+        -------
+        path
+            The location written to.
+
+        See Also
+        --------
+        geoml.persistence.save_model
         """
         import geoml.persistence as _persistence
         return _persistence.save_model(self, path)
 
     @classmethod
-    def open(cls, path, data=None):
-        """
-        Loads a model saved with `save()`.
+    def open(cls, path: _types.PathLike,
+             data: "_data._SpatialData | None" = None) -> "_GPModel":
+        """Load a model saved with :meth:`save`.
 
-        The model is rebuilt with its variables and their types, ready to
-        predict on new data objects or to be trained further. See
-        `geoml.persistence.load_model()`.
+        The model comes back with its variables and their types, ready to
+        predict or to be trained further.
 
         Parameters
         ----------
-        path : str
-            A directory written by `save()`.
+        path
+            A directory written by :meth:`save`.
         data
-            A data object to build the model around, in place of the one it was
-            trained on.
+            A data object to build the model around, in place of the one it
+            was trained on. Used to refit the same structure on a subset,
+            as cross-validation does.
+
+        Returns
+        -------
+        _GPModel
+            The reopened model.
+
+        See Also
+        --------
+        geoml.persistence.load_model
         """
         import geoml.persistence as _persistence
         return _persistence.load_model(path, data=data)
@@ -293,20 +311,22 @@ class GP(_GPModel):
             "log_likelihood": _tf.Variable(_tf.constant(0.0, _tf.float64)),
         })
 
-        self.cov = None
-        self.cov_chol = None
-        self.cov_inv = None
-        self.scale = None
-        self.alpha = None
-        self.x = None
-        self.y = None
-        self.x_dir = None
-        self.y_dir = None
-        self.directions = None
-        self.y_warped = None
-        self.log_derivative = None
-        self.trend = None
-        self.mat_a_inv = None
+        # Everything `refresh()` computes, cleared here so that a model whose
+        # parameters changed cannot be predicted from a stale factorization.
+        self.cov: _Any = None
+        self.cov_chol: _Any = None
+        self.cov_inv: _Any = None
+        self.scale: _Any = None
+        self.alpha: _Any = None
+        self.x: _Any = None
+        self.y: _Any = None
+        self.x_dir: _Any = None
+        self.y_dir: _Any = None
+        self.directions: _Any = None
+        self.y_warped: _Any = None
+        self.log_derivative: _Any = None
+        self.trend: _Any = None
+        self.mat_a_inv: _Any = None
         self.trend_chol = None
         self.beta = None
 
@@ -631,49 +651,72 @@ class GP(_GPModel):
 
 
 class VGPNetwork(_GPModel):
-    """Variational Gaussian process network."""
-    def __init__(self, data, variables, likelihoods,
-                 latent_network,
-                 directional_data=None,
-                 options=None):
-        """
-        Variational Gaussian process network.
+    """Variational Gaussian process network.
 
-        This is the heart of the `geoml` package, a generalization of the standard GP. It supports variables of any
-        kind and flexible structures through the latent variable network.
+    A generalization of the standard Gaussian process: variables of any kind
+    (continuous, categorical, compositional, directional) are modelled
+    through a network of latent Gaussian processes, fitted by maximizing the
+    evidence lower bound on inducing points.
 
-        Parameters
-        ----------
-        data
-            A `PointData` object from the ´data´ module.
-        variables
-            The name of a variable to model, or a list of names.
-        likelihoods
-            A `likelihood` object or a list matching the length of `variables`.
-        latent_network
-            An object from the `latent` module.
-        directional_data
-            A `DirectionalData` object from the ´data´ module. The corresponding variable will be used as the gradient
-            of the modelled field.
-        options : GPOptions
-            Additional configurations.
-        """
+    Parameters
+    ----------
+    data
+        The training data, a container from the :mod:`geoml.data` module.
+    variables
+        The name of a variable in `data` to model, or a list of names.
+    likelihoods
+        A likelihood from :mod:`geoml.likelihood`, or a list of one per
+        variable, in the same order as `variables`.
+    latent_network
+        The network's terminal node, from :mod:`geoml.latent`. Its size must
+        match the likelihoods' sizes summed.
+    directional_data
+        Structural measurements, whose variable is taken as the gradient of
+        the modelled field.
+    options
+        Training and prediction settings.
+
+    Attributes
+    ----------
+    training_log : list of float
+        The evidence lower bound at each iteration of the last training run.
+
+    Examples
+    --------
+    >>> import geoml
+    >>> geoml.set_seed(1234)
+    >>> walker, grid = geoml.datasets.walker()
+    >>> inducing = geoml.data.inducing.from_kmeans(walker, 100, seed=0)
+    >>> gp = geoml.latent.BasicGP(
+    ...     geoml.latent.BasicInput(inducing), size=1)
+    >>> model = geoml.models.VGPNetwork(
+    ...     walker, "V", geoml.likelihood.Gaussian(), gp)
+    >>> model.train_full(max_iter=100)
+    >>> model.predict(grid, n_sim=20)
+    """
+
+    def __init__(self, data: "_data.PointData",
+                 variables: "str | Sequence[str]",
+                 likelihoods: "_lk._Likelihood | Sequence[_lk._Likelihood]",
+                 latent_network: "_latent.network._LatentVariable",
+                 directional_data: "_data.DirectionalData | None" = None,
+                 options: "GPOptions | None" = None):
         super().__init__(options=options)
 
         self.data = data
         self.latent_network = self._register(latent_network)
 
-        if not (isinstance(likelihoods, (list, tuple))):
+        if isinstance(likelihoods, _lk._Likelihood):
             likelihoods = [likelihoods]
-        self.likelihoods = likelihoods
-        self.lik_sizes = [lik.size for lik in likelihoods]
-        for likelihood in likelihoods:
+        self.likelihoods: "list[_lk._Likelihood]" = list(likelihoods)
+        self.lik_sizes = [lik.size for lik in self.likelihoods]
+        for likelihood in self.likelihoods:
             self._register(likelihood)
 
-        if not (isinstance(variables, (list, tuple))):
+        if isinstance(variables, str):
             variables = [variables]
-        self.variables = variables
-        self.var_lengths = [data.variables[v].length for v in variables]
+        self.variables: list[str] = list(variables)
+        self.var_lengths = [data.variables[v].length for v in self.variables]
 
         y, has_value = [], []
         for v in self.variables:
@@ -886,17 +929,21 @@ class VGPNetwork(_GPModel):
 
         return step
 
-    def train_full(self, max_iter=1000):
-        """
-        Model training.
+    def train_full(self, max_iter: int = 1000) -> None:
+        """Train on the whole data set at every iteration.
 
-        The VGP will be trained using all data at once. Only feasible for relatively small datasets, depending of
-        te size of the latent network. For larger datasets, use the `train_svi` method.
+        Feasible while the data and the latent network fit in memory
+        together; past that, use :meth:`train_svi`. The evidence lower bound
+        of each iteration is appended to `training_log`.
 
         Parameters
         ----------
-        max_iter : int
-            The number of iterations to train.
+        max_iter
+            Number of iterations.
+
+        See Also
+        --------
+        train_svi : minibatch training, for larger data sets.
         """
         training_inputs = [self.data.variables[v].training_input()
                            for v in self.variables]
@@ -929,16 +976,22 @@ class VGPNetwork(_GPModel):
         if self.options.verbose:
             print("\n")
 
-    def train_svi(self, epochs=100):
-        """
-        Stochastic Variational Inference training.
+    def train_svi(self, epochs: int = 100) -> None:
+        """Train in minibatches, by stochastic variational inference.
 
-        The model will be trained in batches according to the `options` object.
+        Each epoch visits the data once, in batches of
+        `options.training_batch_size`, drawn in an order reproducible from
+        the model's seed. The mean bound over an epoch's batches is appended
+        to `training_log`.
 
         Parameters
         ----------
-        epochs : int
-            Number of epochs to train.
+        epochs
+            Number of passes over the data.
+
+        See Also
+        --------
+        train_full : one gradient step per iteration on all the data.
         """
         model_variables = self.get_unfixed_variables()
 
@@ -1042,42 +1095,39 @@ class VGPNetwork(_GPModel):
                 )
             return output
 
-    def predict(self, newdata, n_sim=20, include_noise=True,
-                where=None):
-        """
-        Makes a prediction on the specified coordinates.
+    def predict(self, newdata: "_data._SpatialData", n_sim: int = 20,
+                include_noise: bool = True,
+                where: _types.Where = None) -> None:
+        """Predict at new locations, writing the answer into the container.
+
+        The variables the model was trained on are created on `newdata` if
+        absent and filled in place: prediction, latent moments, simulations,
+        and the columns each variable kind adds to those.
 
         Parameters
         ----------
-        newdata :
-            A reference to a spatial points object of compatible dimension.
-            The object's variables will be updated.
-        n_sim : int
-            Number of predictive samples to draw.
-        include_noise : bool
-            Whether to account for the likelihood noise, which is *integrated
-            out* rather than drawn: a prediction reports the value the ground
-            would show once the measurement error and the variability below
-            the model's resolution are averaged over. It is a deterministic
-            correction, and a large one on a skewed variable -- leaving it out
-            biases the answer low. Turn it off only to see the latent field
-            itself.
-        where : array-like, optional
-            One boolean per location, or the indices of the locations to
-            predict. The rest are left exactly as they are, variables and
-            simulations alike, instead of being allocated afresh.
+        newdata
+            The locations to predict, of the same dimension as the training
+            data. Modified in place.
+        n_sim
+            Number of realizations to draw per location.
+        include_noise
+            Whether to integrate the likelihood noise out of the answer. The
+            prediction then reports the value the ground would show once
+            measurement error and sub-resolution variability are averaged
+            over -- a deterministic correction, and a large one on a skewed
+            variable. Turn it off to see the latent field alone.
+        where
+            One boolean per location, the indices of the locations to visit,
+            or `None` for all of them. Locations left out keep whatever they
+            hold, including their simulations, and a location never visited
+            stays missing.
 
-            For refining a block model: `split` keeps what the blocks that
-            were not split already hold, and `unpredicted()` names the ones it
-            created, so only those are visited. A location's simulated value
-            does not depend on what else is in the batch, so this gives the
-            same answer as predicting the lot -- it just does not pay for it
-            twice.
-
-            For a filter: naming the ground worth modelling means the rest is
-            never predicted at all. Those locations keep `nan`, which is what
-            `unpredicted` reads and what the reporting layer already skips, so
-            air above a topography costs nothing.
+        Notes
+        -----
+        A location's simulated values do not depend on what else is in its
+        batch, so predicting a subset gives the same answer as predicting
+        everything and reading that subset back.
         """
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
@@ -1159,38 +1209,43 @@ class VGPNetwork(_GPModel):
         if self.options.verbose:
             print("\n")
 
-    def predict_measurements(self, newdata, n_sim=20, n_nodes=32):
-        """What a *measurement* at each location would read.
+    def predict_measurements(self, newdata: "_data._SpatialData",
+                             n_sim: int = 20,
+                             n_nodes: int = 32) -> "dict[str, _np.ndarray]":
+        """Draw the predictive distribution of a measurement per location.
 
-        `predict` reports the ground, with the likelihood noise integrated
-        out, so its simulations cannot be scored against an assay: they are
-        intervals for a quantity no sample ever observes. This returns the
-        predictive distribution of a sample instead -- `n_sim * n_nodes`
-        equally likely values per location -- which is what a comparison with
-        measured data needs. It is the same computation `predict` makes,
-        stopped one step earlier.
+        :meth:`predict` reports the ground, with the likelihood noise
+        integrated out, so its simulations describe a quantity no sample
+        observes. This keeps the noise instead, giving `n_sim * n_nodes`
+        equally likely readings per location -- the distribution to compare
+        against measured data, as an accuracy plot or a cross-validation
+        does.
 
-        Nothing is stored. The answer is returned, `newdata` is not touched,
-        and `variable.simulations` keeps its one meaning everywhere.
+        Nothing is stored: `newdata` is not modified.
 
         Parameters
         ----------
-        newdata :
-            Locations to ask about, of compatible dimension. Meant for the few
-            thousand that carry measurements.
-        n_sim : int
-            Latent realizations, as in `predict`.
-        n_nodes : int
-            Values per realization standing for the noise. Equal-share nodes,
-            so the two axes pool into one sample.
+        newdata
+            Locations to ask about, of the same dimension as the training
+            data. Intended for the locations that carry measurements, not
+            for a block model.
+        n_sim
+            Latent realizations per location.
+        n_nodes
+            Equal-share noise values per realization, so that the two axes
+            pool into one sample.
 
         Returns
         -------
-        dict
+        dict of str to ndarray
             One `(n_data, size, n_sim * n_nodes)` array per variable whose
-            likelihood carries a warping. A categorical one is skipped: its
-            noise lives in the probabilities, and there is no value for a
-            sample to scatter around.
+            likelihood carries a warping. Categorical variables are skipped:
+            their noise lives in the probabilities, leaving no value for a
+            measurement to scatter around.
+
+        See Also
+        --------
+        predict : the ground, with the noise integrated out.
         """
         if newdata.rows_per_location != 1:
             raise ValueError(
@@ -1222,37 +1277,44 @@ class VGPNetwork(_GPModel):
         return {v: _np.concatenate(parts, axis=0)
                 for v, parts in chunks.items()}
 
-    def responsibilities(self, newdata, store=True):
-        """Which noise component each measurement is likely to have come from.
+    def responsibilities(self, newdata: "_data._SpatialData",
+                         store: bool = True) -> "dict[str, _np.ndarray]":
+        """Posterior probability that each measurement came from each noise
+        component of a mixture likelihood.
 
-        The diagnostic only a mixture can give: a heavy-tailed likelihood
-        downweights a bad sample, this one *names* it. One answer per
-        location, since the mixture is over the row -- a measurement wrong in
-        one component of a vector variable is a wrong measurement.
-
-        Read it where the model has not seen the data. At a training location
-        the model interpolates its own measurement, so an outlier is partly
-        absorbed into the fit and its own responsibility understates it; the
-        honest version is the out-of-fold container `cross_validate` returns,
-        whose fold models never saw the row they scored.
+        One answer per location: a :class:`~geoml.likelihood.Mixture` is a
+        mixture over the row, so a measurement wrong in one component of a
+        vector variable is a wrong measurement.
 
         Parameters
         ----------
-        newdata :
-            Point data carrying the variable's measurements -- the data the
-            model was trained from, or a validation set. Meant for the few
-            thousand locations that have them.
-        store : bool
-            Whether to file the answer on the variable as well as return it
-            (`assay/responsibilities/0`, `.../1`, ...). Turn it off to look
-            without writing.
+        newdata
+            Point data carrying the variables' measurements -- the training
+            data, a validation set, or the out-of-fold container
+            :func:`cross_validate` returns. Modified in place if `store`.
+        store
+            Whether to file the answer on each variable, as
+            `<variable>/responsibilities/<component>`, as well as return it.
 
         Returns
         -------
-        dict
+        dict of str to ndarray
             One `(n_data, n_components)` array per variable whose likelihood
-            is a mixture, rows summing to one and missing where the location
-            carries no measurement.
+            is a mixture, rows summing to one, and missing at locations
+            without a measurement.
+
+        Raises
+        ------
+        ValueError
+            If no variable has a mixture likelihood, if `newdata` lacks one
+            of those variables, or if it fans each location into several
+            rows, as a block model does.
+
+        Notes
+        -----
+        Read out of fold. At a training location the model interpolates its
+        own measurement, so an outlier is partly absorbed into the fit and
+        its responsibility understates it.
         """
         if newdata.rows_per_location != 1:
             raise ValueError(
@@ -1304,101 +1366,73 @@ class VGPNetwork(_GPModel):
         return out
 
 
-def refine(model, blocks, n_sim=20, split_on=None, tolerance=0.05,
-           include_noise=True, where=None, meshes=None,
-           verbose=False):
-    """
-    Predict on a block model, cutting finer wherever it cannot decide.
+def refine(model, blocks: "_data.BlockSet3D", n_sim: int = 20,
+           split_on: "str | Sequence[str] | None" = None,
+           tolerance: float = 0.05, include_noise: bool = True,
+           where: _types.Where = None,
+           meshes: "Sequence[_data.Mesh3D] | None" = None,
+           verbose: bool = False) -> "_data.BlockSet3D":
+    """Predict on a block model, cutting finer wherever it cannot decide.
 
-    The workflow `BlockSet3D` exists for. Predict once on coarse blocks, ask
-    which of them straddle something that matters -- a cut-off a grade is
-    judged against, a contact between two categories -- cut those, and predict
-    again on what the cutting made. A block on one side of every decision
-    holds one answer however finely it is cut, so it is left alone, and the
-    work goes where the answer is still in doubt.
+    Predicts on the coarse blocks, splits the ones still in doubt, predicts
+    only what the split created, and repeats. Three criteria mark a block for
+    splitting: its realizations disagree about which side of a cut-off or a
+    category boundary it falls on
+    (:meth:`~geoml.data.BlockSet3D.needs_splitting`); a neighbour is more
+    than one level finer than it (:meth:`~geoml.data.BlockSet3D.unbalanced`);
+    or a mesh passes through it (:meth:`~geoml.data.BlockSet3D.crossed_by`).
 
-    Geometry can force a cut too. Give it `meshes` and a block a topography or
-    a domain boundary passes through is cut whatever the grades say, because a
-    block the surface runs through holds two answers however finely it is
-    predicted. That is `BlockSet3D.crossed_by`, and it needs no model at all --
-    to refine on geometry alone, loop it against `split` directly.
-
-    It also cuts a block whose neighbour ended up more than one level finer
-    than itself (`BlockSet3D.unbalanced`). Such a block is undecided by its own
-    reckoning -- its sub-blocks agree -- but a neighbour cut twice over is
-    evidence the field turns sharply nearby, and that evidence sits outside the
-    block where nothing else looks. It shows in what gets drawn rather than in
-    what gets decided: a contour reads a block through its eight corners, so a
-    coarse block beside much finer ones lays a crude straight guess right where
-    the surface runs. Levelling those jumps measured three times closer to the
-    true surface for 35% more blocks, against a whole level of extra refinement
-    buying almost nothing for 2.6 times as many.
-
-    It runs until there is nothing left to cut, and needs no telling how many
-    passes that is: every pass takes the blocks it splits one level finer and
-    neither criterion ever marks a block already at the lattice's `max_levels`,
-    so within `max_levels` passes every block is either settled or as fine as
-    the model was built to go. How fine that is was decided when the block set
-    was made, which is the one place it belongs.
-
-    Only the new blocks are predicted at each pass. A block that was not split
-    is the same block on the same support and its value already stands, which
-    is what makes this cheaper than predicting a fine model outright rather
-    than merely different.
-
-    What decides a split carries no noise, because nothing does: the noise is
-    integrated out rather than drawn, so a block never straddles a cut-off on
-    account of a part of its spread that cutting cannot resolve.
-
-    To stop part way and look -- at what a pass cost, or at where it went --
-    write the loop out instead; it is three calls, and
-    `docs/variable-block-models.md` §11.5 has it.
+    The loop ends by itself. Each pass takes the blocks it splits one level
+    finer, and no criterion marks a block already at the lattice's
+    `max_levels`, so within that many passes every block is either settled or
+    as fine as the block model was built to go.
 
     Parameters
     ----------
     model
-        A trained `VGPNetwork`, or anything else with a compatible `predict`.
-    blocks : BlockSet3D
-        The coarse model to start from. It is not modified; each pass returns
+        A trained model with a `predict` method, normally a
+        :class:`VGPNetwork`.
+    blocks
+        The coarse block model to start from. Not modified: each pass builds
         a new one.
-    n_sim : int
-        Simulations to draw, at every pass.
-    split_on : str or list, optional
-        Which variables get a say. All of them by default -- name a few on a
-        polymetallic deposit, or every element marks most of the model and
-        gives back the saving.
-    tolerance : float
+    n_sim
+        Realizations to draw at every pass.
+    split_on
+        Which variables have a say in the decision. All of them by default.
+    tolerance
         The share of realizations that must find a block divided before it is
         cut.
-    include_noise : bool
-        Passed to `predict` for the predictions themselves.
-    where : array-like or str, optional
+    include_noise
+        Passed to :meth:`VGPNetwork.predict`.
+    where
         One boolean per block, the indices of the blocks worth modelling, or
-        the name of a boolean metadata column holding the same -- which is
-        what a stored filter is here, `assign_from_solid` writing one being
-        the usual way to come by it.
-        The rest are never predicted at any pass and are never cut, so ground
-        outside the area of interest -- air above a topography, everything
-        beyond a lease boundary -- costs nothing rather than costing a
-        prediction that is then filtered out of the reports. They keep `nan`,
-        which the reporting layer already skips.
-
-        Given once, against the blocks as they stand at the start: the mask is
-        carried across each split, so a block that was worth modelling has
-        children that are too.
-    meshes : list, optional
-        Surfaces and closed bodies whose crossings force a split, through
-        `BlockSet3D.crossed_by`. A block a topography or a vein wall runs
-        through holds two answers whatever is predicted into it, and geometry
-        says so before any prediction does. Costs a side test per sub-block of
-        every splittable block, each pass.
-    verbose : bool
-        Report what each pass cut.
+        the name of a boolean metadata column holding the same. The rest are
+        never predicted and never cut, and keep their missing values. Given
+        once, against the blocks as they stand: the mask is carried across
+        each split.
+    meshes
+        Surfaces and closed bodies whose crossings force a split. Costs a
+        side test per sub-block of every splittable block, each pass.
+    verbose
+        Print what each pass cut.
 
     Returns
     -------
     BlockSet3D
         The refined model, predicted throughout.
+
+    Notes
+    -----
+    What decides a split carries no noise: the likelihood noise is
+    integrated out rather than drawn, so a block never straddles a cut-off on
+    account of spread that splitting cannot resolve.
+
+    Only the blocks a pass creates are predicted. A block that was not split
+    is the same block on the same support, and its value still stands.
+
+    Written out, the loop is three calls -- predict, ask, split -- which is
+    the way to stop part way and inspect a pass. See
+    `docs/variable-block-models.md`.
     """
     keep = None
     if where is not None:
@@ -1495,77 +1529,73 @@ def _fresh_variational_state(model):
                     break
 
 
-def cross_validate(model, folds="fold", refit="variational", iterations=200,
-                   n_sim=20, n_nodes=32, path=None):
-    """
-    Scores a model on folds it never saw, one short refit per fold.
+def cross_validate(model: VGPNetwork, folds: str = "fold",
+                   refit: str = "variational", iterations: int = 200,
+                   n_sim: int = 20, n_nodes: int = 32,
+                   path: _types.PathLike | None = None
+                   ) -> "tuple[_data._SpatialData, _pd.DataFrame]":
+    """Score a model on folds it never saw, with one short refit per fold.
 
-    A VGP has no closed-form leave-one-out: the posterior is fitted, not
-    solved, and retraining from scratch once per fold is what this exists to
-    avoid. The translation of the kriging practice of cross-validating with a
-    fixed variogram: the trained model is saved once, and each fold gets a
-    copy rebuilt around the data with its fold removed
-    (`persistence.load_model(..., data=...)`), its variational state -- the
-    part of a trained model that encodes the data -- re-initialized so it is
-    structurally ignorant of the held-out rows, every other parameter frozen,
-    and a short refit of that state alone, which is the fast, well-behaved
-    part of the optimization. The fold model then predicts the held-out rows,
-    and only those, into one shared copy of the training data. Folds
-    partition the data, so when the loop ends every location holds a
-    prediction made by a model that never saw it.
+    The trained model is saved once. Each fold gets a copy rebuilt around the
+    data with that fold removed; under `refit="variational"` its variational
+    state -- the part of a trained model that encodes the data -- is
+    re-initialized and every other parameter frozen, so the fold model starts
+    ignorant of the held-out rows, and only that state is refitted. The fold
+    model then predicts its held-out rows, and only those, into one shared
+    copy of the training data. Folds partition the data, so every location
+    ends up predicted by a model that never saw it.
 
-    What is conceded, said plainly: the hyperparameters and the warping were
-    fitted on all the data, including each fold's -- the same concession
-    kriging cross-validation makes when it keeps the variogram. `refit="all"`
-    trades the other way: nothing is re-initialized and nothing newly frozen,
-    every parameter the model was training warm-starts from its trained value
-    and continues on the reduced data -- fewer guarantees, all the
-    flexibility.
-
-    The scores are of *measurements*: the held-out values are assays, so each
-    fold model is asked through `predict_measurements`, whose samples carry
-    the noise a real sample carries. A categorical variable has no
-    measurement distribution and gets no rows here -- subset the returned
-    container by fold and use the variable's own `compute_metrics`.
-
-    Folds come from a metadata column: `spatial_k_fold` writes one that
-    mimics a prediction task, and any labelling works -- a drill hole id
-    column gives leave-one-hole-out directly, at one refit per hole.
+    Scores are of *measurements*: the held-out values are samples, so each
+    fold model is asked through :meth:`VGPNetwork.predict_measurements`.
+    Categorical variables get no rows -- subset the returned container by
+    fold and use the variable's own `compute_metrics`.
 
     Parameters
     ----------
-    model : VGPNetwork
-        A trained model. It is saved, copied and left untouched.
-    folds : str
-        Name of the metadata column holding the fold labels. Every location
-        must have one.
-    refit : str
-        `"variational"` (the default) or `"all"`, as above.
-    iterations : int
-        Training iterations per fold (full-batch Adam, `train_full`).
-    n_sim : int
+    model
+        A trained model. It is saved and copied; the original is untouched.
+    folds
+        Name of the metadata column holding the fold labels, as
+        :meth:`~geoml.data.PointData.spatial_k_fold` writes. Any labelling
+        works: a hole-id column gives leave-one-hole-out.
+    refit
+        `"variational"` to refit the variational state alone, or `"all"` to
+        warm-start every trainable parameter from its trained value and
+        continue on the reduced data.
+    iterations
+        Training iterations per fold.
+    n_sim
         Latent realizations, for the out-of-fold predictions and the
         measurement samples alike.
-    n_nodes : int
+    n_nodes
         Noise values per realization in the measurement samples.
-    path : str, optional
+    path
         Where to keep the saved model and its fold copies. A temporary
         directory, removed at the end, unless one is given.
 
     Returns
     -------
     oof : container
-        A copy of the training data with out-of-fold predictions and
-        simulations on every variable -- what `accuracy`, `spread_check` and
-        the residual figures are honest on. It also carries one metadata
-        column per scored component (`pit_<variable>` or
-        `pit_<variable>_<component>`): where each assay fell inside its own
-        out-of-fold predictive distribution, which is what `conformalize`
-        calibrates on.
+        A copy of the training data carrying out-of-fold predictions and
+        simulations, plus one metadata column per scored component
+        (`pit_<variable>`, or `pit_<variable>_<component>`) holding where
+        each measurement fell inside its own predictive distribution.
     scores : pandas.DataFrame
-        One row per variable component and fold, plus a pooled `"all"` row:
-        `rmse`, `mae`, `bias` (of the predictive mean), `crps` and
-        `goodness`, all against the held-out measurements.
+        One row per component and fold, plus a pooled `"all"` row, with
+        `rmse`, `mae`, `bias`, `crps` and `goodness` against the held-out
+        measurements.
+
+    See Also
+    --------
+    conformalize : calibrate interval widths on the PIT columns.
+    geoml.data.PointData.spatial_k_fold : folds that mimic a prediction task.
+
+    Notes
+    -----
+    The hyperparameters and the warping were fitted on all the data,
+    including each fold's -- the concession kriging cross-validation also
+    makes when it keeps the variogram fixed. Design record and measurements:
+    `docs/cross-validation.md`.
     """
     data = model.data
     labels = _np.asarray(data.get_metadata(folds))
@@ -1600,7 +1630,8 @@ def cross_validate(model, folds="fold", refit="variational", iterations=200,
         _persistence.save_model(model, saved)
         for fold in fold_names:
             held = labels == fold
-            fold_model = _persistence.load_model(saved, data=data[~held])
+            fold_model = _cast(VGPNetwork,
+                               _persistence.load_model(saved, data=data[~held]))
             if refit == "variational":
                 _fresh_variational_state(fold_model)
             fold_model.train_full(max_iter=iterations)
@@ -1696,61 +1727,92 @@ def _pit_column(name, component):
 
 
 class ConformalCalibration:
-    """A finite-sample repair of interval coverage, from out-of-fold PITs.
+    """Interval coverage repaired from out-of-fold PIT values.
 
-    Split conformal prediction on the score `|u - 1/2|`, where `u` is where a
-    held-out assay fell inside its own predictive measurement distribution.
-    `nominal(q)` answers: at what level must a central interval be cut so
-    that it covers a share `q` of fresh measurements? For a calibrated model
-    the answer is `q` itself; an overconfident one is told to cut wider, a
-    hedging one narrower, and the conformal quantile (the `(n+1)q`-th
-    smallest score) carries the standard finite-sample guarantee -- coverage
-    at least `q` -- under exchangeability of the calibration scores with the
+    Split conformal prediction on the score :math:`|u - 1/2|`, where `u` is
+    where a held-out measurement fell inside its own predictive
+    distribution. :meth:`nominal` answers: at what level must a central
+    interval be cut so that it covers a given share of fresh measurements?
+    For a calibrated model that is the share itself; an overconfident model
+    is told to cut wider and a hedging one narrower. The conformal quantile
+    carries the finite-sample guarantee -- coverage at least the share asked
+    for -- under exchangeability of the calibration scores with the
     prediction's.
 
-    Spatial data is not exchangeable point by point, which is why the folds
-    matter: built by `spatial_k_fold` they mimic the prediction task, so the
-    out-of-fold scores are drawn from conditions like deployment's, which is
-    what the guarantee is worth here. The intervals are of *measurements* --
-    the ground is never observed, so there is nothing to calibrate a ground
-    interval against.
+    Parameters
+    ----------
+    pit
+        Probability integral transform values, one per calibration
+        measurement, as :func:`cross_validate` stores them.
 
-    The repair is bounded by what samples can express: an interval cut from
-    an ensemble can never reach past the ensemble's own range, so
-    `nominal(q) == 1.0` means the model was too sure for its samples to say
-    how much wider the interval must be -- raise `n_sim`/`n_nodes`, or fix
-    the model rather than the interval.
+    Raises
+    ------
+    ValueError
+        If no finite PIT values are given.
+
+    Notes
+    -----
+    Spatial data is not exchangeable point by point, which is what the folds
+    are for: built to mimic the prediction task, they draw the calibration
+    scores from conditions like deployment's. The intervals are of
+    measurements -- the ground is never observed.
+
+    The repair is bounded by the ensemble: an interval cut from samples
+    cannot reach past their range, so `nominal(q) == 1.0` means the model was
+    too sure for its samples to say how much wider the interval should be.
+    Raise `n_sim` or `n_nodes`, or reconsider the model.
+
+    References
+    ----------
+    Vovk, V., Gammerman, A. and Shafer, G. (2005) *Algorithmic Learning in a
+    Random World*. Springer.
     """
 
-    def __init__(self, pit):
+    def __init__(self, pit: _types.ArrayLike):
         pit = _np.asarray(pit, dtype=float).ravel()
         pit = pit[_np.isfinite(pit)]
         if pit.size == 0:
             raise ValueError("there are no PIT values to calibrate on")
         self._scores = _np.sort(_np.abs(pit - 0.5))
 
-    def nominal(self, coverage):
-        """The level to cut a central interval at, so it covers `coverage`."""
+    def nominal(self, coverage: float) -> float:
+        """The level to cut a central interval at, to cover `coverage`.
+
+        Parameters
+        ----------
+        coverage
+            The share of fresh measurements the interval should contain.
+
+        Returns
+        -------
+        float
+            The level to pass to :meth:`interval`, between 0 and 1. A value
+            of 1 means the calibration data cannot say how much wider the
+            interval must be.
+        """
         n = self._scores.size
         k = int(_np.ceil((n + 1) * float(coverage)))
         if k > n:
             return 1.0
         return min(1.0, 2.0 * float(self._scores[k - 1]))
 
-    def interval(self, samples, coverage=0.9):
+    def interval(self, samples: _types.ArrayLike, coverage: float = 0.9
+                 ) -> "tuple[_types.FloatArray, _types.FloatArray]":
         """A calibrated central interval per row of measurement samples.
 
         Parameters
         ----------
-        samples : array-like of shape (n_data, n_samples)
-            One component's measurement samples, as
-            `predict_measurements` returns them (sliced to the component).
-        coverage : float
+        samples
+            One component's measurement samples, of shape
+            `(n_data, n_samples)`, as :meth:`VGPNetwork.predict_measurements`
+            returns them once sliced to the component.
+        coverage
             The share of fresh measurements the interval should cover.
 
         Returns
         -------
-        lower, upper : arrays of shape (n_data,)
+        lower, upper : ndarray
+            One bound per location, of shape `(n_data,)`.
         """
         level = self.nominal(coverage)
         samples = _np.asarray(samples, dtype=float)
@@ -1759,33 +1821,33 @@ class ConformalCalibration:
         return lower, upper
 
 
-def conformalize(oof, name, component=None):
-    """
-    The conformal calibration of one variable, from a cross-validation.
+def conformalize(oof: "_data._SpatialData", name: str,
+                 component: str | None = None) -> ConformalCalibration:
+    """Build a conformal calibration from a cross-validation.
 
-    Reads the out-of-fold PIT column `cross_validate` stored on its returned
-    container and hands back the `ConformalCalibration` built on it: the
-    monotone map from the coverage an interval should have to the level it
-    must be cut at, with the split-conformal finite-sample guarantee. Use it
-    on fresh measurement samples::
-
-        oof, scores = geoml.models.cross_validate(model)
-        calibration = geoml.models.conformalize(oof, "grade")
-        samples = model.predict_measurements(new_points)["grade"]
-        lower, upper = calibration.interval(samples[:, 0, :], coverage=0.9)
+    Reads the out-of-fold PIT column :func:`cross_validate` left on its
+    container.
 
     Parameters
     ----------
-    oof :
-        The container `cross_validate` returned.
-    name : str
+    oof
+        The container :func:`cross_validate` returned.
+    name
         The variable.
-    component : str, optional
-        Which component, when the variable is a vector one.
+    component
+        Which component, when the variable is a vector or compositional one.
 
     Returns
     -------
     ConformalCalibration
+        Calibrated on that component's out-of-fold measurements.
+
+    Examples
+    --------
+    >>> oof, scores = geoml.models.cross_validate(model)
+    >>> calibration = geoml.models.conformalize(oof, "grade")
+    >>> samples = model.predict_measurements(new_points)["grade"]
+    >>> lower, upper = calibration.interval(samples[:, 0, :], coverage=0.9)
     """
     return ConformalCalibration(oof.get_metadata(_pit_column(name, component)))
 
@@ -1831,14 +1893,15 @@ class StructuralField(_GPModel):
             "log_likelihood": _tf.Variable(_tf.constant(0.0, _tf.float64)),
         })
 
-        self.cov = None
-        self.cov_chol = None
-        self.cov_inv = None
-        self.scale = None
-        self.alpha = None
-        self.y = None
-        self.all_coordinates = None
-        self.all_directions = None
+        # cleared here and filled by `refresh()`, as in `GP`
+        self.cov: _Any = None
+        self.cov_chol: _Any = None
+        self.cov_inv: _Any = None
+        self.scale: _Any = None
+        self.alpha: _Any = None
+        self.y: _Any = None
+        self.all_coordinates: _Any = None
+        self.all_directions: _Any = None
 
     def __repr__(self):
         s = "Gaussian process structural field model\n\n"

@@ -63,6 +63,14 @@ def _balanced_assignment(cluster, sizes, k):
 class _SpatialData(_TreeNode):
     """Abstract class for spatial data in general"""
 
+    # Declared rather than merely assigned: every subclass fills these in its
+    # own constructor, and a reader (or a type checker) that met only the
+    # `None` they start as would take the counts for optional.
+    _n_dim: int
+    _n_data: int
+    variables: "dict[str, _Variable]"
+    metadata: "dict[str, _Attribute]"
+
     def __init__(self):
         self._n_dim = None
         self._bounding_box = None

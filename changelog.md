@@ -1,4 +1,45 @@
 ## version 0.6.3
+* **Type annotations, and the documentation site rebuilt around them.** One
+workstream, because one pass over a signature does both. The reason for
+annotating at all is editor completion: hints are what an IDE surfaces
+without being asked, which docstrings are not.
+  - The scope is the **user-facing surface**, and the tensor internals are
+  left bare deliberately: `tf.Tensor` in and `tf.Tensor` out says nothing
+  about the rank, dtype or axis order that actually goes wrong in there, and
+  tensorflow-probability ships no stubs, so a checker could not verify that
+  half anyway. `typings/tensorflow/__init__.pyi` says so out loud -- it
+  declares TensorFlow untyped, which took the first `pyright` run on
+  `models.py` from 127 diagnostics (mostly `tf.matmul` overloads) to 24 that
+  were all about geoML's own code.
+  - `geoml/_types.py` holds the aliases the API's several-shapes arguments
+  needed: `Where` (a mask, indices, or the name of a metadata column),
+  `Cutoffs`, `Bins`, `PathLike`, `FloatArray`, `Labels`.
+  - **The declarations paid better than the signatures.** Declaring
+  `_SpatialData._n_data: int` and the `ContinuousVariable` columns closed
+  nineteen of the remaining diagnostics at once, since every `np.zeros(
+  container.n_data)` downstream had been reading a `None`. `models.py` is
+  now clean, and three things the checker found were real: `save()` returns
+  the path it wrote rather than `None`, `VGPNetwork` wants a `PointData`
+  rather than any container (it reads `coordinates` and
+  `get_batched_variance`), and the `variables`/`likelihoods` arguments now
+  normalize on `isinstance(str)` / `isinstance(_Likelihood)`, so a tuple or
+  any other sequence of names is accepted rather than silently wrapped.
+  - **Docstrings are technical now**, scikit-learn style: summary,
+  description, parameters, returns, raises, see-also, a brief notes,
+  references, examples. The design notes and measured comparisons that had
+  accumulated in them -- addressed to a maintainer, and read by users in an
+  IDE tooltip -- moved to code comments, the changelog and the design
+  records. `models.py` is done; the rest follow module by module.
+  - **The documentation site is rebuilt.** The five-file `sphinx-quickstart`
+  skeleton and the 94 tracked build artifacts (a stale HTML build of the
+  pre-0.6.0 layout, with a vendored theme and its fonts) are gone. Sphinx +
+  MyST + autodoc: a Markdown front page with a worked Walker example, an API
+  reference that grows as modules are annotated, and the design records
+  included from `docs/*.md` rather than copied. A new `docs` workflow builds
+  it with warnings as errors on every push, runs `pyright` beside it, and
+  publishes to GitHub Pages on a release tag; the README carries the badge
+  and the worked example.
+
 * **The mixture likelihood, settled: one family, several scales, and the
 mixture taken over the row.** Four changes, all of them decisions the
 first implementation left open or got half right:

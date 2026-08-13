@@ -522,6 +522,20 @@ class ContinuousVariable(_Variable):
                       "responsibilities")
     _NODE_ATTRS = ("cutoffs",)
 
+    measurements: _Attribute
+    latent_mean: _Attribute
+    latent_variance: _Attribute
+    prediction: _Attribute
+    dispersion: _Attribute
+    noise_variance: _Attribute
+    simulations: _storage.ArrayStore | None
+    cutoffs: list[float] | None
+    quantiles: dict[float, _Attribute]
+    probabilities: dict[float, _Attribute]
+    proportions: dict[float, _Attribute]
+    divided: dict[float, _Attribute]
+    responsibilities: dict[int, _Attribute]
+
     def __init__(self, name, coordinates, measurements=None):
         super().__init__(name, coordinates)
 
