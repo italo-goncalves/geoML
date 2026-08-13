@@ -61,10 +61,17 @@ jobs:
           path: docs/build/html
 
   publish:
-    if: github.ref_type == 'tag'
+    # a release publishes; `workflow_dispatch` is how the deployment itself
+    # can be exercised without cutting one
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      # `contents: read` is not optional here: declaring any permissions
+      # block sets every scope left out of it to none, and
+      # `configure-pages` reads the repository before it reads the Pages
+      # settings. Without it the step fails before the deployment starts.
+      contents: read
       pages: write
       id-token: write
     environment:
