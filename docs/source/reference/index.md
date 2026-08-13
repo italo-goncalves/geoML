@@ -19,6 +19,7 @@ likelihood
 :maxdepth: 1
 
 datasets
+data
 inducing
 ```
 
