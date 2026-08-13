@@ -20,11 +20,13 @@ variable) and the `from_data` box-fitting shared with the block classes.
 """
 import copy as _copy
 import itertools as _iter
+from collections.abc import Sequence
 
 import numpy as _np
 import pandas as _pd
 import pyvista as _pv
 
+import geoml._types as _types
 import geoml.math.geometry as _gmt
 import geoml.math.interpolate as _gint
 from geoml.math.geometry import bounding_box
@@ -328,7 +330,7 @@ class _GriddedData(_PointBased):
         return rows
 
     # -- container behaviour ----------------------------------------------- #
-    def index_data(self, data):
+    def index_data(self, data: "_SpatialData") -> _np.ndarray:
         if data.n_dim != self.n_dim:
             raise DimensionMismatchError(
                 f"Data dimension mismatch. Expected dimension {self.n_dim}"
@@ -388,7 +390,9 @@ class _GriddedData(_PointBased):
             ids[inside].T, shape, order="F")
         return flat
 
-    def aggregate(self, data, variables=None, metadata=True):
+    def aggregate(self, data: "_SpatialData",
+                  variables: "str | Sequence[str] | None" = None,
+                  metadata: bool = True) -> "_GriddedData":
         """Carries another object's measurements onto this object's cells.
 
         One method instead of one per kind: each variable says what it is and
@@ -416,7 +420,7 @@ class _GriddedData(_PointBased):
         _aggregate_onto(self, data, variables, metadata)
         return self
 
-    def as_data_frame(self, metadata=True, **kwargs):
+    def as_data_frame(self, metadata: bool = True, **kwargs) -> _pd.DataFrame:
         df = _PointBased.as_data_frame(self, metadata=metadata, **kwargs)
         for i, s in enumerate(self.coordinate_labels):
             df[f'_{s}'] = self.step_size[i]
@@ -522,7 +526,8 @@ class Grid1D(_GriddedData):
         self.origin = start
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+    def from_bounding_box(cls, box, step, margin=0.1,
+                          rounding_decimals=0):
         if not isinstance(margin, (list, tuple)):
             margin = (margin, margin)
 
@@ -595,7 +600,8 @@ class Grid2D(_GriddedData):
         self.origin = start
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+    def from_bounding_box(cls, box, step, margin=0.1,
+                          rounding_decimals=0):
         margin = _np.array(margin)
         if margin.shape == ():
             margin = _np.full([2, 2], margin)
@@ -672,7 +678,7 @@ class Grid3D(_GriddedData):
         self.grid_size = [int(num) for num in n]
         self.origin = start
 
-    def make_interpolator(self, coordinates):
+    def make_interpolator(self, coordinates: _types.ArrayLike):
         return _gint.cubic_conv_3d(coordinates,
                                    self.grid[0], self.grid[1], self.grid[2])
 
@@ -729,7 +735,8 @@ class Grid3D(_GriddedData):
                           labels=list(labels))
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+    def from_bounding_box(cls, box, step, margin=0.1,
+                          rounding_decimals=0):
         margin = _np.array(margin)
         if margin.shape == ():
             margin = _np.full([2, 3], margin)
@@ -860,7 +867,8 @@ class RotatedGrid3D(Grid3D):
         return pv_grid
 
     @classmethod
-    def from_bounding_box(cls, box, step, margin=0.1, rounding_decimals=0):
+    def from_bounding_box(cls, box, step, margin=0.1,
+                          rounding_decimals=0):
         return NotImplementedError
 
     @classmethod
