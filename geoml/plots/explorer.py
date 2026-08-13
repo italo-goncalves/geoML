@@ -89,7 +89,7 @@ class Explorer(_base.Selection):
     # ------------------------------------------------------------------ #
     # figures
     # ------------------------------------------------------------------ #
-    def histogram(self, bins=25, figsize=None):
+    def histogram(self, bins=25, figsize=None) -> "_plt.Figure":
         """
         The distribution of the continuous variable, one panel per component.
 
@@ -132,7 +132,7 @@ class Explorer(_base.Selection):
 
     def pairs(self, kind="scatter", alpha=0.7, bins=60, log_counts=False,
               log=False, principal_components=0, upper=None, figsize=None,
-              size=6):
+              size=6) -> "_plt.Figure":
         """
         Every component against every other, with its distribution down the
         diagonal.
@@ -230,7 +230,7 @@ class Explorer(_base.Selection):
         return figure
 
     def pca(self, explained=0.9, log=False, kind="scatter", alpha=0.7,
-            bins=60, log_counts=False, figsize=None, size=6):
+            bins=60, log_counts=False, figsize=None, size=6) -> "_plt.Figure":
         """
         The same pairs plot, on principal components instead of measurements.
 
@@ -286,7 +286,7 @@ class Explorer(_base.Selection):
             figure.tight_layout(rect=(0, 0, 1, 0.97))
         return figure
 
-    def scene(self, color=None, clip=None, figsize=None, size=14):
+    def scene(self, color=None, clip=None, figsize=None, size=14) -> "_plt.Figure":
         """
         Where the data is, coloured by a variable.
 
@@ -351,7 +351,7 @@ class Explorer(_base.Selection):
     # ------------------------------------------------------------------ #
     # figures that need the model
     # ------------------------------------------------------------------ #
-    def training_curve(self, window=None, figsize=None):
+    def training_curve(self, window=None, figsize=None) -> "_plt.Figure":
         """
         The ELBO against the iteration it was measured at.
 
@@ -384,7 +384,7 @@ class Explorer(_base.Selection):
         return figure
 
     def transformed_pairs(self, kind="scatter", alpha=0.7, bins=60,
-                          log_counts=False, upper=None, figsize=None, size=6):
+                          log_counts=False, upper=None, figsize=None, size=6) -> "_plt.Figure":
         """
         The measurements as the model sees them, after its warping.
 
@@ -439,7 +439,7 @@ class Explorer(_base.Selection):
 
     def simulation_pairs(self, kind="hist2d", bins=60, log_counts=False,
                          most=100000, margin=0.1, alpha=0.6, figsize=None,
-                         size=6):
+                         size=6) -> "_plt.Figure":
         """
         What was measured against what was simulated.
 
@@ -550,7 +550,7 @@ class Explorer(_base.Selection):
                    label="simulated")
 
     def prediction_scatter(self, component=None, kind="scatter", alpha=0.6,
-                           bins=60, log_counts=False, figsize=None, size=10):
+                           bins=60, log_counts=False, figsize=None, size=10) -> "_plt.Figure":
         """
         What was predicted against what was measured.
 
@@ -612,7 +612,7 @@ class Explorer(_base.Selection):
             figure.tight_layout(rect=(0, 0, 1, 0.97))
         return figure
 
-    def accuracy(self, probabilities=None, figsize=None):
+    def accuracy(self, probabilities=None, figsize=None) -> "_plt.Figure":
         """
         Whether the simulated spread is the spread the errors actually have.
 
@@ -668,7 +668,7 @@ class Explorer(_base.Selection):
             figure.tight_layout()
         return figure
 
-    def spread_check(self, bins=8, figsize=None):
+    def spread_check(self, bins=8, figsize=None) -> "_plt.Figure":
         """
         Whether the noise the model fitted is the noise the data has.
 
@@ -753,7 +753,7 @@ class Explorer(_base.Selection):
         axes.set_ylim(bottom=0.0)
 
     def variogram(self, n_lags=15, max_lag=None, direction=None,
-                  tolerance=45.0, residuals=False, figsize=None):
+                  tolerance=45.0, residuals=False, figsize=None) -> "_plt.Figure":
         """
         The data's spatial structure, against the fan the simulations make.
 
@@ -829,7 +829,7 @@ class Explorer(_base.Selection):
         axes.set_ylim(bottom=0.0)
 
     def grade_tonnage(self, component=None, density=None, cutoffs=30,
-                      max_uncertainty=None, log_mass=False, figsize=None):
+                      max_uncertainty=None, log_mass=False, figsize=None) -> "_plt.Figure":
         """
         How much material clears each cut-off, and how good it is.
 

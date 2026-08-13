@@ -210,7 +210,7 @@ class Interactive(_base.Selection):
     # ------------------------------------------------------------------ #
     # figures
     # ------------------------------------------------------------------ #
-    def histogram(self, bins=25, height=None, width=None):
+    def histogram(self, bins=25, height=None, width=None) -> "_go.Figure":
         """
         The distribution of the continuous variable, one panel per component.
 
@@ -247,7 +247,7 @@ class Interactive(_base.Selection):
 
     def pairs(self, kind="scatter", alpha=0.7, bins=60, log_counts=False,
               log=False, principal_components=0, upper=None, size=5,
-              height=None, width=None):
+              height=None, width=None) -> "_go.Figure":
         """
         Every component against every other, with its distribution down the
         diagonal.
@@ -330,7 +330,7 @@ class Interactive(_base.Selection):
             legend={"title": {"text": getattr(self.categorical, "name", "")}})
 
     def pca(self, explained=0.9, log=False, kind="scatter", alpha=0.7,
-            bins=60, log_counts=False, size=5, height=None, width=None):
+            bins=60, log_counts=False, size=5, height=None, width=None) -> "_go.Figure":
         """
         The same pairs plot, on principal components instead of measurements.
 
@@ -380,7 +380,7 @@ class Interactive(_base.Selection):
             height=height or 80 + 190 * n, width=width or 80 + 200 * n,
             legend={"title": {"text": getattr(self.categorical, "name", "")}})
 
-    def scene(self, color=None, clip=None, size=4, height=None, width=None):
+    def scene(self, color=None, clip=None, size=4, height=None, width=None) -> "_go.Figure":
         """
         Where the data is, coloured by a variable.
 
@@ -572,7 +572,7 @@ class Interactive(_base.Selection):
     # ------------------------------------------------------------------ #
     # figures that need the model
     # ------------------------------------------------------------------ #
-    def training_curve(self, window=None, height=None, width=None):
+    def training_curve(self, window=None, height=None, width=None) -> "_go.Figure":
         """
         The ELBO against the iteration it was measured at.
 
@@ -606,7 +606,7 @@ class Interactive(_base.Selection):
 
     def transformed_pairs(self, kind="scatter", alpha=0.7, bins=60,
                           log_counts=False, upper=None, size=5, height=None,
-                          width=None):
+                          width=None) -> "_go.Figure":
         """
         The measurements as the model sees them, after its warping.
 
@@ -652,7 +652,7 @@ class Interactive(_base.Selection):
 
     def simulation_pairs(self, kind="hist2d", bins=60, log_counts=False,
                          most=100000, margin=0.1, alpha=0.6, size=5,
-                         height=None, width=None):
+                         height=None, width=None) -> "_go.Figure":
         """
         What was measured against what was simulated.
 
@@ -744,7 +744,7 @@ class Interactive(_base.Selection):
 
     def prediction_scatter(self, component=None, kind="scatter", alpha=0.6,
                            bins=60, log_counts=False, size=6, height=None,
-                           width=None):
+                           width=None) -> "_go.Figure":
         """
         What was predicted against what was measured.
 
@@ -802,7 +802,7 @@ class Interactive(_base.Selection):
             height=height or 100 + 300 * panels, width=width,
             showlegend=False)
 
-    def accuracy(self, probabilities=None, height=None, width=None):
+    def accuracy(self, probabilities=None, height=None, width=None) -> "_go.Figure":
         """
         Whether the simulated spread is the spread the errors actually have.
 
@@ -857,7 +857,7 @@ class Interactive(_base.Selection):
             legend={"x": 0.02, "y": 0.98, "xanchor": "left",
                     "yanchor": "top"})
 
-    def spread_check(self, bins=8, height=None, width=None):
+    def spread_check(self, bins=8, height=None, width=None) -> "_go.Figure":
         """
         Whether the noise the model fitted is the noise the data has.
 
@@ -933,7 +933,7 @@ class Interactive(_base.Selection):
                           "<extra></extra>"), row=row, col=column)
 
     def variogram(self, n_lags=15, max_lag=None, direction=None,
-                  tolerance=45.0, residuals=False, height=None, width=None):
+                  tolerance=45.0, residuals=False, height=None, width=None) -> "_go.Figure":
         """
         The data's spatial structure, against the fan the simulations make.
 
@@ -1022,7 +1022,7 @@ class Interactive(_base.Selection):
 
     def grade_tonnage(self, component=None, density=None, cutoffs=30,
                       max_uncertainty=None, log_mass=False, height=None,
-                      width=None):
+                      width=None) -> "_go.Figure":
         """
         How much material clears each cut-off, and how good it is.
 
