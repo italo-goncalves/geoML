@@ -322,9 +322,7 @@ def simulation_sample(var, most: int = 100000) -> _types.FloatArray:
     values : array
         `(n_sample, n_columns)`, columns in the variable's own order.
     """
-    components = getattr(var, "components", None)
-    parts = [var] if components is None \
-        else [components[label] for label in var.labels]
+    parts = continuous_parts(var)
 
     stride, columns = None, []
     for part in parts:
@@ -567,6 +565,45 @@ def normal_curve(values: _types.ArrayLike, low: float, high: float,
     return x, density
 
 
+def continuous_parts(var) -> "list[_data.ContinuousVariable]":
+    """The continuous columns a figure draws, one per component.
+
+    A scalar variable is its own single part; a vector or compositional one
+    comes back as its components, in label order. Everything that reads
+    `measurements`, `prediction`, `noise_variance` or the simulations asks
+    through this, so a figure handed a categorical variable is refused by
+    name rather than failing later at whichever column it reached for first.
+
+    Parameters
+    ----------
+    var
+        A variable, as :func:`variable` returns it.
+
+    Returns
+    -------
+    list of geoml.data.ContinuousVariable
+        One part for a scalar variable, one per component otherwise.
+
+    Raises
+    ------
+    ValueError
+        If the variable carries no continuous columns of its own.
+    """
+    components = getattr(var, "components", None)
+    if components is None:
+        parts = [var]
+    else:
+        parts = [components[label] for label in var.labels]
+
+    for part in parts:
+        if not isinstance(part, _data.ContinuousVariable):
+            raise ValueError(
+                "%r is a %s, which carries no continuous values to draw; "
+                "this figure is of measured and predicted numbers"
+                % (str(var.name), type(var).__name__))
+    return parts
+
+
 def prediction_values(container: "_data._SpatialData", name: str):
     """
     What was measured against what was predicted, component by component.
@@ -583,10 +620,7 @@ def prediction_values(container: "_data._SpatialData", name: str):
         from, and only the rows carrying both a measurement and a prediction
         are drawn.
     """
-    var = variable(container, name)
-    components = getattr(var, "components", None)
-    parts = [var] if components is None else \
-        [components[label] for label in var.labels]
+    parts = continuous_parts(variable(container, name))
 
     measured_values, predicted_values, labels = [], [], []
     for part in parts:
@@ -693,10 +727,7 @@ def spread_check(container: "_data._SpatialData", name: str,
         mean square residual and its `observed_error`, and the claimed
         `noise` and `total` spreads.
     """
-    var = variable(container, name)
-    components = getattr(var, "components", None)
-    parts = [var] if components is None else \
-        [components[label] for label in var.labels]
+    parts = continuous_parts(variable(container, name))
 
     panels = []
     for part in parts:
@@ -813,10 +844,7 @@ def variogram(container: "_data._SpatialData", name: str,
         and `realizations` -- an `(n_realizations, n_lags)` array, or None
         when there is nothing simulated or `residuals` was asked.
     """
-    var = variable(container, name)
-    components = getattr(var, "components", None)
-    parts = [var] if components is None else \
-        [components[label] for label in var.labels]
+    parts = continuous_parts(variable(container, name))
 
     coords = _np.asarray(container.coordinates, dtype=float)
     n = coords.shape[0]
