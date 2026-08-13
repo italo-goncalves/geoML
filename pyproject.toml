@@ -64,6 +64,7 @@ include = [
     "geoml/_types.py",
     "geoml/models.py",
     "geoml/metrics.py",
+    "geoml/storage.py",
     "geoml/data/inducing.py",
     "geoml/data/containers.py",
     "geoml/data/variables.py",

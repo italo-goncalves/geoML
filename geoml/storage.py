@@ -37,11 +37,16 @@ __all__ = ["ArrayStore", "DEFAULT_THRESHOLD", "store_columns"]
 
 import os as _os
 import shutil as _shutil
+from collections.abc import Sequence
 import tempfile as _tempfile
 import weakref as _weakref
 
+from typing import Any as _Any
+
 import numpy as _np
 import zarr as _zarr
+
+import geoml._types as _types
 import dask.array as _da
 import xarray as _xr
 
@@ -90,7 +95,7 @@ class _ScratchGroup:
     def __init__(self):
         self._tempdir = _tempfile.mkdtemp(prefix="geoml_scratch_")
         self.path = _os.path.join(self._tempdir, "scratch.zarr")
-        self._group = _zarr.open_group(self.path, mode="w")
+        self._group: _Any = _zarr.open_group(self.path, mode="w")
         self._count = 0
 
     def create_array(self, shape, dtype, fill_value, chunks):
@@ -128,7 +133,7 @@ def _scratch_for(owner):
     return group
 
 
-def store_columns(columns, stores):
+def store_columns(columns, stores: "Sequence[ArrayStore]") -> None:
     """Write each column of a lazy 2-D dask array into its target store.
 
     All columns are computed in a single chunk-by-chunk pass over the source;
@@ -141,7 +146,11 @@ def store_columns(columns, stores):
 class ArrayStore:
     """A single array backed by NumPy (in RAM) or Zarr (on disk, chunked)."""
 
-    def __init__(self, array, backend, store_path=None, _tempdir=None):
+    # Always present -- a NumPy array or a Zarr one, as `_backend` says.
+    _array: _Any
+
+    def __init__(self, array, backend: str, store_path=None,
+                 _tempdir=None):
         # Low-level constructor; prefer the ``from_numpy`` / ``allocate`` /
         # ``open`` factories.
         self._array = array
@@ -153,12 +162,13 @@ class ArrayStore:
     # construction
     # ------------------------------------------------------------------ #
     @classmethod
-    def from_numpy(cls, values):
+    def from_numpy(cls, values: _types.ArrayLike) -> "ArrayStore":
         """Wrap an existing array in a NumPy-backed store (no copy)."""
         return cls(_np.asarray(values), backend="numpy")
 
     @classmethod
-    def from_values(cls, values, owner=None, threshold=None):
+    def from_values(cls, values: _types.ArrayLike, owner=None,
+                    threshold: int | None = None) -> "ArrayStore":
         """Store an existing array, spilling to disk when it is large.
 
         Unlike :meth:`from_numpy`, which always keeps the array in RAM, the
@@ -177,8 +187,9 @@ class ArrayStore:
         return store
 
     @classmethod
-    def allocate(cls, shape, dtype=float, fill_value=_np.nan, chunks=None,
-                 backend="auto", store=None, threshold=None, owner=None):
+    def allocate(cls, shape, dtype: _Any = float, fill_value=_np.nan,
+                 chunks=None, backend: str = "auto", store=None,
+                 threshold: int | None = None, owner=None) -> "ArrayStore":
         """Create a new, filled array.
 
         Parameters
@@ -239,18 +250,19 @@ class ArrayStore:
         return cls(array, backend="zarr", store_path=store_path, _tempdir=tempdir)
 
     @classmethod
-    def open(cls, path, mode="r+"):
+    def open(cls, path: _types.PathLike,
+             mode: str = "r+") -> "ArrayStore":
         """Reopen an existing on-disk Zarr array."""
         return cls(_zarr.open_array(path, mode=mode), backend="zarr",
                    store_path=path)
 
     @classmethod
-    def wrap_zarr(cls, zarr_array):
+    def wrap_zarr(cls, zarr_array) -> "ArrayStore":
         """Wrap an already-open Zarr array (e.g. a child of a reopened group)."""
         return cls(zarr_array, backend="zarr",
                    store_path=getattr(zarr_array, "store_path", None))
 
-    def write_into(self, group, name):
+    def write_into(self, group, name: str) -> None:
         """Stream this store into a new array ``name`` of an open Zarr group.
 
         The copy is chunk-by-chunk via dask, so a large on-disk source is never
@@ -309,14 +321,19 @@ class ArrayStore:
     def __len__(self):
         return int(self._array.shape[0])
 
-    def copy(self):
-        """Materialize to a fresh NumPy array."""
+    def copy(self) -> _np.ndarray:
+        """Materialize to a fresh NumPy array.
+
+        Returns an array rather than another store: the callers of this
+        want the values in hand, and `__copy__` is what makes an
+        independent store.
+        """
         return _np.array(self.__array__())
 
     def ravel(self):
         return self.__array__().ravel()
 
-    def to_numpy(self):
+    def to_numpy(self) -> _np.ndarray:
         return self.__array__()
 
     def __eq__(self, other):
@@ -325,7 +342,7 @@ class ArrayStore:
     def __ne__(self, other):
         return self.__array__() != other
 
-    __hash__ = None
+    __hash__ = None    # type: ignore[assignment]  # unhashable, by design
 
     def __repr__(self):
         return f"ArrayStore(backend={self._backend!r}, shape={self.shape}, " \
@@ -342,7 +359,7 @@ class ArrayStore:
     # ------------------------------------------------------------------ #
     # labelled / lazy views
     # ------------------------------------------------------------------ #
-    def as_dask(self):
+    def as_dask(self) -> "_da.Array":
         """A dask array view (lazy & chunked for Zarr, single-chunk for NumPy)."""
         if self._backend == "zarr":
             return _da.from_array(self._array, chunks=self._array.chunks)
@@ -352,7 +369,7 @@ class ArrayStore:
         """A labelled ``xarray.DataArray`` over this store (dask-backed)."""
         return _xr.DataArray(self.as_dask(), dims=dims, coords=coords, name=name)
 
-    def row_bands(self, rows=None):
+    def row_bands(self, rows: int | None = None) -> "list[slice]":
         """Slices covering axis 0, each one holding whole chunks.
 
         Reading a store a band at a time is what keeps a reduction over
@@ -366,12 +383,13 @@ class ArrayStore:
         """
         n_rows = int(self.shape[0])
         if rows is None:
-            rows = self._array.chunks[0] if self._backend == "zarr" else n_rows
-        rows = max(1, int(rows))
-        return [slice(lo, min(lo + rows, n_rows))
-                for lo in range(0, n_rows, rows)]
+            rows = int(self._array.chunks[0]) \
+                if self._backend == "zarr" else n_rows
+        band = max(1, int(rows))
+        return [slice(lo, min(lo + band, n_rows))
+                for lo in range(0, n_rows, band)]
 
-    def row_quantiles(self, qs):
+    def row_quantiles(self, qs: _types.ArrayLike) -> "list[_da.Array]":
         """Lazy row-wise quantiles of a 2-D store.
 
         Returns an uncomputed dask array of shape ``(n_rows, len(qs))``.
