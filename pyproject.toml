@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geoml"
-version = "0.6.2"
+version = "0.6.3"
 description = "Machine learning for spatial data"
 authors = [
     {name = "Ítalo Gomes Gonçalves", email = "italogoncalves.igg@gmail.com"},

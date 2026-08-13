@@ -13,7 +13,7 @@ copyright = "2025, Ítalo Gomes Gonçalves"
 author = "Ítalo Gomes Gonçalves"
 # One of the three places the version is written; bump it with
 # geoml/__init__.py and pyproject.toml at every release.
-release = "0.6.2"
+release = "0.6.3"
 
 # -- General configuration ---------------------------------------------------
 
