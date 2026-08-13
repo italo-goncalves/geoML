@@ -58,17 +58,25 @@ class _Warping(_gpr.Parametric):
     # declaration against a numerical Jacobian.
     _mixes = False
 
+    # How wide this warping is on each side. Every subclass sets both in its
+    # own constructor, from the size it is built for; they start at zero
+    # rather than None because a width is a count.
+    _size_in: int
+    _size_out: int
+
     def __init__(self, **kwargs):
         super().__init__()
-        self._size_in = None
-        self._size_out = None
+        self._size_in = 0
+        self._size_out = 0
 
     @property
-    def size_in(self):
+    def size_in(self) -> int:
+        """How many components this warping takes, in the data's units."""
         return self._size_in
 
     @property
-    def size_out(self):
+    def size_out(self) -> int:
+        """How many it produces, on the latent scale."""
         return self._size_out
 
     @property
@@ -97,8 +105,8 @@ class _Warping(_gpr.Parametric):
         log_det : array-like
             Log-derivative of warping function.
         """
-        pass
-    
+        raise NotImplementedError
+
     def backward(self, x):
         """
         Transforms values back to the original units.
@@ -113,8 +121,8 @@ class _Warping(_gpr.Parametric):
         x : array-like
             Vector with warped back values.
         """
-        pass
-    
+        raise NotImplementedError
+
     def initialize(self, x):
         """
         Uses the provided values to initialize the object's parameters.

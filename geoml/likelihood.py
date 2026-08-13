@@ -17,6 +17,7 @@
 from scipy.linalg import helmert as _helmert
 import copy as _copy
 from collections.abc import Sequence
+from typing import Any as _Any
 
 import geoml._types as _types
 import geoml.warping as _warp
@@ -267,6 +268,11 @@ def _divided(x, cutoffs, n_splits=None):
 
 class _Likelihood(_gpr.Parametric):
 
+    # The noise machinery below reads these two; a likelihood that has
+    # them is one whose `warped` is True, which is what the flag is for.
+    warping: "_warp._Warping"
+    _make_distribution: "_Any"
+
     # Whether this likelihood carries a warping, and so can say what a
     # measurement of its value would read. A categorical one cannot: its noise
     # lives in the probabilities, and there is no continuous value for a
@@ -274,12 +280,12 @@ class _Likelihood(_gpr.Parametric):
     # and finding out the hard way.
     warped = False
 
-    def __init__(self, size):
+    def __init__(self, size: int):
         super().__init__()
         self._size = size
 
     @property
-    def size(self):
+    def size(self) -> int:
         return self._size
 
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
@@ -517,7 +523,8 @@ class _ContinuousLikelihood(_Likelihood):
     # does -- a family declaring none cannot be mixed.
     _WIDTH_PARAMETERS = {}
 
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         """
         Initializer for continuous likelihoods.
 
@@ -629,7 +636,8 @@ class Gaussian(_ContinuousLikelihood):
     """
     _WIDTH_PARAMETERS = {"noise": 2}   # a variance
 
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         super().__init__(warping, sharpness)
         self._add_parameter(
             "noise",
@@ -653,7 +661,8 @@ class Laplace(_ContinuousLikelihood):
     """
     _WIDTH_PARAMETERS = {"scale": 1}
 
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         super().__init__(warping, sharpness)
         self._add_parameter(
             "scale",
@@ -676,7 +685,8 @@ class Gamma(_ContinuousLikelihood):
     parameter and then mapped to the distribution's shape. The rate parameter
     is fixed at 1.0.
     """
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         super().__init__(warping, sharpness)
         self._add_parameter(
             "mean_alpha",
@@ -702,7 +712,8 @@ class StudentT(_ContinuousLikelihood):
     """
     _WIDTH_PARAMETERS = {"scale": 1}   # `df` is shape, not width
 
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         super().__init__(warping, sharpness)
         self._add_parameter(
             "scale",
@@ -740,7 +751,8 @@ class EpsilonInsensitive(_ContinuousLikelihood):
     # width goes with its inverse, while `epsilon` is in the data's own units
     _WIDTH_PARAMETERS = {"c_rate": -1, "epsilon": 1}
 
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         super().__init__(warping, sharpness)
         self._add_parameter(
             "epsilon",
@@ -777,7 +789,8 @@ class Huber(_ContinuousLikelihood):
     # alone and the shape of the loss is preserved
     _WIDTH_PARAMETERS = {"std": 1}
 
-    def __init__(self, warping=None, sharpness=1):
+    def __init__(self, warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         super().__init__(warping, sharpness)
         self._add_parameter(
             "threshold",
@@ -809,7 +822,9 @@ class Huber(_ContinuousLikelihood):
 # values, so a model saved with either still loads.
 
 class MultivariateGaussian(Gaussian):
-    def __init__(self, n_components, warping=None, sharpness=1):
+    def __init__(self, n_components: int,
+                 warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         if warping is None:
             warping = _warp.ZScore(n_components)
         super().__init__(warping, sharpness=sharpness)
@@ -818,7 +833,9 @@ class MultivariateGaussian(Gaussian):
 class MultivariateLaplace(_ContinuousLikelihood):
     _WIDTH_PARAMETERS = {"rate": 1}   # the name is historical; it is a scale
 
-    def __init__(self, n_components, warping=None, sharpness=1):
+    def __init__(self, n_components: int,
+                 warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         if warping is None:
             warping = _warp.ZScore(n_components)
         super().__init__(warping, sharpness=sharpness)
@@ -835,14 +852,18 @@ class MultivariateLaplace(_ContinuousLikelihood):
 
 
 class MultivariateEpsilonInsensitive(EpsilonInsensitive):
-    def __init__(self, n_components, warping=None, sharpness=1):
+    def __init__(self, n_components: int,
+                 warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         if warping is None:
             warping = _warp.ZScore(n_components)
         super().__init__(warping, sharpness=sharpness)
 
 
 class MultivariateHuber(Huber):
-    def __init__(self, n_components, warping=None, sharpness=1):
+    def __init__(self, n_components: int,
+                 warping: "_warp._Warping | None" = None,
+                 sharpness: int = 1):
         if warping is None:
             warping = _warp.ZScore(n_components)
         super().__init__(warping, sharpness=sharpness)
@@ -1183,7 +1204,7 @@ class Mixture(_ContinuousLikelihood):
 
 
 class Bernoulli(_Likelihood):
-    def __init__(self, shift=0, sharpness=1):
+    def __init__(self, shift: float = 0, sharpness: int = 1):
         """
         Bernoulli's likelihood.
 
@@ -1419,7 +1440,8 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
     leading to maximum entropy far from the data points. Is capable of
     dealing with boundary data.
     """
-    def __init__(self, n_components, tol=1e-3, sharpness=1):
+    def __init__(self, n_components: int, tol: float = 1e-3,
+                 sharpness: int = 1):
         """
         Initializer for CategoricalGaussianIndicator.
 
@@ -1738,7 +1760,8 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
     thresholds that define the contacts are determined during training. It is useful to add a linear trend to the
     network's output.
     """
-    def __init__(self, levels, tol=1e-6, sharpness=1):
+    def __init__(self, levels: int, tol: float = 1e-6,
+                 sharpness: int = 1):
         """
         Initializer for OrderedGaussianIndicator.
 
