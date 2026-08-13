@@ -23,15 +23,18 @@ the arithmetic -- which components a fraction of variance asks for, what a
 composition looks like once it is opened up -- can be tested against numbers
 instead of against pictures.
 """
+from collections.abc import Sequence
+
 import numpy as _np
 import scipy.spatial as _spatial
 import scipy.stats as _stats
 
+import geoml._types as _types
 import geoml.data as _data
 import geoml.storage as _storage
 
 
-def variable(container, name):
+def variable(container: "_data._SpatialData", name: str):
     """The variable called `name`, or a message saying what there is."""
     try:
         return container.variables[name]
@@ -41,7 +44,7 @@ def variable(container, name):
             % (name, ", ".join(sorted(container.variables)) or "none"))
 
 
-def variable_or_component(container, name):
+def variable_or_component(container: "_data._SpatialData", name: str):
     """
     The variable called `name`, or the component of a vector variable.
 
@@ -111,7 +114,7 @@ def groups(values, measured, labels):
     return [(label, measured & (values == label)) for label in labels]
 
 
-def centred_log_ratio(values):
+def centred_log_ratio(values: _types.ArrayLike) -> _types.FloatArray:
     """
     A composition opened up into ordinary numbers.
 
@@ -124,7 +127,8 @@ def centred_log_ratio(values):
     return logged - _np.mean(logged, axis=1, keepdims=True)
 
 
-def logarithm(values, compositional=False):
+def logarithm(values: _types.ArrayLike,
+              compositional: bool = False) -> _types.FloatArray:
     """
     The data on a log scale, by the road that suits it.
 
@@ -151,7 +155,8 @@ def logarithm(values, compositional=False):
     return centred_log_ratio(values) if compositional else _np.log(values)
 
 
-def principal_components(values, explained=0.9):
+def principal_components(values: _types.ArrayLike,
+                         explained: float = 0.9):
     """
     The principal components of `values`, down to a share of the variance.
 
@@ -202,7 +207,7 @@ def principal_components(values, explained=0.9):
             "eigenvalues": eigenvalues}
 
 
-def component_analysis(var, explained=0.9, log=False):
+def component_analysis(var, explained: float = 0.9, log: bool = False):
     """
     `principal_components` for a variable, on a log scale if asked.
 
@@ -228,7 +233,7 @@ def component_analysis(var, explained=0.9, log=False):
     return analysis
 
 
-def warped_values(model, name):
+def warped_values(model, name: str):
     """
     The measurements as the model sees them, after its warping.
 
@@ -294,7 +299,7 @@ def _strided(store, stride):
     return _np.concatenate(pieces) if len(pieces) > 0 else _np.zeros(0)
 
 
-def simulation_sample(var, most=100000):
+def simulation_sample(var, most: int = 100000) -> _types.FloatArray:
     """
     The simulated values, thinned to a number that can be drawn.
 
@@ -340,7 +345,7 @@ def simulation_sample(var, most=100000):
     return values[_np.all(_np.isfinite(values), axis=1)]
 
 
-def padded_range(values, margin=0.1):
+def padded_range(values: _types.ArrayLike, margin: float = 0.1):
     """
     The span of each column, opened up by `margin` at both ends.
 
@@ -355,7 +360,8 @@ def padded_range(values, margin=0.1):
     return list(zip(low - room, high + room))
 
 
-def color_limits(values, clip=None):
+def color_limits(values: _types.ArrayLike,
+                 clip: "_types.ArrayLike | None" = None):
     """
     The ends of a colour scale, set by where the data mostly is.
 
@@ -394,7 +400,8 @@ def color_limits(values, clip=None):
     return None if low >= high else (float(low), float(high))
 
 
-def color_choices(container, names):
+def color_choices(container: "_data._SpatialData",
+                  names: "Sequence[str]") -> dict:
     """
     Several variables' values over the locations that carry all of them.
 
@@ -443,7 +450,7 @@ def color_choices(container, names):
     return _np.column_stack(columns)[rows], rows, labels
 
 
-def cells(n_points, most):
+def cells(n_points: int, most: int):
     """
     How many cells to count `n_points` into, at most `most` of them.
 
@@ -456,7 +463,8 @@ def cells(n_points, most):
     return int(_np.clip(_np.sqrt(n_points), 10, most))
 
 
-def counts_2d(x, y, bins=60, log=False):
+def counts_2d(x: _types.ArrayLike, y: _types.ArrayLike,
+              bins: int = 60, log: bool = False):
     """
     Points counted into cells, with the empty ones left empty.
 
@@ -488,7 +496,8 @@ def counts_2d(x, y, bins=60, log=False):
             "count": counted.astype(int)}
 
 
-def density_grid(x, y, grid=60, most=4000):
+def density_grid(x: _types.ArrayLike, y: _types.ArrayLike,
+                 grid: int = 60, most: int = 4000):
     """
     Smoothed density over a pair of columns, on a regular mesh.
 
@@ -518,7 +527,8 @@ def density_grid(x, y, grid=60, most=4000):
     return x_axis, y_axis, density.reshape(grid, grid)
 
 
-def density_curve(values, limits, points=200, most=5000):
+def density_curve(values: _types.ArrayLike, limits, points: int = 200,
+                  most: int = 5000):
     """
     A smoothed distribution as a line, across `limits`.
 
@@ -535,7 +545,8 @@ def density_curve(values, limits, points=200, most=5000):
     return grid, _stats.gaussian_kde(values)(grid)
 
 
-def normal_curve(values, low, high, points=200):
+def normal_curve(values: _types.ArrayLike, low: float, high: float,
+                 points: int = 200):
     """
     The normal of the same mean and spread as `values`, across a window.
 
@@ -556,7 +567,7 @@ def normal_curve(values, low, high, points=200):
     return x, density
 
 
-def prediction_values(container, name):
+def prediction_values(container: "_data._SpatialData", name: str):
     """
     What was measured against what was predicted, component by component.
 
@@ -641,7 +652,8 @@ def step_path(lo, hi, values):
     return _np.array(x), _np.array(y)
 
 
-def spread_check(container, name, bins=8):
+def spread_check(container: "_data._SpatialData", name: str,
+                 bins: _types.Bins = 8) -> list[dict]:
     """
     What a model claims a value's spread is, against what it turned out to be.
 
@@ -747,8 +759,11 @@ def spread_check(container, name, bins=8):
     return panels
 
 
-def variogram(container, name, n_lags=15, max_lag=None, direction=None,
-              tolerance=45.0, max_pairs=2_000_000, residuals=False):
+def variogram(container: "_data._SpatialData", name: str,
+              n_lags: int = 15, max_lag: "float | None" = None,
+              direction: "_types.ArrayLike | None" = None,
+              tolerance: float = 45.0, max_pairs: int = 2_000_000,
+              residuals: bool = False) -> list[dict]:
     """
     The data's spatial structure, against the fan the simulations reproduce.
 
@@ -884,7 +899,8 @@ def variogram(container, name, n_lags=15, max_lag=None, direction=None,
     return panels
 
 
-def moving_average(values, window):
+def moving_average(values: _types.ArrayLike,
+                   window: int) -> _types.FloatArray:
     """
     The running mean of `values`, and where each point belongs.
 
@@ -902,7 +918,7 @@ def moving_average(values, window):
     return _np.arange(window, len(values) + 1), smoothed
 
 
-def training_curve(model, window=None):
+def training_curve(model, window: "int | None" = None):
     """
     The training log, with a running mean over it.
 
