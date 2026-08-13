@@ -39,12 +39,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # What the documentation site and the type check need, and nothing a user
-# does: `pip install -e .[dev]`.
+# does: `pip install -e .[dev]`. Pinned exactly, where the runtime
+# dependencies are floored: a checker's own rules change between releases,
+# and a type check that reports different things on different days is a
+# gate nobody reads. Bump these deliberately, and expect findings with it.
 dev = [
-    "pyright>=1.1.400",
-    "sphinx>=8.0",
-    "myst-parser>=4.0",
-    "sphinx-rtd-theme>=3.0",
+    "pyright==1.1.411",
+    "sphinx==8.2.3",
+    "myst-parser==5.1.0",
+    "sphinx-rtd-theme==3.1.0",
 ]
 
 [project.urls]

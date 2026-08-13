@@ -30,8 +30,11 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: VTK system libraries
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
+      # against the versions the check was written for: most of what a type
+      # checker reports comes from its dependencies' stubs, so a floating
+      # install would report different things on different days
       - name: Install the package
-        run: pip install -e .[dev]
+        run: pip install -e .[dev] -c constraints-typecheck.txt
       - name: Type check
         run: pyright
 
