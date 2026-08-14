@@ -101,6 +101,110 @@ def test_a_single_component_has_nothing_to_mix():
 
 
 # --------------------------------------------------------------------------- #
+# the log-determinant
+# --------------------------------------------------------------------------- #
+def _numeric_log_det(warping, values, step=1e-6):
+    """`log|det J|` of the forward map, by central differences."""
+    import tensorflow as tf
+    out = []
+    for row in np.atleast_2d(values):
+        row = row[None, :]
+        jacobian = np.zeros([row.shape[1], row.shape[1]])
+        for column in range(row.shape[1]):
+            bump = np.zeros_like(row)
+            bump[0, column] = step
+            plus = np.asarray(
+                warping.forward(tf.constant(row + bump))[0])
+            minus = np.asarray(
+                warping.forward(tf.constant(row - bump))[0])
+            jacobian[:, column] = (plus - minus)[0] / (2 * step)
+        out.append(np.log(np.abs(np.linalg.det(jacobian))))
+    return np.asarray(out)
+
+
+def _log_det_cases():
+    """The warpings whose second return value is meant to be the real thing.
+
+    `PCA`, `RobustPCA`, `CenteredLogRatio` and `ScaledSimplex` are left out:
+    each reports zero where the truth is some other constant, fixed when the
+    warping is initialized. That is wrong in the ELBO's value and invisible
+    in its gradient, which is a different problem from the one this test
+    guards. The flow is left out because its log-determinant comes from the
+    integration it performs rather than from a closed form.
+    """
+    rng = np.random.default_rng(3)
+    positive = rng.lognormal(size=[8, 3])
+    normal = rng.normal(size=[8, 3])
+    unit = rng.uniform(0.05, 0.95, size=[8, 3])
+    return [
+        (wp.Identity(3), normal),
+        (wp.Spline(3), normal),
+        (wp.ZScore(3), normal),
+        (wp.Center(3), normal),
+        (wp.Scale(3), positive),
+        (wp.Softplus(3), positive),
+        (wp.Log(3), positive),
+        (wp.Sigmoid(3), unit),
+        (wp.Rotation(3), normal),
+    ]
+
+
+@pytest.mark.parametrize("warping,data", _log_det_cases(),
+                         ids=lambda x: type(x).__name__
+                         if hasattr(x, "backward") else "")
+def test_the_reported_log_determinant_is_the_log_of_the_jacobians(warping,
+                                                                  data):
+    """`forward` returns the *log* of the Jacobian determinant, not the
+    determinant.
+
+    `Log` returned `sum(1 / (x + shift))` until 0.6.5, where the truth is
+    `-sum(log(x + shift))`. It went unnoticed because `Log` carries no
+    trainable parameter, so as the first link of a chain its term is a
+    constant that no gradient sees; put anything trainable in front of it
+    and the model optimizes the wrong objective.
+    """
+    import tensorflow as tf
+    warping.initialize(data)
+    reported = np.asarray(warping.forward(tf.constant(data))[1])
+    assert np.allclose(reported, _numeric_log_det(warping, data),
+                       atol=1e-5, rtol=1e-4)
+
+
+def test_a_chain_adds_its_links_log_determinants():
+    """Which is the only composition rule a log-determinant obeys, and the
+    reason the accumulator has to start at zero. It started at the number of
+    columns until 0.6.5, offsetting every chained warping by its own width.
+    """
+    import tensorflow as tf
+    data = np.random.default_rng(4).lognormal(size=[8, 3])
+
+    links = [wp.Log(3), wp.ZScore(3), wp.Spline(3)]
+    chain = wp.ChainedWarping(*links)
+    chain.initialize(data)
+
+    expected = np.zeros(data.shape[0])
+    passed = tf.constant(data)
+    for link in links:
+        passed, log_det = link.forward(passed)
+        expected = expected + np.asarray(log_det)
+
+    reported = np.asarray(chain.forward(tf.constant(data))[1])
+    assert np.allclose(reported, expected)
+
+
+def test_a_chain_of_identities_leaves_the_log_determinant_at_zero():
+    """The width used to leak in through the accumulator, so a chain of
+    identities came back at 3 instead of 0."""
+    import tensorflow as tf
+    data = np.random.default_rng(5).normal(size=[8, 3])
+
+    chain = wp.ChainedWarping(wp.Identity(3), wp.Identity(3))
+    chain.initialize(data)
+
+    assert np.allclose(np.asarray(chain.forward(tf.constant(data))[1]), 0.0)
+
+
+# --------------------------------------------------------------------------- #
 # the integral
 # --------------------------------------------------------------------------- #
 def _likelihood(warping=None, noise=0.1, likelihood=None):

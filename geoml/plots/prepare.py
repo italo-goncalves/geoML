@@ -31,6 +31,7 @@ import scipy.stats as _stats
 
 import geoml._types as _types
 import geoml.data as _data
+import geoml.math.geometry as _geom
 import geoml.storage as _storage
 
 
@@ -794,7 +795,8 @@ def variogram(container: "_data._SpatialData", name: str,
               n_lags: int = 15, max_lag: "float | None" = None,
               direction: "_types.ArrayLike | None" = None,
               tolerance: float = 45.0, max_pairs: int = 2_000_000,
-              residuals: bool = False) -> list[dict]:
+              residuals: bool = False,
+              decluster: "bool | float" = True) -> list[dict]:
     """
     The data's spatial structure, against the fan the simulations reproduce.
 
@@ -804,6 +806,30 @@ def variogram(container: "_data._SpatialData", name: str,
     too smooth sags below it at short lags, and a nugget fitted into the
     range lifts it there. Neither shows in the marginal checks
     (`accuracy`, `spread_check`), which is what this figure exists for.
+
+    The two curves are put on the same footing before being compared. The
+    measurements carry the likelihood noise and the stored realizations do
+    not (`predict` integrates it out), so the fan is raised by what that
+    noise adds to a semivariogram. For noise independent between locations
+    that is exactly the pair-averaged `(var_i + var_j) / 2`, taken from the
+    `noise_variance` column and added bin by bin -- no draw, no seed, and
+    exact in expectation rather than approximated. Without the correction
+    the fan sits a nugget below the data at every lag and every model looks
+    over-smooth. A container predicted without `include_noise` carries no
+    such column and its fan is left where it is.
+
+    Pairs are **declustered by default**, which is the other half of making
+    the comparison fair and matters more than it sounds. Samples follow the
+    ore, so an experimental variogram computed on raw pairs describes the
+    sampling as much as the field: on the bundled Walker Lake set, whose
+    exhaustive truth is known, the raw sample curve runs 1.4 times the true
+    variogram at the sill and 2.3 times at the shortest lag, and a model
+    matching the field perfectly would look far too smooth against it. Each
+    pair is therefore weighted by `w_i * w_j` from
+    :func:`geoml.math.geometry.declustering_weights`, and the sill likewise,
+    with the same weights used for the fan so that both sides estimate the
+    same thing. Pass `decluster=False` for the raw curve, or a number to fix
+    the cell size rather than let it be chosen.
 
     With `residuals=True` the variogram is of `measured - predicted` instead
     and the fan is omitted: structure left in the residuals is structure the
@@ -835,6 +861,11 @@ def variogram(container: "_data._SpatialData", name: str,
     residuals : bool
         Variogram of `measured - predicted` rather than of the measurements,
         with no fan.
+    decluster : bool or float
+        Weight pairs by cell-declustering weights, so that the curve
+        estimates the field's variogram rather than the sampling's. `True`
+        chooses the cell size, a number fixes it, `False` leaves the pairs
+        raw.
 
     Returns
     -------
@@ -842,7 +873,10 @@ def variogram(container: "_data._SpatialData", name: str,
         One per component, with `label`, the bin centres `lag`, the pair
         `count` per bin, the data curve `data`, the sample variance `sill`,
         and `realizations` -- an `(n_realizations, n_lags)` array, or None
-        when there is nothing simulated or `residuals` was asked.
+        when there is nothing simulated or `residuals` was asked. `noise` is
+        what was added to the fan per bin to put it on the measurements'
+        footing, or None when the container could not say. `cell` is the
+        declustering cell used, or None when the pairs were left raw.
     """
     parts = continuous_parts(variable(container, name))
 
@@ -878,16 +912,55 @@ def variogram(container: "_data._SpatialData", name: str,
                        0, n_lags - 1)
     centre = 0.5 * (edges[:-1] + edges[1:])
 
-    def curve(values):
+    # declustering weights, one per location, shared by every component: the
+    # sampling geometry is the same for all of them, and the cell is chosen
+    # from the first component that has values to choose it from
+    weights, cell = None, None
+    if decluster is not False:
+        first = parts[0].measurements.values.to_numpy().astype(float)[rows]
+        weights, cell = _geom.declustering_weights(
+            points, first,
+            cell=None if decluster is True else float(decluster))
+
+    def _binned(values, per_pair):
+        """One weighted average per lag bin, over the pairs that are usable.
+
+        `per_pair` builds the quantity being averaged from the pair indices,
+        so the same machinery serves the semivariogram, the declustered one
+        and the noise correction.
+        """
         ok = _np.isfinite(values)
         pair_ok = ok[i_idx] & ok[j_idx]
         pi, pj, pb = i_idx[pair_ok], j_idx[pair_ok], lag_bin[pair_ok]
+
+        share = _np.ones(pi.shape) if weights is None \
+            else weights[pi] * weights[pj]
         count = _np.bincount(pb, minlength=n_lags)
-        gamma = 0.5 * _np.bincount(
-            pb, weights=(values[pi] - values[pj]) ** 2, minlength=n_lags) \
-            / _np.maximum(count, 1)
-        gamma[count == 0] = _np.nan
-        return gamma, count
+        mass = _np.bincount(pb, weights=share, minlength=n_lags)
+        total = _np.bincount(pb, weights=share * per_pair(pi, pj),
+                             minlength=n_lags)
+
+        averaged = total / _np.maximum(mass, _np.finfo(float).tiny)
+        averaged[count == 0] = _np.nan
+        return averaged, count
+
+    def curve(values):
+        return _binned(values,
+                       lambda pi, pj: 0.5 * (values[pi] - values[pj]) ** 2)
+
+    def noise_lift(variance):
+        """What independent measurement noise adds to a semivariogram.
+
+        A measurement is the ground plus an error of its own at each
+        location, so a pair differs by `(g_i - g_j) + (e_i - e_j)`. The
+        cross term averages away and the rest is `(var_i + var_j) / 2` per
+        pair, which is what a realization of the ground has to be raised by
+        before it can be laid against the data's curve. Only the variance
+        enters, never the shape of the noise, which is why nothing has to be
+        drawn here.
+        """
+        return _binned(variance,
+                       lambda pi, pj: 0.5 * (variance[pi] + variance[pj]))[0]
 
     panels = []
     for part in parts:
@@ -905,24 +978,49 @@ def variogram(container: "_data._SpatialData", name: str,
         gamma, count = curve(values)
 
         fan = None
+        lift = None
         store = getattr(part, "simulations", None)
         if not residuals and store is not None \
                 and len(getattr(store, "shape", ())) == 2 \
                 and store.shape[1] > 1:
+            # the realizations are of the ground; the data carries the
+            # measurement noise, so the fan is raised onto its footing
+            noise = getattr(part, "noise_variance", None)
+            noise = None if noise is None else noise.values
+            if noise is not None and getattr(noise, "shape", None) is not None:
+                noise = noise.to_numpy().astype(float).ravel()[rows]
+                if _np.any(_np.isfinite(noise)):
+                    lift = noise_lift(noise)
+
             fan = _np.full((store.shape[1], n_lags), _np.nan)
             for r in range(store.shape[1]):
                 # one realization is one column, read without materializing
                 # the store -- the same discipline as everywhere else here
                 column = _np.asarray(store[:, r], dtype=float).ravel()[rows]
                 fan[r] = curve(column)[0]
+                if lift is not None:
+                    fan[r] = fan[r] + lift
+
+        # the sill is weighted the same way, or the line drawn across the
+        # figure would belong to a different population from the curve
+        usable = _np.isfinite(values)
+        if weights is None:
+            sill = float(_np.var(values[usable]))
+        else:
+            share = weights[usable]
+            centred = values[usable] \
+                - (share * values[usable]).sum() / share.sum()
+            sill = float((share * centred ** 2).sum() / share.sum())
 
         panels.append({
             "label": str(part.name),
             "lag": centre,
             "count": count,
             "data": gamma,
-            "sill": float(_np.var(values[_np.isfinite(values)])),
+            "sill": sill,
             "realizations": fan,
+            "noise": lift,
+            "cell": cell,
         })
     return panels
 

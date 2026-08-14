@@ -130,9 +130,19 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
     ensemble's mean one, squared and averaged. `crps` judges each location's
     marginal and cannot see dependence; this is the score that punishes an
     ensemble whose realizations have the right histograms and the wrong
-    spatial structure -- the numeric side of the variogram-fan figure. Pairs
-    are unweighted, and past the budget they are strided down
-    deterministically.
+    spatial structure. Pairs are unweighted, and past the budget they are
+    strided down deterministically.
+
+    Read it as a **comparison between models on the same data**, not as an
+    absolute quantity. The truth carries the likelihood noise and the
+    realizations are of the ground with that noise integrated out, so a
+    measured difference is systematically the wider of the two and the score
+    never reaches zero however good the model is. The variogram-fan figure
+    corrects for this by raising the fan, which works there because a
+    semivariogram is a second moment and the noise contributes a known
+    variance to it; `|difference| ** p` is not, so there is no constant to
+    add here. The bias is common to any two ensembles on the same locations,
+    which is why ranking survives it.
 
     Parameters
     ----------

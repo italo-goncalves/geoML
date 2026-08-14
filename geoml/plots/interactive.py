@@ -933,7 +933,8 @@ class Interactive(_base.Selection):
                           "<extra></extra>"), row=row, col=column)
 
     def variogram(self, n_lags=15, max_lag=None, direction=None,
-                  tolerance=45.0, residuals=False, height=None, width=None) -> "_go.Figure":
+                  tolerance=45.0, residuals=False, decluster=True,
+                  height=None, width=None) -> "_go.Figure":
         """
         The data's spatial structure, against the fan the simulations make.
 
@@ -943,6 +944,12 @@ class Interactive(_base.Selection):
         kernel too smooth sags below it at short lags, and a nugget fitted
         into the range lifts it there. Neither shows in `accuracy` or
         `spread_check`, which judge one location at a time.
+
+        The measurements carry the likelihood noise and the realizations do
+        not, so the fan is raised by what an independent error at each
+        location adds to a semivariogram, taken from `noise_variance`.
+        Without that the two curves are not the same quantity and every
+        model looks over-smooth by a nugget.
 
         With `residuals=True` it is the variogram of `measured - predicted`
         and the fan is dropped: structure left in the residuals is structure
@@ -967,7 +974,8 @@ class Interactive(_base.Selection):
         var = self._require_continuous("variogram")
         panels = _prep.variogram(
             self.data, var.name, n_lags=n_lags, max_lag=max_lag,
-            direction=direction, tolerance=tolerance, residuals=residuals)
+            direction=direction, tolerance=tolerance, residuals=residuals,
+            decluster=decluster)
         labels = [panel["label"] for panel in panels]
 
         rows, columns = _prep.grid_shape(len(panels))

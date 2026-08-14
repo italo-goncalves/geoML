@@ -427,7 +427,9 @@ class Log(_Warping):
 
     def forward(self, x):
         x_warp = _tf.math.log(x + self.shift)
-        log_det = _tf.reduce_sum(1 / (x + self.shift), axis=1)
+        # the derivative is 1 / (x + shift); what goes out is its log, as
+        # everywhere else, so that a chain can add its links together
+        log_det = - _tf.reduce_sum(_tf.math.log(x + self.shift), axis=1)
         return x_warp, log_det
 
     def backward(self, x):
@@ -493,7 +495,10 @@ class ChainedWarping(_Warping):
         return all(wp.elementwise for wp in self.warpings)
 
     def forward(self, x):
-        d = _tf.reduce_sum(_tf.ones_like(x, dtype=_tf.float64), axis=1)
+        # log-determinants add along a chain, so the accumulator starts at
+        # zero; `ones_like` seeded it with the column count until 0.6.5,
+        # which offset every chained warping's value by its own width
+        d = _tf.reduce_sum(_tf.zeros_like(x, dtype=_tf.float64), axis=1)
         for wp in self.warpings:
             x, log_d = wp.forward(x)
             d = d + log_d

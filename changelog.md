@@ -20,8 +20,10 @@ the pre-0.6.0 flat paths (`geoml.tftools`, `geoml.drillhole`, `geoml.random`,
   helpers, two of which had landed on the `math.linalg` side of the split),
   so the notice would have fired for every user on its own. Repointed at
   `geoml.math.tf` and `geoml.math.linalg` directly, and the test suite —
-  which reached for `geoml.geometry`, `geoml.inducing` and `geoml.drillhole`
-  in eight files — now uses the current paths too.
+  which reached for `geoml.geometry`, `geoml.inducing`, `geoml.drillhole`
+  and `geoml.graphviz` in nine files — now uses the current paths too. The
+  last of those was found by running the suite and reading its warnings
+  rather than by grep: making the shims speak is what made it audible.
   - `test_deprecated_paths.py` pins the contract: every alias resolves,
   warns exactly once, names its destination and 0.7.0, and is attributed to
   the caller; a plain import stays silent; an unknown attribute still raises.
@@ -42,6 +44,100 @@ and the spline is applied where that departure lives.
   - `Rotation` and `ScaledSimplex` join `warping.__all__`, which had left
   them out — reachable as module attributes but missed by a star import.
   Every warping class in the module is now named there.
+* **`warping.Log` was returning the Jacobian instead of its logarithm**, and
+`ChainedWarping` was seeding its accumulator with the column count. Both are
+one-line fixes to the same quantity: the second value `forward` returns is
+the *log* of the Jacobian determinant, which is the only form that composes
+by addition along a chain.
+  - `Log.forward` computed `sum(1 / (x + shift))` where the truth is
+  `-sum(log(x + shift))`, while `Softplus` and `ZScore` next to it both
+  returned logs. Found while writing the manual's Jura chapter, which leads
+  with `Log -> RobustPCA -> Spline`; verified against a finite-difference
+  Jacobian, where `Log(2)` on `[[1, 2], [3, 4]]` reported `[1.5, 0.583]`
+  against a true `[-0.693, -2.485]`.
+  - **What it cost in practice was small, and worth stating precisely.**
+  `Log` carries no trainable parameter, so as the *first* link of a chain
+  its term is a constant that no gradient sees, and every model in the
+  package and the manual used it that way. Put anything trainable ahead of
+  it and the model optimizes the wrong objective. The chain's accumulator
+  was likewise a constant offset of `size_in`. So no fitted model changes;
+  what changes is the ELBO's reported value, and printed training curves for
+  chained warpings shift down by the chain's width.
+  - `test_noise_integration.py` now checks nine warpings' reported
+  log-determinant against a numerical Jacobian, and pins the chain's
+  addition rule and the zero for a chain of identities. Both were confirmed
+  to fail on the old code before the fix landed.
+  - Left alone deliberately, and noted here so the next reader does not
+  take the new test's coverage for more than it is: `PCA`, `RobustPCA`,
+  `CenteredLogRatio` and `ScaledSimplex` each report zero where the truth is
+  a different constant, fixed when the warping is initialized. That is wrong
+  in the ELBO's value and invisible in its gradient — a separate question
+  from a term that varies with the data.
+* **The variogram fan was a nugget below the data, and looked like a
+verdict.** `plots.prepare.variogram` drew the measurements' experimental
+semivariogram against the stored realizations, which are of the *ground*
+with the likelihood noise integrated out. The two are not the same
+quantity, so the fan sat low at every lag by the fitted nugget and every
+model read as over-smooth. On Walker Lake the shortest lag showed 8 555
+against the data's 55 013.
+  - The fan is now raised onto the measurements' footing before it is
+  drawn. An error of its own at each location adds `(var_i + var_j) / 2` to
+  every pair's contribution, so the correction is that quantity averaged
+  over the pairs in each bin, read from the `noise_variance` column. Same
+  example after: 54 344 against 55 013, with the fan running about 15%
+  under the data through the mid-range — which is the *real* finding, a
+  range fitted slightly long, previously buried under the offset.
+  - **It is analytic, not simulated.** Only the noise's variance enters a
+  semivariogram, never its shape, so nothing is drawn: no RNG, no seed
+  inside a figure, and exact in expectation rather than approximated. A
+  Monte Carlo check over 200 draws of independent per-location noise agrees
+  with the closed form, and is in the suite.
+  - `predict_measurements` is **not** the right source here, though it is
+  the one `accuracy` uses. `likelihood.measurement_samples` adds a
+  per-node *scalar* to the whole field at once, so each of its columns is a
+  spatially coherent field plus a constant — exactly the right marginal per
+  location, and a constant cancels out of `(y_i - y_j)`. Measured: it moves
+  the fan by 2%, not by the nugget. The two figures need different things
+  from the same noise, and only one of them needs it to be independent
+  between locations.
+  - Panels gained a `noise` key holding the per-bin correction, or None
+  where the container carries no `noise_variance` (predicted with
+  `include_noise=False`), in which case the fan is drawn uncorrected rather
+  than refused. `residuals=True` is unaffected: it has no fan.
+* **The variogram's pairs are declustered now, by default**, and this was
+the larger of the two errors in that figure. Samples follow the ore, so an
+experimental variogram on raw pairs describes the sampling as much as the
+field. `geoml.math.geometry.declustering_weights` is the new primitive: lay
+a lattice, split one vote among the samples sharing a cell, average over
+shifted lattice origins so that where the lattice starts does not decide
+the answer.
+  - The cell size is chosen the way `declus` has always chosen it (Deutsch
+  & Journel), by sweeping and keeping the departure of the declustered mean
+  from the naive one — taken in absolute value, so clustering in high and
+  in low values are both handled without being told which happened. Both
+  ends of the sweep return the naive mean, so the extremum is interior.
+  - **Checked against a known truth rather than argued.** Walker Lake ships
+  its exhaustive field, so the honest variogram is knowable: its 470 samples
+  have a mean of 435 against the field's 278, and their raw variogram runs
+  1.4× the true one at the sill and 2.3× at the shortest lag. Declustering
+  (chosen cell 22.3 units) brings the mean to 291 and the average departure
+  across lags from 56% to 12%, with the sill from 89 700 to 64 400 against a
+  truth of 61 800. Two tests pin exactly this, and they are the reason to
+  keep the exhaustive grid in the bundled data.
+  - The weights apply to the fan and the sill as well as the data curve, or
+  the sides would again be estimating different things. `decluster=False`
+  restores the raw pairs and a number fixes the cell; panels carry the cell
+  used. The shortest lag is the one bin declustering cannot mend, since the
+  closest pairs exist mostly *inside* the clusters, and the manual now says
+  so where it reads the figure.
+  - This started from the observation that the fan's remaining shortfall
+  looked like preferential sampling rather than a bad model, and it was.
+  With both corrections in place the fan tracks the data across the whole
+  range on Walker Lake, where before the first it sat at a sixth of the
+  data's curve at short lags. The figure's verdict on that model reversed
+  entirely, which is the argument for being scrupulous about what goes on
+  each axis of a diagnostic: an unfair comparison convicts an innocent
+  model and looks like evidence while doing it.
 
 ## version 0.6.4
 * **The repository is now a Claude Code plugin marketplace**, shipping one
