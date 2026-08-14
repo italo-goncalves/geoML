@@ -26,7 +26,9 @@ __all__ = ["Identity",
            "ContinuousNormalizingFlow",
            "CenteredLogRatio",
            "PCA",
-           "RobustPCA"
+           "RobustPCA",
+           "Rotation",
+           "ScaledSimplex"
            ]
 
 import geoml.math.interpolate as _gint
@@ -42,6 +44,7 @@ import warnings as _warnings
 from sklearn.covariance import MinCovDet as _MCD
 from sklearn.cluster import KMeans as _KMeans
 from sklearn.decomposition import FastICA as _ICA
+from sklearn.exceptions import ConvergenceWarning as _ConvergenceWarning
 
 
 class _Warping(_gpr.Parametric):
@@ -809,6 +812,51 @@ class CenteredLogRatio(_Warping):
 
 
 class Rotation(Identity):
+    """
+    An orthogonal rotation of the variables.
+
+    Multiplies the data by a square orthonormal matrix, which is a trainable
+    parameter. The transformation is volume preserving, so the log-determinant
+    it contributes is zero and the rotation neither stretches nor compresses
+    the density.
+
+    The matrix is **initialized by independent component analysis**
+    (`sklearn.decomposition.FastICA`), which positions the axes along the
+    directions of maximum non-Gaussianity in the data. This makes it the
+    natural partner of a per-component transformation placed after it: the
+    rotation finds the directions along which the marginals depart most from
+    a Gaussian, and the following warping is then applied where that departure
+    lives. `Rotation` followed by `Spline` is the usual pairing.
+
+    Parameters
+    ----------
+    n_dim : int
+        Number of variables, and the size of the rotation matrix.
+    fixed : bool
+        Whether to keep the matrix at its initial value instead of training
+        it. The ICA initialization is used either way.
+
+    Notes
+    -----
+    This warping mixes its inputs, so `elementwise` is False for any chain
+    containing it, and the likelihood integrates its noise over Sobol points
+    rather than per-column Gauss-Hermite nodes.
+
+    The ICA fit is a starting point rather than a result: training moves the
+    matrix from wherever ICA stopped, so a fit that reaches the iteration
+    limit is not an error and its convergence warning is suppressed.
+
+    References
+    ----------
+    Hyvärinen, A., & Oja, E. (2000). Independent component analysis:
+    algorithms and applications. Neural Networks, 13(4-5), 411-430.
+
+    See Also
+    --------
+    PCA, RobustPCA : decorrelating transformations, by variance rather than
+        by non-Gaussianity.
+    Spline : the per-component warping usually placed after this one.
+    """
     _mixes = True
 
     def __init__(self, n_dim, fixed=False):
@@ -834,7 +882,15 @@ class Rotation(Identity):
         return x
 
     def initialize(self, x):
-        ica = _ICA(whiten=False).fit(x)
+        # ICA is asked for a starting point, not a converged answer: the
+        # rotation is trainable, and training moves it from wherever the
+        # fit stopped. Hitting the iteration limit therefore costs nothing
+        # worth telling the user about, and the ConvergenceWarning it
+        # raises is noise in a fit that is working as intended -- it fired
+        # on the Jura case in the test suite, where the model is fine.
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", _ConvergenceWarning)
+            ica = _ICA(whiten=False).fit(x)
         self.parameters['rotation'].set_value(ica.components_)
         rot = self.parameters['rotation'].get_value()
         x = _tf.matmul(x, rot)

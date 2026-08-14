@@ -25,6 +25,23 @@ the pre-0.6.0 flat paths (`geoml.tftools`, `geoml.drillhole`, `geoml.random`,
   - `test_deprecated_paths.py` pins the contract: every alias resolves,
   warns exactly once, names its destination and 0.7.0, and is attributed to
   the caller; a plain import stays silent; an unknown attribute still raises.
+* **`warping.Rotation` documented, and its FastICA warning silenced.** The
+class had no docstring; it now says what it is — an orthogonal, volume-
+preserving rotation whose matrix is trainable and **initialized by
+independent component analysis**, putting the axes along the directions of
+maximum non-Gaussianity. That is what makes `Rotation -> Spline` the usual
+pairing: the rotation finds where the marginals depart most from a Gaussian,
+and the spline is applied where that departure lives.
+  - The `ConvergenceWarning` sklearn raised when the ICA fit hit its
+  iteration limit (visible on the Jura case in the suite) is suppressed at
+  that one call, with the reason recorded: ICA is asked for a *starting
+  point*, not a converged answer, since the rotation is a trainable
+  parameter that training moves from wherever the fit stopped. Raising
+  `max_iter` instead would slow every initialization to chase a number that
+  is overwritten anyway.
+  - `Rotation` and `ScaledSimplex` join `warping.__all__`, which had left
+  them out — reachable as module attributes but missed by a star import.
+  Every warping class in the module is now named there.
 
 ## version 0.6.4
 * **The repository is now a Claude Code plugin marketplace**, shipping one
