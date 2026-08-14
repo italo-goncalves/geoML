@@ -1,0 +1,26 @@
+{
+  "name": "geoml",
+  "owner": {
+    "name": "Ítalo Gomes Gonçalves",
+    "email": "italogoncalves.igg@gmail.com"
+  },
+  "metadata": {
+    "description": "Claude Code extensions for the geoML package.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "geoml",
+      "source": "./plugins/geoml",
+      "description": "Working knowledge of the geoML package: the object model, the module layout, the modelling workflow, and the notebook conventions its examples follow.",
+      "category": "knowledge",
+      "keywords": [
+        "gaussian-process",
+        "geostatistics",
+        "spatial",
+        "geoscience",
+        "machine-learning"
+      ]
+    }
+  ]
+}
