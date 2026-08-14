@@ -85,6 +85,16 @@ jobs:
       contents: read
       pages: write
       id-token: write
+    # There is a second gate, and it does not live in this file: the
+    # `github-pages` environment carries a custom deployment policy listing
+    # the refs allowed to deploy. It listed only the branch `master`, so
+    # this job -- which runs on a tag -- was rejected before its first
+    # step, failing in a second with an empty step list. A tag policy for
+    # `v*` was added alongside the branch one in 0.6.4. Anyone debugging a
+    # publish that fails with no steps should look at the environment's
+    # policies before reading a line of YAML, and beware that verifying
+    # this job by `workflow_dispatch` from master exercises the ref the
+    # policy always allowed rather than the tag it is really run on.
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
