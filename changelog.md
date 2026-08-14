@@ -1,3 +1,23 @@
+## version 0.6.4
+* **The repository is now a Claude Code plugin marketplace**, shipping one
+plugin (`geoml`) whose single skill carries the package's own working
+knowledge. Installed with `/plugin marketplace add italo-goncalves/geoML`
+then `/plugin install geoml@geoml`; `README.md` says so.
+  - The point is that an assistant writing geoML code should not have to
+  infer the API from its names. The skill carries the object model, the
+  module layout (which moved wholesale in 0.6.0), the workflow arc, and
+  `references/notebook-style.md` -- the import aliases, the plotting
+  conventions and a **tree-path table checked by execution**, every row run
+  against 0.6.3 rather than written from memory. The seven tutorial
+  notebooks ride along with their outputs stripped: 15 MB of `.ipynb` holds
+  33 KB of code, and unstripped a single one fills a context window with
+  base64.
+  - It costs ~194 tokens of always-on description and is only read when it
+  fires, which is the whole reason this is a skill rather than more
+  `CLAUDE.md`.
+  - `plugins/` sits outside the distribution: `[tool.setuptools.packages.find]`
+  includes `geoml*` only, so nothing here reaches the wheel.
+
 ## version 0.6.3
 * **Type annotations, and the documentation site rebuilt around them.** One
 workstream, because one pass over a signature does both. The reason for

@@ -104,6 +104,28 @@ The following notebooks demonstrate the capabilities of the package (if one
 * [Notebook 08 - multivariate non-stationary modelling](https://colab.research.google.com/drive/1HotYLXScQT-J-aqBMrvI_vR2UOyIWn2o?usp=drive_link)
 * [Notebook 09 - compositional data](https://colab.research.google.com/drive/1oxFsdAvouiJSmsiDhs4vh-DsWGvaAUMm?usp=drive_link)
 
+## Using geoML with Claude Code
+
+This repository ships a [Claude Code](https://claude.com/claude-code) plugin
+carrying the package's own working knowledge: the object model, the module
+layout, the modelling workflow, and the notebook conventions the examples
+above follow. It means Claude writes geoML code the way geoML is meant to be
+written, rather than guessing an API from its name.
+
+Install it from within Claude Code:
+
+```
+/plugin marketplace add italo-goncalves/geoML
+```
+
+```
+/plugin install geoml@geoml
+```
+
+Claude then loads it by itself whenever a task involves geoML, or you can
+invoke it directly with `/geoml:geo-ml`. It costs about 200 tokens per
+session until it is used.
+
 ## References
 
 * [2020 - Sunspot Cycle Prediction Using Warped Gaussian Process Regression](https://www.sciencedirect.com/science/article/pii/S0273117719308026)
