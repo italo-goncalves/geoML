@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 import geoml
-import geoml.inducing as ind
+import geoml.data.inducing as ind
 
 
 def _walker():

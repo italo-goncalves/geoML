@@ -15,8 +15,8 @@ import pandas as pd
 import pytest
 
 import geoml
-import geoml.drillhole as drillhole
-from geoml.drillhole import (DrillholeData, IntervalTable, HOLE, FROM, TO,
+import geoml.data.drillhole as drillhole
+from geoml.data.drillhole import (DrillholeData, IntervalTable, HOLE, FROM, TO,
                              LENGTH)
 
 

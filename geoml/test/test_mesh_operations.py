@@ -22,7 +22,7 @@ def _build(mesh, cls=None):
     mesh = mesh.triangulate()
     points = np.asarray(mesh.points, dtype=float)
     triangles = mesh.faces.reshape(-1, 4)[:, 1:]
-    normals = geoml.geometry.vertex_normals(points, triangles)
+    normals = geoml.math.geometry.vertex_normals(points, triangles)
     return mesh3d(points, triangles, normals) if cls is None \
         else cls(points, triangles, normals)
 
@@ -43,7 +43,7 @@ def _terrain(height=5.0, slope=0.0, extent=20.0, cls=DTM3D, n=9):
             triangles += [[a, b, c], [a, c, d]]
     triangles = np.array(triangles)
     return cls(points, triangles,
-               geoml.geometry.vertex_normals(points, triangles))
+               geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def _grid_with_a_ball(centre, radius_value=6.0):
@@ -112,7 +112,7 @@ def _folded_sheet():
     points = np.array([[0.0, 0, 0], [2, 0, 0], [0, 2, 0],
                        [0.0, 0, 1], [0, 2, 1], [2, 0, 1]])
     triangles = np.array([[0, 1, 2], [3, 4, 5]])
-    return points, triangles, geoml.geometry.vertex_normals(points, triangles)
+    return points, triangles, geoml.math.geometry.vertex_normals(points, triangles)
 
 
 def test_a_sheet_that_folds_over_is_not_a_terrain():
@@ -128,7 +128,7 @@ def test_a_closed_body_is_not_a_terrain_either():
     triangles = pv.Box().triangulate().faces.reshape(-1, 4)[:, 1:]
     with pytest.raises(MeshTypeError):
         DTM3D(points, triangles,
-              geoml.geometry.vertex_normals(points, triangles))
+              geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def test_a_terrain_survives_zarr(tmp_path):
@@ -283,7 +283,7 @@ def _mine_site(offset):
          + 30 * np.cos(xy[:, 1] / 900) + rng.normal(0, 4, len(xy)))
     tri = Delaunay(xy).simplices
     points = np.column_stack([xy, z]) + offset
-    dtm = Surface3D(points, tri, geoml.geometry.vertex_normals(points, tri))
+    dtm = Surface3D(points, tri, geoml.math.geometry.vertex_normals(points, tri))
 
     box = _build(pv.Box(bounds=(offset[0] + 1500, offset[0] + 2500,
                                 offset[1] + 1500, offset[1] + 2500,

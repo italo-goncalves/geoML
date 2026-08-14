@@ -23,7 +23,7 @@ def _pyramid():
     ])
     triangles = np.array([[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 1]])
     return geoml.data.Surface3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def _square():

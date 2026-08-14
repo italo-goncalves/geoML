@@ -21,7 +21,7 @@ def _sheet(z0=5.0, slope_x=0.0, slope_y=0.0, extent=10.0):
     points = np.column_stack([xy, height])
     triangles = np.array([[0, 1, 2], [0, 2, 3]])
     return geoml.data.Surface3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def _sheet_from(xy, triangles, height=5.0):
@@ -30,7 +30,7 @@ def _sheet_from(xy, triangles, height=5.0):
                               np.full(len(xy), float(height))])
     triangles = np.asarray(triangles)
     return geoml.data.Surface3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def _box(bounds=(2.0, 8.0, 2.0, 8.0, 2.0, 8.0)):
@@ -39,7 +39,7 @@ def _box(bounds=(2.0, 8.0, 2.0, 8.0, 2.0, 8.0)):
     points = np.asarray(mesh.points, dtype=float)
     triangles = mesh.faces.reshape(-1, 4)[:, 1:]
     return geoml.data.Solid3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def _points(coordinates):
@@ -138,7 +138,7 @@ def _from_pyvista(mesh):
     points = np.asarray(mesh.points, dtype=float)
     triangles = mesh.faces.reshape(-1, 4)[:, 1:]
     return geoml.data.mesh3d(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def test_a_body_closed_in_space_counts_as_closed():
@@ -171,7 +171,7 @@ def test_triangles_disagreeing_which_way_is_out_are_refused():
     triangles[0] = triangles[0][::-1]
     points = np.asarray(box.coordinates)
     broken = geoml.data.Mesh3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
     assert broken.closed and not broken.consistent
 
     data = _points([[5, 5, 5]])
@@ -184,10 +184,10 @@ def test_a_body_wound_inwards_is_turned_round():
     points = np.asarray(box.coordinates)
     inside_out = np.asarray(box.triangles)[:, ::-1]
     # closed and consistent, only facing the wrong way
-    assert geoml.geometry.signed_volume(points, inside_out) < 0
+    assert geoml.math.geometry.signed_volume(points, inside_out) < 0
 
     turned = geoml.data.Solid3D(
-        points, inside_out, geoml.geometry.vertex_normals(points, inside_out))
+        points, inside_out, geoml.math.geometry.vertex_normals(points, inside_out))
     assert turned.volume > 0
 
     data = _points([[5, 5, 5], [0, 0, 0]])

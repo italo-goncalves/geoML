@@ -1,3 +1,31 @@
+## version 0.6.5
+* **The 0.6.0 aliases now say they are going away.** The ten shims left at
+the pre-0.6.0 flat paths (`geoml.tftools`, `geoml.drillhole`, `geoml.random`,
+…) promised "one release" in a docstring and said nothing at runtime, so
+0.6.1 through 0.6.4 all passed without anyone being told. Each now raises a
+`DeprecationWarning` naming where the module went, ahead of removal in 0.7.0.
+  - **The notice is lazy, and that is the whole design.** `geoml/__init__.py`
+  imported all ten eagerly so that `geoml.geometry` kept working as an
+  attribute; warning from there would have fired ten notices at every
+  `import geoml`, for the majority who never touch an old path — which is how
+  a warning teaches people to ignore warnings. A module-level `__getattr__`
+  (PEP 562) keeps the attribute working and moves the notice to the moment
+  someone reaches for it. Verified in a subprocess: a plain `import geoml`
+  emits nothing and loads no shim.
+  - It is also re-issued from `__getattr__` rather than passed through from
+  the shim body, because a `DeprecationWarning` attributed to library code is
+  one Python's default filter *hides* — attributed to the caller, it shows.
+  One notice, pointing at the line that asked.
+  - **`kernels.py` was itself importing through the `tftools` shim** (three
+  helpers, two of which had landed on the `math.linalg` side of the split),
+  so the notice would have fired for every user on its own. Repointed at
+  `geoml.math.tf` and `geoml.math.linalg` directly, and the test suite —
+  which reached for `geoml.geometry`, `geoml.inducing` and `geoml.drillhole`
+  in eight files — now uses the current paths too.
+  - `test_deprecated_paths.py` pins the contract: every alias resolves,
+  warns exactly once, names its destination and 0.7.0, and is attributed to
+  the caller; a plain import stays silent; an unknown attribute still raises.
+
 ## version 0.6.4
 * **The repository is now a Claude Code plugin marketplace**, shipping one
 plugin (`geoml`) whose single skill carries the package's own working

@@ -30,7 +30,7 @@ def _model(seed=1234):
     point.add_continuous_variable(
         "y", np.sin(xyz[:, 0] / 40) + xyz[:, 2] / 100)
 
-    ip = geoml.inducing.from_kmeans(point, 60, seed=0)
+    ip = geoml.data.inducing.from_kmeans(point, 60, seed=0)
     root = geoml.latent.BasicInput(
         [ip], transform=geoml.transform.Isotropic(50.0))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
@@ -380,7 +380,7 @@ def _ore_model(seed=1234):
         "au", 4.0 * np.exp(-(radius / 28.0) ** 2) + 0.02)
     point.variables["au"].set_cutoffs([1.0])
 
-    ip = geoml.inducing.from_kmeans(point, 150, seed=0)
+    ip = geoml.data.inducing.from_kmeans(point, 150, seed=0)
     root = geoml.latent.BasicInput(
         [ip], transform=geoml.transform.Isotropic(22.0))
     gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
@@ -533,7 +533,7 @@ def _vector_model(seed=1234):
     point.variables["metals"].components["zn"].set_cutoffs([1.0])
     point.variables["metals"].components["pb"].set_cutoffs([0.5])
 
-    ip = geoml.inducing.from_kmeans(point, 100, seed=0)
+    ip = geoml.data.inducing.from_kmeans(point, 100, seed=0)
     root = geoml.latent.BasicInput(
         [ip], transform=geoml.transform.Isotropic(30.0))
     gp = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
@@ -611,7 +611,7 @@ def _rock_model(seed=1234):
     point = geoml.data.PointData.from_array(xyz)
     point.add_categorical_variable("rock", measurements=rock)
 
-    ip = geoml.inducing.from_kmeans(point, 100, seed=0)
+    ip = geoml.data.inducing.from_kmeans(point, 100, seed=0)
     root = geoml.latent.BasicInput(
         [ip], transform=geoml.transform.Isotropic(40.0))
     gp = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
@@ -878,7 +878,7 @@ def _ramp(z0=40.0, slope=0.4, lo=-30.0, hi=170.0):
     points = np.column_stack([xy, z0 + slope * (xy[:, 0] - lo)])
     triangles = np.array([[0, 1, 2], [0, 2, 3]])
     return geoml.data.Surface3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def _body(bounds=(38.0, 102.0, 38.0, 102.0, 38.0, 102.0)):
@@ -890,7 +890,7 @@ def _body(bounds=(38.0, 102.0, 38.0, 102.0, 38.0, 102.0)):
     points = np.asarray(mesh.points, dtype=float)
     triangles = mesh.faces.reshape(-1, 4)[:, 1:]
     return geoml.data.Solid3D(
-        points, triangles, geoml.geometry.vertex_normals(points, triangles))
+        points, triangles, geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def test_a_sheet_marks_the_blocks_it_runs_through():
