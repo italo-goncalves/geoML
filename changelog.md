@@ -1,4 +1,53 @@
 ## version 0.6.5
+* **Training can stop when the bound settles**, through the new
+`GPOptions(training_tolerance=...)`. The bound is smoothed with an
+exponential moving average, and training ends once its gain over the last
+twenty iterations falls below that fraction of everything gained since the
+call began. `max_iter` becomes a cap rather than a count. **Off by default**,
+so nothing trains differently unless asked.
+  - Normalizing by the progress made so far is the load-bearing part. An
+  ELBO's magnitude means nothing on its own — it grows with the number of
+  data points and with whatever normalization the likelihood carries — so a
+  fraction of the *value* would not transfer between models. A fraction of
+  the gain does, and it self-protects early on, when little has been gained
+  and the threshold is correspondingly small.
+  - **The comparison is over a window, not between consecutive iterations.**
+  For a bound approaching its limit with time constant `tau`, a
+  per-iteration test fires once `exp(-t/tau) < tolerance * tau`, so a slowly
+  converging fit stops almost at once and how early depends on a `tau`
+  nobody knows in advance. Measured on three recorded curves at tolerance
+  0.01: a window of 1 fires after 26 to 36 iterations having kept 81-84% of
+  the total gain, a window of 20 keeps 96.2-97.2%, and a window of 40 keeps
+  98.1-98.6%. Twenty is the internal window, and it is not a knob: one
+  number behaved the same way on every case tried, including SVI, where the
+  criterion reads one value an epoch (the mean over its batches) rather than
+  one per minibatch.
+  - **Where it fires**, at 0.01: Walker Lake stops at iteration 118 of 600,
+  the Jura seven-element model at 117 of 600, and the non-stationary Jura
+  network of the skill's worked example at 130 of 400 — which is close to
+  the 250 that network was given by hand. Under SVI, epoch 92 of 300.
+  - **What that costs, which is the only gate that matters.** Held out, over
+  three seeds each: Walker's rmse is 1.5-2.0% *worse* and its CRPS 6% better;
+  Jura's rmse is 1% better and its CRPS 6.5% better. Deep Jura, one seed:
+  rmse 1.4% better, CRPS 2.0% better, in 46% of the time.
+  - **Calibration is the surprise.** Deutsch's goodness went from 0.49-0.51
+  to 0.73-0.75 on Walker and from 0.54-0.58 to 0.77-0.82 on Jura, every seed,
+  and from 0.45 to 0.57 under SVI. The last few percent of the bound buys
+  sharper posteriors that held-out data does not support, which is early
+  stopping doing what early stopping has always done. Worth knowing before
+  reading a training curve as something to maximize.
+  - Two behaviours worth stating because they are deliberate. A run whose
+  bound goes to NaN **never satisfies the test**, so it goes to its cap and
+  leaves the NaNs in the log where they can be seen, rather than stopping and
+  reporting success. And a call that begins already converged has nothing to
+  take a fraction of, so it also runs to its cap: the rule can end a phase of
+  training, never skip one. That is what keeps the phased pattern
+  (`train`, `set_learning_rate`, `train`) working, since each call is judged
+  from its own starting point.
+  - `cross_validate` needs no argument for this: each fold is rebuilt from
+  the saved model, options included, so a tolerance set on the model sizes
+  every fold's refit instead of the hard-coded 200.
+
 * **The `geo-ml` skill gained the non-stationary multivariate recipe**, from
 a notebook verified end to end: `08_Jura_non_stationary.ipynb` joins the
 references (stripped of outputs, 5.6 MB to 20 kB) and a new worked example
@@ -125,12 +174,49 @@ by addition along a chain.
   log-determinant against a numerical Jacobian, and pins the chain's
   addition rule and the zero for a chain of identities. Both were confirmed
   to fail on the old code before the fix landed.
-  - Left alone deliberately, and noted here so the next reader does not
-  take the new test's coverage for more than it is: `PCA`, `RobustPCA`,
-  `CenteredLogRatio` and `ScaledSimplex` each report zero where the truth is
-  a different constant, fixed when the warping is initialized. That is wrong
-  in the ELBO's value and invisible in its gradient — a separate question
-  from a term that varies with the data.
+  - The four that were left alone in the first pass — `PCA`, `RobustPCA`,
+  `CenteredLogRatio` and `ScaledSimplex`, each reporting zero where the
+  truth was something else — were finished a few days later. See the entry
+  below.
+* **The last four zero log-determinants say what they are worth.** Each was
+reporting zero for a map that changes volume, wrong in the ELBO's value and
+invisible in its gradient, so no fitted model moves and no prediction
+changes; what changes is any comparison of ELBOs across warpings.
+  - `PCA` and `RobustPCA` rotate and then divide by the square roots of the
+  eigenvalues, so the term is `-0.5 * sum(log(eigvals))`. Measured against a
+  finite-difference Jacobian on three variables: formula `-1.764258740`,
+  numerical `-1.764258740`. With **fewer components than variables** there
+  is no square Jacobian and no determinant to report at all, since the map
+  projects rather than transforms; that case keeps its zero and now says so
+  in a comment and in a test of its own.
+  - `ScaledSimplex` divides each part by a constant of its own, a diagonal
+  Jacobian, so the term is `-sum(log(scale))`: `3.298589068` against a
+  numerical `3.298589068`.
+  - `CenteredLogRatio` was the interesting one. Between arrays of `n_dim`
+  columns its Jacobian is **singular**, not merely constant — the
+  transformation ignores a rescaling of the whole row, so the determinant is
+  exactly zero and there is nothing to report. Read as the bijection it
+  really is, from the simplex onto the hyperplane where the components sum
+  to zero (both one dimension smaller), the volume factor is
+  `-log(n_dim) - sum(log(x))`, which unlike the others **varies with the
+  row**, growing without bound as a part approaches zero.
+  - **No balance matrix had to be chosen**, which was the objection that
+  parked this. Any two orthonormal bases of that hyperplane differ by a
+  rotation of determinant one, so the volume factor is the same in all of
+  them — measured with four (the SVD basis, the classical Helmert balance
+  matrix, and two random rotations) at `n_dim` 3 and 5, agreeing to ten
+  decimals with each other and with the closed form, which mentions no basis
+  at all. A test pins that invariance, since it is the reason the one-line
+  implementation is legitimate.
+  - The redundant latent direction that comes with it is the familiar
+  softmax one — `backward(z + c)` is `backward(z)` — so it is
+  unidentifiable and harmless rather than a defect to design around. The
+  consequence for the objective is stated in the class docstring: it is a
+  density on the hyperplane, comparable between compositional models and
+  only loosely against a warping that is one to one.
+  - Three of the four join the parametrized log-determinant test, which now
+  covers twelve warpings; the log-ratio has two tests of its own for the two
+  claims a numerical determinant cannot make.
 * **The variogram fan was a nugget below the data, and looked like a
 verdict.** `plots.prepare.variogram` drew the measurements' experimental
 semivariogram against the stored realizations, which are of the *ground*

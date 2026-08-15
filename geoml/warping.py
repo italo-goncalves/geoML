@@ -746,7 +746,17 @@ class PCA(_Warping):
         x = x - self.mean
         x = _tf.matmul(x, self.eigvecs)
         x = x / _tf.sqrt(self.eigvals)
-        return x, _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+
+        # The rotation preserves volume and the scaling does not, so the map
+        # multiplies it by prod(eigvals) ** -0.5 -- a constant, settled when
+        # the warping was initialized. With fewer components than variables
+        # there is no square Jacobian and so no determinant to report: the
+        # map projects, and what the likelihood sees is that projection.
+        log_det = _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+        if self.size_out == self.size_in:
+            log_det = log_det \
+                - 0.5 * _tf.reduce_sum(_tf.math.log(self.eigvals))
+        return x, log_det
 
     def backward(self, x):
         x = x * _tf.sqrt(self.eigvals)
@@ -796,6 +806,22 @@ class RobustPCA(PCA):
 
 
 class CenteredLogRatio(_Warping):
+    """
+    The centered log-ratio transformation of compositional data.
+
+    Takes the logarithm of each part and subtracts the row's mean log, which
+    frees the composition from the constraint that its parts sum to one. The
+    inverse is the softmax.
+
+    Notes
+    -----
+    The transformation maps the simplex onto the hyperplane where the
+    components sum to zero, and both are one dimension smaller than the
+    number of parts. The log-determinant reported is the volume factor of
+    that map, so the objective is a density on the hyperplane: values are
+    comparable between compositional models and only loosely against a
+    warping that transforms a variable one to one.
+    """
     _mixes = True
 
     def __init__(self, n_dim):
@@ -809,7 +835,19 @@ class CenteredLogRatio(_Warping):
 
         x_log = _tf.math.log(x)
         x_log = x_log - _tf.reduce_mean(x_log, axis=1, keepdims=True)
-        log_det = _tf.reduce_sum(1 / x, axis=1) * 0.0
+
+        # The transformation ignores a rescaling of the whole row, so between
+        # arrays of n_dim columns its Jacobian is singular and has no
+        # determinant at all. Read as the bijection it is -- from the simplex
+        # to the hyperplane where the components sum to zero, both of them
+        # one dimension smaller -- the volume factor is this. Unlike the
+        # other constants here it varies with the row, growing without bound
+        # as a part approaches zero, where the transformation stretches. It
+        # is the same whichever orthonormal basis of that hyperplane it is
+        # measured in, which is why no balance matrix has to be chosen (nor
+        # defended) to state it.
+        log_det = - _np.log(self.size_in) \
+            - _tf.reduce_sum(_tf.math.log(x), axis=1)
         return x_log, log_det
 
     def backward(self, x):
@@ -915,7 +953,11 @@ class ScaledSimplex(Identity):
         self.scale = None
 
     def forward(self, x):
-        return x / self.scale, _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+        # each part divided by a constant of its own, so the Jacobian is
+        # diagonal and the log-determinant is minus the log of the scales
+        log_det = _tf.reduce_sum(_tf.zeros_like(x), axis=1) \
+            - _tf.reduce_sum(_tf.math.log(self.scale))
+        return x / self.scale, log_det
 
     def backward(self, x):
         x = x * self.scale

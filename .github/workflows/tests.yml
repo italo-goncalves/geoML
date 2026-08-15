@@ -43,6 +43,7 @@ jobs:
           --ignore=geoml/test/test_mixture.py
           --ignore=geoml/test/test_model_persistence.py
           --ignore=geoml/test/test_noise_integration.py
+          --ignore=geoml/test/test_early_stopping.py
           --ignore=geoml/test/test_plots.py
           --ignore=geoml/test/test_interactive.py
           --ignore=geoml/test/test_block_prediction.py
