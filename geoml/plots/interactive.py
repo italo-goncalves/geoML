@@ -20,6 +20,8 @@ The same figures, for looking at rather than for printing.
 names and the same arguments, and hands back a plotly figure instead of a
 matplotlib one:
 
+.. code-block:: python
+
     eda = geoml.plots.Interactive(point, continuous="Elements",
                                   categorical="Rock")
     eda.pairs().show()
@@ -184,6 +186,8 @@ class Interactive(_base.Selection):
         That is the short way; for figures drawn with arguments of your own,
         or captioned, or from more than one data set, build a `Dashboard`
         directly -- it takes figures rather than names:
+
+        .. code-block:: python
 
             geoml.plots.Dashboard(
                 [("Where the cadmium is", eda.scene(color="Cd")),
@@ -442,6 +446,7 @@ class Interactive(_base.Selection):
             title, menu = self._scene_one(figure, coordinates, n_dim,
                                           color, size, clip), None
 
+        layout: dict = {}
         if n_dim == 3:
             layout = {"scene": {
                 "xaxis": {"title": {"text": labels[0]}},
@@ -819,9 +824,7 @@ class Interactive(_base.Selection):
         was built with.
         """
         var = self._require_continuous("accuracy")
-        components = getattr(var, "components", None)
-        parts = [var] if components is None else \
-            [components[label] for label in var.labels]
+        parts = _prep.continuous_parts(var)
 
         # nothing measured means nothing to check against, said before the
         # model is asked for anything
@@ -1087,8 +1090,7 @@ class Interactive(_base.Selection):
             raise ValueError(
                 "%r holds %d components and a cut-off applies to one grade; "
                 "name one with component= (%s)"
-                % (var.name, var.length,
-                   ", ".join(str(label) for label in var.labels)))
+                % (var.name, var.length, _prep.component_names(var)))
 
         curves = _prep.grade_tonnage(
             self.data, name, density, cutoffs,

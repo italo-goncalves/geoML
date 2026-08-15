@@ -188,8 +188,14 @@ class Selection(object):
             return self.palette[index % len(self.palette)]
         return _style.color(index)
 
-    def _series(self):
-        """What to draw as separate colours: the categories, or everything."""
+    def _series(self) -> "list[tuple]":
+        """What to draw as separate colours: the categories, or everything.
+
+        One pair per series, `(label, mask)`. Without a categorical variable
+        there is one nameless series over every location, and its mask is
+        `None` rather than an array of ones -- the callers that index with it
+        are the ones that checked `self.categorical` first.
+        """
         if self.categorical is None:
             return [(None, None)]
         values, measured, labels = _prep.category_values(self.categorical)
@@ -232,5 +238,5 @@ class Selection(object):
                 "them, or [%r] for all of them, to get a menu to switch "
                 "between"
                 % (var.name, var.length,
-                   ", ".join(str(label) for label in var.labels), var.name))
+                   _prep.component_names(var), var.name))
         return var

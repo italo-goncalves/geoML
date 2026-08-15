@@ -555,6 +555,15 @@ class Sigmoid(_Warping):
 class ContinuousNormalizingFlow(_Warping):
     _mixes = True
 
+    # Built by `refresh` rather than by the constructor, which starts them at
+    # None: the declarations say what they become, so the methods that index
+    # them are not read as indexing None.
+    base_ip: "_tf.Tensor | None"
+    inducing_points: "_tf.Tensor"
+    alpha: "_tf.Tensor"
+    chol_space: "_tf.Tensor | None"
+    chol_time: "_tf.Tensor | None"
+
     def __init__(self, size, inducing_points=20, n_steps=10, step=0.01):
         super().__init__()
         self._size_in = size

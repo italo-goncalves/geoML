@@ -25,9 +25,47 @@ import geoml.stats.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
+import tensorflow_probability as _tfp
 import contextlib as _contextlib
 import warnings as _warnings
 from scipy import special as _special
+
+_tfd = _tfp.distributions
+
+
+def _gamma_mode_one(concentration, mode=1.0):
+    """A Gamma prior peaking at `mode`, for a MAP penalty on a range.
+
+    MAP pulls toward the density's *mode*, not its mean, so the mode is what
+    gets centered: `Gamma(c, (c - 1) / mode)` peaks exactly at `mode`, its
+    log-density falls to minus infinity as the value approaches zero (a range
+    collapsing to nothing is the failure this discourages most), and decays
+    linearly on the long side, where a large range merely says the field is
+    smooth. `concentration` must exceed one or the peak sits at zero.
+    """
+    if concentration <= 1.0:
+        raise ValueError(
+            "concentration must be greater than 1 for the prior to peak "
+            "away from zero, got %r" % (concentration,))
+    return _tfd.Gamma(
+        concentration=_tf.constant(concentration, _tf.float64),
+        rate=_tf.constant((concentration - 1.0) / mode, _tf.float64))
+
+
+class _ColumnwiseDirichlet:
+    """A Dirichlet over each column of a `[n_parents, size]` weight matrix.
+
+    `UnitColumnSumParameter` keeps every *column* on the simplex, while
+    `tfd.Dirichlet` reads the *last* axis as the event -- so the value is
+    transposed on the way in, giving one log-density per column, which
+    `RealParameter.log_prior` then sums.
+    """
+
+    def __init__(self, concentration):
+        self._dirichlet = _tfd.Dirichlet(concentration)
+
+    def log_prob(self, value):
+        return self._dirichlet.log_prob(_tf.transpose(value))
 
 
 # Which rule draws the posterior simulations. Set through `simulation_rule`
@@ -779,7 +817,8 @@ class BasicGP(_GPNode):
     applying the non-stationary covariance.
     """
     def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
-                 fix_range=False, isotropic=False, name=None):
+                 fix_range=False, isotropic=False, range_prior=2.0,
+                 name=None):
         """
         Initializer for BasicGP.
 
@@ -795,6 +834,14 @@ class BasicGP(_GPNode):
             Whether to force a unit range for all input dimensions.
         isotropic : bool
             If `True`, forces the same range for all input dimensions.
+        range_prior : float, optional
+            Strength of the Gamma prior that regularizes the ranges, which
+            stay point estimates -- the prior's log-density joins the
+            training objective. It peaks at 1, the natural scale of the
+            whitened space every node works in, falls hard as a range
+            collapses toward zero and gently as it grows. Larger values
+            hold on tighter; `None` removes it, leaving the ranges to the
+            data alone as in versions before 0.6.5.
         name : str
             A name for this node, shown in the printed network and accepted by
             `get_node`. Numbered automatically if omitted.
@@ -802,6 +849,7 @@ class BasicGP(_GPNode):
         super().__init__(parent, name=name)
         self._size = size
         self.kernel = self._register(kernel)
+        self.range_prior = range_prior
 
         self.cov = None
         self.cov_inv = None
@@ -841,6 +889,10 @@ class BasicGP(_GPNode):
                 ))
             self._add_parameter(
                 f"bias_{i}",
+                # A point estimate, deliberately: no KL prices it and none is
+                # needed -- one bounded scalar per expert, the level the data
+                # sets. `cross_validate` still re-initializes it along with
+                # the variational state, because it encodes the data.
                 _gpr.RealParameter(0, -5, 5))
 
         if self.isotropic:
@@ -863,6 +915,8 @@ class BasicGP(_GPNode):
                     fixed=self.fix_range
                 )
             )
+        if self.range_prior is not None:
+            self.parameters["ranges"].prior = _gamma_mode_one(self.range_prior)
 
     def covariance_matrix(self, x, y, var_x=None, var_y=None):
         with _tf.name_scope("basic_covariance_matrix"):
@@ -1189,7 +1243,8 @@ class Linear(_FunctionalLatentVariable):
     Close to a root node it induces rotation in the coordinates. At the end it induces correlations between the
     outputs, and in the middle it can serve as an information bottleneck.
     """
-    def __init__(self, parent, size=1, unit_norm=True, name=None):
+    def __init__(self, parent, size=1, unit_norm=True, weight_prior=1.0,
+                 name=None):
         """
         Initializer for Linear.
 
@@ -1200,8 +1255,19 @@ class Linear(_FunctionalLatentVariable):
         size
             Number of output latent variables.
         unit_norm : bool
-            Whether the weights should form a unit norm vector. If `False` the weights will be constrained to the
-            [-1, 1] interval.
+            Whether the weights should form a unit norm vector. If `False`,
+            the weights are free and regularized by `weight_prior`.
+        weight_prior : float, optional
+            Standard deviation of the zero-mean Gaussian prior on the free
+            weights (`unit_norm=False` only -- the unit norm is constraint
+            enough on its own). The weights stay point estimates; the
+            prior's log-density joins the training objective, so a weight
+            grows only while the data pays for it, which matters because
+            this is the parameter whose count scales with the network
+            (`parent.size` times `size`) and no KL prices it. The standard
+            deviation of 1 matches the whitened scale the network works in.
+            `None` removes the prior and restores the hard [-1, 1] walls of
+            versions before 0.6.5.
         name : str
             A name for this node.
         """
@@ -1219,14 +1285,22 @@ class Linear(_FunctionalLatentVariable):
             )
         else:
             rnd = _rnd.rng().normal(size=(parent.size, self.size), scale=1e-4)
+            # with a prior the walls step back to a safety net: the prior is
+            # what holds the weights now, and it can be out-argued by the
+            # data where a wall cannot
+            wall = 1.0 if weight_prior is None else 10.0
             self._add_parameter(
                 "weights",
                 _gpr.RealParameter(
                     _np.zeros([parent.size, self.size]) + rnd + 1/parent.size,
-                    _np.zeros([parent.size, self.size]) - 1,
-                    _np.zeros([parent.size, self.size]) + 1
+                    _np.zeros([parent.size, self.size]) - wall,
+                    _np.zeros([parent.size, self.size]) + wall
                 )
             )
+            if weight_prior is not None:
+                self.parameters["weights"].prior = _tfd.Normal(
+                    _tf.constant(0.0, _tf.float64),
+                    _tf.constant(float(weight_prior), _tf.float64))
 
         # binary classification
         if (parent.size == 1) & (self.size == 2):
@@ -1350,7 +1424,8 @@ class LinearCombination(_Operation):
 
     This node combines the inputs linearly with positive weights.
     """
-    def __init__(self, *latent_variables, unit_variance=True, name=None):
+    def __init__(self, *latent_variables, unit_variance=True,
+                 per_component=False, weight_concentration=2.0, name=None):
         """
         Initializer for LinearCombination.
 
@@ -1360,35 +1435,89 @@ class LinearCombination(_Operation):
             Nodes to combine. They must all have the same number of variables.
         unit_variance : bool
             If `True`, constrains the weights to unit sum to control the variance of the output.
+        per_component : bool
+            One set of mixing weights per output component instead of one
+            for the whole node, so each component takes its own share of
+            each parent -- one element can lean on a trend that another
+            ignores. Requires `unit_variance`, and multiplies the weight
+            count by `size`, which is why the prior below comes with it.
+        weight_concentration : float, optional
+            Concentration of the symmetric Dirichlet prior on each
+            component's weights (`per_component=True` only -- the shared
+            weights are few enough to need none). The weights stay point
+            estimates; the prior's log-density joins the training
+            objective, holding each component's shares near equal until its
+            data argues otherwise. Must exceed 1 for the pull to point at
+            equal shares; `None` removes it.
         name : str
             A name for this node.
         """
         super().__init__(*latent_variables, name=name)
         self._size = self._common_size()
         self.propagates_inducing_points = self.same_root and all([p.propagates_inducing_points for p in self.parents])
+        self.per_component = per_component
 
-        if unit_variance:
+        n_parents = len(latent_variables)
+        if per_component:
+            if not unit_variance:
+                raise ValueError(
+                    "per_component weights are compositional; they require "
+                    "unit_variance=True")
+            self._add_parameter(
+                "weights",
+                _gpr.UnitColumnSumParameter(
+                    _np.ones([n_parents, self._size]) / n_parents)
+            )
+            if weight_concentration is not None:
+                if weight_concentration <= 1.0:
+                    raise ValueError(
+                        "weight_concentration must be greater than 1 for "
+                        "the prior to peak at equal shares, got %r"
+                        % (weight_concentration,))
+                self.parameters["weights"].prior = _ColumnwiseDirichlet(
+                    _tf.constant(
+                        _np.full(n_parents, float(weight_concentration)),
+                        _tf.float64))
+        elif unit_variance:
             self._add_parameter(
                 "weights",
                 _gpr.CompositionalParameter(
-                    _np.ones(len(latent_variables)) / len(latent_variables))
+                    _np.ones(n_parents) / n_parents)
             )
         else:
             self._add_parameter(
                 "weights",
                 _gpr.PositiveParameter(
-                    _np.ones(len(latent_variables)) / len(latent_variables),
-                    _np.ones(len(latent_variables)) * 0.01,
-                    _np.ones(len(latent_variables)) * 100
+                    _np.ones(n_parents) / n_parents,
+                    _np.ones(n_parents) * 0.01,
+                    _np.ones(n_parents) * 100
                 )
             )
+
+    def _weights_for(self, stacked):
+        """The weights, broadcast-ready for one `[size, ..., n_parents]`
+        stack. Shared weights ride the trailing axis at any rank; the
+        per-component ones need their `size` axis leading and ones between,
+        and the stacks do not agree on rank (a mean carries a simulation
+        axis, a variance does not), so the shape is read off each stack."""
+        weights = self.parameters["weights"].get_value()
+        if not self.per_component:
+            return weights
+        shape = [self.size] + [1] * (len(stacked.shape) - 2) \
+            + [len(self.parents)]
+        return _tf.reshape(_tf.transpose(weights), shape)
 
     def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
 
         if self.propagates_inducing_points:
-            weights = self.parameters["weights"].get_value()[:, None, None]
+            weights = self.parameters["weights"].get_value()
+            if self.per_component:
+                # against the [n_parents, n_ip, size] stacking below
+                weights = weights[:, None, :]
+            else:
+                weights = weights[:, None, None]
 
             all_ip, all_ip_var = [], []
             for i in range(self.root.n_experts):
@@ -1409,7 +1538,6 @@ class LinearCombination(_Operation):
         all_sims = []
         all_explained_var = []
         all_influence = []
-        weights = self.parameters["weights"].get_value()
 
         for i, v in enumerate(self.parents):
             mu, var, sims, explained_var, influence = v.predict(
@@ -1426,11 +1554,17 @@ class LinearCombination(_Operation):
         all_explained_var = _tf.stack(all_explained_var, axis=-1)
         all_influence = _tf.stack(all_influence, axis=-1)
 
-        all_mu = _tf.reduce_sum(all_mu * weights, axis=-1)
-        all_var = _tf.reduce_sum(all_var * weights**2, axis=-1)
-        all_sims = _tf.reduce_sum(all_sims * weights, axis=-1)
-        all_explained_var = _tf.reduce_sum(all_explained_var * weights**2, axis=-1)
-        all_influence = _tf.reduce_sum(all_influence * weights ** 2, axis=-1)
+        all_mu = _tf.reduce_sum(
+            all_mu * self._weights_for(all_mu), axis=-1)
+        all_var = _tf.reduce_sum(
+            all_var * self._weights_for(all_var) ** 2, axis=-1)
+        all_sims = _tf.reduce_sum(
+            all_sims * self._weights_for(all_sims), axis=-1)
+        all_explained_var = _tf.reduce_sum(
+            all_explained_var * self._weights_for(all_explained_var) ** 2,
+            axis=-1)
+        all_influence = _tf.reduce_sum(
+            all_influence * self._weights_for(all_influence) ** 2, axis=-1)
 
         return all_mu, all_var, all_sims, all_explained_var, all_influence
 
@@ -1438,7 +1572,6 @@ class LinearCombination(_Operation):
         all_mu = []
         all_var = []
         all_explained_var = []
-        weights = self.parameters["weights"].get_value()
 
         for i, v in enumerate(self.parents):
             mu, var, explained_var = v.predict_directions(x, dir_x, jitter)
@@ -1450,9 +1583,13 @@ class LinearCombination(_Operation):
         all_var = _tf.stack(all_var, axis=-1)
         all_explained_var = _tf.stack(all_explained_var, axis=-1)
 
-        all_mu = _tf.reduce_sum(all_mu * weights, axis=-1)
-        all_var = _tf.reduce_sum(all_var * weights ** 2, axis=-1)
-        all_explained_var = _tf.reduce_sum(all_explained_var * weights**2, axis=-1)
+        all_mu = _tf.reduce_sum(
+            all_mu * self._weights_for(all_mu), axis=-1)
+        all_var = _tf.reduce_sum(
+            all_var * self._weights_for(all_var) ** 2, axis=-1)
+        all_explained_var = _tf.reduce_sum(
+            all_explained_var * self._weights_for(all_explained_var) ** 2,
+            axis=-1)
 
         return all_mu, all_var, all_explained_var
 
@@ -2280,7 +2417,9 @@ class MultiStructureGP(BasicGP):
     and applying a linear combination externally is that here the combination is at the kernel level instead of the
     latent variable level.
     """
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False, n_structures=2, name=None):
+    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False,
+                 n_structures=2, weight_concentration="staircase",
+                 range_prior=2.0, name=None):
         """
         Initializer for MultiStructureGP.
 
@@ -2296,11 +2435,31 @@ class MultiStructureGP(BasicGP):
             Whether to force a unit range for all input dimensions.
         n_structures : int
             Number of kernels to combine (minimum 2).
+        weight_concentration : str, float, or None
+            The Dirichlet prior on the structure weights, which stay point
+            estimates -- the prior's log-density joins the training
+            objective. `"staircase"` (the default) aligns the prior with
+            the ranges: structure `n` starts with range `1 / (n + 1)`, and
+            its weight's share of the prior's peak follows the same
+            ordering, so mass sits on the long-range structure until the
+            data moves it to the short ones. The weights themselves still
+            start uniform -- initializing them on the staircase was
+            measured and rejected, since training never left that basin. A
+            number gives a symmetric Dirichlet peaking at equal shares (it
+            must exceed 1); `None` removes the prior, as in versions
+            before 0.6.5.
+        range_prior : float, optional
+            Strength of the Gamma priors on the ranges, one per structure,
+            each peaking at that structure's own starting range rather than
+            at a common value -- a shared peak would fight the staircase the
+            structures exist for. `None` removes them.
         name : str
             A name for this node.
         """
         self.n_structures = n_structures
-        super().__init__(parent, size, kernel, fix_range, name=name)
+        self.weight_concentration = weight_concentration
+        super().__init__(parent, size, kernel, fix_range,
+                         range_prior=range_prior, name=name)
 
     def _set_parameters(self):
         for i, n in enumerate(self.root.n_ip):
@@ -2325,10 +2484,39 @@ class MultiStructureGP(BasicGP):
                 f"bias_{i}",
                 _gpr.RealParameter(0, -5, 5))
 
+        concentration = self.weight_concentration
+        if concentration == "staircase":
+            # concentrations 1 + 2/(n+1): the prior's peak puts shares in
+            # proportion to each structure's starting range. The weights
+            # still START uniform -- initializing them on the staircase was
+            # measured on Walker Lake against the exhaustive truth and
+            # rejected: training never leaves that basin ([0.83, 0.10,
+            # 0.07] against the [0.72, 0.13, 0.15] a uniform start finds
+            # with or without the prior), and every truth-facing score is
+            # worse. The prior alone improved all of them, on every seed.
+            alpha = 1.0 + 2.0 / (_np.arange(self.n_structures) + 1.0)
+        elif isinstance(concentration, str):
+            # any other string would reach the comparison below and fail
+            # there, on a TypeError naming neither the argument nor its
+            # choices
+            raise ValueError(
+                "weight_concentration must be 'staircase', a number greater "
+                "than 1, or None; got %r" % (concentration,))
+        elif concentration is not None:
+            if concentration <= 1.0:
+                raise ValueError(
+                    "weight_concentration must be greater than 1 for the "
+                    "prior to peak at equal shares, got %r" % (concentration,))
+            alpha = _np.full(self.n_structures, float(concentration))
+        else:
+            alpha = None
+
         self._add_parameter(
-            "weights",
-            _gpr.CompositionalParameter(_np.ones([self.n_structures]) / self.n_structures)
-        )
+            "weights", _gpr.CompositionalParameter(
+                _np.ones(self.n_structures) / self.n_structures))
+        if alpha is not None:
+            self.parameters["weights"].prior = _tfd.Dirichlet(
+                _tf.constant(alpha, _tf.float64))
 
         for n in range(self.n_structures):
             self._add_parameter(
@@ -2340,6 +2528,11 @@ class MultiStructureGP(BasicGP):
                     fixed=self.fix_range
                 )
             )
+            if self.range_prior is not None:
+                # each structure's prior peaks at its own starting range:
+                # a common peak at 1 would fight the staircase
+                self.parameters[f"ranges_{n}"].prior = _gamma_mode_one(
+                    self.range_prior, mode=1.0 / (n + 1))
 
     def covariance_matrix(self, x, y, var_x=None, var_y=None):
         with _tf.name_scope("basic_covariance_matrix"):

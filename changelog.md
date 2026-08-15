@@ -1,4 +1,101 @@
 ## version 0.6.5
+* **The documentation site covers the whole public surface, and the type
+check covers every module behind it.** Both had been growing module by
+module; this closes them together.
+  - **`data/grids.py` is annotated and checked**, the last module the typing
+  workstream had left. Thirty-three diagnostics, almost all one idiom: the
+  grid constructors take `step` and `margin` as either a number or one value
+  per axis and rebind the parameter, so a checker follows the float branch
+  down. Each converts into a differently named local now, which is the rule
+  this project has now learned three times. `Grid1D` is narrowed to the
+  scalar `step`/`end` its `float(step)` always required.
+  - **The checked list is every user-facing module** — twenty-seven files,
+  the thirteen in `geoml.__all__` and everything under them, all clean. It
+  had held twelve. The gap mattered: `plots/prepare`, `explorer` and
+  `interactive` were annotated back in 0.6.4 but never added to the list, so
+  their annotations were read by editors and verified by nobody, and they
+  had drifted to twelve diagnostics. A module annotated but unchecked is the
+  worst of both worlds, and `pyproject.toml` now says so where the list is.
+  - Real things the checker found while being pointed at more code:
+  `math/geometry` called `np.atan2`, which only exists in NumPy 2 (now
+  `arctan2`, spelled the same in every version); `viz/plotly` used
+  `collections.abc` while importing only `collections`, which works until
+  nothing else has imported the submodule first; `prepare.color_choices` and
+  `prepare.moving_average` both declared they return an array where they
+  return a tuple. `Grid3D.make_interpolator` still calls a function that
+  does not exist — left as found, since wiring it to `CubicConv3DSeparable`
+  or deleting it is a decision, and now flagged in place rather than only in
+  a changelog entry nobody rereads.
+  - **Eight new reference pages**: `latent`, `kernels`, `transform`,
+  `warping`, `plots`, `viz`, `math` and `stats`, plus grids, blocks, meshes
+  and variables joining the data page, which had documented only the point
+  containers. The two design records written since the site was built join
+  `internals`.
+  - **The manual is part of the site.** A `builder-inited` hook copies
+  `docs/manual/` into the source tree at build time, which is what keeps its
+  relative figure links working; the copy is gitignored, so the chapters
+  still live in one place and are still run from there.
+  - Getting `-W` back to green took two decisions worth recording. The
+  duplicate-object warning is filtered in `conf.py`, because classes here
+  share one function object on purpose (`_blockdata` hands the block fan-out
+  to the grid classes) and autodoc identifies a member by the qualified name
+  of whoever defined it; and `stats.md` excludes the distribution methods
+  TFP copies into every subclass, whose docstrings are TFP's. Nothing else
+  is suppressed: a broken reference or a malformed docstring still fails the
+  build, and five docstrings were fixed to keep it that way — an indented
+  code example is a definition list to RST unless it says
+  `.. code-block:: python`.
+  - **`test_manual.py`** runs every chapter through `run_blocks.py`. It is a
+  release gate only: a full pass trains real models and takes about twenty
+  minutes, so it sits on the structural job's ignore list with the other
+  heavy files.
+
+* **The point-estimated parameters can carry priors now, and the important
+ones do by default.** Only the variational state was ever priced by a KL;
+the ranges, mixing weights and friends were optimized against the ELBO with
+box bounds and nothing else. They stay point estimates — no posterior is
+integrated. A parameter that declares a `prior` adds its log-density to the
+training objective next to the KL, making the whole a bound on
+`log p(y, theta)`: MAP, one differentiable term, and the gradient does the
+rest. A model with no priors trains on bit-for-bit the objective it always
+did, and a saved model reloaded and *refit* gains the defaults, since
+persistence replays constructors.
+  - The defaults are canonical because the network works in whitened space,
+  and each accepts a number for the experienced user or `None` to switch
+  off: `BasicGP(range_prior=2.0)` is a Gamma whose **mode** sits at 1 — MAP
+  pulls toward the mode, so "mean 1" would actually drag ranges toward 0.5
+  — falling to minus infinity as a range collapses and linearly as it
+  grows; `Linear(weight_prior=1.0)` is a standard Gaussian on the free
+  weights (the parameter whose count scales with the network), whose hard
+  [-1, 1] walls step back to a ±10 safety net;
+  `MultiStructureGP(weight_concentration="staircase")` is a Dirichlet whose
+  peak puts shares in proportion to each structure's starting range, and
+  its range priors peak at each structure's own staircase position rather
+  than at a common 1, which would fight the ordering.
+  - **Measured before shipping, and one idea died.** On Walker Lake against
+  the exhaustive truth (the one dataset where overfitting is measurable
+  rather than inferred), the `MultiStructureGP` priors improved every
+  truth-facing number on every seed — rmse against the field 200.1 to
+  199.1, variogram score 42.38 to 42.11, held-out goodness 0.642 to 0.652 —
+  while the staircase *initialization* worsened all of them (206.2, 43.61):
+  training never leaves that basin, where a uniform start finds the right
+  weights with or without the prior. So the prior ships and the staircase
+  start is recorded as rejected. On the chapter-16 Jura network the priors
+  are neutral-to-slightly-positive: CRPS under the Linear prior beats the
+  unpriored model pairwise on every seed, by under a percent, and nothing
+  is ever worse.
+  - `LinearCombination(per_component=True)` is new alongside this: one set
+  of mixing weights per output component instead of one for the node, so
+  one element can lean on a trend another ignores, with a symmetric
+  Dirichlet holding each component's shares near equal until its data
+  argues. Off by default — measured neutral on Jura, whose seven elements
+  evidently agree about how much trend they want.
+  - Design record with the census, the MAP argument and both tables:
+  `docs/parameter-priors.md`. The census is worth one line here: on the
+  deep Jura network the unpriced parameters number 45 against 21 628
+  priced ones, so the density ceiling measured earlier in this release was
+  never about them.
+
 * **Training can stop when the bound settles**, through the new
 `GPOptions(training_tolerance=...)`. The bound is smoothed with an
 exponential moving average, and training ends once its gain over the last

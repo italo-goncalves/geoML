@@ -72,7 +72,7 @@ def rotation_matrix_from_points(points):
 
 
 def azimuth_from_xy(x, y):
-    ang = _np.degrees(_np.atan2(y, x))
+    ang = _np.degrees(_np.arctan2(y, x))
     ang = 90 - ang
     if ang < 0:
         ang += 360
@@ -84,7 +84,7 @@ def dip_from_vec(vec):
         raise ValueError('Vector must be 3D')
     x, y, z = vec
     proj = _np.sqrt(x**2 + y**2)
-    dip = - _np.degrees(_np.atan2(z, proj))
+    dip = - _np.degrees(_np.arctan2(z, proj))
     return dip
 
 

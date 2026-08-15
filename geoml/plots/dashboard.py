@@ -22,6 +22,8 @@ histogram, where are they on the map? -- and no single figure answers that. A
 dashboard does: drag a box over any panel and the same locations light up in
 every other one.
 
+.. code-block:: python
+
     eda = geoml.plots.Interactive(point, continuous="Elements",
                                   categorical="Rock")
     board = eda.dashboard()
@@ -33,6 +35,8 @@ a network.
 
 Take the long way for control over what goes on it, and over how it is laid
 out -- a nested entry is a row of its own, so the rows need not be equal:
+
+.. code-block:: python
 
     geoml.plots.Dashboard(
         [("Where the samples are", eda.scene(color="Cd")),
@@ -63,7 +67,7 @@ import plotly.offline as _poff
 # Bound after every panel has been drawn. Selections are matched on the row
 # index each point carries, not on position, so a point may be a bar in one
 # panel and a dot in another and still be the same sample.
-_SCRIPT = """
+_SCRIPT = r"""
 (function () {
   var ids = %(ids)s;
   var busy = false;

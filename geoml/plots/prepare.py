@@ -401,7 +401,8 @@ def color_limits(values: _types.ArrayLike,
 
 
 def color_choices(container: "_data._SpatialData",
-                  names: "Sequence[str]") -> dict:
+                  names: "Sequence[str]"
+                  ) -> "tuple[_types.FloatArray, _types.IndexArray, list]":
     """
     Several variables' values over the locations that carry all of them.
 
@@ -604,6 +605,17 @@ def continuous_parts(var) -> "list[_data.ContinuousVariable]":
                 "this figure is of measured and predicted numbers"
                 % (str(var.name), type(var).__name__))
     return parts
+
+
+def component_names(var) -> str:
+    """The components a caller can name, ready to drop into a message.
+
+    Every figure that needs one grade out of several says so the same way,
+    and each of them used to reach for `labels` -- an attribute only some
+    variables have. Asking through `continuous_parts` keeps that reach in
+    one place.
+    """
+    return ", ".join(str(part.name) for part in continuous_parts(var))
 
 
 def prediction_values(container: "_data._SpatialData", name: str):
@@ -1054,8 +1066,8 @@ def variogram(container: "_data._SpatialData", name: str,
     return panels
 
 
-def moving_average(values: _types.ArrayLike,
-                   window: int) -> _types.FloatArray:
+def moving_average(values: _types.ArrayLike, window: int
+                   ) -> "tuple[_types.IndexArray, _types.FloatArray]":
     """
     The running mean of `values`, and where each point belongs.
 

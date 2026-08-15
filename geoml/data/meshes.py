@@ -1064,7 +1064,11 @@ def _implicit_combine(here, there, operation):
     grid.add_continuous_variable("distance", field)
     if _np.all(field > 0):
         return _empty_solid()
-    return grid.variables["distance"].measurements.get_contour(0.0)
+    # the variable was just added as a continuous one, which is what carries
+    # the `measurements` this contours
+    distance = grid.variables["distance"]
+    assert isinstance(distance, ContinuousVariable)
+    return distance.measurements.get_contour(0.0)
 
 
 def _local_frame(mine, theirs):

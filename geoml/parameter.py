@@ -261,6 +261,27 @@ class Parametric(object):
                            if not pr.fixed]
         return model_variables
 
+    def log_prior(self):
+        """The summed prior log-density of every unfixed parameter here.
+
+        The MAP half of the objective: parameters that declare a prior stay
+        point estimates, and this term joins the ELBO next to the KL, making
+        the whole a lower bound on `log p(y, theta)` rather than
+        `log p(y | theta)`. Almost every parameter declares none and
+        contributes nothing, so a model without priors trains on exactly the
+        objective it always did. A fixed parameter is left out: its term
+        would be a constant with no gradient, polluting the reported value
+        of the objective without informing anything.
+
+        `_all_parameters` is already unique by identity (`_append_unique`)
+        and its order is the registration order, so the sum is deterministic.
+        """
+        terms = [parameter.log_prior() for parameter in self._all_parameters
+                 if not parameter.fixed and parameter.prior is not None]
+        if not terms:
+            return _tf.constant(0.0, _tf.float64)
+        return _tf.add_n(terms)
+
 
 class RealParameter(object):
     """
@@ -269,9 +290,19 @@ class RealParameter(object):
     The `fixed` property applies to the array as a whole.
     """
     def __init__(self, value, min_val, max_val, fixed=False,
-                 name="Parameter"):
+                 name="Parameter", prior=None):
         self.name = name
         self.fixed = fixed
+
+        # A prior distribution over the parameter's value (any object with a
+        # `log_prob`, in practice a float64 tensorflow-probability
+        # distribution), or None. The parameter stays a point estimate: the
+        # prior's log-density joins the training objective next to the KL
+        # (see `Parametric.log_prior`), which is MAP estimation rather than
+        # variational inference, and costs one differentiable term. Read
+        # when the training graph traces, so it must be in place before the
+        # first call to train.
+        self.prior = prior
 
         value = _np.array(value)
         min_val = _np.array(min_val)
@@ -320,6 +351,18 @@ class RealParameter(object):
 
     def unfix(self):
         self.fixed = False
+
+    def log_prior(self):
+        """The prior's log-density at the current value, as one number.
+
+        Zero when the parameter carries no prior, which is the default
+        everywhere. Differentiable through `get_value`, so the gradient of
+        the objective pulls the parameter toward the prior's mass exactly as
+        hard as the density says to.
+        """
+        if self.prior is None:
+            return _tf.constant(0.0, _tf.float64)
+        return _tf.reduce_sum(self.prior.log_prob(self.get_value()))
 
     def set_limits(self, min_val=None, max_val=None):
         if min_val is not None:

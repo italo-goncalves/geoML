@@ -903,9 +903,15 @@ class VGPNetwork(_GPModel):
         unique_nodes.append(self.latent_network)
         kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
 
-        self.elbo.assign(elbo - kl)
+        # The MAP term: point-estimated parameters that declare a prior pay
+        # its log-density here, making the objective a bound on
+        # `log p(y, theta)`. Zero unless something declares one, so a model
+        # without priors trains on exactly the objective it always did.
+        log_prior = self.log_prior()
+
+        self.elbo.assign(elbo - kl + log_prior)
         self.kl_div.assign(kl)
-        return elbo - kl
+        return elbo - kl + log_prior
 
     @_tf.function
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,

@@ -22,6 +22,8 @@ after another without repeating it. The categorical variable is what splits and
 colours every other figure, which is the question worth asking of most
 geoscientific data: does this population behave as one, or as several?
 
+.. code-block:: python
+
     eda = geoml.plots.Explorer(point, continuous="Elements",
                                categorical="Rock")
     eda.histogram()
@@ -631,9 +633,7 @@ class Explorer(_base.Selection):
         built with.
         """
         var = self._require_continuous("accuracy")
-        components = getattr(var, "components", None)
-        parts = [var] if components is None else \
-            [components[label] for label in var.labels]
+        parts = _prep.continuous_parts(var)
 
         # a grid predicted onto has simulations everywhere and measurements
         # nowhere, and there is nothing to check against -- said before the
@@ -894,8 +894,7 @@ class Explorer(_base.Selection):
             raise ValueError(
                 "%r holds %d components and a cut-off applies to one grade; "
                 "name one with component= (%s)"
-                % (var.name, var.length,
-                   ", ".join(str(label) for label in var.labels)))
+                % (var.name, var.length, _prep.component_names(var)))
 
         curves = _prep.grade_tonnage(
             self.data, name, density, cutoffs,
