@@ -32,6 +32,7 @@ import scipy.stats as _stats
 import geoml._types as _types
 import geoml.data as _data
 import geoml.math.geometry as _geom
+import geoml.metrics as _gmet
 import geoml.storage as _storage
 
 
@@ -877,6 +878,18 @@ def variogram(container: "_data._SpatialData", name: str,
         what was added to the fan per bin to put it on the measurements'
         footing, or None when the container could not say. `cell` is the
         declustering cell used, or None when the pairs were left raw.
+        `score` is :func:`geoml.metrics.variogram_score` over the same
+        locations and weights, or None when there was no fan to score.
+
+    Notes
+    -----
+    The `score` is the figure's verdict as one number, and it is a ranking
+    rather than a measurement: unlike the curves it cannot be put on the
+    measurements' footing, since `|difference| ** p` is not a second moment
+    and has no constant to add. It never reaches zero, and only comparisons
+    between models on the same data mean anything. It is also taken over
+    every pair of the locations kept, not only the binned ones, so it does
+    not answer to `max_lag` or move when `direction` does.
     """
     parts = continuous_parts(variable(container, name))
 
@@ -979,6 +992,7 @@ def variogram(container: "_data._SpatialData", name: str,
 
         fan = None
         lift = None
+        score = None
         store = getattr(part, "simulations", None)
         if not residuals and store is not None \
                 and len(getattr(store, "shape", ())) == 2 \
@@ -993,6 +1007,7 @@ def variogram(container: "_data._SpatialData", name: str,
                     lift = noise_lift(noise)
 
             fan = _np.full((store.shape[1], n_lags), _np.nan)
+            draws = []
             for r in range(store.shape[1]):
                 # one realization is one column, read without materializing
                 # the store -- the same discipline as everywhere else here
@@ -1000,6 +1015,19 @@ def variogram(container: "_data._SpatialData", name: str,
                 fan[r] = curve(column)[0]
                 if lift is not None:
                     fan[r] = fan[r] + lift
+                # kept for the score, which needs the realizations side by
+                # side rather than one at a time. Only the strided rows, so
+                # this is bounded by the pair budget however large the
+                # container is, and it costs no reading that the fan has not
+                # already done.
+                draws.append(column)
+
+            keep = _np.isfinite(values)
+            if keep.sum() > 1:
+                score = _gmet.variogram_score(
+                    values[keep], _np.column_stack(draws)[keep],
+                    coordinates=points[keep],
+                    decluster=cell if cell else False)
 
         # the sill is weighted the same way, or the line drawn across the
         # figure would belong to a different population from the curve
@@ -1021,6 +1049,7 @@ def variogram(container: "_data._SpatialData", name: str,
             "realizations": fan,
             "noise": lift,
             "cell": cell,
+            "score": score,
         })
     return panels
 

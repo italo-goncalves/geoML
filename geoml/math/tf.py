@@ -16,7 +16,67 @@
 """TensorFlow helpers in everyday use. The larger numerical machinery
 (solvers, Lanczos, Kronecker products) is `geoml.math.linalg`."""
 
+import logging as _logging
+
 import tensorflow as _tf
+
+
+# The traced functions whose retracing notices this package answers for.
+# `_predict_raw` retraces on a new batch shape, a new `n_sim` and either
+# value of `include_noise`, all of which are baked into the graph on
+# purpose; `refresh_cached`'s inner function takes no arguments at all and
+# is traced once per network, so a session holding many models (a
+# cross-validation, a manual) trips TensorFlow's counter without anything
+# being retraced twice.
+_RETRACING = "triggered tf.function retracing"
+_OURS = ("_predict_raw", "refresh_cached")
+
+
+class _RetracingFilter(_logging.Filter):
+    """Drops TensorFlow's retracing notice for this package's own graphs.
+
+    The notice is worth having in general and is noise here, for two
+    reasons. It fires on retraces that are deliberate, since the quantities
+    that trigger them are the ones a prediction is allowed to vary; and it
+    interpolates the *repr of the function it names*, which for a bound
+    method is the whole model -- every node, every parameter -- so a single
+    notice can run to hundreds of lines and bury the output it appears in.
+
+    Only messages naming this package's functions are dropped. Anything
+    TensorFlow says about a user's own `tf.function` still comes through.
+    """
+
+    def filter(self, record):
+        message = record.getMessage()
+        if _RETRACING not in message:
+            return True
+        return not any(name in message for name in _OURS)
+
+
+_installed = _RetracingFilter()
+
+
+def silence_retracing_notices(silence: bool = True) -> None:
+    """
+    Whether to drop TensorFlow's retracing notice for geoML's own graphs.
+
+    On by default, and installed when `geoml` is imported. Call it with
+    `False` to hear them, which is worth doing if a prediction seems to be
+    spending its time compiling rather than computing.
+
+    Parameters
+    ----------
+    silence
+        `True` to drop the notices, `False` to let them through.
+
+    See Also
+    --------
+    geoml.models.GPOptions : `jit_predict`, the other tracing-related knob.
+    """
+    logger = _tf.get_logger()
+    logger.removeFilter(_installed)
+    if silence:
+        logger.addFilter(_installed)
 
 
 @_tf.function(

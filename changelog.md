@@ -1,4 +1,62 @@
 ## version 0.6.5
+* **The `geo-ml` skill gained the non-stationary multivariate recipe**, from
+a notebook verified end to end: `08_Jura_non_stationary.ipynb` joins the
+references (stripped of outputs, 5.6 MB to 20 kB) and a new worked example
+sits beside the categorical one. The pattern it records is the one that was
+missing — how a categorical variable *influences* a numerical one, and how
+to make a model non-stationary without leaving the API.
+  - `Linear(cat, size=n, unit_norm=False)` → `LinearCombination(trend, num)`
+  adds a trend read off the rock fields to the grades. `unit_norm=False` is
+  the load-bearing argument: it lets the mixing weights shrink to zero, so
+  the model can conclude the geology says nothing about an element. The
+  alternative — making the categorical node a *parent* of the numerical one
+  — is a genuine deep GP and a much stronger commitment.
+  - `BasicGP(size=2)` → `GPWalk` → `BasicGP` puts the categorical fields in
+  a space the model bends, and the numerical fields read the *unmoved*
+  input: the two need not share a geometry. The input transform starts small
+  (`Isotropic(0.05)`) because the walked coordinates do the long-range work.
+  - Measured on Jura's 100 held-out sites: metals at 0.90 times their own
+  standard deviation and rock balanced accuracy 0.72, against 0.95 and 0.67
+  for the stationary model the manual's case study used before. 250
+  iterations is enough; 500 measures identically.
+  - **A finding that corrects an earlier one.** 0.6.5's variogram work
+  established that this dataset's stationary model degrades sharply with
+  extra inducing points (0.96 → 1.13 from 81 to 169). The non-stationary
+  network is *flat* from 259 to 1220 — five times the points, five and a
+  half times the training, no measurable change. The ceiling belongs to a
+  configuration, not to the method, and both the skill and the manual now
+  say so rather than quoting a number.
+* **TensorFlow's retracing notice is quiet for this package's own graphs**,
+and the retracing it was reporting is largely gone. Two changes, and the
+first is the one that matters.
+  - `predict_raw`'s traced function is built with `reduce_retracing=True`.
+  The batch shape is the one input that varies without meaning anything: a
+  grid divides into equal batches and a short last one, and every container
+  of a different size started the count again. Measured over eight
+  predictions of differing size, **eight traces and 7.6 s become two and
+  2.2 s**, bit-identical, and XLA agrees with the eager path either way
+  (checked at `jit_predict` both ways, gap 1e-14). What still retraces —
+  `n_sim`, `include_noise` — is baked into the graph and has to.
+  - `geoml.math.tf.silence_retracing_notices()` drops the notice for
+  `_predict_raw` and `refresh_cached`'s inner function, and is installed
+  when `geoml` is imported. Call it with `False` to hear them again, which
+  is worth doing if a prediction seems to be compiling rather than
+  computing. The filter matches those two names only, so anything
+  TensorFlow says about a user's own `tf.function` still comes through.
+  - Why suppress at all, when retracing notices are usually worth reading:
+  the message interpolates the repr of the function it names, and for a
+  bound method that is the **entire model** — every node, every parameter —
+  so one notice can run to hundreds of lines and bury whatever it lands in.
+  `refresh_cached`'s function meanwhile takes no arguments and is traced
+  once per network; a session holding many models (a cross-validation, the
+  manual) trips TensorFlow's counter without anything being retraced twice.
+  - Worth knowing, and not a bug: with `jit_predict` on and off, the
+  *deterministic* columns agree to 1e-14 (`latent_mean`, `latent_variance`,
+  `noise_variance`) while `prediction` does not, because it is the mean of
+  the simulations and the two backends draw different random numbers. The
+  gap falls as `1/sqrt(n_sim)` — 79, 19, 5.5 at n_sim 4, 40, 400 — which is
+  Monte Carlo noise, and is why `test_jit_prediction_matches_the_plain_one`
+  compares the latent mean.
 * **The 0.6.0 aliases now say they are going away.** The ten shims left at
 the pre-0.6.0 flat paths (`geoml.tftools`, `geoml.drillhole`, `geoml.random`,
 …) promised "one release" in a docstring and said nothing at runtime, so
@@ -130,6 +188,27 @@ the answer.
   used. The shortest lag is the one bin declustering cannot mend, since the
   closest pairs exist mostly *inside* the clusters, and the manual now says
   so where it reads the figure.
+  - **`metrics.variogram_score` declusters too**, given the `coordinates`
+  its pairs come from: each pair is weighted by `w_i * w_j`, and
+  `compute_metrics` passes them, so the number reported beside the CRPS is
+  the declustered one. Its other bias stays, deliberately. The truth carries
+  the measurement noise and the realizations do not, and unlike a
+  semivariogram there is no constant to add to `|difference| ** p`, so
+  putting the two on one footing would mean drawing noise into the
+  realizations — a seed inside a metric, and a number that moves between
+  calls. The docstring now says plainly that this is an estimate which never
+  reaches zero, to be read as a ranking between models on the same data,
+  and points at the figure for when the size of the gap is the question.
+  - **The figure carries the score**, in each panel's title as `VS = ...`,
+  in both backends. It is computed on the locations the figure kept and
+  with the cell the figure chose, so the number and the curves are the same
+  comparison; the realizations it needs are the columns the fan already
+  read, kept side by side rather than re-read, which is bounded by the pair
+  budget however large the container is. Panels without a fan (`residuals`,
+  nothing simulated) carry `None` and title themselves as before. The score
+  is over every pair of the kept locations rather than the binned ones, so
+  it does not move with `max_lag` or `direction` — it judges the ensemble,
+  and the curves are what the direction changes.
   - This started from the observation that the fan's remaining shortfall
   looked like preferential sampling rather than a bad model, and it was.
   With both corrections in place the fan tracks the data across the whole

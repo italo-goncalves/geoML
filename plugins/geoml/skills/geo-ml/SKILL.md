@@ -100,7 +100,86 @@ by tree path — `get(path)` for an attribute's own methods, `values(path)` for
 a numpy array; see `references/notebook-style.md` §0. `model.to_dot()` renders
 the network as a diagram.
 
-### 1.3 Module map
+### 1.3 Worked example (Jura, non-stationary and multivariate)
+
+The pattern to reach for when one variable should influence another and the
+field is not stationary. From `references/08_Jura_non_stationary.ipynb`,
+which is verified end to end.
+
+```python
+import geoml
+import geoml.latent as gl, geoml.transform as tr
+import geoml.kernels as kr, geoml.likelihood as lk, geoml.warping as wp
+
+geoml.set_seed(1234)
+jura, jura_validation = geoml.datasets.jura()
+elements = list(jura.get("Elements").labels)
+rocks = list(jura.get("Rock").labels)
+
+# the data's own locations plus a regular backbone, split into experts
+inducing = geoml.data.inducing.experts(
+    geoml.data.inducing.combine(
+        jura, geoml.data.Grid2D(start=[0, 0], n=[21, 21], end=[6, 6])),
+    4)
+net_input = gl.BasicInput(inducing_points=inducing,
+                          transform=tr.Isotropic(0.05))
+
+# an SDE moves the coordinates: a stationary kernel in the moved space is
+# non-stationary in the real one
+field = gl.BasicGP(net_input, size=2, kernel=kr.Gaussian())
+coords = gl.GPWalk(field, n_steps=5)
+cat = gl.BasicGP(coords, size=len(rocks), kernel=kr.Matern32())
+
+# how the geology reaches the grades: a trainable map off the categorical
+# fields, *added* to the numerical ones
+trend = gl.Linear(cat, size=len(elements), unit_norm=False)
+num = gl.BasicGP(net_input, size=len(elements), kernel=kr.Spherical())
+net_out = gl.Concatenate(cat, gl.LinearCombination(trend, num))
+
+likelihoods = [
+    lk.CategoricalGaussianIndicator(len(rocks)),
+    lk.Laplace(warping=wp.ChainedWarping(
+        wp.Log(len(elements)),                       # non-negativity
+        wp.RobustPCA(len(elements), len(elements)),  # decorrelate
+        wp.Spline(len(elements), knots_per_arm=5),   # asymmetry
+        wp.ZScore(len(elements)))),
+]
+
+model = geoml.models.VGPNetwork(
+    data=jura, variables=["Rock", "Elements"], likelihoods=likelihoods,
+    latent_network=net_out,
+    options=geoml.models.GPOptions(prediction_batch_size=1000, jitter=1e-6))
+model.train_full(250)
+```
+
+Four things in that network are worth carrying to other problems:
+
+- **`Linear` → `LinearCombination` is how one variable influences another**,
+  and the influence is *additive*. The alternative — making the categorical
+  node a **parent** of the numerical one, `BasicGP(Concatenate(root, cat))` —
+  also works and is a genuine deep GP, but it forces the grades to read the
+  rock fields through the uncertainty propagation, which is a much stronger
+  commitment than adding a trend.
+- **`unit_norm=False` on the `Linear` is deliberate**: it lets the mixing
+  weights shrink towards zero, so the model can conclude that the geology
+  says nothing about a particular element. With the unit-norm constraint it
+  cannot decline the influence.
+- **`GPWalk` is what makes it non-stationary.** An inner GP of size 2 moves
+  the coordinates over a few steps, and the categorical fields are modelled
+  in the moved space. The numerical fields read the *unmoved* input here —
+  the two need not share a geometry.
+- **The input transform starts small** (`Isotropic(0.05)`) because the walked
+  coordinates do the long-range work. Do not copy a range across from a
+  stationary model.
+
+Measured on Jura's 100 held-out sites: the metals come back at 0.91 times
+their own standard deviation and rock balanced accuracy at 0.72, against
+0.95 and 0.67 for a flat stationary model on the same data. The two differ
+in more than the network — likelihood, warping chain and inducing set all
+change — so read that as the recipe being better rather than as an isolated
+effect of any one piece. 250 iterations is enough; 500 measured identically.
+
+### 1.4 Module map
 
 | Module | Role |
 |---|---|
@@ -124,7 +203,7 @@ the network as a diagram.
 | `plots/` | EDA and model figures in two backends: `Explorer` (matplotlib) and `Interactive` (plotly), plus a linked `Dashboard`. `prepare.py` holds the arithmetic and imports no plotting library. |
 | `viz/` | `graphviz.py` (DOT diagrams), `plotly.py`, `pyvista.py` (visualization export). |
 
-### 1.4 Theory → code
+### 1.5 Theory → code
 
 The papers and the code frequently use **different names for the same thing**.
 This table is the bridge:
@@ -144,7 +223,7 @@ This table is the bridge:
 | Warped GP | `warping.Spline` + `Softplus`, attached to the model |
 | Multivariate weight matrix $\mathbf{M}$ | `latent.LinearCombination` |
 
-### 1.5 Gotchas
+### 1.6 Gotchas
 
 - **Reproducibility:** call `geoml.set_seed(seed)` *before constructing the
   objects*. Parameter initialization draws from the package RNG in
@@ -191,6 +270,8 @@ These are the intuitions that are rarely stated explicitly but underlie the work
 - **In implicit modeling, what matters is the sign of the potential field**, not its magnitude. A contact point constrains the field to cross a specific threshold.
 - **Compositional data (Cu-Pb-Zn) lives on a simplex.** The CLR transform maps it to $\mathbb{R}^D$ where standard GP assumptions apply. Back-transforming requires care to enforce the closure constraint.
 - **The number of inducing points $U$ is the main hyperparameter.** For smooth functions, $U \approx 100$–$500$ suffices. For rough/high-frequency patterns, $U \to N$ is needed.
+- **How many inducing points a model can absorb is a property of the whole configuration, not a number to carry between problems.** Measured on Jura (259 samples, 100 held out): a stationary model with a Gaussian likelihood degraded from 0.96 to 1.13 times the data's own standard deviation when its inducing set doubled from 81 to 169, the extra capacity going into interpolating its own samples. The non-stationary network of §1.3, with a Laplace likelihood, is *flat* from 259 to 1220 — five times the points, five and a half times the training, no measurable change. Do not port a count across a change of network or likelihood; measure it on held-out data for the configuration you intend to ship.
+- **A held-out score measured at sampled locations cannot speak for the ground between them.** A regular backbone of inducing points is there for the *map*, and a validation set drawn from the same campaign is structurally unable to notice it. A number that does not move is not always a number that has looked.
 - **Variogram modeling = GP training with a Gaussian likelihood.** Maximum likelihood training is more principled but requires the full $N \times N$ matrix unless sparse approximations are used.
 
 ---

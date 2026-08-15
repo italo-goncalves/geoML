@@ -72,3 +72,10 @@ from geoml import persistence
 from geoml.data import (PointData, Grid1D, Grid2D, Grid3D, BlockSet3D,
                         DrillholeData)
 from geoml.models import VGPNetwork
+
+# TensorFlow's retracing notice, for this package's own graphs only, is
+# noise: the retraces it reports are deliberate, and the message carries the
+# repr of the function it names, which for a bound method is the entire
+# model. `geoml.math.tf.silence_retracing_notices(False)` puts them back.
+from geoml.math.tf import silence_retracing_notices as _silence_retracing
+_silence_retracing()

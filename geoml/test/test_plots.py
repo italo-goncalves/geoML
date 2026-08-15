@@ -1793,6 +1793,52 @@ def test_the_residual_variogram_reads_the_prediction_and_drops_the_fan(
     assert panel["sill"] == pytest.approx(np.var(residual))
 
 
+def test_the_panel_carries_the_score_of_the_fan_it_drew(trained):
+    """The figure's verdict as one number, on the same locations and the same
+    declustering weights as the curves."""
+    _, point = trained
+    part = point.variables["v"].components["a"]
+    measured = part.measurements.values.to_numpy().astype(float).ravel()
+    coords = np.asarray(point.coordinates, dtype=float)
+    sims = np.column_stack([
+        np.asarray(part.simulations[:, r]).ravel()
+        for r in range(part.simulations.shape[1])])
+
+    panel = prepare.variogram(point, "v", n_lags=5)[0]
+    assert panel["score"] == pytest.approx(geoml.metrics.variogram_score(
+        measured, sims, coordinates=coords, decluster=panel["cell"]))
+
+    raw = prepare.variogram(point, "v", n_lags=5, decluster=False)[0]
+    assert raw["cell"] is None
+    assert raw["score"] == pytest.approx(
+        geoml.metrics.variogram_score(measured, sims))
+
+
+def test_a_panel_with_no_fan_has_no_score(trained):
+    """Nothing to score without realizations, and the figure still draws."""
+    _, point = trained
+    panel = prepare.variogram(point, "v", n_lags=4, residuals=True)[0]
+    assert panel["realizations"] is None
+    assert panel["score"] is None
+
+
+def test_the_score_reaches_the_titles_of_both_backends(trained):
+    _, point = trained
+    panels = prepare.variogram(point, "v", n_lags=5)
+    expected = ["%s (VS = %.3g)" % (panel["label"], panel["score"])
+                for panel in panels]
+
+    figure = geoml.plots.Explorer(point, continuous="v").variogram(n_lags=5)
+    # the style puts panel titles on the left, and that is where they are read
+    titles = [ax.get_title(loc="left") for ax in figure.axes
+              if ax.get_title(loc="left")]
+    assert titles == expected
+
+    interactive = geoml.plots.Interactive(
+        point, continuous="v").variogram(n_lags=5)
+    assert [note.text for note in interactive.layout.annotations] == expected
+
+
 def test_the_variogram_reads_realizations_one_column_at_a_time(
         trained, monkeypatch):
     """A block model's store does not fit in memory whole; a column does."""

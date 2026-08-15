@@ -776,6 +776,13 @@ class Explorer(_base.Selection):
         the model missed -- honest on cross-validated predictions
         (`models.cross_validate`).
 
+        Each panel's title carries `VS`, the variogram score of
+        :func:`geoml.metrics.variogram_score` over the same locations and
+        weights: the eye's verdict on the fan as one number, for comparing
+        two models without squinting. Lower is better, but only against
+        another model on the same data -- the score keeps a bias the curves
+        are corrected for, and never reaches zero.
+
         Parameters
         ----------
         n_lags : int
@@ -791,6 +798,11 @@ class Explorer(_base.Selection):
             Angular tolerance around `direction`, in degrees.
         residuals : bool
             Variogram of the residuals instead, without the fan.
+        decluster : bool or float
+            Weight pairs by cell-declustering weights, so that the curve
+            estimates the field's variogram rather than the sampling's.
+            `True` chooses the cell size, a number fixes it, `False` leaves
+            the pairs raw.
         """
         var = self._require_continuous("variogram")
         panels = _prep.variogram(
@@ -807,7 +819,9 @@ class Explorer(_base.Selection):
                 row, column = divmod(i, columns)
                 axes = axes_grid[row][column]
                 self._draw_variogram(axes, panel)
-                axes.set_title(panel["label"])
+                axes.set_title(panel["label"] if panel["score"] is None
+                               else "%s (VS = %.3g)"
+                                    % (panel["label"], panel["score"]))
                 axes.set_xlabel("lag distance")
                 axes.set_ylabel("semivariance")
             for i in range(len(panels), rows * columns):

@@ -799,8 +799,13 @@ class ContinuousVariable(_Variable):
             'Median Absolute Error (simulations)': _skmetrics.median_absolute_error(
                 _np.broadcast_to(y_true, sims.shape), sims),
             'CRPS (simulations)': _gmlmetrics.crps(y_true, sims),
+            # declustered: the pairs come from wherever the drilling went, and
+            # unweighted they would describe the sampling as much as the field
             'Variogram score (simulations)': _gmlmetrics.variogram_score(
-                y_true, sims),
+                y_true, sims,
+                coordinates=_np.asarray(
+                    self.coordinates.coordinates, dtype=float
+                )[has_value == 1]),
         }
 
         bias_2, variance = _gmlmetrics.bias_variance_decomposition(y_true, sims)

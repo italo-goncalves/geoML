@@ -6,6 +6,7 @@ anything -- and tested against distributions whose answer is known in advance.
 """
 import numpy as np
 
+import geoml.math.geometry as geometry
 import geoml.metrics as metrics
 
 
@@ -131,3 +132,33 @@ def test_variogram_score_punishes_broken_spatial_structure():
 
     assert metrics.variogram_score(y_true, honest) < \
         metrics.variogram_score(y_true, shuffled)
+
+
+def test_variogram_score_weights_each_pair_by_its_ends():
+    """With coordinates the pairs are declustered, and the number is the
+    weighted average the weights say it is."""
+    rng = np.random.default_rng(11)
+    n, m = 40, 30
+
+    # a sparse spread with one crowded knot in it, so the weights are not flat
+    coordinates = np.vstack([rng.uniform(0, 100, size=(n, 2)),
+                             rng.normal([20, 20], 1.0, size=(n, 2))])
+    y_true = coordinates[:, 0] * 0.05 + rng.normal(size=2 * n)
+    y_pred = y_true[:, None] + rng.normal(size=(2 * n, m))
+
+    raw = metrics.variogram_score(y_true, y_pred, coordinates=coordinates,
+                                  decluster=False)
+    assert np.isclose(raw, metrics.variogram_score(y_true, y_pred))
+
+    weights = geometry.declustering_weights(coordinates, y_true)[0]
+    i_idx, j_idx = np.triu_indices(2 * n, k=1)
+    truth = np.abs(y_true[i_idx] - y_true[j_idx]) ** 0.5
+    ensemble = np.mean(
+        np.abs(y_pred[i_idx, :] - y_pred[j_idx, :]) ** 0.5, axis=1)
+    share = weights[i_idx] * weights[j_idx]
+    expected = (share * (truth - ensemble) ** 2).sum() / share.sum()
+
+    declustered = metrics.variogram_score(y_true, y_pred,
+                                          coordinates=coordinates)
+    assert np.isclose(declustered, expected)
+    assert not np.isclose(declustered, raw)

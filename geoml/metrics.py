@@ -18,6 +18,7 @@
 import numpy as _np
 
 import geoml._types as _types
+import geoml.math.geometry as _geom
 
 
 def rmse(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
@@ -121,7 +122,9 @@ def crps(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
 
 
 def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
-                    p: float = 0.5, max_pairs: int = 50000) -> float:
+                    p: float = 0.5, max_pairs: int = 50000,
+                    coordinates: "_types.ArrayLike | None" = None,
+                    decluster: "bool | float" = True) -> float:
     """
     How well the ensemble reproduces the differences between locations.
 
@@ -130,19 +133,31 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
     ensemble's mean one, squared and averaged. `crps` judges each location's
     marginal and cannot see dependence; this is the score that punishes an
     ensemble whose realizations have the right histograms and the wrong
-    spatial structure. Pairs are unweighted, and past the budget they are
-    strided down deterministically.
+    spatial structure. Past the budget the pairs are strided down
+    deterministically.
 
-    Read it as a **comparison between models on the same data**, not as an
-    absolute quantity. The truth carries the likelihood noise and the
-    realizations are of the ground with that noise integrated out, so a
-    measured difference is systematically the wider of the two and the score
-    never reaches zero however good the model is. The variogram-fan figure
-    corrects for this by raising the fan, which works there because a
-    semivariogram is a second moment and the noise contributes a known
-    variance to it; `|difference| ** p` is not, so there is no constant to
-    add here. The bias is common to any two ensembles on the same locations,
-    which is why ranking survives it.
+    Given `coordinates`, each pair is weighted by `w_i * w_j` from
+    :func:`geoml.math.geometry.declustering_weights`, so that a crowded
+    patch of drilling counts once rather than once per hole. Without them
+    the pairs are raw and the score describes the sampling as much as the
+    field.
+
+    This is an **estimate, and a biased one**. The truth carries the
+    likelihood noise while the realizations are of the ground with that
+    noise integrated out, so a measured difference is systematically the
+    wider of the two and the score never reaches zero however good the model
+    is. The variogram figure corrects the same bias by raising its fan,
+    which works there because a semivariogram is a second moment and
+    independent noise adds a known variance to it. `|difference| ** p` is
+    not a second moment and has no such constant, so putting the two sides
+    on one footing here would mean drawing noise into the realizations,
+    which is a seed inside a metric and a number that changes between calls.
+    The bias is instead left in place: it is common to any two ensembles on
+    the same locations, so read the score as a **comparison between models
+    on the same data** rather than as an absolute quantity.
+    :func:`geoml.plots.prepare.variogram` is the honest picture of the same
+    question, and the one to reach for when the size of the disagreement
+    matters rather than its ordering.
 
     Parameters
     ----------
@@ -156,14 +171,32 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
         The power. 0.5 is the authors' recommendation.
     max_pairs
         The pair budget.
+    coordinates
+        `(n_data, n_dim)` sample locations, needed to decluster.
+    decluster
+        Weight pairs by cell-declustering weights. `True` chooses the cell
+        size, a number fixes it, `False` leaves the pairs raw. Ignored when
+        there are no `coordinates` to lay a lattice over.
 
     Returns
     -------
     score : float
         Lower is better.
+
+    References
+    ----------
+    Scheuerer, M., & Hamill, T. M. (2015). Variogram-based proper scoring
+    rules for probabilistic forecasts of multivariate quantities. *Monthly
+    Weather Review*, 143(4), 1321-1334.
     """
     y_true = _np.asarray(y_true, dtype=float).ravel()
     y_pred = _np.asarray(y_pred, dtype=float)
+
+    weights = None
+    if coordinates is not None and decluster is not False:
+        weights = _geom.declustering_weights(
+            _np.asarray(coordinates, dtype=float), y_true,
+            cell=None if decluster is True else float(decluster))[0]
 
     i_idx, j_idx = _np.triu_indices(y_true.size, k=1)
     if i_idx.size > max_pairs:
@@ -173,7 +206,12 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
     truth = _np.abs(y_true[i_idx] - y_true[j_idx]) ** p
     ensemble = _np.mean(
         _np.abs(y_pred[i_idx, :] - y_pred[j_idx, :]) ** p, axis=1)
-    return float(_np.mean((truth - ensemble) ** 2))
+    squared = (truth - ensemble) ** 2
+
+    if weights is None:
+        return float(_np.mean(squared))
+    share = weights[i_idx] * weights[j_idx]
+    return float((share * squared).sum() / share.sum())
 
 
 def interval_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
