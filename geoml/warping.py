@@ -26,7 +26,9 @@ __all__ = ["Identity",
            "ContinuousNormalizingFlow",
            "CenteredLogRatio",
            "PCA",
-           "RobustPCA"
+           "RobustPCA",
+           "Rotation",
+           "ScaledSimplex"
            ]
 
 import geoml.math.interpolate as _gint
@@ -42,6 +44,7 @@ import warnings as _warnings
 from sklearn.covariance import MinCovDet as _MCD
 from sklearn.cluster import KMeans as _KMeans
 from sklearn.decomposition import FastICA as _ICA
+from sklearn.exceptions import ConvergenceWarning as _ConvergenceWarning
 
 
 class _Warping(_gpr.Parametric):
@@ -424,7 +427,9 @@ class Log(_Warping):
 
     def forward(self, x):
         x_warp = _tf.math.log(x + self.shift)
-        log_det = _tf.reduce_sum(1 / (x + self.shift), axis=1)
+        # the derivative is 1 / (x + shift); what goes out is its log, as
+        # everywhere else, so that a chain can add its links together
+        log_det = - _tf.reduce_sum(_tf.math.log(x + self.shift), axis=1)
         return x_warp, log_det
 
     def backward(self, x):
@@ -490,7 +495,10 @@ class ChainedWarping(_Warping):
         return all(wp.elementwise for wp in self.warpings)
 
     def forward(self, x):
-        d = _tf.reduce_sum(_tf.ones_like(x, dtype=_tf.float64), axis=1)
+        # log-determinants add along a chain, so the accumulator starts at
+        # zero; `ones_like` seeded it with the column count until 0.6.5,
+        # which offset every chained warping's value by its own width
+        d = _tf.reduce_sum(_tf.zeros_like(x, dtype=_tf.float64), axis=1)
         for wp in self.warpings:
             x, log_d = wp.forward(x)
             d = d + log_d
@@ -546,6 +554,15 @@ class Sigmoid(_Warping):
 
 class ContinuousNormalizingFlow(_Warping):
     _mixes = True
+
+    # Built by `refresh` rather than by the constructor, which starts them at
+    # None: the declarations say what they become, so the methods that index
+    # them are not read as indexing None.
+    base_ip: "_tf.Tensor | None"
+    inducing_points: "_tf.Tensor"
+    alpha: "_tf.Tensor"
+    chol_space: "_tf.Tensor | None"
+    chol_time: "_tf.Tensor | None"
 
     def __init__(self, size, inducing_points=20, n_steps=10, step=0.01):
         super().__init__()
@@ -738,7 +755,17 @@ class PCA(_Warping):
         x = x - self.mean
         x = _tf.matmul(x, self.eigvecs)
         x = x / _tf.sqrt(self.eigvals)
-        return x, _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+
+        # The rotation preserves volume and the scaling does not, so the map
+        # multiplies it by prod(eigvals) ** -0.5 -- a constant, settled when
+        # the warping was initialized. With fewer components than variables
+        # there is no square Jacobian and so no determinant to report: the
+        # map projects, and what the likelihood sees is that projection.
+        log_det = _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+        if self.size_out == self.size_in:
+            log_det = log_det \
+                - 0.5 * _tf.reduce_sum(_tf.math.log(self.eigvals))
+        return x, log_det
 
     def backward(self, x):
         x = x * _tf.sqrt(self.eigvals)
@@ -788,6 +815,22 @@ class RobustPCA(PCA):
 
 
 class CenteredLogRatio(_Warping):
+    """
+    The centered log-ratio transformation of compositional data.
+
+    Takes the logarithm of each part and subtracts the row's mean log, which
+    frees the composition from the constraint that its parts sum to one. The
+    inverse is the softmax.
+
+    Notes
+    -----
+    The transformation maps the simplex onto the hyperplane where the
+    components sum to zero, and both are one dimension smaller than the
+    number of parts. The log-determinant reported is the volume factor of
+    that map, so the objective is a density on the hyperplane: values are
+    comparable between compositional models and only loosely against a
+    warping that transforms a variable one to one.
+    """
     _mixes = True
 
     def __init__(self, n_dim):
@@ -801,7 +844,19 @@ class CenteredLogRatio(_Warping):
 
         x_log = _tf.math.log(x)
         x_log = x_log - _tf.reduce_mean(x_log, axis=1, keepdims=True)
-        log_det = _tf.reduce_sum(1 / x, axis=1) * 0.0
+
+        # The transformation ignores a rescaling of the whole row, so between
+        # arrays of n_dim columns its Jacobian is singular and has no
+        # determinant at all. Read as the bijection it is -- from the simplex
+        # to the hyperplane where the components sum to zero, both of them
+        # one dimension smaller -- the volume factor is this. Unlike the
+        # other constants here it varies with the row, growing without bound
+        # as a part approaches zero, where the transformation stretches. It
+        # is the same whichever orthonormal basis of that hyperplane it is
+        # measured in, which is why no balance matrix has to be chosen (nor
+        # defended) to state it.
+        log_det = - _np.log(self.size_in) \
+            - _tf.reduce_sum(_tf.math.log(x), axis=1)
         return x_log, log_det
 
     def backward(self, x):
@@ -809,6 +864,51 @@ class CenteredLogRatio(_Warping):
 
 
 class Rotation(Identity):
+    """
+    An orthogonal rotation of the variables.
+
+    Multiplies the data by a square orthonormal matrix, which is a trainable
+    parameter. The transformation is volume preserving, so the log-determinant
+    it contributes is zero and the rotation neither stretches nor compresses
+    the density.
+
+    The matrix is **initialized by independent component analysis**
+    (`sklearn.decomposition.FastICA`), which positions the axes along the
+    directions of maximum non-Gaussianity in the data. This makes it the
+    natural partner of a per-component transformation placed after it: the
+    rotation finds the directions along which the marginals depart most from
+    a Gaussian, and the following warping is then applied where that departure
+    lives. `Rotation` followed by `Spline` is the usual pairing.
+
+    Parameters
+    ----------
+    n_dim : int
+        Number of variables, and the size of the rotation matrix.
+    fixed : bool
+        Whether to keep the matrix at its initial value instead of training
+        it. The ICA initialization is used either way.
+
+    Notes
+    -----
+    This warping mixes its inputs, so `elementwise` is False for any chain
+    containing it, and the likelihood integrates its noise over Sobol points
+    rather than per-column Gauss-Hermite nodes.
+
+    The ICA fit is a starting point rather than a result: training moves the
+    matrix from wherever ICA stopped, so a fit that reaches the iteration
+    limit is not an error and its convergence warning is suppressed.
+
+    References
+    ----------
+    Hyvärinen, A., & Oja, E. (2000). Independent component analysis:
+    algorithms and applications. Neural Networks, 13(4-5), 411-430.
+
+    See Also
+    --------
+    PCA, RobustPCA : decorrelating transformations, by variance rather than
+        by non-Gaussianity.
+    Spline : the per-component warping usually placed after this one.
+    """
     _mixes = True
 
     def __init__(self, n_dim, fixed=False):
@@ -834,7 +934,15 @@ class Rotation(Identity):
         return x
 
     def initialize(self, x):
-        ica = _ICA(whiten=False).fit(x)
+        # ICA is asked for a starting point, not a converged answer: the
+        # rotation is trainable, and training moves it from wherever the
+        # fit stopped. Hitting the iteration limit therefore costs nothing
+        # worth telling the user about, and the ConvergenceWarning it
+        # raises is noise in a fit that is working as intended -- it fired
+        # on the Jura case in the test suite, where the model is fine.
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", _ConvergenceWarning)
+            ica = _ICA(whiten=False).fit(x)
         self.parameters['rotation'].set_value(ica.components_)
         rot = self.parameters['rotation'].get_value()
         x = _tf.matmul(x, rot)
@@ -854,7 +962,11 @@ class ScaledSimplex(Identity):
         self.scale = None
 
     def forward(self, x):
-        return x / self.scale, _tf.reduce_sum(_tf.zeros_like(x), axis=1)
+        # each part divided by a constant of its own, so the Jacobian is
+        # diagonal and the log-determinant is minus the log of the scales
+        log_det = _tf.reduce_sum(_tf.zeros_like(x), axis=1) \
+            - _tf.reduce_sum(_tf.math.log(self.scale))
+        return x / self.scale, log_det
 
     def backward(self, x):
         x = x * self.scale

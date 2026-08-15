@@ -5,6 +5,10 @@
 # onto that list. The sunspot test is deselected even from the full suite
 # because it downloads from sidc.be -- a release gate should not depend on
 # a third-party server being up.
+#
+# `test_manual.py` is the heaviest of them: a full pass over the manual's
+# seventeen chapters trains real models and takes about twenty minutes, so
+# it is a release gate and nothing else.
 
 name: tests
 
@@ -43,6 +47,9 @@ jobs:
           --ignore=geoml/test/test_mixture.py
           --ignore=geoml/test/test_model_persistence.py
           --ignore=geoml/test/test_noise_integration.py
+          --ignore=geoml/test/test_early_stopping.py
+          --ignore=geoml/test/test_priors.py
+          --ignore=geoml/test/test_manual.py
           --ignore=geoml/test/test_plots.py
           --ignore=geoml/test/test_interactive.py
           --ignore=geoml/test/test_block_prediction.py

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geoml"
-version = "0.6.4"
+version = "0.6.5"
 description = "Machine learning for spatial data"
 authors = [
     {name = "Ítalo Gomes Gonçalves", email = "italogoncalves.igg@gmail.com"},
@@ -63,6 +63,13 @@ Homepage = "http://github.com/italo-goncalves/geoML"
 # actually goes wrong there, and tensorflow-probability ships no stubs, so
 # a checker could not verify that half of the package anyway.
 [tool.pyright]
+# Every user-facing module, which since 0.6.5 means all thirteen named in
+# `geoml.__all__` and everything under them -- except `latent/network.py`
+# and the likelihood/kernel tensor maths, left bare on purpose (see the
+# typing note in CLAUDE.md). A module that is annotated but absent from this
+# list is the worst of both worlds: the annotations are read by the editor
+# and checked by nobody, which is how the three `plots` modules drifted
+# between 0.6.4 and 0.6.5.
 include = [
     "geoml/_types.py",
     "geoml/models.py",
@@ -70,12 +77,27 @@ include = [
     "geoml/likelihood.py",
     "geoml/kernels.py",
     "geoml/transform.py",
+    "geoml/warping.py",
     "geoml/storage.py",
+    "geoml/datasets.py",
     "geoml/data/inducing.py",
     "geoml/data/containers.py",
     "geoml/data/variables.py",
+    "geoml/data/grids.py",
     "geoml/data/blocks.py",
+    "geoml/data/meshes.py",
     "geoml/data/drillhole.py",
+    "geoml/plots/base.py",
+    "geoml/plots/prepare.py",
+    "geoml/plots/explorer.py",
+    "geoml/plots/interactive.py",
+    "geoml/plots/dashboard.py",
+    "geoml/viz/plotly.py",
+    "geoml/viz/pyvista.py",
+    "geoml/viz/graphviz.py",
+    "geoml/math/geometry.py",
+    "geoml/math/tf.py",
+    "geoml/stats/random.py",
 ]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"

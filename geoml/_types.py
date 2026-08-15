@@ -32,14 +32,18 @@ from typing import Union
 import numpy as _np
 import numpy.typing as _npt
 
-__all__ = ["ArrayLike", "FloatArray", "PathLike", "Where", "Cutoffs",
-           "Bins", "Labels"]
+__all__ = ["ArrayLike", "FloatArray", "IndexArray", "PathLike", "Where",
+           "Cutoffs", "Bins", "Labels"]
 
 #: Anything NumPy can turn into an array: a list, a tuple, a Series, an array.
 ArrayLike = _npt.ArrayLike
 
 #: An array of doubles, which is what every computation here produces.
 FloatArray = _npt.NDArray[_np.float64]
+
+#: Whole numbers that point at something -- which locations were kept, where
+#: each value belongs -- rather than measuring it.
+IndexArray = _npt.NDArray[_np.integer]
 
 #: A filesystem location, as a string or as anything `os.fspath` accepts.
 PathLike = Union[str, _os.PathLike]

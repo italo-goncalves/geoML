@@ -72,7 +72,7 @@ def rotation_matrix_from_points(points):
 
 
 def azimuth_from_xy(x, y):
-    ang = _np.degrees(_np.atan2(y, x))
+    ang = _np.degrees(_np.arctan2(y, x))
     ang = 90 - ang
     if ang < 0:
         ang += 360
@@ -84,7 +84,7 @@ def dip_from_vec(vec):
         raise ValueError('Vector must be 3D')
     x, y, z = vec
     proj = _np.sqrt(x**2 + y**2)
-    dip = - _np.degrees(_np.atan2(z, proj))
+    dip = - _np.degrees(_np.arctan2(z, proj))
     return dip
 
 
@@ -509,6 +509,114 @@ def bounding_box(points):
         _np.diff(bbox[:, i]) ** 2 for i in range(bbox.shape[1])]))
     d = _np.squeeze(d)
     return bbox, d
+
+
+def _cell_weights(coordinates, cell, origins):
+    """Weights for one cell size, averaged over shifted cell origins.
+
+    Where the lattice happens to start is arbitrary, and on a small sample it
+    moves the answer, so the weights are averaged over `origins` evenly
+    shifted lattices rather than computed on one.
+    """
+    total = _np.zeros(coordinates.shape[0])
+    for k in range(origins):
+        shift = cell * k / origins
+        key = _np.floor((coordinates + shift) / cell).astype(_np.int64)
+        _, inverse, counts = _np.unique(key, axis=0, return_inverse=True,
+                                        return_counts=True)
+        total = total + 1.0 / counts[inverse]
+    return total / origins
+
+
+def declustering_weights(coordinates, values=None, cell=None, origins=4,
+                         n_sizes=24):
+    """
+    Cell-declustering weights, one per location.
+
+    Samples are rarely laid down evenly. Drilling follows the ore, so the
+    interesting ground is crowded and the rest is sparse, and every statistic
+    that treats the samples as equal votes then describes the *sampling*
+    rather than the field. Cell declustering is the classical repair: lay a
+    lattice over the data, and split one vote among the samples sharing a
+    cell, so a crowded cell speaks once rather than twenty times.
+
+    Parameters
+    ----------
+    coordinates
+        `(n_data, n_dim)` sample locations.
+    values
+        Sample values, needed only to choose `cell` automatically.
+    cell
+        Cell side. Chosen automatically when absent, which needs `values`.
+    origins
+        How many shifted lattices to average the weights over. Where the
+        lattice starts is arbitrary and on a small sample it moves the
+        answer.
+    n_sizes
+        Cell sides tried when choosing one.
+
+    Returns
+    -------
+    weights : array
+        `(n_data,)`, summing to `n_data`, so that a set of evenly spread
+        samples comes back at one apiece.
+    cell : float
+        The size used, whether given or chosen.
+
+    Notes
+    -----
+    The automatic choice follows the usual practice (Deutsch & Journel's
+    `declus`): sweep the cell size and keep the one whose declustered mean
+    departs furthest from the naive one. Both extremes of the sweep return
+    the naive mean -- a cell below the sample spacing gives every point its
+    own vote, and one larger than the domain puts them all in one cell -- so
+    the departure has an interior maximum, and taking it by absolute value
+    handles clustering in high and in low values alike without being told
+    which happened.
+
+    References
+    ----------
+    Deutsch, C. V., & Journel, A. G. (1998). *GSLIB: Geostatistical Software
+    Library and User's Guide* (2nd ed.). Oxford University Press.
+    """
+    coordinates = _np.asarray(coordinates, dtype=float)
+    n_data = coordinates.shape[0]
+    if n_data < 2:
+        return _np.ones(n_data), float(cell or 1.0)
+
+    if cell is None:
+        if values is None:
+            raise ValueError(
+                "choosing a cell size needs the values; pass `values`, or "
+                "give `cell` directly")
+        values = _np.asarray(values, dtype=float).ravel()
+        usable = _np.isfinite(values)
+        if usable.sum() < 2:
+            return _np.ones(n_data), 0.0
+
+        span = coordinates.max(axis=0) - coordinates.min(axis=0)
+        largest = float(_np.max(span))
+        if largest <= 0:
+            return _np.ones(n_data), 0.0
+
+        # from about the sample spacing to about the domain: below the first
+        # every point is alone in its cell, above the second they all share
+        # one, and the weights are flat at both ends
+        spacing = largest / max(n_data ** (1.0 / coordinates.shape[1]), 1.0)
+        sizes = _np.geomspace(max(spacing, largest * 1e-3), largest, n_sizes)
+
+        naive = float(values[usable].mean())
+        best, cell = -1.0, float(sizes[0])
+        for size in sizes:
+            weights = _cell_weights(coordinates, size, origins)
+            share = weights[usable]
+            mean = float((share * values[usable]).sum() / share.sum())
+            departure = abs(mean - naive)
+            if departure > best:
+                best, cell = departure, float(size)
+
+    weights = _cell_weights(coordinates, cell, origins)
+    return weights * (n_data / weights.sum()), float(cell)
 
 
 def sub_block_index(discretization):

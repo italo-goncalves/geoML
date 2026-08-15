@@ -10,6 +10,10 @@ without notice.
 :maxdepth: 1
 
 models
+latent
+kernels
+transform
+warping
 likelihood
 ```
 
@@ -24,6 +28,15 @@ inducing
 drillhole
 ```
 
+## Figures and export
+
+```{toctree}
+:maxdepth: 1
+
+plots
+viz
+```
+
 ## Support
 
 ```{toctree}
@@ -31,10 +44,13 @@ drillhole
 
 metrics
 storage
+math
+stats
 ```
 
 ```{note}
-The reference grows module by module as each one's docstrings are rewritten
-and its signatures annotated. The modules already covered are listed above;
-the rest are documented in their source for now.
+`parameter`, `persistence` and `storage`'s internals are not listed: they
+are the machinery underneath, and they change without notice. The tensor
+code inside the latent nodes and the likelihoods carries no type
+annotations on purpose — see the typing note in `CLAUDE.md`.
 ```

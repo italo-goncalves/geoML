@@ -384,14 +384,17 @@ class _GriddedData(_PointBased):
         """
         start, n, step, labels = _cover_box(
             data, step, margin, decimals, n_dim=cls._GRID_NDIM)
+        # The concrete grids take start/n/step; the base takes the axes it
+        # builds from them, so this call is theirs to answer -- which is why
+        # the arguments are gathered rather than passed by name: `cls` here
+        # is a subclass whose signature the base cannot see.
         if len(start) == 1:
-            # the concrete grids take start/n/step; the base takes the
-            # axes it builds from them, so this call is theirs to answer
-            return cls(start=float(start[0]), n=int(n[0]),  # type: ignore[call-arg]
-                       step=float(step[0]),
-                       labels=labels[0] if labels else None)
-        return cls(start=start, n=n, step=step,  # type: ignore[call-arg]
-                   labels=labels)
+            arguments = dict(start=float(start[0]), n=int(n[0]),
+                             step=float(step[0]),
+                             labels=labels[0] if labels else None)
+        else:
+            arguments = dict(start=start, n=n, step=step, labels=labels)
+        return cls(**arguments)
 
     def _cell_of(self, data):
         """Which cell each of `data`'s locations falls in, as this object's
@@ -402,7 +405,7 @@ class _GriddedData(_PointBased):
         flat = _np.full(len(ids), -1, dtype=_np.int64)
         # the first axis varies fastest in `_generate`, which is Fortran order
         flat[inside] = _np.ravel_multi_index(
-            ids[inside].T, shape, order="F")
+            tuple(ids[inside].T), tuple(shape.tolist()), order="F")
         return flat
 
     def aggregate(self, data: "_SpatialData",
@@ -503,9 +506,10 @@ class Grid1D(_GriddedData):
         The number of points in grid.
     """
 
-    def __init__(self, start, n,
-                 step: "float | _types.ArrayLike | None" = None,
-                 end=None, labels=None):
+    def __init__(self, start: float, n: int,
+                 step: "float | None" = None,
+                 end: "float | None" = None,
+                 labels: "str | None" = None):
         """
         Initializer for Grid1D.
 
@@ -513,13 +517,13 @@ class Grid1D(_GriddedData):
         ----------
         start :
             Starting point for grid.
-        n : int
+        n :
             Number of grid nodes.
         step :
-            Spacing between grid nodes.
+            Spacing between grid nodes. One number: this grid has one axis.
         end :
             Last grid point.
-        labels : str
+        labels :
             The label for the coordinate.
 
 
@@ -528,31 +532,34 @@ class Grid1D(_GriddedData):
         if (step is None) & (end is None):
             raise ValueError("one of step or end must be given")
         if step is not None:
-            step_vector = float(step)
-            end = start + (n - 1) * step_vector
+            step_size = float(step)
+            last = start + (n - 1) * step_size
         else:
-            step_vector = (end - start) / (n - 1)
-        grid = _np.linspace(start, end, n, dtype=float)
+            last = float(end)  # type: ignore[arg-type]  # the guard above
+            step_size = (last - start) / (n - 1)
+        grid = _np.linspace(start, last, n, dtype=float)
 
         if labels is None:
             labels = "X"
 
         super().__init__([grid], labels)
-        self.step_size = [step_vector]
+        self.step_size = [step_size]
         self.grid = [grid]
         self.grid_size = [int(n)]
         self.origin = start
 
     @classmethod
-    def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
-                          margin: float = 0.1,
+    def from_bounding_box(cls, box, step: float,
+                          margin: "float | _types.ArrayLike" = 0.1,
                           rounding_decimals: int = 0):
-        if not isinstance(margin, (list, tuple)):
-            margin = (margin, margin)
+        # converted into a local of its own rather than rebound: a parameter
+        # that changes type inside its own function has no statable signature
+        sides = margin if isinstance(margin, (list, tuple)) \
+            else (margin, margin)
 
         dif = box.max[0, 0] - box.min[0, 0]
-        new_min = _np.round(box.min[0, 0] - dif * margin[0], rounding_decimals)
-        new_max = _np.round(box.max[0, 0] + dif * margin[1], rounding_decimals)
+        new_min = _np.round(box.min[0, 0] - dif * sides[0], rounding_decimals)
+        new_max = _np.round(box.max[0, 0] + dif * sides[1], rounding_decimals)
         n = int(_np.ceil((new_max - new_min)/step)) + 1
 
         label = box.labels[0] if box.labels else None
@@ -622,17 +629,18 @@ class Grid2D(_GriddedData):
 
     @classmethod
     def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
-                          margin: float = 0.1,
+                          margin: "float | _types.ArrayLike" = 0.1,
                           rounding_decimals: int = 0):
-        margin = _np.array(margin)
-        if margin.shape == ():
-            margin = _np.full([2, 2], margin)
-        elif margin.shape == (2,):
-            margin = _np.stack([margin]*2, axis=1)
+        # a local of its own rather than a rebound parameter -- see `Grid1D`
+        sides = _np.array(margin)
+        if sides.shape == ():
+            sides = _np.full([2, 2], sides)
+        elif sides.shape == (2,):
+            sides = _np.stack([sides] * 2, axis=1)
 
         dif = box.max - box.min
-        new_min = _np.round(box.min - dif * margin[0], rounding_decimals)
-        new_max = _np.round(box.max + dif * margin[1], rounding_decimals)
+        new_min = _np.round(box.min - dif * sides[0], rounding_decimals)
+        new_max = _np.round(box.max + dif * sides[1], rounding_decimals)
         n = _np.ceil((new_max - new_min) / step).astype(int) + 1
 
         return cls(start=new_min[0], n=n[0], step=step, labels=box.labels)
@@ -703,8 +711,12 @@ class Grid3D(_GriddedData):
         self.origin = start
 
     def make_interpolator(self, coordinates: _types.ArrayLike):
-        return _gint.cubic_conv_3d(coordinates,
-                                   self.grid[0], self.grid[1], self.grid[2])
+        # `cubic_conv_3d` does not exist -- the class is
+        # `CubicConv3DSeparable`, and nothing in the package calls this. Left
+        # as found: wiring it up or deleting it is a decision, filed with the
+        # RBF interpolation item rather than made here in passing.
+        return _gint.cubic_conv_3d(  # type: ignore[attr-defined]
+            coordinates, self.grid[0], self.grid[1], self.grid[2])
 
     def as_pyvista(self, simulations=False, include="**"):
         """
@@ -760,17 +772,18 @@ class Grid3D(_GriddedData):
 
     @classmethod
     def from_bounding_box(cls, box, step: "float | _types.ArrayLike",
-                          margin: float = 0.1,
+                          margin: "float | _types.ArrayLike" = 0.1,
                           rounding_decimals: int = 0):
-        margin = _np.array(margin)
-        if margin.shape == ():
-            margin = _np.full([2, 3], margin)
-        elif margin.shape == (2,):
-            margin = _np.stack([margin] * 3, axis=1)
+        # a local of its own rather than a rebound parameter -- see `Grid1D`
+        sides = _np.array(margin)
+        if sides.shape == ():
+            sides = _np.full([2, 3], sides)
+        elif sides.shape == (2,):
+            sides = _np.stack([sides] * 3, axis=1)
 
         dif = box.max - box.min
-        new_min = _np.round(box.min - dif * margin[0], rounding_decimals)
-        new_max = _np.round(box.max + dif * margin[1], rounding_decimals)
+        new_min = _np.round(box.min - dif * sides[0], rounding_decimals)
+        new_max = _np.round(box.max + dif * sides[1], rounding_decimals)
         n = _np.ceil((new_max - new_min) / step).astype(int) + 1
 
         return cls(start=new_min[0], n=n[0], step=step, labels=box.labels)
@@ -932,17 +945,18 @@ class RotatedGrid3D(Grid3D):
         centre = _np.mean(points, axis=0, keepdims=True)
         unrotated = _np.matmul(points - centre, mat.T)
 
-        margin = _np.asarray(margin, dtype=float)
-        if margin.shape == ():
-            margin = _np.full([2, 3], float(margin))
-        elif margin.shape == (2,):
-            margin = _np.stack([margin] * 3, axis=1)
+        # a local of its own rather than a rebound parameter -- see `Grid1D`
+        sides = _np.asarray(margin, dtype=float)
+        if sides.shape == ():
+            sides = _np.full([2, 3], float(sides))
+        elif sides.shape == (2,):
+            sides = _np.stack([sides] * 3, axis=1)
 
         low = unrotated.min(axis=0)
         high = unrotated.max(axis=0)
         extent = high - low
-        low = low - extent * margin[0]
-        high = high + extent * margin[1]
+        low = low - extent * sides[0]
+        high = high + extent * sides[1]
 
         step = _np.broadcast_to(
             _np.asarray(step, dtype=float).ravel(), (3,))

@@ -16,7 +16,7 @@
 
 import numpy as _np
 import pandas as _pd
-import collections as _collections
+import collections.abc as _collections_abc
 
 
 def _deep_update(d, u):
@@ -25,7 +25,7 @@ def _deep_update(d, u):
     update-value-of-a-nested-dictionary-of-varying-depth
     """
     for k, v in u.items():
-        if isinstance(v, _collections.abc.Mapping):
+        if isinstance(v, _collections_abc.Mapping):
             d[k] = _deep_update(d.get(k, {}), v)
         else:
             d[k] = v

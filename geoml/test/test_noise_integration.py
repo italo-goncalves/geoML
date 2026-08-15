@@ -101,6 +101,212 @@ def test_a_single_component_has_nothing_to_mix():
 
 
 # --------------------------------------------------------------------------- #
+# the log-determinant
+# --------------------------------------------------------------------------- #
+def _jacobian(warping, row, step=1e-6):
+    """The forward map's Jacobian at one row, by central differences."""
+    import tensorflow as tf
+    row = np.asarray(row, dtype=float)[None, :]
+    out = np.zeros([row.shape[1], row.shape[1]])
+    for column in range(row.shape[1]):
+        bump = np.zeros_like(row)
+        bump[0, column] = step
+        plus = np.asarray(warping.forward(tf.constant(row + bump))[0])
+        minus = np.asarray(warping.forward(tf.constant(row - bump))[0])
+        out[:, column] = (plus - minus)[0] / (2 * step)
+    return out
+
+
+def _numeric_log_det(warping, values, step=1e-6):
+    """`log|det J|` of the forward map, by central differences."""
+    return np.asarray([
+        np.log(np.abs(np.linalg.det(_jacobian(warping, row, step))))
+        for row in np.atleast_2d(values)])
+
+
+def _log_det_cases():
+    """The warpings whose forward map has a Jacobian determinant of its own.
+
+    `CenteredLogRatio` is left out because its Jacobian between arrays of
+    `n_dim` columns is singular rather than merely constant, so it is
+    checked on the hyperplane it actually maps onto, in its own test below.
+    The flow is left out because its log-determinant comes from the
+    integration it performs rather than from a closed form.
+    """
+    rng = np.random.default_rng(3)
+    positive = rng.lognormal(size=[8, 3])
+    normal = rng.normal(size=[8, 3])
+    unit = rng.uniform(0.05, 0.95, size=[8, 3])
+    # a covariance estimate needs rows, and a robust one needs more of them
+    spread = rng.normal(size=[40, 3]) @ np.array([[2.0, 0.3, 0.0],
+                                                  [0.0, 1.0, 0.5],
+                                                  [0.1, 0.0, 3.0]])
+    parts = rng.dirichlet(np.ones(3), size=40)
+    return [
+        (wp.Identity(3), normal),
+        (wp.Spline(3), normal),
+        (wp.ZScore(3), normal),
+        (wp.Center(3), normal),
+        (wp.Scale(3), positive),
+        (wp.Softplus(3), positive),
+        (wp.Log(3), positive),
+        (wp.Sigmoid(3), unit),
+        (wp.Rotation(3), normal),
+        (wp.PCA(3), spread),
+        (wp.RobustPCA(3), spread),
+        (wp.ScaledSimplex(3), parts),
+    ]
+
+
+@pytest.mark.parametrize("warping,data", _log_det_cases(),
+                         ids=lambda x: type(x).__name__
+                         if hasattr(x, "backward") else "")
+def test_the_reported_log_determinant_is_the_log_of_the_jacobians(warping,
+                                                                  data):
+    """`forward` returns the *log* of the Jacobian determinant, not the
+    determinant.
+
+    `Log` returned `sum(1 / (x + shift))` until 0.6.5, where the truth is
+    `-sum(log(x + shift))`. It went unnoticed because `Log` carries no
+    trainable parameter, so as the first link of a chain its term is a
+    constant that no gradient sees; put anything trainable in front of it
+    and the model optimizes the wrong objective. `PCA`, `RobustPCA` and
+    `ScaledSimplex` reported zero for the same length of time, each where
+    the truth is a constant settled at initialization.
+    """
+    import tensorflow as tf
+    warping.initialize(data)
+    # every row is checked against differences, but only a few of them:
+    # fitting a covariance takes more rows than the check needs
+    rows = data[:8]
+    reported = np.asarray(warping.forward(tf.constant(rows))[1])
+    assert np.allclose(reported, _numeric_log_det(warping, rows),
+                       atol=1e-5, rtol=1e-4)
+
+
+def _tangent_basis(n, rotation=None):
+    """An orthonormal basis of `{u : sum(u) = 0}` -- the simplex's tangent
+    space, and the space the centered log-ratio maps onto. `rotation` turns
+    it into a different basis of the same space."""
+    centred = np.eye(n) - np.ones([n, n]) / n
+    basis = np.linalg.svd(centred)[0][:, :n - 1]
+    return basis if rotation is None else basis @ rotation
+
+
+def _helmert_basis(n):
+    """The classical balance matrix, each row contrasting one part against
+    the average of those before it."""
+    rows = []
+    for i in range(1, n):
+        row = np.zeros(n)
+        row[:i] = 1.0 / i
+        row[i] = -1.0
+        rows.append(row * np.sqrt(i / (i + 1.0)))
+    return np.asarray(rows).T
+
+
+@pytest.mark.parametrize("n", [3, 5])
+def test_the_log_ratios_determinant_is_the_one_on_the_hyperplane(n):
+    """Between arrays of `n` columns the centered log-ratio has no
+    determinant: it ignores a rescaling of the whole row, so its Jacobian is
+    singular. What it does have is a volume factor for the map it really is,
+    from the simplex onto the hyperplane where the components sum to zero,
+    and that is what `forward` reports.
+    """
+    import tensorflow as tf
+    rng = np.random.default_rng(20 + n)
+    data = rng.dirichlet(np.ones(n), size=6)
+
+    warping = wp.CenteredLogRatio(n)
+    reported = np.asarray(warping.forward(tf.constant(data))[1])
+
+    basis = _tangent_basis(n)
+    for i, row in enumerate(data):
+        jacobian = _jacobian(warping, row)
+        # singular, and read as a rank rather than as a determinant: a row
+        # with a small part makes the entries huge, and a determinant that
+        # is zero next to them is not a number close to zero
+        singular = np.linalg.svd(jacobian, compute_uv=False)
+        assert singular[-1] < 1e-8 * singular[0]
+
+        restricted = basis.T @ jacobian @ basis
+        assert np.log(abs(np.linalg.det(restricted))) == \
+            pytest.approx(reported[i], abs=1e-5)
+
+
+@pytest.mark.parametrize("n", [3, 5])
+def test_the_log_ratios_determinant_needs_no_balance_matrix(n):
+    """Two orthonormal bases of the same hyperplane differ by a rotation,
+    whose determinant is one either way, so the volume factor does not
+    depend on which is used. Which is why the reported value is a closed
+    form with no basis in it, and why no balance matrix has to be chosen.
+    """
+    rng = np.random.default_rng(30 + n)
+    data = rng.dirichlet(np.ones(n), size=3)
+
+    turn = np.linalg.qr(rng.normal(size=[n - 1, n - 1]))[0]
+    bases = [_tangent_basis(n), _helmert_basis(n), _tangent_basis(n, turn)]
+    for basis in bases:
+        assert np.allclose(basis.T @ basis, np.eye(n - 1))
+        assert np.allclose(basis.sum(axis=0), 0.0)
+
+    warping = wp.CenteredLogRatio(n)
+    for row in data:
+        jacobian = _jacobian(warping, row)
+        measured = [np.log(abs(np.linalg.det(basis.T @ jacobian @ basis)))
+                    for basis in bases]
+        assert measured == pytest.approx([measured[0]] * len(bases), abs=1e-6)
+
+
+def test_a_projection_reports_no_determinant():
+    """With fewer components than variables the map is not square, so there
+    is no determinant to report and nothing to correct a density by: what
+    the likelihood sees is the projection."""
+    import tensorflow as tf
+    data = np.random.default_rng(9).normal(size=[40, 3]) \
+        @ np.array([[2.0, 0.3, 0.0], [0.0, 1.0, 0.5], [0.1, 0.0, 3.0]])
+
+    warping = wp.PCA(3, n_components=2)
+    warping.initialize(data)
+    reported = np.asarray(warping.forward(tf.constant(data))[1])
+    assert np.allclose(reported, 0.0)
+
+
+def test_a_chain_adds_its_links_log_determinants():
+    """Which is the only composition rule a log-determinant obeys, and the
+    reason the accumulator has to start at zero. It started at the number of
+    columns until 0.6.5, offsetting every chained warping by its own width.
+    """
+    import tensorflow as tf
+    data = np.random.default_rng(4).lognormal(size=[8, 3])
+
+    links = [wp.Log(3), wp.ZScore(3), wp.Spline(3)]
+    chain = wp.ChainedWarping(*links)
+    chain.initialize(data)
+
+    expected = np.zeros(data.shape[0])
+    passed = tf.constant(data)
+    for link in links:
+        passed, log_det = link.forward(passed)
+        expected = expected + np.asarray(log_det)
+
+    reported = np.asarray(chain.forward(tf.constant(data))[1])
+    assert np.allclose(reported, expected)
+
+
+def test_a_chain_of_identities_leaves_the_log_determinant_at_zero():
+    """The width used to leak in through the accumulator, so a chain of
+    identities came back at 3 instead of 0."""
+    import tensorflow as tf
+    data = np.random.default_rng(5).normal(size=[8, 3])
+
+    chain = wp.ChainedWarping(wp.Identity(3), wp.Identity(3))
+    chain.initialize(data)
+
+    assert np.allclose(np.asarray(chain.forward(tf.constant(data))[1]), 0.0)
+
+
+# --------------------------------------------------------------------------- #
 # the integral
 # --------------------------------------------------------------------------- #
 def _likelihood(warping=None, noise=0.1, likelihood=None):

@@ -22,6 +22,8 @@ after another without repeating it. The categorical variable is what splits and
 colours every other figure, which is the question worth asking of most
 geoscientific data: does this population behave as one, or as several?
 
+.. code-block:: python
+
     eda = geoml.plots.Explorer(point, continuous="Elements",
                                categorical="Rock")
     eda.histogram()
@@ -631,9 +633,7 @@ class Explorer(_base.Selection):
         built with.
         """
         var = self._require_continuous("accuracy")
-        components = getattr(var, "components", None)
-        parts = [var] if components is None else \
-            [components[label] for label in var.labels]
+        parts = _prep.continuous_parts(var)
 
         # a grid predicted onto has simulations everywhere and measurements
         # nowhere, and there is nothing to check against -- said before the
@@ -753,7 +753,8 @@ class Explorer(_base.Selection):
         axes.set_ylim(bottom=0.0)
 
     def variogram(self, n_lags=15, max_lag=None, direction=None,
-                  tolerance=45.0, residuals=False, figsize=None) -> "_plt.Figure":
+                  tolerance=45.0, residuals=False, decluster=True,
+                  figsize=None) -> "_plt.Figure":
         """
         The data's spatial structure, against the fan the simulations make.
 
@@ -764,10 +765,23 @@ class Explorer(_base.Selection):
         into the range lifts it there. Neither shows in `accuracy` or
         `spread_check`, which judge one location at a time.
 
+        The measurements carry the likelihood noise and the realizations do
+        not, so the fan is raised by what an independent error at each
+        location adds to a semivariogram, taken from `noise_variance`.
+        Without that the two curves are not the same quantity and every
+        model looks over-smooth by a nugget.
+
         With `residuals=True` it is the variogram of `measured - predicted`
         and the fan is dropped: structure left in the residuals is structure
         the model missed -- honest on cross-validated predictions
         (`models.cross_validate`).
+
+        Each panel's title carries `VS`, the variogram score of
+        :func:`geoml.metrics.variogram_score` over the same locations and
+        weights: the eye's verdict on the fan as one number, for comparing
+        two models without squinting. Lower is better, but only against
+        another model on the same data -- the score keeps a bias the curves
+        are corrected for, and never reaches zero.
 
         Parameters
         ----------
@@ -784,11 +798,17 @@ class Explorer(_base.Selection):
             Angular tolerance around `direction`, in degrees.
         residuals : bool
             Variogram of the residuals instead, without the fan.
+        decluster : bool or float
+            Weight pairs by cell-declustering weights, so that the curve
+            estimates the field's variogram rather than the sampling's.
+            `True` chooses the cell size, a number fixes it, `False` leaves
+            the pairs raw.
         """
         var = self._require_continuous("variogram")
         panels = _prep.variogram(
             self.data, var.name, n_lags=n_lags, max_lag=max_lag,
-            direction=direction, tolerance=tolerance, residuals=residuals)
+            direction=direction, tolerance=tolerance, residuals=residuals,
+            decluster=decluster)
 
         rows, columns = _prep.grid_shape(len(panels))
         with _style.context():
@@ -799,7 +819,9 @@ class Explorer(_base.Selection):
                 row, column = divmod(i, columns)
                 axes = axes_grid[row][column]
                 self._draw_variogram(axes, panel)
-                axes.set_title(panel["label"])
+                axes.set_title(panel["label"] if panel["score"] is None
+                               else "%s (VS = %.3g)"
+                                    % (panel["label"], panel["score"]))
                 axes.set_xlabel("lag distance")
                 axes.set_ylabel("semivariance")
             for i in range(len(panels), rows * columns):
@@ -872,8 +894,7 @@ class Explorer(_base.Selection):
             raise ValueError(
                 "%r holds %d components and a cut-off applies to one grade; "
                 "name one with component= (%s)"
-                % (var.name, var.length,
-                   ", ".join(str(label) for label in var.labels)))
+                % (var.name, var.length, _prep.component_names(var)))
 
         curves = _prep.grade_tonnage(
             self.data, name, density, cutoffs,

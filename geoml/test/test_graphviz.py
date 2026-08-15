@@ -123,7 +123,7 @@ def test_a_concatenation_is_a_circle_not_a_box():
 def test_the_root_is_the_input_colour_and_names_the_coordinates():
     dot = _model().to_dot()
     box = _boxes(dot)["BasicInput_1\\nX, Y, Z"]
-    assert geoml.graphviz.PALETTE["input"] in box[1]
+    assert geoml.viz.graphviz.PALETTE["input"] in box[1]
 
 
 def test_a_line_break_is_written_the_way_dot_reads_it():
@@ -161,8 +161,8 @@ def test_the_warpings_are_drawn_the_way_the_model_generates():
     assert sizes[(joined, pca)] == "3"          # what the network puts out
     assert sizes[(pca, clr)] == "4"             # PCA opens back up to 4 parts
     assert sizes[(clr, variable)] == "4"
-    assert geoml.graphviz.PALETTE["warping"] in boxes["PCA"][1]
-    assert geoml.graphviz.PALETTE["output"] in boxes[
+    assert geoml.viz.graphviz.PALETTE["warping"] in boxes["PCA"][1]
+    assert geoml.viz.graphviz.PALETTE["output"] in boxes[
         "assay\\nMultivariateGaussian"][1]
 
 
@@ -214,7 +214,7 @@ def test_a_warping_that_does_nothing_is_left_out():
 def test_a_network_can_be_drawn_without_a_model():
     """Then there is nothing to say about outputs, so nothing is said."""
     boxes = _boxes(_network().to_dot())
-    assert not any(geoml.graphviz.PALETTE["output"] in attributes
+    assert not any(geoml.viz.graphviz.PALETTE["output"] in attributes
                    for _, attributes in boxes.values())
 
 

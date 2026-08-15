@@ -126,7 +126,13 @@ honest on the OOF container. The pair budget is met by deterministic
 striding; realizations are read one column at a time, never the store whole.
 `metrics.variogram_score` (Scheuerer & Hamill 2015, p = 0.5) is the numeric
 side: the proper score over pairs that catches an ensemble with the right
-histograms and the wrong spatial structure.
+histograms and the wrong spatial structure. Given `coordinates` it
+declusters its pairs the same way the figure does, but it cannot correct the
+noise footing — `|difference| ** p` is not a second moment, so there is no
+constant to add and the alternative is a draw, which would put a seed inside
+a metric. It is therefore an estimate that never reaches zero, to be read as
+a ranking between models on the same data; the figure is what to reach for
+when the size of the disagreement matters.
 
 ## The calibration: `models.conformalize` / `ConformalCalibration`
 

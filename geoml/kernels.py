@@ -30,9 +30,11 @@ __all__ = ["Gaussian",
 import geoml.parameter as _gpr
 import geoml.transform as _gt
 
-from geoml.tftools import pairwise_dist as _pairwise_dist
-from geoml.tftools import pairwise_dist_l1 as _pairwise_dist_l1
-from geoml.tftools import prod_n as _prod_n
+from geoml.math.tf import pairwise_dist as _pairwise_dist
+# the other two landed on the linalg side of the 0.6.0 tftools split, which
+# is why this used to reach for them through the `geoml.tftools` shim
+from geoml.math.linalg import pairwise_dist_l1 as _pairwise_dist_l1
+from geoml.math.linalg import prod_n as _prod_n
 
 import tensorflow as _tf
 import numpy as _np

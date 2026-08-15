@@ -17,8 +17,9 @@
 # VS Code launch/debug settings, per machine.
 .vscode/
 
-# The user manual, kept out of the tree until it is ready to ship.
-/docs/manual/
-
 # The built documentation site: CI builds it, and publishes it on a tag.
 /docs/build/
+
+# The manual, copied in from `docs/manual/` when the site builds so that its
+# figures resolve. One copy in git; this one is made and remade.
+/docs/source/manual/

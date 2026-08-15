@@ -20,6 +20,8 @@ The same figures, for looking at rather than for printing.
 names and the same arguments, and hands back a plotly figure instead of a
 matplotlib one:
 
+.. code-block:: python
+
     eda = geoml.plots.Interactive(point, continuous="Elements",
                                   categorical="Rock")
     eda.pairs().show()
@@ -184,6 +186,8 @@ class Interactive(_base.Selection):
         That is the short way; for figures drawn with arguments of your own,
         or captioned, or from more than one data set, build a `Dashboard`
         directly -- it takes figures rather than names:
+
+        .. code-block:: python
 
             geoml.plots.Dashboard(
                 [("Where the cadmium is", eda.scene(color="Cd")),
@@ -442,6 +446,7 @@ class Interactive(_base.Selection):
             title, menu = self._scene_one(figure, coordinates, n_dim,
                                           color, size, clip), None
 
+        layout: dict = {}
         if n_dim == 3:
             layout = {"scene": {
                 "xaxis": {"title": {"text": labels[0]}},
@@ -819,9 +824,7 @@ class Interactive(_base.Selection):
         was built with.
         """
         var = self._require_continuous("accuracy")
-        components = getattr(var, "components", None)
-        parts = [var] if components is None else \
-            [components[label] for label in var.labels]
+        parts = _prep.continuous_parts(var)
 
         # nothing measured means nothing to check against, said before the
         # model is asked for anything
@@ -933,7 +936,8 @@ class Interactive(_base.Selection):
                           "<extra></extra>"), row=row, col=column)
 
     def variogram(self, n_lags=15, max_lag=None, direction=None,
-                  tolerance=45.0, residuals=False, height=None, width=None) -> "_go.Figure":
+                  tolerance=45.0, residuals=False, decluster=True,
+                  height=None, width=None) -> "_go.Figure":
         """
         The data's spatial structure, against the fan the simulations make.
 
@@ -944,10 +948,23 @@ class Interactive(_base.Selection):
         into the range lifts it there. Neither shows in `accuracy` or
         `spread_check`, which judge one location at a time.
 
+        The measurements carry the likelihood noise and the realizations do
+        not, so the fan is raised by what an independent error at each
+        location adds to a semivariogram, taken from `noise_variance`.
+        Without that the two curves are not the same quantity and every
+        model looks over-smooth by a nugget.
+
         With `residuals=True` it is the variogram of `measured - predicted`
         and the fan is dropped: structure left in the residuals is structure
         the model missed -- honest on cross-validated predictions
         (`models.cross_validate`).
+
+        Each panel's title carries `VS`, the variogram score of
+        :func:`geoml.metrics.variogram_score` over the same locations and
+        weights: the eye's verdict on the fan as one number, for comparing
+        two models without squinting. Lower is better, but only against
+        another model on the same data -- the score keeps a bias the curves
+        are corrected for, and never reaches zero.
 
         Parameters
         ----------
@@ -963,12 +980,20 @@ class Interactive(_base.Selection):
             Angular tolerance around `direction`, in degrees.
         residuals : bool
             Variogram of the residuals instead, without the fan.
+        decluster : bool or float
+            Weight pairs by cell-declustering weights, so that the curve
+            estimates the field's variogram rather than the sampling's.
+            `True` chooses the cell size, a number fixes it, `False` leaves
+            the pairs raw.
         """
         var = self._require_continuous("variogram")
         panels = _prep.variogram(
             self.data, var.name, n_lags=n_lags, max_lag=max_lag,
-            direction=direction, tolerance=tolerance, residuals=residuals)
-        labels = [panel["label"] for panel in panels]
+            direction=direction, tolerance=tolerance, residuals=residuals,
+            decluster=decluster)
+        labels = [panel["label"] if panel["score"] is None
+                  else "%s (VS = %.3g)" % (panel["label"], panel["score"])
+                  for panel in panels]
 
         rows, columns = _prep.grid_shape(len(panels))
         figure = _subplots(rows=rows, cols=columns, subplot_titles=labels,
@@ -1065,8 +1090,7 @@ class Interactive(_base.Selection):
             raise ValueError(
                 "%r holds %d components and a cut-off applies to one grade; "
                 "name one with component= (%s)"
-                % (var.name, var.length,
-                   ", ".join(str(label) for label in var.labels)))
+                % (var.name, var.length, _prep.component_names(var)))
 
         curves = _prep.grade_tonnage(
             self.data, name, density, cutoffs,

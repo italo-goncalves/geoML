@@ -15,6 +15,11 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Deprecated alias: tftools split into `geoml.math.tf` (the helpers in
 everyday use) and `geoml.math.linalg` (the numerical machinery) in 0.6.0.
-This shim keeps the old path importable for one release."""
+This shim keeps the old path importable until 0.7.0."""
+
+from geoml._deprecated import warn_moved as _warn_moved
+
+_warn_moved("tftools", stacklevel=2)
+
 from geoml.math.linalg import *
 from geoml.math.tf import *

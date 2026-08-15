@@ -10,6 +10,8 @@ author six months later — rather than for its users.
 variable-block-models
 variable-paths
 cross-validation
+parameter-priors
 sparse-experts
 mixed-precision
+notebook-html-export
 ```

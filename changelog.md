@@ -1,3 +1,406 @@
+## version 0.6.5
+* **The documentation site covers the whole public surface, and the type
+check covers every module behind it.** Both had been growing module by
+module; this closes them together.
+  - **`data/grids.py` is annotated and checked**, the last module the typing
+  workstream had left. Thirty-three diagnostics, almost all one idiom: the
+  grid constructors take `step` and `margin` as either a number or one value
+  per axis and rebind the parameter, so a checker follows the float branch
+  down. Each converts into a differently named local now, which is the rule
+  this project has now learned three times. `Grid1D` is narrowed to the
+  scalar `step`/`end` its `float(step)` always required.
+  - **The checked list is every user-facing module** — twenty-seven files,
+  the thirteen in `geoml.__all__` and everything under them, all clean. It
+  had held twelve. The gap mattered: `plots/prepare`, `explorer` and
+  `interactive` were annotated back in 0.6.4 but never added to the list, so
+  their annotations were read by editors and verified by nobody, and they
+  had drifted to twelve diagnostics. A module annotated but unchecked is the
+  worst of both worlds, and `pyproject.toml` now says so where the list is.
+  - Real things the checker found while being pointed at more code:
+  `math/geometry` called `np.atan2`, which only exists in NumPy 2 (now
+  `arctan2`, spelled the same in every version); `viz/plotly` used
+  `collections.abc` while importing only `collections`, which works until
+  nothing else has imported the submodule first; `prepare.color_choices` and
+  `prepare.moving_average` both declared they return an array where they
+  return a tuple. `Grid3D.make_interpolator` still calls a function that
+  does not exist — left as found, since wiring it to `CubicConv3DSeparable`
+  or deleting it is a decision, and now flagged in place rather than only in
+  a changelog entry nobody rereads.
+  - **Eight new reference pages**: `latent`, `kernels`, `transform`,
+  `warping`, `plots`, `viz`, `math` and `stats`, plus grids, blocks, meshes
+  and variables joining the data page, which had documented only the point
+  containers. The two design records written since the site was built join
+  `internals`.
+  - **The manual is part of the site.** A `builder-inited` hook copies
+  `docs/manual/` into the source tree at build time, which is what keeps its
+  relative figure links working; the copy is gitignored, so the chapters
+  still live in one place and are still run from there.
+  - Getting `-W` back to green took two decisions worth recording. The
+  duplicate-object warning is filtered in `conf.py`, because classes here
+  share one function object on purpose (`_blockdata` hands the block fan-out
+  to the grid classes) and autodoc identifies a member by the qualified name
+  of whoever defined it; and `stats.md` excludes the distribution methods
+  TFP copies into every subclass, whose docstrings are TFP's. Nothing else
+  is suppressed: a broken reference or a malformed docstring still fails the
+  build, and five docstrings were fixed to keep it that way — an indented
+  code example is a definition list to RST unless it says
+  `.. code-block:: python`.
+  - **`test_manual.py`** runs every chapter through `run_blocks.py`. It is a
+  release gate only: a full pass trains real models and takes about twenty
+  minutes, so it sits on the structural job's ignore list with the other
+  heavy files.
+
+* **The point-estimated parameters can carry priors now, and the important
+ones do by default.** Only the variational state was ever priced by a KL;
+the ranges, mixing weights and friends were optimized against the ELBO with
+box bounds and nothing else. They stay point estimates — no posterior is
+integrated. A parameter that declares a `prior` adds its log-density to the
+training objective next to the KL, making the whole a bound on
+`log p(y, theta)`: MAP, one differentiable term, and the gradient does the
+rest. A model with no priors trains on bit-for-bit the objective it always
+did, and a saved model reloaded and *refit* gains the defaults, since
+persistence replays constructors.
+  - The defaults are canonical because the network works in whitened space,
+  and each accepts a number for the experienced user or `None` to switch
+  off: `BasicGP(range_prior=2.0)` is a Gamma whose **mode** sits at 1 — MAP
+  pulls toward the mode, so "mean 1" would actually drag ranges toward 0.5
+  — falling to minus infinity as a range collapses and linearly as it
+  grows; `Linear(weight_prior=1.0)` is a standard Gaussian on the free
+  weights (the parameter whose count scales with the network), whose hard
+  [-1, 1] walls step back to a ±10 safety net;
+  `MultiStructureGP(weight_concentration="staircase")` is a Dirichlet whose
+  peak puts shares in proportion to each structure's starting range, and
+  its range priors peak at each structure's own staircase position rather
+  than at a common 1, which would fight the ordering.
+  - **Measured before shipping, and one idea died.** On Walker Lake against
+  the exhaustive truth (the one dataset where overfitting is measurable
+  rather than inferred), the `MultiStructureGP` priors improved every
+  truth-facing number on every seed — rmse against the field 200.1 to
+  199.1, variogram score 42.38 to 42.11, held-out goodness 0.642 to 0.652 —
+  while the staircase *initialization* worsened all of them (206.2, 43.61):
+  training never leaves that basin, where a uniform start finds the right
+  weights with or without the prior. So the prior ships and the staircase
+  start is recorded as rejected. On the chapter-16 Jura network the priors
+  are neutral-to-slightly-positive: CRPS under the Linear prior beats the
+  unpriored model pairwise on every seed, by under a percent, and nothing
+  is ever worse.
+  - `LinearCombination(per_component=True)` is new alongside this: one set
+  of mixing weights per output component instead of one for the node, so
+  one element can lean on a trend another ignores, with a symmetric
+  Dirichlet holding each component's shares near equal until its data
+  argues. Off by default — measured neutral on Jura, whose seven elements
+  evidently agree about how much trend they want.
+  - Design record with the census, the MAP argument and both tables:
+  `docs/parameter-priors.md`. The census is worth one line here: on the
+  deep Jura network the unpriced parameters number 45 against 21 628
+  priced ones, so the density ceiling measured earlier in this release was
+  never about them.
+
+* **Training can stop when the bound settles**, through the new
+`GPOptions(training_tolerance=...)`. The bound is smoothed with an
+exponential moving average, and training ends once its gain over the last
+twenty iterations falls below that fraction of everything gained since the
+call began. `max_iter` becomes a cap rather than a count. **Off by default**,
+so nothing trains differently unless asked.
+  - Normalizing by the progress made so far is the load-bearing part. An
+  ELBO's magnitude means nothing on its own — it grows with the number of
+  data points and with whatever normalization the likelihood carries — so a
+  fraction of the *value* would not transfer between models. A fraction of
+  the gain does, and it self-protects early on, when little has been gained
+  and the threshold is correspondingly small.
+  - **The comparison is over a window, not between consecutive iterations.**
+  For a bound approaching its limit with time constant `tau`, a
+  per-iteration test fires once `exp(-t/tau) < tolerance * tau`, so a slowly
+  converging fit stops almost at once and how early depends on a `tau`
+  nobody knows in advance. Measured on three recorded curves at tolerance
+  0.01: a window of 1 fires after 26 to 36 iterations having kept 81-84% of
+  the total gain, a window of 20 keeps 96.2-97.2%, and a window of 40 keeps
+  98.1-98.6%. Twenty is the internal window, and it is not a knob: one
+  number behaved the same way on every case tried, including SVI, where the
+  criterion reads one value an epoch (the mean over its batches) rather than
+  one per minibatch.
+  - **Where it fires**, at 0.01: Walker Lake stops at iteration 118 of 600,
+  the Jura seven-element model at 117 of 600, and the non-stationary Jura
+  network of the skill's worked example at 130 of 400 — which is close to
+  the 250 that network was given by hand. Under SVI, epoch 92 of 300.
+  - **What that costs, which is the only gate that matters.** Held out, over
+  three seeds each: Walker's rmse is 1.5-2.0% *worse* and its CRPS 6% better;
+  Jura's rmse is 1% better and its CRPS 6.5% better. Deep Jura, one seed:
+  rmse 1.4% better, CRPS 2.0% better, in 46% of the time.
+  - **Calibration is the surprise.** Deutsch's goodness went from 0.49-0.51
+  to 0.73-0.75 on Walker and from 0.54-0.58 to 0.77-0.82 on Jura, every seed,
+  and from 0.45 to 0.57 under SVI. The last few percent of the bound buys
+  sharper posteriors that held-out data does not support, which is early
+  stopping doing what early stopping has always done. Worth knowing before
+  reading a training curve as something to maximize.
+  - Two behaviours worth stating because they are deliberate. A run whose
+  bound goes to NaN **never satisfies the test**, so it goes to its cap and
+  leaves the NaNs in the log where they can be seen, rather than stopping and
+  reporting success. And a call that begins already converged has nothing to
+  take a fraction of, so it also runs to its cap: the rule can end a phase of
+  training, never skip one. That is what keeps the phased pattern
+  (`train`, `set_learning_rate`, `train`) working, since each call is judged
+  from its own starting point.
+  - `cross_validate` needs no argument for this: each fold is rebuilt from
+  the saved model, options included, so a tolerance set on the model sizes
+  every fold's refit instead of the hard-coded 200.
+
+* **The `geo-ml` skill gained the non-stationary multivariate recipe**, from
+a notebook verified end to end: `08_Jura_non_stationary.ipynb` joins the
+references (stripped of outputs, 5.6 MB to 20 kB) and a new worked example
+sits beside the categorical one. The pattern it records is the one that was
+missing — how a categorical variable *influences* a numerical one, and how
+to make a model non-stationary without leaving the API.
+  - `Linear(cat, size=n, unit_norm=False)` → `LinearCombination(trend, num)`
+  adds a trend read off the rock fields to the grades. `unit_norm=False` is
+  the load-bearing argument: it lets the mixing weights shrink to zero, so
+  the model can conclude the geology says nothing about an element. The
+  alternative — making the categorical node a *parent* of the numerical one
+  — is a genuine deep GP and a much stronger commitment.
+  - `BasicGP(size=2)` → `GPWalk` → `BasicGP` puts the categorical fields in
+  a space the model bends, and the numerical fields read the *unmoved*
+  input: the two need not share a geometry. The input transform starts small
+  (`Isotropic(0.05)`) because the walked coordinates do the long-range work.
+  - Measured on Jura's 100 held-out sites: metals at 0.90 times their own
+  standard deviation and rock balanced accuracy 0.72, against 0.95 and 0.67
+  for the stationary model the manual's case study used before. 250
+  iterations is enough; 500 measures identically.
+  - **A finding that corrects an earlier one.** 0.6.5's variogram work
+  established that this dataset's stationary model degrades sharply with
+  extra inducing points (0.96 → 1.13 from 81 to 169). The non-stationary
+  network is *flat* from 259 to 1220 — five times the points, five and a
+  half times the training, no measurable change. The ceiling belongs to a
+  configuration, not to the method, and both the skill and the manual now
+  say so rather than quoting a number.
+* **TensorFlow's retracing notice is quiet for this package's own graphs**,
+and the retracing it was reporting is largely gone. Two changes, and the
+first is the one that matters.
+  - `predict_raw`'s traced function is built with `reduce_retracing=True`.
+  The batch shape is the one input that varies without meaning anything: a
+  grid divides into equal batches and a short last one, and every container
+  of a different size started the count again. Measured over eight
+  predictions of differing size, **eight traces and 7.6 s become two and
+  2.2 s**, bit-identical, and XLA agrees with the eager path either way
+  (checked at `jit_predict` both ways, gap 1e-14). What still retraces —
+  `n_sim`, `include_noise` — is baked into the graph and has to.
+  - `geoml.math.tf.silence_retracing_notices()` drops the notice for
+  `_predict_raw` and `refresh_cached`'s inner function, and is installed
+  when `geoml` is imported. Call it with `False` to hear them again, which
+  is worth doing if a prediction seems to be compiling rather than
+  computing. The filter matches those two names only, so anything
+  TensorFlow says about a user's own `tf.function` still comes through.
+  - Why suppress at all, when retracing notices are usually worth reading:
+  the message interpolates the repr of the function it names, and for a
+  bound method that is the **entire model** — every node, every parameter —
+  so one notice can run to hundreds of lines and bury whatever it lands in.
+  `refresh_cached`'s function meanwhile takes no arguments and is traced
+  once per network; a session holding many models (a cross-validation, the
+  manual) trips TensorFlow's counter without anything being retraced twice.
+  - Worth knowing, and not a bug: with `jit_predict` on and off, the
+  *deterministic* columns agree to 1e-14 (`latent_mean`, `latent_variance`,
+  `noise_variance`) while `prediction` does not, because it is the mean of
+  the simulations and the two backends draw different random numbers. The
+  gap falls as `1/sqrt(n_sim)` — 79, 19, 5.5 at n_sim 4, 40, 400 — which is
+  Monte Carlo noise, and is why `test_jit_prediction_matches_the_plain_one`
+  compares the latent mean.
+* **The 0.6.0 aliases now say they are going away.** The ten shims left at
+the pre-0.6.0 flat paths (`geoml.tftools`, `geoml.drillhole`, `geoml.random`,
+…) promised "one release" in a docstring and said nothing at runtime, so
+0.6.1 through 0.6.4 all passed without anyone being told. Each now raises a
+`DeprecationWarning` naming where the module went, ahead of removal in 0.7.0.
+  - **The notice is lazy, and that is the whole design.** `geoml/__init__.py`
+  imported all ten eagerly so that `geoml.geometry` kept working as an
+  attribute; warning from there would have fired ten notices at every
+  `import geoml`, for the majority who never touch an old path — which is how
+  a warning teaches people to ignore warnings. A module-level `__getattr__`
+  (PEP 562) keeps the attribute working and moves the notice to the moment
+  someone reaches for it. Verified in a subprocess: a plain `import geoml`
+  emits nothing and loads no shim.
+  - It is also re-issued from `__getattr__` rather than passed through from
+  the shim body, because a `DeprecationWarning` attributed to library code is
+  one Python's default filter *hides* — attributed to the caller, it shows.
+  One notice, pointing at the line that asked.
+  - **`kernels.py` was itself importing through the `tftools` shim** (three
+  helpers, two of which had landed on the `math.linalg` side of the split),
+  so the notice would have fired for every user on its own. Repointed at
+  `geoml.math.tf` and `geoml.math.linalg` directly, and the test suite —
+  which reached for `geoml.geometry`, `geoml.inducing`, `geoml.drillhole`
+  and `geoml.graphviz` in nine files — now uses the current paths too. The
+  last of those was found by running the suite and reading its warnings
+  rather than by grep: making the shims speak is what made it audible.
+  - `test_deprecated_paths.py` pins the contract: every alias resolves,
+  warns exactly once, names its destination and 0.7.0, and is attributed to
+  the caller; a plain import stays silent; an unknown attribute still raises.
+* **`warping.Rotation` documented, and its FastICA warning silenced.** The
+class had no docstring; it now says what it is — an orthogonal, volume-
+preserving rotation whose matrix is trainable and **initialized by
+independent component analysis**, putting the axes along the directions of
+maximum non-Gaussianity. That is what makes `Rotation -> Spline` the usual
+pairing: the rotation finds where the marginals depart most from a Gaussian,
+and the spline is applied where that departure lives.
+  - The `ConvergenceWarning` sklearn raised when the ICA fit hit its
+  iteration limit (visible on the Jura case in the suite) is suppressed at
+  that one call, with the reason recorded: ICA is asked for a *starting
+  point*, not a converged answer, since the rotation is a trainable
+  parameter that training moves from wherever the fit stopped. Raising
+  `max_iter` instead would slow every initialization to chase a number that
+  is overwritten anyway.
+  - `Rotation` and `ScaledSimplex` join `warping.__all__`, which had left
+  them out — reachable as module attributes but missed by a star import.
+  Every warping class in the module is now named there.
+* **`warping.Log` was returning the Jacobian instead of its logarithm**, and
+`ChainedWarping` was seeding its accumulator with the column count. Both are
+one-line fixes to the same quantity: the second value `forward` returns is
+the *log* of the Jacobian determinant, which is the only form that composes
+by addition along a chain.
+  - `Log.forward` computed `sum(1 / (x + shift))` where the truth is
+  `-sum(log(x + shift))`, while `Softplus` and `ZScore` next to it both
+  returned logs. Found while writing the manual's Jura chapter, which leads
+  with `Log -> RobustPCA -> Spline`; verified against a finite-difference
+  Jacobian, where `Log(2)` on `[[1, 2], [3, 4]]` reported `[1.5, 0.583]`
+  against a true `[-0.693, -2.485]`.
+  - **What it cost in practice was small, and worth stating precisely.**
+  `Log` carries no trainable parameter, so as the *first* link of a chain
+  its term is a constant that no gradient sees, and every model in the
+  package and the manual used it that way. Put anything trainable ahead of
+  it and the model optimizes the wrong objective. The chain's accumulator
+  was likewise a constant offset of `size_in`. So no fitted model changes;
+  what changes is the ELBO's reported value, and printed training curves for
+  chained warpings shift down by the chain's width.
+  - `test_noise_integration.py` now checks nine warpings' reported
+  log-determinant against a numerical Jacobian, and pins the chain's
+  addition rule and the zero for a chain of identities. Both were confirmed
+  to fail on the old code before the fix landed.
+  - The four that were left alone in the first pass — `PCA`, `RobustPCA`,
+  `CenteredLogRatio` and `ScaledSimplex`, each reporting zero where the
+  truth was something else — were finished a few days later. See the entry
+  below.
+* **The last four zero log-determinants say what they are worth.** Each was
+reporting zero for a map that changes volume, wrong in the ELBO's value and
+invisible in its gradient, so no fitted model moves and no prediction
+changes; what changes is any comparison of ELBOs across warpings.
+  - `PCA` and `RobustPCA` rotate and then divide by the square roots of the
+  eigenvalues, so the term is `-0.5 * sum(log(eigvals))`. Measured against a
+  finite-difference Jacobian on three variables: formula `-1.764258740`,
+  numerical `-1.764258740`. With **fewer components than variables** there
+  is no square Jacobian and no determinant to report at all, since the map
+  projects rather than transforms; that case keeps its zero and now says so
+  in a comment and in a test of its own.
+  - `ScaledSimplex` divides each part by a constant of its own, a diagonal
+  Jacobian, so the term is `-sum(log(scale))`: `3.298589068` against a
+  numerical `3.298589068`.
+  - `CenteredLogRatio` was the interesting one. Between arrays of `n_dim`
+  columns its Jacobian is **singular**, not merely constant — the
+  transformation ignores a rescaling of the whole row, so the determinant is
+  exactly zero and there is nothing to report. Read as the bijection it
+  really is, from the simplex onto the hyperplane where the components sum
+  to zero (both one dimension smaller), the volume factor is
+  `-log(n_dim) - sum(log(x))`, which unlike the others **varies with the
+  row**, growing without bound as a part approaches zero.
+  - **No balance matrix had to be chosen**, which was the objection that
+  parked this. Any two orthonormal bases of that hyperplane differ by a
+  rotation of determinant one, so the volume factor is the same in all of
+  them — measured with four (the SVD basis, the classical Helmert balance
+  matrix, and two random rotations) at `n_dim` 3 and 5, agreeing to ten
+  decimals with each other and with the closed form, which mentions no basis
+  at all. A test pins that invariance, since it is the reason the one-line
+  implementation is legitimate.
+  - The redundant latent direction that comes with it is the familiar
+  softmax one — `backward(z + c)` is `backward(z)` — so it is
+  unidentifiable and harmless rather than a defect to design around. The
+  consequence for the objective is stated in the class docstring: it is a
+  density on the hyperplane, comparable between compositional models and
+  only loosely against a warping that is one to one.
+  - Three of the four join the parametrized log-determinant test, which now
+  covers twelve warpings; the log-ratio has two tests of its own for the two
+  claims a numerical determinant cannot make.
+* **The variogram fan was a nugget below the data, and looked like a
+verdict.** `plots.prepare.variogram` drew the measurements' experimental
+semivariogram against the stored realizations, which are of the *ground*
+with the likelihood noise integrated out. The two are not the same
+quantity, so the fan sat low at every lag by the fitted nugget and every
+model read as over-smooth. On Walker Lake the shortest lag showed 8 555
+against the data's 55 013.
+  - The fan is now raised onto the measurements' footing before it is
+  drawn. An error of its own at each location adds `(var_i + var_j) / 2` to
+  every pair's contribution, so the correction is that quantity averaged
+  over the pairs in each bin, read from the `noise_variance` column. Same
+  example after: 54 344 against 55 013, with the fan running about 15%
+  under the data through the mid-range — which is the *real* finding, a
+  range fitted slightly long, previously buried under the offset.
+  - **It is analytic, not simulated.** Only the noise's variance enters a
+  semivariogram, never its shape, so nothing is drawn: no RNG, no seed
+  inside a figure, and exact in expectation rather than approximated. A
+  Monte Carlo check over 200 draws of independent per-location noise agrees
+  with the closed form, and is in the suite.
+  - `predict_measurements` is **not** the right source here, though it is
+  the one `accuracy` uses. `likelihood.measurement_samples` adds a
+  per-node *scalar* to the whole field at once, so each of its columns is a
+  spatially coherent field plus a constant — exactly the right marginal per
+  location, and a constant cancels out of `(y_i - y_j)`. Measured: it moves
+  the fan by 2%, not by the nugget. The two figures need different things
+  from the same noise, and only one of them needs it to be independent
+  between locations.
+  - Panels gained a `noise` key holding the per-bin correction, or None
+  where the container carries no `noise_variance` (predicted with
+  `include_noise=False`), in which case the fan is drawn uncorrected rather
+  than refused. `residuals=True` is unaffected: it has no fan.
+* **The variogram's pairs are declustered now, by default**, and this was
+the larger of the two errors in that figure. Samples follow the ore, so an
+experimental variogram on raw pairs describes the sampling as much as the
+field. `geoml.math.geometry.declustering_weights` is the new primitive: lay
+a lattice, split one vote among the samples sharing a cell, average over
+shifted lattice origins so that where the lattice starts does not decide
+the answer.
+  - The cell size is chosen the way `declus` has always chosen it (Deutsch
+  & Journel), by sweeping and keeping the departure of the declustered mean
+  from the naive one — taken in absolute value, so clustering in high and
+  in low values are both handled without being told which happened. Both
+  ends of the sweep return the naive mean, so the extremum is interior.
+  - **Checked against a known truth rather than argued.** Walker Lake ships
+  its exhaustive field, so the honest variogram is knowable: its 470 samples
+  have a mean of 435 against the field's 278, and their raw variogram runs
+  1.4× the true one at the sill and 2.3× at the shortest lag. Declustering
+  (chosen cell 22.3 units) brings the mean to 291 and the average departure
+  across lags from 56% to 12%, with the sill from 89 700 to 64 400 against a
+  truth of 61 800. Two tests pin exactly this, and they are the reason to
+  keep the exhaustive grid in the bundled data.
+  - The weights apply to the fan and the sill as well as the data curve, or
+  the sides would again be estimating different things. `decluster=False`
+  restores the raw pairs and a number fixes the cell; panels carry the cell
+  used. The shortest lag is the one bin declustering cannot mend, since the
+  closest pairs exist mostly *inside* the clusters, and the manual now says
+  so where it reads the figure.
+  - **`metrics.variogram_score` declusters too**, given the `coordinates`
+  its pairs come from: each pair is weighted by `w_i * w_j`, and
+  `compute_metrics` passes them, so the number reported beside the CRPS is
+  the declustered one. Its other bias stays, deliberately. The truth carries
+  the measurement noise and the realizations do not, and unlike a
+  semivariogram there is no constant to add to `|difference| ** p`, so
+  putting the two on one footing would mean drawing noise into the
+  realizations — a seed inside a metric, and a number that moves between
+  calls. The docstring now says plainly that this is an estimate which never
+  reaches zero, to be read as a ranking between models on the same data,
+  and points at the figure for when the size of the gap is the question.
+  - **The figure carries the score**, in each panel's title as `VS = ...`,
+  in both backends. It is computed on the locations the figure kept and
+  with the cell the figure chose, so the number and the curves are the same
+  comparison; the realizations it needs are the columns the fan already
+  read, kept side by side rather than re-read, which is bounded by the pair
+  budget however large the container is. Panels without a fan (`residuals`,
+  nothing simulated) carry `None` and title themselves as before. The score
+  is over every pair of the kept locations rather than the binned ones, so
+  it does not move with `max_lag` or `direction` — it judges the ensemble,
+  and the curves are what the direction changes.
+  - This started from the observation that the fan's remaining shortfall
+  looked like preferential sampling rather than a bad model, and it was.
+  With both corrections in place the fan tracks the data across the whole
+  range on Walker Lake, where before the first it sat at a sixth of the
+  data's curve at short lags. The figure's verdict on that model reversed
+  entirely, which is the argument for being scrupulous about what goes on
+  each axis of a diagnostic: an unfair comparison convicts an innocent
+  model and looks like evidence while doing it.
+
 ## version 0.6.4
 * **The repository is now a Claude Code plugin marketplace**, shipping one
 plugin (`geoml`) whose single skill carries the package's own working

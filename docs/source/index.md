@@ -39,6 +39,9 @@ Python 3.10 or newer. The dependencies are declared in `pyproject.toml`;
 
 ## Where to go
 
+- **[The manual](manual/index)** teaches the model: seventeen chapters from
+  kriging to the variational GP, through the workflow, to three case
+  studies. Every code block in it runs.
 - **[The API reference](reference/index)** documents every public class and
   function, module by module.
 - **[Internals](internals/index)** collects the design records: what was
@@ -48,6 +51,7 @@ Python 3.10 or newer. The dependencies are declared in `pyproject.toml`;
 :maxdepth: 2
 :hidden:
 
+manual/index
 reference/index
 internals/index
 ```

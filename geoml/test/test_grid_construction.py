@@ -88,7 +88,7 @@ def test_drillholes_serve_as_data():
         "HoleID": ["H1", "H2"], "X": [0.0, 30.0], "Y": [0.0, 10.0],
         "Z": [100.0, 105.0], "Length": [50.0, 60.0],
         "Dip": [90.0, 90.0], "Azimuth": [0.0, 0.0]})
-    holes = geoml.drillhole.DrillholeData(
+    holes = geoml.data.drillhole.DrillholeData(
         collar, hole="HoleID", x="X", y="Y", z="Z", length="Length",
         dip="Dip", azimuth="Azimuth")
 
@@ -103,7 +103,7 @@ def test_drillholes_serve_as_data():
 def test_the_fitted_angles_come_out_rounded():
     rng = np.random.default_rng(1)
     plane = rng.uniform(0, 100, size=(300, 3)) * [1.0, 0.3, 0.05]
-    mat = geoml.geometry.rotation_matrix(37.3182, 12.6541, 0.0)
+    mat = geoml.math.geometry.rotation_matrix(37.3182, 12.6541, 0.0)
     tilted = geoml.data.PointData.from_array(plane @ mat)
 
     grid = geoml.data.RotatedGrid3D.from_data(tilted, step=5.0, decimals=0)
@@ -214,7 +214,7 @@ def test_from_data_fits_and_covers():
     rng = np.random.default_rng(2)
     cloud = rng.uniform(0, 60, size=(300, 3)) * [1.0, 0.4, 0.1]
     tilted = geoml.data.PointData.from_array(
-        cloud @ geoml.geometry.rotation_matrix(25.0, 5.0, 0.0))
+        cloud @ geoml.math.geometry.rotation_matrix(25.0, 5.0, 0.0))
 
     blocks = geoml.data.RotatedBlockSet3D.from_data(
         tilted, step=[10.0, 10.0, 2.0], margin=0.05,

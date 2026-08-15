@@ -14,5 +14,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """Deprecated alias: this module moved to `geoml.math.geometry` in 0.6.0.
-This shim keeps the old path importable for one release."""
+This shim keeps the old path importable until 0.7.0."""
+
+from geoml._deprecated import warn_moved as _warn_moved
+
+_warn_moved("geometry", stacklevel=2)
+
 from geoml.math.geometry import *

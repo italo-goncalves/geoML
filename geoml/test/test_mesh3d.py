@@ -22,7 +22,7 @@ def _arrays(mesh):
 
 def _build(mesh, cls=None):
     points, triangles = _arrays(mesh)
-    normals = geoml.geometry.vertex_normals(points, triangles)
+    normals = geoml.math.geometry.vertex_normals(points, triangles)
     if cls is None:
         return mesh3d(points, triangles, normals)
     return cls(points, triangles, normals)
@@ -32,7 +32,7 @@ def _sheet():
     points = np.array([[0.0, 0, 0], [4, 0, 0], [4, 3, 0], [0, 3, 0]])
     triangles = np.array([[0, 1, 2], [0, 2, 3]])
     return Surface3D(points, triangles,
-                     geoml.geometry.vertex_normals(points, triangles))
+                     geoml.math.geometry.vertex_normals(points, triangles))
 
 
 # -- what a mesh knows about itself --------------------------------------- #
@@ -71,7 +71,7 @@ def test_a_closed_mesh_cannot_be_a_surface():
     points, triangles = _arrays(pv.Box())
     with pytest.raises(ValueError, match="this mesh closes"):
         Surface3D(points, triangles,
-                  geoml.geometry.vertex_normals(points, triangles))
+                  geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def test_an_open_mesh_cannot_be_a_solid():
@@ -79,7 +79,7 @@ def test_an_open_mesh_cannot_be_a_solid():
     triangles = np.array([[0, 1, 2], [0, 2, 3]])
     with pytest.raises(ValueError, match="does not close"):
         Solid3D(points, triangles,
-                geoml.geometry.vertex_normals(points, triangles))
+                geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def test_a_body_whose_triangles_disagree_cannot_be_a_solid():
@@ -88,7 +88,7 @@ def test_a_body_whose_triangles_disagree_cannot_be_a_solid():
     triangles[0] = triangles[0][::-1]
     with pytest.raises(ValueError, match="disagree about which way is out"):
         Solid3D(points, triangles,
-                geoml.geometry.vertex_normals(points, triangles))
+                geoml.math.geometry.vertex_normals(points, triangles))
 
 
 def test_the_factory_picks_the_class_the_geometry_calls_for():
@@ -100,7 +100,7 @@ def test_the_factory_picks_the_class_the_geometry_calls_for():
     triangles = triangles.copy()
     triangles[0] = triangles[0][::-1]
     broken = mesh3d(points, triangles,
-                    geoml.geometry.vertex_normals(points, triangles))
+                    geoml.math.geometry.vertex_normals(points, triangles))
     assert type(broken) is Mesh3D
 
 
@@ -133,7 +133,7 @@ def test_healing_settles_triangles_that_disagree():
     triangles = triangles.copy()
     triangles[0] = triangles[0][::-1]
     broken = mesh3d(points, triangles,
-                    geoml.geometry.vertex_normals(points, triangles))
+                    geoml.math.geometry.vertex_normals(points, triangles))
     assert not broken.consistent
 
     healed = broken.heal()

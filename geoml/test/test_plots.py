@@ -17,6 +17,7 @@ matplotlib.use("Agg", force=True)
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.spatial as spatial
 
 import geoml
 import geoml.plots.prepare as prepare
@@ -1540,14 +1541,42 @@ def _line_points(values):
 
 
 def test_the_variogram_on_a_worked_example():
-    """Three points on a line, every pair by hand."""
+    """Three points on a line, every pair by hand. Declustering off: this
+    pins the arithmetic, and weights are the next test's business."""
     point = _line_points([0.0, 1.0, 4.0])
-    panel = prepare.variogram(point, "z", n_lags=1, max_lag=3.0)[0]
+    panel = prepare.variogram(point, "z", n_lags=1, max_lag=3.0,
+                              decluster=False)[0]
 
     assert panel["count"][0] == 3
     assert panel["data"][0] == pytest.approx(0.5 * (1 + 9 + 16) / 3)
     assert panel["sill"] == pytest.approx(np.var([0.0, 1.0, 4.0]))
     assert panel["realizations"] is None
+    assert panel["cell"] is None
+
+
+def test_a_declustered_variogram_weights_each_pair_by_its_ends():
+    """`w_i * w_j` on the pairs and `w_i` on the sill, by hand."""
+    point = _line_points([0.0, 1.0, 4.0])
+    cell = 2.0
+    panel = prepare.variogram(point, "z", n_lags=1, max_lag=3.0,
+                              decluster=cell)[0]
+
+    coords = np.asarray(point.coordinates, dtype=float)
+    values = np.array([0.0, 1.0, 4.0])
+    weights, used = geoml.math.geometry.declustering_weights(
+        coords, values, cell=cell)
+    assert used == pytest.approx(cell)
+
+    pairs = [(0, 1), (0, 2), (1, 2)]
+    share = np.array([weights[i] * weights[j] for i, j in pairs])
+    gamma = np.array([0.5 * (values[i] - values[j]) ** 2 for i, j in pairs])
+    assert panel["data"][0] == pytest.approx(
+        float((share * gamma).sum() / share.sum()))
+
+    centre = (weights * values).sum() / weights.sum()
+    assert panel["sill"] == pytest.approx(
+        float((weights * (values - centre) ** 2).sum() / weights.sum()))
+    assert panel["cell"] == pytest.approx(cell)
 
 
 def test_iid_values_lie_flat_and_a_smooth_field_rises():
@@ -1571,6 +1600,90 @@ def test_iid_values_lie_flat_and_a_smooth_field_rises():
     assert np.nanmax(rising["data"]) > 0.75 * rising["sill"]
 
 
+def test_declustering_weights_split_one_vote_among_a_cluster():
+    """Four points in one cell and one on its own: the loner outvotes any
+    single member of the cluster by four to one."""
+    coords = np.array([[0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1],
+                       [50.0, 50.0]])
+    weights, _ = geoml.math.geometry.declustering_weights(
+        coords, np.arange(5.0), cell=10.0)
+
+    assert weights.sum() == pytest.approx(5.0)
+    assert weights[4] == pytest.approx(4 * weights[0])
+    assert np.allclose(weights[:4], weights[0])
+
+
+def test_evenly_spread_samples_are_left_alone():
+    """Nothing to decluster means one vote each.
+
+    Away from the boundary, that is exact. The edge of a regular grid is a
+    real exception rather than a wobble: a cell straddling the edge holds
+    fewer samples, so those few carry it, and their weight goes up. Nothing
+    can be done about that with a lattice, and it is why the interior is
+    what gets asserted.
+    """
+    x, y = np.meshgrid(np.arange(8.0), np.arange(8.0))
+    coords = np.column_stack([x.ravel(), y.ravel()])
+    weights, _ = geoml.math.geometry.declustering_weights(
+        coords, np.zeros(len(coords)) + 1.0, cell=2.0)
+
+    interior = (coords[:, 0] > 0) & (coords[:, 0] < 7) \
+        & (coords[:, 1] > 0) & (coords[:, 1] < 7)
+    assert np.allclose(weights[interior], weights[interior][0])
+    assert weights.std() / weights.mean() < 0.4
+
+    # against a genuinely clustered layout, where the spread is five times as
+    # large and the loner carries many times a cluster member's vote
+    clustered = np.vstack([np.zeros([20, 2]), [[50.0, 50.0]]])
+    lumpy, _ = geoml.math.geometry.declustering_weights(
+        clustered, np.ones(21), cell=10.0)
+    assert lumpy.std() / lumpy.mean() > 4 * weights.std() / weights.mean()
+    assert lumpy[-1] > 10 * lumpy[0]
+
+
+def test_declustering_recovers_walker_lakes_true_variogram():
+    """The bundled Walker Lake ships its exhaustive field, so the honest
+    variogram is knowable rather than inferable.
+
+    Its 470 samples are preferentially placed in high-value ground, which
+    inflates the raw experimental variogram by half at the sill -- a model
+    reproducing the field exactly would look far too smooth against it.
+    Declustering is what makes the figure a statement about the field.
+    """
+    walker, walker_grid = geoml.datasets.walker()
+    exhaustive = walker_grid.values("V/measurements")
+
+    truth_points = geoml.data.PointData.from_array(
+        np.asarray(walker_grid.coordinates, dtype=float)[::6])
+    truth_points.add_continuous_variable("V", exhaustive[::6])
+
+    kwargs = dict(n_lags=12, max_lag=180.0)
+    truth = prepare.variogram(truth_points, "V", decluster=False,
+                              **kwargs)[0]["data"]
+    raw = prepare.variogram(walker, "V", decluster=False,
+                            **kwargs)[0]["data"]
+    declustered = prepare.variogram(walker, "V", **kwargs)[0]["data"]
+
+    # the lags where declustering can work: the shortest bin is built almost
+    # entirely of pairs inside the clusters, so no weighting reaches it
+    off_raw = np.abs(raw[1:] / truth[1:] - 1).mean()
+    off_dec = np.abs(declustered[1:] / truth[1:] - 1).mean()
+    assert off_raw > 0.4
+    assert off_dec < 0.15
+    assert off_dec < off_raw / 3
+
+
+def test_declustering_pulls_the_sill_towards_the_fields_variance():
+    walker, walker_grid = geoml.datasets.walker()
+    true_variance = float(np.var(walker_grid.values("V/measurements")))
+
+    raw = prepare.variogram(walker, "V", n_lags=8, decluster=False)[0]["sill"]
+    declustered = prepare.variogram(walker, "V", n_lags=8)[0]["sill"]
+
+    assert raw > 1.3 * true_variance
+    assert abs(declustered / true_variance - 1) < 0.1
+
+
 def test_a_directional_variogram_keeps_the_pairs_along_its_direction():
     coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     point = geoml.data.PointData.from_array(coords)
@@ -1583,9 +1696,11 @@ def test_a_directional_variogram_keeps_the_pairs_along_its_direction():
     assert panel["data"][0] == pytest.approx(0.5)
 
 
-def test_the_fan_is_the_variogram_of_each_realization(trained):
+def test_the_fan_is_each_realization_raised_onto_the_measurements(trained):
+    """The realizations are of the ground and the data carries the noise, so
+    the fan is one realization's variogram plus what that noise adds."""
     _, point = trained
-    panel = prepare.variogram(point, "v", n_lags=5)[0]
+    panel = prepare.variogram(point, "v", n_lags=5, decluster=False)[0]
     fan = panel["realizations"]
     part = point.variables["v"].components["a"]
     assert fan.shape == (part.simulations.shape[1], 5)
@@ -1593,20 +1708,135 @@ def test_the_fan_is_the_variogram_of_each_realization(trained):
     column = np.asarray(part.simulations[:, 7]).ravel()
     check = geoml.data.PointData.from_array(np.asarray(point.coordinates))
     check.add_continuous_variable("r", column)
-    alone = prepare.variogram(check, "r", n_lags=5)[0]["data"]
-    assert np.allclose(fan[7], alone, equal_nan=True)
+    alone = prepare.variogram(check, "r", n_lags=5, decluster=False)[0]["data"]
+    assert np.allclose(fan[7], alone + panel["noise"], equal_nan=True)
+
+
+def test_the_noise_lift_is_the_pair_averaged_variance(trained):
+    """`(var_i + var_j) / 2` over the pairs in each bin, which is what an
+    error of its own at each location adds to a semivariogram."""
+    _, point = trained
+    panel = prepare.variogram(point, "v", n_lags=5)[0]
+
+    part = point.variables["v"].components["a"]
+    variance = part.noise_variance.values.to_numpy().astype(float).ravel()
+    coords = np.asarray(point.coordinates, dtype=float)
+
+    distance = spatial.distance.pdist(coords)
+    i_idx, j_idx = np.triu_indices(len(coords), k=1)
+    max_lag = 0.5 * float(np.sqrt(
+        ((coords.max(axis=0) - coords.min(axis=0)) ** 2).sum()))
+    keep = distance <= max_lag
+    i_idx, j_idx, distance = i_idx[keep], j_idx[keep], distance[keep]
+
+    edges = np.linspace(0.0, max_lag, 6)
+    lag_bin = np.clip(np.searchsorted(edges, distance, side="right") - 1, 0, 4)
+    expected = np.array([
+        0.5 * (variance[i_idx[lag_bin == b]]
+               + variance[j_idx[lag_bin == b]]).mean()
+        for b in range(5)])
+
+    assert np.allclose(panel["noise"], expected)
+
+
+def test_the_lift_matches_noise_actually_drawn_per_location(trained):
+    """The correction is analytic, and this is what it stands in for: the
+    variogram of a realization with an independent error added at every
+    location. Only the variance of that error enters, never its shape, which
+    is why nothing has to be drawn in the figure itself.
+    """
+    _, point = trained
+    panel = prepare.variogram(point, "v", n_lags=5)[0]
+
+    part = point.variables["v"].components["a"]
+    variance = part.noise_variance.values.to_numpy().astype(float).ravel()
+    column = np.asarray(part.simulations[:, 3]).ravel()
+
+    rng = np.random.default_rng(0)
+    drawn = []
+    for _ in range(200):
+        noisy = column + rng.normal(0.0, np.sqrt(variance))
+        check = geoml.data.PointData.from_array(np.asarray(point.coordinates))
+        check.add_continuous_variable("r", noisy)
+        drawn.append(prepare.variogram(check, "r", n_lags=5)[0]["data"])
+
+    assert np.allclose(np.mean(drawn, axis=0), panel["realizations"][3],
+                       rtol=0.05)
+
+
+def test_a_container_without_a_noise_column_keeps_its_fan_unlifted(trained):
+    """`include_noise=False` leaves nothing to correct with, and the figure
+    still draws rather than raising."""
+    model, point = trained
+    bare = geoml.data.PointData.from_array(np.asarray(point.coordinates))
+    bare.add_vector_variable(
+        "v", ["a", "b", "c"],
+        np.column_stack([
+            point.values("v/%s/measurements" % c) for c in "abc"]))
+    model.predict(bare, n_sim=5, include_noise=False)
+
+    panel = prepare.variogram(bare, "v", n_lags=4)[0]
+    assert panel["noise"] is None
+    assert panel["realizations"] is not None
 
 
 def test_the_residual_variogram_reads_the_prediction_and_drops_the_fan(
         trained):
     _, point = trained
-    panel = prepare.variogram(point, "v", n_lags=4, residuals=True)[0]
+    panel = prepare.variogram(point, "v", n_lags=4, residuals=True,
+                              decluster=False)[0]
     assert panel["realizations"] is None
 
     part = point.variables["v"].components["a"]
     residual = part.measurements.values.to_numpy() \
         - part.prediction.values.to_numpy()
     assert panel["sill"] == pytest.approx(np.var(residual))
+
+
+def test_the_panel_carries_the_score_of_the_fan_it_drew(trained):
+    """The figure's verdict as one number, on the same locations and the same
+    declustering weights as the curves."""
+    _, point = trained
+    part = point.variables["v"].components["a"]
+    measured = part.measurements.values.to_numpy().astype(float).ravel()
+    coords = np.asarray(point.coordinates, dtype=float)
+    sims = np.column_stack([
+        np.asarray(part.simulations[:, r]).ravel()
+        for r in range(part.simulations.shape[1])])
+
+    panel = prepare.variogram(point, "v", n_lags=5)[0]
+    assert panel["score"] == pytest.approx(geoml.metrics.variogram_score(
+        measured, sims, coordinates=coords, decluster=panel["cell"]))
+
+    raw = prepare.variogram(point, "v", n_lags=5, decluster=False)[0]
+    assert raw["cell"] is None
+    assert raw["score"] == pytest.approx(
+        geoml.metrics.variogram_score(measured, sims))
+
+
+def test_a_panel_with_no_fan_has_no_score(trained):
+    """Nothing to score without realizations, and the figure still draws."""
+    _, point = trained
+    panel = prepare.variogram(point, "v", n_lags=4, residuals=True)[0]
+    assert panel["realizations"] is None
+    assert panel["score"] is None
+
+
+def test_the_score_reaches_the_titles_of_both_backends(trained):
+    _, point = trained
+    panels = prepare.variogram(point, "v", n_lags=5)
+    expected = ["%s (VS = %.3g)" % (panel["label"], panel["score"])
+                for panel in panels]
+
+    figure = geoml.plots.Explorer(point, continuous="v").variogram(n_lags=5)
+    # the style puts panel titles on the left, and that is where they are read
+    titles = [ax.get_title(loc="left") for ax in figure.axes
+              if ax.get_title(loc="left")]
+    assert titles == expected
+
+    interactive = geoml.plots.Interactive(
+        point, continuous="v").variogram(n_lags=5)
+    assert [note.text for note in interactive.layout.annotations] == expected
 
 
 def test_the_variogram_reads_realizations_one_column_at_a_time(

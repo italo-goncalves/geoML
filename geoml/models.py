@@ -83,12 +83,13 @@ class GPOptions(_ModelOptions):
     jit_predict = False
     qmc_simulations = False
     expert_propagation = "consensus"
+    training_tolerance = None
 
     def __init__(self, verbose=True, prediction_batch_size=20000,
                  jitter=1e-9,
                  training_batch_size=2000, training_samples=20,
                  jit_predict=False, qmc_simulations=False,
-                 expert_propagation="consensus"):
+                 expert_propagation="consensus", training_tolerance=None):
         """
         Configuration of Gaussian process models.
 
@@ -148,6 +149,22 @@ class GPOptions(_ModelOptions):
             to slow optimization at large K. Only deep (multi-layer)
             networks are affected: below a terminal node the propagation
             never runs.
+        training_tolerance : float, optional
+            When to stop training before its iteration count runs out, as a
+            fraction. The bound is smoothed, and training stops once its
+            gain over the last twenty iterations falls below this share of
+            everything gained since the call began. `None` (the default)
+            trains for exactly as long as it is told, which is what every
+            version before 0.6.5 did. 0.01 is a reasonable setting.
+
+            The count passed to `train_full`/`train_svi` remains the cap,
+            and the criterion only ever ends training sooner. It is
+            deliberately unable to stop a model that begins the call already
+            converged: with nothing gained, there is nothing to take a
+            fraction of, and the run goes to its cap. Training in phases is
+            the pattern this protects -- a smaller learning rate makes
+            progress the previous phase could not, and each phase is judged
+            against its own starting point.
         """
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
@@ -160,6 +177,66 @@ class GPOptions(_ModelOptions):
         self.jit_predict = jit_predict
         self.qmc_simulations = qmc_simulations
         self.expert_propagation = expert_propagation
+        self.training_tolerance = training_tolerance
+
+
+class _Convergence:
+    """Has the bound stopped improving? The rule behind `training_tolerance`.
+
+    Smooths the bound with an exponential moving average and compares its
+    gain over the last window against the gain since training started,
+    stopping when the first is a small enough fraction of the second.
+
+    Two things about that ratio are deliberate. Measuring progress from the
+    **start of this call** keeps the phased pattern working -- a model
+    trained, given a smaller learning rate and trained again plateaus and
+    then improves, and each phase is judged on its own terms. And measuring
+    the recent gain against the total one rather than against the bound's
+    value is the only scale-free choice available: an ELBO's magnitude means
+    nothing on its own, since it grows with the number of data points and
+    with whatever normalization the likelihood carries.
+
+    The comparison is over a window rather than between consecutive
+    iterations, which matters more than it sounds. For a bound approaching
+    its limit with time constant `tau`, a per-iteration test fires once
+    `exp(-t/tau) < tolerance * tau` -- so a slowly converging fit stops
+    almost at once, and how early depends on `tau`, which nobody knows in
+    advance. Over a window of `w`, it fires at
+    `t > tau * log((exp(w/tau) - 1) / tolerance)`, which for `w` near `tau`
+    is a few time constants whatever `tau` is.
+    """
+
+    # The window, in iterations (full batch) or epochs (SVI), used both as
+    # the average's span and as how far back the comparison reaches.
+    _WINDOW = 20
+
+    def __init__(self, tolerance, window=None):
+        self.tolerance = tolerance or 0.0
+        self.window = self._WINDOW if window is None else int(window)
+        self.start = None
+        self.trail = []
+
+    def stop(self, value):
+        """Whether to stop, having seen `value` as the latest bound."""
+        if self.tolerance <= 0.0:
+            return False
+
+        if self.start is None:
+            self.start, smoothed = value, value
+        else:
+            weight = 2.0 / (self.window + 1.0)
+            smoothed = weight * value + (1.0 - weight) * self.trail[-1]
+        self.trail.append(smoothed)
+
+        # nothing to look back at yet, which is the burn-in: a flat stretch
+        # before any real progress has a small numerator and a small
+        # denominator, and their ratio is not evidence of anything
+        if len(self.trail) <= self.window:
+            return False
+
+        recent = abs(self.trail[-1] - self.trail[-1 - self.window])
+        total = abs(self.trail[-1] - self.start)
+        return recent < self.tolerance * total
 
 
 class _GPModel(_gpr.Parametric):
@@ -826,9 +903,15 @@ class VGPNetwork(_GPModel):
         unique_nodes.append(self.latent_network)
         kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
 
-        self.elbo.assign(elbo - kl)
+        # The MAP term: point-estimated parameters that declare a prior pay
+        # its log-density here, making the objective a bound on
+        # `log p(y, theta)`. Zero unless something declares one, so a model
+        # without priors trains on exactly the objective it always did.
+        log_prior = self.log_prior()
+
+        self.elbo.assign(elbo - kl + log_prior)
         self.kl_div.assign(kl)
-        return elbo - kl
+        return elbo - kl + log_prior
 
     @_tf.function
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
@@ -939,7 +1022,9 @@ class VGPNetwork(_GPModel):
         Parameters
         ----------
         max_iter
-            Number of iterations.
+            Number of iterations, and a cap rather than a count when
+            `options.training_tolerance` asks training to stop once the
+            bound settles.
 
         See Also
         --------
@@ -957,6 +1042,8 @@ class VGPNetwork(_GPModel):
         has_value = _tf.constant(self.has_value, _tf.float64)
         x_var = _tf.constant(self.data.get_batched_variance()[0], _tf.float64)
 
+        converged = _Convergence(self.options.training_tolerance)
+
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
         with _latent.propagation_rule(self.options.expert_propagation):
@@ -973,6 +1060,12 @@ class VGPNetwork(_GPModel):
                     print("\rIteration %s | ELBO: %s" %
                           (str(i+1), str(current_elbo)), end="")
 
+                if converged.stop(current_elbo):
+                    if self.options.verbose:
+                        print("\nStopped at iteration %s: the bound has "
+                              "settled" % str(i + 1), end="")
+                    break
+
         if self.options.verbose:
             print("\n")
 
@@ -987,7 +1080,10 @@ class VGPNetwork(_GPModel):
         Parameters
         ----------
         epochs
-            Number of passes over the data.
+            Number of passes over the data, and a cap rather than a count
+            when `options.training_tolerance` asks training to stop once the
+            bound settles. The criterion reads one value an epoch, the mean
+            over its batches.
 
         See Also
         --------
@@ -999,6 +1095,11 @@ class VGPNetwork(_GPModel):
         # they are in `train_full` -- see the commented-out attempt below.
         step = self._training_step(
             model_variables, [{} for _ in self.variables])
+
+        # judged once an epoch, on the mean over its batches: a single
+        # batch's bound is an estimate with noise of its own, and smoothing
+        # that would only measure how the batches were drawn
+        converged = _Convergence(self.options.training_tolerance)
 
         # a generator of its own, so the batch order is reproducible from
         # options.seed without reaching any draw made outside training
@@ -1033,6 +1134,12 @@ class VGPNetwork(_GPModel):
                     print("\rEpoch %s | ELBO: %s" %
                           (str(i + 1), str(total_elbo)), end="")
 
+                if converged.stop(total_elbo):
+                    if self.options.verbose:
+                        print("\nStopped at epoch %s: the bound has settled"
+                              % str(i + 1), end="")
+                    break
+
         if self.options.verbose:
             print("\n")
 
@@ -1056,7 +1163,16 @@ class VGPNetwork(_GPModel):
         rule = self.options.expert_propagation
         traced = self._compiled.get((jit, qmc, rule))
         if traced is None:
-            traced = _tf.function(self._predict_raw, jit_compile=jit or None)
+            # `reduce_retracing` relaxes the batch shape, which is the one
+            # thing that varies without meaning anything: a grid divides
+            # into equal batches and a short last one, and every container
+            # of a different size starts the count again. Measured on eight
+            # predictions of differing size: eight traces and 7.6 s become
+            # two and 2.2 s, bit-identical, and XLA agrees either way. What
+            # remains keyed on the value -- `n_sim`, `include_noise` -- is
+            # baked into the graph and has to retrace.
+            traced = _tf.function(self._predict_raw, jit_compile=jit or None,
+                                  reduce_retracing=True)
             self._compiled[(jit, qmc, rule)] = traced
         with _latent.simulation_rule(qmc), _latent.propagation_rule(rule):
             return traced(*args, **kwargs)
