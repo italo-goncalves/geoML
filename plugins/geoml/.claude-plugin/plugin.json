@@ -1,7 +1,7 @@
 {
   "name": "geoml",
   "description": "Working knowledge of the geoML package: the object model, the module layout, the modelling workflow, and the notebook conventions its examples follow.",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "author": {
     "name": "Ítalo Gomes Gonçalves",
     "email": "italogoncalves.igg@gmail.com"
