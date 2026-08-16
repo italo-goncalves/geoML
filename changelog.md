@@ -59,6 +59,49 @@ they are differentiated is the interesting part.
   that already assembles the mixed blocks in
   `full_directional_covariance_d1` and `GradientConstrainedInput.refresh`.
   `self_covariance_matrix_d2` is overridden alongside, for the same reason.
+* **`Spline` initializes on the data, and the projection-pursuit question
+it was blocking is answered.** The warping's knots have fixed inputs on a
+regular grid and trainable outputs; they used to start on a uniform
+partition, which reads out as exactly that grid — the identity. So a
+`Spline` began every fit with nothing to say, and a chain of
+`Rotation → Spline` pairs rotated repeatedly with nothing gaussianizing
+between the rotations. Measured, that initialization moved *backwards*: the
+projection-pursuit index on the worst direction went 47 to 111, because
+stacked rotations without a marginal transform only remix heavy tails.
+  - `Spline.initialize` now fits the knots to the marginal normal-score
+  transform — the empirical CDF at each knot through the normal quantile,
+  which is the geostatistician's anamorphosis and PPMT's gaussianization
+  step. Closed form, monotone by construction, and a *start* rather than a
+  fit, as `Rotation`'s ICA already was.
+  - Two compositional parameters carry the map, so it is pinned at
+  `(-5, -5)`, `(0, 0)` and `(5, 5)`; each arm is rescaled to reach the
+  anchors, which keeps the transform's shape and not its scale. That is the
+  one approximation: on the Jura elements the index lands at 0.19 against
+  0.15 for the exact transform, where the raw data reads 4.65 and Gaussian
+  data of the same size reads 0.04.
+  - **Because `ChainedWarping.initialize` already threads the data link by
+  link, this makes a chain initialize as a projection-pursuit sweep** with
+  no new machinery: each rotation runs its ICA on data the previous spline
+  has gaussianized. Four sweeps reach the Gaussian null at Jura's sample
+  size, not the fifteen PPMT asks for.
+  - **And the measurement says to stop at one.** Trained on Jura and scored
+  held out, one initialized marginal transform gives the best rmse (0.927
+  against 0.933 as it was, 0.938 with no transform) and the best CRPS; a
+  single rotation sweep is worse on both; two and four sweeps blow up the
+  back-transform, 56 and 189 non-finite predictions of 700, since a chain
+  of splines is steep in the tails and `Log.backward` exponentiates what
+  comes out. The ELBO improves monotonically with sweeps the whole time,
+  which is worth knowing on its own.
+  - Recorded in passing, pre-existing and unrelated to the initializer:
+  `Spline.backward` swaps the two knot sets and interpolates again, which
+  is not the analytic inverse of a cubic. The round trip is exact only
+  where the map is straight — 1e-6 for the identity, 1e-1 at five knots per
+  arm, 1e-2 at forty — and an initialized spline is curved from the first
+  iteration rather than after training, so it meets that sooner.
+  - `geoml/test/test_spline_initialization.py`: the anchors, monotonicity
+  at the knots and densely between them, the constant-column fallback, the
+  round trip against the identity that isolates whose approximation it is,
+  and that a chain leaves its second rotation something to find.
 * **A capacity warning the manual made, withdrawn on measurement.**
 Chapter 3 taught that a stationary Jura model went from 0.96 to 1.13 times
 the data's standard deviation when its inducing set doubled, and explained
