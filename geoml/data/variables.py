@@ -773,6 +773,44 @@ class ContinuousVariable(_Variable):
             owner=self.coordinates)
 
     def compute_metrics(self, alpha=0.05):
+        """
+        Scores this variable's prediction against its own measurements.
+
+        Parameters
+        ----------
+        alpha
+            Significance level for the interval-based scores.
+
+        Returns
+        -------
+        dict
+            One entry per score, named.
+
+        Notes
+        -----
+        The spread-based scores here -- goodness, coverage, CRPS, the
+        interval score -- are of the **ground**: a container's simulations
+        have the likelihood's noise integrated out, so they describe a
+        quantity no sample observes, while the measurements they are
+        compared against carry it. Those scores therefore read pessimistic
+        on held-out data, by the share of the variance the model calls
+        noise, and increasingly so for a model with more capacity, which
+        calls less of it noise. Measured on Jura, a nominal 90% band read
+        0.59 here against 0.94 through the measurement distribution.
+
+        For calibration on data the model has not seen, use
+        :func:`geoml.models.cross_validate`, whose scores come from
+        :meth:`geoml.models.VGPNetwork.predict_measurements`, or the
+        `accuracy` figure, which asks the model for the same thing. The
+        location-wise scores (rmse, mae, bias) are unaffected: integrating
+        the noise out changes the spread, not the value.
+
+        See Also
+        --------
+        geoml.models.VGPNetwork.predict_measurements : the distribution an
+            assay is drawn from.
+        geoml.models.cross_validate : out-of-fold scores, of measurements.
+        """
         y_true, has_value = self.get_measurements()
         if _np.sum(has_value) == 0:
             raise ValueError('No measurements available')

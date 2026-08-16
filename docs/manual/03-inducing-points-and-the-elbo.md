@@ -132,27 +132,52 @@ variogram's. A **smooth field is summarized by few**, one or two hundred,
 while a short-range, high-nugget field needs many to have anything local
 to say. Too few shows up as an over-smoothed map that misses the highs.
 
-Too many *can* cost more than time. On the Jura data, a stationary model
-with a Gaussian likelihood went from 0.96 to 1.13 times the data's own
-standard deviation on held-out sites when its inducing set merely doubled,
-from 81 points to 169 for 259 samples: the difference between a model worth
-having and one no better than quoting the average. The extra points are
-extra capacity, and the range that would have to grow to keep the field
-smooth is a plain point estimate the objective never charges for, so the
-field roughens until the model interpolates its own samples. The
-variational state pays a KL penalty; the range does not.
+Too many mostly costs time, and it is worth being exact about what it does
+not cost. Here is the plainest version of this dataset — 259 Jura samples,
+a stationary model with a Gaussian likelihood, everything held but the
+inducing count, scored on the 100 sites nobody trained on:
 
-But that ceiling belongs to that model, not to the method. Chapter 16
-rebuilds the same dataset with a heavy-tailed likelihood and a walked,
-non-stationary input, and its held-out score is *flat* from 259 inducing
-points to 1220. That is nearly five times as many, five and a half times
-the training, and no measurable change. What a model can absorb depends on
-what its structure does with the capacity.
+| inducing points | rmse / sd | 90% coverage | predicted sd / data sd |
+|---|---|---|---|
+| 81 | 0.935 | 0.936 | 0.917 |
+| 169 | 0.930 | 0.926 | 0.873 |
+| 324 | 0.927 | 0.911 | 0.839 |
+| 625 | 0.932 | 0.894 | 0.804 |
+
+**The accuracy does not move** across nearly eight times the capacity.
+What moves is the width of the model's own uncertainty: the intervals
+narrow, carrying a nominal 90% band from mildly conservative to mildly
+optimistic. That drift is the thing to watch, and at this size it is not a
+reason to hold back — a model covering 0.89 where it promised 0.90 is a
+calibrated model.
+
+**How that table is read matters more than the table**, because reading it
+wrong manufactures an alarming version of the same numbers. `predict`
+reports the **ground**, with the likelihood's noise averaged out, so the
+simulations it stores describe a quantity no sample observes. Score those
+directly against assays — which is what `compute_metrics()` on the
+predicted container does — and the noise is missing from every interval:
+the 90% band above then reads 0.59 falling to 0.49 rather than 0.94 
+falling to 0.89, and the error *grows* with capacity, because a model with
+more capacity explains more of the variation as field and less as noise,
+so the omitted piece gets bigger. Chapter 13 develops this properly; the
+short version is that intervals of a *measurement* come from
+`predict_measurements`, which is what the `accuracy` figure and
+`cross_validate` both use.
+
+There is a tidy story about the kernel range here that does not survive
+being checked, and it is worth knowing that it does not. The range is a
+plain point estimate the objective never charges for, so one expects that
+as capacity grows the field is free to roughen — and the fitted range does
+fall, 3.9 km to 2.7 km, straight down that table. But freezing it at the
+value the smallest model chose makes the calibration *worse* at every
+count. The shrinking range is the model compensating, not the model
+failing.
 
 So the count is a knob with no safe default, and there is only one way to
 set it: measure on data the model has not seen, for the configuration you
-actually intend to use. Both case studies do exactly that, and show their
-tables.
+actually intend to use, with intervals of the right quantity. Both case
+studies do exactly that, and show their tables.
 
 ## 3.4 Experts: many small models, one answer
 

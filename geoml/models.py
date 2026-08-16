@@ -470,7 +470,7 @@ class GP(_GPModel):
                     self.y,
                     self.y_dir[:, None]
                 ], axis=0)
-                self.log_derivative = 0.0
+                self.log_derivative = _tf.constant(0.0, _tf.float64)
 
                 eye = _tf.eye(_np.sum(keep) + self.directional_data.n_data,
                               dtype=_tf.float64)
@@ -2207,7 +2207,13 @@ class StructuralField(_GPModel):
                 mu, var = self.predict_raw(
                     _tf.constant(newdata.coordinates[batch], _tf.float64),
                     jitter=self.options.jitter)
-            output = {"mean": _tf.squeeze(mu),
+            # `update` names the columns the way the likelihoods fill them:
+            # `average_sim` is the prediction and `mean`/`variance` the
+            # latent pair. This model has no likelihood and no warping to
+            # separate them -- the potential field is the latent value --
+            # so the prediction is the mean itself.
+            output = {"average_sim": _tf.squeeze(mu),
+                      "mean": _tf.squeeze(mu),
                       "variance": _tf.squeeze(var)}
 
             newdata.variables[variable].update(batch, **output)

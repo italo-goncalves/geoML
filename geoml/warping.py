@@ -41,10 +41,70 @@ import numpy as _np
 import tensorflow as _tf
 import warnings as _warnings
 
+from scipy.special import ndtri as _ndtri
 from sklearn.covariance import MinCovDet as _MCD
 from sklearn.cluster import KMeans as _KMeans
 from sklearn.decomposition import FastICA as _ICA
 from sklearn.exceptions import ConvergenceWarning as _ConvergenceWarning
+
+
+# The share of a uniform partition that `Spline.initialize` keeps for the
+# outermost segment of each arm. That segment's slope is the one `backward`
+# extrapolates along, and an inverse crosses `1 / slope` per unit: at 0.2 the
+# slope is at least 0.2 whatever the knot count, so nothing beyond the knots
+# comes back further than five units per unit out. The absolute 1e-6 floor
+# this replaced left that slope at 1e-5, and the Jura chain answered a latent
+# draw three standard deviations out with 1e5 -- which the `Log` at the
+# bottom of the chain turned into an infinity, and the quantiles over the
+# simulations into NaN.
+_OUTERMOST_SHARE = 0.2
+
+# Every share must also be strictly positive: the partitions are
+# compositional, so a zero is minus infinity in logit coordinates and takes
+# the whole column with it.
+_SMALLEST_SHARE = 1e-6
+
+
+def _arm_shares(widths, outer):
+    """
+    One arm's compositional shares, from the widths its knots ask for.
+
+    Parameters
+    ----------
+    widths
+        Gaps between consecutive warped knot positions on one arm.
+    outer
+        Index of the segment touching the arm's outer anchor: `0` for the
+        left arm, `-1` for the right.
+
+    Returns
+    -------
+    The widths as a composition summing to one, the outermost holding at
+    least `_OUTERMOST_SHARE` of a uniform share.
+
+    Notes
+    -----
+    Only the outermost segment is held away from zero by a real margin, and
+    the asymmetry is the point. `backward` locates its bracket first and
+    clips each iterate into it, so a flat segment *between* knots costs
+    accuracy across one interval and cannot leave it. Past the last knot the
+    spline extrapolates along that segment's slope with nothing to clip
+    against, which is where a share near zero becomes an answer near
+    infinity.
+
+    A run of flat segments at the end of an arm is the normal case rather
+    than a pathology: the knots span [-5, 5] and data rarely fills it, so
+    every knot beyond the sample's range reads the same empirical quantile.
+    """
+    widths = _np.maximum(_np.asarray(widths, dtype=float), _SMALLEST_SHARE)
+    shares = widths / widths.sum()
+    floor = _OUTERMOST_SHARE / len(shares)
+    if shares[outer] < floor:
+        # the others keep their proportions to each other, rescaled into
+        # whatever the outermost segment leaves them
+        shares = shares * (1.0 - floor) / (shares.sum() - shares[outer])
+        shares[outer] = floor
+    return shares / shares.sum()
 
 
 class _Warping(_gpr.Parametric):
@@ -227,8 +287,93 @@ class Spline(_Warping):
             [self._get_warped_coordinates(i) for i in range(self.size_in)],
             axis=1
         )
-        x_back = self.spline.interpolate(warped_coordinates, self.x_original, x)
+        # solved rather than approximated: interpolating the knots the
+        # other way round meets `forward` at the knots and parts between
+        # them, which used to leave `forward(backward(y))` a tenth of a
+        # standard deviation from `y`
+        x_back = self.spline.invert(self.x_original, warped_coordinates, x)
         return x_back
+
+    def initialize(self, x):
+        """
+        Places the knots on the data's own normal-score transform.
+
+        The spline's input knots are fixed on a regular grid; what moves is
+        where each one lands. Setting them to the marginal Gaussian
+        anamorphosis -- the empirical CDF at each knot, read through the
+        normal quantile -- starts the warping at the transform a
+        geostatistician would apply by hand, and training refines it from
+        there.
+
+        Parameters
+        ----------
+        x
+            Values reaching this link of the chain, one column per
+            dimension. Expected to be roughly standardized, as the class
+            docstring says: the knots span [-5, 5].
+
+        Returns
+        -------
+        The warped values, so that a chain's next link initializes on them.
+
+        Notes
+        -----
+        Two compositional parameters carry each arm, so the map is monotone
+        by construction and pinned at `(-5, -5)`, `(0, 0)` and `(5, 5)` --
+        a compositional vector sums to one, and those three points are what
+        the sum buys. The fit therefore keeps the *shape* of the normal
+        score transform on each arm while rescaling it to reach the
+        anchors, which is the one approximation involved.
+
+        The knots span [-5, 5] and data rarely fills that, so the outermost
+        knots of each arm read the same empirical quantile and ask to sit on
+        top of one another. `_arm_shares` keeps the last segment of each arm
+        at `_OUTERMOST_SHARE` of a uniform share instead, since that segment
+        is the slope `backward` extrapolates along and a flat one inverts
+        into an answer that leaves the scale entirely.
+
+        Without this the knots keep their uniform partition, which reads
+        out as exactly the input grid -- the identity -- so a chain of
+        `Rotation` and `Spline` pairs would rotate repeatedly with nothing
+        gaussianizing in between, and every rotation after the first sees
+        data the previous one already made as independent as it knows how.
+
+        An initialized spline is curved from the first iteration rather
+        than after training, which used to matter: `backward` interpolated
+        the swapped knots, an approximation good only where the map is
+        straight, and the round trip was off by a tenth of a standard
+        deviation. It solves the forward polynomial now
+        (`MonotonicCubicSpline.invert`), so what is left is set by the
+        transform's own conditioning rather than by the inverse.
+
+        See Also
+        --------
+        Rotation : the usual partner before this one, likewise initialized
+            from the data and likewise only as a starting point.
+        """
+        values = _np.asarray(x, dtype=float)
+        knots = self.x_original.numpy()[:, 0]
+        per_arm = (len(knots) - 1) // 2
+        for dim in range(values.shape[1]):
+            column = _np.sort(values[:, dim])
+            if not _np.ptp(column) > 0:
+                # nothing to transform, and no CDF worth inverting: leave
+                # this column on the uniform partition, i.e. the identity
+                continue
+            floor = 1.0 / (len(column) + 1.0)
+            share = _np.searchsorted(column, knots, side="right") * floor
+            share = _np.clip(share, floor, 1.0 - floor)
+            target = _np.clip(_ndtri(share), -5.0, 5.0)
+
+            # invert `_get_warped_coordinates`, then normalize each arm --
+            # which is what enforces the anchors.
+            scaled = (target + 5.0) / 5.0
+            self.parameters[f"warped_partition_left_{dim}"].set_value(
+                _arm_shares(_np.diff(scaled[:per_arm + 1]), outer=0))
+            self.parameters[f"warped_partition_right_{dim}"].set_value(
+                _arm_shares(_np.diff(scaled[per_arm:]), outer=-1))
+
+        return self.forward(_tf.constant(values, _tf.float64))[0]
 
 
 class ZScore(_Warping):

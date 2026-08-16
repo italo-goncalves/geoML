@@ -1,3 +1,240 @@
+## version 0.6.6
+* **The kernel derivatives are exact.** `covariance_matrix_d1` and
+`covariance_matrix_d2` — the point-to-direction and direction-to-direction
+covariances that directional data are built on — were central differences
+over a hard-coded step of 1e-3. They are now differentiated, and the way
+they are differentiated is the interesting part.
+  - **Differentiating the covariance matrix does not work, and cannot.** A
+  covariance goes through a Euclidean distance, and `|h|` is not twice
+  differentiable at `h = 0` — which is exactly the diagonal every d2 call
+  has, since `self_covariance_matrix_d2` asks for a point against itself.
+  Forward-mode autodiff over the matrix returns NaN there. So the kernel is
+  differentiated instead: `kernelize` is a one-dimensional elementwise
+  function, two nested `GradientTape`s give `f'(r)` and `f''(r)` exactly,
+  and the spatial part is carried by the chain rule
+  `dK/dy.u = -phi A`, `d2K/dx dy = -(psi A B + phi C)`, with
+  `phi = f'(r)/r` and `psi = (f''(r) - phi)/r**2`. Both have removable
+  singularities at the origin, `phi(0) = f''(0)`, and A and B vanish there —
+  so the coincident case is *computed*, not stepped around.
+  - Directions are pushed through the transform's Jacobian by a
+  `ForwardAccumulator`, which is what keeps an anisotropy, a projection or
+  a periodic transform correct without any of them declaring a derivative.
+  - **Measured**, against the closed forms written out by hand: relative
+  error 5e-16 where the central differences gave 2.3e-7 (d2) and 5e-10
+  (d1), and 5e-16 on the derivative variance where they gave 2.5e-5 for
+  Cubic and 6.7e-5 for Matern32. The error the differences carried grows
+  with the square of the range — the answer shrinks as `1/range**2` while
+  the rounding amplified by dividing out `1e-3` twice does not — reaching
+  1.3e-4 at range 5000. **At which point the derivative block stops being
+  positive definite and the Cholesky in `GradientConstrainedInput.refresh`,
+  which adds no jitter at all, returns NaN.** It now factorizes.
+  - Also faster, since it is one distance matrix rather than four: 4.1 ms
+  to 1.9 ms for a 600x600 d2. On the fold notebook the model is unchanged
+  (ELBO -125.591 either way) — the old error was far below what that
+  well-conditioned case could feel, which is the honest summary of when
+  this matters and when it does not.
+  - **`Linear`'s directional covariances were wrong** and are now right.
+  The old code measured its step about a shifted origin, which cancels only
+  when the covariance depends on differences alone; `Linear` does not, so
+  `dK/dy.u` came back as `(x - min(y)).u` instead of `x.u`. It now takes
+  the base class's generic forward-mode route, which for a covariance with
+  no distance in it is exact.
+  - `point_variance_d2` loses its `step` argument, having no step any more.
+  - Kernels with no derivative process are unchanged in status and changed
+  in number: `Exponential` and `Spherical` have a kink at the origin, so
+  the variance of their derivative is infinite. The differences reported a
+  finite number manufactured by the step size; the chain rule reports one
+  implied by the kernel's own `epsilon`. Both are arbitrary. Using them
+  with directional data is a modelling error either way.
+  - **`Product`'s directional covariances were wrong** and now follow the
+  product rule. `_NodeCovariance` applies its operation to the components'
+  derivatives, which is the derivative of the operation only where that
+  operation is *linear* — true of `Sum`, and not of a product, where it
+  returned the product of the derivatives. Measured on a case with an exact
+  answer (a product of Gaussian kernels is a Gaussian kernel, with
+  `1/c**2 = 1/a**2 + 1/b**2`): **98% wrong**, now exact to 9e-16. The rule
+  needs the derivative in the *first* argument, which the interface does
+  not offer and does not need to — a covariance is symmetric, so
+  `dK/dx = transpose(covariance_matrix_d1(y, x, dir_x))`, the same identity
+  that already assembles the mixed blocks in
+  `full_directional_covariance_d1` and `GradientConstrainedInput.refresh`.
+  `self_covariance_matrix_d2` is overridden alongside, for the same reason.
+* **`Spline.backward` is a solve, not a second guess.** It used to
+interpolate the knots the other way round, which is not an inverse: the
+inverse of a cubic is not a cubic, so the two curves met at the knots and
+parted between them. `forward(backward(y))` came back **1.3e-1** from `y`,
+a tenth of a standard deviation, meaning the model inverted a different map
+from the one it fitted. `MonotonicCubicSpline.invert` now solves the
+forward polynomial by Newton, and the round trip is **1e-11 or better in
+both directions**.
+  - The interval is located once, in `y` — a monotone map puts the answer
+  in the interval the query occupies among the y-knots, so the bracket
+  cannot move and no step searches again. The Hermite form is converted to
+  monomial coefficients once, so each iteration is a Horner pass rather
+  than four basis polynomials; that is what keeps twelve steps cheaper than
+  three were before it. `backward` costs 2.6x a forward pass.
+  - The last correction is taken from a detached iterate, so the derivative
+  is the implicit `1 / f'(t)` exactly rather than the derivative of an
+  unrolled loop. Checked against a finite difference.
+  - **The accuracy floor is the transform's, not the solver's**, and that
+  is worth knowing when reading the tolerance: a normal-score fit leaves
+  half its intervals nearly flat — 40% have a span below 1e-4 even at the
+  default five knots per arm — and where the forward map compresses by `s`,
+  a residual at machine precision returns magnified by `1/s`. The measured
+  5e-11 floor is exactly `2.2e-16 / 1e-5`. It is information `forward`
+  discarded, and no inverse recovers it.
+  - Twelve iterations is the default because that is where the error stops
+  falling, measured over six samples at knot counts from 11 to 161: 1e-3 at
+  three steps, 1e-7 at eight, 5e-11 at twelve, unchanged at thirty-two. A
+  single sample suggested three was enough, which is why the default is set
+  from a sweep and not from one run.
+* **The interpolators' epsilons no longer perturb the intervals that were
+fine.** `w + 1e-6` in the derivative rule and `h + 1e-6` in the evaluation
+guarded against a zero-width interval by shifting *every* interval; at a
+knot spacing of 0.125 that is a relative error of 8e-6, which put a floor
+under the spline's own self-consistency and was enough to stall the Newton
+inversion above. `_safe_width` replaces only the zeros, so a legitimate
+width is divided by itself. Interpolating a straight line now returns the
+line to 1e-12 at every spacing tested. The base class used 1e-12 for the
+same guard and the monotone subclass 1e-6, a millionfold apart with no
+reason recorded; both are exact now.
+* **`Spline` initializes on the data, and the projection-pursuit question
+it was blocking is answered.** The warping's knots have fixed inputs on a
+regular grid and trainable outputs; they used to start on a uniform
+partition, which reads out as exactly that grid — the identity. So a
+`Spline` began every fit with nothing to say, and a chain of
+`Rotation → Spline` pairs rotated repeatedly with nothing gaussianizing
+between the rotations. Measured, that initialization moved *backwards*: the
+projection-pursuit index on the worst direction went 47 to 111, because
+stacked rotations without a marginal transform only remix heavy tails.
+  - `Spline.initialize` now fits the knots to the marginal normal-score
+  transform — the empirical CDF at each knot through the normal quantile,
+  which is the geostatistician's anamorphosis and PPMT's gaussianization
+  step. Closed form, monotone by construction, and a *start* rather than a
+  fit, as `Rotation`'s ICA already was.
+  - Two compositional parameters carry the map, so it is pinned at
+  `(-5, -5)`, `(0, 0)` and `(5, 5)`; each arm is rescaled to reach the
+  anchors, which keeps the transform's shape and not its scale. That is the
+  one approximation: on the Jura elements the index lands at 0.19 against
+  0.15 for the exact transform, where the raw data reads 4.65 and Gaussian
+  data of the same size reads 0.04.
+  - **Because `ChainedWarping.initialize` already threads the data link by
+  link, this makes a chain initialize as a projection-pursuit sweep** with
+  no new machinery: each rotation runs its ICA on data the previous spline
+  has gaussianized. Four sweeps reach the Gaussian null at Jura's sample
+  size, not the fifteen PPMT asks for.
+  - **And the measurement says to stop at one.** Trained on Jura and scored
+  held out, one initialized marginal transform gives the best rmse (0.927
+  against 0.933 as it was, 0.938 with no transform) and the best CRPS; a
+  single rotation sweep is worse on both; two and four sweeps blow up the
+  back-transform, 56 and 189 non-finite predictions of 700, since a chain
+  of splines is steep in the tails and `Log.backward` exponentiates what
+  comes out. The ELBO improves monotonically with sweeps the whole time,
+  which is worth knowing on its own. **Those two blow-up numbers were
+  mostly this initializer's own defect** — see the entry below: repaired,
+  one and two sweeps are clean on the same draws and four leaves 0.2%, so
+  the recommendation stands on the held-out scores rather than on
+  arithmetic falling over.
+  - Recorded in passing, pre-existing and unrelated to the initializer:
+  `Spline.backward` swaps the two knot sets and interpolates again, which
+  is not the analytic inverse of a cubic. The round trip is exact only
+  where the map is straight — 1e-6 for the identity, 1e-1 at five knots per
+  arm, 1e-2 at forty — and an initialized spline is curved from the first
+  iteration rather than after training, so it meets that sooner.
+  - `geoml/test/test_spline_initialization.py`: the anchors, monotonicity
+  at the knots and densely between them, the constant-column fallback, the
+  round trip against the identity that isolates whose approximation it is,
+  and that a chain leaves its second rotation something to find.
+* **The initializer left the map uninvertible where the data runs out, and
+now does not.** Reported against a Jura prediction, as
+`invalid value encountered in subtract` from `np.quantile` — which raises
+only for `inf - inf`, so the simulations held infinities.
+  - The knots span [-5, 5] and data does not fill that. Every knot past the
+  sample's range therefore reads the same empirical quantile, asks to sit
+  on top of its neighbour, and was held apart only by an absolute floor of
+  1e-6 on each share. On Jura that put the outer three knots of each arm
+  within 1e-5 of the anchor: a forward map essentially flat out there, and
+  **a flat forward map is a vertical inverse**. A latent draw a little past
+  the knots came back at 1e5, `Log.backward` exponentiated it to infinity,
+  and the quantiles taken over the simulations returned NaN. At one
+  standard deviation, 1943 of 140 000 back-transformed draws were
+  non-finite.
+  - The repair is one rule, and which segment it applies to is the whole
+  point: **only the outermost segment of each arm gets a real floor**
+  (`_OUTERMOST_SHARE`, 0.2 of a uniform share). `backward` locates its
+  bracket first and clips every iterate into it, so a flat segment
+  *between* knots costs accuracy across one interval and cannot leave it;
+  past the last knot the spline extrapolates along the end segment with
+  nothing to clip against. That gives an exact bound, independent of the
+  knot count: the slope there is at least 0.2, so nothing comes back
+  further than five units per unit past the knots. Measured at `y = 8`:
+  20.0, against 1.7e5 before.
+  - **Two alternatives were measured and rejected.** Continuing the
+  transform linearly past the data — the statistically obvious fix — costs
+  an order of magnitude of gaussianization, because the arms are rescaled
+  to the anchors and the continuation eats the range the data needed
+  (lognormal departure 1.6 to 20.5). Flooring *every* segment relatively
+  costs a quarter of it (2.0). Flooring only the outermost costs nothing
+  measurable: the Jura projection index reads 0.0426 against 0.0428 for the
+  broken version, where the raw data reads 0.111 and a Gaussian sample
+  0.008.
+  - Training does not re-create the flatness: after 150 iterations on Jura
+  the outermost gaps sit at 0.28 to 1.62, and the prediction that reported
+  this is clean.
+  - Four tests in `test_spline_initialization.py`: the outermost share at
+  four knot counts, the extrapolation against its own bound, a mass point
+  keeping the partition positive, and a `Log`-bottomed chain staying finite
+  — which is the reported failure in miniature.
+* **A capacity warning the manual made, withdrawn on measurement.**
+Chapter 3 taught that a stationary Jura model went from 0.96 to 1.13 times
+the data's standard deviation when its inducing set doubled, and explained
+it by the kernel range being an unpriced point estimate that lets the field
+roughen. Re-measured across 81, 169, 324 and 625 inducing points on three
+seeds: **rmse/sd is flat at 0.93** and the number does not reproduce.
+  - What does move is the width of the intervals, and reading *that* is
+  where the trap was. `compute_metrics` scores the container's stored
+  simulations — the **ground**, with the likelihood's noise integrated out.
+  Against assays that leaves the noise out of every interval, so a nominal
+  90% band reads 0.59 falling to 0.49; through `predict_measurements` the
+  same models read **0.936, 0.926, 0.911, 0.894**. Well calibrated
+  throughout, drifting gently. The artifact grows with capacity because a
+  model with more capacity calls less of the variance noise, so the piece
+  being omitted is larger. `cross_validate` and the `accuracy` figure were
+  always right — both ask for measurements — and
+  `ContinuousVariable.compute_metrics` now says so in a `Notes` section.
+  - The range explanation is backwards. The fitted range does fall (3.9 to
+  2.7 km across the sweep), but freezing it at the value the smallest model
+  chose makes calibration *worse* at every count. It is the model
+  compensating, not failing.
+  - Recorded in passing, because it bears on when a MAP prior is worth
+  reaching for: `range_prior=2.0` moves the fitted range by 0.003 and
+  changes no score to four decimals. A log-prior does not scale with the
+  data, so against ~1800 likelihood terms two scalars decide nothing.
+  - Chapter 3's section is rewritten around the measured table and chapter
+  16's cross-reference now matches it.
+* **Two directional entry points that could not run at all.** Neither has
+test coverage, which is how both rotted unnoticed; both were found while
+checking the derivative work end to end.
+  - `GP` with `directional_data` died in training: the branch that bypasses
+  the warping set `log_derivative` to a Python float, which is float32
+  against the float64 it is added to.
+  - `StructuralField.predict` died writing its answer, calling `update` with
+  `mean`/`variance` where a variable is filled with `average_sim` (the
+  prediction) and `mean`/`variance` (the latent pair). This model has no
+  likelihood and no warping to separate them, so the prediction is the mean
+  itself.
+  - Both now train and predict. On the fold dataset the structural field's
+  potential is flat along the tangents that constrain it — slope 4e-4 rms
+  against 0.76 across them — and `predict_raw_directions` returns 1e-10
+  along them.
+  - `geoml/test/test_kernel_derivatives.py` is new: 29 tests over the
+  closed forms, the transform's Jacobian, coincident points at mine-grid
+  coordinates, the positive-definiteness case above, the product rule
+  against both an exact and a numerical reference, tracing with a changing
+  batch shape, one direction broadcast over every point, and that the
+  training gradient still reaches the kernel and transform parameters
+  through a derivative of a derivative.
+
 ## version 0.6.5
 * **The documentation site covers the whole public surface, and the type
 check covers every module behind it.** Both had been growing module by
