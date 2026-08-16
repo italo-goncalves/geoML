@@ -166,6 +166,81 @@ def test_the_round_trip_comes_back():
 
 
 # --------------------------------------------------------------------------- #
+# the knots the data does not reach
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("knots_per_arm", [3, 5, 10, 20])
+def test_the_outermost_segment_keeps_its_share(knots_per_arm):
+    """The knots span [-5, 5] and data rarely fills it, so the outer knots
+    of each arm read the same empirical quantile and ask to sit on top of
+    one another. The two that touch the anchors are held apart; the ones
+    between them are free to collapse, and do."""
+    data = _skewed(n=259, size=3, seed=8)
+    spline = wp.Spline(3, knots_per_arm=knots_per_arm)
+    spline.initialize(_f64(data))
+
+    uniform = 5.0 / knots_per_arm
+    for dim in range(3):
+        gaps = np.diff(spline._get_warped_coordinates(dim).numpy())
+        assert gaps[0] >= wp._OUTERMOST_SHARE * uniform * (1 - 1e-9)
+        assert gaps[-1] >= wp._OUTERMOST_SHARE * uniform * (1 - 1e-9)
+
+
+@pytest.mark.parametrize("knots_per_arm", [5, 10, 20])
+def test_backward_stays_on_scale_past_the_knots(knots_per_arm):
+    """What the user saw: a simulated value a little beyond the knot range
+    came back at 1e5, and the `Log` below it in the chain overflowed to
+    infinity. Out there the spline extrapolates along the end segment, so
+    the inverse crosses `1 / slope` per unit -- and holding that slope at
+    `_OUTERMOST_SHARE` bounds the answer, whatever the knot count.
+    """
+    data = _skewed(n=259, size=2, seed=9)
+    spline = wp.Spline(2, knots_per_arm=knots_per_arm)
+    spline.initialize(_f64(data))
+
+    outside = np.linspace(-9, 9, 37)
+    back = spline.backward(_f64(outside[:, None] * np.ones((1, 2)))).numpy()
+
+    assert np.all(np.isfinite(back))
+    assert np.all(np.diff(back, axis=0) > 0)
+    bound = 5.0 + np.maximum(np.abs(outside) - 5.0, 0.0) / wp._OUTERMOST_SHARE
+    assert np.all(np.abs(back) <= bound[:, None] * (1 + 1e-9))
+
+
+def test_a_repeated_value_does_not_break_the_partition():
+    """A mass point ties the empirical CDF at several knots. Inside the
+    arm that is allowed -- `backward` clips into the bracket it located, so
+    a flat segment there costs accuracy over one interval and cannot leave
+    it -- but every share must stay strictly positive, the partitions being
+    compositional."""
+    rng = np.random.default_rng(10)
+    column = np.concatenate([rng.normal(size=200), np.zeros(300)])
+    data = np.stack([column, rng.normal(size=500)], axis=1)
+
+    spline = wp.Spline(2, knots_per_arm=5)
+    spline.initialize(_f64(data))
+
+    coordinates = spline._get_warped_coordinates(0).numpy()
+    assert np.all(np.diff(coordinates) > 0)
+    assert np.all(np.isfinite(spline.forward(_f64(data))[1].numpy()))
+
+
+def test_a_chain_ending_in_an_exponential_stays_finite():
+    """The reported failure in miniature: `Log` at the bottom of the chain
+    means `backward` ends in an exponential, so a spline inverse that leaves
+    the scale does not merely read oddly -- it overflows to infinity, and
+    the quantiles taken over the simulations come back NaN."""
+    rng = np.random.default_rng(11)
+    values = np.exp(rng.normal(size=(259, 4)) * 0.8) * np.array([1.0, 10.0, 0.1, 3.0])
+
+    chain = wp.ChainedWarping(wp.Log(4), wp.RobustPCA(4, 4),
+                              wp.Spline(4, knots_per_arm=5), wp.ZScore(4))
+    chain.initialize(_f64(values))
+
+    latent = _f64(rng.normal(size=(5000, 4)) * 1.5)
+    assert np.all(np.isfinite(chain.backward(latent).numpy()))
+
+
+# --------------------------------------------------------------------------- #
 # the reason it was written: a chain initializes as a projection-pursuit sweep
 # --------------------------------------------------------------------------- #
 def test_a_chain_gaussianizes_between_its_rotations():

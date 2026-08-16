@@ -130,7 +130,11 @@ stacked rotations without a marginal transform only remix heavy tails.
   back-transform, 56 and 189 non-finite predictions of 700, since a chain
   of splines is steep in the tails and `Log.backward` exponentiates what
   comes out. The ELBO improves monotonically with sweeps the whole time,
-  which is worth knowing on its own.
+  which is worth knowing on its own. **Those two blow-up numbers were
+  mostly this initializer's own defect** — see the entry below: repaired,
+  one and two sweeps are clean on the same draws and four leaves 0.2%, so
+  the recommendation stands on the held-out scores rather than on
+  arithmetic falling over.
   - Recorded in passing, pre-existing and unrelated to the initializer:
   `Spline.backward` swaps the two knot sets and interpolates again, which
   is not the analytic inverse of a cubic. The round trip is exact only
@@ -141,6 +145,46 @@ stacked rotations without a marginal transform only remix heavy tails.
   at the knots and densely between them, the constant-column fallback, the
   round trip against the identity that isolates whose approximation it is,
   and that a chain leaves its second rotation something to find.
+* **The initializer left the map uninvertible where the data runs out, and
+now does not.** Reported against a Jura prediction, as
+`invalid value encountered in subtract` from `np.quantile` — which raises
+only for `inf - inf`, so the simulations held infinities.
+  - The knots span [-5, 5] and data does not fill that. Every knot past the
+  sample's range therefore reads the same empirical quantile, asks to sit
+  on top of its neighbour, and was held apart only by an absolute floor of
+  1e-6 on each share. On Jura that put the outer three knots of each arm
+  within 1e-5 of the anchor: a forward map essentially flat out there, and
+  **a flat forward map is a vertical inverse**. A latent draw a little past
+  the knots came back at 1e5, `Log.backward` exponentiated it to infinity,
+  and the quantiles taken over the simulations returned NaN. At one
+  standard deviation, 1943 of 140 000 back-transformed draws were
+  non-finite.
+  - The repair is one rule, and which segment it applies to is the whole
+  point: **only the outermost segment of each arm gets a real floor**
+  (`_OUTERMOST_SHARE`, 0.2 of a uniform share). `backward` locates its
+  bracket first and clips every iterate into it, so a flat segment
+  *between* knots costs accuracy across one interval and cannot leave it;
+  past the last knot the spline extrapolates along the end segment with
+  nothing to clip against. That gives an exact bound, independent of the
+  knot count: the slope there is at least 0.2, so nothing comes back
+  further than five units per unit past the knots. Measured at `y = 8`:
+  20.0, against 1.7e5 before.
+  - **Two alternatives were measured and rejected.** Continuing the
+  transform linearly past the data — the statistically obvious fix — costs
+  an order of magnitude of gaussianization, because the arms are rescaled
+  to the anchors and the continuation eats the range the data needed
+  (lognormal departure 1.6 to 20.5). Flooring *every* segment relatively
+  costs a quarter of it (2.0). Flooring only the outermost costs nothing
+  measurable: the Jura projection index reads 0.0426 against 0.0428 for the
+  broken version, where the raw data reads 0.111 and a Gaussian sample
+  0.008.
+  - Training does not re-create the flatness: after 150 iterations on Jura
+  the outermost gaps sit at 0.28 to 1.62, and the prediction that reported
+  this is clean.
+  - Four tests in `test_spline_initialization.py`: the outermost share at
+  four knot counts, the extrapolation against its own bound, a mass point
+  keeping the partition positive, and a `Log`-bottomed chain staying finite
+  — which is the reported failure in miniature.
 * **A capacity warning the manual made, withdrawn on measurement.**
 Chapter 3 taught that a stationary Jura model went from 0.96 to 1.13 times
 the data's standard deviation when its inducing set doubled, and explained

@@ -48,6 +48,65 @@ from sklearn.decomposition import FastICA as _ICA
 from sklearn.exceptions import ConvergenceWarning as _ConvergenceWarning
 
 
+# The share of a uniform partition that `Spline.initialize` keeps for the
+# outermost segment of each arm. That segment's slope is the one `backward`
+# extrapolates along, and an inverse crosses `1 / slope` per unit: at 0.2 the
+# slope is at least 0.2 whatever the knot count, so nothing beyond the knots
+# comes back further than five units per unit out. The absolute 1e-6 floor
+# this replaced left that slope at 1e-5, and the Jura chain answered a latent
+# draw three standard deviations out with 1e5 -- which the `Log` at the
+# bottom of the chain turned into an infinity, and the quantiles over the
+# simulations into NaN.
+_OUTERMOST_SHARE = 0.2
+
+# Every share must also be strictly positive: the partitions are
+# compositional, so a zero is minus infinity in logit coordinates and takes
+# the whole column with it.
+_SMALLEST_SHARE = 1e-6
+
+
+def _arm_shares(widths, outer):
+    """
+    One arm's compositional shares, from the widths its knots ask for.
+
+    Parameters
+    ----------
+    widths
+        Gaps between consecutive warped knot positions on one arm.
+    outer
+        Index of the segment touching the arm's outer anchor: `0` for the
+        left arm, `-1` for the right.
+
+    Returns
+    -------
+    The widths as a composition summing to one, the outermost holding at
+    least `_OUTERMOST_SHARE` of a uniform share.
+
+    Notes
+    -----
+    Only the outermost segment is held away from zero by a real margin, and
+    the asymmetry is the point. `backward` locates its bracket first and
+    clips each iterate into it, so a flat segment *between* knots costs
+    accuracy across one interval and cannot leave it. Past the last knot the
+    spline extrapolates along that segment's slope with nothing to clip
+    against, which is where a share near zero becomes an answer near
+    infinity.
+
+    A run of flat segments at the end of an arm is the normal case rather
+    than a pathology: the knots span [-5, 5] and data rarely fills it, so
+    every knot beyond the sample's range reads the same empirical quantile.
+    """
+    widths = _np.maximum(_np.asarray(widths, dtype=float), _SMALLEST_SHARE)
+    shares = widths / widths.sum()
+    floor = _OUTERMOST_SHARE / len(shares)
+    if shares[outer] < floor:
+        # the others keep their proportions to each other, rescaled into
+        # whatever the outermost segment leaves them
+        shares = shares * (1.0 - floor) / (shares.sum() - shares[outer])
+        shares[outer] = floor
+    return shares / shares.sum()
+
+
 class _Warping(_gpr.Parametric):
     """
     Base warping class.
@@ -264,11 +323,14 @@ class Spline(_Warping):
         a compositional vector sums to one, and those three points are what
         the sum buys. The fit therefore keeps the *shape* of the normal
         score transform on each arm while rescaling it to reach the
-        anchors, which is the one approximation involved. Measured on the
-        Jura elements, the projection-pursuit index lands at 0.19 with ten
-        knots per arm against 0.15 for the exact transform, where the
-        untransformed data reads 4.65 and Gaussian data of the same size
-        reads 0.04.
+        anchors, which is the one approximation involved.
+
+        The knots span [-5, 5] and data rarely fills that, so the outermost
+        knots of each arm read the same empirical quantile and ask to sit on
+        top of one another. `_arm_shares` keeps the last segment of each arm
+        at `_OUTERMOST_SHARE` of a uniform share instead, since that segment
+        is the slope `backward` extrapolates along and a flat one inverts
+        into an answer that leaves the scale entirely.
 
         Without this the knots keep their uniform partition, which reads
         out as exactly the input grid -- the identity -- so a chain of
@@ -304,16 +366,12 @@ class Spline(_Warping):
             target = _np.clip(_ndtri(share), -5.0, 5.0)
 
             # invert `_get_warped_coordinates`, then normalize each arm --
-            # which is what enforces the anchors. The floor keeps a share
-            # away from zero: the parameters are compositional, so they
-            # live in logit coordinates where a zero is minus infinity.
+            # which is what enforces the anchors.
             scaled = (target + 5.0) / 5.0
-            left = _np.maximum(_np.diff(scaled[:per_arm + 1]), 1e-6)
-            right = _np.maximum(_np.diff(scaled[per_arm:] - 1.0), 1e-6)
             self.parameters[f"warped_partition_left_{dim}"].set_value(
-                left / left.sum())
+                _arm_shares(_np.diff(scaled[:per_arm + 1]), outer=0))
             self.parameters[f"warped_partition_right_{dim}"].set_value(
-                right / right.sum())
+                _arm_shares(_np.diff(scaled[per_arm:]), outer=-1))
 
         return self.forward(_tf.constant(values, _tf.float64))[0]
 
