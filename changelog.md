@@ -1,3 +1,87 @@
+## version 0.6.6
+* **The kernel derivatives are exact.** `covariance_matrix_d1` and
+`covariance_matrix_d2` — the point-to-direction and direction-to-direction
+covariances that directional data are built on — were central differences
+over a hard-coded step of 1e-3. They are now differentiated, and the way
+they are differentiated is the interesting part.
+  - **Differentiating the covariance matrix does not work, and cannot.** A
+  covariance goes through a Euclidean distance, and `|h|` is not twice
+  differentiable at `h = 0` — which is exactly the diagonal every d2 call
+  has, since `self_covariance_matrix_d2` asks for a point against itself.
+  Forward-mode autodiff over the matrix returns NaN there. So the kernel is
+  differentiated instead: `kernelize` is a one-dimensional elementwise
+  function, two nested `GradientTape`s give `f'(r)` and `f''(r)` exactly,
+  and the spatial part is carried by the chain rule
+  `dK/dy.u = -phi A`, `d2K/dx dy = -(psi A B + phi C)`, with
+  `phi = f'(r)/r` and `psi = (f''(r) - phi)/r**2`. Both have removable
+  singularities at the origin, `phi(0) = f''(0)`, and A and B vanish there —
+  so the coincident case is *computed*, not stepped around.
+  - Directions are pushed through the transform's Jacobian by a
+  `ForwardAccumulator`, which is what keeps an anisotropy, a projection or
+  a periodic transform correct without any of them declaring a derivative.
+  - **Measured**, against the closed forms written out by hand: relative
+  error 5e-16 where the central differences gave 2.3e-7 (d2) and 5e-10
+  (d1), and 5e-16 on the derivative variance where they gave 2.5e-5 for
+  Cubic and 6.7e-5 for Matern32. The error the differences carried grows
+  with the square of the range — the answer shrinks as `1/range**2` while
+  the rounding amplified by dividing out `1e-3` twice does not — reaching
+  1.3e-4 at range 5000. **At which point the derivative block stops being
+  positive definite and the Cholesky in `GradientConstrainedInput.refresh`,
+  which adds no jitter at all, returns NaN.** It now factorizes.
+  - Also faster, since it is one distance matrix rather than four: 4.1 ms
+  to 1.9 ms for a 600x600 d2. On the fold notebook the model is unchanged
+  (ELBO -125.591 either way) — the old error was far below what that
+  well-conditioned case could feel, which is the honest summary of when
+  this matters and when it does not.
+  - **`Linear`'s directional covariances were wrong** and are now right.
+  The old code measured its step about a shifted origin, which cancels only
+  when the covariance depends on differences alone; `Linear` does not, so
+  `dK/dy.u` came back as `(x - min(y)).u` instead of `x.u`. It now takes
+  the base class's generic forward-mode route, which for a covariance with
+  no distance in it is exact.
+  - `point_variance_d2` loses its `step` argument, having no step any more.
+  - Kernels with no derivative process are unchanged in status and changed
+  in number: `Exponential` and `Spherical` have a kink at the origin, so
+  the variance of their derivative is infinite. The differences reported a
+  finite number manufactured by the step size; the chain rule reports one
+  implied by the kernel's own `epsilon`. Both are arbitrary. Using them
+  with directional data is a modelling error either way.
+  - **`Product`'s directional covariances were wrong** and now follow the
+  product rule. `_NodeCovariance` applies its operation to the components'
+  derivatives, which is the derivative of the operation only where that
+  operation is *linear* — true of `Sum`, and not of a product, where it
+  returned the product of the derivatives. Measured on a case with an exact
+  answer (a product of Gaussian kernels is a Gaussian kernel, with
+  `1/c**2 = 1/a**2 + 1/b**2`): **98% wrong**, now exact to 9e-16. The rule
+  needs the derivative in the *first* argument, which the interface does
+  not offer and does not need to — a covariance is symmetric, so
+  `dK/dx = transpose(covariance_matrix_d1(y, x, dir_x))`, the same identity
+  that already assembles the mixed blocks in
+  `full_directional_covariance_d1` and `GradientConstrainedInput.refresh`.
+  `self_covariance_matrix_d2` is overridden alongside, for the same reason.
+* **Two directional entry points that could not run at all.** Neither has
+test coverage, which is how both rotted unnoticed; both were found while
+checking the derivative work end to end.
+  - `GP` with `directional_data` died in training: the branch that bypasses
+  the warping set `log_derivative` to a Python float, which is float32
+  against the float64 it is added to.
+  - `StructuralField.predict` died writing its answer, calling `update` with
+  `mean`/`variance` where a variable is filled with `average_sim` (the
+  prediction) and `mean`/`variance` (the latent pair). This model has no
+  likelihood and no warping to separate them, so the prediction is the mean
+  itself.
+  - Both now train and predict. On the fold dataset the structural field's
+  potential is flat along the tangents that constrain it — slope 4e-4 rms
+  against 0.76 across them — and `predict_raw_directions` returns 1e-10
+  along them.
+  - `geoml/test/test_kernel_derivatives.py` is new: 29 tests over the
+  closed forms, the transform's Jacobian, coincident points at mine-grid
+  coordinates, the positive-definiteness case above, the product rule
+  against both an exact and a numerical reference, tracing with a changing
+  batch shape, one direction broadcast over every point, and that the
+  training gradient still reaches the kernel and transform parameters
+  through a derivative of a derivative.
+
 ## version 0.6.5
 * **The documentation site covers the whole public surface, and the type
 check covers every module behind it.** Both had been growing module by

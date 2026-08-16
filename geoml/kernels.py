@@ -40,6 +40,83 @@ import tensorflow as _tf
 import numpy as _np
 
 
+# How much of `na - 2 a.b + nb` is rounding, relative to the magnitudes that
+# go into it. A squared distance below this is indistinguishable from zero
+# and is read as zero, so coincident points reach the exact `r = 0` branch of
+# the chain rule instead of a distance at rounding level -- which for a
+# kernel with an odd term in r (Cubic, both Materns) would carry straight
+# into f'(r)/r. Generous by an order of magnitude: it only ever zeroes
+# separations below ~1e-8 of the point cloud's own extent.
+_DISTANCE_ROUNDING = 8 * float(_np.finfo(_np.float64).eps)
+
+
+def _kernel_derivatives(kernel, dist):
+    """
+    First and second derivatives of a kernel with respect to distance.
+
+    `kernelize` is elementwise, so its Jacobian is diagonal and one reverse
+    pass per order returns the derivative of every entry at once.
+
+    Parameters
+    ----------
+    kernel
+        A kernel object.
+    dist
+        Distances at which to differentiate.
+
+    Returns
+    -------
+    first, second
+        Tensors shaped like `dist`.
+    """
+    with _tf.GradientTape() as outer:
+        outer.watch(dist)
+        with _tf.GradientTape() as inner:
+            inner.watch(dist)
+            k = kernel.kernelize(dist)
+        first = inner.gradient(k, dist)
+        if first is None:                       # a kernel with no distance in it
+            first = _tf.zeros_like(dist)
+    second = outer.gradient(first, dist)
+    if second is None:
+        second = _tf.zeros_like(dist)
+    return first, second
+
+
+def _transform_jvp(transform, x, direction):
+    """
+    A transform applied to `x`, and a direction pushed through its Jacobian.
+
+    Parameters
+    ----------
+    transform
+        An object from the `transform` module.
+    x
+        Coordinates.
+    direction
+        One direction per row of `x`, in the untransformed space.
+
+    Returns
+    -------
+    transformed, pushed
+        The transformed coordinates and the directions carried with them.
+    """
+    # callers reach here with plain arrays as often as with tensors, and an
+    # accumulator can only watch a tensor. It also wants one tangent per
+    # row: a single direction meant for every point (`StructuralField`
+    # predicts along one mean vector) has to be spelled out first, where
+    # the arithmetic it replaces would have broadcast it.
+    x = _tf.convert_to_tensor(x, _tf.float64)
+    direction = _tf.broadcast_to(
+        _tf.convert_to_tensor(direction, _tf.float64), _tf.shape(x))
+    with _tf.autodiff.ForwardAccumulator(x, direction) as acc:
+        transformed = transform.__call__(x)
+    pushed = acc.jvp(transformed)
+    if pushed is None:                          # a transform ignoring its input
+        pushed = _tf.zeros_like(transformed)
+    return transformed, pushed
+
+
 class _Kernel(_gpr.Parametric):
     def __init__(self):
         super().__init__()
@@ -217,31 +294,35 @@ class _AbstractCovariance(_gpr.Parametric):
         """
         Computes point-direction covariance matrix between x and y tensors.
         """
-        # if step is None:
-        step = 1e-3
-
-        min_coords = _tf.reduce_min(y, axis=0, keepdims=True)
-        x = x - min_coords
-        y = y - min_coords
-
-        k1 = self.covariance_matrix(x, y + 0.5*step*dir_y)
-        k2 = self.covariance_matrix(x, y - 0.5*step*dir_y)
-        return (k1 - k2)/step
+        # Forward mode fits the shape of the answer: entry (i, j) involves
+        # only row i of x and row j of y, so a single pass along `dir_y`
+        # fills the whole matrix, where reverse mode would contract it.
+        y = _tf.convert_to_tensor(y, _tf.float64)
+        dir_y = _tf.broadcast_to(
+            _tf.convert_to_tensor(dir_y, _tf.float64), _tf.shape(y))
+        with _tf.autodiff.ForwardAccumulator(y, dir_y) as acc:
+            k = self.covariance_matrix(x, y)
+        return acc.jvp(k)
 
     def covariance_matrix_d2(self, x, y, dir_x, dir_y):
         """
         Computes direction-direction covariance matrix between x and y tensors.
         """
-        # if step is None:
-        step = 1e-3
-
-        min_coords = _tf.reduce_min(y, axis=0, keepdims=True)
-        x = x - min_coords
-        y = y - min_coords
-
-        k1 = self.covariance_matrix_d1(x + 0.5*step*dir_x, y, dir_y)
-        k2 = self.covariance_matrix_d1(x - 0.5*step*dir_x, y, dir_y)
-        return (k1 - k2) / step
+        # `self_covariance_matrix_d2` passes one tensor twice, and each
+        # accumulator has to watch a tensor of its own; the copy is made
+        # before the outer context opens, or it inherits the outer tangent
+        # and the whole thing differentiates K(x + t.v, x + t.v) instead.
+        x = _tf.convert_to_tensor(x, _tf.float64)
+        y = _tf.identity(_tf.convert_to_tensor(y, _tf.float64))
+        dir_x = _tf.broadcast_to(
+            _tf.convert_to_tensor(dir_x, _tf.float64), _tf.shape(x))
+        dir_y = _tf.broadcast_to(
+            _tf.convert_to_tensor(dir_y, _tf.float64), _tf.shape(y))
+        with _tf.autodiff.ForwardAccumulator(x, dir_x) as acc_x:
+            with _tf.autodiff.ForwardAccumulator(y, dir_y) as acc_y:
+                k = self.covariance_matrix(x, y)
+            k_d1 = acc_y.jvp(k)
+        return acc_x.jvp(k_d1)
 
     def point_variance(self, x):
         """
@@ -256,24 +337,9 @@ class _AbstractCovariance(_gpr.Parametric):
     def self_covariance_matrix_d2(self, x, dir_x):
         return self.covariance_matrix_d2(x, x, dir_x, dir_x)
 
-    def point_variance_d2(self, x, dir_x, step=None):
-        if step is None:
-            step = 1e-3
-
-        min_coords = _tf.reduce_min(x, axis=0, keepdims=True)
-        x = x - min_coords
-
-        def loop_fn(elems):
-            y = _tf.expand_dims(elems[0], 0)
-            dir_y = _tf.expand_dims(elems[1], 0)
-            k = self.covariance_matrix(y, y + dir_y*step)
-            return _tf.squeeze(k)
-
-        cov_2 = _tf.map_fn(loop_fn, [x, dir_x], dtype=_tf.float64,
-                           parallel_iterations=1000)
-        cov_0 = self.point_variance(x)
-
-        return 2 * (cov_0 - cov_2) / step**2
+    def point_variance_d2(self, x, dir_x):
+        return _tf.linalg.diag_part(
+            self.covariance_matrix_d2(x, x, dir_x, dir_x))
 
     def set_limits(self, data):
         pass
@@ -385,6 +451,88 @@ class Covariance(_AbstractCovariance):
             v = _tf.ones([_tf.shape(x)[0]], dtype=_tf.float64)
         return v
 
+    # The base class differentiates the covariance matrix itself, which
+    # cannot work here: this covariance goes through a Euclidean distance,
+    # and |h| is not twice differentiable at h = 0 -- exactly the diagonal
+    # every d2 call has. Differentiating the *kernel* instead moves the
+    # autodiff onto a one-dimensional elementwise function, where it is
+    # exact, and leaves the spatial part to the chain rule below, which is
+    # regular at the origin.
+
+    def _radial_derivatives(self, p, q):
+        """
+        The radial factors of the directional covariances.
+
+        With `K = f(r)` and `r` the distance between transformed
+        coordinates, every directional derivative is built from
+        `phi = f'(r)/r` and `psi = (f''(r) - phi)/r ** 2`. Both have
+        removable singularities at the origin, where `phi` tends to `f''(0)`
+        and `psi` is multiplied by a factor that vanishes.
+
+        Parameters
+        ----------
+        p, q
+            Transformed coordinates.
+
+        Returns
+        -------
+        phi, psi
+            Matrices with one entry per pair.
+        """
+        # Distances are measured about a common origin: only differences
+        # reach the kernel, and subtracting it keeps `na - 2 p.q + nb` away
+        # from the cancellation that mine-grid coordinates would cause.
+        origin = _tf.stop_gradient(_tf.reduce_min(q, axis=0, keepdims=True))
+        p_local = p - origin
+        q_local = q - origin
+        na = _tf.reduce_sum(p_local ** 2, axis=1)[:, None]
+        nb = _tf.reduce_sum(q_local ** 2, axis=1)[None, :]
+        sq_dist = na - 2 * _tf.matmul(p_local, q_local, False, True) + nb
+        sq_dist = _tf.where(sq_dist > _DISTANCE_ROUNDING * (na + nb),
+                            sq_dist, _tf.zeros_like(sq_dist))
+        dist = _tf.sqrt(sq_dist)
+
+        first, second = _kernel_derivatives(self.kernel, dist)
+        apart = dist > 0.0
+        safe = _tf.where(apart, dist, _tf.ones_like(dist))
+        phi = _tf.where(apart, first / safe, second)
+        psi = _tf.where(apart, (second - phi) / safe ** 2,
+                        _tf.zeros_like(dist))
+        return phi, psi
+
+    def covariance_matrix_d1(self, x, y, dir_y):
+        with _tf.name_scope(self.__class__.__name__ + "_cov_d1"):
+            p = self.transform.__call__(x)
+            q, q_dir = _transform_jvp(self.transform, y, dir_y)
+            phi, _ = self._radial_derivatives(p, q)
+            # a[i, j] = (p_i - q_j) . q_dir_j, without ever forming h
+            a = (_tf.matmul(p, q_dir, False, True)
+                 - _tf.reduce_sum(q * q_dir, axis=1)[None, :])
+            k = -phi * a
+        return k
+
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
+        with _tf.name_scope(self.__class__.__name__ + "_cov_d2"):
+            p, p_dir = _transform_jvp(self.transform, x, dir_x)
+            q, q_dir = _transform_jvp(self.transform, y, dir_y)
+            phi, psi = self._radial_derivatives(p, q)
+            a = (_tf.matmul(p, q_dir, False, True)
+                 - _tf.reduce_sum(q * q_dir, axis=1)[None, :])
+            b = (_tf.reduce_sum(p * p_dir, axis=1)[:, None]
+                 - _tf.matmul(p_dir, q, False, True))
+            c = _tf.matmul(p_dir, q_dir, False, True)
+            k = -(psi * a * b + phi * c)
+        return k
+
+    def point_variance_d2(self, x, dir_x):
+        with _tf.name_scope("Kernel_point_var_d2"):
+            # a and b vanish where a point meets itself, leaving -f''(0) c
+            _, p_dir = _transform_jvp(self.transform, x, dir_x)
+            _, second = _kernel_derivatives(
+                self.kernel, _tf.zeros([_tf.shape(x)[0]], _tf.float64))
+            v = -second * _tf.reduce_sum(p_dir ** 2, axis=1)
+        return v
+
     def set_limits(self, data):
         self.transform.set_limits(data)
 
@@ -419,6 +567,9 @@ class _NodeCovariance(_AbstractCovariance):
         )
         return k
 
+    # Applying the operation to the components' derivatives is the
+    # derivative of the operation only where that operation is linear --
+    # true of `Sum`, and the reason `Product` overrides all three.
     def covariance_matrix_d1(self, x, y, dir_y):
         k = self._operation(
             [kernel.covariance_matrix_d1(x, y, dir_y)
@@ -551,6 +702,49 @@ class Product(_NodeCovariance):
     def _operation(self, arg_list):
         return _prod_n(arg_list)
 
+    # A product is not linear in its components, so the delegation above
+    # would return the product of the derivatives where the product rule
+    # is wanted. The rule needs the derivative in the *first* argument,
+    # which the interface does not offer -- and does not need to: a
+    # covariance is symmetric, `K(x, y) = K(y, x)'`, so the derivative in x
+    # is the derivative in y with the arguments swapped and the result
+    # transposed. The same identity assembles the mixed blocks in
+    # `full_directional_covariance_d1` and in `GradientConstrainedInput`.
+    @staticmethod
+    def _all_but(matrices, *skip):
+        """The product of every component's matrix except the ones named."""
+        kept = [mat for i, mat in enumerate(matrices) if i not in skip]
+        if len(kept) == 0:
+            return _tf.ones_like(matrices[0])
+        return _prod_n(kept)
+
+    def covariance_matrix_d1(self, x, y, dir_y):
+        values = [kernel.covariance_matrix(x, y)
+                  for kernel in self.components]
+        d_y = [kernel.covariance_matrix_d1(x, y, dir_y)
+               for kernel in self.components]
+        return _tf.add_n([d * self._all_but(values, i)
+                          for i, d in enumerate(d_y)])
+
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
+        values = [kernel.covariance_matrix(x, y)
+                  for kernel in self.components]
+        d_y = [kernel.covariance_matrix_d1(x, y, dir_y)
+               for kernel in self.components]
+        d_x = [_tf.transpose(kernel.covariance_matrix_d1(y, x, dir_x))
+               for kernel in self.components]
+        d_xy = [kernel.covariance_matrix_d2(x, y, dir_x, dir_y)
+                for kernel in self.components]
+
+        terms = [d * self._all_but(values, i) for i, d in enumerate(d_xy)]
+        terms += [d_y[i] * d_x[j] * self._all_but(values, i, j)
+                  for i in range(len(values))
+                  for j in range(len(values)) if j != i]
+        return _tf.add_n(terms)
+
+    def self_covariance_matrix_d2(self, x, dir_x):
+        return self.covariance_matrix_d2(x, x, dir_x, dir_x)
+
 
 class Scale(_WrapperCovariance):
     """
@@ -569,3 +763,19 @@ class Scale(_WrapperCovariance):
     def point_variance(self, x):
         return self.parameters["amplitude"].get_value() \
                * self.base_covariance.point_variance(x)
+
+    # Scaling passes through a derivative, so these delegate rather than
+    # inherit: the base class would differentiate `covariance_matrix` above,
+    # and with a distance-based covariance underneath that is the one thing
+    # it cannot do.
+    def covariance_matrix_d1(self, x, y, dir_y):
+        return self.parameters["amplitude"].get_value() \
+               * self.base_covariance.covariance_matrix_d1(x, y, dir_y)
+
+    def covariance_matrix_d2(self, x, y, dir_x, dir_y):
+        return self.parameters["amplitude"].get_value() \
+               * self.base_covariance.covariance_matrix_d2(x, y, dir_x, dir_y)
+
+    def point_variance_d2(self, x, dir_x):
+        return self.parameters["amplitude"].get_value() \
+               * self.base_covariance.point_variance_d2(x, dir_x)
