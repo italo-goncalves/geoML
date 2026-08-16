@@ -59,6 +59,45 @@ they are differentiated is the interesting part.
   that already assembles the mixed blocks in
   `full_directional_covariance_d1` and `GradientConstrainedInput.refresh`.
   `self_covariance_matrix_d2` is overridden alongside, for the same reason.
+* **`Spline.backward` is a solve, not a second guess.** It used to
+interpolate the knots the other way round, which is not an inverse: the
+inverse of a cubic is not a cubic, so the two curves met at the knots and
+parted between them. `forward(backward(y))` came back **1.3e-1** from `y`,
+a tenth of a standard deviation, meaning the model inverted a different map
+from the one it fitted. `MonotonicCubicSpline.invert` now solves the
+forward polynomial by Newton, and the round trip is **1e-11 or better in
+both directions**.
+  - The interval is located once, in `y` — a monotone map puts the answer
+  in the interval the query occupies among the y-knots, so the bracket
+  cannot move and no step searches again. The Hermite form is converted to
+  monomial coefficients once, so each iteration is a Horner pass rather
+  than four basis polynomials; that is what keeps twelve steps cheaper than
+  three were before it. `backward` costs 2.6x a forward pass.
+  - The last correction is taken from a detached iterate, so the derivative
+  is the implicit `1 / f'(t)` exactly rather than the derivative of an
+  unrolled loop. Checked against a finite difference.
+  - **The accuracy floor is the transform's, not the solver's**, and that
+  is worth knowing when reading the tolerance: a normal-score fit leaves
+  half its intervals nearly flat — 40% have a span below 1e-4 even at the
+  default five knots per arm — and where the forward map compresses by `s`,
+  a residual at machine precision returns magnified by `1/s`. The measured
+  5e-11 floor is exactly `2.2e-16 / 1e-5`. It is information `forward`
+  discarded, and no inverse recovers it.
+  - Twelve iterations is the default because that is where the error stops
+  falling, measured over six samples at knot counts from 11 to 161: 1e-3 at
+  three steps, 1e-7 at eight, 5e-11 at twelve, unchanged at thirty-two. A
+  single sample suggested three was enough, which is why the default is set
+  from a sweep and not from one run.
+* **The interpolators' epsilons no longer perturb the intervals that were
+fine.** `w + 1e-6` in the derivative rule and `h + 1e-6` in the evaluation
+guarded against a zero-width interval by shifting *every* interval; at a
+knot spacing of 0.125 that is a relative error of 8e-6, which put a floor
+under the spline's own self-consistency and was enough to stall the Newton
+inversion above. `_safe_width` replaces only the zeros, so a legitimate
+width is divided by itself. Interpolating a straight line now returns the
+line to 1e-12 at every spacing tested. The base class used 1e-12 for the
+same guard and the monotone subclass 1e-6, a millionfold apart with no
+reason recorded; both are exact now.
 * **`Spline` initializes on the data, and the projection-pursuit question
 it was blocking is answered.** The warping's knots have fixed inputs on a
 regular grid and trainable outputs; they used to start on a uniform

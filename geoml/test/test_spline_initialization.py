@@ -147,32 +147,22 @@ def test_a_constant_column_is_left_alone():
         spline.forward(_f64(data))[1].numpy()))
 
 
-def test_the_round_trip_comes_back_approximately():
-    """`backward` swaps the two knot sets and interpolates again, which is
-    not the analytic inverse of a cubic -- so the round trip is exact only
-    where the map is straight. That is a property of the spline rather than
-    of the initializer, which is what the identity case below isolates: it
-    returns to 1e-5, while a curved map returns to 1e-2 and tightens as the
-    knots multiply.
+def test_the_round_trip_comes_back():
+    """An initialized spline is curved from the first iteration, which is
+    what used to make `backward` -- then a second spline through the
+    swapped knots -- inexact by a tenth of a standard deviation. It solves
+    the forward polynomial now, so this comes back. `test_spline_inversion`
+    owns the detail, including why the tolerance is not machine precision.
     """
     data = _skewed(size=2, seed=5)
     inside = np.clip(data, -4.5, 4.5)
 
-    straight = wp.Spline(2, knots_per_arm=10)
-    assert np.allclose(
-        straight.backward(straight.forward(_f64(inside))[0]), inside,
-        atol=1e-5)
-
-    errors = []
     for knots_per_arm in (5, 20):
         spline = wp.Spline(2, knots_per_arm=knots_per_arm)
         spline.initialize(_f64(data))
         back = spline.backward(spline.forward(_f64(inside))[0]).numpy()
         assert np.all(np.isfinite(back))
-        errors.append(np.max(np.abs(back - inside)))
-
-    assert errors[0] < 0.2                      # curved, and approximate
-    assert errors[1] < errors[0] / 2            # more knots, closer
+        assert np.allclose(back, inside, atol=1e-9)
 
 
 # --------------------------------------------------------------------------- #

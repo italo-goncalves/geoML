@@ -228,7 +228,11 @@ class Spline(_Warping):
             [self._get_warped_coordinates(i) for i in range(self.size_in)],
             axis=1
         )
-        x_back = self.spline.interpolate(warped_coordinates, self.x_original, x)
+        # solved rather than approximated: interpolating the knots the
+        # other way round meets `forward` at the knots and parts between
+        # them, which used to leave `forward(backward(y))` a tenth of a
+        # standard deviation from `y`
+        x_back = self.spline.invert(self.x_original, warped_coordinates, x)
         return x_back
 
     def initialize(self, x):
@@ -272,14 +276,13 @@ class Spline(_Warping):
         gaussianizing in between, and every rotation after the first sees
         data the previous one already made as independent as it knows how.
 
-        One consequence to be aware of, which belongs to `backward` rather
-        than to this method: inverting swaps the two knot sets and
-        interpolates again, which is not the analytic inverse of a cubic,
-        so the round trip is exact only where the map is straight. An
-        initialized spline is curved from the first iteration rather than
-        after training, so that approximation is met sooner. Measured on
-        lognormal columns, the worst round-trip error is 1e-1 at five knots
-        per arm and 1e-2 at forty, against 1e-6 for the identity map.
+        An initialized spline is curved from the first iteration rather
+        than after training, which used to matter: `backward` interpolated
+        the swapped knots, an approximation good only where the map is
+        straight, and the round trip was off by a tenth of a standard
+        deviation. It solves the forward polynomial now
+        (`MonotonicCubicSpline.invert`), so what is left is set by the
+        transform's own conditioning rather than by the inverse.
 
         See Also
         --------
