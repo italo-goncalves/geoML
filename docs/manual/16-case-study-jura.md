@@ -182,16 +182,17 @@ mean "no better than quoting the average grade".
 and a half times the training, and the held-out error is flat to the second
 decimal.
 
-That is worth setting beside chapter 3's warning, which was measured on
-this same dataset and said the opposite: a *stationary* model with a
-Gaussian likelihood went from 0.96 to 1.13 when its inducing set merely
-doubled, because the extra capacity went into interpolating its own
-samples. Both measurements are real. What they say together is that **the
-number of inducing points a model can absorb is a property of the whole
-configuration**, network and likelihood and warping together, rather than a
-number to carry between problems. This one has a heavy-tailed likelihood that
-declines to chase extremes and a walked input that spends capacity on
-geometry rather than on wiggles, and it simply does not overfit here.
+Chapter 3 ran the same sweep on the plainest possible version of this
+dataset — a stationary model, a Gaussian likelihood, no walked input — and
+found the same flatness, from 81 inducing points to 625. Two
+configurations this far apart agreeing is worth more than either alone:
+**what capacity buys is resolution rather than accuracy at the sampled
+sites**, and what it costs is a slow narrowing of the model's own
+intervals, which a validation table shows long before it becomes a
+problem. The goodness column above is computed from the container's stored
+simulations, so like every such number it describes the *ground* rather
+than an assay and reads low; chapter 13 does it the honest way, and
+`cross_validate` does it that way for you.
 
 So why keep the larger set? Because the table is measured at *sampled*
 locations, and it cannot speak for the ground between them. A regular

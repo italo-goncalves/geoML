@@ -59,6 +59,33 @@ they are differentiated is the interesting part.
   that already assembles the mixed blocks in
   `full_directional_covariance_d1` and `GradientConstrainedInput.refresh`.
   `self_covariance_matrix_d2` is overridden alongside, for the same reason.
+* **A capacity warning the manual made, withdrawn on measurement.**
+Chapter 3 taught that a stationary Jura model went from 0.96 to 1.13 times
+the data's standard deviation when its inducing set doubled, and explained
+it by the kernel range being an unpriced point estimate that lets the field
+roughen. Re-measured across 81, 169, 324 and 625 inducing points on three
+seeds: **rmse/sd is flat at 0.93** and the number does not reproduce.
+  - What does move is the width of the intervals, and reading *that* is
+  where the trap was. `compute_metrics` scores the container's stored
+  simulations — the **ground**, with the likelihood's noise integrated out.
+  Against assays that leaves the noise out of every interval, so a nominal
+  90% band reads 0.59 falling to 0.49; through `predict_measurements` the
+  same models read **0.936, 0.926, 0.911, 0.894**. Well calibrated
+  throughout, drifting gently. The artifact grows with capacity because a
+  model with more capacity calls less of the variance noise, so the piece
+  being omitted is larger. `cross_validate` and the `accuracy` figure were
+  always right — both ask for measurements — and
+  `ContinuousVariable.compute_metrics` now says so in a `Notes` section.
+  - The range explanation is backwards. The fitted range does fall (3.9 to
+  2.7 km across the sweep), but freezing it at the value the smallest model
+  chose makes calibration *worse* at every count. It is the model
+  compensating, not failing.
+  - Recorded in passing, because it bears on when a MAP prior is worth
+  reaching for: `range_prior=2.0` moves the fitted range by 0.003 and
+  changes no score to four decimals. A log-prior does not scale with the
+  data, so against ~1800 likelihood terms two scalars decide nothing.
+  - Chapter 3's section is rewritten around the measured table and chapter
+  16's cross-reference now matches it.
 * **Two directional entry points that could not run at all.** Neither has
 test coverage, which is how both rotted unnoticed; both were found while
 checking the derivative work end to end.
