@@ -1,4 +1,50 @@
 ## version 0.6.8
+* **One declustering column, and everything downstream shares it.**
+`container.decluster(on=, cell=)` computes cell-declustering weights and
+keeps them as the metadata column `"declustering"` — a first-class
+per-location column with subsetting, Zarr and export for free, which is
+what metadata columns are. The census that forced it: the two existing
+consumers each swept their own cell size on their own values, so the
+same container could get different weights in different figures; with
+the initializers joining them, the inconsistency would have multiplied.
+  - **One call turns declustering on everywhere.** The `variogram`
+  figure reads the stored column when present (its internal
+  `variogram_score` then rides the very same weights);
+  `metrics.variogram_score` — arrays in, arrays out, no container —
+  gains an explicit `weights=` argument instead. Precedence everywhere:
+  explicit argument > stored column > computed on the fly. `on=` names
+  the variable driving the automatic cell sweep, defaulting to the only
+  continuous variable and refusing to guess among several.
+  - **The warping initializers start declustered.** The model fetches
+  the stored column at construction and threads it down
+  `likelihood.initialize` → `warping.initialize(x, weights=None)`:
+  `ZScore` takes weighted moments (and weighted winsor fences when
+  robust), `Spline` places its knots on the weighted empirical CDF —
+  with the tail floor counted in **Kish's effective sample size** rather
+  than in rows, since a region carried by many light rows is still the
+  sample it weighs, and equal weights reproduce `count/(n+1)` exactly.
+  Warpings with nothing to weight accept and ignore; `None` everywhere
+  is the start it always was, bit for bit. The declustered start on a
+  duplicated-region sample lands where the plain start on the clean
+  sample does, which is the test.
+  - A subset carries its parent's weights by value — the `"fold"`
+  column's convention — so they are a snapshot, recomputed after
+  subsetting when it matters. Said in the docstring rather than solved
+  by magic.
+  - **`Rotation`'s ICA is seeded from the package RNG now.** Found by a
+  test threshold that moved when the batch around it changed: unseeded,
+  FastICA draws from numpy's *global* state, which made the rotation the
+  one data-dependent start `geoml.set_seed` did not reproduce — a gap in
+  the 0.6.2 one-knob unification, closed. The affected test seeds itself
+  and means one thing now.
+  - Also here, the type check over the touched files: two diagnostics
+  that had shipped silently with the reliability commit (bare `labels`
+  access on the `_Variable` base) and the `weights` argument rebound in
+  `variogram_score` against the house rule — repaired, the list clean.
+  - The variogram-based kernel initialization that was planned alongside
+  this is **dropped, on the user's call**: too much work for machinery
+  this library exists to replace. The experimental variogram stays what
+  the manual sells it as — a check, never a fitting surface.
 * **A reliability diagram, on both plotting backends.** `reliability` on
 `Explorer` and `Interactive`, the counting in `prepare.reliability` — the
 categorical half of what `accuracy` asks of a continuous variable, and

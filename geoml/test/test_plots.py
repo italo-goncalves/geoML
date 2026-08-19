@@ -1734,6 +1734,33 @@ def test_the_variogram_on_a_worked_example():
     assert panel["cell"] is None
 
 
+def test_a_stored_declustering_column_is_what_the_curve_uses():
+    """`container.decluster()` keeps a column, and `decluster=True` reads
+    it instead of sweeping its own cell -- pinned by storing crafted
+    weights and matching the hand-weighted curve."""
+    point = _line_points([0.0, 1.0, 4.0])
+    weights = np.array([2.0, 0.5, 0.5])
+    point.add_metadata("declustering", weights)
+
+    panel = prepare.variogram(point, "z", n_lags=1, max_lag=3.0)[0]
+
+    values = np.array([0.0, 1.0, 4.0])
+    pairs = [(0, 1), (0, 2), (1, 2)]
+    share = np.array([weights[i] * weights[j] for i, j in pairs])
+    gamma = np.array([0.5 * (values[i] - values[j]) ** 2 for i, j in pairs])
+    assert panel["data"][0] == pytest.approx(
+        float((share * gamma).sum() / share.sum()))
+    # no cell was swept: the weights came as they were
+    assert panel["cell"] is None
+
+    # and weights of one are exactly the raw curve
+    point.add_metadata("declustering", np.ones(3))
+    even = prepare.variogram(point, "z", n_lags=1, max_lag=3.0)[0]
+    raw = prepare.variogram(point, "z", n_lags=1, max_lag=3.0,
+                            decluster=False)[0]
+    assert even["data"][0] == pytest.approx(raw["data"][0])
+
+
 def test_a_declustered_variogram_weights_each_pair_by_its_ends():
     """`w_i * w_j` on the pairs and `w_i` on the sill, by hand."""
     point = _line_points([0.0, 1.0, 4.0])

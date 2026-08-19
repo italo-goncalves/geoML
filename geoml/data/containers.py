@@ -1048,6 +1048,84 @@ class PointData(_PointBased):
         _geoh5io.write_points(self, workspace, name, include, simulations,
                               replace, folder)
 
+    def decluster(self, on: "str | None" = None,
+                  cell: "float | None" = None,
+                  name: str = "declustering"
+                  ) -> "tuple[_np.ndarray, float]":
+        """
+        Computes cell-declustering weights and keeps them, for everything
+        downstream to share.
+
+        Samples are rarely laid down evenly — drilling follows the ore —
+        and every statistic that gives them equal votes describes the
+        sampling rather than the field. This stores one weight per
+        location as the metadata column `"declustering"`, which is where
+        the declustered consumers look first: the `variogram` figure, and
+        the warping initializers a model runs at construction. **One call
+        here turns declustering on everywhere**, with one consistent set
+        of weights — computed independently, each consumer would sweep
+        its own cell size on its own values and quietly disagree.
+
+        The weights are a snapshot of these locations, exactly as a fold
+        column is: a subset carries its parent's values, which are then
+        not the subset's own weights — recompute after subsetting when it
+        matters.
+
+        Parameters
+        ----------
+        on
+            The continuous variable (or component) whose values drive the
+            automatic cell-size choice — the sweep keeps the cell whose
+            declustered mean departs furthest from the naive one, which
+            needs values to mean anything. Left out, the only continuous
+            variable is used; holding several, this refuses to guess.
+            Not needed when `cell` is given.
+        cell
+            The cell side, fixing it instead of sweeping.
+        name
+            The metadata column written. An existing column of this name
+            is replaced.
+
+        Returns
+        -------
+        weights : array
+            One per location, summing to the number of locations, as
+            `math.geometry.declustering_weights` returns them.
+        cell : float
+            The cell side used, whether given or chosen.
+
+        See Also
+        --------
+        math.geometry.declustering_weights : the arithmetic, and the
+            cell-sweep rule.
+        """
+        coordinates = _np.asarray(self.coordinates, dtype=float)
+        if cell is None:
+            if on is None:
+                continuous = [key for key, variable in self.variables.items()
+                              if isinstance(variable, ContinuousVariable)]
+                if len(continuous) != 1:
+                    raise ValueError(
+                        "the automatic cell sweep needs values: name the "
+                        "variable with `on=` (found %s) or fix the size "
+                        "with `cell=`"
+                        % (", ".join(sorted(continuous)) or "no continuous "
+                           "variable"))
+                on = continuous[0]
+            variable, _ = self._variable_or_component(str(on))
+            measurements = getattr(variable, "measurements", None)
+            if measurements is None or measurements.labels is not None:
+                raise ValueError(
+                    "%r holds no continuous measurements to sweep the "
+                    "cell size on" % str(on))
+            values = _np.asarray(measurements.values, dtype=float).ravel()
+            weights, cell = _gmt.declustering_weights(coordinates, values)
+        else:
+            weights, cell = _gmt.declustering_weights(
+                coordinates, cell=float(cell))
+        self.add_metadata(name, weights)
+        return weights, float(cell)
+
     def spatial_k_fold(self, test_data, k=5, groups=None, seed=None,
                        name="fold"):
         """

@@ -212,3 +212,60 @@ def test_a_large_column_spills_to_disk(monkeypatch):
     point = _points()
     point.add_metadata("fold", np.arange(12))
     assert point.metadata["fold"].values.backend == "zarr"
+
+
+# --------------------------------------------------------------------------- #
+# the declustering column
+# --------------------------------------------------------------------------- #
+def _clustered(n_cluster=30):
+    """A tight cluster in one corner of a sparse field."""
+    rng = np.random.default_rng(7)
+    sparse = rng.uniform(0, 100, (12, 3))
+    crowd = rng.uniform(0, 5, (n_cluster, 3))
+    coords = np.concatenate([sparse, crowd])
+    frame = pd.DataFrame(coords, columns=["X", "Y", "Z"])
+    point = geoml.data.PointData(frame, ["X", "Y", "Z"])
+    # the crowd carries high values, the classic infill-follows-ore bias
+    values = np.concatenate([rng.normal(1.0, 0.1, 12),
+                             rng.normal(5.0, 0.1, n_cluster)])
+    point.add_continuous_variable("grade", values)
+    return point
+
+
+def test_decluster_stores_the_column_everything_shares():
+    point = _clustered()
+    weights, cell = point.decluster()
+
+    assert "declustering" in point.metadata
+    assert np.allclose(point.get_metadata("declustering"), weights)
+    assert np.isclose(weights.sum(), point.n_data)
+    assert cell > 0
+    # the crowd speaks softly, the sparse samples loudly
+    assert weights[12:].mean() < weights[:12].mean()
+
+
+def test_decluster_refuses_to_guess_among_variables():
+    point = _clustered()
+    point.add_continuous_variable("second", np.zeros(point.n_data))
+    with pytest.raises(ValueError, match="on="):
+        point.decluster()
+    # naming one, or fixing the cell, both settle it
+    point.decluster(on="grade")
+    point.decluster(cell=10.0)
+
+
+def test_a_fixed_cell_needs_no_values():
+    frame = pd.DataFrame(np.random.default_rng(1).uniform(0, 10, (8, 3)),
+                         columns=["X", "Y", "Z"])
+    bare = geoml.data.PointData(frame, ["X", "Y", "Z"])
+    weights, cell = bare.decluster(cell=2.5)
+    assert cell == 2.5
+    assert np.isclose(weights.sum(), 8.0)
+
+
+def test_a_categorical_cannot_drive_the_sweep():
+    point = _clustered()
+    point.add_categorical_variable(
+        "rock", measurements=np.array(["a", "b"] * (point.n_data // 2)))
+    with pytest.raises(ValueError, match="continuous"):
+        point.decluster(on="rock")

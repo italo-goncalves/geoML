@@ -186,14 +186,23 @@ class _Warping(_gpr.Parametric):
         """
         raise NotImplementedError
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         """
         Uses the provided values to initialize the object's parameters.
+
+        A data-dependent *start*, not a fit — and `weights` is how a
+        declustered start arrives: one weight per row, as
+        `container.decluster()` stores them, so a crowded patch of
+        drilling does not set the target distribution. A warping with
+        nothing to weight accepts and ignores them; `None` reproduces
+        the unweighted start exactly.
 
         Parameters
         ----------
         x : array-like
             Vector with values to warp.
+        weights : array-like, optional
+            One declustering weight per row of `x`.
 
         Returns
         -------
@@ -294,7 +303,7 @@ class Spline(_Warping):
         x_back = self.spline.invert(self.x_original, warped_coordinates, x)
         return x_back
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         """
         Places the knots on the data's own normal-score transform.
 
@@ -311,6 +320,10 @@ class Spline(_Warping):
             Values reaching this link of the chain, one column per
             dimension. Expected to be roughly standardized, as the class
             docstring says: the knots span [-5, 5].
+        weights
+            One declustering weight per row: the empirical CDF the knots
+            are placed on is then the weighted one, so the target
+            distribution is the field's rather than the sampling's.
 
         Returns
         -------
@@ -352,16 +365,33 @@ class Spline(_Warping):
             from the data and likewise only as a starting point.
         """
         values = _np.asarray(x, dtype=float)
+        if weights is not None:
+            weights = _np.asarray(weights, dtype=float).ravel()
         knots = self.x_original.numpy()[:, 0]
         per_arm = (len(knots) - 1) // 2
         for dim in range(values.shape[1]):
-            column = _np.sort(values[:, dim])
+            order = _np.argsort(values[:, dim])
+            column = values[order, dim]
             if not _np.ptp(column) > 0:
                 # nothing to transform, and no CDF worth inverting: leave
                 # this column on the uniform partition, i.e. the identity
                 continue
-            floor = 1.0 / (len(column) + 1.0)
-            share = _np.searchsorted(column, knots, side="right") * floor
+            found = _np.searchsorted(column, knots, side="right")
+            if weights is None:
+                floor = 1.0 / (len(column) + 1.0)
+                share = found * floor
+            else:
+                # the weighted empirical CDF, with the tail floor counted
+                # in Kish's effective sample size rather than in rows: a
+                # region carried by many light rows is still the sample
+                # it weighs, and equal weights reproduce count/(n+1)
+                # exactly
+                share_w = weights[order]
+                cumulative = _np.concatenate([[0.0], _np.cumsum(share_w)])
+                effective = cumulative[-1] ** 2 / (share_w ** 2).sum()
+                floor = 1.0 / (effective + 1.0)
+                share = cumulative[found] / cumulative[-1] \
+                    * (effective * floor)
             share = _np.clip(share, floor, 1.0 - floor)
             target = _np.clip(_ndtri(share), -5.0, 5.0)
 
@@ -374,6 +404,26 @@ class Spline(_Warping):
                 _arm_shares(_np.diff(scaled[per_arm:]), outer=-1))
 
         return self.forward(_tf.constant(values, _tf.float64))[0]
+
+
+def _weighted_quantiles(x, q, weights):
+    """Per-column weighted quantiles, by the midpoint rule.
+
+    Equal weights land within a sample spacing of `np.quantile`, which is
+    all a winsor fence needs; written out because the runtime floor's
+    numpy has no weighted quantile of its own.
+    """
+    x = _np.asarray(x, dtype=float)
+    weights = _np.asarray(weights, dtype=float).ravel()
+    q = _np.asarray(q, dtype=float)
+    out = _np.empty((len(q), x.shape[1]))
+    for dim in range(x.shape[1]):
+        order = _np.argsort(x[:, dim])
+        column = x[order, dim]
+        share = weights[order]
+        cdf = (_np.cumsum(share) - 0.5 * share) / share.sum()
+        out[:, dim] = _np.interp(q, cdf, column)
+    return out
 
 
 class ZScore(_Warping):
@@ -450,17 +500,27 @@ class ZScore(_Warping):
         # x = _tftools.ensure_rank_2(x)
         return x * std + mean
 
-    def _trusted(self, x):
+    def _trusted(self, x, weights=None):
         """The data the initialization believes: winsorized when robust."""
         if not self.robust:
             return x
-        lo, hi = _np.quantile(x, self._ROBUST_QUANTILES, axis=0)
+        if weights is None:
+            lo, hi = _np.quantile(x, self._ROBUST_QUANTILES, axis=0)
+        else:
+            lo, hi = _weighted_quantiles(x, self._ROBUST_QUANTILES, weights)
         return _np.clip(x, lo, hi)
 
-    def initialize(self, x):
-        fit = self._trusted(x)
-        mean = _np.mean(fit, axis=0)
-        std = _np.std(fit, axis=0)
+    def initialize(self, x, weights=None):
+        fit = self._trusted(x, weights)
+        if weights is None:
+            mean = _np.mean(fit, axis=0)
+            std = _np.std(fit, axis=0)
+        else:
+            share = _np.asarray(weights, dtype=float).ravel()[:, None]
+            fit = _np.asarray(fit, dtype=float)
+            mean = (share * fit).sum(axis=0) / share.sum()
+            std = _np.sqrt(
+                (share * (fit - mean) ** 2).sum(axis=0) / share.sum())
 
         if not self.parameters["mean"].fixed:
             self.parameters["mean"].set_value(mean)
@@ -469,7 +529,7 @@ class ZScore(_Warping):
         if not self.parameters["std"].fixed:
             self.parameters["std"].set_value(std)
             self.parameters["std"].set_limits(std / 100, std * 10)
-        return super().initialize(x)
+        return super().initialize(x, weights)
 
 
 class Center(ZScore):
@@ -491,11 +551,11 @@ class Center(ZScore):
         super().__init__(size, mean, std=_np.ones(size))
         self.parameters['std'].fix()
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         mean = _np.mean(x, axis=0)
         if not self.parameters["mean"].fixed:
             self.parameters["mean"].set_value(mean)
-        return super().initialize(x)
+        return super().initialize(x, weights)
 
 
 class Softplus(_Warping):
@@ -591,7 +651,7 @@ class Scale(ZScore):
         )
         self.parameters["mean"].fix()
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         sc = _np.max(x, axis=0) - _np.min(x, axis=0) + 1e-6
         if not self.parameters["std"].fixed:
             self.parameters["std"].set_value(sc)
@@ -656,9 +716,9 @@ class ChainedWarping(_Warping):
             x = wp.backward(x)
         return x
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         for wp in self.warpings:
-            x = wp.initialize(x)
+            x = wp.initialize(x, weights)
         return x
 
 
@@ -864,7 +924,7 @@ class ContinuousNormalizingFlow(_Warping):
             history.append(x.numpy())
         return history
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         cluster = _KMeans(self.n_ip).fit(x)
 
         cl_mean = _np.mean(cluster.cluster_centers_, axis=0, keepdims=True)
@@ -918,7 +978,7 @@ class PCA(_Warping):
         x = x + self.mean
         return x
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         self.mean = _tf.constant(_np.mean(x, axis=0, keepdims=True), _tf.float64)
         x_center = x - self.mean
         cov = _np.matmul(_np.transpose(x_center), x_center) / x_center.shape[0]
@@ -935,7 +995,7 @@ class RobustPCA(PCA):
         super().__init__(n_dim, n_components)
         self.support_fraction = support_fraction
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         with _warnings.catch_warnings():
             # FastMCD chatters while it searches: "Determinant has increased"
             # on its concentration steps, and a not-full-rank notice on the
@@ -1078,7 +1138,7 @@ class Rotation(Identity):
         x = _tf.matmul(x, rot, False, True)
         return x
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         # ICA is asked for a starting point, not a converged answer: the
         # rotation is trainable, and training moves it from wherever the
         # fit stopped. Hitting the iteration limit therefore costs nothing
@@ -1087,7 +1147,13 @@ class Rotation(Identity):
         # on the Jura case in the test suite, where the model is fine.
         with _warnings.catch_warnings():
             _warnings.simplefilter("ignore", _ConvergenceWarning)
-            ica = _ICA(whiten=False).fit(x)
+            # seeded from the package RNG: unseeded, FastICA draws from
+            # numpy's global state, which made this the one data-dependent
+            # start `geoml.set_seed` did not reproduce -- and left a test
+            # threshold riding on whatever ran before it
+            ica = _ICA(whiten=False,
+                       random_state=int(_rnd.rng().integers(2 ** 31))
+                       ).fit(x)
         self.parameters['rotation'].set_value(ica.components_)
         rot = self.parameters['rotation'].get_value()
         x = _tf.matmul(x, rot)
@@ -1126,7 +1192,7 @@ class ScaledSimplex(Identity):
         x = _tf.maximum(x, 0.0)
         return x
 
-    def initialize(self, x):
+    def initialize(self, x, weights=None):
         missing = _np.isnan(x)
         complete = ~_np.any(missing, axis=1, keepdims=True)
         x_new = _np.where(missing, 0, x) * complete

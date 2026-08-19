@@ -804,12 +804,18 @@ class VGPNetwork(_GPModel):
         self.has_value = _np.concatenate(has_value, axis=1)
         self.total_data = _np.sum(self.has_value)
 
-        # initializing likelihoods
+        # initializing likelihoods -- declustered where the data carries
+        # the column `container.decluster()` keeps, so the warpings start
+        # on the field's distribution rather than the sampling's
+        stored = data.metadata.get("declustering")
+        stored = None if stored is None \
+            else _np.asarray(stored.values, dtype=float).ravel()
         for i, v in enumerate(self.variables):
             y, has_value = data.variables[v].get_measurements()
             has_value = _np.all(has_value == 1.0, axis=1)
             y = y[has_value, :]
-            self.likelihoods[i].initialize(y)
+            self.likelihoods[i].initialize(
+                y, weights=None if stored is None else stored[has_value])
 
         # directions
         self.directional_likelihood = _lk.GradientIndicator()

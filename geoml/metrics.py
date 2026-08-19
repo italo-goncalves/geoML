@@ -124,7 +124,8 @@ def crps(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
 def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
                     p: float = 0.5, max_pairs: int = 50000,
                     coordinates: "_types.ArrayLike | None" = None,
-                    decluster: "bool | float" = True) -> float:
+                    decluster: "bool | float" = True,
+                    weights: "_types.ArrayLike | None" = None) -> float:
     """
     How well the ensemble reproduces the differences between locations.
 
@@ -177,6 +178,11 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
         Weight pairs by cell-declustering weights. `True` chooses the cell
         size, a number fixes it, `False` leaves the pairs raw. Ignored when
         there are no `coordinates` to lay a lattice over.
+    weights
+        Declustering weights given directly, one per location — the column
+        `container.decluster()` keeps is the natural source. Takes
+        precedence over `coordinates` and `decluster`, which exist to
+        compute what this hands over.
 
     Returns
     -------
@@ -192,9 +198,13 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
     y_true = _np.asarray(y_true, dtype=float).ravel()
     y_pred = _np.asarray(y_pred, dtype=float)
 
-    weights = None
-    if coordinates is not None and decluster is not False:
-        weights = _geom.declustering_weights(
+    # rebound into its own local: the argument's type has no statable
+    # narrowing once reassigned
+    votes = None
+    if weights is not None:
+        votes = _np.asarray(weights, dtype=float).ravel()
+    elif coordinates is not None and decluster is not False:
+        votes = _geom.declustering_weights(
             _np.asarray(coordinates, dtype=float), y_true,
             cell=None if decluster is True else float(decluster))[0]
 
@@ -208,9 +218,9 @@ def variogram_score(y_true: _types.ArrayLike, y_pred: _types.ArrayLike,
         _np.abs(y_pred[i_idx, :] - y_pred[j_idx, :]) ** p, axis=1)
     squared = (truth - ensemble) ** 2
 
-    if weights is None:
+    if votes is None:
         return float(_np.mean(squared))
-    share = weights[i_idx] * weights[j_idx]
+    share = votes[i_idx] * votes[j_idx]
     return float((share * squared).sum() / share.sum())
 
 

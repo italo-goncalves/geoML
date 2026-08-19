@@ -791,7 +791,7 @@ def reliability(container: "_data._SpatialData", name: str,
     keep = keep & (_np.asarray(called.to_numpy()).astype(str) != "")
 
     panels = []
-    for label in var.labels:
+    for label in getattr(var, "labels", []):
         claimed = _np.asarray(
             components[label].probability.values, dtype=float).ravel()
         rows = keep & _np.isfinite(claimed)
@@ -891,7 +891,8 @@ def confusion_matrix(container: "_data._SpatialData", name: str) -> dict:
     measured, predicted = measured[keep], predicted[keep]
 
     present = set(measured) | set(predicted)
-    labels = [str(label) for label in var.labels if str(label) in present]
+    labels = [str(label) for label in getattr(var, "labels", [])
+              if str(label) in present]
     labels += sorted(present - set(labels))
     index = {label: i for i, label in enumerate(labels)}
     k = len(labels)
@@ -1147,14 +1148,23 @@ def variogram(container: "_data._SpatialData", name: str,
     centre = 0.5 * (edges[:-1] + edges[1:])
 
     # declustering weights, one per location, shared by every component: the
-    # sampling geometry is the same for all of them, and the cell is chosen
-    # from the first component that has values to choose it from
-    weights, cell = None, None
+    # sampling geometry is the same for all of them. The column
+    # `container.decluster()` keeps is preferred — one consistent set of
+    # weights for every declustered consumer — and only in its absence is
+    # the cell swept here, from the first component that has values
+    weights, cell, stored = None, None, False
     if decluster is not False:
-        first = parts[0].measurements.values.to_numpy().astype(float)[rows]
-        weights, cell = _geom.declustering_weights(
-            points, first,
-            cell=None if decluster is True else float(decluster))
+        column = container.metadata.get("declustering") \
+            if decluster is True else None
+        if column is not None:
+            weights = _np.asarray(column.values, dtype=float)[rows]
+            stored = True
+        else:
+            first = parts[0].measurements.values.to_numpy() \
+                .astype(float)[rows]
+            weights, cell = _geom.declustering_weights(
+                points, first,
+                cell=None if decluster is True else float(decluster))
 
     def _binned(values, per_pair):
         """One weighted average per lag bin, over the pairs that are usable.
@@ -1245,10 +1255,16 @@ def variogram(container: "_data._SpatialData", name: str,
 
             keep = _np.isfinite(values)
             if keep.sum() > 1:
-                score = _gmet.variogram_score(
-                    values[keep], _np.column_stack(draws)[keep],
-                    coordinates=points[keep],
-                    decluster=cell if cell else False)
+                if stored and weights is not None:
+                    # the same weights the curve used, exactly
+                    score = _gmet.variogram_score(
+                        values[keep], _np.column_stack(draws)[keep],
+                        weights=weights[keep])
+                else:
+                    score = _gmet.variogram_score(
+                        values[keep], _np.column_stack(draws)[keep],
+                        coordinates=points[keep],
+                        decluster=cell if cell else False)
 
         # the sill is weighted the same way, or the line drawn across the
         # figure would belong to a different population from the curve
