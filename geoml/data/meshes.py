@@ -350,92 +350,99 @@ class Mesh3D(_PointBased):
             _np.ravel(box.max) - _np.ravel(box.min)))
         original = self._polydata()
 
-        # one distance function for every measurement in the loop: the
-        # locator over the original is the expensive part of a probe
-        measure = _vtk.vtkImplicitPolyDataDistance()
-        measure.SetInput(original)
+        # one distance oracle for every measurement in the loop, its
+        # workers and locators built once -- the measurements are half of
+        # a real simplify (4.9 of 10.0 s on a 522k-triangle shell), and
+        # VTK holds the GIL through them, so the pool is what threads can
+        # not do (see `_signed_distance`); a mesh too small to repay the
+        # spin-up measures serially on the one kept locator
+        with _DistanceQueries(
+                original,
+                parallel=4 * original.n_cells >= _PARALLEL_QUERIES
+        ) as measure:
 
-        def deviation_of(mesh):
-            # probed on the simplified faces -- centroids and edge midpoints;
-            # the surviving vertices lie on the original by construction and
-            # would measure nothing
-            pts = _np.asarray(mesh.points, dtype=float)
-            tri = mesh.faces.reshape(-1, 4)[:, 1:]
-            probes = _np.concatenate([
-                pts[tri].mean(axis=1),
-                (pts[tri[:, 0]] + pts[tri[:, 1]]) / 2,
-                (pts[tri[:, 1]] + pts[tri[:, 2]]) / 2,
-                (pts[tri[:, 2]] + pts[tri[:, 0]]) / 2])
-            cloud = _pv.PolyData(_np.ascontiguousarray(probes))
-            out = _vtk.vtkDoubleArray()
-            measure.FunctionValue(cloud.GetPoints().GetData(), out)
-            return float(_np.abs(_pv.convert_array(out)).max())
+            def deviation_of(mesh):
+                # probed on the simplified faces -- centroids and edge
+                # midpoints; the surviving vertices lie on the original by
+                # construction and would measure nothing
+                pts = _np.asarray(mesh.points, dtype=float)
+                tri = mesh.faces.reshape(-1, 4)[:, 1:]
+                probes = _np.concatenate([
+                    pts[tri].mean(axis=1),
+                    (pts[tri[:, 0]] + pts[tri[:, 1]]) / 2,
+                    (pts[tri[:, 1]] + pts[tri[:, 2]]) / 2,
+                    (pts[tri[:, 2]] + pts[tri[:, 0]]) / 2])
+                return float(_np.abs(measure.query(probes)).max())
 
-        # A large mesh takes a fast quadric pre-pass first, so the
-        # error-bounded decimator works a fraction of the triangles: on an
-        # 835k-triangle shell this is most of a 4x speedup. The pre-pass is
-        # verified against the original like everything else, and given half
-        # the budget; where it overspends, the mesh is taken as it came.
-        working = original
-        n_triangles = original.n_cells
-        if n_triangles > 100_000:
-            rough = original.decimate(1.0 - 50_000.0 / n_triangles,
-                                      volume_preservation=True)
-            rough = rough.clean().triangulate()
-            if deviation_of(rough) <= 0.5 * max_error:
-                working = rough
+            # A large mesh takes a fast quadric pre-pass first, so the
+            # error-bounded decimator works a fraction of the triangles: on
+            # an 835k-triangle shell this is most of a 4x speedup. The
+            # pre-pass is verified against the original like everything
+            # else, and given half the budget; where it overspends, the
+            # mesh is taken as it came.
+            working = original
+            n_triangles = original.n_cells
+            if n_triangles > 100_000:
+                rough = original.decimate(1.0 - 50_000.0 / n_triangles,
+                                          volume_preservation=True)
+                rough = rough.clean().triangulate()
+                if deviation_of(rough) <= 0.5 * max_error:
+                    working = rough
 
-        def cut_at(bound):
-            # vtkDecimatePro is the one decimator that takes an error bound,
-            # as a fraction of the bounding-box diagonal; preserving topology
-            # is what keeps a closed body closed, and the error accumulates
-            # against its input rather than being re-granted per collapse
-            decimate = _vtk.vtkDecimatePro()
-            decimate.SetInputData(working)
-            decimate.SetTargetReduction(1.0)
-            decimate.SetMaximumError(bound / diagonal)
-            decimate.AccumulateErrorOn()
-            decimate.PreserveTopologyOn()
-            decimate.BoundaryVertexDeletionOff()
-            decimate.Update()
-            return _pv.wrap(decimate.GetOutput()).clean().triangulate()
+            def cut_at(bound):
+                # vtkDecimatePro is the one decimator that takes an error
+                # bound, as a fraction of the bounding-box diagonal;
+                # preserving topology is what keeps a closed body closed,
+                # and the error accumulates against its input rather than
+                # being re-granted per collapse
+                decimate = _vtk.vtkDecimatePro()
+                decimate.SetInputData(working)
+                decimate.SetTargetReduction(1.0)
+                decimate.SetMaximumError(bound / diagonal)
+                decimate.AccumulateErrorOn()
+                decimate.PreserveTopologyOn()
+                decimate.BoundaryVertexDeletionOff()
+                decimate.Update()
+                return _pv.wrap(decimate.GetOutput()).clean().triangulate()
 
-        # the decimator's own error metric runs loose at tight budgets
-        # (measured 7x over at 0.02 of a unit step on a contoured shell), so
-        # the true deviation -- always against the original, whatever the
-        # pre-pass did -- is measured and the internal bound tightened until
-        # the promise holds
-        bound = max_error
-        for _ in range(4):
-            mesh = cut_at(bound)
-            deviation = deviation_of(mesh)
-            if deviation <= max_error:
-                break
-            bound *= 0.5 * max_error / deviation
+            # the decimator's own error metric runs loose at tight budgets
+            # (measured 7x over at 0.02 of a unit step on a contoured
+            # shell), so the true deviation -- always against the original,
+            # whatever the pre-pass did -- is measured and the internal
+            # bound tightened until the promise holds
+            bound = max_error
+            for _ in range(4):
+                mesh = cut_at(bound)
+                deviation = deviation_of(mesh)
+                if deviation <= max_error:
+                    break
+                bound *= 0.5 * max_error / deviation
 
-        # Decimation can also break the kind's own promise -- collapse a
-        # thin feature into a membrane the rebuild cannot always repair --
-        # and that is no reason to raise out of a workflow, because unlike
-        # the other rebuilds this one holds a remedy: cutting less. A
-        # gentler cut avoids the collapse, its error only shrinks, and the
-        # original mesh is within any budget at all -- so the budget is
-        # spent more timidly until the kind survives, and not at all as
-        # the last resort, said out loud rather than silently.
-        for _ in range(3):
+            # Decimation can also break the kind's own promise -- collapse
+            # a thin feature into a membrane the rebuild cannot always
+            # repair -- and that is no reason to raise out of a workflow,
+            # because unlike the other rebuilds this one holds a remedy:
+            # cutting less. A gentler cut avoids the collapse, its error
+            # only shrinks, and the original mesh is within any budget at
+            # all -- so the budget is spent more timidly until the kind
+            # survives, and not at all as the last resort, said out loud
+            # rather than silently.
+            for _ in range(3):
+                try:
+                    return _rebuilt_as(type(self), mesh)
+                except (NotClosedError, InconsistentMeshError,
+                        NotSingleValuedError):
+                    bound *= 0.25
+                    mesh = cut_at(bound)
             try:
                 return _rebuilt_as(type(self), mesh)
             except (NotClosedError, InconsistentMeshError,
                     NotSingleValuedError):
-                bound *= 0.25
-                mesh = cut_at(bound)
-        try:
-            return _rebuilt_as(type(self), mesh)
-        except (NotClosedError, InconsistentMeshError, NotSingleValuedError):
-            _warnings.warn(
-                "decimation broke this mesh's own shape however gently it "
-                "was applied, so the mesh is returned as it came, with all "
-                "its %d triangles" % len(self.triangles))
-            return self
+                _warnings.warn(
+                    "decimation broke this mesh's own shape however gently "
+                    "it was applied, so the mesh is returned as it came, "
+                    "with all its %d triangles" % len(self.triangles))
+                return self
 
     def smooth(self, iterations=20, pass_band=0.1):
         """
@@ -1069,6 +1076,68 @@ def _distance_chunk(chunk):
     out = _vtk.vtkDoubleArray()
     _QUERY_STATE["measure"].FunctionValue(cloud.GetPoints().GetData(), out)
     return _np.asarray(_pv.convert_array(out), dtype=float)
+
+
+class _DistanceQueries:
+    """Signed distances to one surface, over several queries.
+
+    The keep-the-pool sibling of `_signed_distance`, which spins its
+    workers up per call: `simplify` measures its deviations three to six
+    times against the same original, so the fork and the per-worker
+    locator builds are paid once here and every measurement after the
+    first rides them. Probing 260k points against a 522k-triangle shell
+    measured 1.6 s a call serial; the pool answers the lot of a
+    `simplify` in about that. Serial wherever a pool cannot or should not
+    come up -- `parallel=False`, no `fork`, one CPU, or the fork failing
+    -- with the one locator likewise kept across queries.
+    """
+
+    def __init__(self, polydata, parallel=True):
+        self._polydata = polydata
+        self._pool = None
+        self._measure = None
+        if not (parallel and "fork" in _mp.get_all_start_methods()):
+            return
+        self._workers = max(1, min(16, _os.cpu_count() or 1))
+        if self._workers < 2:
+            return
+        try:
+            with _warnings.catch_warnings():
+                # the same suppression as `_signed_distance`, for the
+                # same measured reason: the workers touch VTK and numpy
+                # alone, never TF, never the GPU
+                _warnings.filterwarnings(
+                    "ignore", message=".*fork\\(\\)",
+                    category=DeprecationWarning)
+                self._pool = _mp.get_context("fork").Pool(
+                    self._workers, initializer=_distance_worker,
+                    initargs=(_np.asarray(polydata.points, dtype=float),
+                              _np.asarray(polydata.faces)))
+        except OSError:
+            self._pool = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool = None
+        return False
+
+    def query(self, points):
+        points = _np.ascontiguousarray(points, dtype=float)
+        if self._pool is not None:
+            return _np.concatenate(self._pool.map(
+                _distance_chunk,
+                _np.array_split(points, 2 * self._workers)))
+        if self._measure is None:
+            self._measure = _vtk.vtkImplicitPolyDataDistance()
+            self._measure.SetInput(self._polydata)
+        cloud = _pv.PolyData(points)
+        out = _vtk.vtkDoubleArray()
+        self._measure.FunctionValue(cloud.GetPoints().GetData(), out)
+        return _np.asarray(_pv.convert_array(out), dtype=float)
 
 
 def _signed_distance(body, points):

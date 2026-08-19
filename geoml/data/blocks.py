@@ -25,6 +25,7 @@ from collections.abc import Sequence
 import numpy as _np
 import pandas as _pd
 import pyvista as _pv
+import vtk as _vtk
 
 import geoml._types as _types
 import geoml.math.geometry as _gmt
@@ -351,33 +352,48 @@ _PAINT_BUDGET = 8_000_000
 
 def _painted_contour(origin, size, step, values, corner, value, label,
                      background):
-    """The cells painted onto a regular grid, contoured by flying edges.
+    """The welded field painted onto a regular grid, contoured by flying
+    edges.
 
     What `_cut_to_contour` hands over is a list of axis-aligned cells on
     one lattice — origins and sizes in whole cells — and turning that list
     into an unstructured mesh was most of a contour's cost: welding eight
     corners per cell (`unique` over millions of rows) and VTK's
     single-threaded unstructured contour. Measured at 912k blocks, 9.1 s
-    of an 11.9 s call. Painting the same cells into an `ImageData` needs
-    no welding at all, the corner averaging is a separable pass, and
-    `vtkFlyingEdges3D` is threaded: the same call measures 3.7 s, with
-    the paint itself a fraction of a second of array writes. The values
-    the surface reads are identical — near the surface every cell is
-    already at the one finest size, which is `_cut_to_contour`'s whole
-    point — so this changes how the field is *represented*, not what it
-    says.
+    of an 11.9 s call against 3.7 painted.
 
-    Painted in z-slabs of at most `_PAINT_BUDGET` cells, each with one
-    ghost layer of cells either side so the corner averaging at a slab
-    face sees the same neighbours the full grid would. Every point plane
-    is drawn by exactly one slab, and the shared planes carry identical
-    values by construction, so the pieces weld back seamlessly.
+    What is painted is the *point* field the welded mesh reads, never the
+    cells: the cell-equal mean over the blocks meeting at each block
+    corner (`_at_corners`' rule — one vote per block, whatever its size),
+    and inside any block larger than one cell the trilinear reading of
+    its own eight corner means, which is exactly what VTK interpolates
+    across a hexahedron — and trilinear survives subdivision, so the fine
+    lattice reproduces the coarse cell's surface rather than resampling
+    it. Painting cell values and letting `cell_data_to_point_data`
+    average them was the first version of this route, and it disagrees
+    with the welded mesh at every fine/coarse interface (a
+    volume-weighted corner against a cell-equal one); on a near-binary
+    indicator, contoured within a whisker of its corners, that
+    disagreement pinched the surface into a few dozen same-way edges
+    nothing downstream could settle, so such fields had to be routed
+    around it. One field, one surface, no routing.
 
-    `background` fills whatever the cells do not cover. Without closing
-    ghosts the cells tile their box exactly and it never shows; with them
+    Painted in z-slabs of at most `_PAINT_BUDGET` cells. The point plane
+    two slabs share is painted by both from the same corner table,
+    identically, so the pieces weld back seamlessly and no ghost layers
+    are needed. Where two blocks' interior fills meet at a point that is
+    no block's corner — a coarse/coarse interface — the two trilinear
+    readings can differ and the later paint wins, but `_cut_to_contour`
+    keeps the surface a margin of finest cells away from any such point,
+    which is the same guarantee the welded mesh itself rests on.
+
+    `background` fills whatever the blocks do not cover. Without closing
+    ghosts the blocks tile their box exactly and it never shows; with them
     the painted box is the hull of ghosts of different sizes, and the
     hollows beyond the smaller ghosts must read as far outside for the cap
-    to stay shut.
+    to stay shut. A block holding no value paints its own points as absent
+    rather than as background — unpredicted ground is not outside the
+    model — and contributes to no corner (`_at_corners`' rule again).
 
     Returns
     -------
@@ -386,70 +402,125 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         rotated set turns the vertices afterwards. Empty when the surface
         misses the value.
     """
-    origin = _np.asarray(origin)
-    size = _np.asarray(size)
+    origin = _np.asarray(origin, dtype=_np.int64)
+    size = _np.asarray(size, dtype=_np.int64)
     values = _np.asarray(values, dtype=float)
     step = _np.broadcast_to(_np.asarray(step, dtype=float), (3,))
 
     low = origin.min(axis=0)
-    dims = ((origin + size).max(axis=0) - low).astype(int)
+    dims = ((origin + size).max(axis=0) - low).astype(_np.int64)
     origin = origin - low
     world = _np.asarray(corner, dtype=float) + low * step
+    span = dims + 1
+    plane = int(span[0]) * int(span[1])
+
+    # the corner table: every finite block's eight corners as one integer
+    # key — z-major, so one slab's point planes are one contiguous key
+    # range — averaged with one vote per block
+    corners = (origin[:, None, :]
+               + _gmt.HEX_CORNERS[None, :, :] * size[:, None, :])
+    key = ((corners[..., 2] * span[1] + corners[..., 1]) * span[0]
+           + corners[..., 0])
+    known = _np.isfinite(values)
+    corner_key, inverse = _np.unique(key[known].ravel(), return_inverse=True)
+    corner_value = (_np.bincount(inverse,
+                                 weights=_np.repeat(values[known], 8))
+                    / _np.bincount(inverse))
+
+    # a finite block bigger than one cell owns points no corner pass will
+    # visit; it reads its eight corner means back from the table (its own
+    # vote keeps them finite) to spread trilinearly. A one-cell block has
+    # no such points and needs no fill at all.
+    big_rows = _np.flatnonzero(known & (size > 1).any(axis=1))
+    eight = corner_value[_np.searchsorted(corner_key, key[big_rows])]
+    row_in_big = _np.full(len(values), -1, dtype=_np.int64)
+    row_in_big[big_rows] = _np.arange(len(big_rows))
 
     # sizes as one integer key: `unique` over an axis sorts rows as void
     # records, which measured ~1.5 s of this call at 912k blocks where the
     # keyed form is milliseconds
-    size_key = (size[:, 0].astype(_np.int64)
-                + (size[:, 1].astype(_np.int64) << 21)
-                + (size[:, 2].astype(_np.int64) << 42))
+    fill_rows = _np.flatnonzero(~known | (size > 1).any(axis=1))
+    size_key = (size[fill_rows, 0] + (size[fill_rows, 1] << 21)
+                + (size[fill_rows, 2] << 42))
     _, first, member = _np.unique(size_key, return_index=True,
                                   return_inverse=True)
-    classes = size[first]
+    classes = size[fill_rows[first]]
     member = member.ravel()
-    thick = max(1, int(_PAINT_BUDGET // max(1, int(dims[0]) * int(dims[1]))))
+    thick = max(1, int(_PAINT_BUDGET // max(1, plane)))
 
     verts, faces, count = [], [], 0
     for z_start in range(0, int(dims[2]), thick):
         z_stop = min(z_start + thick, int(dims[2]))
-        g_start, g_stop = max(z_start - 1, 0), min(z_stop + 1, int(dims[2]))
-        paint = _np.full((g_stop - g_start, int(dims[1]), int(dims[0])),
+        paint = _np.full((z_stop - z_start + 1, int(span[1]), int(span[0])),
                          background, dtype=float)
 
         for index, shape in enumerate(classes):
-            rows = _np.flatnonzero(
+            rows = fill_rows[
                 (member == index)
-                & (origin[:, 2] < g_stop)
-                & (origin[:, 2] + size[:, 2] > g_start))
+                & (origin[fill_rows, 2] <= z_stop)
+                & (origin[fill_rows, 2] + size[fill_rows, 2] >= z_start)]
             if len(rows) == 0:
                 continue
             offsets = _np.stack(_np.meshgrid(
-                _np.arange(shape[0]), _np.arange(shape[1]),
-                _np.arange(shape[2]), indexing="ij"), axis=-1).reshape(-1, 3)
-            cells = (origin[rows, None, :]
-                     + offsets[None, :, :]).reshape(-1, 3)
-            filled = _np.repeat(values[rows], len(offsets))
-            keep = (cells[:, 2] >= g_start) & (cells[:, 2] < g_stop)
-            cells = cells[keep]
-            paint[cells[:, 2] - g_start, cells[:, 1], cells[:, 0]] = \
+                _np.arange(shape[0] + 1), _np.arange(shape[1] + 1),
+                _np.arange(shape[2] + 1), indexing="ij"),
+                axis=-1).reshape(-1, 3)
+            t = offsets / shape
+            mix = _np.prod(_np.where(_gmt.HEX_CORNERS[None, :, :] == 1,
+                                     t[:, None, :], 1.0 - t[:, None, :]),
+                           axis=2)
+            filled = _np.full((len(rows), len(offsets)), _np.nan)
+            finite = known[rows]
+            if finite.any():
+                filled[finite] = eight[row_in_big[rows[finite]]] @ mix.T
+            points = (origin[rows, None, :]
+                      + offsets[None, :, :]).reshape(-1, 3)
+            filled = filled.ravel()
+            keep = (points[:, 2] >= z_start) & (points[:, 2] <= z_stop)
+            points = points[keep]
+            paint[points[:, 2] - z_start, points[:, 1], points[:, 0]] = \
                 filled[keep]
 
+        # the corner means last, over whatever the fills wrote: every
+        # point that is any block's corner reads the welded value
+        lo = _np.searchsorted(corner_key, z_start * plane)
+        hi = _np.searchsorted(corner_key, (z_stop + 1) * plane)
+        keys = corner_key[lo:hi]
+        rest = keys % plane
+        paint[keys // plane - z_start, rest // span[0], rest % span[0]] = \
+            corner_value[lo:hi]
+
+        # The image lives in the lattice's own units, and the world enters
+        # only after the contour, in float64: every VTK image contour
+        # writes float32 points with no say in the matter (flying edges
+        # has no output-precision setting at all), and at mine-grid
+        # coordinates that quantizes a northing of 2.8e6 to steps of 0.25
+        # and snaps any crossing within ~1e-4 of a lattice plane onto it,
+        # welding the surface into a pinch wherever it grazes one --
+        # measured twice on a real model, both at a bench boundary the
+        # surface hugged. At lattice magnitudes float32 resolves ~1e-5 of
+        # one cell, and a crossing collapsing onto a plane from that close
+        # is a sliver the degenerate-face drop already owns. The welded
+        # mesh never had the problem because an unstructured contour
+        # inherits its input's float64.
         image = _pv.ImageData(
-            dimensions=(int(dims[0]) + 1, int(dims[1]) + 1,
-                        g_stop - g_start + 1),
-            spacing=tuple(step),
-            origin=tuple(world + _np.array([0.0, 0.0, g_start]) * step))
-        image.cell_data[label] = paint.ravel()
-        image = image.cell_data_to_point_data()
-        # each slab draws its own point-cell rows and no other's: the
-        # subset spans this slab's planes, the ghosts having already done
-        # their job inside the averaging
-        piece = image.extract_subset(
-            (0, int(dims[0]), 0, int(dims[1]),
-             z_start - g_start, z_stop - g_start)).contour(
-            [value], scalars=label)
+            dimensions=(int(span[0]), int(span[1]),
+                        z_stop - z_start + 1),
+            spacing=(1.0, 1.0, 1.0),
+            origin=(0.0, 0.0, float(z_start)))
+        image.point_data[label] = paint.ravel()
+        edges = _vtk.vtkFlyingEdges3D()
+        edges.SetInputData(image)
+        edges.SetValue(0, value)
+        edges.ComputeNormalsOff()
+        edges.ComputeGradientsOff()
+        edges.ComputeScalarsOff()
+        edges.Update()
+        piece = _pv.wrap(edges.GetOutput())
         if piece.n_cells:
             piece = piece.triangulate()
-            verts.append(_np.asarray(piece.points, dtype=float))
+            verts.append(world
+                         + _np.asarray(piece.points, dtype=float) * step)
             faces.append(piece.faces.reshape(-1, 4)[:, 1:] + count)
             count += len(verts[-1])
 
@@ -1454,7 +1525,7 @@ class BlockSet3D(PointData):
         """
         Isosurface through blocks of more than one size.
 
-        The cells are painted onto slabs of a regular grid and contoured by
+        The field is painted onto slabs of a regular grid and contoured by
         flying edges (`_painted_contour`) -- the model itself never carries
         every block at the finest size, but a transient slab of the field
         can, and contouring it is what an unstructured mesh of welded
@@ -1462,9 +1533,10 @@ class BlockSet3D(PointData):
         answer is the one a model carried at the finest size throughout
         would have given.
 
-        Values live on the cells and an isosurface needs them on the corners,
-        so they are averaged onto the corners first -- the blocks meeting at a
-        corner are what decide where the surface passes.
+        Values live on the cells and an isosurface needs them on the
+        corners, so what is painted are the corners -- the blocks meeting
+        at each one decide where the surface passes, one vote per block
+        whatever its size.
 
         The blocks the surface runs through are cut to the finest size the
         lattice allows before any of that, in the mesh handed to VTK and not
@@ -1566,47 +1638,32 @@ class BlockSet3D(PointData):
                 [cell_values,
                  _ghost_values(cell_values[ghost_parent], value, cap > 0)])
 
-        # Two routes to the same surface. The painted flying-edges route is
-        # the fast one, and on fields that pinch it can come back with a
-        # few dozen same-way edges nothing settles: an indicator contoured
-        # at 1e-4 crosses every cell within a whisker of a corner, and at
-        # the fine/coarse interfaces the painted grid's corner values
-        # differ from the welded mesh's (volume-weighted against
-        # cell-equal). Such fields announce themselves -- the share of
-        # near-level cells sitting within a thousandth of the span from
-        # the level measured 0.034-0.134 on six real indicator fields
-        # against 0.000-0.003 on grade fields -- so past 0.01 the welded
-        # route is taken directly rather than paying both. Either way the
-        # classification is the arbiter: a closed-but-inconsistent Mesh3D
-        # is never what a level set means, and sends the painted result
-        # back through the welded route. (Snapping the vertices onto the
-        # lattice planes and dropping collinear faces were each tried
-        # against the real model first: the one left 44 of the 46 bad
-        # edges standing, the other tore 46 902 edges open.)
-        width = span[1] - span[0]
-        near = (values[_np.abs(values - value) < 0.5 * width]
-                if width > 0 else values[:0])
-        pinchy = bool(len(near)) and float(
-            _np.mean(_np.abs(near - value) < 1e-3 * width)) > 0.01
-
-        surface = None
-        if not pinchy:
-            background = _closing_value(close, values) if close else _np.nan
-            verts, faces = _painted_contour(origin, size, step, cell_values,
-                                            self.box_corner, value, label,
-                                            background)
-            if len(faces) == 0:
-                raise ValueError(
-                    "no surface at %g; %r runs from %g to %g"
-                    % (value, label, span[0], span[1]))
-            # the lattice frame is where the contour is exact; a rotated
-            # set turns the finished vertices, as its `_hex_mesh` does
-            verts = self._to_world(verts)
-            verts, faces = _gmt.drop_degenerate_faces(verts, faces)
-            surface = mesh3d(verts, faces,
-                             _gmt.vertex_normals(verts, faces))
-            if type(surface) is Mesh3D and surface.n_data > 0:
-                surface = None
+        # One field, one route: the painted grid carries the welded mesh's
+        # own point field -- cell-equal corner means, trilinear interiors
+        # -- so flying edges draws the surface the welded hexahedra would,
+        # at a fraction of the cost (see `_painted_contour`; an earlier
+        # version painted cell values instead, whose volume-weighted
+        # interface corners pinched near-binary indicators, and those
+        # fields had to be routed around it). The classification stays the
+        # arbiter regardless: a closed-but-inconsistent Mesh3D is never
+        # what a level set means, and sends the result back through the
+        # welded mesh, which remains the last word on what the field says.
+        background = _closing_value(close, values) if close else _np.nan
+        verts, faces = _painted_contour(origin, size, step, cell_values,
+                                        self.box_corner, value, label,
+                                        background)
+        if len(faces) == 0:
+            raise ValueError(
+                "no surface at %g; %r runs from %g to %g"
+                % (value, label, span[0], span[1]))
+        # the lattice frame is where the contour is exact; a rotated
+        # set turns the finished vertices, as its `_hex_mesh` does
+        verts = self._to_world(verts)
+        verts, faces = _gmt.drop_degenerate_faces(verts, faces)
+        surface = mesh3d(verts, faces,
+                         _gmt.vertex_normals(verts, faces))
+        if type(surface) is Mesh3D and surface.n_data > 0:
+            surface = None
 
         if surface is None:
             mesh = self._hex_mesh(origin, size, step)

@@ -353,6 +353,60 @@ the user's call.
   from one scan. All 15 Assen rock-pair intersections: 95 s, 14 through
   the implicit grid (adjacent domains overlap by thin films of 400-8900
   m³ — real, not noise), one exactly disjoint.
+* **The two contour routes are one, and the router above is gone.** The
+router was an admission — the painted route disagreed with the welded
+mesh on fields that hug the lattice — and closing the disagreement at
+its sources turned out to dissolve it. Two sources, found in sequence on
+the same real model.
+  - **The painted grid now carries the welded mesh's own point field.**
+  Painting cell values and letting `cell_data_to_point_data` average
+  them puts volume-weighted values at every fine/coarse interface corner
+  where the welded mesh's are cell-equal. So the cells are not painted
+  at all any more: `_painted_contour` builds the corner table itself —
+  one integer key per block corner, one vote per block whatever its size
+  — and fills the interior of any block larger than one cell with the
+  trilinear reading of its own eight corner means, which is exactly what
+  VTK interpolates across a hexahedron, and trilinear survives
+  subdivision, so the fine lattice reproduces the coarse cell's surface
+  rather than resampling it. A block holding no value paints its points
+  absent rather than background — unpredicted ground is not outside the
+  model. This alone took the real model's worst field (BIF, 46 same-way
+  edges) to a clean `Solid3D` and cut the failures from six fields in
+  six to two in seven; painting points needs no slab ghost layers and
+  no `cell_data_to_point_data` pass, so it is also mildly faster.
+  - **The last two pinches were float32, not geometry.** Full-precision
+  inspection of a surviving pinch showed every output coordinate
+  quantized: VTK's image contours write single-precision points with no
+  say in the matter (flying edges has no output-precision setting at
+  all), and at mine-grid coordinates that is a northing of 2.8e6
+  resolved in steps of **0.25 m** and any crossing within ~1e-4 of a
+  lattice plane snapped onto it — both surviving pinches sat at a bench
+  boundary the surface grazed, welded shut by the snap. The welded mesh
+  never had the problem only because an unstructured contour inherits
+  its input's float64. The image now lives in the lattice's own frame —
+  origin zero, spacing one, where float32 resolves ~1e-5 of a cell —
+  and the world enters after the contour, in float64. The grid path was
+  checked for the same defect and is already built this way (skimage in
+  the local frame, origin added afterwards).
+  - **End state on the real model**: all seven fields — six rock
+  indicators and the uncertainty — close as `Solid3D` straight through
+  the painted route, the welded fallback firing zero times; it stays as
+  the classification net it always was, a closed-but-inconsistent
+  `Mesh3D` never being what a level set means. The six-rock loop runs
+  52 s where the router had it at 147 (indicators paid the welded price)
+  and the release began at 673. Volumes unchanged to five figures.
+* **`simplify` measures on a pool of forked workers.** Profiled on the
+real uncertainty shell (522k triangles), half of a `simplify(0.5)` was
+the deviation measurements — 4.9 of 10.0 s in `FunctionValue`, which
+holds the GIL, so threads were never an option (the boolean engine
+measured that lesson already: 8 threads 1.2x, 16 forked processes 7.9x).
+`_DistanceQueries` is the keep-the-pool sibling of `_signed_distance`:
+the fork and the per-worker locator builds are paid once per `simplify`
+call and every measurement rides them — three to six measurements, all
+probing the same original. The call went 10.0 to 6.2 s, bit-identical
+output; what remains is `vtkDecimatePro` itself, which is sequential by
+nature. A mesh too small to repay the spin-up keeps the serial path on
+one kept locator, and the boolean's own `_signed_distance` is untouched.
 ## version 0.6.6
 * **The kernel derivatives are exact.** `covariance_matrix_d1` and
 `covariance_matrix_d2` — the point-to-direction and direction-to-direction
