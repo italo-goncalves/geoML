@@ -1,3 +1,358 @@
+## version 0.6.7
+* **`BlockSet3D.get_contour(close=...)` returns a body again.** Reported
+against a real model: `close="above"` and `close="below"` both promise a
+closed shell, and a `Mesh3D` was coming back instead. Two independent
+defects, both in the closing, and the second is the one the report named.
+  - **The ghost shell had no diagonals.** `_ghost_shell` mirrored each
+  boundary block across the faces it touched and skipped the edge and
+  corner directions, on the reasoning that nothing crosses a box edge from
+  inside. Nothing does — but the closing cap itself runs *along* the
+  boundary, and where two face ghosts meet without the diagonal between
+  them the cap reaches the shell's own edge and stops. That is a slit, and
+  it is the common case rather than a corner one: `close="below"` keeps the
+  region under the value, which on most models touches every face, so its
+  cap ran the length of all twelve box edges and tore along each. Measured
+  on a ball model, `close="below"` returned an open `Surface3D` with 178 to
+  630 boundary edges in every geometry that reached the boundary — the
+  open edges sitting at the ghost centres, one cell outside the box, which
+  is what pointed at the missing diagonals. All 26 directions are mirrored
+  now, and the same sweep returns `Solid3D` throughout.
+  - **VTK's contour emits faces that bound nothing.** Where the level set
+  passes exactly through a cell corner it pinches to a point, and the
+  marching-cubes case covering that writes out its zero-area triangles
+  anyway. They carry no geometry, but each makes an edge appear twice the
+  same way round, so `reversed_edges` counts them and `mesh3d` reads the
+  surface as inconsistently wound. One geometry produced 28 slivers, 4
+  twinned faces and 22 non-manifold edges: closed, consistent everywhere it
+  had area, and classed `Mesh3D`. `math.geometry.drop_degenerate_faces`
+  welds and drops both kinds, and `get_contour` runs it before asking what
+  class the geometry calls for. How many copies of a twin go is decided by its
+  edges (see the sweep below), which is what keeps a doubled wall from
+  being read as a flap.
+  - Neither fix moves a surface that was already closing: the volumes on
+  every previously-working case are unchanged to five figures.
+  - Six tests in `test_blockset.py` (both sides at three supersampling
+  levels, the three geometries that reach a face, an edge and a corner, and
+  the pinch that produced the `Mesh3D`) and one in `test_mesh3d.py` for the
+  dropping itself, including what it deliberately costs.
+  - **Not fixed, and worth knowing:** the cap does not sit on the box face.
+  It lands where the boundary block's value and the fill put it — the fill
+  being one past the data's range — so a closed body can extend up to half
+  a block beyond the model and report a volume larger than the model's own
+  box: measured +2.8% on a `Grid3D` and up to +6% on blocks. This is not
+  new and not specific to blocks; the grid path pads its cube with the same
+  constant. Landing the cap on the face would mean giving each ghost the
+  reflection of its partner's value about the contour level rather than one
+  shared constant.
+* **`simplify` on a closed body raised instead of simplifying.** The same
+family as the contour fix above, one function further on, and reported from
+the same workflow: `get_contour(..., simplify=0.5)` came back
+`InconsistentMeshError: this mesh closes, but its triangles disagree about
+which way is out`.
+  - Decimation collapses edges, and collapsing one through a thin feature
+  folds it into a **zero-thickness flap** — the same triangle twice,
+  bounding nothing. Every edge of it then runs twice the same way round, so
+  the constructor reads the body as inconsistently wound and refuses.
+  - `_rebuilt_as` already anticipated inconsistent winding and reoriented
+  the triangles as `heal()` would. **That cannot work here, and the failure
+  is diagnostic**: a flap is non-manifold, VTK's orientation pass cannot
+  walk across it, and it returns having spread the disagreement rather than
+  settled it — measured 2 reversed edges in and 3 out on a decimated shell,
+  and 16 in and 24 out in the report. So the flaps are dropped first, by the
+  same `drop_degenerate_faces`, and only genuine winding is reoriented.
+  Second repair now runs on the cleaned arrays rather than the mesh as it
+  arrived, so the orientation pass walks a manifold surface.
+  - Measured over 80 combinations — four rough fields, both sides, two
+  supersampling levels, five error budgets — two raised before and none
+  does now, with volumes stable across budgets to under a percent.
+  - `test_mesh_operations.py` plants a flap on a box and rebuilds through
+  `_rebuilt_as` directly, which is deterministic where reproducing a
+  decimator artifact is not.
+* **`Solid3D`'s booleans no longer call VTK, because VTK was crashing the
+session.** Reported as a hard crash from `intersection` — not an exception,
+a segfault: `vtkIntersectionPolyDataFilter` dies on contour-derived bodies,
+which are the shapes this package exists to produce.
+  - **What the design assumed, and why it could not hold.** `_combine` ran
+  the exact filter first and fell back to `_implicit_combine` on an error,
+  an empty answer or invalid output. A SIGSEGV is none of those: the
+  process is gone, `VtkErrorCatcher` never gets a turn, and a notebook
+  loses its state. So the meshes most in need of the fallback were exactly
+  the ones that could not reach it.
+  - **It is not about size, quality or coordinates.** Measured: a box
+  against a box (12 triangles) and two spheres (1680 each) go through
+  exactly; a block-model shell of **836** triangles segfaults, one of 3128
+  hangs past 300 s and then segfaults. The same shells cleaned, stripped of
+  slivers (they had none — smallest triangle area 1.5e-3) and decimated to
+  1460 triangles crash identically, at the origin and at 1e6. No property
+  measured here separates the survivors from the casualties, so no screen
+  would be safe.
+  - **The exact engine is therefore gone**, on the user's call, rather than
+  guarded behind a subprocess. Two bodies now go straight to `_resolved`:
+  the vertices say whether the surfaces cross, the disjoint and nested
+  cases are answered exactly and cheaply as before, and anything that
+  crosses goes to `_implicit_combine`. The cost is exactness on the cases
+  VTK could do — a box against a box now answers to the grid step like
+  everything else, and the warning says so. `_without_crossing` is
+  `_resolved` renamed, since it is now the whole of the decision rather
+  than the branch VTK left over.
+  - **The fallback needed the same repair as the contour**: it ends in a
+  marching-cubes contour of its distance field, and a sphere differenced
+  from a sphere was coming back a `Mesh3D` with a NaN volume for want of
+  dropping the faces that bound nothing. `_Attribute.get_contour` now
+  drops them too, so both contour producers are clean and the implicit
+  engine answers with a body.
+  - `test_mesh_operations.py` combines two block-model shells three ways.
+  A regression there does not fail the test — it takes the runner down,
+  which is the loudest signal available and the reason the engine was
+  dropped rather than guarded.
+* **`heal()` did not heal the thing everything sends it.** Every mesh error
+message in the module ends "heal() puts this right", and for the commonest
+cause it did not: a zero-thickness flap or a zero-area sliver makes an edge
+run twice the same way round, which reads as a winding failure and is the
+one such failure reorienting cannot mend — the surface is non-manifold
+there, so VTK has nowhere to walk. Traced step by step on a box carrying one
+flap, `clean`, `compute_normals(consistent_normals=True,
+auto_orient_normals=True)` and `triangulate` left all three of its reversed
+edges exactly as they were, and the mesh came back a `Mesh3D` still, with
+pyvista warning that its own output was invalid. `heal` now drops the faces
+that bound nothing before any of that, and the same box comes back a
+`Solid3D` of the right volume. An open tube still closes at `hole_size`, as
+before.
+  - The refusal in `_closed_body` was recommending the repair that does not
+  work — "rebuild from as_pyvista().compute_normals(...)" — and now points
+  at `heal()` like every other message.
+* **A sweep of the mesh code: four repairs.**
+  - **One welding where there were two.** Every mesh asks `open_edges` and
+  `reversed_edges` of the same triangulation as it is built, and each
+  welded for itself — a rounding and a `unique` over the vertices, which is
+  the expensive half. `geometry.edge_defects` answers both from one
+  welding: measured on 27 656 triangles, 15 ms became 11 ms and building
+  the mesh 18 ms became 13 ms. It compounds, `simplify` building one mesh
+  and a boolean three.
+  - **Triangles that index nothing are refused where they are given.** The
+  constructor checked that its arrays had three columns and nothing else,
+  so an out-of-range index surfaced as `IndexError: index 99 is out of
+  bounds` from inside `area` — a confusing place to meet it. It now says
+  which range the triangles reach and how many points there are to reach.
+  - **How many copies of a twinned face to drop is worked out on the
+  surface, not per face — it took two field reports from the same model to
+  land here, and the trail is worth keeping.** Dropping every copy is
+  right for a zero-thickness flap and turned a doubled *wall* into a hole
+  (report one: `NotClosedError` out of `simplify`). Scoring each twin
+  group by its own edges — drop all copies unless some edge would be left
+  on exactly one face — repaired the wall and still tore a doubled
+  *patch*, because the groups couple: the middle face of a collapsed
+  membrane sees every neighbour as a twin, so its own edges all look
+  twice-supported and it drops while the rim stays (report two, same
+  error, 32 open edges). The rule that survives predicts nothing:
+  duplicated faces start out dropped, and copies are put back one at a
+  time wherever the surface as it stands has an edge on exactly one face —
+  the rim of a doubled patch comes back on the first pass, the middle on
+  the next, once the rim's return leaves its edges half-supported. A
+  detached flap stays dropped (its edges land on zero faces, which is no
+  boundary), a doubled wall keeps one copy, a clean mesh is untouched.
+  - **`simplify` no longer raises at all.** Decimation can break a body
+  however clean its input, and `simplify` holds a remedy no other rebuild
+  has: cutting less, whose error only shrinks, down to not cutting at
+  all — the original is within any budget trivially. So where the rebuilt
+  kind is refused it retries at a quarter of the internal bound, three
+  times, and as the last resort returns the mesh as it came with a warning
+  naming the triangle count. Measured over 64 rough-shell
+  contour-then-simplify pipelines: zero raises, four fallbacks — the four
+  that used to come out of a notebook as `NotClosedError`.
+  - **The guard reaches the last two mesh producers**: `Surface3D._clipped`,
+  where cutting along a surface leaves slivers wherever the cut passes near
+  a vertex, and `from_dxf`, a foreign file being nobody's promise. Doing
+  that made `drop_degenerate_faces` **order-preserving** — it welds only to
+  judge coincidence now, and reports on the caller's own vertices — because
+  welding sorts, and `from_dxf` promises a file's vertices back in the
+  file's own order, which its round-trip test rightly pins.
+  - **The closing cap lands on the box face.** Each ghost now holds the
+  reflection of the block it mirrors about the contour level, `2*value - v`,
+  which puts the crossing halfway between the two centres — on the shared
+  face, which is the boundary. One shared constant far past the data's range
+  put it hard against the block's own centre instead, half a block short, so
+  a grade shell was **cut back** wherever it met the model's edge and its
+  complement let out by the same amount. Measured against Monte Carlo
+  volumes, a ball meeting the box at a face, an edge, a corner and half
+  outside it: `close="above"` read −6.3%, −12.9%, −20.0% and −13.9%, and now
+  reads within 1%; `close="below"` read +2.5% to +5.1% and now reads within
+  0.2%. Worst of the eight, 20.0% to 0.99%. Blocks on the far side of the
+  level set keep their value and make no cap, so every ghost still lands
+  outside the kept region — which is what stops the surface reaching the
+  shell's own outer face and leaving the body open.
+  - **A correction, and the reason it is worth recording.** This same change
+  was tried earlier in the day, measured, and reported as a regression that
+  doubled the error. That measurement was against a box I had got wrong:
+  `BlockSet3D(start, ...)` takes the first block's *centre*, so a model built
+  from `[0,0,0]` with a step of 10 spans [−5, 155] and not [0, 160]. Every
+  "exact" volume in that table was the wrong reference, and it reversed the
+  sign of the finding — the cap was reported as bulging *out* by 10–31% when
+  it was in fact falling *short*. The lesson is cheap to state and was not
+  cheap to learn: **take the box from the object** (`bounding_box`), never
+  from the arguments it was built with, and prefer Monte Carlo over a closed
+  form whose derivation encodes the same assumption twice.
+* **The mesh pipeline profiled and sped where the profile said, not where
+it looked slow.** At 33k blocks and 56k-triangle shells: the boolean was
+8.6 s with 92% of it inside `vtkImplicitPolyDataDistance.FunctionValue`,
+`get_contour` 0.7 s, `simplify` 0.17 s — so only the boolean was worth
+real work, and it is the operation the exact engine's removal made
+universal.
+  - **The distance queries run on a pool of forked workers.**
+  `_signed_distance` splits any query past 20k points over up to 16
+  processes, one locator each. Processes and not threads, and it is not a
+  style choice: **VTK holds the GIL through `FunctionValue`**, measured at
+  1.2x on 8 threads where forked processes reach 7.9x on the same
+  1.2M-point benchmark, bit-identical. End to end the crossing boolean
+  went **8.6 s to 2.9 s**; the remaining time is locator builds, pool
+  spin-up and the contouring, not queries. Verified stable with CUDA live
+  in the parent — the workers touch VTK and numpy alone — and Python's
+  fork-in-threads `DeprecationWarning` is suppressed at that one call
+  site with the reasoning in a comment, since the alternatives lose the
+  race: threads sit behind the GIL, and spawned workers would import the
+  package, TensorFlow and all, per pool. Platforms without `fork`
+  (Windows outside WSL) take the serial path unchanged.
+  - **The crossing test probes before it commits.** `_resolved` asked
+  every vertex of each body which side of the other it falls on — 0.79 s
+  at 55k vertices a side — when crossing, the common case, is usually
+  provable from a couple of thousand. A probe of ~2k vertices a side runs
+  first; the full queries are paid only when the probes come back
+  one-sided, which is the only time their answer is needed in full.
+  - **`get_contour` reads its column from the container**, by the path
+  `_contour_column` had already resolved, instead of building the whole
+  `as_pyvista` export — every corner welded, every variable's every
+  attribute filled — just to read one column back out of it. On the
+  one-variable profiling model that was worth little (0.05 s); the cost
+  it removes scales with columns times blocks, which is exactly what a
+  real categorical model carries. The `geoml_paths` label lookup went
+  with it, there being no label to look up any more.
+* **The implicit engine validated on real ore-body meshes, and hardened
+where they broke it.** The user supplied the practical case: two closed
+bodies from the Assen Fe project — an uncertainty envelope of 650k
+triangles and a hematite envelope of 2.5M, several lobes each, flat
+clipping walls on exact box planes, at true mine-grid coordinates. The
+intersection came back an **open `Surface3D`**. Three findings, each
+measured:
+  - **The distance locator lies, and no oracle tells the truth.**
+  `vtkImplicitPolyDataDistance` signs by the closest feature's
+  pseudonormal, and on the hematite mesh it called a whole cone of points
+  forty metres *outside* the body inside — -43 where +40 was true — which
+  carried the boolean's zero surface out through the grid margin, where
+  the contour is sliced open. Dropping the mesh's 1228 zero-area faces
+  changed nothing. Replacing the sign with `vtkSelectEnclosedPoints`' ray
+  casting was built, measured and **reverted**: the same 58 probes stayed
+  wrong and whole columns of good ones flipped — a ray through a
+  degenerate patch corrupts the parity of every point in its shadow — and
+  the outputs quintupled and opened everywhere. A pseudonormal error is
+  local; a parity error is a column.
+  - **So closure is made unconditional instead of the field truthful.**
+  The answer cannot exist outside the region box (the boxes' overlap for
+  an intersection, their union for a union, the first body's for a
+  difference), so the box's own signed distance — analytic, no locator —
+  caps the combined field 1.5 cells out. Whatever the locators report
+  inside, the zero surface cannot cross the cap. 1.5 cells rather than
+  0.5 because a body's own clipping wall sits *on* the region boundary,
+  and two zero surfaces closer than a cell pinch marching cubes, which
+  has one crossing per edge to give.
+  - **The residue is pinholes, and the engine heals them at its own
+  resolution.** After the cap, the difference still returned 6 open edges
+  of 350k triangles — sub-cell pinches where walls meet the cap region.
+  Where the contour of the combined field is not a body, the engine now
+  tries `heal(hole_size=2*step)` before answering; a pinhole is honestly
+  repairable at the resolution the answer is exact to, which is the step.
+  - **End state, all measured on the real pair**: intersection, difference
+  and union all `Solid3D`, ~14-16 s each, and the algebra closes —
+  intersection + difference matches the first body's volume to **0.05%**,
+  and inclusion-exclusion for the union to 0.06%. The meshes are too large
+  to bundle, so the regression test injects the locator's lie directly
+  (`test_a_lying_locator_cannot_carry_the_surface_out_of_the_region`) and
+  requires the boolean to close anyway.
+* **`BlockSet3D.get_contour` paints and runs flying edges instead of
+welding hexahedra.** The user pointed at Micromine contouring a mixed-size
+block model fast and asked what the trick was; profiled at 912k blocks,
+ours had no trick to miss — 9 of 11.9 s went to building the unstructured
+mesh the contour ran on (welding eight corners per cell through `unique`,
+then VTK's single-threaded unstructured contour at 3.8 s) rather than to
+the sizes themselves.
+  - The repair uses what `_cut_to_contour` already guarantees: near the
+  surface every cell is at the one finest size, so the same field can be
+  **painted onto slabs of a regular grid** — array writes, no welding —
+  and contoured by `vtkFlyingEdges3D`, which is threaded and measured at
+  0.85 s where the unstructured contour took 3.8. Slabs are capped at 8M
+  cells with one ghost cell layer either side, so the corner averaging at
+  a slab face sees the same neighbours the full grid would and the pieces
+  weld back seamlessly; the closing ghosts paint like any cell, with the
+  hollows beyond the smaller ones filled far-outside so the cap stays
+  shut. A rotated set contours on its lattice and turns the finished
+  vertices, exactly as its `_hex_mesh` did.
+  - **What Micromine's trick was not copied**: resampling everything to a
+  common coarse size is where its rounded corners and inflated limits
+  come from. The painting is at the contour lattice's own resolution —
+  the field is represented differently, not changed — and the volumes
+  agree with the welded path to seven significant figures on every case
+  measured.
+  - Two numpy repairs rode along, found by the same profile: the size
+  classes were looked up by `unique` over rows (void-record sort, ~1.5 s)
+  and are now one integer key; and `_at_corners` summed through
+  `np.add.at`, which is several times slower than the `bincount` that
+  replaced it.
+  - Measured at 912k blocks (base lattice 192x192x64, supersample 1):
+  `close="above"` 11.9 to 8.5 s, `close="below"` 21.8 to 12.5 s, open
+  contour 9.5 to 6.6 s, supersample 0 2.9 to 1.6 s. What remains is
+  `_cut_to_contour`'s corner matching and the finished mesh's own
+  classification welds, both numpy sorts — the next lever if contouring
+  registers again.
+  - **The real model then failed the painted route, and the repair is a
+  router, not another patch.** On the 908k-block Assen model, every rock
+  type's indicator contoured at 1e-4 came back a closed-but-inconsistent
+  `Mesh3D` — 46 same-way edges of 1.2M triangles — where the welded-hex
+  route had been clean on the same calls. The cause is semantic, not a
+  bug in either: an indicator field crosses every cell within a whisker
+  of a corner, and at fine/coarse interfaces the painted grid's corner
+  values are volume-weighted where the welded mesh's are cell-equal,
+  which is enough to pinch a surface that hugs the lattice. Two source
+  repairs were built, measured against the real model, and reverted:
+  snapping vertices to the lattice planes left 44 of the 46 bad edges
+  standing, and dropping collinear zero-area faces tore 46 902 edges open
+  — collinear faces are structural on a lattice-hugging surface in their
+  tens of thousands. What stands instead: fields that pinch **announce
+  themselves** (the share of near-level cells within a thousandth of the
+  span from the level measured 0.034-0.134 on the six real indicator
+  fields against 0.000-0.003 on grade fields), so past 0.01 the welded
+  route is taken directly; and whichever route runs, a `Mesh3D`
+  classification sends the painted result back through the welded one,
+  so the routing is a cost decision and never a correctness one.
+  - **End state on the real model**: all six rock types close as
+  `Solid3D` where the session began with `NotClosedError`s, and the
+  Hematite contour's volume matches the surface saved from it days
+  earlier to five figures. The painted route serves grade-like fields at
+  its measured 1.4-1.8x; indicator fields pay the welded price they
+  always did, once, instead of twice.
+* **`supersample` defaults to 0, and the disjoint boolean conclusion got
+cheap.** Both from running the whole workflow on the real Assen model, on
+the user's call.
+  - The supersample's measured benefit — rounder and *closer*, worth a
+  model 3.4x the size — was established on smooth fields, and the fields a
+  domains workflow contours most are near-binary indicators, which are
+  corner-locked either way: at 908k blocks, one level cost 3.5-5.8x the
+  time and moved the volumes 0.03-0.17%. The six-rock contour loop went
+  673 s to 147 s at the new default; pass `supersample=1` for a smooth
+  grade at an interior cut-off, which is what the docstring now says. One
+  test pins `supersample=1` explicitly, its 3% tolerance having been
+  measured there.
+  - Rock shells are mutually exclusive, so their pairwise intersections
+  are the boolean the workflow actually runs — and a disjoint answer never
+  goes to the implicit grid, it is concluded exactly, which used to mean
+  querying every vertex of both meshes. Now: boxes apart conclude with no
+  query at all; overlapping-box disjoint pairs pay one full scan of the
+  smaller vertex set, since two crossing surfaces put vertices of *each*
+  on both sides of the other and one side's scan therefore decides for
+  both; and the second scan is owed only where nesting is still possible,
+  which the bounding boxes say for free — plus always after an
+  all-inside verdict, nesting being exactly where a crossing could hide
+  from one scan. All 15 Assen rock-pair intersections: 95 s, 14 through
+  the implicit grid (adjacent domains overlap by thin films of 400-8900
+  m³ — real, not noise), one exactly disjoint.
 ## version 0.6.6
 * **The kernel derivatives are exact.** `covariance_matrix_d1` and
 `covariance_matrix_d2` — the point-to-direction and direction-to-direction

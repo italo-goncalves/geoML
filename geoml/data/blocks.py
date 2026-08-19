@@ -20,7 +20,6 @@ and the sub-block geometry behind the mesh assignments and `crossed_by`.
 """
 import copy as _copy
 import itertools as _iter
-import json as _json
 from collections.abc import Sequence
 
 import numpy as _np
@@ -273,33 +272,190 @@ class Blocks3D(Grid3D):
 
 
 def _ghost_shell(origin, size, shape):
-    """Mirror images of the boundary cells, one per box face they touch.
+    """Mirror images of the boundary cells, in all 26 directions.
 
-    A ghost is its partner's reflection across the shared face, so their
-    corners coincide exactly and the corner averaging cannot tear along the
-    box surface -- the mismatch between neighbouring ghosts of different
-    sizes does not matter, the fill value being one constant no surface
-    runs through. Edge and corner diagonals get no ghost: no crossing can
-    happen there either.
+    A ghost is its partner's reflection across the face, edge or corner they
+    share, so their corners coincide exactly and the corner averaging cannot
+    tear along the box surface -- the mismatch between neighbouring ghosts of
+    different sizes does not matter, since every one of them lands outside
+    the kept region and no surface runs between them. What each holds is
+    `_ghost_values` business.
+
+    **The diagonals are not optional**, though they read as though they
+    should be: nothing crosses a box edge from inside, but the closing cap
+    itself runs along the boundary, and where two face ghosts meet without
+    the diagonal between them the cap reaches the shell's own edge and stops
+    there. That is a hole in the body, and it is the common case rather than
+    a corner one -- `close="below"` keeps the region under the value, which
+    on most models touches every face, so its cap ran the length of all
+    twelve box edges and tore along each.
     """
-    ghost_origin, ghost_size = [], []
-    for axis in range(3):
-        at_low = origin[:, axis] == 0
-        if at_low.any():
-            mirrored = origin[at_low].copy()
-            mirrored[:, axis] -= size[at_low][:, axis]
-            ghost_origin.append(mirrored)
-            ghost_size.append(size[at_low])
-        at_high = origin[:, axis] + size[:, axis] == shape[axis]
-        if at_high.any():
-            mirrored = origin[at_high].copy()
-            mirrored[:, axis] += size[at_high][:, axis]
-            ghost_origin.append(mirrored)
-            ghost_size.append(size[at_high])
+    ghost_origin, ghost_size, ghost_parent = [], [], []
+    for direction in _iter.product((-1, 0, 1), repeat=3):
+        if not any(direction):
+            continue
+        touching = _np.ones(len(origin), dtype=bool)
+        for axis, step in enumerate(direction):
+            if step < 0:
+                touching &= origin[:, axis] == 0
+            elif step > 0:
+                touching &= origin[:, axis] + size[:, axis] == shape[axis]
+        if not touching.any():
+            continue
+        mirrored = origin[touching].copy()
+        for axis, step in enumerate(direction):
+            if step:
+                mirrored[:, axis] += step * size[touching][:, axis]
+        ghost_origin.append(mirrored)
+        ghost_size.append(size[touching])
+        ghost_parent.append(_np.flatnonzero(touching))
     if not ghost_origin:
         return (_np.zeros([0, 3], dtype=origin.dtype),
-                _np.zeros([0, 3], dtype=size.dtype))
-    return _np.concatenate(ghost_origin), _np.concatenate(ghost_size)
+                _np.zeros([0, 3], dtype=size.dtype),
+                _np.zeros([0], dtype=int))
+    return (_np.concatenate(ghost_origin), _np.concatenate(ghost_size),
+            _np.concatenate(ghost_parent))
+
+
+def _ghost_values(parent_values, value, keep_above):
+    """What each ghost holds, so the cap lands on the box face.
+
+    A ghost is the mirror of the block it stands against, and the value it
+    carries decides where between the two centres the surface crosses. The
+    **reflection about the contour level**, `2 * value - v`, puts that
+    crossing exactly halfway -- on the shared face, which is the box
+    boundary. One shared constant far past the data's range put it hard
+    against the block's own centre instead, half a block short of the face,
+    so a body was cut back on the side it was kept and let out on the other.
+
+    Only the blocks the body occupies are reflected. A boundary block on the
+    far side of the level set has no cap to make and keeps its value, so
+    nothing crosses between it and its ghost. Either way every ghost ends up
+    outside the kept region, which is what stops the surface reaching the
+    shell's own outer face and leaving the body open.
+
+    Measured against Monte Carlo volumes on a ball meeting the box at a
+    face, an edge, a corner, and half outside it: `close="above"` was
+    reading -6.3%, -12.9%, -20.0% and -13.9%, and now reads within 1%;
+    `close="below"`, the complement, was +2.5% to +5.1% and is now within
+    0.2%. The worst of the eight went from 20.0% to 0.99%.
+    """
+    kept = parent_values > value if keep_above else parent_values < value
+    return _np.where(kept, 2.0 * value - parent_values, parent_values)
+
+
+# the largest slab _painted_contour will hold at once, in cells: two of
+# these in float64 is ~130 MB, transient
+_PAINT_BUDGET = 8_000_000
+
+
+def _painted_contour(origin, size, step, values, corner, value, label,
+                     background):
+    """The cells painted onto a regular grid, contoured by flying edges.
+
+    What `_cut_to_contour` hands over is a list of axis-aligned cells on
+    one lattice — origins and sizes in whole cells — and turning that list
+    into an unstructured mesh was most of a contour's cost: welding eight
+    corners per cell (`unique` over millions of rows) and VTK's
+    single-threaded unstructured contour. Measured at 912k blocks, 9.1 s
+    of an 11.9 s call. Painting the same cells into an `ImageData` needs
+    no welding at all, the corner averaging is a separable pass, and
+    `vtkFlyingEdges3D` is threaded: the same call measures 3.7 s, with
+    the paint itself a fraction of a second of array writes. The values
+    the surface reads are identical — near the surface every cell is
+    already at the one finest size, which is `_cut_to_contour`'s whole
+    point — so this changes how the field is *represented*, not what it
+    says.
+
+    Painted in z-slabs of at most `_PAINT_BUDGET` cells, each with one
+    ghost layer of cells either side so the corner averaging at a slab
+    face sees the same neighbours the full grid would. Every point plane
+    is drawn by exactly one slab, and the shared planes carry identical
+    values by construction, so the pieces weld back seamlessly.
+
+    `background` fills whatever the cells do not cover. Without closing
+    ghosts the cells tile their box exactly and it never shows; with them
+    the painted box is the hull of ghosts of different sizes, and the
+    hollows beyond the smaller ghosts must read as far outside for the cap
+    to stay shut.
+
+    Returns
+    -------
+    verts, faces : arrays
+        The contoured triangulation, in the lattice's own frame — a
+        rotated set turns the vertices afterwards. Empty when the surface
+        misses the value.
+    """
+    origin = _np.asarray(origin)
+    size = _np.asarray(size)
+    values = _np.asarray(values, dtype=float)
+    step = _np.broadcast_to(_np.asarray(step, dtype=float), (3,))
+
+    low = origin.min(axis=0)
+    dims = ((origin + size).max(axis=0) - low).astype(int)
+    origin = origin - low
+    world = _np.asarray(corner, dtype=float) + low * step
+
+    # sizes as one integer key: `unique` over an axis sorts rows as void
+    # records, which measured ~1.5 s of this call at 912k blocks where the
+    # keyed form is milliseconds
+    size_key = (size[:, 0].astype(_np.int64)
+                + (size[:, 1].astype(_np.int64) << 21)
+                + (size[:, 2].astype(_np.int64) << 42))
+    _, first, member = _np.unique(size_key, return_index=True,
+                                  return_inverse=True)
+    classes = size[first]
+    member = member.ravel()
+    thick = max(1, int(_PAINT_BUDGET // max(1, int(dims[0]) * int(dims[1]))))
+
+    verts, faces, count = [], [], 0
+    for z_start in range(0, int(dims[2]), thick):
+        z_stop = min(z_start + thick, int(dims[2]))
+        g_start, g_stop = max(z_start - 1, 0), min(z_stop + 1, int(dims[2]))
+        paint = _np.full((g_stop - g_start, int(dims[1]), int(dims[0])),
+                         background, dtype=float)
+
+        for index, shape in enumerate(classes):
+            rows = _np.flatnonzero(
+                (member == index)
+                & (origin[:, 2] < g_stop)
+                & (origin[:, 2] + size[:, 2] > g_start))
+            if len(rows) == 0:
+                continue
+            offsets = _np.stack(_np.meshgrid(
+                _np.arange(shape[0]), _np.arange(shape[1]),
+                _np.arange(shape[2]), indexing="ij"), axis=-1).reshape(-1, 3)
+            cells = (origin[rows, None, :]
+                     + offsets[None, :, :]).reshape(-1, 3)
+            filled = _np.repeat(values[rows], len(offsets))
+            keep = (cells[:, 2] >= g_start) & (cells[:, 2] < g_stop)
+            cells = cells[keep]
+            paint[cells[:, 2] - g_start, cells[:, 1], cells[:, 0]] = \
+                filled[keep]
+
+        image = _pv.ImageData(
+            dimensions=(int(dims[0]) + 1, int(dims[1]) + 1,
+                        g_stop - g_start + 1),
+            spacing=tuple(step),
+            origin=tuple(world + _np.array([0.0, 0.0, g_start]) * step))
+        image.cell_data[label] = paint.ravel()
+        image = image.cell_data_to_point_data()
+        # each slab draws its own point-cell rows and no other's: the
+        # subset spans this slab's planes, the ghosts having already done
+        # their job inside the averaging
+        piece = image.extract_subset(
+            (0, int(dims[0]), 0, int(dims[1]),
+             z_start - g_start, z_stop - g_start)).contour(
+            [value], scalars=label)
+        if piece.n_cells:
+            piece = piece.triangulate()
+            verts.append(_np.asarray(piece.points, dtype=float))
+            faces.append(piece.faces.reshape(-1, 4)[:, 1:] + count)
+            count += len(verts[-1])
+
+    if not verts:
+        return _np.zeros([0, 3]), _np.zeros([0, 3], dtype=int)
+    return _np.concatenate(verts), _np.concatenate(faces)
 
 
 def _contour_column(blocks, path):
@@ -1143,6 +1299,12 @@ class BlockSet3D(PointData):
         mesh = self._hex_mesh(self._origin, self._size, self.base_step)
         return self._finish_pyvista(mesh, "cells", simulations, include)
 
+    def _to_world(self, coordinates):
+        """An unrotated set's lattice frame is the world frame; the rotated
+        subclass overrides this with its rotation, and the contour's
+        vertices go through it exactly as `_hex_mesh`'s points do."""
+        return coordinates
+
     def _hex_mesh(self, origin, size, step):
         """One welded hexahedron per block, on any lattice of blocks -- the
         object's own, or the finer one a contour is drawn on. `origin` and
@@ -1182,12 +1344,15 @@ class BlockSet3D(PointData):
         where the surface runs. A block holding no value contributes nothing,
         rather than carrying its absence into every corner it touches.
         """
-        total = _np.zeros(int(corners.max()) + 1)
-        count = _np.zeros(len(total))
         known = _np.isfinite(values)
-        _np.add.at(total, corners[known].ravel(), _np.repeat(values[known], 8))
-        _np.add.at(count, corners[known].ravel(), 1.0)
-        mean = _np.divide(total, count, out=_np.full(len(total), _np.nan),
+        length = int(corners.max()) + 1
+        # bincount rather than `np.add.at`: the same sums, several times
+        # faster -- add.at goes through the buffered-ufunc machinery
+        total = _np.bincount(corners[known].ravel(),
+                             weights=_np.repeat(values[known], 8),
+                             minlength=length)
+        count = _np.bincount(corners[known].ravel(), minlength=length)
+        mean = _np.divide(total, count, out=_np.full(length, _np.nan),
                           where=count > 0)
         return mean[corners]
 
@@ -1284,16 +1449,18 @@ class BlockSet3D(PointData):
             return None, None, None, None
         return origin, size, step, values
 
-    def get_contour(self, path, value, supersample=1, simplify=None,
+    def get_contour(self, path, value, supersample=0, simplify=None,
                     close=False):
         """
         Isosurface through blocks of more than one size.
 
-        `marching_cubes` wants a rectangular array and there is none to give
-        it, so the cells are handed to VTK instead, which contours an
-        unstructured grid directly. On a model of one block size the two agree
-        exactly; here the answer is the one a regular grid could not have
-        produced without carrying every block at the finest size.
+        The cells are painted onto slabs of a regular grid and contoured by
+        flying edges (`_painted_contour`) -- the model itself never carries
+        every block at the finest size, but a transient slab of the field
+        can, and contouring it is what an unstructured mesh of welded
+        hexahedra used to be built for, at most of the call's cost. The
+        answer is the one a model carried at the finest size throughout
+        would have given.
 
         Values live on the cells and an isosurface needs them on the corners,
         so they are averaged onto the corners first -- the blocks meeting at a
@@ -1325,12 +1492,17 @@ class BlockSet3D(PointData):
         supersample : int
             How many levels past the model's own finest block to cut the mesh
             to. Costs `prod(discretization)` times the cells per level, around
-            the surface only, and buys a rounder and *closer* surface rather
-            than merely a prettier one -- what VTK reads between block corners
-            is trilinear, and creasing at every face is what looks blocky. One
-            level is worth roughly predicting a model several times the size;
-            past that it flattens off. Zero to leave the mesh at the model's
-            own resolution.
+            the surface only. On a *smooth* field one level buys a rounder
+            and genuinely closer surface -- what VTK reads between block
+            corners is trilinear, creasing at every face, and averaging onto
+            corners again at each finer level composes into a reconstruction
+            worth roughly predicting a model several times the size. On a
+            near-binary field -- an indicator contoured close to zero -- the
+            surface is corner-locked either way, and the extra lattice buys
+            almost nothing: measured on a real 908k-block model, one level
+            cost 3.5-5.8x the time and moved the volumes by 0.03-0.17%. The
+            default is 0 for that reason; pass 1 when contouring a smooth
+            grade at a cut-off well inside its range.
         simplify : float, optional
             A geometric error budget, in coordinate units: the surface is
             simplified until pushing further would move it more than this
@@ -1352,69 +1524,108 @@ class BlockSet3D(PointData):
         surf : Solid3D, Surface3D or Mesh3D
             Whichever the geometry calls for, as `get_contour` on a grid.
         """
-        path, _ = _contour_column(self, path)
-
-        # the export records each column's label beside its path, so the
-        # label is looked up rather than reconstructed -- rebuilding it by
-        # hand is what used to break whenever the spelling changed
-        mesh = self.as_pyvista()
-        table = {}
-        if "geoml_paths" in mesh.field_data:
-            table = _json.loads(str(mesh.field_data["geoml_paths"][0]))
-        label = {p: lb for lb, p in table.items()}.get(str(path))
-        if label is None or label not in mesh.cell_data:
-            raise ValueError(
-                "nothing under %r to contour; the mesh carries %s"
-                % (str(path),
-                   ", ".join(sorted(mesh.cell_data.keys())) or "nothing"))
+        # the column comes straight from the container by its resolved path
+        # -- `as_pyvista` used to be built here just to read one column out
+        # of it, which welded every block's corners and exported every
+        # variable's every attribute first; on a model of any size that was
+        # most of the call, and all of it thrown away
+        path, column = _contour_column(self, path)
+        if not column._has_content():
+            raise ValueError("nothing under %r to contour" % str(path))
+        label = str(path)
 
         value = float(value)
-        values = _np.asarray(mesh.cell_data[label], dtype=float)
+        values = _np.asarray(column.values, dtype=float).ravel()
         span = (float(_np.nanmin(values)), float(_np.nanmax(values)))
-        fill = cap = None
+        cap = None
         if close:
-            fill = _closing_value(close, values)
-            cap = 1 if fill < value else -1
+            # `_closing_value` is asked only which side is kept, and raises
+            # on anything that is not a side; what the ghosts hold comes
+            # from the blocks they mirror, in `_ghost_values`
+            cap = 1 if _closing_value(close, values) < value else -1
 
         origin, size, step, cell_values = self._cut_to_contour(
             values, value, supersample=supersample, cap=cap)
         if origin is None:
             origin, size = self._origin, self._size
             step, cell_values = self.base_step, values
-        else:
-            # let the coarse mesh go before the finer one is built: a block
-            # model is large enough that holding both is worth avoiding
-            mesh = None
 
         if close:
             # the box measured in whichever lattice the mesh is drawn on
             shape = _np.asarray(self.lattice_shape) * _np.round(
                 _np.asarray(self.base_step) / _np.asarray(step)
             ).astype(int)
-            ghost_origin, ghost_size = _ghost_shell(origin, size, shape)
+            ghost_origin, ghost_size, ghost_parent = _ghost_shell(
+                origin, size, shape)
+            cell_values = _np.asarray(cell_values)
             origin = _np.concatenate(
                 [_np.asarray(origin), _np.asarray(ghost_origin)])
             size = _np.concatenate(
                 [_np.asarray(size), _np.asarray(ghost_size)])
             cell_values = _np.concatenate(
-                [_np.asarray(cell_values),
-                 _np.full(len(ghost_origin), fill)])
+                [cell_values,
+                 _ghost_values(cell_values[ghost_parent], value, cap > 0)])
 
-        if close or mesh is None:
+        # Two routes to the same surface. The painted flying-edges route is
+        # the fast one, and on fields that pinch it can come back with a
+        # few dozen same-way edges nothing settles: an indicator contoured
+        # at 1e-4 crosses every cell within a whisker of a corner, and at
+        # the fine/coarse interfaces the painted grid's corner values
+        # differ from the welded mesh's (volume-weighted against
+        # cell-equal). Such fields announce themselves -- the share of
+        # near-level cells sitting within a thousandth of the span from
+        # the level measured 0.034-0.134 on six real indicator fields
+        # against 0.000-0.003 on grade fields -- so past 0.01 the welded
+        # route is taken directly rather than paying both. Either way the
+        # classification is the arbiter: a closed-but-inconsistent Mesh3D
+        # is never what a level set means, and sends the painted result
+        # back through the welded route. (Snapping the vertices onto the
+        # lattice planes and dropping collinear faces were each tried
+        # against the real model first: the one left 44 of the 46 bad
+        # edges standing, the other tore 46 902 edges open.)
+        width = span[1] - span[0]
+        near = (values[_np.abs(values - value) < 0.5 * width]
+                if width > 0 else values[:0])
+        pinchy = bool(len(near)) and float(
+            _np.mean(_np.abs(near - value) < 1e-3 * width)) > 0.01
+
+        surface = None
+        if not pinchy:
+            background = _closing_value(close, values) if close else _np.nan
+            verts, faces = _painted_contour(origin, size, step, cell_values,
+                                            self.box_corner, value, label,
+                                            background)
+            if len(faces) == 0:
+                raise ValueError(
+                    "no surface at %g; %r runs from %g to %g"
+                    % (value, label, span[0], span[1]))
+            # the lattice frame is where the contour is exact; a rotated
+            # set turns the finished vertices, as its `_hex_mesh` does
+            verts = self._to_world(verts)
+            verts, faces = _gmt.drop_degenerate_faces(verts, faces)
+            surface = mesh3d(verts, faces,
+                             _gmt.vertex_normals(verts, faces))
+            if type(surface) is Mesh3D and surface.n_data > 0:
+                surface = None
+
+        if surface is None:
             mesh = self._hex_mesh(origin, size, step)
             mesh.cell_data[label] = cell_values
+            welded = mesh.cell_data_to_point_data().contour(
+                [value], scalars=label)
+            if welded.n_cells == 0:
+                raise ValueError(
+                    "no surface at %g; %r runs from %g to %g"
+                    % (value, label, span[0], span[1]))
+            welded = welded.triangulate()
+            verts = _np.asarray(welded.points, dtype=float)
+            faces = _np.asarray(welded.faces).reshape(-1, 4)[:, 1:]
+            # the level set pinching at a corner writes its zero-area
+            # slivers out anyway, and they read as winding failures
+            verts, faces = _gmt.drop_degenerate_faces(verts, faces)
+            surface = mesh3d(verts, faces,
+                             _gmt.vertex_normals(verts, faces))
 
-        surface = mesh.cell_data_to_point_data().contour(
-            [value], scalars=label)
-        if surface.n_cells == 0:
-            raise ValueError(
-                "no surface at %g; %r runs from %g to %g"
-                % (value, label, span[0], span[1]))
-
-        surface = surface.triangulate()
-        verts = _np.asarray(surface.points, dtype=float)
-        faces = _np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
-        surface = mesh3d(verts, faces, _gmt.vertex_normals(verts, faces))
         if simplify is not None:
             surface = surface.simplify(simplify)
         return surface

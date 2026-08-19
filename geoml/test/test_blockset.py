@@ -1291,6 +1291,93 @@ def test_a_closed_contour_survives_a_refined_boundary():
     assert isinstance(closed, geoml.data.Solid3D)
 
 
+@pytest.mark.parametrize("centre", [[10.0, 80.0, 80.0],    # one face
+                                    [10.0, 10.0, 80.0],    # a box edge
+                                    [10.0, 10.0, 10.0]])   # a box corner
+def test_closing_below_the_value_is_a_body_too(centre):
+    """`close="below"` keeps the region under the value, which on most
+    models touches every face -- so unlike a grade shell its cap runs the
+    length of all twelve box edges. The ghost shell needs its diagonals
+    there: with face ghosts alone the cap reached the shell's own edge and
+    stopped, and what came back was a sheet slit along every one of them.
+    """
+    blocks = _ball_blocks(centre)
+
+    closed = blocks.get_contour("g", -50.0, close="below")
+
+    assert isinstance(closed, geoml.data.Solid3D)
+    assert closed.volume > 0
+
+
+@pytest.mark.parametrize("supersample", [0, 1, 2])
+@pytest.mark.parametrize("side", ["above", "below"])
+def test_a_closed_contour_is_a_body_at_every_resolution(side, supersample):
+    """The cap is drawn on whichever lattice the mesh is cut to, so how far
+    the mesh is supersampled must not decide whether it shuts."""
+    blocks = _ball_blocks([10.0, 10.0, 80.0])
+
+    closed = blocks.get_contour("g", -50.0, close=side,
+                                supersample=supersample)
+
+    assert isinstance(closed, geoml.data.Solid3D)
+
+
+@pytest.mark.parametrize("centre", [[75.0, 75.0, 75.0],    # interior
+                                    [-5.0, 75.0, 75.0],    # meets a face
+                                    [-5.0, -5.0, -5.0]])   # meets a corner
+def test_a_closed_contour_is_capped_on_the_box_face(centre):
+    """The cap goes where the boundary block's value and its ghost's put
+    it, and the ghost holds the reflection `2 * value - v` so that lands
+    halfway between the two centres -- on the face. One shared constant far
+    past the data put it against the block's own centre instead, half a
+    block short, which cut a grade shell back on the side it was kept and
+    let its complement out on the other: measured against Monte Carlo,
+    `close="above"` read -6.3% where a ball meets a face and -20.0% at a
+    corner. Both sides now agree with the volume to about a percent.
+    """
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [16, 16, 16], [10.0] * 3,
+                                   discretization=(2, 2, 2), max_levels=1)
+    radius = 45.0
+    values = radius - np.linalg.norm(
+        np.asarray(blocks.coordinates) - np.asarray([centre]), axis=1)
+    _graded(blocks, values)
+
+    low = np.ravel(blocks.bounding_box.min)
+    high = np.ravel(blocks.bounding_box.max)
+    box = float(np.prod(high - low))
+    # the ball clipped to the box, by Monte Carlo -- an analytic cap volume
+    # would only cover the ball meeting one face square on
+    sample = np.random.default_rng(0).uniform(low, high, size=(400000, 3))
+    inside = np.linalg.norm(sample - np.asarray(centre), axis=1) < radius
+    exact = inside.mean() * box
+
+    # supersample pinned to the level the 3% tolerance was measured at;
+    # the default of 0 loosens the corner case past it
+    above = blocks.get_contour("g", 0.0, close="above", supersample=1)
+    below = blocks.get_contour("g", 0.0, close="below", supersample=1)
+
+    assert isinstance(above, geoml.data.Solid3D)
+    assert isinstance(below, geoml.data.Solid3D)
+    assert above.volume == pytest.approx(exact, rel=0.03)
+    assert below.volume == pytest.approx(box - exact, rel=0.03)
+
+
+def test_a_surface_pinching_at_a_corner_is_still_a_body():
+    """Where the level set passes exactly through a cell corner it pinches
+    to a point, and VTK writes out the zero-area triangles of that marching
+    cubes case anyway. They bound nothing, but each makes an edge appear
+    twice the same way round, so the surface used to be classed
+    inconsistently wound -- a `Mesh3D` where every triangle with any area
+    agreed. This geometry produced 28 of them.
+    """
+    blocks = _ball_blocks([10.0, 80.0, 80.0])
+
+    closed = blocks.get_contour("g", -50.0, close="above", supersample=0)
+
+    assert isinstance(closed, geoml.data.Solid3D)
+    assert closed.volume > 0
+
+
 def test_close_wants_a_side():
     blocks = _blockset()
     _graded(blocks, np.linspace(0.0, 1.0, blocks.n_data))
