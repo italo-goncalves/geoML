@@ -468,6 +468,95 @@ def test_a_variable_the_model_does_not_hold_says_what_it_does(trained):
         prepare.warped_values(model, "gold")
 
 
+def _called_rock(n=8):
+    """A categorical variable with predictions written in by hand."""
+    point, _ = _points(n=n, seed=7)
+    measured = np.array(["granite", "basalt"] * (n // 2))
+    point.add_categorical_variable("rock", measurements=measured)
+    return point
+
+
+def test_a_confusion_matrix_counts_what_was_called_what():
+    point = _called_rock(n=8)
+    var = point.variables["rock"]
+    assert list(var.labels) == ["basalt", "granite"]
+    # measured g b g b g b g b -- one granite called basalt, the last
+    # location left unpredicted
+    var.predicted.values[:] = np.array([1, 0, 1, 0, 0, 0, 1, -1])
+
+    table = prepare.confusion_matrix(point, "rock")
+
+    assert table["labels"] == ["basalt", "granite"]
+    assert np.array_equal(table["counts"], [[3, 0], [1, 3]])
+    assert np.allclose(table["share"], [[1.0, 0.0], [0.25, 0.75]])
+    assert np.isclose(table["agreement"], 6 / 7)
+
+
+def test_a_contact_has_no_one_truth_to_count():
+    point, _ = _points(n=6, seed=8)
+    a = np.array(["granite"] * 6)
+    b = np.array(["granite", "granite", "basalt",
+                  "granite", "granite", "basalt"])
+    point.add_rock_type_variable("rock", measurements_a=a, measurements_b=b)
+    var = point.variables["rock"]
+    var.predicted.values[:] = np.full(6, list(var.labels).index("granite"))
+
+    table = prepare.confusion_matrix(point, "rock")
+
+    # the two contact points are out, and only granite is left to count
+    assert table["labels"] == ["granite"]
+    assert np.array_equal(table["counts"], [[4]])
+
+
+def test_a_measured_category_the_model_never_calls_keeps_its_row():
+    point, _ = _points(n=4, seed=9)
+    point.add_categorical_variable(
+        "rock", labels=["basalt", "granite"],
+        measurements=np.array(["granite", "basalt", "gneiss", "gneiss"]))
+    point.variables["rock"].predicted.values[:] = np.array([1, 0, 0, 1])
+
+    table = prepare.confusion_matrix(point, "rock")
+
+    # the variable's own order first, the stranger appended after it --
+    # and its row never lands on the diagonal
+    assert table["labels"] == ["basalt", "granite", "gneiss"]
+    assert np.array_equal(table["counts"],
+                          [[1, 0, 0], [0, 1, 0], [1, 1, 0]])
+    assert np.isclose(table["agreement"], 0.5)
+
+
+def test_the_matrix_says_when_nothing_was_predicted(jura):
+    with pytest.raises(ValueError, match="out of fold"):
+        prepare.confusion_matrix(jura, "Rock")
+
+
+def test_a_continuous_variable_has_no_categories_to_confuse(jura):
+    with pytest.raises(TypeError, match="categories"):
+        prepare.confusion_matrix(jura, "Elements")
+
+
+def test_the_confusion_matrix_writes_the_counts_in_the_cells():
+    point = _called_rock(n=8)
+    point.variables["rock"].predicted.values[:] = \
+        np.array([1, 0, 1, 0, 0, 0, 1, -1])
+
+    figure = geoml.plots.Explorer(point, categorical="rock") \
+        .confusion_matrix()
+
+    axes = figure.axes[0]
+    assert sorted(text.get_text() for text in axes.texts) == \
+        sorted(["3", "0", "1", "3"])
+    # the package style puts every title on the left
+    assert "agreement" in axes.get_title(loc="left")
+    assert [label.get_text() for label in axes.get_xticklabels()] == \
+        ["basalt", "granite"]
+
+
+def test_the_confusion_matrix_needs_a_categorical_variable(jura):
+    with pytest.raises(ValueError, match="categorical"):
+        geoml.plots.Explorer(jura, continuous="Elements").confusion_matrix()
+
+
 def test_a_running_mean_is_drawn_against_its_own_positions():
     position, smoothed = prepare.moving_average(np.arange(10.0), window=3)
 

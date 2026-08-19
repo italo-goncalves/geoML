@@ -860,6 +860,50 @@ class Interactive(_base.Selection):
             legend={"x": 0.02, "y": 0.98, "xanchor": "left",
                     "yanchor": "top"})
 
+    def confusion_matrix(self, height=None, width=None) -> "_go.Figure":
+        """
+        What was measured against what the model called there, counted.
+
+        Rows are the measured categories, columns the predicted ones, so
+        the diagonal is agreement and each row reads as one category's
+        fate. The shading is each cell's share of its measured row --
+        categories are as unbalanced as rock types usually are, and raw
+        counts would light the dominant row and hide what happens to a
+        rare one -- and the counts are written in the cells.
+
+        Contacts do not count: a rock type variable carries two
+        measurements there, and neither alone is the truth the prediction
+        is measured against. Locations missing either the measurement or
+        the prediction are left out likewise.
+
+        Only honest on data the model has not seen: at a training location
+        the prediction interpolates its own measurement, and the diagonal
+        congratulates the model on remembering it. The out-of-fold
+        container `models.cross_validate` fills is the honest input.
+        """
+        var = self._require_categorical("confusion_matrix")
+        table = _prep.confusion_matrix(self.data, var.name)
+        counts, labels = table["counts"], table["labels"]
+
+        figure = _go.Figure(_go.Heatmap(
+            z=table["share"], x=labels, y=labels,
+            text=counts, texttemplate="%{text}",
+            zmin=0.0, zmax=1.0, colorscale=_style.SEQUENTIAL,
+            colorbar={"title": "share of the<br>measured category"},
+            hovertemplate="measured %{y}<br>predicted %{x}"
+                          "<br>count %{text}<br>share %{z:.2f}"
+                          "<extra></extra>"))
+        return self._finish(
+            figure,
+            title="%s: %d locations, %.0f%% agreement"
+                  % (var.name, int(counts.sum()),
+                     100.0 * table["agreement"]),
+            height=height, width=width,
+            xaxis={"title": {"text": "predicted"}},
+            # reversed, so the matrix reads top-down as the printed one does
+            yaxis={"title": {"text": "measured"},
+                   "autorange": "reversed"})
+
     def spread_check(self, bins=8, height=None, width=None) -> "_go.Figure":
         """
         Whether the noise the model fitted is the noise the data has.

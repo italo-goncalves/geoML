@@ -407,6 +407,31 @@ probing the same original. The call went 10.0 to 6.2 s, bit-identical
 output; what remains is `vtkDecimatePro` itself, which is sequential by
 nature. A mesh too small to repay the spin-up keeps the serial path on
 one kept locator, and the boolean's own `_signed_distance` is untouched.
+* **A confusion matrix, on both plotting backends.** `confusion_matrix`
+on `Explorer` and `Interactive`, with the counting in
+`prepare.confusion_matrix` as everything drawn twice is.
+  - Rows are what was measured, columns what the model called there, in
+  the variable's own label order — with any measured category the
+  variable does not model appended after, so a stranger in the data gets
+  a row whose diagonal can never light rather than being dropped. The
+  shading is each cell's share of its measured row (categories are as
+  unbalanced as rock types usually are, and raw-count colour lights the
+  dominant row and hides what happens to a rare one); the counts are
+  written in the cells, and the title carries the overall agreement.
+  - Three kinds of location do not count, each for its own reason: a
+  contact carries two measurements and neither alone is a truth to be
+  right about (the `boundary` flag, the same rule `compute_metrics`
+  applies); an unpredicted location has no claim to score; an unmeasured
+  one nothing to score it against. All in `prepare`, so the two backends
+  cannot disagree about who counted.
+  - The docstrings say what every model-checking figure here says: only
+  honest on data the model has not seen — at a training location the
+  prediction interpolates its own measurement, and the diagonal
+  congratulates the model on remembering it. The out-of-fold container
+  `cross_validate` fills is the honest input.
+  - `Selection` grew `_require_categorical`, the missing sibling of
+  `_require_continuous`. Seven tests on the counting and one per
+  backend on the figures.
 ## version 0.6.6
 * **The kernel derivatives are exact.** `covariance_matrix_d1` and
 `covariance_matrix_d2` — the point-to-direction and direction-to-direction

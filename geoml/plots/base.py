@@ -130,6 +130,13 @@ class Selection(object):
                 "values everywhere and observations nowhere, and this figure "
                 "is a comparison against what was observed" % var.name)
 
+    def _require_categorical(self, caller):
+        if self.categorical is None:
+            raise ValueError("%s needs a categorical variable; the %s was "
+                             "built without one"
+                             % (caller, type(self).__name__))
+        return self.categorical
+
     def _require_model(self, caller):
         if self.model is None:
             raise ValueError("%s needs a model; the %s was built without one"
