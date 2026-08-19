@@ -700,6 +700,92 @@ def step_path(lo, hi, values):
     return _np.array(x), _np.array(y)
 
 
+def confusion_matrix(container: "_data._SpatialData", name: str) -> dict:
+    """
+    Measured categories against predicted ones, counted.
+
+    Rows are what was measured, columns what the model called there. Only
+    the unambiguous locations count: a rock type variable carries two
+    measurements per location, and where they disagree the point lies on a
+    contact and there is no one truth for the prediction to be right
+    about; locations missing either the measurement or the prediction are
+    left out likewise.
+
+    Only honest on data the model has not seen: at a training location the
+    prediction interpolates its own measurement. The out-of-fold container
+    `models.cross_validate` fills is the honest input.
+
+    Parameters
+    ----------
+    container
+        Any container from the `data` module.
+    name
+        The name of a categorical variable holding measurements and
+        predictions.
+
+    Returns
+    -------
+    table : dict
+        `counts` -- an integer matrix, measured by predicted; `share` --
+        each cell as a share of its measured row, zero where a row holds
+        nothing; `labels` -- one name per row and column, the categories
+        present in either role in the variable's own order, with any
+        measured category the variable does not model appended after;
+        `agreement` -- the diagonal's share of the total.
+
+    Raises
+    ------
+    TypeError
+        If the variable holds no measured and predicted categories.
+    ValueError
+        If no location carries both.
+    """
+    var = variable(container, name)
+    truth = getattr(var, "measurements_a", None)
+    if truth is None:
+        truth = getattr(var, "measurements", None)
+    called = getattr(var, "predicted", None)
+    if truth is None or called is None \
+            or getattr(truth, "labels", None) is None:
+        raise TypeError(
+            "%s %r holds no measured and predicted categories to compare"
+            % (type(var).__name__, str(name)))
+
+    # everything through `str`, which is how the figures name categories
+    # everywhere; the missing code decodes to the empty string on both sides
+    measured = _np.asarray(truth.to_numpy()).astype(str)
+    predicted = _np.asarray(called.to_numpy()).astype(str)
+    keep = (measured != "") & (predicted != "")
+    boundary = getattr(var, "boundary", None)
+    if boundary is not None:
+        keep &= ~_np.asarray(boundary.values, dtype=bool)
+    if not _np.any(keep):
+        raise ValueError(
+            "no location carries both a measured and a predicted category "
+            "of %r; predict on the data first -- and note this table is "
+            "only honest out of fold (see `models.cross_validate`)"
+            % str(name))
+    measured, predicted = measured[keep], predicted[keep]
+
+    present = set(measured) | set(predicted)
+    labels = [str(label) for label in var.labels if str(label) in present]
+    labels += sorted(present - set(labels))
+    index = {label: i for i, label in enumerate(labels)}
+    k = len(labels)
+
+    values, codes = _np.unique(
+        _np.concatenate([measured, predicted]), return_inverse=True)
+    codes = _np.array([index[value] for value in values])[codes]
+    counts = _np.bincount(
+        codes[:len(measured)] * k + codes[len(measured):],
+        minlength=k * k).reshape(k, k)
+    totals = counts.sum(axis=1, keepdims=True)
+    return {"counts": counts,
+            "share": counts / _np.where(totals == 0, 1, totals),
+            "labels": labels,
+            "agreement": float(_np.trace(counts)) / float(counts.sum())}
+
+
 def spread_check(container: "_data._SpatialData", name: str,
                  bins: _types.Bins = 8) -> list[dict]:
     """

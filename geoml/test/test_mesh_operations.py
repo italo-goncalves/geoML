@@ -394,6 +394,145 @@ def test_simplify_honours_its_error_budget():
     assert np.abs(np.asarray(distance)).max() <= budget * 1.001
 
 
+def _block_shell(centre, radius=45.0, n=8):
+    """A closed body contoured out of a block model, which is the shape the
+    package actually produces and the one VTK's boolean could not survive."""
+    step = 160.0 / n
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [n, n, n], [step] * 3,
+                                   discretization=(2, 2, 2), max_levels=1)
+    values = radius - np.linalg.norm(
+        np.asarray(blocks.coordinates) - np.asarray([centre]), axis=1)
+    blocks.add_continuous_variable("g")
+    blocks.variables["g"].prediction.values[:] = values
+    blocks.variables["g"].allocate_simulations(1)
+    blocks.variables["g"].simulations[:, :] = values[:, None]
+    return blocks.get_contour("g", 0.0, close="above")
+
+
+@pytest.mark.parametrize("operation", ["intersection", "union", "difference"])
+def test_two_block_model_shells_combine(operation):
+    """The reported crash. `vtkIntersectionPolyDataFilter` **segfaults** on
+    contour-derived bodies -- measured from 836 triangles upwards, at the
+    origin and at mine-grid coordinates, and on the same shells cleaned,
+    de-slivered and decimated -- so the exact engine is not consulted at all
+    any more and everything crossing goes to the implicit one.
+
+    A regression here does not fail this test: it takes the whole test
+    runner down with it, which is the loudest signal available and the
+    reason the engine was dropped rather than guarded.
+    """
+    one, two = _block_shell([60.0, 80.0, 80.0]), _block_shell([100.0, 80.0, 80.0])
+    assert isinstance(one, Solid3D) and isinstance(two, Solid3D)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        combined = getattr(one, operation)(two)
+
+    assert isinstance(combined, Solid3D)
+    assert combined.volume > 0
+    if operation == "union":
+        assert combined.volume > max(one.volume, two.volume)
+    if operation == "intersection":
+        assert combined.volume < min(one.volume, two.volume)
+
+
+def test_a_lying_locator_cannot_carry_the_surface_out_of_the_region(
+        monkeypatch):
+    """The implicit engine's distance sign is a pseudonormal's, and on a
+    real 2.5M-triangle ore envelope it was measured wrong forty metres
+    outside the body -- a cone of -43 where +40 was true -- which carried
+    the zero surface out through the grid margin and returned the
+    intersection of two closed bodies as an open sheet. Ray casting was
+    tried as the replacement sign and measured *worse* (a ray through a
+    degenerate patch flips the parity of every point in its shadow), so no
+    oracle can promise a truthful field. The region clamp is what makes
+    closure unconditional: the answer cannot exist outside the region box,
+    so the box's own signed distance caps the field 1.5 cells out,
+    whatever the locators report inside. Here the lie is injected
+    directly, reaching through the grid's top margin, and the boolean
+    must close anyway.
+    """
+    import geoml.data.meshes as meshes
+
+    one = _build(pv.Sphere(radius=5.0, center=(0, 0, 0),
+                           theta_resolution=40, phi_resolution=40), Solid3D)
+    two = _build(pv.Sphere(radius=5.0, center=(6, 0, 0),
+                           theta_resolution=40, phi_resolution=40), Solid3D)
+
+    truthful = meshes._signed_distance
+
+    def lying(body, points):
+        answer = truthful(body, points)
+        bogus = ((points[:, 2] > 4.0)
+                 & (np.abs(points[:, 0] - 3.0) < 1.0)
+                 & (np.abs(points[:, 1]) < 1.0))
+        return np.where(bogus, -40.0, answer)
+
+    monkeypatch.setattr(meshes, "_signed_distance", lying)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        crossed = one.intersection(two)
+
+    assert isinstance(crossed, Solid3D)
+    assert crossed.volume > 0
+
+
+def test_a_flap_left_by_decimation_does_not_break_the_rebuild():
+    """Collapsing an edge through a thin feature folds it into a
+    zero-thickness flap -- the same triangle twice, bounding nothing. Every
+    edge of it then runs twice the same way round, so the constructor reads
+    the body as inconsistently wound and refuses.
+
+    It cannot be repaired by reorienting, which is what `_rebuilt_as` used
+    to try alone: a flap is non-manifold, VTK's orientation pass cannot walk
+    across it, and it returns having spread the disagreement rather than
+    settled it. Measured on a decimated shell, 2 reversed edges went in and
+    3 came out. So the flap is dropped first, and only genuine winding is
+    reoriented.
+    """
+    from geoml.data.meshes import _rebuilt_as
+
+    box = _build(pv.Box())
+    points = np.asarray(box.coordinates)
+    triangles = np.asarray(box.triangles)
+
+    # a flap standing clear of the box: two coincident triangles, sharing
+    # every edge with each other and nothing else
+    flap = np.array([[0.0, 0.0, 9.0], [1.0, 0.0, 9.0], [0.0, 1.0, 9.0]])
+    offset = len(points)
+    dirty_points = np.concatenate([points, flap])
+    dirty = np.concatenate([triangles,
+                            [[offset, offset + 1, offset + 2]],
+                            [[offset, offset + 1, offset + 2]]])
+    assert geoml.math.geometry.reversed_edges(dirty_points, dirty) > 0
+
+    faces = np.concatenate(
+        [np.full([len(dirty), 1], 3, int), dirty], axis=1).ravel()
+    rebuilt = _rebuilt_as(Solid3D, pv.PolyData(dirty_points, faces))
+
+    assert isinstance(rebuilt, Solid3D)
+    assert np.isclose(rebuilt.volume, box.volume, rtol=1e-9)
+
+
+def test_simplify_never_raises_out_of_a_workflow():
+    """Decimation can break a body however clean its input -- collapse a
+    thin feature into a membrane -- and `simplify` holds a remedy no other
+    rebuild has: cutting less, whose error only shrinks, down to not
+    cutting at all. So it retries gently and, as the last resort, returns
+    the mesh as it came with a warning, rather than raising out of
+    `get_contour(..., simplify=)` -- which it was reported doing, twice,
+    from the same real model.
+    """
+    shell = _contoured_shell()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for budget in (0.3, 0.5, 1.0, 3.0):
+            slim = shell.simplify(budget)
+            assert isinstance(slim, Solid3D)
+            assert len(slim.triangles) <= len(shell.triangles)
+
+
 def test_simplify_keeps_a_terrain_a_terrain():
     ground = _terrain(height=5.0, slope=0.3, n=17)
     slim = ground.simplify(0.5)

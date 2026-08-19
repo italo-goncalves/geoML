@@ -31,6 +31,7 @@ from skimage import filters as _filters
 
 import geoml.storage as _storage
 import geoml.viz.plotly as _py
+import geoml.math.geometry as _gmt
 
 class NoDataError(Exception):
     """Exception raised when a data object is empty."""
@@ -1205,8 +1206,13 @@ class _Attribute(object):
 
         # return verts, faces, normals, values
         # a contour that closes inside the grid is a body; one the grid cuts
-        # off is a sheet, and `mesh3d` is what tells them apart
+        # off is a sheet, and `mesh3d` is what tells them apart -- after the
+        # faces that bound nothing are dropped, marching cubes writing out
+        # the zero-area triangles of the cases where the level set pinches
+        # at a corner, which are read as a winding failure and are not one
         from geoml.data import mesh3d
+        verts, faces = _gmt.drop_degenerate_faces(verts, faces)
+        normals = _gmt.vertex_normals(verts, faces)
         surface = mesh3d(verts, faces, normals)
         if simplify is not None:
             surface = surface.simplify(simplify)

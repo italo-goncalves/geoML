@@ -34,40 +34,6 @@ lying in the boundary between two rock types);
 * Exports results to [PyVista](https://github.com/pyvista/pyvista) format;
 * Back-end powered by [TensorFlow](https://www.tensorflow.org/).
 
-## A worked example
-
-Walker Lake, end to end: look at the data, build a model, train it, and map
-the answer with its uncertainty beside it.
-
-```python
-import geoml
-
-geoml.set_seed(1234)
-walker, grid = geoml.datasets.walker()
-
-# 100 inducing points, a spherical covariance, and a warping that keeps the
-# predictions positive and takes care of the skew
-inducing = geoml.data.inducing.from_kmeans(walker, 100, seed=0)
-gp = geoml.latent.BasicGP(
-    geoml.latent.BasicInput(inducing,
-                            transform=geoml.transform.Isotropic(50)),
-    size=1, kernel=geoml.kernels.Spherical())
-warping = geoml.warping.ChainedWarping(
-    geoml.warping.Softplus(1), geoml.warping.ZScore(1))
-
-model = geoml.models.VGPNetwork(
-    walker, "V", geoml.likelihood.Gaussian(warping), gp)
-model.train_full(max_iter=300)
-
-model.predict(grid, n_sim=50)
-grid.variables["V"].reset_quantiles([0.05, 0.5, 0.95])
-
-geoml.plots.Explorer(grid, continuous="V").scene()
-```
-
-No experimental variogram is fitted (the model estimates its own), no
-normal-score tables are built (the warping is the transform, trained), and no
-search neighbourhood is tuned (the inducing points are the sparsity).
 
 ## Installation
 

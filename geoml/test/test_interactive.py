@@ -633,6 +633,31 @@ def test_several_components_are_drawn_as_panels(trained):
     assert [a.text for a in figure.layout.annotations] == ["a", "b", "c"]
 
 
+def test_the_confusion_matrix_is_one_heatmap_reading_top_down():
+    rng = np.random.default_rng(11)
+    coords = rng.uniform(0, 100, (8, 2))
+    point = geoml.data.PointData(pd.DataFrame(coords, columns=COLS), COLS)
+    point.add_categorical_variable(
+        "rock", measurements=np.array(["granite", "basalt"] * 4))
+    point.variables["rock"].predicted.values[:] = \
+        np.array([1, 0, 1, 0, 0, 0, 1, -1])
+
+    figure = geoml.plots.Interactive(point, categorical="rock") \
+        .confusion_matrix()
+
+    assert len(figure.data) == 1
+    trace = figure.data[0]
+    assert trace.type == "heatmap"
+    assert np.array_equal(np.asarray(trace.text, dtype=int),
+                          [[3, 0], [1, 3]])
+    assert list(trace.x) == ["basalt", "granite"]
+    # measured reads top-down, as the printed matrix does
+    assert figure.layout.yaxis.autorange == "reversed"
+    assert "agreement" in figure.layout.title.text
+    # cells are not locations: nothing here for a dashboard to link on
+    assert traces_with_rows(figure) == []
+
+
 def test_the_spread_check_draws_three_traces_per_component(trained):
     """The noise band, the whole claim, and what the errors actually did."""
     _, point = trained

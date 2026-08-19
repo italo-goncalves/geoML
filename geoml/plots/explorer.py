@@ -668,6 +668,61 @@ class Explorer(_base.Selection):
             figure.tight_layout()
         return figure
 
+    def confusion_matrix(self, figsize=None) -> "_plt.Figure":
+        """
+        What was measured against what the model called there, counted.
+
+        Rows are the measured categories, columns the predicted ones, so
+        the diagonal is agreement and each row reads as one category's
+        fate. The shading is each cell's share of its measured row --
+        categories are as unbalanced as rock types usually are, and raw
+        counts would light the dominant row and hide what happens to a
+        rare one -- and the counts are written in the cells.
+
+        Contacts do not count: a rock type variable carries two
+        measurements there, and neither alone is the truth the prediction
+        is measured against. Locations missing either the measurement or
+        the prediction are left out likewise.
+
+        Only honest on data the model has not seen: at a training location
+        the prediction interpolates its own measurement, and the diagonal
+        congratulates the model on remembering it. The out-of-fold
+        container `models.cross_validate` fills is the honest input.
+        """
+        var = self._require_categorical("confusion_matrix")
+        table = _prep.confusion_matrix(self.data, var.name)
+        counts, labels = table["counts"], table["labels"]
+        k = len(labels)
+
+        with _style.context():
+            side = max(3.4, 1.4 + 0.45 * k)
+            figure, axes = _plt.subplots(figsize=figsize
+                                         or (side + 1.1, side))
+            image = axes.imshow(table["share"], vmin=0.0, vmax=1.0,
+                                cmap=self.cmap)
+            axes.grid(False)
+            axes.set_xticks(range(k), labels, rotation=45, ha="right",
+                            rotation_mode="anchor")
+            axes.set_yticks(range(k), labels)
+            axes.set_xlabel("predicted")
+            axes.set_ylabel("measured")
+            # a count is readable over any cell as long as its ink
+            # disagrees with the shading behind it
+            face = image.cmap(image.norm(table["share"]))
+            dark = face[..., :3] @ (0.299, 0.587, 0.114) < 0.5
+            for i in range(k):
+                for j in range(k):
+                    axes.text(j, i, str(int(counts[i, j])), ha="center",
+                              va="center", fontsize=8,
+                              color="white" if dark[i, j] else "#2b2b2b")
+            figure.colorbar(image, ax=axes, fraction=0.046, pad=0.04,
+                            label="share of the measured category")
+            axes.set_title("%s: %d locations, %.0f%% agreement"
+                           % (var.name, int(counts.sum()),
+                              100.0 * table["agreement"]))
+            figure.tight_layout()
+        return figure
+
     def spread_check(self, bins=8, figsize=None) -> "_plt.Figure":
         """
         Whether the noise the model fitted is the noise the data has.

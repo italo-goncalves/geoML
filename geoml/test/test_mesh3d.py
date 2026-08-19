@@ -104,6 +104,74 @@ def test_the_factory_picks_the_class_the_geometry_calls_for():
     assert type(broken) is Mesh3D
 
 
+def test_faces_that_bound_nothing_are_dropped():
+    """Neither a zero-area triangle nor a twinned face bounds anything, and
+    both are read as defects: a sliver carries a self-edge belonging to one
+    triangle, which counts as a boundary, and a twin makes its edges run
+    twice the same way round, which counts as a winding failure. A contour
+    emits both where the level set pinches at a cell corner, so they go
+    before the geometry is asked what class it calls for.
+
+    How many copies of a twin to drop is decided by its edges rather than
+    assumed, and the two cases below are why. A flap standing clear of the
+    surface owns its edges outright, so both copies go and nothing is left
+    hanging; a wall written twice shares its edges with the body, so
+    dropping both would leave each of them bounding one face -- an open edge
+    where there is no hole -- and one copy stays.
+    """
+    points, triangles = _arrays(pv.Box())
+    sliver = np.array([[triangles[0, 0], triangles[0, 1], triangles[0, 1]]])
+
+    # a wall recorded twice: one copy survives, and the box stays a box
+    twinned = np.concatenate([triangles, sliver, triangles[1:2]])
+    assert not isinstance(
+        mesh3d(points, twinned,
+               geoml.math.geometry.vertex_normals(points, twinned)), Solid3D)
+    kept, clean = geoml.math.geometry.drop_degenerate_faces(points, twinned)
+    assert len(clean) == len(triangles)
+    assert len(kept) == len(points)
+    assert isinstance(
+        mesh3d(kept, clean,
+               geoml.math.geometry.vertex_normals(kept, clean)), Solid3D)
+
+    # a flap standing clear of it: both copies go, and so does the flap
+    flap = np.array([[0.0, 0.0, 9.0], [1.0, 0.0, 9.0], [0.0, 1.0, 9.0]])
+    offset = len(points)
+    face = [[offset, offset + 1, offset + 2]]
+    loose = np.concatenate([points, flap])
+    kept, clean = geoml.math.geometry.drop_degenerate_faces(
+        loose, np.concatenate([triangles, face, face]))
+    assert len(clean) == len(triangles)
+    assert geoml.math.geometry.reversed_edges(kept, clean) == 0
+
+
+def test_a_doubled_patch_is_resurrected_from_its_rim_inward():
+    """The twin groups couple, which is why the rule is worked out on the
+    surface rather than per face: in a doubled patch -- what decimation
+    makes of a collapsed thin feature -- the middle face sees every
+    neighbour as a twin, so any rule scoring its edges in isolation drops
+    it while the rim stays, and the patch tears down the middle. Reported
+    from a real model as `NotClosedError: 32 of its edges belong to a
+    single triangle` out of `simplify`. Here an octahedron has a face and
+    all three of its neighbours written twice; the rim's copies come back
+    on the first pass and the middle's on the second, once the rim's
+    return leaves its edges half-supported.
+    """
+    v = np.array([[1.0, 0, 0], [-1, 0, 0], [0, 1, 0],
+                  [0, -1, 0], [0, 0, 1], [0, 0, -1]])
+    f = np.array([[0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4],
+                  [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5]])
+    doubled = np.concatenate([f, f[[0, 1, 3, 4]]])
+
+    kept, clean = geoml.math.geometry.drop_degenerate_faces(v, doubled)
+
+    assert len(clean) == len(f)
+    assert geoml.math.geometry.open_edges(kept, clean) == 0
+    body = mesh3d(kept, clean,
+                  geoml.math.geometry.vertex_normals(kept, clean))
+    assert isinstance(body, Solid3D)
+
+
 def test_a_contour_that_closes_comes_back_as_a_solid():
     grid = geoml.data.Grid3D(start=[0, 0, 0], n=[24, 24, 24], step=[1, 1, 1])
     radius = np.linalg.norm(
@@ -134,6 +202,33 @@ def test_healing_settles_triangles_that_disagree():
     triangles[0] = triangles[0][::-1]
     broken = mesh3d(points, triangles,
                     geoml.math.geometry.vertex_normals(points, triangles))
+    assert not broken.consistent
+
+    healed = broken.heal()
+
+    assert isinstance(healed, Solid3D)
+    assert np.isclose(healed.volume, 1.0)
+
+
+def test_healing_settles_a_disagreement_reorienting_cannot():
+    """The winding failure that is not a winding failure. A zero-thickness
+    flap makes each of its edges run twice the same way round, and it is
+    the one such disagreement VTK cannot walk across: measured on this very
+    mesh, `clean`, `compute_normals(consistent_normals=True,
+    auto_orient_normals=True)` and `triangulate` left all three reversed
+    edges exactly as they were. Since every error message in the module
+    sends the user to `heal`, it drops what bounds nothing first.
+    """
+    points, triangles = _arrays(pv.Box(bounds=(0, 1, 0, 1, 0, 1)))
+    flap = np.array([[0.0, 0.0, 9.0], [1.0, 0.0, 9.0], [0.0, 1.0, 9.0]])
+    offset = len(points)
+    twin = [[offset, offset + 1, offset + 2]]
+    dirty_points = np.concatenate([points, flap])
+    dirty = np.concatenate([triangles, twin, twin])
+
+    broken = mesh3d(dirty_points, dirty,
+                    geoml.math.geometry.vertex_normals(dirty_points, dirty))
+    assert type(broken) is Mesh3D
     assert not broken.consistent
 
     healed = broken.heal()
