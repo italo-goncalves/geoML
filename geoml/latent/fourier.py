@@ -209,12 +209,14 @@ class Concatenate(_Operation):
 
 
 class BasicProjectedGP(_FunctionalProjectedVariable):
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
+    def __init__(self, parent, size=1, kernel=None,
                  fix_range=False, #isotropic=False,
                  n_directions=30):
         super().__init__(parent)
 
         self._size = size
+        if kernel is None:
+            kernel = _kr.Gaussian()
         self.kernel = self._register(kernel)
         # self.isotropic = isotropic
 

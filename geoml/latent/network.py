@@ -816,7 +816,7 @@ class BasicGP(_GPNode):
     Gaussian, having an associated variance. This variance is integrated by considering it as a squared range and
     applying the non-stationary covariance.
     """
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian(),
+    def __init__(self, parent, size=1, kernel=None,
                  fix_range=False, isotropic=False, range_prior=2.0,
                  name=None):
         """
@@ -829,7 +829,8 @@ class BasicGP(_GPNode):
         size
             Number of output latent variables
         kernel
-            The kernel to use for the covariance matrices.
+            The kernel to use for the covariance matrices. A fresh
+            `Gaussian` if omitted.
         fix_range : bool
             Whether to force a unit range for all input dimensions.
         isotropic : bool
@@ -848,6 +849,11 @@ class BasicGP(_GPNode):
         """
         super().__init__(parent, name=name)
         self._size = size
+        # each node gets its own kernel object -- a shared default would
+        # couple every node built without one the day a kernel gains a
+        # trainable parameter
+        if kernel is None:
+            kernel = _kr.Gaussian()
         self.kernel = self._register(kernel)
         self.range_prior = range_prior
 
@@ -2417,7 +2423,7 @@ class MultiStructureGP(BasicGP):
     and applying a linear combination externally is that here the combination is at the kernel level instead of the
     latent variable level.
     """
-    def __init__(self, parent, size=1, kernel=_kr.Gaussian(), fix_range=False,
+    def __init__(self, parent, size=1, kernel=None, fix_range=False,
                  n_structures=2, weight_concentration="staircase",
                  range_prior=2.0, name=None):
         """
@@ -2430,7 +2436,8 @@ class MultiStructureGP(BasicGP):
         size : int
             Number of output functions.
         kernel
-            The kernel to use for the covariance matrices.
+            The kernel to use for the covariance matrices. A fresh
+            `Gaussian` if omitted.
         fix_range : bool
             Whether to force a unit range for all input dimensions.
         n_structures : int

@@ -173,18 +173,20 @@ mean "no better than quoting the average grade".
 
 | inducing points | training | metals, rmse / sd | goodness | rock accuracy |
 |---|---|---|---|---|
-| 259, the data alone | 54 s | 0.90 | 0.47 | 0.73 |
-| 380, data + an 11 × 11 backbone | 66 s | 0.90 | 0.50 | 0.73 |
-| **700, data + 21 × 21, four experts** | **198 s** | **0.90** | **0.51** | **0.72** |
-| 1220, data + 31 × 31, four experts | 300 s | 0.91 | 0.48 | 0.71 |
+| 259, the data alone | 56 s | 0.90 | 0.47 | 0.70 |
+| 380, data + an 11 × 11 backbone | 69 s | 0.91 | 0.50 | 0.66 |
+| **700, data + 21 × 21, four experts** | **204 s** | **0.91** | **0.52** | **0.70** |
+| 1220, data + 31 × 31, four experts | 308 s | 0.91 | 0.50 | 0.63 |
 
-**The score does not move.** Nearly five times the inducing points, five
-and a half times the training, and the held-out error is flat to the second
-decimal.
+**The metals' score does not move.** Nearly five times the inducing
+points, five and a half times the training, and the held-out error is flat
+to the second decimal; the rock's accuracy wobbles around 0.7 and is
+lowest at the largest set.
 
 Chapter 3 ran the same sweep on the plainest possible version of this
 dataset — a stationary model, a Gaussian likelihood, no walked input — and
-found the same flatness, from 81 inducing points to 625. Two
+carried it to 2401 inducing points: the same flatness up to around the
+data count, then a slow worsening while the intervals keep narrowing. Two
 configurations this far apart agreeing is worth more than either alone:
 **what capacity buys is resolution rather than accuracy at the sampled
 sites**, and what it costs is a slow narrowing of the model's own

@@ -58,6 +58,17 @@ def test_a_name_that_was_given_is_kept():
     assert network.parents[0].name == "BasicGP_1"
 
 
+def test_default_kernels_are_not_shared():
+    """Each node built without a kernel gets its own object. A shared default
+    is harmless only while kernels carry no trainable parameters."""
+    root = _root()
+    first = latent.BasicGP(root, size=1)
+    second = latent.BasicGP(root, size=1)
+
+    assert isinstance(first.kernel, geoml.kernels.Gaussian)
+    assert first.kernel is not second.kernel
+
+
 def test_the_numbering_is_per_class():
     root = _root()
     gp = latent.BasicGP(root, size=1)

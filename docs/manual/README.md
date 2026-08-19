@@ -31,10 +31,10 @@ namespace, in order:
 python docs/manual/run_blocks.py docs/manual/*.md
 ```
 
-A full pass takes about 20 minutes on a desktop GPU, most of it in four
+A full pass takes about 25 minutes on a desktop GPU, most of it in five
 chapters that train real models: 5 (a deep network), 13 and 15 (a
-cross-validation each) and 17 (two 3D implicit models). Everything else
-runs in seconds.
+cross-validation each), 16 (a two-variable network) and 17 (two 3D
+implicit models). Everything else runs in seconds.
 
 Everything runs on the bundled sample data except chapter 17, which
 fetches about 20 kB of drillhole logs on first run and caches them in

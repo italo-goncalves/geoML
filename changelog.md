@@ -1,4 +1,41 @@
 ## version 0.6.8
+* **The manual's numbers are measured again, and the figures with them.**
+All 17 chapters rerun on current code — the committed figures predated
+the 0.6.5 MAP priors and the 0.6.6 spline initialization — and all 22
+regenerated figures are committed with the prose that quotes them.
+Chapter 3's capacity table now runs to 2401 inducing points, from the
+three-seed sweep that answered the standing §7 question: accuracy is
+flattest at about two thirds of the data count, the interval tightening
+decelerates toward a floor rather than running away, and Walker Lake
+improves across the whole ladder — capacity becomes resolution where the
+data can pin structure, and confidence where it cannot. Chapter 16's
+inducing sweep was remeasured (metals flat to the second decimal, as
+before; the rock's accuracy now wobbles and is lowest at the largest
+set), chapter 13's residual-variogram sentence was corrected to the
+fresh figure (the shortest bin rides high — the crowded-bin caveat the
+chapter already carries), and every other number-bearing prose claim
+checked against the fresh output held, Portlandian's zeros included.
+* **The block-model design record reruns on today's `refine`.** §11 of
+`docs/variable-block-models.md` remeasured on Macpass: sixteen passes
+now — the jump-levelling criterion joins from pass 3 and settles in a
+long tail — landing at 848 579 blocks, 15.0x fewer than uniform, against
+the straddle-only 496 591 at 25.6x; the halved saving is what §5.1
+measured as a contour three times closer to the true surface.
+Grade-tonnage and the 4% shell requoted (194 202 triangles, the blocks
+along the surface cut to the finest size), §7.3's synthetic headline
+dated to the criterion it was measured under. Found stale in passing and
+fixed: the walkthrough still passed `GPOptions(seed=...)`, a `TypeError`
+since 0.6.2, and reached the inducing helpers through the deprecated
+`geoml.inducing` shim.
+* **The last shared default kernel is gone.** `BasicGP`,
+`MultiStructureGP` and the fourier module's `BasicProjectedGP` took
+`kernel=Gaussian()` as a literal default, so every node built without a
+kernel shared one module-level object — verified harmless today (a bare
+`Gaussian` carries no trainable parameters) and armed the day a kernel
+gains one, or a parameterized kernel becomes a default. The default is
+`None` now, each node building its own fresh `Gaussian`. Saved models
+replay their recorded constructor arguments, so nothing changes for
+them; a test pins that two default-built nodes hold distinct kernels.
 * **One declustering column, and everything downstream shares it.**
 `container.decluster(on=, cell=)` computes cell-declustering weights and
 keeps them as the metadata column `"declustering"` — a first-class
