@@ -42,6 +42,10 @@ import geoml.storage as _storage
 import geoml.viz.plotly as _py
 from geoml.math.geometry import bounding_box
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from geoml.data.geoh5 import Workspace as _GeoH5Workspace
+
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _TreeNode, _frame_from_columns
 from geoml.data.variables import *
@@ -933,6 +937,194 @@ class PointData(_PointBased):
 
         pv_points = _pv.PolyData(_np.asarray(self.coordinates))
         return self._finish_pyvista(pv_points, "points", simulations, include)
+
+    @classmethod
+    def from_geoh5(cls, workspace: "_types.PathLike | _GeoH5Workspace",
+                   name: "str | None" = None) -> "PointData":
+        """
+        Reads a Points object from a geoh5 workspace.
+
+        The columns come in as measured variables: float data as
+        continuous variables and referenced (coded) data as categorical
+        ones, named as the file names them, with geoh5's "Unknown" code
+        reading as not measured. What the file has no room to say —
+        which column was a prediction, whose tree it belonged to — is not
+        guessed at: a geoML container round-trips whole through
+        `to_zarr`, and this reader is for data somebody else made.
+
+        `name` says which Points object to read, and may be left out when
+        the workspace holds exactly one; `geoml.data.geoh5.contents`
+        lists what there is to name. Needs the `geoh5py` package:
+        `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to read, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The Points object to read, when the file holds more than one.
+
+        Returns
+        -------
+        data : PointData
+            The vertices as locations, the columns as variables.
+
+        Raises
+        ------
+        ValueError
+            If the workspace holds no such Points object — the message
+            lists what it does hold.
+        """
+        # late, through the module: the geoh5 machinery must not load,
+        # nor its optional dependency be missed, before a file is asked for
+        import geoml.data.geoh5 as _geoh5io
+        vertices, floats, coded = _geoh5io.read_points(workspace, name)
+        data = PointData(_pd.DataFrame(vertices, columns=["X", "Y", "Z"]),
+                         ["X", "Y", "Z"])
+        for column, values in floats:
+            data.add_continuous_variable(column, values)
+        for column, labels, values in coded:
+            # the empty string is how the reader spells geoh5's "Unknown";
+            # None is what pandas reads as a missing category
+            values = _np.asarray(values, dtype=object)
+            values[values == ""] = None
+            data.add_categorical_variable(column, labels=labels,
+                                          measurements=values)
+        return data
+
+    def to_geoh5(self, workspace: "_types.PathLike | _GeoH5Workspace",
+                 name: str = "Points", include: str = "**",
+                 simulations: "bool | int | Sequence[int]" = False,
+                 replace: bool = True,
+                 folder: "str | None" = None) -> None:
+        """
+        Writes this object into a geoh5 workspace, as a Points object.
+
+        A workspace is what Geoscience ANALYST — a free viewer for the
+        format — opens as **one** project, so a model's pieces belong in
+        one file: writing into an existing path adds the object beside
+        what is already there, and several exports in a row go fastest
+        through an open `geoml.data.geoh5.Workspace`, which holds the
+        file open across them.
+
+        The columns are the ones every export carries, named as the
+        pyvista export names them, with categorical columns as geoh5's
+        own *referenced* data; the mapping from each name back to the
+        path that produced it rides in the object's metadata under
+        ``geoml_paths``, since no rendered name parses back. Needs the
+        `geoh5py` package: `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to write into, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The name the object gets in the workspace.
+        include
+            A path pattern selecting the columns to carry, as in
+            `as_pyvista`.
+        simulations
+            Which simulations to include: `False` for none (the default,
+            since each one is a full-length array in the file), `True`
+            for all of them, an `int` for the first n, or a sequence of
+            indices.
+        replace
+            Whether an existing Points object of this name, in this
+            folder, makes way — what a re-run export script means.
+            `False` keeps both, and reading that name back then requires
+            saying which.
+        folder
+            Where the object sits in ANALYST's project tree, as a path —
+            `"Data/Assays"` — each segment a group, created when it does
+            not exist and reused when it does. `None` is the root.
+        """
+        if self.n_dim != 3:
+            raise ValueError(
+                "a geoh5 workspace holds 3-dimensional objects; this data "
+                "has %d coordinates per location" % self.n_dim)
+        import geoml.data.geoh5 as _geoh5io
+        _geoh5io.write_points(self, workspace, name, include, simulations,
+                              replace, folder)
+
+    def decluster(self, on: "str | None" = None,
+                  cell: "float | None" = None,
+                  name: str = "declustering"
+                  ) -> "tuple[_np.ndarray, float]":
+        """
+        Computes cell-declustering weights and keeps them, for everything
+        downstream to share.
+
+        Samples are rarely laid down evenly — drilling follows the ore —
+        and every statistic that gives them equal votes describes the
+        sampling rather than the field. This stores one weight per
+        location as the metadata column `"declustering"`, which is where
+        the declustered consumers look first: the `variogram` figure, and
+        the warping initializers a model runs at construction. **One call
+        here turns declustering on everywhere**, with one consistent set
+        of weights — computed independently, each consumer would sweep
+        its own cell size on its own values and quietly disagree.
+
+        The weights are a snapshot of these locations, exactly as a fold
+        column is: a subset carries its parent's values, which are then
+        not the subset's own weights — recompute after subsetting when it
+        matters.
+
+        Parameters
+        ----------
+        on
+            The continuous variable (or component) whose values drive the
+            automatic cell-size choice — the sweep keeps the cell whose
+            declustered mean departs furthest from the naive one, which
+            needs values to mean anything. Left out, the only continuous
+            variable is used; holding several, this refuses to guess.
+            Not needed when `cell` is given.
+        cell
+            The cell side, fixing it instead of sweeping.
+        name
+            The metadata column written. An existing column of this name
+            is replaced.
+
+        Returns
+        -------
+        weights : array
+            One per location, summing to the number of locations, as
+            `math.geometry.declustering_weights` returns them.
+        cell : float
+            The cell side used, whether given or chosen.
+
+        See Also
+        --------
+        math.geometry.declustering_weights : the arithmetic, and the
+            cell-sweep rule.
+        """
+        coordinates = _np.asarray(self.coordinates, dtype=float)
+        if cell is None:
+            if on is None:
+                continuous = [key for key, variable in self.variables.items()
+                              if isinstance(variable, ContinuousVariable)]
+                if len(continuous) != 1:
+                    raise ValueError(
+                        "the automatic cell sweep needs values: name the "
+                        "variable with `on=` (found %s) or fix the size "
+                        "with `cell=`"
+                        % (", ".join(sorted(continuous)) or "no continuous "
+                           "variable"))
+                on = continuous[0]
+            variable, _ = self._variable_or_component(str(on))
+            measurements = getattr(variable, "measurements", None)
+            if measurements is None or measurements.labels is not None:
+                raise ValueError(
+                    "%r holds no continuous measurements to sweep the "
+                    "cell size on" % str(on))
+            values = _np.asarray(measurements.values, dtype=float).ravel()
+            weights, cell = _gmt.declustering_weights(coordinates, values)
+        else:
+            weights, cell = _gmt.declustering_weights(
+                coordinates, cell=float(cell))
+        self.add_metadata(name, weights)
+        return weights, float(cell)
 
     def spatial_k_fold(self, test_data, k=5, groups=None, seed=None,
                        name="fold"):

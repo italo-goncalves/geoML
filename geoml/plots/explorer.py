@@ -668,6 +668,54 @@ class Explorer(_base.Selection):
             figure.tight_layout()
         return figure
 
+    def reliability(self, bins=10, figsize=None) -> "_plt.Figure":
+        """
+        Whether a claimed probability is the frequency it claims.
+
+        One curve per category: the locations binned by the probability
+        the model assigned to it, each bin's mean claim against the share
+        of its locations actually measured as that category. On the
+        diagonal a 70% claim is that category 70% of the time; below it
+        the model is overconfident, above it hedging. The legend carries
+        each curve's expected calibration error, the count-weighted mean
+        distance from the diagonal.
+
+        The same locations count as in `confusion_matrix`: a contact has
+        two measurements and no one truth, and locations missing either
+        the measurement or the prediction are left out.
+
+        Only honest on data the model has not seen: at a training
+        location the claim was fitted to its own outcome. The out-of-fold
+        container `models.cross_validate` fills is the honest input.
+
+        Parameters
+        ----------
+        bins : int or sequence
+            How many bins, or where their edges are. A count gives
+            **equal-count** bins over the claimed probabilities; pass
+            explicit edges for equal width.
+        """
+        var = self._require_categorical("reliability")
+        panels = _prep.reliability(self.data, var.name, bins=bins)
+
+        with _style.context():
+            figure, axes = _plt.subplots(figsize=figsize or (5.0, 5.0))
+            axes.plot([0, 1], [0, 1], color="#4a4a4a", linewidth=1.0,
+                      linestyle="--", label="perfect")
+            for i, panel in enumerate(panels):
+                axes.plot(panel["claimed"], panel["observed"], marker="o",
+                          markersize=3,
+                          color=self._color(i, panel["label"]),
+                          label="%s (ECE = %.2f)"
+                                % (panel["label"], panel["ece"]))
+            axes.set_xlabel("claimed probability")
+            axes.set_ylabel("share measured as the category")
+            axes.set_title("Reliability")
+            axes.set_aspect("equal")
+            axes.legend(loc="upper left")
+            figure.tight_layout()
+        return figure
+
     def confusion_matrix(self, figsize=None) -> "_plt.Figure":
         """
         What was measured against what the model called there, counted.

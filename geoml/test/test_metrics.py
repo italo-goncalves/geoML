@@ -162,3 +162,25 @@ def test_variogram_score_weights_each_pair_by_its_ends():
                                           coordinates=coordinates)
     assert np.isclose(declustered, expected)
     assert not np.isclose(declustered, raw)
+
+
+def test_the_score_takes_stored_weights_directly():
+    """`weights=` hands the column `container.decluster()` keeps straight
+    in, taking precedence over anything computed from coordinates."""
+    rng = np.random.default_rng(12)
+    n, m = 30, 10
+    coordinates = rng.uniform(0, 50, size=(n, 2))
+    y_true = rng.normal(size=n)
+    y_pred = y_true[:, None] + rng.normal(size=(n, m))
+
+    weights = geometry.declustering_weights(coordinates, y_true)[0]
+    given = metrics.variogram_score(y_true, y_pred, weights=weights)
+    computed = metrics.variogram_score(y_true, y_pred,
+                                       coordinates=coordinates)
+    assert np.isclose(given, computed)
+
+    # even weights are the raw score, whatever the coordinates would say
+    even = metrics.variogram_score(y_true, y_pred, weights=np.ones(n),
+                                   coordinates=coordinates)
+    raw = metrics.variogram_score(y_true, y_pred)
+    assert np.isclose(even, raw)

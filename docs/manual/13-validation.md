@@ -285,9 +285,11 @@ residuals is structure the model missed, whether a range fitted too short,
 an anisotropy overlooked, or a trend unmodelled. On the out-of-fold
 container it is honest by construction.
 
-Here it is flat at its sill from the first lag, which is what "nothing
-left" looks like: the residuals are noise with no spatial organization
-worth naming. That agrees with the fan above, and the two agreeing is
+Here it is flat at its sill from the second lag on, with only the shortest
+bin riding high — the same crowded, high-value bin the caution above named
+as the least trustworthy point in either figure. Flat at the sill is what
+"nothing left" looks like: the residuals are noise with no spatial
+organization worth naming. That agrees with the fan above, and the two agreeing is
 worth more than either alone, because they fail in different ways. The fan
 would miss a model that got the structure right and the level wrong; the
 residual variogram would miss one whose realizations were individually too

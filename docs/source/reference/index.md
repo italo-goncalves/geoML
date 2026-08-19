@@ -26,6 +26,7 @@ datasets
 data
 inducing
 drillhole
+geoh5
 ```
 
 ## Figures and export

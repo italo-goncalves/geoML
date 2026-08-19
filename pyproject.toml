@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geoml"
-version = "0.6.7"
+version = "0.6.8"
 description = "Machine learning for spatial data"
 authors = [
     {name = "Ítalo Gomes Gonçalves", email = "italogoncalves.igg@gmail.com"},
@@ -49,6 +49,13 @@ dev = [
     "myst-parser==5.1.0",
     "sphinx-rtd-theme==3.1.0",
 ]
+# The geoh5 interchange (`data/geoh5.py`): `pip install geoml[geoh5]`.
+# Floored at the version the round trips were verified against; the
+# `value_map` representation has moved between geoh5py releases, so an
+# older floor would be a guess presented as a fact.
+geoh5 = [
+    "geoh5py>=0.13",
+]
 
 [project.urls]
 Homepage = "http://github.com/italo-goncalves/geoML"
@@ -86,6 +93,7 @@ include = [
     "geoml/data/grids.py",
     "geoml/data/blocks.py",
     "geoml/data/meshes.py",
+    "geoml/data/geoh5.py",
     "geoml/data/drillhole.py",
     "geoml/plots/base.py",
     "geoml/plots/prepare.py",

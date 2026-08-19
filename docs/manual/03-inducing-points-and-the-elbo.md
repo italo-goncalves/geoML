@@ -132,24 +132,39 @@ variogram's. A **smooth field is summarized by few**, one or two hundred,
 while a short-range, high-nugget field needs many to have anything local
 to say. Too few shows up as an over-smoothed map that misses the highs.
 
-Too many mostly costs time, and it is worth being exact about what it does
-not cost. Here is the plainest version of this dataset — 259 Jura samples,
-a stationary model with a Gaussian likelihood, everything held but the
-inducing count, scored on the 100 sites nobody trained on:
+Too many costs time first, and it is worth being exact about what else it
+costs. Here is the plainest version of this dataset — 259 Jura samples, a
+stationary model with a Gaussian likelihood, everything held but the
+inducing count, three seeds averaged, scored on the 100 sites nobody
+trained on:
 
 | inducing points | rmse / sd | 90% coverage | predicted sd / data sd |
 |---|---|---|---|
-| 81 | 0.935 | 0.936 | 0.917 |
-| 169 | 0.930 | 0.926 | 0.873 |
-| 324 | 0.927 | 0.911 | 0.839 |
-| 625 | 0.932 | 0.894 | 0.804 |
+| 81 | 0.942 | 0.922 | 0.904 |
+| 169 | 0.937 | 0.911 | 0.859 |
+| 324 | 0.948 | 0.897 | 0.815 |
+| 625 | 0.952 | 0.879 | 0.782 |
+| 1225 | 0.960 | 0.870 | 0.762 |
+| 2401 | 0.967 | 0.863 | 0.752 |
 
-**The accuracy does not move** across nearly eight times the capacity.
-What moves is the width of the model's own uncertainty: the intervals
-narrow, carrying a nominal 90% band from mildly conservative to mildly
-optimistic. That drift is the thing to watch, and at this size it is not a
-reason to hold back — a model covering 0.89 where it promised 0.90 is a
-calibrated model.
+**The accuracy barely moves; the confidence keeps moving.** The error is
+flattest around 169 points — two thirds of the data count — and drifts up
+by three percent over the rest of the ladder, while the intervals narrow
+monotonically, carrying a nominal 90% band from mildly conservative to
+covering 0.86. The drift decelerates rather than running away: each
+doubling tightens less than the one before, so what is being approached is
+a floor, not a collapse. Up to the data count the reading is benign — a
+model covering 0.88 where it promised 0.90 is a calibrated model. Past the
+data count the extra capacity buys nothing here and slowly costs, in the
+proper scores as well as the coverage.
+
+Nor is the drift a law of the method, and the same sweep on Walker Lake
+says so: there the error keeps *improving* across the whole ladder
+(rmse/sd 0.97 down to 0.64) and the coverage never falls below nominal.
+Capacity converts into resolution where the field has structure the data
+can pin down, and into confidence where it does not — Jura's
+well-predicted elements behave like Walker under the hood, and its noisy
+ones drive the table above.
 
 **How that table is read matters more than the table**, because reading it
 wrong manufactures an alarming version of the same numbers. `predict`
@@ -157,19 +172,19 @@ reports the **ground**, with the likelihood's noise averaged out, so the
 simulations it stores describe a quantity no sample observes. Score those
 directly against assays — which is what `compute_metrics()` on the
 predicted container does — and the noise is missing from every interval:
-the 90% band above then reads 0.59 falling to 0.49 rather than 0.94 
-falling to 0.89, and the error *grows* with capacity, because a model with
-more capacity explains more of the variation as field and less as noise,
-so the omitted piece gets bigger. Chapter 13 develops this properly; the
-short version is that intervals of a *measurement* come from
-`predict_measurements`, which is what the `accuracy` figure and
+over the first four counts the 90% band then reads 0.59 falling to 0.49
+rather than 0.92 falling to 0.88, and the error *grows* with capacity,
+because a model with more capacity explains more of the variation as field
+and less as noise, so the omitted piece gets bigger. Chapter 13 develops
+this properly; the short version is that intervals of a *measurement* come
+from `predict_measurements`, which is what the `accuracy` figure and
 `cross_validate` both use.
 
 There is a tidy story about the kernel range here that does not survive
 being checked, and it is worth knowing that it does not. The range is a
 plain point estimate the objective never charges for, so one expects that
 as capacity grows the field is free to roughen — and the fitted range does
-fall, 3.9 km to 2.7 km, straight down that table. But freezing it at the
+fall, roughly by half, straight down that table. But freezing it at the
 value the smallest model chose makes the calibration *worse* at every
 count. The shrinking range is the model compensating, not the model
 failing.

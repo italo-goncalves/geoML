@@ -626,7 +626,10 @@ not anything is ever refined. `divided[c]` is the criterion.
 On a compact ore body in a barren domain, cut-off 1.0, three passes from a
 256-block start: **4309 blocks against 131 072** for the equivalent uniform
 model, 30x fewer, with the level-0 blocks at grade -0.17 to 0.66 and the
-finest spanning the cut-off.
+finest spanning the cut-off. *(Measured with this criterion alone, before
+the jump-levelling of §5.1 joined `refine`; §11 shows the combined
+behaviour on real data, where levelling roughly halves the saving in
+exchange for the measured accuracy gain.)*
 
 **The criterion reads the noise-free field.** Noise is the part of a block's
 spread that cutting cannot resolve, so a block straddling a cut-off only on
@@ -878,8 +881,8 @@ Not recoverable, and not worth faking: `as_cube`, `as_image`, `smooth` and
 
 Worked on the Macpass drillholes, which are not distributed with geoML —
 `datasets.macpass` takes the directory you downloaded them into. Every number
-below is from running it; the whole thing takes about a minute and a half on
-a GPU.
+below is from running it (last remeasured 2026-08-19, on 0.6.8); the whole
+thing takes about two and a half minutes on a GPU.
 
 ### 11.1 The data, and one deposit
 
@@ -937,7 +940,7 @@ Nothing here is new — the model is built and trained as always.
 warping = geoml.warping.ChainedWarping(
     geoml.warping.Softplus(1), geoml.warping.ZScore(1),
     geoml.warping.Spline(1, 8), geoml.warping.ZScore(1))
-inducing = geoml.inducing.from_kmeans(deposit, 400, seed=0)
+inducing = geoml.data.inducing.from_kmeans(deposit, 400, seed=0)
 root = geoml.latent.BasicInput(
     [inducing], transform=geoml.transform.Anisotropy3D(
         maxrange=120.0, midrange_fct=0.6, minrange_fct=0.25, azimuth=45.0))
@@ -945,8 +948,7 @@ gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
 
 model = geoml.models.VGPNetwork(
     deposit, "Zn_pct", geoml.likelihood.Gaussian(warping=warping), gp,
-    options=geoml.models.GPOptions(verbose=False, seed=1234,
-                                   training_samples=10))
+    options=geoml.models.GPOptions(verbose=False, training_samples=10))
 model.train_full(max_iter=120)
 ```
 
@@ -974,26 +976,37 @@ blocks = geoml.data.BlockSet3D(
 refined = geoml.models.refine(model, blocks, n_sim=20, verbose=True)
 ```
 
-    pass 1: cut 5485 block(s), 63235 now
-    pass 2: cut 18106 block(s), 189977 now
-    pass 3: cut 43802 block(s), 496591 now
-    refined in 74 s
+    pass 1: cut 5808 block(s) (5808 undecided, 0 crossed by a mesh, 0 to level a jump), 65496 now
+    pass 2: cut 19347 block(s) (19347 undecided, 0 crossed by a mesh, 0 to level a jump), 200925 now
+    pass 3: cut 51642 block(s) (48120 undecided, 0 crossed by a mesh, 3522 to level a jump), 562419 now
+    pass 4: cut 21371 block(s) (1795 undecided, 0 crossed by a mesh, 19576 to level a jump), 712016 now
+    pass 5: cut 12366 block(s) (10976 undecided, 0 crossed by a mesh, 1390 to level a jump), 798578 now
+    pass 6: cut 4160 block(s) (140 undecided, 0 crossed by a mesh, 4020 to level a jump), 827698 now
+    ...
+    pass 16: cut 1 block(s) (0 undecided, 0 crossed by a mesh, 1 to level a jump), 848579 now
+    refined in 112 s
 
-    496591 blocks, 25.6x fewer than uniform, full=True
-       level 0:  19355 blocks of  40.0 m
-       level 1:  25774 blocks of  20.0 m
-       level 2: 101046 blocks of  10.0 m
-       level 3: 350416 blocks of   5.0 m
+    848579 blocks, 15.0x fewer than uniform, full=True
+       level 0:  13745 blocks of  40.0 m
+       level 1:  42807 blocks of  20.0 m
+       level 2: 306995 blocks of  10.0 m
+       level 3: 485032 blocks of   5.0 m
 
-Half a million blocks against the 12.7 million a uniform 5 m model would need,
-and the 5 m ones are where the 4% surface runs.
+Well under a million blocks against the 12.7 million a uniform 5 m model
+would need, and the 5 m ones are where the 4% surface runs.
 
-Three passes, and nobody asked for three. `refine` runs until nothing needs
-cutting, and needs no count: each pass takes the blocks it splits one level
-finer, and the criterion never marks a block already at `max_levels`, so
-within that many passes every block is either settled or as fine as the
-lattice allows. How fine that is was decided when the block set was made,
-which is the one place it belongs.
+Sixteen passes, and nobody asked for sixteen. `refine` runs until nothing
+needs cutting, and needs no count: each pass takes the blocks it splits one
+level finer, and the criterion never marks a block already at `max_levels`.
+The first passes are almost all the cut-off criterion; from the third the
+jump-levelling of §5.1 joins, since each round of cutting can leave a coarse
+neighbour two levels behind, and the long tail is that levelling settling —
+thousands of blocks, then hundreds, then one. Under the straddle criterion
+alone this run stopped at three passes and 496 591 blocks (25.6x); the
+levelling roughly halves the saving, and §5.1 is the measurement of what
+that buys — a contour three times closer to the true surface. How fine any
+of it may go was decided when the block set was made, which is the one place
+it belongs.
 
 `refine` takes `split_on` to name which variables get a say, `tolerance` for
 how often a block must be found divided, and `include_noise`, which is passed
@@ -1052,10 +1065,10 @@ curves = prep.grade_tonnage(refined, "Zn_pct", density=2.96,
                             cutoffs=[1.0, 2.0, 4.0, 8.0])
 ```
 
-    >=  1.0 %Zn :    1.491e+09 t, at 3.71 %
-    >=  2.0 %Zn :    8.830e+08 t, at 5.72 %
-    >=  4.0 %Zn :    4.566e+08 t, at 8.42 %
-    >=  8.0 %Zn :    1.815e+08 t, at 12.55 %
+    >=  1.0 %Zn :    1.138e+09 t, at 3.76 %
+    >=  2.0 %Zn :    6.566e+08 t, at 5.47 %
+    >=  4.0 %Zn :    3.321e+08 t, at 8.13 %
+    >=  8.0 %Zn :    1.263e+08 t, at 12.33 %
 
 A grade shell comes from VTK rather than marching cubes, there being no
 rectangular array to give it:
@@ -1064,14 +1077,17 @@ rectangular array to give it:
 shell = refined.get_contour("Zn_pct", 4.0)
 ```
 
-    4% shell: Surface3D, 57301 triangles, closed=False
+    4% shell: Surface3D, 194202 triangles, closed=False
 
 Note the type. It came back a `Surface3D` and not a `Solid3D`, which is the
 honest answer: the shell is cut by the edge of the modelled box, so it is not
 a body and cannot say what volume it encloses. That is the only cause left —
-tearing where the mesh changes level is handled inside `get_contour` now
-(§5.1.1), and this run predates that. `heal()` is there when the geometry is
-nearly right.
+tearing where the mesh changes level is handled inside `get_contour` (§5.1.1),
+which is also why the count is large: the blocks a surface runs through are
+cut to the finest size in the mesh handed to VTK. `get_contour(...,
+simplify=...)` decimates it on the way out within a stated error budget, and
+`close="above"`/`"below"` is the argument that pads the box so the shell
+closes into a body. `heal()` is there when the geometry is nearly right.
 
 ### 11.7 Saving it
 

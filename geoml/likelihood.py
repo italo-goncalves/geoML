@@ -493,7 +493,7 @@ class _Likelihood(_gpr.Parametric):
             initializer=(blank, blank, blank))
         return mean, _tf.maximum(second - 2 * drawn * mean + mean ** 2, 0.0)
 
-    def initialize(self, y):
+    def initialize(self, y, weights=None):
         pass
 
 
@@ -539,8 +539,8 @@ class _ContinuousLikelihood(_Likelihood):
         self.warping = self._register(warping)
         self.sharpness = sharpness
 
-    def initialize(self, y):
-        self.warping.initialize(y)
+    def initialize(self, y, weights=None):
+        self.warping.initialize(y, weights)
 
     def _column_quadrature(self):
         """Whether the latent expectation can be taken one column at a time.

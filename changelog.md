@@ -1,3 +1,273 @@
+## version 0.6.8
+* **The manual's numbers are measured again, and the figures with them.**
+All 17 chapters rerun on current code — the committed figures predated
+the 0.6.5 MAP priors and the 0.6.6 spline initialization — and all 22
+regenerated figures are committed with the prose that quotes them.
+Chapter 3's capacity table now runs to 2401 inducing points, from the
+three-seed sweep that answered the standing §7 question: accuracy is
+flattest at about two thirds of the data count, the interval tightening
+decelerates toward a floor rather than running away, and Walker Lake
+improves across the whole ladder — capacity becomes resolution where the
+data can pin structure, and confidence where it cannot. Chapter 16's
+inducing sweep was remeasured (metals flat to the second decimal, as
+before; the rock's accuracy now wobbles and is lowest at the largest
+set), chapter 13's residual-variogram sentence was corrected to the
+fresh figure (the shortest bin rides high — the crowded-bin caveat the
+chapter already carries), and every other number-bearing prose claim
+checked against the fresh output held, Portlandian's zeros included.
+* **The block-model design record reruns on today's `refine`.** §11 of
+`docs/variable-block-models.md` remeasured on Macpass: sixteen passes
+now — the jump-levelling criterion joins from pass 3 and settles in a
+long tail — landing at 848 579 blocks, 15.0x fewer than uniform, against
+the straddle-only 496 591 at 25.6x; the halved saving is what §5.1
+measured as a contour three times closer to the true surface.
+Grade-tonnage and the 4% shell requoted (194 202 triangles, the blocks
+along the surface cut to the finest size), §7.3's synthetic headline
+dated to the criterion it was measured under. Found stale in passing and
+fixed: the walkthrough still passed `GPOptions(seed=...)`, a `TypeError`
+since 0.6.2, and reached the inducing helpers through the deprecated
+`geoml.inducing` shim.
+* **The last shared default kernel is gone.** `BasicGP`,
+`MultiStructureGP` and the fourier module's `BasicProjectedGP` took
+`kernel=Gaussian()` as a literal default, so every node built without a
+kernel shared one module-level object — verified harmless today (a bare
+`Gaussian` carries no trainable parameters) and armed the day a kernel
+gains one, or a parameterized kernel becomes a default. The default is
+`None` now, each node building its own fresh `Gaussian`. Saved models
+replay their recorded constructor arguments, so nothing changes for
+them; a test pins that two default-built nodes hold distinct kernels.
+* **One declustering column, and everything downstream shares it.**
+`container.decluster(on=, cell=)` computes cell-declustering weights and
+keeps them as the metadata column `"declustering"` — a first-class
+per-location column with subsetting, Zarr and export for free, which is
+what metadata columns are. The census that forced it: the two existing
+consumers each swept their own cell size on their own values, so the
+same container could get different weights in different figures; with
+the initializers joining them, the inconsistency would have multiplied.
+  - **One call turns declustering on everywhere.** The `variogram`
+  figure reads the stored column when present (its internal
+  `variogram_score` then rides the very same weights);
+  `metrics.variogram_score` — arrays in, arrays out, no container —
+  gains an explicit `weights=` argument instead. Precedence everywhere:
+  explicit argument > stored column > computed on the fly. `on=` names
+  the variable driving the automatic cell sweep, defaulting to the only
+  continuous variable and refusing to guess among several.
+  - **The warping initializers start declustered.** The model fetches
+  the stored column at construction and threads it down
+  `likelihood.initialize` → `warping.initialize(x, weights=None)`:
+  `ZScore` takes weighted moments (and weighted winsor fences when
+  robust), `Spline` places its knots on the weighted empirical CDF —
+  with the tail floor counted in **Kish's effective sample size** rather
+  than in rows, since a region carried by many light rows is still the
+  sample it weighs, and equal weights reproduce `count/(n+1)` exactly.
+  Warpings with nothing to weight accept and ignore; `None` everywhere
+  is the start it always was, bit for bit. The declustered start on a
+  duplicated-region sample lands where the plain start on the clean
+  sample does, which is the test.
+  - A subset carries its parent's weights by value — the `"fold"`
+  column's convention — so they are a snapshot, recomputed after
+  subsetting when it matters. Said in the docstring rather than solved
+  by magic.
+  - **`Rotation`'s ICA is seeded from the package RNG now.** Found by a
+  test threshold that moved when the batch around it changed: unseeded,
+  FastICA draws from numpy's *global* state, which made the rotation the
+  one data-dependent start `geoml.set_seed` did not reproduce — a gap in
+  the 0.6.2 one-knob unification, closed. The affected test seeds itself
+  and means one thing now.
+  - Also here, the type check over the touched files: two diagnostics
+  that had shipped silently with the reliability commit (bare `labels`
+  access on the `_Variable` base) and the `weights` argument rebound in
+  `variogram_score` against the house rule — repaired, the list clean.
+  - The variogram-based kernel initialization that was planned alongside
+  this is **dropped, on the user's call**: too much work for machinery
+  this library exists to replace. The experimental variogram stays what
+  the manual sells it as — a check, never a fitting surface.
+* **A reliability diagram, on both plotting backends.** `reliability` on
+`Explorer` and `Interactive`, the counting in `prepare.reliability` — the
+categorical half of what `accuracy` asks of a continuous variable, and
+the first of the categorical follow-ups the confusion matrix opened.
+  - One curve per category: the locations binned by the probability the
+  model assigned to it (**equal-count** bins — for a rare category the
+  claims pile up near zero, and equal width would leave most bins
+  holding nothing; pass edges for equal width), each bin's mean claim
+  against the share of its locations actually measured as that
+  category. The legend carries each curve's expected calibration error,
+  the count-weighted mean distance from the diagonal. A constant claim
+  comes back as one point rather than an error, so one degenerate
+  category cannot blank the figure.
+  - The same locations count as in `confusion_matrix` — the shared truth
+  side now lives in `_measured_categories` — and **the predicted label
+  is what says a location was predicted at all**: a category's
+  `probability` initializes to zero, not to absence, so an unpredicted
+  container would otherwise read as a model claiming zero everywhere.
+  Caught by the test that asks an unpredicted container to say so.
+  - The plotly twin keeps the bin counts in `text`, deliberately not
+  `customdata`: that slot is the dashboard's contract for container
+  rows, and a bin is not a location.
+  - Same honesty caveat as the whole model-checking family: only honest
+  on data the model has not seen, the out-of-fold container being the
+  honest input. Five tests on the counting, one per backend on the
+  figures.
+* **geoh5 interchange, phase one: surfaces and points.** The first cut of
+the geoh5 plan (the octree and block-model halves are the later phases):
+`Surface3D`/`Solid3D`/`Mesh3D` and `PointData` now read and write Mira
+Geoscience's workspace format, which is what **Geoscience ANALYST — a
+free viewer — opens**, so `to_geoh5` turns that viewer into a 3D screen
+for geoML's meshes and point predictions.
+  - The dependency is an optional extra (`pip install geoml[geoh5]`,
+  `geoh5py >= 0.13` — floored at the verified version, the `value_map`
+  representation having moved between geoh5py releases), imported lazily
+  inside `data/geoh5.py` and never before a file is asked for. CI
+  installs the extra so the tests run rather than skip; without it they
+  skip whole, and the package works untouched.
+  - A workspace accumulates: writing into an existing file adds the
+  object beside what is there, `name=` says which object to read when a
+  file holds several, and `geoml.data.geoh5.contents` lists what there
+  is to name. Reading a path that does not exist raises instead of
+  quietly creating an empty workspace, which is what `geoh5py` itself
+  would do with a typo.
+  - Surfaces travel as geometry and classify on the way back through
+  `mesh3d`, exactly the `from_dxf` convention — including the
+  degenerate-face drop, a foreign file not being ours to trust. Points
+  carry their columns off the same `_export_leaves` enumeration every
+  export drives, named in the `pretty` style, with coded attributes as
+  geoh5's own *referenced* data (codes shifted by one: geoh5 reserves 0
+  for "Unknown" where geoML's missing is -1) and the name-to-path table
+  in the object's metadata under `geoml_paths`. Imported columns become
+  measured variables — float as continuous, referenced as categorical,
+  "Unknown" as not measured; what the file has no room to say (which
+  column was a prediction, whose tree it belonged to) is not guessed at.
+  - One geoh5py fact recorded where it bit: a `Surface` *is a* `Points`
+  by inheritance, so the object lookup matches on exact type — reading
+  "the points" out of a workspace must not hand back a surface.
+  - Nine tests, round-tripping both mesh kinds, the accumulating
+  workspace, the name errors, missing values in both column kinds, and
+  the paths table; `pytest.importorskip` guards the lot.
+* **geoh5 interchange, phase two: block models.** `BlockSet3D.to_geoh5`
+and `from_geoh5`, against geoh5's Octree object. The subclass question
+the phase opened with — a `BlockSet3D` subclass in 1:1 correspondence
+with geoh5 — dissolved under measurement: **the correspondence already
+exists at `discretization=(2, 2, 2)`, which is the constructor's
+default**, because a block's origin and size in base cells are an octree
+cell's `I J K NCells` as they stand. The two facts that could have
+justified the class both fell to geoh5py's own behaviour, probed before
+any code was written: axis counts must be powers of two, but **partial
+coverage is legal**, so export pads the counts and writes no padding
+cells — nothing contaminates a round trip, no phantom blocks, and the
+box comes back exact; and cell order is preserved end to end, so values
+ride with no reordering. A model built any other way is refused with the
+message naming the fix, never resampled.
+  - **Rotation maps exactly, both directions**: geoh5 carries one
+  counter-clockwise rotation about the vertical axis about its origin
+  (verified numerically against geoh5py's own centroids), which is the
+  negated mining-convention azimuth once the row-vector application is
+  accounted for. A `RotatedBlockSet3D` with dip or rake is refused —
+  there is nowhere for them to go — and a rotated octree comes back a
+  `RotatedBlockSet3D` whose world centres match to the last figure. The
+  pivot difference (geoML turns about its first block's centre, geoh5
+  about its corner) cancels by exporting the *world* corner as the
+  origin.
+  - **`max_levels` rides in the object metadata**: it is refinement
+  capacity, which the cells alone cannot say once every coarse block has
+  been split; a foreign file without it gets the largest cell as the
+  root.
+  - **A foreign file is validated, then completed.** Cells must be
+  aligned power-of-two cubes free of overlaps — `dyadic_overlaps` in
+  `math/geometry.py`, one ancestor lookup per cell, since aligned dyadic
+  cubes are disjoint or nested and never partial — and whatever they do
+  not cover inside their own box is filled with unvalued blocks by
+  `dyadic_complement` (top-down, largest aligned cells first), a
+  metadata column named `imported` marking the difference: the
+  always-full design, not bent for the vendor octrees that carry only
+  the domain of interest. Both helpers are the lattice-validation core
+  the CSV importer item was scoped to need, built once here. An octree
+  written with its vertical axis running downward — origin at the top,
+  negative w, common in the wild — is normalized on the way in; a
+  flipped *horizontal* axis under a rotation would compose a reflection
+  no rotated block model can hold, and is refused.
+  - Nine more tests: refined and rotated round trips whole (geometry,
+  levels, values, box), the two export refusals, the partial fill, the
+  upside-down file, the overlap and reflection refusals.
+  - Also here, found by running the type check over the touched files:
+  two diagnostics latent in `blocks.py` since the 0.6.7 contour rewrite
+  (an unannotated `_contour_column` contract and a `cap` narrowing the
+  checker could not see) — repaired, the file list is clean again.
+* **geoh5 interchange: the `Workspace` object, and replace-on-rewrite.**
+From the first real ANALYST session: the files loaded — which also
+confirms the rotation sense and the partial-coverage padding against the
+actual viewer — but one file per object opens as one *project* per
+object, and a model's pieces belong together. So
+`geoml.data.geoh5.Workspace(path)` opens (or creates) one file and every
+`to_geoh5`/`from_geoh5`/`contents` now takes it in place of a path — a
+context manager, the file opened once for a whole model's exports
+instead of per call, readable back through the same open handle.
+  - The workspace's name, as ANALYST shows it, **is the file's name**:
+  geoh5py accepts a display name at creation and does not persist it —
+  measured, it reads back as "GEOSCIENCE" — so no name argument is
+  offered that would silently vanish on reload. Per-object names were
+  already there (`name=` on every `to_geoh5`).
+  - **Rewriting a name replaces the object** (`replace=True`, the new
+  default): re-running an export script is what the workflow *is*, and
+  without replacement every run doubled the project and made the name
+  unreadable back. `replace=False` keeps both, said out loud in the
+  ambiguity error. One geoh5py fact carried the design: entity removal
+  is deferred to `close`, so the live listings keep a ghost of anything
+  replaced — the wrapper remembers the removed uids and filters them,
+  which is what keeps a read-after-replace honest inside one session.
+  - Four more tests: a whole model through one open workspace and read
+  back without closing, replacement across sessions with the new values
+  winning, `replace=False` keeping both, and the in-session ghost.
+* **geoh5 interchange, the remaining pieces: regular block models,
+drillholes, and the workspace that reads like a dict.** The last three
+items of the geoh5 plan, plus the import ergonomics the user asked for.
+  - **`Workspace` is a mapping now.** Printing one lists what it holds —
+  name against geoh5 kind, drillhole groups included with their hole
+  counts — and `project["ore body"]` returns the geoML container the
+  object's kind calls for: a Surface classifies through `mesh3d`, Points
+  become `PointData`, an Octree a `BlockSet3D`, a BlockModel a
+  `Blocks3D`, a drillhole — or a whole drillhole group named as one — a
+  `DrillholeData`. Converted on demand, one name at a time, deliberately
+  not an eager dict: a workspace can hold more than fits in memory.
+  `in`, `len` and iteration over names come with it.
+  - **`Blocks3D.to_geoh5`/`from_geoh5`, against geoh5's BlockModel** —
+  the regular-grid sibling of the Octree. Cell data is stored u-fastest
+  where geoML's grids run x slowest, so every column transposes on the
+  way through, the ordering pinned against geoh5py's own centroids; a
+  rotated BlockModel comes back a `RotatedBlockSet3D` with
+  `max_levels=0` (there is no rotated regular-grid class, and a uniform
+  rotated model is exactly that — everything works, nothing refines); a
+  true tartan grid is refused with the uneven axis named, geoML having
+  no container for uneven blocks. The first-edge offset travels
+  separately from the origin, because it is local and must turn with
+  the rotation.
+  - **`DrillholeData.from_geoh5`.** Every hole a collar row, surveys
+  across with **geoh5's dip convention converted** (there a vertical
+  downward hole reads -90, so the database is built with
+  `dip_positive_down=False`), and each named property group holding
+  FROM/TO becomes one interval table of that name gathered across the
+  holes — referenced columns take the categorical role, depth-associated
+  readings (no interval to cover) stay out, and `name` narrows to one
+  group or one hole. What comes back composites, validates and converts
+  like any other drillhole database.
+  - A reference page for the module joins the docs, and the `data` page
+  stops advertising `RotatedBlocks3D` — a class that does not exist,
+  listed since the reference was written.
+* **geoh5 folders.** Every `to_geoh5` takes `folder="Surfaces/Ore"` — a
+path whose segments are geoh5 *container groups*, the folders ANALYST
+shows in its project tree, each created when it does not exist and
+reused when it does, so repeated exports share one tree rather than
+planting a second `Surfaces`. What follows from a tree follows
+everywhere: `contents()`, the workspace repr and iteration come
+folder-qualified (`Surfaces/Ore/hematite`; a root object keeps its bare
+name); `project[...]` and every `from_geoh5` accept the qualified name,
+with the bare one staying valid while it is unique and the ambiguity
+error answering with the qualified alternatives; and `replace` is
+**scoped to the folder**, so "hematite" under Ore and "hematite" under
+Waste can each be rewritten alone. Foreign files with folders were
+already readable — geoh5py lists objects flat — so this changes what
+geoML writes and how names render, not what it can open. Three tests:
+the tree (nesting, reuse, qualified listing, the ambiguity answer),
+the scoped replace, and the qualified name reaching the classmethods.
 ## version 0.6.7
 * **`BlockSet3D.get_contour(close=...)` returns a body again.** Reported
 against a real model: `close="above"` and `close="below"` both promise a

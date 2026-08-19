@@ -249,6 +249,11 @@ def test_a_chain_gaussianizes_between_its_rotations():
     greedy sweep of a projection-pursuit transform: each rotation runs its
     ICA on data the previous spline has already gaussianized.
     """
+    # the rotations' ICA draws from the package RNG (it used to draw from
+    # numpy's global state, which left the threshold below riding on
+    # whatever tests ran first); seeded, this test means one thing
+    import geoml
+    geoml.set_seed(42)
     rng = np.random.default_rng(6)
     source = np.stack([rng.exponential(size=500),
                        rng.uniform(size=500) ** 3,
@@ -267,3 +272,111 @@ def test_a_chain_gaussianizes_between_its_rotations():
     # because a spline gaussianized before it
     second = chain.warpings[4].parameters["rotation"].get_value().numpy()
     assert np.mean(np.max(np.abs(second), axis=1)) < 0.99
+
+
+# --------------------------------------------------------------------------- #
+# declustered starts
+# --------------------------------------------------------------------------- #
+def _duplicated(n=400, copies=8, seed=3):
+    """A sample with one region over-represented `copies` times, plus the
+    weights that undo it: the declustered start on the duplicated sample
+    should land where the plain start on the clean sample does."""
+    rng = np.random.default_rng(seed)
+    clean = rng.normal(size=(n, 2)) * np.array([1.0, 2.0]) + 0.5
+    crowd = clean[:50]
+    stacked = np.concatenate([clean] + [crowd] * (copies - 1))
+    weights = np.concatenate([
+        np.ones(50) / copies, np.ones(n - 50),
+        np.full(50 * (copies - 1), 1.0 / copies)])
+    return clean, stacked, weights
+
+
+def test_a_declustered_zscore_ignores_the_duplicates():
+    clean, stacked, weights = _duplicated()
+
+    plain = wp.ZScore(2)
+    plain.initialize(clean)
+    weighted = wp.ZScore(2)
+    weighted.initialize(stacked, weights=weights)
+
+    assert np.allclose(
+        weighted.parameters["mean"].get_value().numpy(),
+        plain.parameters["mean"].get_value().numpy())
+    assert np.allclose(
+        weighted.parameters["std"].get_value().numpy(),
+        plain.parameters["std"].get_value().numpy())
+
+
+def test_a_declustered_robust_zscore_moves_its_fences_too():
+    clean, stacked, weights = _duplicated()
+
+    plain = wp.ZScore(2, robust=True)
+    plain.initialize(clean)
+    weighted = wp.ZScore(2, robust=True)
+    weighted.initialize(stacked, weights=weights)
+
+    # the weighted fences interpolate where the plain ones take order
+    # statistics, so the agreement is close rather than exact
+    assert np.allclose(
+        weighted.parameters["mean"].get_value().numpy(),
+        plain.parameters["mean"].get_value().numpy(), atol=0.02)
+    assert np.allclose(
+        weighted.parameters["std"].get_value().numpy(),
+        plain.parameters["std"].get_value().numpy(), rtol=0.02)
+
+
+def test_a_declustered_spline_places_its_knots_on_the_clean_cdf():
+    clean, stacked, weights = _duplicated()
+
+    plain = wp.Spline(2, 10)
+    plain.initialize(clean)
+    weighted = wp.Spline(2, 10)
+    weighted.initialize(stacked, weights=weights)
+
+    for dim in range(2):
+        for side in ("left", "right"):
+            name = f"warped_partition_{side}_{dim}"
+            assert np.allclose(
+                weighted.parameters[name].get_value().numpy(),
+                plain.parameters[name].get_value().numpy(), atol=0.02)
+
+
+def test_no_weights_is_the_start_it_always_was():
+    values = _skewed()
+    old = wp.ZScore(2)
+    old.initialize(values)
+    new = wp.ZScore(2)
+    new.initialize(values, weights=None)
+    assert np.array_equal(old.parameters["mean"].get_value().numpy(),
+                          new.parameters["mean"].get_value().numpy())
+    assert np.array_equal(old.parameters["std"].get_value().numpy(),
+                          new.parameters["std"].get_value().numpy())
+
+
+def test_a_stored_column_reaches_the_warping_through_the_model():
+    """`container.decluster()` once, and the model's warping starts
+    declustered -- the threading from metadata to `initialize`."""
+    import pandas as pd
+    import geoml
+
+    clean, stacked, weights = _duplicated(n=100, copies=4)
+    rng = np.random.default_rng(9)
+    coords = rng.uniform(0, 100, (len(stacked), 3))
+    point = geoml.data.PointData(
+        pd.DataFrame(coords, columns=["X", "Y", "Z"]), ["X", "Y", "Z"])
+    point.add_continuous_variable("v", stacked[:, 0])
+    point.add_metadata("declustering", weights)
+
+    inducing = geoml.data.Grid3D(start=[0, 0, 0], n=[3, 3, 3],
+                                 step=[50, 50, 50])
+    model = geoml.models.VGPNetwork(
+        point, "v",
+        geoml.likelihood.Gaussian(wp.ZScore(1)),
+        geoml.latent.BasicGP(geoml.latent.BasicInput(inducing), size=1),
+        options=geoml.models.GPOptions(verbose=False))
+
+    warping = model.likelihoods[0].warping
+    share = weights
+    expected = (share * stacked[:, 0]).sum() / share.sum()
+    assert np.isclose(
+        float(warping.parameters["mean"].get_value().numpy()[0]), expected)
