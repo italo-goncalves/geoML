@@ -525,6 +525,97 @@ def test_a_measured_category_the_model_never_calls_keeps_its_row():
     assert np.isclose(table["agreement"], 0.5)
 
 
+def test_a_calibrated_claim_sits_on_the_diagonal():
+    point, _ = _points(n=10, seed=10)
+    measured = np.array(["granite", "basalt", "basalt", "basalt", "basalt",
+                         "granite", "granite", "granite", "granite",
+                         "basalt"])
+    point.add_categorical_variable("rock", measurements=measured)
+    var = point.variables["rock"]
+    claims = np.array([0.2] * 5 + [0.8] * 5)
+    var.components["granite"].probability.values[:] = claims
+    var.components["basalt"].probability.values[:] = 1.0 - claims
+    var.predicted.values[:] = (claims > 0.5).astype(int)
+
+    panels = prepare.reliability(point, "rock", bins=2)
+
+    assert [panel["label"] for panel in panels] == ["basalt", "granite"]
+    for panel in panels:
+        # one granite in five at 0.2, four in five at 0.8 -- and the
+        # complement for basalt -- is exactly what was claimed
+        assert np.allclose(panel["observed"], panel["claimed"])
+        assert np.isclose(panel["ece"], 0.0)
+        assert panel["count"].sum() == 10
+
+
+def test_overconfidence_reads_as_distance_from_the_diagonal():
+    point, _ = _points(n=10, seed=11)
+    measured = np.array(["granite", "basalt"] * 5)
+    point.add_categorical_variable("rock", measurements=measured)
+    var = point.variables["rock"]
+    # 90% granite everywhere, and granite half the time: one constant
+    # claim comes back as one point, 0.4 from the diagonal
+    var.components["granite"].probability.values[:] = np.full(10, 0.9)
+    var.components["basalt"].probability.values[:] = np.full(10, 0.1)
+    var.predicted.values[:] = np.ones(10, dtype=int)
+
+    panels = prepare.reliability(point, "rock")
+
+    granite = panels[[p["label"] for p in panels].index("granite")]
+    assert np.allclose(granite["claimed"], [0.9])
+    assert np.allclose(granite["observed"], [0.5])
+    assert np.isclose(granite["ece"], 0.4)
+    assert np.array_equal(granite["count"], [10])
+
+
+def test_a_contact_claims_nothing_about_reliability():
+    point, _ = _points(n=6, seed=12)
+    a = np.array(["granite"] * 6)
+    b = np.array(["granite", "granite", "basalt",
+                  "granite", "granite", "basalt"])
+    point.add_rock_type_variable("rock", measurements_a=a, measurements_b=b)
+    var = point.variables["rock"]
+    var.components["granite"].probability.values[:] = np.ones(6)
+    var.components["basalt"].probability.values[:] = np.zeros(6)
+    var.predicted.values[:] = np.ones(6, dtype=int)
+
+    panels = prepare.reliability(point, "rock")
+
+    granite = panels[[p["label"] for p in panels].index("granite")]
+    # the two contact rows are out, and the four kept are all granite
+    assert np.array_equal(granite["count"], [4])
+    assert np.allclose(granite["observed"], [1.0])
+
+
+def test_reliability_says_when_nothing_was_predicted(jura):
+    with pytest.raises(ValueError, match="out of fold"):
+        prepare.reliability(jura, "Rock")
+
+
+def test_reliability_needs_categories_too(jura):
+    with pytest.raises(TypeError, match="categories"):
+        prepare.reliability(jura, "Elements")
+
+
+def test_the_reliability_figure_draws_one_curve_per_category():
+    point, _ = _points(n=10, seed=10)
+    measured = np.array(["granite", "basalt"] * 5)
+    point.add_categorical_variable("rock", measurements=measured)
+    var = point.variables["rock"]
+    claims = np.linspace(0.05, 0.95, 10)
+    var.components["granite"].probability.values[:] = claims
+    var.components["basalt"].probability.values[:] = 1.0 - claims
+    var.predicted.values[:] = (claims > 0.5).astype(int)
+
+    figure = geoml.plots.Explorer(point, categorical="rock") \
+        .reliability(bins=3)
+
+    axes = figure.axes[0]
+    assert len(axes.lines) == 3           # the diagonal and two categories
+    labels = [line.get_label() for line in axes.lines]
+    assert sum("ECE" in label for label in labels) == 2
+
+
 def test_the_matrix_says_when_nothing_was_predicted(jura):
     with pytest.raises(ValueError, match="out of fold"):
         prepare.confusion_matrix(jura, "Rock")

@@ -860,6 +860,62 @@ class Interactive(_base.Selection):
             legend={"x": 0.02, "y": 0.98, "xanchor": "left",
                     "yanchor": "top"})
 
+    def reliability(self, bins=10, height=None, width=None) -> "_go.Figure":
+        """
+        Whether a claimed probability is the frequency it claims.
+
+        One curve per category: the locations binned by the probability
+        the model assigned to it, each bin's mean claim against the share
+        of its locations actually measured as that category. On the
+        diagonal a 70% claim is that category 70% of the time; below it
+        the model is overconfident, above it hedging. The legend carries
+        each curve's expected calibration error, the count-weighted mean
+        distance from the diagonal.
+
+        The same locations count as in `confusion_matrix`: a contact has
+        two measurements and no one truth, and locations missing either
+        the measurement or the prediction are left out.
+
+        Only honest on data the model has not seen: at a training
+        location the claim was fitted to its own outcome. The out-of-fold
+        container `models.cross_validate` fills is the honest input.
+
+        Parameters
+        ----------
+        bins : int or sequence
+            How many bins, or where their edges are. A count gives
+            **equal-count** bins over the claimed probabilities; pass
+            explicit edges for equal width.
+        """
+        var = self._require_categorical("reliability")
+        panels = _prep.reliability(self.data, var.name, bins=bins)
+
+        figure = _go.Figure()
+        self._line(figure, [0, 1], [0, 1], REFERENCE, width=1.0,
+                   name="perfect", legend=True, dash="dash")
+        for i, panel in enumerate(panels):
+            figure.add_trace(_go.Scatter(
+                x=panel["claimed"], y=panel["observed"],
+                mode="lines+markers", marker={"size": 6},
+                line={"color": self._color(i, panel["label"]),
+                      "width": 1.8},
+                # the counts ride in `text`: `customdata` is the dashboard's
+                # slot for container rows, and a bin is not a location
+                text=panel["count"],
+                name="%s (ECE = %.2f)" % (panel["label"], panel["ece"]),
+                hovertemplate="claimed %{x:.2f}<br>observed %{y:.2f}"
+                              "<br>%{text} locations"
+                              "<extra></extra>"))
+
+        return self._finish(
+            figure, title="Reliability",
+            height=height or 520, width=width or 560,
+            xaxis={"title": {"text": "claimed probability"}},
+            yaxis={"title": {"text": "share measured as the category"},
+                   "scaleanchor": "x"},
+            legend={"x": 0.02, "y": 0.98, "xanchor": "left",
+                    "yanchor": "top"})
+
     def confusion_matrix(self, height=None, width=None) -> "_go.Figure":
         """
         What was measured against what the model called there, counted.

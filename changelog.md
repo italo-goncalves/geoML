@@ -1,4 +1,30 @@
 ## version 0.6.8
+* **A reliability diagram, on both plotting backends.** `reliability` on
+`Explorer` and `Interactive`, the counting in `prepare.reliability` — the
+categorical half of what `accuracy` asks of a continuous variable, and
+the first of the categorical follow-ups the confusion matrix opened.
+  - One curve per category: the locations binned by the probability the
+  model assigned to it (**equal-count** bins — for a rare category the
+  claims pile up near zero, and equal width would leave most bins
+  holding nothing; pass edges for equal width), each bin's mean claim
+  against the share of its locations actually measured as that
+  category. The legend carries each curve's expected calibration error,
+  the count-weighted mean distance from the diagonal. A constant claim
+  comes back as one point rather than an error, so one degenerate
+  category cannot blank the figure.
+  - The same locations count as in `confusion_matrix` — the shared truth
+  side now lives in `_measured_categories` — and **the predicted label
+  is what says a location was predicted at all**: a category's
+  `probability` initializes to zero, not to absence, so an unpredicted
+  container would otherwise read as a model claiming zero everywhere.
+  Caught by the test that asks an unpredicted container to say so.
+  - The plotly twin keeps the bin counts in `text`, deliberately not
+  `customdata`: that slot is the dashboard's contract for container
+  rows, and a bin is not a location.
+  - Same honesty caveat as the whole model-checking family: only honest
+  on data the model has not seen, the out-of-fold container being the
+  honest input. Five tests on the counting, one per backend on the
+  figures.
 * **geoh5 interchange, phase one: surfaces and points.** The first cut of
 the geoh5 plan (the octree and block-model halves are the later phases):
 `Surface3D`/`Solid3D`/`Mesh3D` and `PointData` now read and write Mira

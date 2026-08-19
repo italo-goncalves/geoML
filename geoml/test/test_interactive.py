@@ -633,6 +633,27 @@ def test_several_components_are_drawn_as_panels(trained):
     assert [a.text for a in figure.layout.annotations] == ["a", "b", "c"]
 
 
+def test_the_reliability_curves_carry_no_rows_to_link_on():
+    rng = np.random.default_rng(12)
+    coords = rng.uniform(0, 100, (10, 2))
+    point = geoml.data.PointData(pd.DataFrame(coords, columns=COLS), COLS)
+    point.add_categorical_variable(
+        "rock", measurements=np.array(["granite", "basalt"] * 5))
+    var = point.variables["rock"]
+    claims = np.linspace(0.05, 0.95, 10)
+    var.components["granite"].probability.values[:] = claims
+    var.components["basalt"].probability.values[:] = 1.0 - claims
+    var.predicted.values[:] = (claims > 0.5).astype(int)
+
+    figure = geoml.plots.Interactive(point, categorical="rock") \
+        .reliability(bins=3)
+
+    assert len(figure.data) == 3          # the diagonal and two categories
+    assert sum("ECE" in (trace.name or "") for trace in figure.data) == 2
+    # a bin is not a location: nothing here for a dashboard to link on
+    assert traces_with_rows(figure) == []
+
+
 def test_the_confusion_matrix_is_one_heatmap_reading_top_down():
     rng = np.random.default_rng(11)
     coords = rng.uniform(0, 100, (8, 2))

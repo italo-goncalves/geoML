@@ -700,6 +700,139 @@ def step_path(lo, hi, values):
     return _np.array(x), _np.array(y)
 
 
+def _measured_categories(var, name):
+    """The measured label per location, and the rows a score may use.
+
+    The truth side shared by `confusion_matrix` and `reliability`: labels
+    as strings — how the figures name categories everywhere, with the
+    missing code decoding to the empty string — and the rows narrowed to
+    the unambiguous ones: a contact carries two measurements, and where
+    they disagree (`boundary`) there is no one truth for a prediction to
+    be right about.
+    """
+    truth = getattr(var, "measurements_a", None)
+    if truth is None:
+        truth = getattr(var, "measurements", None)
+    if truth is None or getattr(truth, "labels", None) is None:
+        raise TypeError(
+            "%s %r holds no measured categories to score against"
+            % (type(var).__name__, str(name)))
+    measured = _np.asarray(truth.to_numpy()).astype(str)
+    keep = measured != ""
+    boundary = getattr(var, "boundary", None)
+    if boundary is not None:
+        keep &= ~_np.asarray(boundary.values, dtype=bool)
+    return measured, keep
+
+
+def reliability(container: "_data._SpatialData", name: str,
+                bins: _types.Bins = 10) -> list[dict]:
+    """
+    Whether a claimed probability is the frequency it claims.
+
+    The categorical half of what the accuracy figure asks of a continuous
+    variable: for each category, the locations are binned by the
+    probability the model assigned to it, and each bin's mean claim is
+    set against the share of its locations actually measured as that
+    category. On the diagonal a 70% claim is that category 70% of the
+    time; below it the model is overconfident, above it hedging. The
+    expected calibration error summarizes a curve as the count-weighted
+    mean distance from the diagonal.
+
+    The same locations count as in `confusion_matrix`: a contact carries
+    two measurements and no one truth, and locations missing either the
+    measurement or the prediction are left out.
+
+    Only honest on data the model has not seen: at a training location
+    the claim was fitted to its own outcome. The out-of-fold container
+    `models.cross_validate` fills is the honest input.
+
+    Parameters
+    ----------
+    container
+        Any container from the `data` module.
+    name
+        The name of a categorical variable holding measurements and
+        predicted probabilities.
+    bins
+        How many bins, or where their edges are. A count gives
+        **equal-count** bins over the claimed probabilities — for a rare
+        category the claims pile up near zero and for a dominant one near
+        one, and equal width would leave most bins holding nothing — so
+        pass explicit edges to ask for equal width instead.
+
+    Returns
+    -------
+    panels : list of dict
+        One per category, in the variable's own order: `label`;
+        `claimed` and `observed`, one pair per non-empty bin; `count`,
+        the locations in each; `ece`, the count-weighted mean
+        `|observed - claimed|`.
+
+    Raises
+    ------
+    TypeError
+        If the variable holds no measured categories or no components.
+    ValueError
+        If no location carries both a measurement and a probability.
+    """
+    var = variable(container, name)
+    measured, keep = _measured_categories(var, name)
+    components = getattr(var, "components", None)
+    called = getattr(var, "predicted", None)
+    if components is None or called is None:
+        raise TypeError(
+            "%s %r holds no categories with predicted probabilities"
+            % (type(var).__name__, str(name)))
+    # the predicted label is what says a location was predicted at all --
+    # a category's `probability` initializes to zero, not to absence, so
+    # an unpredicted container would otherwise read as a model claiming
+    # zero everywhere
+    keep = keep & (_np.asarray(called.to_numpy()).astype(str) != "")
+
+    panels = []
+    for label in var.labels:
+        claimed = _np.asarray(
+            components[label].probability.values, dtype=float).ravel()
+        rows = keep & _np.isfinite(claimed)
+        if not _np.any(rows):
+            raise ValueError(
+                "no location carries both a measured category and a "
+                "predicted probability of %r; predict on the data first -- "
+                "and note this figure is only honest out of fold (see "
+                "`models.cross_validate`)" % str(name))
+        hit = (measured[rows] == str(label)).astype(float)
+        claimed = claimed[rows]
+
+        if _np.all(claimed == claimed[0]):
+            # one constant claim is one point, not nothing to draw
+            panels.append({"label": str(label),
+                           "claimed": claimed[:1].copy(),
+                           "observed": _np.array([float(hit.mean())]),
+                           "count": _np.array([len(hit)]),
+                           "ece": float(abs(hit.mean() - claimed[0]))})
+            continue
+
+        edges = _bin_edges(claimed, bins)
+        which = _np.clip(
+            _np.searchsorted(edges, claimed, side="right") - 1,
+            0, len(edges) - 2)
+        count = _np.bincount(which, minlength=len(edges) - 1)
+        filled = count > 0
+        safe = _np.where(filled, count, 1)
+        claim = _np.bincount(which, weights=claimed,
+                             minlength=len(edges) - 1) / safe
+        freq = _np.bincount(which, weights=hit,
+                            minlength=len(edges) - 1) / safe
+        ece = float(_np.sum(count[filled]
+                            * _np.abs(freq - claim)[filled])
+                    / count.sum())
+        panels.append({"label": str(label), "claimed": claim[filled],
+                       "observed": freq[filled], "count": count[filled],
+                       "ece": ece})
+    return panels
+
+
 def confusion_matrix(container: "_data._SpatialData", name: str) -> dict:
     """
     Measured categories against predicted ones, counted.
@@ -741,24 +874,14 @@ def confusion_matrix(container: "_data._SpatialData", name: str) -> dict:
         If no location carries both.
     """
     var = variable(container, name)
-    truth = getattr(var, "measurements_a", None)
-    if truth is None:
-        truth = getattr(var, "measurements", None)
+    measured, keep = _measured_categories(var, name)
     called = getattr(var, "predicted", None)
-    if truth is None or called is None \
-            or getattr(truth, "labels", None) is None:
+    if called is None:
         raise TypeError(
-            "%s %r holds no measured and predicted categories to compare"
+            "%s %r holds no predicted categories to compare"
             % (type(var).__name__, str(name)))
-
-    # everything through `str`, which is how the figures name categories
-    # everywhere; the missing code decodes to the empty string on both sides
-    measured = _np.asarray(truth.to_numpy()).astype(str)
     predicted = _np.asarray(called.to_numpy()).astype(str)
-    keep = (measured != "") & (predicted != "")
-    boundary = getattr(var, "boundary", None)
-    if boundary is not None:
-        keep &= ~_np.asarray(boundary.values, dtype=bool)
+    keep = keep & (predicted != "")
     if not _np.any(keep):
         raise ValueError(
             "no location carries both a measured and a predicted category "
