@@ -29,6 +29,10 @@ import geoml._types as _types
 import geoml.data.containers as _data
 import geoml.viz.plotly as _py
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from geoml.data.geoh5 import Workspace as _GeoH5Workspace
+
 
 # canonical names for the three columns every interval table must have
 HOLE = "HOLEID"
@@ -1025,6 +1029,59 @@ class DrillholeData(_data._SpatialData):
     @property
     def _survey_count(self):
         return sum(1 for t in self._traces.values() if len(t.depth) > 1)
+
+    @classmethod
+    def from_geoh5(cls, workspace: "_types.PathLike | _GeoH5Workspace",
+                   name: "str | None" = None) -> "DrillholeData":
+        """
+        Reads drillholes from a geoh5 workspace.
+
+        Every hole becomes a collar row named as the file names it, its
+        survey stations come across with **geoh5's own dip convention
+        converted** — there a vertical downward hole reads -90, so the
+        object is built with `dip_positive_down=False` — and each named
+        *property group* holding FROM/TO columns becomes one interval
+        table of that name, gathered across the holes. Referenced
+        (coded) columns take the categorical role; depth-associated
+        readings, which cover no interval, are left out. `name` narrows
+        the read to one drillhole group, or to one hole.
+
+        Needs the `geoh5py` package: `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to read, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            A drillhole group, or a single hole, when the file holds
+            more than one.
+
+        Returns
+        -------
+        data : DrillholeData
+            Ready for validation, compositing and conversion, like any
+            other drillhole database.
+
+        Raises
+        ------
+        ValueError
+            If the workspace holds no drillholes, or none of the given
+            name.
+        """
+        import geoml.data.geoh5 as _geoh5io
+        collar, survey, tables = _geoh5io.read_drillholes(workspace, name)
+        data = cls(collar, survey if len(survey) else None,
+                   hole="HOLEID", x="X", y="Y", z="Z",
+                   dip="DIP", azimuth="AZIMUTH", depth="DEPTH",
+                   dip_positive_down=False)
+        for label, frame in tables.items():
+            text = [column for column in frame.columns
+                    if column not in ("HOLEID", "FROM", "TO")
+                    and not _pd.api.types.is_numeric_dtype(frame[column])]
+            data.add_intervals(label, frame,
+                               categorical=text if text else None)
+        return data
 
     def add_intervals(self, name: str, data: _pd.DataFrame,
                       on_error: str = "warn",

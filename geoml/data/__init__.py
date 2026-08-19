@@ -18,8 +18,9 @@ Spatial data, one module per concern: `base` the container tree (errors,
 paths, traversal, the attribute), `variables` the variable family,
 `containers` the point-based containers, `grids` the regular grids,
 `meshes` the triangulated surfaces and solids, `blocks` the block models,
-`io` the Zarr persistence, `drillhole` the drilling databases and
-`inducing` the inducing-point helpers.
+`io` the Zarr persistence, `geoh5` the Geoscience ANALYST interchange,
+`drillhole` the drilling databases and `inducing` the inducing-point
+helpers.
 
 This facade re-exports everything `geoml.data` held when it was one
 module, so `geoml.data.PointData` keeps resolving -- in user code and in
@@ -36,6 +37,10 @@ from geoml.data.io import *
 from geoml.data.base import _Attribute
 from geoml.data.variables import _Variable
 from geoml.data.containers import _SpatialData
+# `geoh5` imported as a module and never star-exported: its dependency is
+# an optional extra, loaded only inside its functions, so importing the
+# module here costs nothing -- and without it `geoml.data.geoh5.Workspace`
+# would only resolve after some `to_geoh5` call had imported it first.
 from geoml.data import (base, variables, containers, grids, meshes, blocks,
-                        io, drillhole, inducing)
+                        io, geoh5, drillhole, inducing)
 from geoml.data.drillhole import DrillholeData, IntervalTable

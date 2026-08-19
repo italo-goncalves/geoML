@@ -32,8 +32,13 @@ import vtk as _vtk
 import ezdxf as _ezdxf
 from ezdxf.render import MeshVertexMerger as _MeshVertexMerger
 
+import geoml._types as _types
 import geoml.math.geometry as _gmt
 from geoml.math.geometry import bounding_box
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from geoml.data.geoh5 import Workspace as _GeoH5Workspace
 
 from geoml.data.base import *
 from geoml.data.containers import *
@@ -587,6 +592,84 @@ class Mesh3D(_PointBased):
             mesh_data.vertices = points.tolist()
             mesh_data.faces = _np.asarray(self.triangles, dtype=int).tolist()
         document.saveas(filename)
+
+    @classmethod
+    def from_geoh5(cls, workspace: "_types.PathLike | _GeoH5Workspace",
+                   name: "str | None" = None) -> "Mesh3D":
+        """
+        Reads a triangulated surface from a geoh5 workspace.
+
+        A workspace holds any number of named objects; `name` says which
+        Surface to read, and may be left out when the file holds exactly
+        one. `geoml.data.geoh5.contents` lists what there is to name.
+
+        Only the geometry is read, as in `from_dxf`, with the normals
+        computed from the triangles. Needs the `geoh5py` package:
+        `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to read, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The Surface object to read, when the file holds more than one.
+
+        Returns
+        -------
+        mesh : Surface3D, Solid3D or Mesh3D
+            Whichever the geometry read calls for.
+
+        Raises
+        ------
+        ValueError
+            If the workspace holds no such Surface — the message lists
+            what it does hold.
+        """
+        # late, through the module: the geoh5 machinery must not load,
+        # nor its optional dependency be missed, before a file is asked for
+        import geoml.data.geoh5 as _geoh5io
+        points, triangles = _geoh5io.read_surface(workspace, name)
+        # a foreign file is not ours to trust, exactly as in `from_dxf`
+        points, triangles = _gmt.drop_degenerate_faces(points, triangles)
+        return mesh3d(points, triangles,
+                      _gmt.vertex_normals(points, triangles))
+
+    def to_geoh5(self, workspace: "_types.PathLike | _GeoH5Workspace",
+                 name: str = "Surface", replace: bool = True,
+                 folder: "str | None" = None) -> None:
+        """
+        Writes this surface into a geoh5 workspace, as a Surface object.
+
+        A workspace is what Geoscience ANALYST — a free viewer for the
+        format — opens as **one** project, so a model's pieces belong in
+        one file: writing into an existing path adds the object beside
+        what is there, and several exports in a row go fastest through an
+        open `geoml.data.geoh5.Workspace`, which holds the file open
+        across them.
+
+        Only the geometry travels, as in `export_dxf`: `to_zarr` is what
+        keeps a container whole. Needs the `geoh5py` package:
+        `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to write into, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The name the object gets in the workspace.
+        replace
+            Whether an existing Surface of this name, in this folder,
+            makes way — what a re-run export script means. `False` keeps
+            both, and reading that name back then requires saying which.
+        folder
+            Where the object sits in ANALYST's project tree, as a path —
+            `"Surfaces/Ore"` — each segment a group, created when it
+            does not exist and reused when it does. `None` is the root.
+        """
+        import geoml.data.geoh5 as _geoh5io
+        _geoh5io.write_surface(self, workspace, name, replace, folder)
 
     def export_micromine(self, points_filename="points",
                          triangles_filename="triangles",

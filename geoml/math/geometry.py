@@ -810,6 +810,114 @@ def trilinear_weights(discretization):
                               t[:, None, :], 1.0 - t[:, None, :]), axis=2)
 
 
+def dyadic_overlaps(origin, size):
+    """The cells of a dyadic tiling that sit inside a larger one.
+
+    Cells aligned to their own power-of-two size — origin a multiple of it,
+    per axis — are either disjoint or nested, never partially overlapping,
+    so overlap detection collapses to an ancestor lookup: a cell overlaps
+    iff the cube one of the present sizes above it is itself present. Built
+    for reading foreign octrees, whose files are not ours to trust.
+
+    Parameters
+    ----------
+    origin : array
+        `(n, 3)` integer cell origins, each a multiple of its cell's size.
+    size : array
+        `(n,)` integer cell sizes, powers of two.
+
+    Returns
+    -------
+    offending : array
+        Indices of the cells contained in some larger present cell; empty
+        when the tiling is sound.
+    """
+    origin = _np.asarray(origin, dtype=_np.int64)
+    size = _np.asarray(size, dtype=_np.int64)
+    present = {(int(i), int(j), int(k), int(s))
+               for (i, j, k), s in zip(origin, size)}
+    offending = []
+    for row, ((i, j, k), s) in enumerate(zip(origin, size)):
+        for bigger in _np.unique(size[size > s]):
+            bigger = int(bigger)
+            parent = (int(i) // bigger * bigger, int(j) // bigger * bigger,
+                      int(k) // bigger * bigger, bigger)
+            if parent in present:
+                offending.append(row)
+                break
+    return _np.asarray(offending, dtype=_np.int64)
+
+
+def dyadic_complement(origin, size, shape, coarsest):
+    """The gaps of a dyadic tiling, as the largest aligned cells that fit.
+
+    What makes a partial octree full again: a foreign file usually carries
+    only the cells inside a domain of interest, and the always-full design
+    wants the rest present and marked rather than absent. Walks the box top
+    down — a candidate cube that is a present cell, or sits inside one, is
+    covered; one holding a present descendant splits into its eight
+    children; one holding nothing is a gap, emitted at that size.
+
+    Parameters
+    ----------
+    origin, size : arrays
+        The present cells, as in `dyadic_overlaps` — already checked not to
+        overlap, since a nested pair here would be read as coverage.
+    shape : array
+        `(3,)` the box to fill, in cells; each axis a multiple of
+        `coarsest`.
+    coarsest : int
+        The largest cell size to emit, a power of two; the recursion
+        starts on the grid of cubes this size.
+
+    Returns
+    -------
+    gap_origin, gap_size : arrays
+        The cells that complete the tiling; empty when it already is one.
+    """
+    origin = _np.asarray(origin, dtype=_np.int64)
+    size = _np.asarray(size, dtype=_np.int64)
+    shape = _np.asarray(shape, dtype=_np.int64)
+    coarsest = int(coarsest)
+
+    present = {(int(i), int(j), int(k), int(s))
+               for (i, j, k), s in zip(origin, size)}
+    # every dyadic cube standing above a present cell, so "holds something
+    # finer" is one lookup
+    above = set()
+    for (i, j, k), s in zip(origin, size):
+        bigger = int(s) * 2
+        while bigger <= coarsest:
+            above.add((int(i) // bigger * bigger,
+                       int(j) // bigger * bigger,
+                       int(k) // bigger * bigger, bigger))
+            bigger *= 2
+
+    gap_origin, gap_size = [], []
+    stack = [(int(i), int(j), int(k), coarsest)
+             for i in range(0, int(shape[0]), coarsest)
+             for j in range(0, int(shape[1]), coarsest)
+             for k in range(0, int(shape[2]), coarsest)]
+    while stack:
+        cube = stack.pop()
+        if cube in present:
+            continue
+        i, j, k, s = cube
+        if cube in above:
+            half = s // 2
+            stack.extend(
+                (i + di * half, j + dj * half, k + dk * half, half)
+                for di in (0, 1) for dj in (0, 1) for dk in (0, 1))
+            continue
+        gap_origin.append((i, j, k))
+        gap_size.append(s)
+    if not gap_origin:
+        return (_np.zeros((0, 3), dtype=_np.int64),
+                _np.zeros((0,), dtype=_np.int64))
+    return (_np.asarray(gap_origin, dtype=_np.int64),
+            _np.asarray(gap_size, dtype=_np.int64))
+
+
 def grow(corners, marked, rings):
     """Add `rings` of neighbouring blocks, through the corners blocks share.
 

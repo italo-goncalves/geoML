@@ -29,7 +29,7 @@ so that splitting keeps it tiling exactly. Design record:
 
 ```{eval-rst}
 .. automodule:: geoml.data.blocks
-   :members: Blocks3D, BlockSet3D, RotatedBlocks3D, RotatedBlockSet3D
+   :members: Blocks3D, BlockSet3D, RotatedBlockSet3D
    :show-inheritance:
 ```
 

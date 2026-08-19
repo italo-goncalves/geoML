@@ -36,7 +36,7 @@ jobs:
       - name: VTK system libraries
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
-        run: pip install -e . pytest
+        run: pip install -e .[geoh5] pytest
       - name: Structural tests
         run: >-
           python -m pytest -q geoml/test
@@ -68,7 +68,7 @@ jobs:
       - name: VTK system libraries
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
-        run: pip install -e . pytest
+        run: pip install -e .[geoh5] pytest
       - name: Full suite
         run: >-
           python -m pytest -q geoml/test

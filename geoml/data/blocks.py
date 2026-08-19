@@ -21,6 +21,9 @@ and the sub-block geometry behind the mesh assignments and `crossed_by`.
 import copy as _copy
 import itertools as _iter
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from geoml.data.geoh5 import Workspace as _GeoH5Workspace
 
 import numpy as _np
 import pandas as _pd
@@ -270,6 +273,102 @@ class Blocks3D(Grid3D):
 
         return self._finish_pyvista(pv_blocks, "blocks", simulations,
                                     include)
+
+    def to_geoh5(self, workspace: "_types.PathLike | _GeoH5Workspace",
+                 name: str = "Blocks", include: str = "**",
+                 simulations: "bool | int | Sequence[int]" = False,
+                 replace: bool = True,
+                 folder: "str | None" = None) -> None:
+        """
+        Writes this block model into a geoh5 workspace, as a BlockModel.
+
+        The geoh5 BlockModel is the regular-grid sibling of the Octree a
+        `BlockSet3D` writes; a uniform model maps onto it exactly.
+        Everything else is as `PointData.to_geoh5`: the workspace
+        accumulates, the columns ride with their path table, `replace`
+        makes a re-run export mean what it says. Needs the `geoh5py`
+        package: `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to write into, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The name the object gets in the workspace.
+        include
+            A path pattern selecting the columns to carry.
+        simulations
+            Which simulations to include: `False` for none (the default),
+            `True` for all, an `int` for the first n, or a sequence of
+            indices.
+        replace
+            Whether an existing BlockModel of this name, in this folder,
+            makes way.
+        folder
+            Where the object sits in ANALYST's project tree, as a path —
+            each segment a group, created when it does not exist and
+            reused when it does. `None` is the root.
+        """
+        import geoml.data.geoh5 as _geoh5io
+        _geoh5io.write_grid_blocks(self, workspace, name, include,
+                                   simulations, replace, folder)
+
+    @classmethod
+    def from_geoh5(cls, workspace: "_types.PathLike | _GeoH5Workspace",
+                   name: "str | None" = None
+                   ) -> "Blocks3D | RotatedBlockSet3D":
+        """
+        Reads a BlockModel from a geoh5 workspace.
+
+        Only a **uniform** spacing has a geoML container: a true tartan
+        grid — uneven cells along an axis — is refused with the axis
+        named. An unrotated model comes back as a `Blocks3D`; a rotated
+        one as a `RotatedBlockSet3D` with `max_levels=0`, there being no
+        rotated regular-grid class — the blocks, their rotation and
+        block-support prediction all work, and nothing can be refined.
+        Float cell data becomes continuous variables and referenced data
+        categorical ones, as in `PointData.from_geoh5`. Needs the
+        `geoh5py` package: `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to read, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The BlockModel to read, when the file holds more than one.
+
+        Returns
+        -------
+        blocks : Blocks3D or RotatedBlockSet3D
+            Whichever the file's rotation calls for.
+
+        Raises
+        ------
+        ValueError
+            If the workspace holds no such BlockModel, or its spacing is
+            uneven.
+        """
+        import geoml.data.geoh5 as _geoh5io
+        raw = _geoh5io.read_grid_blocks(workspace, name)
+        azimuth = -raw["rotation"]
+        matrix = _gmt.rotation_matrix(azimuth, 0.0, 0.0)
+        start = (raw["offset"] + raw["step"] / 2.0) @ matrix \
+            + raw["corner"]
+        if raw["rotation"] == 0.0:
+            blocks = Blocks3D(start, raw["shape"], raw["step"])
+        else:
+            blocks = RotatedBlockSet3D(start, raw["shape"], raw["step"],
+                                       azimuth=azimuth, max_levels=0)
+        for column, values in raw["floats"]:
+            blocks.add_continuous_variable(column, values)
+        for column, labels, values in raw["coded"]:
+            values = _np.asarray(values, dtype=object)
+            values[values == ""] = None
+            blocks.add_categorical_variable(column, labels=labels,
+                                            measurements=values)
+        return blocks
 
 
 def _ghost_shell(origin, size, shape):
@@ -529,7 +628,7 @@ def _painted_contour(origin, size, step, values, corner, value, label,
     return _np.concatenate(verts), _np.concatenate(faces)
 
 
-def _contour_column(blocks, path):
+def _contour_column(blocks, path) -> "tuple[VariablePath, _Attribute]":
     """The column a contour path names, and that path in full.
 
     A path naming a column (`"metals/zn/prediction"`) is taken as it stands;
@@ -976,6 +1075,182 @@ class BlockSet3D(PointData):
                 fresh.labels = column.labels
                 new.metadata[name] = fresh
         return new
+
+    # ------------------------------------------------------------------ #
+    # geoh5 interchange
+    # ------------------------------------------------------------------ #
+    def to_geoh5(self, workspace: "_types.PathLike | _GeoH5Workspace",
+                 name: str = "Blocks", include: str = "**",
+                 simulations: "bool | int | Sequence[int]" = False,
+                 replace: bool = True,
+                 folder: "str | None" = None) -> None:
+        """
+        Writes this block model into a geoh5 workspace, as an Octree.
+
+        The lattice maps one to one when `discretization` is `(2, 2, 2)`
+        — the default — since a geoh5 octree subdivides strictly two by
+        two by two; any other discretization is refused rather than
+        resampled. A workspace is what Geoscience ANALYST — a free
+        viewer for the format — opens as **one** project, so a model's
+        pieces belong in one file, as in `PointData.to_geoh5`; several
+        exports in a row go fastest through an open
+        `geoml.data.geoh5.Workspace`. Needs the `geoh5py` package:
+        `pip install geoml[geoh5]`.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to write into, or an open
+            `geoml.data.geoh5.Workspace`.
+        name
+            The name the object gets in the workspace.
+        include
+            A path pattern selecting the columns to carry, as in
+            `as_pyvista`.
+        simulations
+            Which simulations to include: `False` for none (the default),
+            `True` for all, an `int` for the first n, or a sequence of
+            indices.
+        replace
+            Whether an existing Octree of this name, in this folder,
+            makes way — what a re-run export script means. `False` keeps
+            both, and reading that name back then requires saying which.
+        folder
+            Where the object sits in ANALYST's project tree, as a path —
+            each segment a group, created when it does not exist and
+            reused when it does. `None` is the root.
+
+        Raises
+        ------
+        ValueError
+            If the discretization is not `(2, 2, 2)`, or the model
+            carries a dip or rake — geoh5 rotates about the vertical
+            axis alone.
+        """
+        import geoml.data.geoh5 as _geoh5io
+        _geoh5io.write_blocks(self, workspace, name, include, simulations,
+                              replace, folder)
+
+    @classmethod
+    def from_geoh5(cls, workspace: "_types.PathLike | _GeoH5Workspace",
+                   name: "str | None" = None) -> "BlockSet3D":
+        """
+        Reads an Octree from a geoh5 workspace, as a block model.
+
+        The octree cells become blocks on a `(2, 2, 2)` lattice, in the
+        file's own row order, with float cell data as continuous
+        variables and referenced data as categorical ones. A rotated
+        octree comes back as a `RotatedBlockSet3D`; an octree written
+        with its vertical axis running downward is normalized on the way
+        in. `name` says which Octree to read when the workspace holds
+        more than one; `geoml.data.geoh5.contents` lists what there is
+        to name. Needs the `geoh5py` package: `pip install geoml[geoh5]`.
+
+        A foreign file is not ours to trust, and the always-full design
+        does not bend for it: cells must sit aligned to their own
+        power-of-two size and free of overlaps, and whatever the cells
+        do not cover inside their box is filled with unvalued blocks, a
+        metadata column named ``imported`` marking the difference — a
+        vendor octree usually carries only the domain of interest.
+
+        Parameters
+        ----------
+        workspace
+            Path of the workspace to read, or an open `geoml.data.geoh5.Workspace`.
+        name
+            The Octree object to read, when the file holds more than one.
+
+        Returns
+        -------
+        blocks : BlockSet3D or RotatedBlockSet3D
+            Whichever the file's rotation calls for.
+
+        Raises
+        ------
+        ValueError
+            If the workspace holds no such Octree, or its cells are not
+            an octree this lattice can hold (misaligned, overlapping, or
+            reflected under a rotation).
+        """
+        import geoml.data.geoh5 as _geoh5io
+        raw = _geoh5io.read_blocks(workspace, name)
+        origin, size = raw["origin"], raw["size"]
+
+        safe = _np.where(size > 0, size, 1)
+        aligned = (size > 0) & ((size & (size - 1)) == 0) \
+            & (origin % safe[:, None] == 0).all(axis=1)
+        if not aligned.all():
+            raise ValueError(
+                "%d cell(s) of %s are not aligned power-of-two octree "
+                "cells, which is not a lattice this class can hold"
+                % (int(_np.count_nonzero(~aligned)), raw["filename"]))
+        offending = _gmt.dyadic_overlaps(origin, size)
+        if len(offending):
+            raise ValueError(
+                "%d cell(s) of %s sit inside larger cells of the same "
+                "file; an overlapping model has no one value per block"
+                % (len(offending), raw["filename"]))
+
+        # capacity from the writer's own record where there is one -- the
+        # cells alone cannot say it once every coarse block has been split
+        max_levels = int(raw["lattice"].get(
+            "max_levels", int(_np.log2(size.max()))))
+        max_levels = max(max_levels, int(_np.log2(size.max())))
+        root = 1 << max_levels
+
+        # the box on root multiples, in the file's own frame -- shifting
+        # by anything else would break the alignment just checked
+        low = (origin.min(axis=0) // root) * root
+        high = -(-(origin + size[:, None]).max(axis=0) // root) * root
+        origin = origin - low
+        shape = high - low
+
+        gap_origin, gap_size = _gmt.dyadic_complement(
+            origin, size, shape, root)
+        origin = _np.concatenate([origin, gap_origin])
+        size = _np.concatenate([size, gap_size])
+        level = max_levels - _np.log2(size).astype(_np.int64)
+
+        # the constructor takes the first coarse block's world *centre*;
+        # the corner offset turns with the rotation, the way every
+        # coordinate leaves the lattice frame
+        step = raw["step"]
+        azimuth = -raw["rotation"]
+        matrix = _gmt.rotation_matrix(azimuth, 0.0, 0.0)
+        centre_local = (low + root / 2.0) * step
+        start = centre_local @ matrix + raw["corner"]
+        if raw["rotation"] == 0.0:
+            blocks = BlockSet3D(start, shape // root, root * step,
+                                max_levels=max_levels)
+        else:
+            blocks = RotatedBlockSet3D(start, shape // root, root * step,
+                                       azimuth=azimuth,
+                                       max_levels=max_levels)
+
+        # the mixed levels go in the way `split` writes its own
+        blocks._origin = origin
+        blocks._level = level
+        blocks._fresh = _np.ones(len(origin), dtype=bool)
+        blocks._init_coordinates(blocks._centres(), ["X", "Y", "Z"])
+        blocks._bounding_box = blocks._lattice_bounding_box()
+
+        for column, values in raw["floats"]:
+            blocks.add_continuous_variable(
+                column, _np.concatenate([values,
+                                         _np.full(len(gap_size), _np.nan)]))
+        for column, labels, values in raw["coded"]:
+            values = _np.asarray(values, dtype=object)
+            values[values == ""] = None
+            values = _np.concatenate(
+                [values, _np.full(len(gap_size), None, dtype=object)])
+            blocks.add_categorical_variable(column, labels=labels,
+                                            measurements=values)
+        if len(gap_size):
+            blocks.add_metadata(
+                "imported",
+                _np.concatenate([_np.ones(len(raw["origin"]), dtype=bool),
+                                 _np.zeros(len(gap_size), dtype=bool)]))
+        return blocks
 
     def block_shares(self, split_on: "str | Sequence[str] | None" = None
                      ) -> "dict[str, _np.ndarray]":
@@ -1622,7 +1897,7 @@ class BlockSet3D(PointData):
             origin, size = self._origin, self._size
             step, cell_values = self.base_step, values
 
-        if close:
+        if cap is not None:
             # the box measured in whichever lattice the mesh is drawn on
             shape = _np.asarray(self.lattice_shape) * _np.round(
                 _np.asarray(self.base_step) / _np.asarray(step)
