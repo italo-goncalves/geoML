@@ -34,7 +34,7 @@ pip install git+https://github.com/italo-goncalves/geoML
 computation is in `float64` — geostatistical matrices are ill-conditioned and
 `float32` breaks the Cholesky factorizations.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.6.7.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.6.8.
 
 **Layout:** since 0.6.0, `geoml/` is five subpackages — `data/`, `latent/`,
 `math/`, `stats/`, `viz/` (plus the older `plots/`) — around a set of modules
