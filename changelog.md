@@ -77,6 +77,40 @@ skip is removed.
   transformation, and `docs/benchmarks/flow_warpings.py` is the fixed
   bar any future candidate — the CP-structured field, the discrete
   RQ coupling flow — must clear first.
+* **A rational-quadratic backbone for `Spline`, opt-in.**
+`math.interpolate.MonotonicRationalQuadraticSpline` is the monotone
+rational quadratic of Gregory and Delbourgo (1982) on Steffen's knot
+derivatives — a true drop-in for the monotonic cubic: same knots, same
+slopes, identical at the knots and on both linear extrapolation
+segments (with equal end derivatives the rational quadratic *is* the
+line), so `Spline(size, backbone="rq")` changes only the shape between
+knots and what that buys — an inverse that is one closed-form quadratic
+root per value where the cubic spends twelve Newton passes, taken in
+the cancellation-safe form that stays finite on linear segments, with
+the round trip at machine precision rather than at the iteration's
+5e-11 floor. `"cubic"` stays the default and always will: saved models
+replay the default they were built with. `test_rq_spline.py` pins the
+knots interpolated, monotonicity, the derivative against differences
+inside the knots and against the end slopes outside them, agreement
+with the cubic wherever both are linear, round trips both ways at
+1e-9, and the default untouched; the noise-integration harness holds
+the new backbone to the same log-determinant check as every warping.
+One thing learned writing the derivative test: the padded
+extrapolation segments span 1e6 units, so a *value* out there carries
+~1e-10 of cancellation — nothing for the value, but a central
+difference divides it by its step and reports a 1e-4 derivative error
+that is not there. Inherited from the cubic's padding, now written
+down.
+  - **Measured, and it earns the recommendation for new models.** At the
+  hot-path shapes (100k rows x 3, 10k x 7, traced, GPU) `backward` runs
+  in 4.7 and 3.2 ms against the cubic's 7.5 and 8.2 ms, `forward` no
+  slower, both round trips at machine precision; held-out on Jura and
+  Walker the two backbones agree to the third decimal on rmse, CRPS and
+  coverage (0.963/0.485 vs 0.964/0.485; 0.660/0.354 both), training time
+  the same, and a whole prediction with its measurement samples 2.6x
+  faster on Jura and 1.3x on Walker. Nothing degrades, so
+  `backbone="rq"` is what a new model should ask for; the default cannot
+  follow it without changing what saved models replay.
 * **`TensorProductFlow`: the CP-grid field, and the strongest Jura arm
 so far — still not the recommendation.** The flows now share a base
 (`_ContinuousFlow`: knots, solver, both directions, the `constants`

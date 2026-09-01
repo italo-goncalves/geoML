@@ -1125,6 +1125,139 @@ class MonotonicCubicSpline(CubicSpline):
             return d
 
 
+class MonotonicRationalQuadraticSpline(MonotonicCubicSpline):
+    """
+    The monotone rational-quadratic interpolant of Gregory and Delbourgo
+    (1982), on Steffen's knot derivatives.
+
+    Same knots, same slopes and the same linear extrapolation as the
+    monotonic cubic -- with equal derivatives at both ends of a segment
+    the rational quadratic *is* the straight line -- so it is a drop-in
+    for `MonotonicCubicSpline`. What differs is the segment between knots,
+    a ratio of two quadratics instead of a cubic, and that difference buys
+    the inverse: `invert` solves a quadratic in closed form, one formula
+    per value where the cubic needs twelve Newton passes, and the round
+    trip is at machine precision rather than at the iteration's floor.
+    Monotone whenever the secants and knot derivatives are non-negative,
+    which Steffen's derivatives guarantee.
+    """
+
+    @staticmethod
+    def _padded(x, y, d):
+        """The knots with one linear segment added at each end, exactly as
+        the cubic pads, so the two agree on the extrapolation segments."""
+        x_left = _tf.concat([x[:1] - 1e6, x], axis=0)
+        x_right = _tf.concat([x, x[-1:] + 1e6], axis=0)
+        y_left = _tf.concat([y[:1] - 1e6 * d[:1], y], axis=0)
+        y_right = _tf.concat([y, y[-1:] + 1e6 * d[-1:]], axis=0)
+        d_left = _tf.concat([d[:1], d], axis=0)
+        d_right = _tf.concat([d, d[-1:]], axis=0)
+        return x_left, x_right, y_left, y_right, d_left, d_right
+
+    @staticmethod
+    def _locate(bins, values):
+        """The bracket of each value among the padded knots, `[M, B]`."""
+        indices = _tf.searchsorted(
+            _tf.transpose(bins, [1, 0]), _tf.transpose(values, [1, 0]),
+            side='right')
+        return _tf.maximum(1, indices) - 1
+
+    @staticmethod
+    def _take(padded, indices):
+        gathered = _tf.gather(_tf.transpose(padded, [1, 0]), indices,
+                              batch_dims=1)
+        return _tf.transpose(gathered, [1, 0])
+
+    def interpolate(self, x, y, xnew, grad=False):
+        """
+        Rational-quadratic interpolation.
+
+        Args:
+            x: [N, B] tensor of knot x-coordinates. Must be sorted.
+            y: [N, B] tensor of knot y-coordinates.
+            xnew: [M, B] tensor of new x-coordinates to interpolate at.
+            grad: bool, if True, returns the derivative dy/dx at xnew.
+        """
+        with _tf.name_scope("rational_quadratic_interpolation"):
+            d = self._get_derivative(x, y)
+            x_l, x_r, y_l, y_r, d_l, d_r = self._padded(x, y, d)
+            indices = self._locate(x_l, xnew)
+            x_l, x_r = self._take(x_l, indices), self._take(x_r, indices)
+            y_l, y_r = self._take(y_l, indices), self._take(y_r, indices)
+            d_l, d_r = self._take(d_l, indices), self._take(d_r, indices)
+
+            h = _safe_width(x_r - x_l)
+            rise = y_r - y_l
+            s = rise / h
+            xi = (xnew - x_l) / h
+            cross = xi * (1.0 - xi)
+            denominator = s + (d_r + d_l - 2.0 * s) * cross
+
+            if grad:
+                numerator = d_r * xi ** 2 + 2.0 * s * cross \
+                    + d_l * (1.0 - xi) ** 2
+                return s ** 2 * numerator / denominator ** 2
+            numerator = s * xi ** 2 + d_l * cross
+            return y_l + rise * numerator / denominator
+
+    def invert(self, x, y, ynew, steps=None):
+        """
+        Solves `interpolate(x, y, t) == ynew` for `t`, in closed form.
+
+        A monotone map puts `t` in the interval whose index `ynew` occupies
+        among the y-knots, and inside that bracket `ynew = g(t)` is a
+        quadratic in the bracket coordinate: the root is a formula, taken
+        in the form that avoids cancellation, and the extrapolation
+        segments -- linear, so the quadratic term vanishes -- come out of
+        the same expression. `steps` is accepted for interface parity with
+        the cubic and ignored.
+
+        Parameters
+        ----------
+        x, y
+            Knot coordinates, `[N, B]`, with `x` sorted and `y` monotone in
+            it.
+        ynew
+            Values to invert, `[M, B]`.
+
+        Returns
+        -------
+        `t`, shaped like `ynew`.
+        """
+        with _tf.name_scope("rational_quadratic_inversion"):
+            d = self._get_derivative(x, y)
+            x_l, x_r, y_l, y_r, d_l, d_r = self._padded(x, y, d)
+            indices = self._locate(y_l, ynew)
+            x_l, x_r = self._take(x_l, indices), self._take(x_r, indices)
+            y_l, y_r = self._take(y_l, indices), self._take(y_r, indices)
+            d_l, d_r = self._take(d_l, indices), self._take(d_r, indices)
+
+            h = _safe_width(x_r - x_l)
+            rise = _safe_width(y_r - y_l)
+            s = rise / h
+            delta = ynew - y_l
+            w = d_r + d_l - 2.0 * s
+
+            # `a xi^2 + b xi + c = 0` with the root written as
+            # `2c / (-b - sqrt(b^2 - 4ac))`: it stays finite where `a`
+            # vanishes (a linear segment) and does not cancel where the
+            # segment is nearly flat. A value on the bracket's left knot
+            # has `c = 0` and the answer `0`, spelled out rather than
+            # divided out.
+            a = rise * (s - d_l) + delta * w
+            b = rise * d_l - delta * w
+            c = -s * delta
+            root = _tf.sqrt(_tf.maximum(b ** 2 - 4.0 * a * c, 0.0))
+            divisor = -b - root
+            xi = _tf.where(_tf.abs(divisor) > 0.0,
+                           2.0 * c / _tf.where(_tf.abs(divisor) > 0.0,
+                                               divisor,
+                                               _tf.ones_like(divisor)),
+                           _tf.zeros_like(c))
+            xi = _tf.clip_by_value(xi, 0.0, 1.0)
+            return x_l + xi * h
+
+
 class StatefulCubicSpline(_CubicSpline):
     """
     Stateful Cubic Spline.

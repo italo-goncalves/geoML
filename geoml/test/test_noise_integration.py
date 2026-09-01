@@ -30,6 +30,7 @@ def _cases():
     return [
         (wp.Identity(3), normal),
         (wp.Spline(3), normal),
+        (wp.Spline(3, backbone="rq"), normal),
         (wp.ZScore(3), normal),
         (wp.Center(3), normal),
         (wp.Softplus(3), positive),
@@ -145,6 +146,7 @@ def _log_det_cases():
     return [
         (wp.Identity(3), normal),
         (wp.Spline(3), normal),
+        (wp.Spline(3, backbone="rq"), normal),
         (wp.ZScore(3), normal),
         (wp.Center(3), normal),
         (wp.Scale(3), positive),

@@ -33,6 +33,7 @@ arithmetic, and cell declustering.
 ```{eval-rst}
 .. automodule:: geoml.math.interpolate
    :members: CubicConv1D, CubicConv2DSeparable, CubicConv3DSeparable,
-             CubicConvND, CubicSpline, MonotonicCubicSpline
+             CubicConvND, CubicSpline, MonotonicCubicSpline,
+             MonotonicRationalQuadraticSpline
    :show-inheritance:
 ```

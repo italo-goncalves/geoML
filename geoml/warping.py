@@ -256,7 +256,7 @@ class Spline(_Warping):
     n_knots : int
         Total number of knots.
     """
-    def __init__(self, size, knots_per_arm=5):
+    def __init__(self, size, knots_per_arm=5, backbone="cubic"):
         """
         Initializer for Spline.
 
@@ -265,6 +265,11 @@ class Spline(_Warping):
         knots_per_arm : int
             The number of knots used to build each side (positive and negative)
             of the spline.
+        backbone : str
+            The interpolant between the knots: `"cubic"` (the monotonic
+            cubic, the default) or `"rq"` (the monotonic rational
+            quadratic, whose inverse is a closed form rather than an
+            iteration). Same knots and slopes either way.
         """
         super().__init__()
         self._size_in = size
@@ -277,7 +282,14 @@ class Spline(_Warping):
                                 _gpr.CompositionalParameter(comp))
             self._add_parameter(f"warped_partition_right_{i}",
                                 _gpr.CompositionalParameter(comp))
-        self.spline = _gint.MonotonicCubicSpline()
+        if backbone == "cubic":
+            self.spline = _gint.MonotonicCubicSpline()
+        elif backbone == "rq":
+            self.spline = _gint.MonotonicRationalQuadraticSpline()
+        else:
+            raise ValueError(
+                "backbone must be 'cubic' or 'rq', got %r" % (backbone,))
+        self.backbone = backbone
         x_original = _tf.constant(
             _np.linspace(-5, 5, knots_per_arm * 2 + 1)[:, None],
             _tf.float64
