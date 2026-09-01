@@ -42,6 +42,7 @@ def _cases():
         (wp.Rotation(3), normal),
         (wp.ScaledSimplex(3), composition),
         (wp.ContinuousNormalizingFlow(3, inducing_points=10), normal),
+        (wp.TensorProductFlow(3, grid=7, rank=3), normal),
     ]
 
 
@@ -73,11 +74,10 @@ def test_a_warping_that_claims_to_be_elementwise_is(warping, data):
 
 def test_the_mixing_warpings_really_mix():
     """The other direction, for the ones where it can be seen at once. The
-    flow is left out: freshly initialized it is nearly the identity, which is
-    its own item on the to-do list."""
+    flow included since 0.6.9: it initializes near the identity, but near
+    is not at, and a nudge must couple the components even before training
+    moves it."""
     for warping, data in _cases():
-        if type(warping).__name__ == "ContinuousNormalizingFlow":
-            continue
         warping.initialize(data)
         if not warping.elementwise:
             assert _crosstalk(warping) > 1e-9

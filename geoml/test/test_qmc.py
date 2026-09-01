@@ -115,10 +115,10 @@ def test_qmc_lands_closer_to_the_posterior():
 
     x = tf.constant(grid.coordinates[:500], tf.float64)
     with geoml.latent.simulation_rule(False):
-        mu, var, sims_mc, _, _ = model.latent_network.predict(
+        mu, var, sims_mc, _ = model.latent_network.predict(
             x, n_sim=64, seed=[1234, 0])
     with geoml.latent.simulation_rule(True):
-        _, _, sims_qmc, _, _ = model.latent_network.predict(
+        _, _, sims_qmc, _ = model.latent_network.predict(
             x, n_sim=64, seed=[1234, 0])
 
     mu = mu.numpy()[:, :, 0]

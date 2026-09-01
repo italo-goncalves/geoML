@@ -6,9 +6,16 @@
 # because it downloads from sidc.be -- a release gate should not depend on
 # a third-party server being up.
 #
-# `test_manual.py` is the heaviest of them: a full pass over the manual's
-# seventeen chapters trains real models and takes about twenty minutes, so
-# it is a release gate and nothing else.
+# The release tier is TWO jobs, and the split is load-bearing: as one
+# pytest process the full suite killed the 16 GB runner itself on every
+# release tag from v0.6.6 to v0.6.8 ("the runner has received a shutdown
+# signal", mid-suite, no test failing -- the OOM signature of TensorFlow
+# training, matplotlib and pyvista RSS accumulating across 1200+ tests
+# plus the whole manual). `test_manual.py` -- seventeen chapters of real
+# model training, the heaviest single item and where the kills landed --
+# runs alone in its own process; everything else runs in the other. If
+# the manual job ever dies the same way, the next lever is one
+# subprocess per chapter inside `run_blocks.py`, not a longer timeout.
 
 name: tests
 
@@ -69,7 +76,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
         run: pip install -e .[geoh5] pytest
-      - name: Full suite
+      - name: Full suite, the manual aside
         run: >-
           python -m pytest -q geoml/test
+          --ignore=geoml/test/test_manual.py
           --deselect geoml/test/test_real_cases.py::test_sunspot_deep_model
+
+  manual:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: VTK system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
+      - name: Install the package
+        run: pip install -e .[geoh5] pytest
+      - name: The manual's chapters
+        run: python -m pytest -q geoml/test/test_manual.py

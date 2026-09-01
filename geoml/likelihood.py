@@ -399,6 +399,7 @@ class _Likelihood(_gpr.Parametric):
         -------
         (rows, variables, n_sim * n_nodes)
         """
+        self.warping.refresh()
         noise = self._measurement_values(n_nodes)
 
         return _tf.concat(
@@ -440,6 +441,7 @@ class _Likelihood(_gpr.Parametric):
         """
         if include_noise:
             return self.integrated_backward(sims)
+        self.warping.refresh()
         values = self._back_transform(sims)
         return values, _tf.fill(_tf.shape(values),
                                 _tf.constant(_np.nan, values.dtype))
@@ -470,6 +472,7 @@ class _Likelihood(_gpr.Parametric):
         mean : the integrated value, in the variable's own units
         variance : the spread of a measurement of it, same units
         """
+        self.warping.refresh()
         noise, value_weights, spread_weights = self._noise_values()
 
         blank = _tf.zeros(
@@ -555,6 +558,7 @@ class _ContinuousLikelihood(_Likelihood):
 
     def log_lik(self, mu, var, y, has_value, samples=None,
                 *args, **kwargs):
+        self.warping.refresh()
         y_warped, log_derivative = self.warping.forward(y)
 
         if self.size > 1:
@@ -1178,6 +1182,7 @@ class Mixture(_ContinuousLikelihood):
         var = _tf.constant(_np.atleast_2d(_np.transpose(latent_variance)).T,
                            _tf.float64)
         y = _tf.constant(_np.atleast_2d(_np.transpose(values)).T, _tf.float64)
+        self.warping.refresh()
         y_warped, _ = self.warping.forward(y)
 
         vals = _tf.sqrt(2 * var[:, :, None]) * _ROOTS_64[None, None, :] \

@@ -1,3 +1,142 @@
+## version 0.6.9
+* **The latent-node protocol is two primitives and one composer.** Every
+node used to implement `predict` twice over — a five-tuple with
+simulations, a two-tuple without, switched by `n_sim=0` — a remnant from
+when simulation was optional, unevenly kept (`LinearCombination` and
+`Multiply` crashed on the moment shape and worked around themselves),
+and the reason the network's own moment path quietly drew random
+numbers: `LinearCombination.propagate` drew one simulation per parent
+and discarded it, `ProductOfExperts` forced a draw at `n_sim=0`,
+`RadialTrend` asked its parent for simulations it never read — inside
+every training iteration of any network carrying them under a GP node.
+Now `propagate` carries the moments and stamps the per-batch state its
+node's draw needs (`_sim_state`, `_explained_var` — plain attributes,
+alive within one traced call, invisible to the refresh snapshot), a new
+`simulate(n_sim, seed)` draws from that state, and the base-class
+`predict` is the one composer pairing them. Simulations originate at GP
+nodes and are carried pathwise by the operations above them, so
+`simulate`'s recursion stops where the mathematics does; internal moment
+queries at other locations (`GPWalk`'s stepping, a refresh) go through
+stash-free doors (`interpolate`, `_walk`) and can never shadow a sweep's
+state. Every duplicated moment branch is gone — one predict where there
+were seventeen.
+  - **The interface is one shape now**: `predict` returns
+  `(mu, var, sims, explained_var)` and requires `n_sim >= 1`; `influence`,
+  computed and threaded through every node and read by nothing, is
+  dropped on the user's call. This closes the two-return-shapes half of
+  the long-standing typing item.
+  - **Bit-for-bit preserved**: a golden capture of nine networks covering
+  every node class (36 arrays — deep GPWalk chain, experts, products,
+  trends) is identical before and after, the draws being stateless so
+  the removed waste shifted no stream. `test_node_protocol.py` pins the
+  new guarantees: zero normals generated on the moment path (the
+  regression that used to hide in `LinearCombination`), `simulate`
+  before `propagate` refused with the rule in the message, `n_sim=0`
+  refused, the four-tuple's shapes.
+  - `ProjectedVGP`/`latent.fourier` keep their own protocol untouched,
+  awaiting their own rewrite.
+* **The continuous flow is rebuilt from the field up, and the gate's
+verdict is recorded: correct, and not superior.** The old
+`ContinuousNormalizingFlow` integrated two mismatched midpoint schemes
+(`backward(forward(y))` missed by 7.4 in original units on Jura), carried
+an ad-hoc log-determinant correction, re-ran its ten Choleskys inside
+every call, placed its anchors by an **unseeded** KMeans (the one start
+`set_seed` could not reproduce) and left them un-persisted, so a saved
+flow reloaded broken. The new field is a fixed function: Sobol anchors
+covering the `[-5, 5]` box (constructor-determined — nothing
+data-dependent to persist, nothing to seed, `initialize` reduced to a
+pass-through) crossed with regular time knots, the covariance separable
+as `K_space (x) K_time` so `refresh` is one small Cholesky per factor,
+and both directions integrate the *same* field through an adaptive
+Dormand-Prince solver with the augmented `(x, log_det)` state — the
+divergence analytic, the ad-hoc correction deleted. `test_cnf.py` pins
+the round trip at solver tolerance, the log-determinant against the
+numerical Jacobian, identity tails, save/reload, and — the trap worth
+remembering — **gradients reaching every parameter**: the solver's
+adjoint differentiates its state, Variables read inside the field and
+its `constants`, but *cuts tensors merely captured by the closure*,
+which silently detached `alpha_white` and `amp` from training in the
+first draft; the field now rides `constants`. The mixing test's flow
+skip is removed.
+  - **The refresh hoist**: `_Warping.refresh()` is a no-op hook the
+  likelihood calls once per entry point, so a warping with real state
+  pays for it per call instead of per backward — the old flow refreshed
+  inside every one of `integrated_backward`'s 64 node evaluations.
+  - **The gate's verdict, against the recorded baselines**: round trip
+  7.4 → 2.9e-2 on Jura (the residual is the marginal links' inverses
+  amplifying a latent-units error that is itself at tolerance) and
+  8.0e-2 → 4.1e-4 on Macpass; held-out crps/sd 0.455 on Jura — still
+  the best arm, now honestly — but 0.268 on Macpass against the
+  marginal chain's 0.234, at 4-10x the training and prediction cost of
+  the marginal arm (an exact adaptive solve is dearer than ten broken
+  midpoint steps, and prediction pays it once per noise node). A third
+  experiment in a row where ELBO gains from mixing flexibility do not
+  survive held-out scoring. **The standing recommendation is unchanged:
+  one initialized marginal transform.** The flow is now correct
+  machinery for the case that genuinely needs a learned joint
+  transformation, and `docs/benchmarks/flow_warpings.py` is the fixed
+  bar any future candidate — the CP-structured field, the discrete
+  RQ coupling flow — must clear first.
+* **`TensorProductFlow`: the CP-grid field, and the strongest Jura arm
+so far — still not the recommendation.** The flows now share a base
+(`_ContinuousFlow`: knots, solver, both directions, the `constants`
+contract) and a second representation joins the dense one: the field on
+the full `(size + 1)`-dimensional lattice — a regular grid per `[-5, 5]`
+axis crossed with the time knots — with the weight tensor a rank-`R`
+canonical polyadic sum of per-axis vectors (plus a component axis and a
+per-rank amplitude). Because the kernel is separable the field
+factorizes through the CP structure into one-dimensional kernel sums,
+`O(R (size * grid + knots))` per evaluation with the `grid^size * knots`
+tensor never formed (about 400 parameters at Jura's seven elements,
+against tens of millions of lattice entries), whitening acts axis by
+axis on the factors, and the divergence is exact one axis at a time.
+Every factor initializes at unit scale with the amplitude alone holding
+the field near identity, so no rank can start dead. `test_cnf.py` runs
+its whole battery over both representations.
+  - **The gate, user's prior `rank=5`**: Jura rmse/sd **0.924** — the
+  best arm outright, 4% under the marginal chain and 3% under the dense
+  flow — crps/sd 0.455 tied with the dense flow, coverage 0.871; Macpass
+  1.003/0.267, no better than the dense flow and still 14% behind the
+  marginal chain on crps; training 800 s on Jura, 2.5x the dense flow.
+  Same verdict shape, stronger Jura: **not superior on both**, and the
+  standing recommendation holds.
+  - **A chain's round trip is not the flow's.** The harness now reports
+  three round trips, and the flows' own latent-unit numbers sit at
+  solver tolerance (dense 2.4e-6, CP 5.4e-6) while the chain's max-abs
+  reads 0.3 to 14.6 in the data's units: one or two tail points that a
+  flow has moved into the `Spline`'s extrapolation zone, where the
+  inverse crosses `1 / slope` per unit — the mechanism the
+  `_OUTERMOST_SHARE` note already describes. Read the flow's number for
+  the flow and the mean for the chain; the max is a tail's.
+* **The flow-warping benchmark gate exists before any flow does.**
+`docs/benchmarks/flow_warpings.py` — on the user's call, the bar was
+built and baselined first, so the coming flow (discrete coupling or the
+CNF overhaul) faces measured numbers rather than a literature argument.
+Held-out rmse/sd, crps/sd, coverage, interval width, wall time and each
+chain's own `backward(forward(y))` round trip, on Jura and the Macpass
+assays (Ag/Pb/Zn as one vector variable, whole holes held out), against
+three arms: the standing marginal chain, a `RobustPCA` route, and the
+CNF as it stands. The baselines already earn their keep: **the two
+datasets disagree** — on Jura today's CNF leads every held-out score
+despite a back-transform that misses by 7.4 in original units where the
+honest chains sit at 1e-5, while on Macpass the marginal chain wins and
+the CNF's 1125-nat ELBO advantage buys nothing held-out — the same
+bound-versus-held-out divergence the trained-rotation experiment
+measured. Neither mixer clears the "definitely superior on both" gate,
+which is the criterion doing its job; a candidate is one more factory in
+`ARMS`.
+* **The release-tag CI job no longer dies of its own size.** As one
+pytest process the full suite killed the 16 GB GitHub runner on every
+release tag from v0.6.6 to v0.6.8 — "the runner has received a shutdown
+signal" mid-suite with every printed test green, the OOM signature of
+TensorFlow training, matplotlib and pyvista memory accumulating across
+1200+ tests plus the whole manual, with the kills landing in
+`test_manual`'s stretch. The tag tier is two jobs now: the suite minus
+the manual in one process, the manual's seventeen chapters alone in the
+other — same coverage, each process bounded. The workflow comment
+records the next lever (one subprocess per chapter) in case the manual
+job ever goes the same way.
+
 ## version 0.6.8
 * **The manual's numbers are measured again, and the figures with them.**
 All 17 chapters rerun on current code — the committed figures predated

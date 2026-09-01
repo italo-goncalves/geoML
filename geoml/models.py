@@ -924,7 +924,7 @@ class VGPNetwork(_GPModel):
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
             # prediction
-            mu, var, sims, _, _ = self.latent_network.predict(
+            mu, var, sims, _ = self.latent_network.predict(
                 x, x_var=x_var, n_sim=samples, seed=[seed, 0])
 
             mu = _tf.transpose(mu[:, :, 0])
@@ -1189,7 +1189,7 @@ class VGPNetwork(_GPModel):
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
         with _tf.name_scope("Prediction"):
-            pred_mu, pred_var, pred_sim, pred_exp_var, _ = \
+            pred_mu, pred_var, pred_sim, pred_exp_var = \
                 self.latent_network.predict(
                     x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0]
                 )
@@ -1385,7 +1385,7 @@ class VGPNetwork(_GPModel):
 
         def batch_measure(x, x_var, n_splits):
             with _latent.simulation_rule(self.options.qmc_simulations):
-                _, _, sims, _, _ = self.latent_network.predict(
+                _, _, sims, _ = self.latent_network.predict(
                     x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
             sims = _tf.split(_tf.transpose(sims, [1, 0, 2]),
                              self.lik_sizes, axis=1)
@@ -1461,7 +1461,7 @@ class VGPNetwork(_GPModel):
                 % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
 
         def batch_moments(x, x_var, n_splits):
-            mu, var, _, _, _ = self.latent_network.predict(
+            mu, var, _, _ = self.latent_network.predict(
                 x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
             mu = _tf.split(_tf.transpose(mu[:, :, 0]), self.lik_sizes, axis=1)
             var = _tf.split(_tf.transpose(var), self.lik_sizes, axis=1)
