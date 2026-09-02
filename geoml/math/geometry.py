@@ -631,6 +631,133 @@ def inside_solid(mesh, coordinates):
     return _np.asarray(selected["selected_points"]).astype(bool)
 
 
+def _circumradius(vertices):
+    """Circumradius of each simplex, `[n_simplices]`, from its vertices
+    `[n_simplices, n_dim + 1, n_dim]`. Solves for the circumcentre: the point
+    equidistant from every vertex. A flat simplex has no circumsphere and
+    reads as infinite, which is what excludes it from any hull."""
+    first = vertices[:, :1, :]
+    rest = vertices[:, 1:, :]
+    system = 2.0 * (rest - first)                              # [n, d, d]
+    target = (rest ** 2).sum(axis=2) - (first ** 2).sum(axis=2)
+    determinant = _np.linalg.det(system)
+    scale = _np.abs(system).max(axis=(1, 2)) + 1e-300
+    flat = _np.abs(determinant) < 1e-12 * scale ** system.shape[1]
+    safe = _np.where(flat[:, None, None], _np.eye(system.shape[1])[None],
+                     system)
+    centre = _np.linalg.solve(safe, target[:, :, None])[:, :, 0]
+    radius = _np.sqrt(((centre - first[:, 0, :]) ** 2).sum(axis=1))
+    return _np.where(flat, _np.inf, radius)
+
+
+class ConcaveHull:
+    """
+    The alpha shape of a point set: a concave hull at a chosen length.
+
+    The Delaunay triangulation's simplices are kept where their circumradius
+    is below `length`, so the hull follows the data at that scale -- it
+    fills the interior between drill fences closer than `length` apart and
+    leaves out a notch wider than that, where a convex hull would bridge
+    the notch and a ball around each sample would leave the interior out.
+    Built by `concave_hull`.
+
+    Attributes
+    ----------
+    points : array
+        The `(n_points, n_dim)` input.
+    length : float
+        The circumradius the simplices were kept under.
+    kept : array
+        One boolean per Delaunay simplex.
+    simplices : array
+        The kept simplices, as vertex indices into `points`.
+    boundary : array
+        The facets of kept simplices that face an unkept one or nothing --
+        `(n_facets, n_dim)` vertex indices: segments in 2D, triangles in 3D.
+    """
+
+    def __init__(self, points, length):
+        from scipy.spatial import Delaunay
+        points = _np.asarray(points, dtype=float)
+        if points.ndim != 2:
+            raise ValueError("points must be an (n_points, n_dim) array")
+        self.points = points
+        self.length = float(length)
+        self._delaunay = Delaunay(points)
+        radius = _circumradius(points[self._delaunay.simplices])
+        self.kept = radius < self.length
+        self.simplices = self._delaunay.simplices[self.kept]
+
+        # a facet is on the boundary when the simplex across it is unkept
+        # or absent; `neighbors[i, j]` is the simplex across the facet
+        # opposite vertex `j`
+        neighbors = self._delaunay.neighbors
+        across = _np.where(neighbors >= 0, self.kept[neighbors], False)
+        facets = []
+        n_vertices = self._delaunay.simplices.shape[1]
+        for i in _np.flatnonzero(self.kept):
+            for j in range(n_vertices):
+                if not across[i, j]:
+                    facets.append(_np.delete(self._delaunay.simplices[i], j))
+        self.boundary = _np.asarray(facets, dtype=int).reshape(
+            -1, n_vertices - 1)
+
+    def contains(self, coordinates):
+        """
+        Whether each location lies inside a kept simplex.
+
+        Parameters
+        ----------
+        coordinates
+            `(n, n_dim)` locations.
+
+        Returns
+        -------
+        inside : array
+            `(n,)` booleans.
+        """
+        coordinates = _np.asarray(coordinates, dtype=float)
+        index = self._delaunay.find_simplex(coordinates)
+        return _np.where(index >= 0, self.kept[_np.maximum(index, 0)], False)
+
+
+def concave_hull(points, length):
+    """
+    The concave hull of a point set at a length scale -- an alpha shape.
+
+    Parameters
+    ----------
+    points
+        `(n_points, n_dim)` sample locations, 2D or 3D.
+    length
+        The largest circumradius a Delaunay simplex may have and still be
+        part of the hull: a length in the coordinates' units, so a hull
+        "at 100 m" spans gaps in the data narrower than that and stops at
+        wider ones.
+
+    Returns
+    -------
+    ConcaveHull
+        With `contains(coordinates)` for the inside test and `boundary` for
+        the facets.
+
+    Raises
+    ------
+    ValueError
+        If the points do not span their space (fewer than `n_dim + 1` of
+        them, or all on a line or plane), which leaves nothing to
+        triangulate.
+    """
+    from scipy.spatial import QhullError
+    try:
+        return ConcaveHull(points, length)
+    except QhullError as error:
+        raise ValueError(
+            "a concave hull needs points that span their space -- at least "
+            "n_dim + 1 of them, not all on one line or plane; Qhull said: %s"
+            % str(error).splitlines()[0]) from None
+
+
 def bounding_box(points):
     """
     Computes a point set's bounding box and its diagonal.

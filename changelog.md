@@ -77,6 +77,40 @@ skip is removed.
   transformation, and `docs/benchmarks/flow_warpings.py` is the fixed
   bar any future candidate — the CP-structured field, the discrete
   RQ coupling flow — must clear first.
+* **Swath plots, with the two corrections that make them fair.** A swath
+compares the data's mean with the model's slab by slab along one axis
+— the check that *localizes* conditional bias where every score
+aggregates it away — and the raw version describes the drilling: the
+data mean follows the clustering, and the model mean over a whole grid
+includes air and waste the data never spoke for. `prepare.swath` and
+`Explorer.swath`/`Interactive.swath` fix both. The data's slab means are
+**declustered** — explicit weights, else the `"declustering"` column
+`container.decluster()` keeps, else cell weights computed on the spot,
+the precedence every declustered consumer shares — and the model's run
+only over the ground `where` names, each block at its own volume as
+`grade_tonnage` counts it. With simulations the band between two
+quantiles of the per-realization slab means is drawn, read a band of
+rows at a time and never held whole (a test pins it); the categorical
+sibling (`prepare.categorical_swath`) stacks the data's declustered
+category shares against the model's mean predicted probabilities. Slabs
+are of equal *width* — a slab is a place, not a value. Chapter 13 gains
+the figure, after the residual variogram, with the fairness argument in
+its prose.
+  - **The reach, as a container column.** `assign_from_data(data,
+  distance=, hull=, transform=)` writes a boolean metadata column
+  naming which locations the data informs: within `distance` of a
+  sample, inside the data's **concave hull** at a length `hull`, or
+  both — a hull with a margin. The hull is an alpha shape from a
+  Delaunay triangulation (`math.geometry.concave_hull`, simplices kept
+  under a circumradius), which fills the interior between drill fences
+  closer than its length, where a ball around each sample leaves a gap,
+  and leaves out a notch wider than it, where a convex hull bridges
+  across — both cases are tests. A `transform` from `geoml.transform`
+  is how drillhole anisotropy is said (dense down the hole, sparse
+  across), every length then read in the transformed units — the
+  package's own idiom, chosen over per-axis lengths. Being metadata, the
+  column survives Zarr, a block model's children inherit it across
+  `split` and `refine`, and `where=` takes it by name.
 * **A rational-quadratic backbone for `Spline`, opt-in.**
 `math.interpolate.MonotonicRationalQuadraticSpline` is the monotone
 rational quadratic of Gregory and Delbourgo (1982) on Steffen's knot

@@ -17,6 +17,7 @@ arithmetic, and cell declustering.
              weld, fan_triangulation, vertex_normals, area, components,
              single_valued, open_edges, reversed_edges, signed_volume,
              sheet_interpolator, sheet_elevation, inside_solid,
+             concave_hull, ConcaveHull,
              sub_block_index, unit_sub_grid, trilinear_weights
 ```
 
