@@ -90,3 +90,29 @@ def test_predict_returns_four_values():
     assert tuple(mu.shape) == (1, 5, 1)
     assert tuple(var.shape) == (1, 5)
     assert tuple(exp_var.shape) == (1, 5)
+
+
+def test_a_linear_head_on_the_input_trains_finite():
+    """`Linear.refresh` used to build the inducing variance from the
+    parent's inducing *points*, so a Linear node straight on an input fed
+    coordinates to the kernel as variances and the bound was NaN from the
+    first iteration."""
+    import geoml.kernels as kr
+    import geoml.likelihood as lk
+    import geoml.transform as tr
+    coords = np.asarray(geoml.data.Grid2D(start=[-5, -5], end=[5, 5],
+                                          n=[6, 6]).coordinates, dtype=float)
+    data = geoml.data.PointData.from_array(coords, ["X", "Y"])
+    data.add_continuous_variable("v", coords[:, 1])
+    root = geoml.latent.BasicInput(
+        geoml.data.Grid2D(start=[-5, -5], end=[5, 5], n=[7, 7]),
+        tr.Isotropic(3.0))
+    head = geoml.latent.Linear(root, size=3)
+    gp = geoml.latent.BasicGP(head, kernel=kr.Cubic())
+    model = geoml.models.VGPNetwork(
+        data, "v", lk.Gaussian(), gp,
+        options=geoml.models.GPOptions(verbose=False))
+    model.train_full(max_iter=3)
+    assert np.all(np.isfinite(model.training_log))
+    gp.refresh()  # eagerly, so the attribute is a value rather than a graph tensor
+    assert np.all(np.isfinite(np.asarray(head.inducing_points_variance[0])))

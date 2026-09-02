@@ -151,6 +151,79 @@ bytes, not backend: a container reopened from Zarr keeps every store on
 Zarr whatever its size, and small data must keep working. On a block
 model the same call used to ask for hundreds of gigabytes and take the
 session with it.
+* **Implicit surfaces, and faults as transforms.** `math.rbf.HermiteRBF`
+is a parameter-free implicit surface: a polyharmonic radial basis
+function field with a linear drift, zero at the points and with the
+normals as its gradient (the Hermite form, cubic basis), or with each
+normal turned into two off-surface points for the thin-plate and linear
+bases (Carr's form). Nothing about it trains and nothing is asked per
+point — normals may sit on a subset, at their own locations, or be one.
+`geometry.point_normals` derives them when absent, by local PCA with the
+sign propagated along a spanning tree and the root oriented toward the
+surface's concavity. The fit lives in a unit-extent frame (a cubic basis
+at metre scale conditions at 1e14), given normals go through a
+transform's Jacobian as covectors, `max_error` selects centres greedily,
+and `contour` hands the zero level set to `get_contour` as a mesh. On it,
+three transforms: `ImplicitFault`, `BellFault2D` for any fitted surface
+in any dimension, one extra coordinate that repels points across the
+fault; `FaultDisplacement`, which restores the hanging wall by a trainable
+`throw` along the fault's up-dip direction and, in three dimensions, a
+`strike_slip` along its strike, tangent to the surface by construction,
+so one kernel reads across it — the move is **fault-parallel flow**, each
+point following the level set of the field through it by a few midpoint
+steps (`flow_steps`), so material slides along a curved fault rather
+than stepping straight off it (`flow_steps=0` is the straight step along
+the frame at the point's foot; a frame read at the point itself sent
+neighbours different ways, measured); `profile="bell"` makes the throw a
+displacement profile over trainable extents along the fault's mean axes,
+largest at the centre and zero at the tip lines; `drag=True` trains the
+step's width as a drag zone, and `set_width` anneals it between phases
+from wide, where the bound is smooth in the throw, to sharp;
+`throw_from_markers(hanging, footwall)` reads the throw off one horizon
+seen on both walls by Gauss-Newton on the footwall markers' implicit
+surface, no bound needed — measured on a synthetic
+20 m offset: held-out RMSE 0.60 against 2.37 without it, the throw read
+as 20.4, at the learning rate the phased pattern uses, since the default
+schedule left it at a tenth; `models.search_throw`, which chooses a
+throw among candidates on the bound with the model restored between
+bursts, coarse then fine with `refine=`, for the cases where the throw
+does not train from zero at all (a categorical likelihood, two faults); `ImplicitFaultBlocks`, the
+repulsion's twin of the network — `ImplicitFault` objects with the
+same `(stopping, bounding, side)` triples, each coordinate the *trimmed*
+sign `amp · sign(s) · H(side · s_j)`, a composition of implicit
+functions that makes a fault that ends on another identically zero
+beyond it instead of fading over a reach (in decay mode the distance to
+the trimmed surface, `sqrt(s² + Σ max(0, −side · s_j)²)`, does the
+trimming); and `FaultNetwork`, several
+faults restored youngest first, each older surface refitted inside the
+graph on the coordinates the younger ones restore, with declared abutting
+relations. Every docstring cites its sources and
+`docs/implicit-surfaces.md` says what is taken from whom; the only
+original pieces are the concavity rule for derived normals and the
+repulsion coordinate as a kernel-space fault drift. Deleted with it: the
+commented-out `_RadialBasisFunction` kernels, and the `make_interpolator`
+methods of `Grid3D` and `RotatedGrid3D`, which called a function that no
+longer existed.
+* **Fixed: a `Linear` node straight on an input gave a NaN bound.**
+`Linear.refresh` built the inducing variance from the parent's inducing
+*points* rather than their variance, so coordinates, negative half the
+time, reached the kernel as variances and the covariance was NaN from
+the first iteration. A `Linear` above a GP never saw it, the GP's
+inducing values being what it multiplied. Found by rebuilding the fault
+notebook, whose configuration is exactly `BasicInput → Linear → BasicGP`;
+pinned by a test in `test_node_protocol.py`.
+* **Fixed: NaN simulations, and so NaN predictions, from an
+ill-conditioned inducing set.** `BasicGP.refresh` formed the square root
+the simulations draw through as the Cholesky of `K⁻¹ − (K + D)⁻¹`, a
+difference that cancels catastrophically once `K` is ill-conditioned:
+behind a fault displacement the restored inducing lattice had points
+0.03 apart, `K⁻¹` at 1e9 against `(K + D)⁻¹` at 1e3, and the Cholesky
+came back NaN in graph mode while passing eagerly, so every simulation
+and the prediction built on them was NaN in two fits out of three. The
+root is now the whitened `L⁻ᵀ chol(W)` with `W = (I + LᵀD⁻¹L)⁻¹`, the
+same matrix with no difference formed and `W`'s eigenvalues in `(0, 1]`
+whatever `K` does. `GradientConstrainedInput` keeps its form, its
+noise-free gradient rows having no `D⁻¹`.
 * **A rational-quadratic backbone for `Spline`, opt-in.**
 `math.interpolate.MonotonicRationalQuadraticSpline` is the monotone
 rational quadratic of Gregory and Delbourgo (1982) on Steffen's knot

@@ -104,6 +104,7 @@ include = [
     "geoml/viz/pyvista.py",
     "geoml/viz/graphviz.py",
     "geoml/math/geometry.py",
+    "geoml/math/rbf.py",
     "geoml/math/tf.py",
     "geoml/stats/random.py",
 ]

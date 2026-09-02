@@ -974,6 +974,17 @@ class BasicGP(_GPNode):
             cov = cov * norm
             return cov
 
+    @staticmethod
+    def _whitened_root(chol, delta, eye):
+        """`L^-T chol(W)`, `W = (I + L^T D^-1 L)^-1`, per output: a square
+        root of `K^-1 - (K+D)^-1` that never forms the difference."""
+        scaled = _tf.transpose(chol)[None, :, :] / delta[:, None, :]
+        inner = eye + _tf.matmul(scaled, chol[None, :, :])
+        w = _tf.linalg.cholesky_solve(_tf.linalg.cholesky(inner), eye)
+        root = _tf.linalg.cholesky(w)
+        return _tf.linalg.triangular_solve(chol[None, :, :], root,
+                                           lower=True, adjoint=True)
+
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_refresh"):
             self.parent.refresh(jitter)
@@ -1008,9 +1019,19 @@ class BasicGP(_GPNode):
                 _tf.linalg.cholesky_solve(mat, e)
                 for mat, e in zip(self.cov_smooth_chol, eye)
             )
+            # the square root the simulations draw through, with
+            # chol_r chol_r^T = K^-1 - (K+D)^-1, in the whitened form
+            # L^-T chol(W) with W = (I + L^T D^-1 L)^-1 rather than as the
+            # Cholesky of the difference itself: that difference cancels
+            # catastrophically once K is ill-conditioned -- inducing points
+            # 0.03 apart behind a fault displacement put K^-1 at 1e9 against
+            # (K+D)^-1 at 1e3, and the Cholesky came back NaN in graph mode
+            # while it passed eagerly, so every simulation and the prediction
+            # built on them was NaN -- where W has its eigenvalues in (0, 1]
+            # whatever K does
             self.chol_r = tuple(
-                _tf.linalg.cholesky(m1[None, :, :] - m2 + e * jitter)
-                for m1, m2, e in zip(self.cov_inv, self.cov_smooth_inv, eye)
+                self._whitened_root(chol, d, e)
+                for chol, d, e in zip(self.cov_chol, delta, eye)
             )
 
             # inducing points
@@ -1325,7 +1346,7 @@ class Linear(_FunctionalLatentVariable):
             )
             self.inducing_points_variance = tuple(
                 _tf.matmul(ip_var, weights**2)
-                for ip_var in self.parent.inducing_points
+                for ip_var in self.parent.inducing_points_variance
             )
 
     def kl_divergence(self):

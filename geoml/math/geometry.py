@@ -20,8 +20,12 @@ import itertools as _iter
 import numpy as _np
 import pyvista as _pv
 from sklearn.decomposition import PCA as _PCA
+import scipy.spatial as _spatial
+import warnings as _warnings
 from scipy.sparse import coo_matrix as _coo_matrix
 from scipy.sparse.csgraph import connected_components as _connected_components
+from scipy.sparse.csgraph import minimum_spanning_tree as _minimum_spanning_tree
+from scipy.sparse.csgraph import breadth_first_order as _breadth_first_order
 
 # geometry, not drawing: `tri` locates a point in a triangulation and
 # interpolates over it, which is what asking a sheet its elevation amounts to
@@ -1056,3 +1060,117 @@ def grow(corners, marked, rings):
         touched[corners[marked].ravel()] = True
         marked = touched[corners].any(axis=1)
     return marked
+
+
+def point_normals(points, k=12, orient="concave"):
+    """
+    Unit normals of a scattered point set lying on a surface.
+
+    Each normal is the direction of least spread among a point's nearest
+    neighbours (Hoppe et al. 1992), which fixes it up to sign. The sign is
+    made consistent over the whole set by propagating it along a minimum
+    spanning tree of the neighbour graph, from one root per connected
+    piece, so that the field can serve as a gradient constraint.
+
+    Parameters
+    ----------
+    points
+        `(n, 2)` or `(n, 3)`.
+    k
+        Neighbours per point.
+    orient
+        `"concave"` (default): the root's normal points toward the side the
+        surface curves to, read from where its neighbours' centroid falls
+        relative to the tangent plane; the root is the most curved point of
+        its piece. A surface that reads as flat has no such side, which is
+        warned about, and the sign is then whatever the root drew. A vector
+        instead orients every normal to have a positive component along it.
+
+    Returns
+    -------
+    normals : array
+        `(n, d)` unit normals.
+
+    Raises
+    ------
+    ValueError
+        In three dimensions, when the points read as a single line, which
+        cannot fix a normal: give the normals, or points off the line.
+
+    References
+    ----------
+    Hoppe, H., DeRose, T., Duchamp, T., McDonald, J. and Stuetzle, W.
+    (1992). Surface reconstruction from unorganized points. SIGGRAPH 1992,
+    71-78.
+    """
+    points = _np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] not in (2, 3):
+        raise ValueError("points must be (n, 2) or (n, 3)")
+    n, d = points.shape
+    if n < d + 1:
+        raise ValueError("at least %d points are needed" % (d + 1))
+    k = int(min(k, n - 1))
+    tree = _spatial.cKDTree(points)
+    distance, index = tree.query(points, k=k + 1)
+    neighbours = points[index]                       # [n, k + 1, d], self first
+    centroid = neighbours.mean(axis=1)
+    centred = neighbours - centroid[:, None, :]
+    covariance = _np.einsum("nki,nkj->nij", centred, centred) / (k + 1)
+    eigenvalues, eigenvectors = _np.linalg.eigh(covariance)
+    normals = eigenvectors[:, :, 0].copy()
+    if d == 3:
+        # a line spreads along one direction only: the two smallest
+        # eigenvalues vanish together and no normal is defined
+        flat = eigenvalues[:, 1] <= 1e-6 * eigenvalues[:, 2] + 1e-300
+        if flat.mean() > 0.5:
+            raise ValueError(
+                "the points read as a single line, which cannot fix a "
+                "normal in three dimensions; give the normals, or points "
+                "off the line")
+
+    if not isinstance(orient, str):
+        vector = _np.asarray(orient, dtype=float).ravel()
+        if len(vector) != d:
+            raise ValueError("orient must be a %d-vector" % d)
+        sign = _np.sign(normals @ vector)
+        sign[sign == 0] = 1.0
+        return normals * sign[:, None]
+    if orient != "concave":
+        raise ValueError("orient must be 'concave' or a vector")
+
+    # how far, and to which side, the neighbourhood bends off the tangent
+    # plane, relative to its own spacing: the concavity signal
+    offset = _np.einsum("ni,ni->n", centroid - points, normals)
+    spacing = _np.median(distance[:, 1:], axis=1)
+    confidence = _np.abs(offset) / _np.where(spacing > 0, spacing, 1.0)
+
+    # the neighbour graph, weighted by how much adjacent normals disagree
+    rows = _np.repeat(_np.arange(n), k)
+    cols = index[:, 1:].ravel()
+    agreement = _np.abs(_np.einsum("ni,ni->n", normals[rows], normals[cols]))
+    weight = 1.0 - agreement + 1e-9
+    graph = _coo_matrix((weight, (rows, cols)), shape=(n, n)).tocsr()
+    graph = graph.maximum(graph.T)
+    forest = _minimum_spanning_tree(graph)
+    forest = forest.maximum(forest.T)
+    n_pieces, piece = _connected_components(graph, directed=False)
+
+    weakest = _np.inf
+    for p in range(n_pieces):
+        members = _np.where(piece == p)[0]
+        root = members[_np.argmax(confidence[members])]
+        weakest = min(weakest, confidence[root])
+        if offset[root] < 0:
+            normals[root] = -normals[root]
+        order, predecessor = _breadth_first_order(
+            forest, root, directed=False, return_predecessors=True)
+        for node in order[1:]:
+            parent = predecessor[node]
+            if normals[node] @ normals[parent] < 0:
+                normals[node] = -normals[node]
+    if weakest < 0.02:
+        _warnings.warn(
+            "the surface reads as flat: it has no concave side, so the "
+            "normals' sign is consistent but arbitrary; pass a vector as "
+            "`orient` to fix it", UserWarning)
+    return normals

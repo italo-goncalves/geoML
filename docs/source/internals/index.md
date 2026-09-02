@@ -11,6 +11,7 @@ variable-block-models
 variable-paths
 cross-validation
 parameter-priors
+implicit-surfaces
 sparse-experts
 mixed-precision
 notebook-html-export
