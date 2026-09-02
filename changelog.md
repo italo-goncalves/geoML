@@ -141,6 +141,16 @@ interval's depth down the hole as a third metadata column, `DEPTH`,
 beside `HOLEID` and `LENGTH`, and `get_contacts` records each contact's.
 Data only, by decision: no model overlay, and the distance to a modelled
 boundary surface is left for later.
+* **`get_simulations` refuses what would not fit.** The one deliberate
+materializer of a simulations store — continuous and vector variables,
+the latter on the components' total — now raises a `MemoryError` past
+`storage.DEFAULT_THRESHOLD`, the size at which a store goes to disk,
+naming the two reads that work at any size (`simulation(i)` for one
+realization, `simulations.row_bands()` for a band of rows). Keyed on
+bytes, not backend: a container reopened from Zarr keeps every store on
+Zarr whatever its size, and small data must keep working. On a block
+model the same call used to ask for hundreds of gigabytes and take the
+session with it.
 * **A rational-quadratic backbone for `Spline`, opt-in.**
 `math.interpolate.MonotonicRationalQuadraticSpline` is the monotone
 rational quadratic of Gregory and Delbourgo (1982) on Steffen's knot

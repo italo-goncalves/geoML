@@ -41,6 +41,24 @@ from geoml.data.base import (
 # inside the class is not read as that alias.
 _Attr = _Attribute
 
+def _store_bytes(store):
+    return int(_np.prod(store.shape)) * _np.dtype(store.dtype).itemsize
+
+
+def _refuse_past_threshold(nbytes, name):
+    """Refuses to hold `nbytes` of simulations whole past the size the store
+    class spills to disk at -- what `get_simulations` on a block model would
+    ask for, hundreds of gigabytes that take the session with them. The
+    message names the two reads that work at any size."""
+    if nbytes > _storage.DEFAULT_THRESHOLD:
+        raise MemoryError(
+            "%s holds %.0f MB of simulations, past the %.0f MB the package "
+            "keeps in RAM; read one realization with `simulation(i)` or the "
+            "store in bands with `simulations.row_bands()`"
+            % (name, nbytes / 1024 ** 2,
+               _storage.DEFAULT_THRESHOLD / 1024 ** 2))
+
+
 class _Variable(_TreeNode):
     """Representation of a dependent random variable."""
 
@@ -638,9 +656,11 @@ class ContinuousVariable(_Variable):
         return values, has_value
 
     def get_simulations(self):
-        # Materializes the whole (n_data, n_sim) array -- fine on point data,
-        # ruinous on a block model. At scale, read `simulation(i)` for one
-        # realization or the store itself in row bands.
+        # The one deliberate materializer of the (n_data, n_sim) store, for
+        # data small enough to hold whole; past the size the store spills to
+        # disk at it refuses, naming `simulation(i)` and the row bands
+        if self.simulations is not None:
+            _refuse_past_threshold(_store_bytes(self.simulations), self.name)
         return _np.asarray(self.simulations)
 
     def get_predictions(self):
@@ -973,7 +993,11 @@ class VectorVariable(_Variable):
 
     def get_simulations(self):
         # Materializes every component at once -- n_data x n_sim x n_comp in
-        # RAM. At scale, take one component's `simulation(i)` at a time.
+        # RAM -- so the refusal is on the total, not on one component
+        stores = [self.components[v].simulations for v in self.labels]
+        if all(store is not None for store in stores):
+            _refuse_past_threshold(sum(_store_bytes(s) for s in stores),
+                                   self.name)
         sims = _np.stack([self.components[v].get_simulations() for v in self.labels], axis=2)
         return sims
 
