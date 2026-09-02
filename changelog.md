@@ -111,6 +111,36 @@ its prose.
   package's own idiom, chosen over per-axis lengths. Being metadata, the
   column survives Zarr, a block model's children inherit it across
   `split` and `refine`, and `where=` takes it by name.
+* **Proportions comparison for categoricals.** The categorical swath
+without the slabs: `prepare.proportions` and
+`Explorer.proportions`/`Interactive.proportions` put the data's
+**declustered** share of each category beside the model's expected
+share — its mean predicted probability over the ground `where` names,
+each block at its own volume — one bar pair per category, the model's
+hatched. It is the global check the row-normalized confusion matrix
+cannot make: a model can place every measured sample in its right
+category and still call the dominant rock over ground the data never
+reached. The model's side is the mean `probability` rather than a share
+of realizations — a category's stored realizations are latent draws,
+and turning them into labels is the likelihood's rule, not the
+figure's.
+* **Contact analysis, on the data alone.** The figure the hard-or-soft
+boundary decision is read from, which the package had no diagnostic
+for: `prepare.contact` and `Explorer.contact`/`Interactive.contact`
+put a grade against its signed distance **down the hole** to the
+nearest contact between two domains in the same hole — negative on the
+first domain's side, positive on the second's — the samples faint
+behind the binned length-weighted mean, a band between two sample
+quantiles and the counts below. A step at zero with flat profiles
+either side is a hard boundary; a ramp is a soft one, its width how far
+one domain's estimate may borrow from the other. Samples in a hole
+without the pair's contact are left out and counted; a `domain`
+variable on the samples keeps a third domain beyond the far one off the
+profile. To measure from, every drillhole conversion now carries the
+interval's depth down the hole as a third metadata column, `DEPTH`,
+beside `HOLEID` and `LENGTH`, and `get_contacts` records each contact's.
+Data only, by decision: no model overlay, and the distance to a modelled
+boundary surface is left for later.
 * **A rational-quadratic backbone for `Spline`, opt-in.**
 `math.interpolate.MonotonicRationalQuadraticSpline` is the monotone
 rational quadratic of Gregory and Delbourgo (1982) on Steffen's knot

@@ -1336,6 +1336,221 @@ def categorical_swath(data: "_data._SpatialData",
             "declustered": all_weights is not None}
 
 
+def proportions(data: "_data._SpatialData", predicted: "_data._SpatialData",
+                name: str, weights: "_types.ArrayLike | None" = None,
+                where: _types.Where = None) -> dict:
+    """
+    The data's category shares against the model's, over the whole model.
+
+    `categorical_swath` without the slabs: the declustered share of each
+    category among the samples against the model's mean predicted
+    probability of it -- its expected share -- over the locations `where`
+    names, each block at its own volume. Both sides sum to one. It is the
+    global check the row-normalized confusion matrix cannot make: a model
+    can place every measured sample in its right category and still call
+    the dominant rock over ground the data never reached.
+
+    Parameters
+    ----------
+    data, predicted, name, weights, where
+        As in `swath`.
+
+    Returns
+    -------
+    dict
+        `labels`, `data_share` and `model_share` (one per label),
+        `data_count`, `model_count`, and `declustered`.
+    """
+    values, measured, labels = category_values(variable(data, name))
+    components = variable(predicted, name).components
+    keep = _where_mask(predicted, where)
+    if not keep.any():
+        raise ValueError("`where` leaves no location of the model to compare")
+    volume = _volume_rows(predicted)
+
+    all_weights, _, _ = _declustering(data, weights, None)
+    share = _np.ones(measured.sum()) if all_weights is None \
+        else all_weights[measured]
+    with _np.errstate(invalid="ignore", divide="ignore"):
+        data_share = _np.array([
+            share[values[measured] == label].sum() / share.sum()
+            for label in labels])
+
+    model_share = _np.full(len(labels), _np.nan)
+    model_count = 0
+    for k, label in enumerate(labels):
+        if label not in components:
+            raise ValueError("%r has no category %r in the predicted "
+                             "container" % (name, label))
+        probability = components[label].probability.values.to_numpy() \
+            .astype(float)
+        cells = _np.isfinite(probability) & keep
+        size = _np.ones(cells.sum()) if volume is None else volume[cells]
+        with _np.errstate(invalid="ignore", divide="ignore"):
+            model_share[k] = (size * probability[cells]).sum() / size.sum()
+        model_count = max(model_count, int(cells.sum()))
+
+    return {"labels": labels, "data_share": data_share,
+            "model_share": model_share,
+            "data_count": int(measured.sum()), "model_count": model_count,
+            "declustered": all_weights is not None}
+
+
+def _drillhole_column(container, key, what):
+    column = container.metadata.get(key)
+    if column is None:
+        raise ValueError("%s must carry the %r metadata column a drillhole "
+                         "conversion writes" % (what, key))
+    return _np.asarray(column.values)
+
+
+def contact(data: "_data._SpatialData", name: str,
+            contacts: "_data._SpatialData", pair: "tuple[str, str]",
+            domain: "str | None" = None, bins: _types.Bins = 6,
+            max_distance: "float | None" = None,
+            quantiles: "tuple[float, float]" = (0.25, 0.75)) -> dict:
+    """
+    A grade against its distance down the hole to a domain contact.
+
+    Contact analysis on the data alone: every sample is placed by its
+    signed distance down the hole to the nearest contact between the two
+    domains of `pair` in the same hole -- negative on the first domain's
+    side, positive on the second's -- and the samples are binned by that
+    distance, each bin reporting its length-weighted mean, its count and
+    two sample quantiles. A hard boundary reads as a step at zero with
+    flat profiles either side; a soft one as a ramp, whose width is how
+    far one domain's estimate may borrow from the other.
+
+    The distance is measured down the hole, not through the rock: exact
+    where a hole crosses the contact squarely and stretched where it runs
+    oblique to it, as every downhole contact analysis is.
+
+    Parameters
+    ----------
+    data
+        Samples from `DrillholeData.as_point_data`, carrying the `HOLEID`
+        and `DEPTH` metadata that conversion writes, and `LENGTH` for the
+        weighting.
+    name
+        The continuous variable to profile.
+    contacts
+        The contact points from `DrillholeData.get_contacts`, carrying the
+        domain above and below each.
+    pair
+        The two domain labels, in the order the axis runs: negative
+        distances on the first's side, positive on the second's.
+    domain
+        A categorical variable on `data` naming each sample's own domain,
+        when the samples carry it: samples logged as neither of the pair
+        are then left out, which keeps a third domain beyond the far one
+        off the profile.
+    bins
+        How many bins of equal width on each side of the contact, or where
+        their edges are.
+    max_distance
+        How far from the contact the profile reaches; the furthest placed
+        sample by default.
+    quantiles
+        The two sample quantiles reported per bin.
+
+    Returns
+    -------
+    dict
+        `pair`, `label`, the bin bounds `lo`/`hi` and `centre`, `mean`,
+        `count`, `band_lo`/`band_hi` and `quantiles`; the placed samples'
+        `distance`, `value` and `rows`; `n_unplaced` (samples in holes
+        without a contact of the pair), `n_outside` (samples `domain`
+        excluded) and `weighted` (whether by `LENGTH`).
+    """
+    first, second = (str(p) for p in pair)
+    hole = _drillhole_column(data, "HOLEID", "data")
+    depth = _drillhole_column(data, "DEPTH", "data").astype(float)
+    contact_hole = _drillhole_column(contacts, "HOLEID", "contacts")
+    contact_depth = _drillhole_column(contacts, "DEPTH", "contacts") \
+        .astype(float)
+    rock = [var for var in contacts.variables.values()
+            if isinstance(var, _data.RockTypeVariable)]
+    if len(rock) != 1:
+        raise ValueError("contacts must hold one rock type variable, as "
+                         "`DrillholeData.get_contacts` returns")
+    above = _np.asarray(rock[0].measurements_a.to_numpy(), dtype=object)
+    below = _np.asarray(rock[0].measurements_b.to_numpy(), dtype=object)
+    forward = (above == first) & (below == second)
+    backward = (above == second) & (below == first)
+    of_pair = forward | backward
+    if not of_pair.any():
+        raise ValueError("no contact between %r and %r among the contacts"
+                         % (first, second))
+    # deeper than a forward contact is the second domain's side: positive
+    orientation = _np.where(forward, 1.0, -1.0)
+
+    signed = _np.full(data.n_data, _np.nan)
+    for this in _np.unique(contact_hole[of_pair]):
+        here = of_pair & (contact_hole == this)
+        rows = _np.where(hole == this)[0]
+        if len(rows) == 0:
+            continue
+        gap = depth[rows][:, None] - contact_depth[here][None, :]
+        nearest = _np.argmin(_np.abs(gap), axis=1)
+        signed[rows] = gap[_np.arange(len(rows)), nearest] \
+            * orientation[here][nearest]
+
+    var = variable(data, name)
+    values, has_value = var.get_measurements()
+    values = _np.asarray(values, dtype=float).ravel()
+    measured = _np.asarray(has_value, dtype=bool).ravel() \
+        & _np.isfinite(values)
+    n_outside = 0
+    if domain is not None:
+        labels, _, _ = category_values(variable(data, domain))
+        inside = (labels == first) | (labels == second)
+        n_outside = int((measured & ~inside).sum())
+        measured &= inside
+    placed = measured & _np.isfinite(signed)
+    n_unplaced = int((measured & ~_np.isfinite(signed)).sum())
+    if not placed.any():
+        raise ValueError("no measured sample sits in a hole with a contact "
+                         "between %r and %r" % (first, second))
+    rows = _np.where(placed)[0]
+    distance, value = signed[rows], values[rows]
+
+    if isinstance(bins, (int, _np.integer)):
+        reach = float(_np.abs(distance).max()) if max_distance is None \
+            else float(max_distance)
+        edges = _np.linspace(-reach, reach, 2 * int(bins) + 1)
+    else:
+        edges = _np.asarray(bins, dtype=float)
+    n_bins = len(edges) - 1
+    which = _np.searchsorted(edges, distance, side="right") - 1
+    which[distance == edges[-1]] = n_bins - 1
+    binned = (which >= 0) & (which < n_bins)
+
+    length = data.metadata.get("LENGTH")
+    weight = _np.ones(len(rows)) if length is None \
+        else _np.asarray(length.values, dtype=float)[rows]
+    with _np.errstate(invalid="ignore", divide="ignore"):
+        mean = _np.bincount(which[binned], weights=weight[binned] * value[binned],
+                            minlength=n_bins) \
+            / _np.bincount(which[binned], weights=weight[binned],
+                           minlength=n_bins)
+    count = _np.bincount(which[binned], minlength=n_bins)
+    band = _np.full([n_bins, 2], _np.nan)
+    for b in range(n_bins):
+        inside = binned & (which == b)
+        if inside.any():
+            band[b] = _np.quantile(value[inside], quantiles)
+
+    return {"pair": (first, second), "label": str(name),
+            "lo": edges[:-1], "hi": edges[1:],
+            "centre": 0.5 * (edges[:-1] + edges[1:]),
+            "mean": mean, "count": count,
+            "band_lo": band[:, 0], "band_hi": band[:, 1],
+            "quantiles": tuple(quantiles),
+            "distance": distance, "value": value, "rows": rows,
+            "n_unplaced": n_unplaced, "n_outside": n_outside,
+            "weighted": length is not None}
+
+
 def variogram(container: "_data._SpatialData", name: str,
               n_lags: int = 15, max_lag: "float | None" = None,
               direction: "_types.ArrayLike | None" = None,

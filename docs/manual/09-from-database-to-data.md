@@ -60,11 +60,16 @@ The tests pin both.
 ## 9.3 Converting: what the models actually receive
 
 `as_point_data()` produces the `PointData` the models take, and every
-conversion carries two columns as **metadata**, which are per-location
-facts the models never see: the hole id (`HOLEID`) and the sample length
-(`LENGTH`). The identifier is what leave-one-hole-out validation splits on
-(chapter 13), and the length is what a weighting scheme reads. Both travel
-with the data through subsetting, prediction and Zarr, and neither is
+conversion carries three columns as **metadata**, which are per-location
+facts the models never see: the hole id (`HOLEID`), the depth down the
+hole (`DEPTH`) and the sample length (`LENGTH`). The identifier is what
+leave-one-hole-out validation splits on (chapter 13), the length is what a
+weighting scheme reads, and the depth is what a contact profile measures
+from: `Explorer.contact` puts a grade against its distance down the hole
+to the nearest contact between two domains, which is the figure the
+hard-or-soft boundary decision is read from before anything is modelled.
+This database logs no assays, so the chapter cannot draw one. All three
+travel with the data through subsetting, prediction and Zarr, and none is
 modelled.
 
 For categories, the conversion of chapter 6 gives interior points plus the

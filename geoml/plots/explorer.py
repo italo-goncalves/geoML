@@ -832,7 +832,7 @@ class Explorer(_base.Selection):
 
     def _continuous_swath(self, predicted, axis, bins, where, weights,
                           quantiles, figsize):
-        var = self.continuous
+        var = self._require_continuous("swath")
         panels = _prep.swath(self.data, predicted, var.name, axis=axis,
                              bins=bins, weights=weights, where=where,
                              quantiles=quantiles)
@@ -841,7 +841,6 @@ class Explorer(_base.Selection):
         figure = _plt.figure(figsize=size)
         grid = figure.add_gridspec(2 * rows, columns,
                                    height_ratios=[3, 1] * rows)
-        top = None
         for i, panel in enumerate(panels):
             row, column = divmod(i, columns)
             top = figure.add_subplot(grid[2 * row, column])
@@ -849,7 +848,8 @@ class Explorer(_base.Selection):
             self._draw_swath(top, bottom, panel, quantiles)
             top.set_title(panel["label"])
             bottom.set_xlabel(panel["axis"])
-        handles, labels = top.get_legend_handles_labels()
+        # every panel draws the same series; the first one's legend serves
+        handles, labels = figure.axes[0].get_legend_handles_labels()
         figure.legend(handles, labels, loc="upper center", frameon=False,
                       fontsize="small", ncol=min(3, len(labels)),
                       bbox_to_anchor=(0.5, 0.995))
@@ -919,6 +919,135 @@ class Explorer(_base.Selection):
                    width=0.9 * (result["hi"] - result["lo"]),
                    color=self._color(3, "data"), alpha=0.5)
         bottom.set_ylabel("samples")
+
+    def proportions(self, predicted, where=None, weights=None,
+                    figsize=None) -> "_plt.Figure":
+        """
+        The data's category shares against the model's, one bar pair each.
+
+        The whole-model reading of the categorical `swath`: the declustered
+        share of each category among the samples beside the model's mean
+        predicted probability of it -- its expected share -- over the
+        ground `where` names, each block at its own volume. The confusion
+        matrix is row-normalized and so cannot see a model that calls the
+        dominant rock over ground the data never reached; this figure can.
+
+        Parameters
+        ----------
+        predicted
+            The grid or block model carrying the model's prediction.
+        where
+            Which locations of `predicted` take part: a boolean mask or
+            the name of a boolean metadata column, as `assign_from_data`
+            writes. Everything, by default.
+        weights
+            One declustering weight per sample, overriding the stored
+            column.
+        """
+        with _style.context():
+            var = self._require_categorical("proportions")
+            result = _prep.proportions(self.data, predicted, var.name,
+                                       weights, where)
+            figure, ax = _plt.subplots(figsize=figsize or (6.0, 4.0))
+            position = _np.arange(len(result["labels"]))
+            for k, label in enumerate(result["labels"]):
+                color = self._color(k, label)
+                ax.bar(position[k] - 0.21, result["data_share"][k],
+                       width=0.42, color=color)
+                ax.bar(position[k] + 0.21, result["model_share"][k],
+                       width=0.42, color=color, hatch="//",
+                       edgecolor="white", linewidth=0.5)
+            ax.set_xticks(position)
+            ax.set_xticklabels(result["labels"])
+            ax.set_ylabel("share (data | model, hatched)")
+            ax.set_xlabel("%d samples, %d model locations"
+                          % (result["data_count"], result["model_count"]))
+            ax.set_title("%s: %sshares, data against the model"
+                         % (var.name,
+                            "declustered " if result["declustered"] else ""))
+            figure.tight_layout()
+        return figure
+
+    def contact(self, contacts, pair, domain=None, bins=6, max_distance=None,
+                quantiles=(0.25, 0.75), figsize=None) -> "_plt.Figure":
+        """
+        The grade against its distance down the hole to a domain contact.
+
+        Contact analysis on the data alone, the figure the hard-or-soft
+        boundary decision is read from: every sample placed by its signed
+        distance down the hole to the nearest contact between the two
+        domains of `pair`, the samples themselves faint behind the binned
+        length-weighted mean, a band between two sample quantiles, and the
+        counts below. A step at zero with flat profiles either side is a
+        hard boundary; a ramp is a soft one, its width how far one domain's
+        estimate may borrow from the other.
+
+        Parameters
+        ----------
+        contacts
+            The contact points from `DrillholeData.get_contacts`.
+        pair
+            The two domain labels, in the order the axis runs: the first
+            left of the contact, the second right of it.
+        domain
+            A categorical variable on the data naming each sample's own
+            domain, when the samples carry it, so a third domain beyond
+            the far one stays off the profile.
+        bins
+            Bins of equal width on each side of the contact, or the edges.
+        max_distance
+            How far from the contact the profile reaches.
+        quantiles
+            The two sample quantiles drawn as a band.
+        """
+        with _style.context():
+            var = self._require_continuous("contact")
+            result = _prep.contact(self.data, var.name, contacts, pair,
+                                   domain=domain, bins=bins,
+                                   max_distance=max_distance,
+                                   quantiles=quantiles)
+            figure = _plt.figure(figsize=figsize or (7.0, 4.6))
+            grid = figure.add_gridspec(2, 1, height_ratios=[3, 1])
+            top = figure.add_subplot(grid[0])
+            bottom = figure.add_subplot(grid[1], sharex=top)
+            color = self._color(3, "data")
+
+            top.plot(result["distance"], result["value"], ".", color=color,
+                     alpha=0.25, markersize=3, label="samples")
+            x, low = _prep.step_path(result["lo"], result["hi"],
+                                     result["band_lo"])
+            _, high = _prep.step_path(result["lo"], result["hi"],
+                                      result["band_hi"])
+            top.fill_between(x, low, high, color=color, alpha=0.2,
+                             linewidth=0,
+                             label="%.0f-%.0f%% of samples"
+                             % tuple(100 * q for q in result["quantiles"]))
+            _, mean = _prep.step_path(result["lo"], result["hi"],
+                                      result["mean"])
+            top.plot(x, mean, color=color, linewidth=1.8,
+                     label="mean by length" if result["weighted"]
+                     else "mean")
+            top.axvline(0.0, color="black", linewidth=0.8, alpha=0.6)
+            # the profile sets the scale; a lone outlier does not
+            lo_y, hi_y = _np.nanquantile(result["value"], [0.01, 0.99])
+            lo_y = min(lo_y, _np.nanmin(result["band_lo"]))
+            hi_y = max(hi_y, _np.nanmax(result["band_hi"]))
+            margin = 0.05 * (hi_y - lo_y) or 1.0
+            top.set_ylim(lo_y - margin, hi_y + margin)
+            top.set_ylabel(var.name)
+            top.legend(frameon=False, fontsize="small")
+            top.set_title("%s across the %s | %s contact"
+                          % (var.name, *result["pair"]))
+
+            bottom.bar(result["centre"], result["count"],
+                       width=0.9 * (result["hi"] - result["lo"]),
+                       color=color, alpha=0.5)
+            bottom.axvline(0.0, color="black", linewidth=0.8, alpha=0.6)
+            bottom.set_ylabel("samples")
+            bottom.set_xlabel("distance down the hole: %s  |  %s"
+                              % result["pair"])
+            figure.tight_layout()
+        return figure
 
     def spread_check(self, bins=8, figsize=None) -> "_plt.Figure":
         """
