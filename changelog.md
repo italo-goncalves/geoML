@@ -1,3 +1,342 @@
+## version 0.6.9
+* **The latent-node protocol is two primitives and one composer.** Every
+node used to implement `predict` twice over — a five-tuple with
+simulations, a two-tuple without, switched by `n_sim=0` — a remnant from
+when simulation was optional, unevenly kept (`LinearCombination` and
+`Multiply` crashed on the moment shape and worked around themselves),
+and the reason the network's own moment path quietly drew random
+numbers: `LinearCombination.propagate` drew one simulation per parent
+and discarded it, `ProductOfExperts` forced a draw at `n_sim=0`,
+`RadialTrend` asked its parent for simulations it never read — inside
+every training iteration of any network carrying them under a GP node.
+Now `propagate` carries the moments and stamps the per-batch state its
+node's draw needs (`_sim_state`, `_explained_var` — plain attributes,
+alive within one traced call, invisible to the refresh snapshot), a new
+`simulate(n_sim, seed)` draws from that state, and the base-class
+`predict` is the one composer pairing them. Simulations originate at GP
+nodes and are carried pathwise by the operations above them, so
+`simulate`'s recursion stops where the mathematics does; internal moment
+queries at other locations (`GPWalk`'s stepping, a refresh) go through
+stash-free doors (`interpolate`, `_walk`) and can never shadow a sweep's
+state. Every duplicated moment branch is gone — one predict where there
+were seventeen.
+  - **The interface is one shape now**: `predict` returns
+  `(mu, var, sims, explained_var)` and requires `n_sim >= 1`; `influence`,
+  computed and threaded through every node and read by nothing, is
+  dropped on the user's call. This closes the two-return-shapes half of
+  the long-standing typing item.
+  - **Bit-for-bit preserved**: a golden capture of nine networks covering
+  every node class (36 arrays — deep GPWalk chain, experts, products,
+  trends) is identical before and after, the draws being stateless so
+  the removed waste shifted no stream. `test_node_protocol.py` pins the
+  new guarantees: zero normals generated on the moment path (the
+  regression that used to hide in `LinearCombination`), `simulate`
+  before `propagate` refused with the rule in the message, `n_sim=0`
+  refused, the four-tuple's shapes.
+  - `ProjectedVGP`/`latent.fourier` keep their own protocol untouched,
+  awaiting their own rewrite.
+* **The continuous flow is rebuilt from the field up, and the gate's
+verdict is recorded: correct, and not superior.** The old
+`ContinuousNormalizingFlow` integrated two mismatched midpoint schemes
+(`backward(forward(y))` missed by 7.4 in original units on Jura), carried
+an ad-hoc log-determinant correction, re-ran its ten Choleskys inside
+every call, placed its anchors by an **unseeded** KMeans (the one start
+`set_seed` could not reproduce) and left them un-persisted, so a saved
+flow reloaded broken. The new field is a fixed function: Sobol anchors
+covering the `[-5, 5]` box (constructor-determined — nothing
+data-dependent to persist, nothing to seed, `initialize` reduced to a
+pass-through) crossed with regular time knots, the covariance separable
+as `K_space (x) K_time` so `refresh` is one small Cholesky per factor,
+and both directions integrate the *same* field through an adaptive
+Dormand-Prince solver with the augmented `(x, log_det)` state — the
+divergence analytic, the ad-hoc correction deleted. `test_cnf.py` pins
+the round trip at solver tolerance, the log-determinant against the
+numerical Jacobian, identity tails, save/reload, and — the trap worth
+remembering — **gradients reaching every parameter**: the solver's
+adjoint differentiates its state, Variables read inside the field and
+its `constants`, but *cuts tensors merely captured by the closure*,
+which silently detached `alpha_white` and `amp` from training in the
+first draft; the field now rides `constants`. The mixing test's flow
+skip is removed.
+  - **The refresh hoist**: `_Warping.refresh()` is a no-op hook the
+  likelihood calls once per entry point, so a warping with real state
+  pays for it per call instead of per backward — the old flow refreshed
+  inside every one of `integrated_backward`'s 64 node evaluations.
+  - **The gate's verdict, against the recorded baselines**: round trip
+  7.4 → 2.9e-2 on Jura (the residual is the marginal links' inverses
+  amplifying a latent-units error that is itself at tolerance) and
+  8.0e-2 → 4.1e-4 on Macpass; held-out crps/sd 0.455 on Jura — still
+  the best arm, now honestly — but 0.268 on Macpass against the
+  marginal chain's 0.234, at 4-10x the training and prediction cost of
+  the marginal arm (an exact adaptive solve is dearer than ten broken
+  midpoint steps, and prediction pays it once per noise node). A third
+  experiment in a row where ELBO gains from mixing flexibility do not
+  survive held-out scoring. **The standing recommendation is unchanged:
+  one initialized marginal transform.** The flow is now correct
+  machinery for the case that genuinely needs a learned joint
+  transformation, and `docs/benchmarks/flow_warpings.py` is the fixed
+  bar any future candidate — the CP-structured field, the discrete
+  RQ coupling flow — must clear first.
+* **Swath plots, with the two corrections that make them fair.** A swath
+compares the data's mean with the model's slab by slab along one axis
+— the check that *localizes* conditional bias where every score
+aggregates it away — and the raw version describes the drilling: the
+data mean follows the clustering, and the model mean over a whole grid
+includes air and waste the data never spoke for. `prepare.swath` and
+`Explorer.swath`/`Interactive.swath` fix both. The data's slab means are
+**declustered** — explicit weights, else the `"declustering"` column
+`container.decluster()` keeps, else cell weights computed on the spot,
+the precedence every declustered consumer shares — and the model's run
+only over the ground `where` names, each block at its own volume as
+`grade_tonnage` counts it. With simulations the band between two
+quantiles of the per-realization slab means is drawn, read a band of
+rows at a time and never held whole (a test pins it); the categorical
+sibling (`prepare.categorical_swath`) stacks the data's declustered
+category shares against the model's mean predicted probabilities. Slabs
+are of equal *width* — a slab is a place, not a value. Chapter 13 gains
+the figure, after the residual variogram, with the fairness argument in
+its prose.
+  - **The reach, as a container column.** `assign_from_data(data,
+  distance=, hull=, transform=)` writes a boolean metadata column
+  naming which locations the data informs: within `distance` of a
+  sample, inside the data's **concave hull** at a length `hull`, or
+  both — a hull with a margin. The hull is an alpha shape from a
+  Delaunay triangulation (`math.geometry.concave_hull`, simplices kept
+  under a circumradius), which fills the interior between drill fences
+  closer than its length, where a ball around each sample leaves a gap,
+  and leaves out a notch wider than it, where a convex hull bridges
+  across — both cases are tests. A `transform` from `geoml.transform`
+  is how drillhole anisotropy is said (dense down the hole, sparse
+  across), every length then read in the transformed units — the
+  package's own idiom, chosen over per-axis lengths. Being metadata, the
+  column survives Zarr, a block model's children inherit it across
+  `split` and `refine`, and `where=` takes it by name.
+* **Proportions comparison for categoricals.** The categorical swath
+without the slabs: `prepare.proportions` and
+`Explorer.proportions`/`Interactive.proportions` put the data's
+**declustered** share of each category beside the model's expected
+share — its mean predicted probability over the ground `where` names,
+each block at its own volume — one bar pair per category, the model's
+hatched. It is the global check the row-normalized confusion matrix
+cannot make: a model can place every measured sample in its right
+category and still call the dominant rock over ground the data never
+reached. The model's side is the mean `probability` rather than a share
+of realizations — a category's stored realizations are latent draws,
+and turning them into labels is the likelihood's rule, not the
+figure's.
+* **Contact analysis, on the data alone.** The figure the hard-or-soft
+boundary decision is read from, which the package had no diagnostic
+for: `prepare.contact` and `Explorer.contact`/`Interactive.contact`
+put a grade against its signed distance **down the hole** to the
+nearest contact between two domains in the same hole — negative on the
+first domain's side, positive on the second's — the samples faint
+behind the binned length-weighted mean, a band between two sample
+quantiles and the counts below. A step at zero with flat profiles
+either side is a hard boundary; a ramp is a soft one, its width how far
+one domain's estimate may borrow from the other. Samples in a hole
+without the pair's contact are left out and counted; a `domain`
+variable on the samples keeps a third domain beyond the far one off the
+profile. To measure from, every drillhole conversion now carries the
+interval's depth down the hole as a third metadata column, `DEPTH`,
+beside `HOLEID` and `LENGTH`, and `get_contacts` records each contact's.
+Data only, by decision: no model overlay, and the distance to a modelled
+boundary surface is left for later.
+* **`get_simulations` refuses what would not fit.** The one deliberate
+materializer of a simulations store — continuous and vector variables,
+the latter on the components' total — now raises a `MemoryError` past
+`storage.DEFAULT_THRESHOLD`, the size at which a store goes to disk,
+naming the two reads that work at any size (`simulation(i)` for one
+realization, `simulations.row_bands()` for a band of rows). Keyed on
+bytes, not backend: a container reopened from Zarr keeps every store on
+Zarr whatever its size, and small data must keep working. On a block
+model the same call used to ask for hundreds of gigabytes and take the
+session with it.
+* **Implicit surfaces, and faults as transforms.** `math.rbf.HermiteRBF`
+is a parameter-free implicit surface: a polyharmonic radial basis
+function field with a linear drift, zero at the points and with the
+normals as its gradient (the Hermite form, cubic basis), or with each
+normal turned into two off-surface points for the thin-plate and linear
+bases (Carr's form). Nothing about it trains and nothing is asked per
+point — normals may sit on a subset, at their own locations, or be one.
+`geometry.point_normals` derives them when absent, by local PCA with the
+sign propagated along a spanning tree and the root oriented toward the
+surface's concavity. The fit lives in a unit-extent frame (a cubic basis
+at metre scale conditions at 1e14), given normals go through a
+transform's Jacobian as covectors, `max_error` selects centres greedily,
+and `contour` hands the zero level set to `get_contour` as a mesh. On it,
+three transforms: `ImplicitFault`, `BellFault2D` for any fitted surface
+in any dimension, one extra coordinate that repels points across the
+fault; `FaultDisplacement`, which restores the hanging wall by a trainable
+`throw` along the fault's up-dip direction and, in three dimensions, a
+`strike_slip` along its strike, tangent to the surface by construction,
+so one kernel reads across it — the move is **fault-parallel flow**, each
+point following the level set of the field through it by a few midpoint
+steps (`flow_steps`), so material slides along a curved fault rather
+than stepping straight off it (`flow_steps=0` is the straight step along
+the frame at the point's foot; a frame read at the point itself sent
+neighbours different ways, measured); `profile="bell"` makes the throw a
+displacement profile over trainable extents along the fault's mean axes,
+largest at the centre and zero at the tip lines; `drag=True` trains the
+step's width as a drag zone, and `set_width` anneals it between phases
+from wide, where the bound is smooth in the throw, to sharp;
+`throw_from_markers(hanging, footwall)` reads the throw off one horizon
+seen on both walls by Gauss-Newton on the footwall markers' implicit
+surface, no bound needed — measured on a synthetic
+20 m offset: held-out RMSE 0.60 against 2.37 without it, the throw read
+as 20.4, at the learning rate the phased pattern uses, since the default
+schedule left it at a tenth; `models.search_throw`, which chooses a
+throw among candidates on the bound with the model restored between
+bursts, coarse then fine with `refine=`, for the cases where the throw
+does not train from zero at all (a categorical likelihood, two faults); `ImplicitFaultBlocks`, the
+repulsion's twin of the network — `ImplicitFault` objects with the
+same `(stopping, bounding, side)` triples, each coordinate the *trimmed*
+sign `amp · sign(s) · H(side · s_j)`, a composition of implicit
+functions that makes a fault that ends on another identically zero
+beyond it instead of fading over a reach (in decay mode the distance to
+the trimmed surface, `sqrt(s² + Σ max(0, −side · s_j)²)`, does the
+trimming); and `FaultNetwork`, several
+faults restored youngest first, each older surface refitted inside the
+graph on the coordinates the younger ones restore, with declared abutting
+relations. Every docstring cites its sources and
+`docs/implicit-surfaces.md` says what is taken from whom; the only
+original pieces are the concavity rule for derived normals and the
+repulsion coordinate as a kernel-space fault drift. Deleted with it: the
+commented-out `_RadialBasisFunction` kernels, and the `make_interpolator`
+methods of `Grid3D` and `RotatedGrid3D`, which called a function that no
+longer existed.
+* **Fixed: a `Linear` node straight on an input gave a NaN bound.**
+`Linear.refresh` built the inducing variance from the parent's inducing
+*points* rather than their variance, so coordinates, negative half the
+time, reached the kernel as variances and the covariance was NaN from
+the first iteration. A `Linear` above a GP never saw it, the GP's
+inducing values being what it multiplied. Found by rebuilding the fault
+notebook, whose configuration is exactly `BasicInput → Linear → BasicGP`;
+pinned by a test in `test_node_protocol.py`.
+* **Fixed: NaN simulations, and so NaN predictions, from an
+ill-conditioned inducing set.** `BasicGP.refresh` formed the square root
+the simulations draw through as the Cholesky of `K⁻¹ − (K + D)⁻¹`, a
+difference that cancels catastrophically once `K` is ill-conditioned:
+behind a fault displacement the restored inducing lattice had points
+0.03 apart, `K⁻¹` at 1e9 against `(K + D)⁻¹` at 1e3, and the Cholesky
+came back NaN in graph mode while passing eagerly, so every simulation
+and the prediction built on them was NaN in two fits out of three. The
+root is now the whitened `L⁻ᵀ chol(W)` with `W = (I + LᵀD⁻¹L)⁻¹`, the
+same matrix with no difference formed and `W`'s eigenvalues in `(0, 1]`
+whatever `K` does. `GradientConstrainedInput` keeps its form, its
+noise-free gradient rows having no `D⁻¹`.
+* **A rational-quadratic backbone for `Spline`, opt-in.**
+`math.interpolate.MonotonicRationalQuadraticSpline` is the monotone
+rational quadratic of Gregory and Delbourgo (1982) on Steffen's knot
+derivatives — a true drop-in for the monotonic cubic: same knots, same
+slopes, identical at the knots and on both linear extrapolation
+segments (with equal end derivatives the rational quadratic *is* the
+line), so `Spline(size, backbone="rq")` changes only the shape between
+knots and what that buys — an inverse that is one closed-form quadratic
+root per value where the cubic spends twelve Newton passes, taken in
+the cancellation-safe form that stays finite on linear segments, with
+the round trip at machine precision rather than at the iteration's
+5e-11 floor. `"cubic"` stays the default and always will: saved models
+replay the default they were built with. `test_rq_spline.py` pins the
+knots interpolated, monotonicity, the derivative against differences
+inside the knots and against the end slopes outside them, agreement
+with the cubic wherever both are linear, round trips both ways at
+1e-9, and the default untouched; the noise-integration harness holds
+the new backbone to the same log-determinant check as every warping.
+One thing learned writing the derivative test: the padded
+extrapolation segments span 1e6 units, so a *value* out there carries
+~1e-10 of cancellation — nothing for the value, but a central
+difference divides it by its step and reports a 1e-4 derivative error
+that is not there. Inherited from the cubic's padding, now written
+down.
+  - **Measured, and it earns the recommendation for new models.** At the
+  hot-path shapes (100k rows x 3, 10k x 7, traced, GPU) `backward` runs
+  in 4.7 and 3.2 ms against the cubic's 7.5 and 8.2 ms, `forward` no
+  slower, both round trips at machine precision; held-out on Jura and
+  Walker the two backbones agree to the third decimal on rmse, CRPS and
+  coverage (0.963/0.485 vs 0.964/0.485; 0.660/0.354 both), training time
+  the same, and a whole prediction with its measurement samples 2.6x
+  faster on Jura and 1.3x on Walker. Nothing degrades, so
+  `backbone="rq"` is what a new model should ask for; the default cannot
+  follow it without changing what saved models replay.
+* **`TensorProductFlow`: the CP-grid field, and the strongest Jura arm
+so far — still not the recommendation.** The flows now share a base
+(`_ContinuousFlow`: knots, solver, both directions, the `constants`
+contract) and a second representation joins the dense one: the field on
+the full `(size + 1)`-dimensional lattice — a regular grid per `[-5, 5]`
+axis crossed with the time knots — with the weight tensor a rank-`R`
+canonical polyadic sum of per-axis vectors (plus a component axis and a
+per-rank amplitude). Because the kernel is separable the field
+factorizes through the CP structure into one-dimensional kernel sums,
+`O(R (size * grid + knots))` per evaluation with the `grid^size * knots`
+tensor never formed (about 400 parameters at Jura's seven elements,
+against tens of millions of lattice entries), whitening acts axis by
+axis on the factors, and the divergence is exact one axis at a time.
+Every factor initializes at unit scale with the amplitude alone holding
+the field near identity, so no rank can start dead. `test_cnf.py` runs
+its whole battery over both representations.
+  - **The gate, user's prior `rank=5`**: Jura rmse/sd **0.924** — the
+  best arm outright, 4% under the marginal chain and 3% under the dense
+  flow — crps/sd 0.455 tied with the dense flow, coverage 0.871; Macpass
+  1.003/0.267, no better than the dense flow and still 14% behind the
+  marginal chain on crps; training 800 s on Jura, 2.5x the dense flow.
+  Same verdict shape, stronger Jura: **not superior on both**, and the
+  standing recommendation holds.
+  - **A chain's round trip is not the flow's.** The harness now reports
+  three round trips, and the flows' own latent-unit numbers sit at
+  solver tolerance (dense 2.4e-6, CP 5.4e-6) while the chain's max-abs
+  reads 0.3 to 14.6 in the data's units: one or two tail points that a
+  flow has moved into the `Spline`'s extrapolation zone, where the
+  inverse crosses `1 / slope` per unit — the mechanism the
+  `_OUTERMOST_SHARE` note already describes. Read the flow's number for
+  the flow and the mean for the chain; the max is a tail's.
+* **The flow-warping benchmark gate exists before any flow does.**
+`docs/benchmarks/flow_warpings.py` — on the user's call, the bar was
+built and baselined first, so the coming flow (discrete coupling or the
+CNF overhaul) faces measured numbers rather than a literature argument.
+Held-out rmse/sd, crps/sd, coverage, interval width, wall time and each
+chain's own `backward(forward(y))` round trip, on Jura and the Macpass
+assays (Ag/Pb/Zn as one vector variable, whole holes held out), against
+three arms: the standing marginal chain, a `RobustPCA` route, and the
+CNF as it stands. The baselines already earn their keep: **the two
+datasets disagree** — on Jura today's CNF leads every held-out score
+despite a back-transform that misses by 7.4 in original units where the
+honest chains sit at 1e-5, while on Macpass the marginal chain wins and
+the CNF's 1125-nat ELBO advantage buys nothing held-out — the same
+bound-versus-held-out divergence the trained-rotation experiment
+measured. Neither mixer clears the "definitely superior on both" gate,
+which is the criterion doing its job; a candidate is one more factory in
+`ARMS`.
+* **The release-tag CI job no longer dies of its own size.** As one
+pytest process the full suite killed the 16 GB GitHub runner on every
+release tag from v0.6.6 to v0.6.8 — "the runner has received a shutdown
+signal" mid-suite with every printed test green, the OOM signature of
+TensorFlow training, matplotlib and pyvista memory accumulating across
+1200+ tests plus the whole manual, with the kills landing in
+`test_manual`'s stretch. The tag tier is two jobs now: the suite minus
+the manual in one process, the manual's seventeen chapters alone in the
+other — same coverage, each process bounded. The workflow comment
+records the next lever (one subprocess per chapter) in case the manual
+job ever goes the same way.
+* **The manual runs against the checkout it sits in.** `docs/manual/run_blocks.py`
+put nothing on the path, so launched as a script it found `geoml` only
+where the package was installed — which CI does and a working checkout
+does not, so `test_manual` failed every chapter at its first block on
+the release run and had only ever been green where an editable install
+happened to stand in. The runner now puts the repository root first on
+`sys.path`, and the chapters prove the tree under test wherever they
+run. The release run regenerated seventeen figures, every shape claim
+checked against the fresh output (the residual variogram's high
+first bin, the fans tracking the data, Portlandian's zeros), and
+chapter 16's inducing-point table was remeasured on the corrected
+`Linear` node: the metals' error stays flat at 0.91, the goodness
+column settles 0.02–0.05 lower, the rock's accuracy still wobbles
+around 0.7 and is still lowest at the largest set. Chapter 3's
+ladder was spot-checked at its two smallest rungs on both datasets —
+every three-seed mean within 0.01 of the recorded row, inside the
+seed-to-seed spread, which is what a reformulation of `chol_r` that
+changes nothing but rounding should do — and its table stands as
+measured at 0.6.8.
+
 ## version 0.6.8
 * **The manual's numbers are measured again, and the figures with them.**
 All 17 chapters rerun on current code — the committed figures predated

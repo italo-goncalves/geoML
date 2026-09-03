@@ -15,6 +15,13 @@ import sys
 import time
 import urllib.request
 
+# the manual documents the tree it sits in. Python puts a script's own
+# folder on the path, not the working directory, so the repository root goes
+# there too and the chapters run against this checkout whether or not the
+# package is installed -- locally it is not; CI installs it editable
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+
 os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 

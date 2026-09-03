@@ -233,42 +233,6 @@ class RationalQuadratic(_Kernel):
         return cov
 
 
-# class _RadialBasisFunction(_Kernel):
-#     def __init__(self, max_distance, epsilon=1e-12):
-#         super().__init__()
-#         self.max_distance = max_distance
-#         self.epsilon = epsilon  # required to be able to compute gradients
-#
-#
-# class RBF3D(_RadialBasisFunction):
-#     """RBF 3D"""
-#     def kernelize(self, x):
-#         d = _tf.sqrt(x ** 2 + self.epsilon)
-#         k = 2 * d**3 + 3 * d**2 * self.max_distance + self.max_distance**3
-#         k = k / self.max_distance**3
-#         return k
-#
-#
-# class RBF2D(_RadialBasisFunction):
-#     """Thin plate spline RBF (2D)"""
-#     def kernelize(self, x):
-#         d = _tf.sqrt(x ** 2 + self.epsilon)
-#         k = 2 * _tf.math.log(d) * d ** 2 \
-#             - (1 + 2*_np.log(self.max_distance)) * d**2 \
-#             + self.max_distance**2
-#         k = k / self.max_distance ** 2
-#         return k
-#
-#
-# class RBF1D(_RadialBasisFunction):
-#     """Cubic RBF (1D)"""
-#     def kernelize(self, x):
-#         d = _tf.sqrt(x ** 2 + self.epsilon)
-#         k = 2*d**3 - 3 * d**2 * self.max_distance + self.max_distance**3
-#         k = k / self.max_distance ** 3
-#         return k
-
-
 class _AbstractCovariance(_gpr.Parametric):
     """Abstract covariance function class"""
 

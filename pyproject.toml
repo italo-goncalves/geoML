@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geoml"
-version = "0.6.8"
+version = "0.6.9"
 description = "Machine learning for spatial data"
 authors = [
     {name = "Ítalo Gomes Gonçalves", email = "italogoncalves.igg@gmail.com"},
@@ -104,6 +104,7 @@ include = [
     "geoml/viz/pyvista.py",
     "geoml/viz/graphviz.py",
     "geoml/math/geometry.py",
+    "geoml/math/rbf.py",
     "geoml/math/tf.py",
     "geoml/stats/random.py",
 ]

@@ -8,7 +8,9 @@ so a periodic direction and an anisotropic one can sit in the same model.
 
 ```{eval-rst}
 .. automodule:: geoml.transform
-   :members: Identity, Isotropic, Anisotropy2D, Anisotropy3D, AnisotropyARD
+   :members: Identity, Isotropic, Anisotropy2D, Anisotropy3D, AnisotropyARD,
+             ImplicitFault, ImplicitFaultBlocks, FaultDisplacement,
+             FaultNetwork
    :show-inheritance:
 ```
 

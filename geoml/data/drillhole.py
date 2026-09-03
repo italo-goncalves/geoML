@@ -39,8 +39,10 @@ HOLE = "HOLEID"
 FROM = "FROM"
 TO = "TO"
 
-# what a sample's own length is called once it is a point
+# what a sample's own length is called once it is a point, and where along
+# the hole it sits -- what a contact profile measures from
 LENGTH = "LENGTH"
+DEPTH = "DEPTH"
 
 ROLES = ("grade", "categorical", "density", "recovery", "flag", "ignore")
 
@@ -1650,9 +1652,10 @@ class DrillholeData(_data._SpatialData):
         become continuous variables and categorical ones become categorical
         variables, unless they are claimed by a compositional or vector group.
 
-        The hole each point came from and the length it stands for are carried
-        as the metadata columns `HOLEID` and `LENGTH`, which the models never
-        see: they are what a leave-one-hole-out split and a support-weighted
+        The hole each point came from, its depth down that hole and the
+        length it stands for are carried as the metadata columns `HOLEID`,
+        `DEPTH` and `LENGTH`, which the models never see: they are what a
+        leave-one-hole-out split, a contact profile and a support-weighted
         statistic read. Columns with the ``recovery`` role ride beside them,
         for the same reason -- they describe the sample, not the ground.
 
@@ -1730,6 +1733,8 @@ class DrillholeData(_data._SpatialData):
         # describes the sample rather than the ground, so it rides beside
         # them instead of becoming a variable
         point.add_metadata(HOLE, merged[HOLE].values)
+        point.add_metadata(DEPTH, merged[FROM].values + position
+                           * (merged[TO].values - merged[FROM].values))
         point.add_metadata(LENGTH, merged[TO].values - merged[FROM].values)
         for table in tables:
             for column in table.columns_with_role("recovery"):
@@ -1770,8 +1775,8 @@ class DrillholeData(_data._SpatialData):
 
         Each contact carries the category above it and the category below it,
         which is what an implicit model needs to place a boundary. The hole it
-        came from is carried as the metadata column `HOLEID`; a contact has no
-        length, so none is recorded.
+        came from and its depth down it are carried as the metadata columns
+        `HOLEID` and `DEPTH`; a contact has no length, so none is recorded.
 
         Parameters
         ----------
@@ -1805,6 +1810,7 @@ class DrillholeData(_data._SpatialData):
 
         point = _data.PointData(frame, ["X", "Y", "Z"])
         point.add_metadata(HOLE, frame[HOLE].values)
+        point.add_metadata(DEPTH, runs[TO].values[above][keep])
         point.add_rock_type_variable(
             column, labels=_pd.unique(value[~_pd.isna(value)]),
             measurements_a=value[above][keep],

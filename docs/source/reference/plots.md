@@ -38,6 +38,7 @@ how they are tested.
 .. automodule:: geoml.plots.prepare
    :members: variable, variable_or_component, continuous_parts,
              component_names, prediction_values, spread_check, variogram,
+             swath, categorical_swath, proportions, contact,
              grade_tonnage, training_curve, moving_average, realizations,
              realization_store
 ```

@@ -20,8 +20,12 @@ import itertools as _iter
 import numpy as _np
 import pyvista as _pv
 from sklearn.decomposition import PCA as _PCA
+import scipy.spatial as _spatial
+import warnings as _warnings
 from scipy.sparse import coo_matrix as _coo_matrix
 from scipy.sparse.csgraph import connected_components as _connected_components
+from scipy.sparse.csgraph import minimum_spanning_tree as _minimum_spanning_tree
+from scipy.sparse.csgraph import breadth_first_order as _breadth_first_order
 
 # geometry, not drawing: `tri` locates a point in a triangulation and
 # interpolates over it, which is what asking a sheet its elevation amounts to
@@ -631,6 +635,133 @@ def inside_solid(mesh, coordinates):
     return _np.asarray(selected["selected_points"]).astype(bool)
 
 
+def _circumradius(vertices):
+    """Circumradius of each simplex, `[n_simplices]`, from its vertices
+    `[n_simplices, n_dim + 1, n_dim]`. Solves for the circumcentre: the point
+    equidistant from every vertex. A flat simplex has no circumsphere and
+    reads as infinite, which is what excludes it from any hull."""
+    first = vertices[:, :1, :]
+    rest = vertices[:, 1:, :]
+    system = 2.0 * (rest - first)                              # [n, d, d]
+    target = (rest ** 2).sum(axis=2) - (first ** 2).sum(axis=2)
+    determinant = _np.linalg.det(system)
+    scale = _np.abs(system).max(axis=(1, 2)) + 1e-300
+    flat = _np.abs(determinant) < 1e-12 * scale ** system.shape[1]
+    safe = _np.where(flat[:, None, None], _np.eye(system.shape[1])[None],
+                     system)
+    centre = _np.linalg.solve(safe, target[:, :, None])[:, :, 0]
+    radius = _np.sqrt(((centre - first[:, 0, :]) ** 2).sum(axis=1))
+    return _np.where(flat, _np.inf, radius)
+
+
+class ConcaveHull:
+    """
+    The alpha shape of a point set: a concave hull at a chosen length.
+
+    The Delaunay triangulation's simplices are kept where their circumradius
+    is below `length`, so the hull follows the data at that scale -- it
+    fills the interior between drill fences closer than `length` apart and
+    leaves out a notch wider than that, where a convex hull would bridge
+    the notch and a ball around each sample would leave the interior out.
+    Built by `concave_hull`.
+
+    Attributes
+    ----------
+    points : array
+        The `(n_points, n_dim)` input.
+    length : float
+        The circumradius the simplices were kept under.
+    kept : array
+        One boolean per Delaunay simplex.
+    simplices : array
+        The kept simplices, as vertex indices into `points`.
+    boundary : array
+        The facets of kept simplices that face an unkept one or nothing --
+        `(n_facets, n_dim)` vertex indices: segments in 2D, triangles in 3D.
+    """
+
+    def __init__(self, points, length):
+        from scipy.spatial import Delaunay
+        points = _np.asarray(points, dtype=float)
+        if points.ndim != 2:
+            raise ValueError("points must be an (n_points, n_dim) array")
+        self.points = points
+        self.length = float(length)
+        self._delaunay = Delaunay(points)
+        radius = _circumradius(points[self._delaunay.simplices])
+        self.kept = radius < self.length
+        self.simplices = self._delaunay.simplices[self.kept]
+
+        # a facet is on the boundary when the simplex across it is unkept
+        # or absent; `neighbors[i, j]` is the simplex across the facet
+        # opposite vertex `j`
+        neighbors = self._delaunay.neighbors
+        across = _np.where(neighbors >= 0, self.kept[neighbors], False)
+        facets = []
+        n_vertices = self._delaunay.simplices.shape[1]
+        for i in _np.flatnonzero(self.kept):
+            for j in range(n_vertices):
+                if not across[i, j]:
+                    facets.append(_np.delete(self._delaunay.simplices[i], j))
+        self.boundary = _np.asarray(facets, dtype=int).reshape(
+            -1, n_vertices - 1)
+
+    def contains(self, coordinates):
+        """
+        Whether each location lies inside a kept simplex.
+
+        Parameters
+        ----------
+        coordinates
+            `(n, n_dim)` locations.
+
+        Returns
+        -------
+        inside : array
+            `(n,)` booleans.
+        """
+        coordinates = _np.asarray(coordinates, dtype=float)
+        index = self._delaunay.find_simplex(coordinates)
+        return _np.where(index >= 0, self.kept[_np.maximum(index, 0)], False)
+
+
+def concave_hull(points, length):
+    """
+    The concave hull of a point set at a length scale -- an alpha shape.
+
+    Parameters
+    ----------
+    points
+        `(n_points, n_dim)` sample locations, 2D or 3D.
+    length
+        The largest circumradius a Delaunay simplex may have and still be
+        part of the hull: a length in the coordinates' units, so a hull
+        "at 100 m" spans gaps in the data narrower than that and stops at
+        wider ones.
+
+    Returns
+    -------
+    ConcaveHull
+        With `contains(coordinates)` for the inside test and `boundary` for
+        the facets.
+
+    Raises
+    ------
+    ValueError
+        If the points do not span their space (fewer than `n_dim + 1` of
+        them, or all on a line or plane), which leaves nothing to
+        triangulate.
+    """
+    from scipy.spatial import QhullError
+    try:
+        return ConcaveHull(points, length)
+    except QhullError as error:
+        raise ValueError(
+            "a concave hull needs points that span their space -- at least "
+            "n_dim + 1 of them, not all on one line or plane; Qhull said: %s"
+            % str(error).splitlines()[0]) from None
+
+
 def bounding_box(points):
     """
     Computes a point set's bounding box and its diagonal.
@@ -929,3 +1060,117 @@ def grow(corners, marked, rings):
         touched[corners[marked].ravel()] = True
         marked = touched[corners].any(axis=1)
     return marked
+
+
+def point_normals(points, k=12, orient="concave"):
+    """
+    Unit normals of a scattered point set lying on a surface.
+
+    Each normal is the direction of least spread among a point's nearest
+    neighbours (Hoppe et al. 1992), which fixes it up to sign. The sign is
+    made consistent over the whole set by propagating it along a minimum
+    spanning tree of the neighbour graph, from one root per connected
+    piece, so that the field can serve as a gradient constraint.
+
+    Parameters
+    ----------
+    points
+        `(n, 2)` or `(n, 3)`.
+    k
+        Neighbours per point.
+    orient
+        `"concave"` (default): the root's normal points toward the side the
+        surface curves to, read from where its neighbours' centroid falls
+        relative to the tangent plane; the root is the most curved point of
+        its piece. A surface that reads as flat has no such side, which is
+        warned about, and the sign is then whatever the root drew. A vector
+        instead orients every normal to have a positive component along it.
+
+    Returns
+    -------
+    normals : array
+        `(n, d)` unit normals.
+
+    Raises
+    ------
+    ValueError
+        In three dimensions, when the points read as a single line, which
+        cannot fix a normal: give the normals, or points off the line.
+
+    References
+    ----------
+    Hoppe, H., DeRose, T., Duchamp, T., McDonald, J. and Stuetzle, W.
+    (1992). Surface reconstruction from unorganized points. SIGGRAPH 1992,
+    71-78.
+    """
+    points = _np.asarray(points, dtype=float)
+    if points.ndim != 2 or points.shape[1] not in (2, 3):
+        raise ValueError("points must be (n, 2) or (n, 3)")
+    n, d = points.shape
+    if n < d + 1:
+        raise ValueError("at least %d points are needed" % (d + 1))
+    k = int(min(k, n - 1))
+    tree = _spatial.cKDTree(points)
+    distance, index = tree.query(points, k=k + 1)
+    neighbours = points[index]                       # [n, k + 1, d], self first
+    centroid = neighbours.mean(axis=1)
+    centred = neighbours - centroid[:, None, :]
+    covariance = _np.einsum("nki,nkj->nij", centred, centred) / (k + 1)
+    eigenvalues, eigenvectors = _np.linalg.eigh(covariance)
+    normals = eigenvectors[:, :, 0].copy()
+    if d == 3:
+        # a line spreads along one direction only: the two smallest
+        # eigenvalues vanish together and no normal is defined
+        flat = eigenvalues[:, 1] <= 1e-6 * eigenvalues[:, 2] + 1e-300
+        if flat.mean() > 0.5:
+            raise ValueError(
+                "the points read as a single line, which cannot fix a "
+                "normal in three dimensions; give the normals, or points "
+                "off the line")
+
+    if not isinstance(orient, str):
+        vector = _np.asarray(orient, dtype=float).ravel()
+        if len(vector) != d:
+            raise ValueError("orient must be a %d-vector" % d)
+        sign = _np.sign(normals @ vector)
+        sign[sign == 0] = 1.0
+        return normals * sign[:, None]
+    if orient != "concave":
+        raise ValueError("orient must be 'concave' or a vector")
+
+    # how far, and to which side, the neighbourhood bends off the tangent
+    # plane, relative to its own spacing: the concavity signal
+    offset = _np.einsum("ni,ni->n", centroid - points, normals)
+    spacing = _np.median(distance[:, 1:], axis=1)
+    confidence = _np.abs(offset) / _np.where(spacing > 0, spacing, 1.0)
+
+    # the neighbour graph, weighted by how much adjacent normals disagree
+    rows = _np.repeat(_np.arange(n), k)
+    cols = index[:, 1:].ravel()
+    agreement = _np.abs(_np.einsum("ni,ni->n", normals[rows], normals[cols]))
+    weight = 1.0 - agreement + 1e-9
+    graph = _coo_matrix((weight, (rows, cols)), shape=(n, n)).tocsr()
+    graph = graph.maximum(graph.T)
+    forest = _minimum_spanning_tree(graph)
+    forest = forest.maximum(forest.T)
+    n_pieces, piece = _connected_components(graph, directed=False)
+
+    weakest = _np.inf
+    for p in range(n_pieces):
+        members = _np.where(piece == p)[0]
+        root = members[_np.argmax(confidence[members])]
+        weakest = min(weakest, confidence[root])
+        if offset[root] < 0:
+            normals[root] = -normals[root]
+        order, predecessor = _breadth_first_order(
+            forest, root, directed=False, return_predecessors=True)
+        for node in order[1:]:
+            parent = predecessor[node]
+            if normals[node] @ normals[parent] < 0:
+                normals[node] = -normals[node]
+    if weakest < 0.02:
+        _warnings.warn(
+            "the surface reads as flat: it has no concave side, so the "
+            "normals' sign is consistent but arbitrary; pass a vector as "
+            "`orient` to fix it", UserWarning)
+    return normals

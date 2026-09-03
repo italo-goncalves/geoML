@@ -17,7 +17,18 @@ arithmetic, and cell declustering.
              weld, fan_triangulation, vertex_normals, area, components,
              single_valued, open_edges, reversed_edges, signed_volume,
              sheet_interpolator, sheet_elevation, inside_solid,
+             concave_hull, ConcaveHull, point_normals,
              sub_block_index, unit_sub_grid, trilinear_weights
+```
+
+## Implicit surfaces
+
+A parameter-free radial basis function interpolant through points on a
+surface and their normals; the surface is its zero level set.
+
+```{eval-rst}
+.. automodule:: geoml.math.rbf
+   :members: HermiteRBF
 ```
 
 ## TensorFlow helpers
@@ -33,6 +44,7 @@ arithmetic, and cell declustering.
 ```{eval-rst}
 .. automodule:: geoml.math.interpolate
    :members: CubicConv1D, CubicConv2DSeparable, CubicConv3DSeparable,
-             CubicConvND, CubicSpline, MonotonicCubicSpline
+             CubicConvND, CubicSpline, MonotonicCubicSpline,
+             MonotonicRationalQuadraticSpline
    :show-inheritance:
 ```

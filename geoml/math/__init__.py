@@ -18,4 +18,4 @@ Numerics: `geometry` (triangulated surfaces, rotations -- arrays in, arrays
 out), `interpolate` (cubic interpolators in TF), `tf` (the everyday TF
 helpers) and `linalg` (solvers and decompositions held for future use).
 """
-from geoml.math import geometry, interpolate, linalg, tf
+from geoml.math import geometry, interpolate, linalg, rbf, tf

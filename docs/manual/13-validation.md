@@ -295,6 +295,49 @@ would miss a model that got the structure right and the level wrong; the
 residual variogram would miss one whose realizations were individually too
 smooth while the mean was right.
 
+One more figure, and it is the one that *localizes* a bias where every
+score so far aggregated it away. A model can be unbiased over the whole
+deposit and still run high in the north and low in the south, and only a
+mean per slab shows where it drifts. That is the swath plot, and the
+package's version carries the two corrections without which it describes
+the drilling rather than the deposit.
+
+```python
+walker.decluster(on="V")
+model.predict(walker_grid, n_sim=20)
+walker_grid.assign_from_data(walker, distance=15.0, hull=40.0)
+
+figure = geoml.plots.Explorer(walker, continuous="V").swath(
+    walker_grid, axis="Y", bins=12, where="near_data")
+figure.savefig("figures/13-swath.png", dpi=150, bbox_inches="tight")
+```
+
+![The data's mean against the model's, slab by slab](figures/13-swath.png)
+
+The first correction is the one §13.3 already made for the variogram: the
+data's slab means are **declustered**, through the column `decluster()`
+stores, so a crowded patch of samples speaks once rather than twenty
+times. The second is new, and it is the part a swath plot usually gets
+wrong. The model's slab means run over the *grid*, and a grid holds ground
+the samples never spoke for -- air, waste, the far corners of the box --
+where the model is extrapolating and its mean says nothing a sample could
+be compared with. `assign_from_data` names the ground the data informs:
+within a distance of a sample, inside the data's concave hull at a chosen
+length, or both. The hull is what makes it honest on drilling: it fills
+the interior between fences closer than its length, where a ball around
+each hole would leave a gap, and leaves out a notch wider than that, where
+a convex hull would bridge across. On a drillhole dataset the lengths go
+through a `transform` -- an `Anisotropy3D` with the ranges of the drilling,
+dense down the hole and sparse across -- so that "near" means what the
+geometry means by it. Walker Lake's samples cover the whole area, so here
+the column changes little; on a block model built around a deposit it is
+the difference between a swath and a lie.
+
+The band is what a kriging swath cannot draw: each realization's slab mean
+taken separately, and the two quantiles between them. The data's mean
+sitting inside it, slab after slab, is the model saying it did not know
+better -- outside it, the model saying it did.
+
 ## 13.4 Holding the intervals to their word
 
 The scores may now say the intervals are miscalibrated, with a `goodness`

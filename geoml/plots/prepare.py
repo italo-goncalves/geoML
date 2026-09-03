@@ -1014,6 +1014,543 @@ def spread_check(container: "_data._SpatialData", name: str,
     return panels
 
 
+def _axis_index(container, axis):
+    """Which coordinate to slab along, by index or by label."""
+    labels = [str(label) for label in
+              (getattr(container, "coordinate_labels", None) or [])]
+    if isinstance(axis, str):
+        if axis not in labels:
+            raise ValueError("no coordinate named %r; found %s"
+                             % (axis, ", ".join(labels) or "none"))
+        return labels.index(axis), axis
+    index = int(axis)
+    if not 0 <= index < container.n_dim:
+        raise ValueError("axis must be between 0 and %d, got %d"
+                         % (container.n_dim - 1, index))
+    return index, labels[index] if index < len(labels) else "axis %d" % index
+
+
+def _slab_edges(positions, bins):
+    """Where the slabs are cut, from a count or from the positions.
+
+    A count gives equal *width*: a slab is a place, not a value, and the
+    question a swath asks is where along the deposit the model and the
+    data part company. `_bin_edges` gives equal count, which is right for
+    a predicted grade and wrong here.
+    """
+    if _np.ndim(bins) > 0:
+        edges = _np.unique(_np.asarray(bins, dtype=float))
+    else:
+        bins = int(bins)
+        if bins < 1:
+            raise ValueError("bins must be at least 1, got %r" % bins)
+        edges = _np.linspace(positions.min(), positions.max(), bins + 1)
+    if len(edges) < 2 or edges[-1] <= edges[0]:
+        raise ValueError("there is nothing to slab: every position is %g"
+                         % edges[0])
+    return edges
+
+
+def _slab_of(positions, edges):
+    """The slab each position falls in, and whether it falls in any."""
+    index = _np.searchsorted(edges, positions, side="right") - 1
+    # the last edge belongs to the last slab, so the range is closed
+    index = _np.where(positions == edges[-1], len(edges) - 2, index)
+    inside = (index >= 0) & (index < len(edges) - 1)
+    return _np.clip(index, 0, len(edges) - 2), inside
+
+
+def _where_mask(container, where):
+    """A stored or given filter as a boolean row mask."""
+    if where is None:
+        return _np.ones(container.n_data, dtype=bool)
+    if isinstance(where, str):
+        return _np.asarray(container.get_metadata(where)).astype(bool)
+    mask = _np.asarray(where).astype(bool)
+    if mask.shape != (container.n_data,):
+        raise ValueError("where must hold one boolean per location (%d), "
+                         "got shape %s" % (container.n_data, mask.shape))
+    return mask
+
+
+def _volume_rows(container):
+    """One volume per location, or None where locations have no size."""
+    try:
+        volume = block_volume(container)
+    except TypeError:
+        return None
+    if _np.ndim(volume) == 0:
+        return _np.full(container.n_data, float(volume))
+    return _np.asarray(volume, dtype=float)
+
+
+def _declustering(container, weights, values):
+    """One weight per location: explicit, then the stored column, then
+    computed from `values` -- the precedence every declustered consumer
+    shares. `values` None means nothing to compute from, and the weights
+    come back None: an unweighted mean, said rather than guessed."""
+    if weights is not None:
+        return _np.asarray(weights, dtype=float).ravel(), None, False
+    column = container.metadata.get("declustering")
+    if column is not None:
+        return _np.asarray(column.values, dtype=float), None, True
+    if values is None:
+        return None, None, False
+    points = _np.asarray(container.coordinates, dtype=float)
+    finite = _np.isfinite(values)
+    computed = _np.ones(container.n_data)
+    computed[finite], cell = _geom.declustering_weights(
+        points[finite], values[finite])
+    return computed, cell, False
+
+
+def swath(data: "_data._SpatialData", predicted: "_data._SpatialData",
+          name: str, axis: "int | str" = 0, bins: _types.Bins = 12,
+          weights: "_types.ArrayLike | None" = None,
+          where: _types.Where = None,
+          quantiles=(0.05, 0.95)) -> list[dict]:
+    """
+    The data's mean against the model's, slab by slab along one axis.
+
+    The check that *localizes* conditional bias instead of aggregating it
+    away: a model that runs high in the north and low in the south can
+    score unbiased overall, and only a mean per slab shows where it drifts.
+    Two corrections make the comparison fair, and without them the figure
+    describes the drilling rather than the deposit. The data's means are
+    **declustered** -- explicit `weights`, else the `"declustering"` column
+    `container.decluster()` keeps, else cell weights computed here -- so a
+    crowded patch of holes speaks once. The model's means run only over
+    the ground its data informs, which `where` names: the boolean column
+    `assign_from_data` writes, or any mask. Over a block model each block
+    counts at its own volume.
+
+    Where the model carries simulations, the slab mean of every realization
+    is taken as well and the band between two of their quantiles reported,
+    which a kriging swath cannot draw.
+
+    Parameters
+    ----------
+    data
+        The samples, carrying measurements of `name`.
+    predicted
+        The grid or block model carrying the model's prediction of it.
+    name
+        The variable.
+    axis
+        Which coordinate the slabs cut across, by index or by label.
+    bins
+        How many slabs, or where their edges are. A count gives slabs of
+        **equal width** over the range both containers span.
+    weights
+        One declustering weight per sample, overriding the stored column.
+    where
+        Which locations of `predicted` take part: a boolean mask, or the
+        name of a boolean metadata column. Everything, by default.
+    quantiles
+        The two quantiles of the realizations' slab means drawn as a band.
+
+    Returns
+    -------
+    list of dict
+        One per component, with `label`, the slab bounds `lo`/`hi` and
+        `centre`, `axis`, then `data_mean`, `data_weight` (the summed
+        weights, an effective count) and `data_count`, `model_mean` and
+        `model_count`, `band_lo`/`band_hi` (None without simulations),
+        and `cell`, the declustering cell when the weights were computed
+        here.
+
+    See Also
+    --------
+    categorical_swath : the same figure for a categorical variable.
+    geoml.data.PointData.decluster : the stored weights this reads.
+    geoml.data.PointData.assign_from_data : the stored reach `where` names.
+    """
+    axis_index, axis_label = _axis_index(data, axis)
+    if predicted.n_dim != data.n_dim:
+        raise ValueError("data and predicted must have the same dimension")
+    data_parts = continuous_parts(variable(data, name))
+    model_parts = {str(part.name): part
+                   for part in continuous_parts(variable(predicted, name))}
+
+    data_pos = _np.asarray(data.coordinates, dtype=float)[:, axis_index]
+    model_pos = _np.asarray(predicted.coordinates, dtype=float)[:, axis_index]
+    keep = _where_mask(predicted, where)
+    if not keep.any():
+        raise ValueError("`where` leaves no location of the model to compare")
+    edges = _slab_edges(_np.concatenate([data_pos, model_pos[keep]]), bins)
+    n_slabs = len(edges) - 1
+    data_slab, data_in = _slab_of(data_pos, edges)
+    model_slab, model_in = _slab_of(model_pos, edges)
+    model_in &= keep
+    volume = _volume_rows(predicted)
+
+    first = data_parts[0].measurements.values.to_numpy().astype(float)
+    all_weights, cell, _ = _declustering(data, weights, first)
+
+    panels = []
+    for part in data_parts:
+        label = str(part.name)
+        if label not in model_parts:
+            raise ValueError("%r has no component %r in the predicted "
+                             "container" % (name, label))
+        measured = part.measurements.values.to_numpy().astype(float)
+        rows = _np.isfinite(measured) & data_in
+        share = _np.ones(rows.sum()) if all_weights is None \
+            else all_weights[rows]
+        weight = _np.bincount(data_slab[rows], weights=share,
+                              minlength=n_slabs)
+        total = _np.bincount(data_slab[rows], weights=share * measured[rows],
+                             minlength=n_slabs)
+        with _np.errstate(invalid="ignore", divide="ignore"):
+            data_mean = _np.where(weight > 0, total / weight, _np.nan)
+
+        model_part = model_parts[label]
+        if getattr(model_part, "prediction", None) is None:
+            raise ValueError("%r carries no prediction; run the model over "
+                             "the predicted container first" % name)
+        prediction = model_part.prediction.values.to_numpy().astype(float)
+        cells = _np.isfinite(prediction) & model_in
+        size = _np.ones(cells.sum()) if volume is None else volume[cells]
+        mass = _np.bincount(model_slab[cells], weights=size,
+                            minlength=n_slabs)
+        held = _np.bincount(model_slab[cells], weights=size * prediction[cells],
+                            minlength=n_slabs)
+        with _np.errstate(invalid="ignore", divide="ignore"):
+            model_mean = _np.where(mass > 0, held / mass, _np.nan)
+
+        band_lo = band_hi = None
+        store = realization_store(model_part)
+        if store.shape[1] > 1:
+            sums = _np.zeros([n_slabs, store.shape[1]])
+            for band in store.row_bands():
+                chunk = _np.asarray(store[band], dtype=float)
+                inside = cells[band]
+                size_band = 1.0 if volume is None \
+                    else volume[band][inside][:, None]
+                _np.add.at(sums, model_slab[band][inside],
+                           size_band * chunk[inside])
+            with _np.errstate(invalid="ignore", divide="ignore"):
+                means = _np.where(mass[:, None] > 0, sums / mass[:, None],
+                                  _np.nan)
+            band_lo, band_hi = _np.nanquantile(means, quantiles, axis=1)
+
+        panels.append({
+            "label": label, "axis": axis_label,
+            "lo": edges[:-1], "hi": edges[1:],
+            "centre": 0.5 * (edges[:-1] + edges[1:]),
+            "data_mean": data_mean, "data_weight": weight,
+            "data_count": _np.bincount(data_slab[rows], minlength=n_slabs),
+            "model_mean": model_mean,
+            "model_count": _np.bincount(model_slab[cells], minlength=n_slabs),
+            "band_lo": band_lo, "band_hi": band_hi, "cell": cell})
+    return panels
+
+
+def categorical_swath(data: "_data._SpatialData",
+                      predicted: "_data._SpatialData", name: str,
+                      axis: "int | str" = 0, bins: _types.Bins = 12,
+                      weights: "_types.ArrayLike | None" = None,
+                      where: _types.Where = None) -> dict:
+    """
+    The data's category shares against the model's, slab by slab.
+
+    The categorical `swath`: per slab, the declustered share of each
+    category among the samples against the model's mean predicted
+    probability of it -- its expected share -- over the locations `where`
+    names, each block at its own volume. The shares of a slab sum to one on
+    both sides, which is what lets them stack.
+
+    The declustering weights are explicit `weights` or the stored
+    `"declustering"` column; a categorical variable offers no values to
+    compute a cell from, so without either the shares are raw, which is
+    said in the result.
+
+    Parameters
+    ----------
+    data, predicted, name, axis, bins, weights, where
+        As in `swath`.
+
+    Returns
+    -------
+    dict
+        `labels`, `axis`, the slab bounds `lo`/`hi` and `centre`,
+        `data_share` and `model_share` (`(n_slabs, n_labels)`),
+        `data_weight`, `data_count`, `model_count`, and `declustered`.
+    """
+    axis_index, axis_label = _axis_index(data, axis)
+    if predicted.n_dim != data.n_dim:
+        raise ValueError("data and predicted must have the same dimension")
+    values, measured, labels = category_values(variable(data, name))
+    components = variable(predicted, name).components
+
+    data_pos = _np.asarray(data.coordinates, dtype=float)[:, axis_index]
+    model_pos = _np.asarray(predicted.coordinates, dtype=float)[:, axis_index]
+    keep = _where_mask(predicted, where)
+    if not keep.any():
+        raise ValueError("`where` leaves no location of the model to compare")
+    edges = _slab_edges(_np.concatenate([data_pos, model_pos[keep]]), bins)
+    n_slabs = len(edges) - 1
+    data_slab, data_in = _slab_of(data_pos, edges)
+    model_slab, model_in = _slab_of(model_pos, edges)
+    model_in &= keep
+    volume = _volume_rows(predicted)
+
+    all_weights, _, _ = _declustering(data, weights, None)
+    rows = measured & data_in
+    share = _np.ones(rows.sum()) if all_weights is None else all_weights[rows]
+    weight = _np.bincount(data_slab[rows], weights=share, minlength=n_slabs)
+
+    data_share = _np.full([n_slabs, len(labels)], _np.nan)
+    model_share = _np.full([n_slabs, len(labels)], _np.nan)
+    model_count = _np.zeros(n_slabs, dtype=int)
+    for k, label in enumerate(labels):
+        hit = (values[rows] == label).astype(float)
+        with _np.errstate(invalid="ignore", divide="ignore"):
+            data_share[:, k] = _np.bincount(
+                data_slab[rows], weights=share * hit, minlength=n_slabs) \
+                / weight
+
+        if label not in components:
+            raise ValueError("%r has no category %r in the predicted "
+                             "container" % (name, label))
+        probability = components[label].probability.values.to_numpy() \
+            .astype(float)
+        cells = _np.isfinite(probability) & model_in
+        size = _np.ones(cells.sum()) if volume is None else volume[cells]
+        mass = _np.bincount(model_slab[cells], weights=size,
+                            minlength=n_slabs)
+        with _np.errstate(invalid="ignore", divide="ignore"):
+            model_share[:, k] = _np.bincount(
+                model_slab[cells], weights=size * probability[cells],
+                minlength=n_slabs) / mass
+        model_count = _np.maximum(
+            model_count, _np.bincount(model_slab[cells], minlength=n_slabs))
+
+    return {"labels": labels, "axis": axis_label,
+            "lo": edges[:-1], "hi": edges[1:],
+            "centre": 0.5 * (edges[:-1] + edges[1:]),
+            "data_share": data_share, "model_share": model_share,
+            "data_weight": weight,
+            "data_count": _np.bincount(data_slab[rows], minlength=n_slabs),
+            "model_count": model_count,
+            "declustered": all_weights is not None}
+
+
+def proportions(data: "_data._SpatialData", predicted: "_data._SpatialData",
+                name: str, weights: "_types.ArrayLike | None" = None,
+                where: _types.Where = None) -> dict:
+    """
+    The data's category shares against the model's, over the whole model.
+
+    `categorical_swath` without the slabs: the declustered share of each
+    category among the samples against the model's mean predicted
+    probability of it -- its expected share -- over the locations `where`
+    names, each block at its own volume. Both sides sum to one. It is the
+    global check the row-normalized confusion matrix cannot make: a model
+    can place every measured sample in its right category and still call
+    the dominant rock over ground the data never reached.
+
+    Parameters
+    ----------
+    data, predicted, name, weights, where
+        As in `swath`.
+
+    Returns
+    -------
+    dict
+        `labels`, `data_share` and `model_share` (one per label),
+        `data_count`, `model_count`, and `declustered`.
+    """
+    values, measured, labels = category_values(variable(data, name))
+    components = variable(predicted, name).components
+    keep = _where_mask(predicted, where)
+    if not keep.any():
+        raise ValueError("`where` leaves no location of the model to compare")
+    volume = _volume_rows(predicted)
+
+    all_weights, _, _ = _declustering(data, weights, None)
+    share = _np.ones(measured.sum()) if all_weights is None \
+        else all_weights[measured]
+    with _np.errstate(invalid="ignore", divide="ignore"):
+        data_share = _np.array([
+            share[values[measured] == label].sum() / share.sum()
+            for label in labels])
+
+    model_share = _np.full(len(labels), _np.nan)
+    model_count = 0
+    for k, label in enumerate(labels):
+        if label not in components:
+            raise ValueError("%r has no category %r in the predicted "
+                             "container" % (name, label))
+        probability = components[label].probability.values.to_numpy() \
+            .astype(float)
+        cells = _np.isfinite(probability) & keep
+        size = _np.ones(cells.sum()) if volume is None else volume[cells]
+        with _np.errstate(invalid="ignore", divide="ignore"):
+            model_share[k] = (size * probability[cells]).sum() / size.sum()
+        model_count = max(model_count, int(cells.sum()))
+
+    return {"labels": labels, "data_share": data_share,
+            "model_share": model_share,
+            "data_count": int(measured.sum()), "model_count": model_count,
+            "declustered": all_weights is not None}
+
+
+def _drillhole_column(container, key, what):
+    column = container.metadata.get(key)
+    if column is None:
+        raise ValueError("%s must carry the %r metadata column a drillhole "
+                         "conversion writes" % (what, key))
+    return _np.asarray(column.values)
+
+
+def contact(data: "_data._SpatialData", name: str,
+            contacts: "_data._SpatialData", pair: "tuple[str, str]",
+            domain: "str | None" = None, bins: _types.Bins = 6,
+            max_distance: "float | None" = None,
+            quantiles: "tuple[float, float]" = (0.25, 0.75)) -> dict:
+    """
+    A grade against its distance down the hole to a domain contact.
+
+    Contact analysis on the data alone: every sample is placed by its
+    signed distance down the hole to the nearest contact between the two
+    domains of `pair` in the same hole -- negative on the first domain's
+    side, positive on the second's -- and the samples are binned by that
+    distance, each bin reporting its length-weighted mean, its count and
+    two sample quantiles. A hard boundary reads as a step at zero with
+    flat profiles either side; a soft one as a ramp, whose width is how
+    far one domain's estimate may borrow from the other.
+
+    The distance is measured down the hole, not through the rock: exact
+    where a hole crosses the contact squarely and stretched where it runs
+    oblique to it, as every downhole contact analysis is.
+
+    Parameters
+    ----------
+    data
+        Samples from `DrillholeData.as_point_data`, carrying the `HOLEID`
+        and `DEPTH` metadata that conversion writes, and `LENGTH` for the
+        weighting.
+    name
+        The continuous variable to profile.
+    contacts
+        The contact points from `DrillholeData.get_contacts`, carrying the
+        domain above and below each.
+    pair
+        The two domain labels, in the order the axis runs: negative
+        distances on the first's side, positive on the second's.
+    domain
+        A categorical variable on `data` naming each sample's own domain,
+        when the samples carry it: samples logged as neither of the pair
+        are then left out, which keeps a third domain beyond the far one
+        off the profile.
+    bins
+        How many bins of equal width on each side of the contact, or where
+        their edges are.
+    max_distance
+        How far from the contact the profile reaches; the furthest placed
+        sample by default.
+    quantiles
+        The two sample quantiles reported per bin.
+
+    Returns
+    -------
+    dict
+        `pair`, `label`, the bin bounds `lo`/`hi` and `centre`, `mean`,
+        `count`, `band_lo`/`band_hi` and `quantiles`; the placed samples'
+        `distance`, `value` and `rows`; `n_unplaced` (samples in holes
+        without a contact of the pair), `n_outside` (samples `domain`
+        excluded) and `weighted` (whether by `LENGTH`).
+    """
+    first, second = (str(p) for p in pair)
+    hole = _drillhole_column(data, "HOLEID", "data")
+    depth = _drillhole_column(data, "DEPTH", "data").astype(float)
+    contact_hole = _drillhole_column(contacts, "HOLEID", "contacts")
+    contact_depth = _drillhole_column(contacts, "DEPTH", "contacts") \
+        .astype(float)
+    rock = [var for var in contacts.variables.values()
+            if isinstance(var, _data.RockTypeVariable)]
+    if len(rock) != 1:
+        raise ValueError("contacts must hold one rock type variable, as "
+                         "`DrillholeData.get_contacts` returns")
+    above = _np.asarray(rock[0].measurements_a.to_numpy(), dtype=object)
+    below = _np.asarray(rock[0].measurements_b.to_numpy(), dtype=object)
+    forward = (above == first) & (below == second)
+    backward = (above == second) & (below == first)
+    of_pair = forward | backward
+    if not of_pair.any():
+        raise ValueError("no contact between %r and %r among the contacts"
+                         % (first, second))
+    # deeper than a forward contact is the second domain's side: positive
+    orientation = _np.where(forward, 1.0, -1.0)
+
+    signed = _np.full(data.n_data, _np.nan)
+    for this in _np.unique(contact_hole[of_pair]):
+        here = of_pair & (contact_hole == this)
+        rows = _np.where(hole == this)[0]
+        if len(rows) == 0:
+            continue
+        gap = depth[rows][:, None] - contact_depth[here][None, :]
+        nearest = _np.argmin(_np.abs(gap), axis=1)
+        signed[rows] = gap[_np.arange(len(rows)), nearest] \
+            * orientation[here][nearest]
+
+    var = variable(data, name)
+    values, has_value = var.get_measurements()
+    values = _np.asarray(values, dtype=float).ravel()
+    measured = _np.asarray(has_value, dtype=bool).ravel() \
+        & _np.isfinite(values)
+    n_outside = 0
+    if domain is not None:
+        labels, _, _ = category_values(variable(data, domain))
+        inside = (labels == first) | (labels == second)
+        n_outside = int((measured & ~inside).sum())
+        measured &= inside
+    placed = measured & _np.isfinite(signed)
+    n_unplaced = int((measured & ~_np.isfinite(signed)).sum())
+    if not placed.any():
+        raise ValueError("no measured sample sits in a hole with a contact "
+                         "between %r and %r" % (first, second))
+    rows = _np.where(placed)[0]
+    distance, value = signed[rows], values[rows]
+
+    if isinstance(bins, (int, _np.integer)):
+        reach = float(_np.abs(distance).max()) if max_distance is None \
+            else float(max_distance)
+        edges = _np.linspace(-reach, reach, 2 * int(bins) + 1)
+    else:
+        edges = _np.asarray(bins, dtype=float)
+    n_bins = len(edges) - 1
+    which = _np.searchsorted(edges, distance, side="right") - 1
+    which[distance == edges[-1]] = n_bins - 1
+    binned = (which >= 0) & (which < n_bins)
+
+    length = data.metadata.get("LENGTH")
+    weight = _np.ones(len(rows)) if length is None \
+        else _np.asarray(length.values, dtype=float)[rows]
+    with _np.errstate(invalid="ignore", divide="ignore"):
+        mean = _np.bincount(which[binned], weights=weight[binned] * value[binned],
+                            minlength=n_bins) \
+            / _np.bincount(which[binned], weights=weight[binned],
+                           minlength=n_bins)
+    count = _np.bincount(which[binned], minlength=n_bins)
+    band = _np.full([n_bins, 2], _np.nan)
+    for b in range(n_bins):
+        inside = binned & (which == b)
+        if inside.any():
+            band[b] = _np.quantile(value[inside], quantiles)
+
+    return {"pair": (first, second), "label": str(name),
+            "lo": edges[:-1], "hi": edges[1:],
+            "centre": 0.5 * (edges[:-1] + edges[1:]),
+            "mean": mean, "count": count,
+            "band_lo": band[:, 0], "band_hi": band[:, 1],
+            "quantiles": tuple(quantiles),
+            "distance": distance, "value": value, "rows": rows,
+            "n_unplaced": n_unplaced, "n_outside": n_outside,
+            "weighted": length is not None}
+
+
 def variogram(container: "_data._SpatialData", name: str,
               n_lags: int = 15, max_lag: "float | None" = None,
               direction: "_types.ArrayLike | None" = None,

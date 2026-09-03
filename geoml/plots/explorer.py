@@ -771,6 +771,284 @@ class Explorer(_base.Selection):
             figure.tight_layout()
         return figure
 
+    def swath(self, predicted, axis=0, bins=12, where=None, weights=None,
+              quantiles=(0.05, 0.95), figsize=None) -> "_plt.Figure":
+        """
+        The data's mean against the model's, slab by slab along one axis.
+
+        The check that localizes conditional bias instead of aggregating it
+        away: a model unbiased overall can run high in one part of the
+        deposit and low in another, and only a mean per slab shows where.
+        Two corrections make the comparison fair. The data's means are
+        declustered -- the stored `"declustering"` column, else weights
+        computed here -- so a crowded patch of holes speaks once; and the
+        model's means run only over the ground the data informs, which
+        `where` names. Where the model carries simulations the band
+        between two quantiles of the realizations' slab means is drawn,
+        which a kriging swath cannot.
+
+        Draws the continuous variable when one was given, else the
+        categorical one as stacked shares: the data's declustered share of
+        each category against the model's mean predicted probability.
+
+        Parameters
+        ----------
+        predicted
+            The grid or block model carrying the model's prediction.
+        axis : int or str
+            Which coordinate the slabs cut across, by index or by label.
+        bins : int or sequence
+            How many slabs, of **equal width**, or where their edges are.
+        where
+            Which locations of `predicted` take part: a boolean mask or
+            the name of a boolean metadata column, as `assign_from_data`
+            writes. Everything, by default.
+        weights
+            One declustering weight per sample, overriding the stored
+            column.
+        quantiles
+            The two quantiles of the realizations' slab means drawn as a
+            band.
+        """
+        with _style.context():
+            if self.continuous is not None:
+                return self._continuous_swath(predicted, axis, bins, where,
+                                              weights, quantiles, figsize)
+            var = self._require_categorical("swath")
+            result = _prep.categorical_swath(self.data, predicted, var.name,
+                                             axis, bins, weights, where)
+            figure = _plt.figure(figsize=figsize or (7.0, 4.6))
+            grid = figure.add_gridspec(2, 1, height_ratios=[3, 1])
+            top = figure.add_subplot(grid[0])
+            bottom = figure.add_subplot(grid[1], sharex=top)
+            self._draw_category_swath(top, bottom, result)
+            top.set_title("%s: %sshares along %s"
+                          % (var.name,
+                             "declustered " if result["declustered"] else "",
+                             result["axis"]))
+            bottom.set_xlabel(result["axis"])
+            figure.tight_layout()
+        return figure
+
+    def _continuous_swath(self, predicted, axis, bins, where, weights,
+                          quantiles, figsize):
+        var = self._require_continuous("swath")
+        panels = _prep.swath(self.data, predicted, var.name, axis=axis,
+                             bins=bins, weights=weights, where=where,
+                             quantiles=quantiles)
+        rows, columns = _prep.grid_shape(len(panels))
+        size = figsize or (4.6 * columns, 1.0 + 3.8 * rows)
+        figure = _plt.figure(figsize=size)
+        grid = figure.add_gridspec(2 * rows, columns,
+                                   height_ratios=[3, 1] * rows)
+        for i, panel in enumerate(panels):
+            row, column = divmod(i, columns)
+            top = figure.add_subplot(grid[2 * row, column])
+            bottom = figure.add_subplot(grid[2 * row + 1, column], sharex=top)
+            self._draw_swath(top, bottom, panel, quantiles)
+            top.set_title(panel["label"])
+            bottom.set_xlabel(panel["axis"])
+        # every panel draws the same series; the first one's legend serves
+        handles, labels = figure.axes[0].get_legend_handles_labels()
+        figure.legend(handles, labels, loc="upper center", frameon=False,
+                      fontsize="small", ncol=min(3, len(labels)),
+                      bbox_to_anchor=(0.5, 0.995))
+        figure.suptitle("%s: declustered data against the model along %s"
+                        % (var.name, panels[0]["axis"]), y=1.03)
+        figure.tight_layout(rect=(0, 0, 1, 0.93))
+        return figure
+
+    def _draw_swath(self, top, bottom, panel, quantiles):
+        """One component of `swath`: means and band above, support below."""
+        x, model = _prep.step_path(panel["lo"], panel["hi"],
+                                   panel["model_mean"])
+        _, data = _prep.step_path(panel["lo"], panel["hi"],
+                                  panel["data_mean"])
+        model_color, data_color = self._color(0, "model"), \
+            self._color(3, "data")
+        if panel["band_lo"] is not None:
+            _, low = _prep.step_path(panel["lo"], panel["hi"],
+                                     panel["band_lo"])
+            _, high = _prep.step_path(panel["lo"], panel["hi"],
+                                      panel["band_hi"])
+            top.fill_between(x, low, high, color=model_color, alpha=0.2,
+                             linewidth=0,
+                             label="model: %.0f-%.0f%% of realizations"
+                             % (100 * quantiles[0], 100 * quantiles[1]))
+        top.plot(x, model, color=model_color, linewidth=1.8,
+                 label="model mean")
+        top.plot(x, data, color=data_color, linewidth=1.2, label="data mean")
+        top.plot(panel["centre"], panel["data_mean"], "o", markersize=4,
+                 color=data_color)
+        top.set_ylabel(panel["label"])
+
+        width = 0.9 * (panel["hi"] - panel["lo"])
+        bottom.bar(panel["centre"], panel["data_count"], width=width,
+                   color=data_color, alpha=0.5, label="samples")
+        bottom.set_ylabel("samples")
+        cells = bottom.twinx()
+        _, count = _prep.step_path(panel["lo"], panel["hi"],
+                                   panel["model_count"])
+        cells.plot(x, count, color=model_color, linewidth=1.0, alpha=0.7)
+        cells.set_ylabel("model cells")
+        cells.grid(False)
+
+    def _draw_category_swath(self, top, bottom, result):
+        """Stacked shares per slab, the data's beside the model's."""
+        width = 0.42 * (result["hi"] - result["lo"])
+        left = result["centre"] - 0.5 * width
+        right = result["centre"] + 0.5 * width
+        base_data = _np.zeros_like(result["centre"])
+        base_model = _np.zeros_like(result["centre"])
+        for k, label in enumerate(result["labels"]):
+            color = self._color(k, label)
+            data_share = _np.nan_to_num(result["data_share"][:, k])
+            model_share = _np.nan_to_num(result["model_share"][:, k])
+            top.bar(left, data_share, width=width, bottom=base_data,
+                    color=color, label=label)
+            top.bar(right, model_share, width=width, bottom=base_model,
+                    color=color, hatch="//", edgecolor="white",
+                    linewidth=0.5)
+            base_data = base_data + data_share
+            base_model = base_model + model_share
+        top.set_ylim(0.0, 1.0)
+        top.set_ylabel("share (data | model, hatched)")
+        top.legend(frameon=False, fontsize="small")
+
+        bottom.bar(result["centre"], result["data_count"],
+                   width=0.9 * (result["hi"] - result["lo"]),
+                   color=self._color(3, "data"), alpha=0.5)
+        bottom.set_ylabel("samples")
+
+    def proportions(self, predicted, where=None, weights=None,
+                    figsize=None) -> "_plt.Figure":
+        """
+        The data's category shares against the model's, one bar pair each.
+
+        The whole-model reading of the categorical `swath`: the declustered
+        share of each category among the samples beside the model's mean
+        predicted probability of it -- its expected share -- over the
+        ground `where` names, each block at its own volume. The confusion
+        matrix is row-normalized and so cannot see a model that calls the
+        dominant rock over ground the data never reached; this figure can.
+
+        Parameters
+        ----------
+        predicted
+            The grid or block model carrying the model's prediction.
+        where
+            Which locations of `predicted` take part: a boolean mask or
+            the name of a boolean metadata column, as `assign_from_data`
+            writes. Everything, by default.
+        weights
+            One declustering weight per sample, overriding the stored
+            column.
+        """
+        with _style.context():
+            var = self._require_categorical("proportions")
+            result = _prep.proportions(self.data, predicted, var.name,
+                                       weights, where)
+            figure, ax = _plt.subplots(figsize=figsize or (6.0, 4.0))
+            position = _np.arange(len(result["labels"]))
+            for k, label in enumerate(result["labels"]):
+                color = self._color(k, label)
+                ax.bar(position[k] - 0.21, result["data_share"][k],
+                       width=0.42, color=color)
+                ax.bar(position[k] + 0.21, result["model_share"][k],
+                       width=0.42, color=color, hatch="//",
+                       edgecolor="white", linewidth=0.5)
+            ax.set_xticks(position)
+            ax.set_xticklabels(result["labels"])
+            ax.set_ylabel("share (data | model, hatched)")
+            ax.set_xlabel("%d samples, %d model locations"
+                          % (result["data_count"], result["model_count"]))
+            ax.set_title("%s: %sshares, data against the model"
+                         % (var.name,
+                            "declustered " if result["declustered"] else ""))
+            figure.tight_layout()
+        return figure
+
+    def contact(self, contacts, pair, domain=None, bins=6, max_distance=None,
+                quantiles=(0.25, 0.75), figsize=None) -> "_plt.Figure":
+        """
+        The grade against its distance down the hole to a domain contact.
+
+        Contact analysis on the data alone, the figure the hard-or-soft
+        boundary decision is read from: every sample placed by its signed
+        distance down the hole to the nearest contact between the two
+        domains of `pair`, the samples themselves faint behind the binned
+        length-weighted mean, a band between two sample quantiles, and the
+        counts below. A step at zero with flat profiles either side is a
+        hard boundary; a ramp is a soft one, its width how far one domain's
+        estimate may borrow from the other.
+
+        Parameters
+        ----------
+        contacts
+            The contact points from `DrillholeData.get_contacts`.
+        pair
+            The two domain labels, in the order the axis runs: the first
+            left of the contact, the second right of it.
+        domain
+            A categorical variable on the data naming each sample's own
+            domain, when the samples carry it, so a third domain beyond
+            the far one stays off the profile.
+        bins
+            Bins of equal width on each side of the contact, or the edges.
+        max_distance
+            How far from the contact the profile reaches.
+        quantiles
+            The two sample quantiles drawn as a band.
+        """
+        with _style.context():
+            var = self._require_continuous("contact")
+            result = _prep.contact(self.data, var.name, contacts, pair,
+                                   domain=domain, bins=bins,
+                                   max_distance=max_distance,
+                                   quantiles=quantiles)
+            figure = _plt.figure(figsize=figsize or (7.0, 4.6))
+            grid = figure.add_gridspec(2, 1, height_ratios=[3, 1])
+            top = figure.add_subplot(grid[0])
+            bottom = figure.add_subplot(grid[1], sharex=top)
+            color = self._color(3, "data")
+
+            top.plot(result["distance"], result["value"], ".", color=color,
+                     alpha=0.25, markersize=3, label="samples")
+            x, low = _prep.step_path(result["lo"], result["hi"],
+                                     result["band_lo"])
+            _, high = _prep.step_path(result["lo"], result["hi"],
+                                      result["band_hi"])
+            top.fill_between(x, low, high, color=color, alpha=0.2,
+                             linewidth=0,
+                             label="%.0f-%.0f%% of samples"
+                             % tuple(100 * q for q in result["quantiles"]))
+            _, mean = _prep.step_path(result["lo"], result["hi"],
+                                      result["mean"])
+            top.plot(x, mean, color=color, linewidth=1.8,
+                     label="mean by length" if result["weighted"]
+                     else "mean")
+            top.axvline(0.0, color="black", linewidth=0.8, alpha=0.6)
+            # the profile sets the scale; a lone outlier does not
+            lo_y, hi_y = _np.nanquantile(result["value"], [0.01, 0.99])
+            lo_y = min(lo_y, _np.nanmin(result["band_lo"]))
+            hi_y = max(hi_y, _np.nanmax(result["band_hi"]))
+            margin = 0.05 * (hi_y - lo_y) or 1.0
+            top.set_ylim(lo_y - margin, hi_y + margin)
+            top.set_ylabel(var.name)
+            top.legend(frameon=False, fontsize="small")
+            top.set_title("%s across the %s | %s contact"
+                          % (var.name, *result["pair"]))
+
+            bottom.bar(result["centre"], result["count"],
+                       width=0.9 * (result["hi"] - result["lo"]),
+                       color=color, alpha=0.5)
+            bottom.axvline(0.0, color="black", linewidth=0.8, alpha=0.6)
+            bottom.set_ylabel("samples")
+            bottom.set_xlabel("distance down the hole: %s  |  %s"
+                              % result["pair"])
+            figure.tight_layout()
+        return figure
+
     def spread_check(self, bins=8, figsize=None) -> "_plt.Figure":
         """
         Whether the noise the model fitted is the noise the data has.

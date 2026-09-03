@@ -710,14 +710,6 @@ class Grid3D(_GriddedData):
         self.grid_size = [int(num) for num in n]
         self.origin = start
 
-    def make_interpolator(self, coordinates: _types.ArrayLike):
-        # `cubic_conv_3d` does not exist -- the class is
-        # `CubicConv3DSeparable`, and nothing in the package calls this. Left
-        # as found: wiring it up or deleting it is a decision, filed with the
-        # RBF interpolation item rather than made here in passing.
-        return _gint.cubic_conv_3d(  # type: ignore[attr-defined]
-            coordinates, self.grid[0], self.grid[1], self.grid[2])
-
     def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
@@ -879,9 +871,6 @@ class RotatedGrid3D(Grid3D):
         return super().index_data(
             rotate(data, self.origin, self.azimuth, self.dip, self.rake,
                    reverse=True))
-
-    def make_interpolator(self, coordinates):
-        raise NotImplementedError
 
     def as_pyvista(self, simulations=False, include="**"):
         """

@@ -45,6 +45,7 @@ from geoml.math.geometry import bounding_box
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from geoml.data.geoh5 import Workspace as _GeoH5Workspace
+    import geoml.transform as _tr
 
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _TreeNode, _frame_from_columns
@@ -476,6 +477,101 @@ class _SpatialData(_TreeNode):
         coordinates = _np.asarray(self.coordinates, dtype=float)
         inside = _gmt.inside_solid(_closed_body(solid), coordinates)
         self.add_metadata(name, inside.astype(_np.int8), labels=list(labels))
+
+    def assign_from_data(self, data: "_SpatialData | _types.ArrayLike",
+                         distance: "float | None" = None,
+                         hull: "float | None" = None,
+                         transform: "_tr._Transform | None" = None,
+                         name: str = "near_data") -> _np.ndarray:
+        """
+        Records which locations lie within the data's reach.
+
+        A model speaks for the ground its data informs and no further, and
+        any comparison of the two -- a swath plot above all -- is only fair
+        over that ground. A location is in reach when it lies within
+        `distance` of a sample, or inside the data's concave hull at the
+        length `hull`, or both: the hull fills the interior between drill
+        fences closer than its length, where a ball around each sample
+        would leave a gap, and leaves out a notch wider than it, where a
+        convex hull would bridge across. Giving both is a hull with a
+        margin.
+
+        The answer is a boolean metadata column, so it survives subsetting
+        and Zarr, a block model's children inherit it across `split` and
+        `refine`, and `where=` takes it by name.
+
+        Parameters
+        ----------
+        data
+            The samples: a spatial container, or an `(n, n_dim)` array of
+            coordinates.
+        distance
+            Radius around each sample within which a location is in
+            reach. In the transformed units when `transform` is given.
+        hull
+            Length of the concave hull -- the largest circumradius a
+            Delaunay simplex may have and still be part of it. In the
+            transformed units when `transform` is given. Data that do not
+            span their space (all on a line or plane) have no hull, and
+            the distance alone decides, with a warning.
+        transform
+            A spatial transform from `geoml.transform`, applied to the
+            samples and to this object's locations before any distance is
+            measured -- how drillhole anisotropy is said, dense down the
+            hole and sparse across: an `Anisotropy3D` with the ranges of
+            the drilling. `None` measures in the coordinates' own units.
+        name
+            Name of the metadata column to write. An existing column with
+            this name is replaced.
+
+        Returns
+        -------
+        reach : array
+            `(n_data,)` booleans, the column just written.
+
+        Raises
+        ------
+        ValueError
+            If neither `distance` nor `hull` is given, or the dimensions
+            differ.
+
+        See Also
+        --------
+        assign_from_surface, assign_from_solid : the same kind of column
+            from a surface or a body.
+        geoml.math.geometry.concave_hull : the hull itself.
+        """
+        if distance is None and hull is None:
+            raise ValueError("give a distance, a hull length, or both")
+
+        samples = _np.asarray(
+            getattr(data, "coordinates", data), dtype=float)
+        targets = _np.asarray(self.coordinates, dtype=float)
+        if samples.ndim != 2 or samples.shape[1] != targets.shape[1]:
+            raise ValueError(
+                "the data must have the same dimension as this object "
+                "(%d)" % targets.shape[1])
+        if transform is not None:
+            transform.refresh()
+            samples = _np.asarray(transform(samples), dtype=float)
+            targets = _np.asarray(transform(targets), dtype=float)
+
+        reach = _np.zeros(targets.shape[0], dtype=bool)
+        if distance is not None:
+            nearest, _ = _spatial.cKDTree(samples).query(targets)
+            reach |= nearest <= distance
+        if hull is not None:
+            try:
+                reach |= _gmt.concave_hull(samples, hull).contains(targets)
+            except ValueError as error:
+                if distance is None:
+                    raise
+                import warnings
+                warnings.warn(
+                    "no concave hull for these data (%s); the distance "
+                    "alone decides the reach" % error)
+        self.add_metadata(name, reach)
+        return reach
 
     def _metadata_frame(self):
         """The metadata columns as a data frame, empty if there are none."""

@@ -24,6 +24,7 @@ __all__ = ["Identity",
            "Sigmoid",
            "Center",
            "ContinuousNormalizingFlow",
+           "TensorProductFlow",
            "CenteredLogRatio",
            "PCA",
            "RobustPCA",
@@ -39,11 +40,11 @@ import geoml.stats.random as _rnd
 
 import numpy as _np
 import tensorflow as _tf
+import tensorflow_probability as _tfp
 import warnings as _warnings
 
 from scipy.special import ndtri as _ndtri
 from sklearn.covariance import MinCovDet as _MCD
-from sklearn.cluster import KMeans as _KMeans
 from sklearn.decomposition import FastICA as _ICA
 from sklearn.exceptions import ConvergenceWarning as _ConvergenceWarning
 
@@ -152,6 +153,20 @@ class _Warping(_gpr.Parametric):
         return not self._mixes or self.size_out == 1
 
 
+    def refresh(self):
+        """
+        Recomputes whatever internal state `forward` and `backward` read.
+
+        A no-op for the closed-form warpings. The likelihood calls it once
+        at each of its entry points, so a warping with real state (the
+        flow) pays for it per call rather than per invocation --
+        `integrated_backward` alone runs the backward once per noise node.
+        Deliberately a per-call recomputation and never a stored-Variable
+        cache, which would cut the training gradients to the state's
+        parameters.
+        """
+        pass
+
     def forward(self, x):
         """
         Passes values through the class's warping function.
@@ -241,7 +256,7 @@ class Spline(_Warping):
     n_knots : int
         Total number of knots.
     """
-    def __init__(self, size, knots_per_arm=5):
+    def __init__(self, size, knots_per_arm=5, backbone="cubic"):
         """
         Initializer for Spline.
 
@@ -250,6 +265,11 @@ class Spline(_Warping):
         knots_per_arm : int
             The number of knots used to build each side (positive and negative)
             of the spline.
+        backbone : str
+            The interpolant between the knots: `"cubic"` (the monotonic
+            cubic, the default) or `"rq"` (the monotonic rational
+            quadratic, whose inverse is a closed form rather than an
+            iteration). Same knots and slopes either way.
         """
         super().__init__()
         self._size_in = size
@@ -262,7 +282,14 @@ class Spline(_Warping):
                                 _gpr.CompositionalParameter(comp))
             self._add_parameter(f"warped_partition_right_{i}",
                                 _gpr.CompositionalParameter(comp))
-        self.spline = _gint.MonotonicCubicSpline()
+        if backbone == "cubic":
+            self.spline = _gint.MonotonicCubicSpline()
+        elif backbone == "rq":
+            self.spline = _gint.MonotonicRationalQuadraticSpline()
+        else:
+            raise ValueError(
+                "backbone must be 'cubic' or 'rq', got %r" % (backbone,))
+        self.backbone = backbone
         x_original = _tf.constant(
             _np.linspace(-5, 5, knots_per_arm * 2 + 1)[:, None],
             _tf.float64
@@ -699,6 +726,10 @@ class ChainedWarping(_Warping):
         """
         return all(wp.elementwise for wp in self.warpings)
 
+    def refresh(self):
+        for wp in self.warpings:
+            wp.refresh()
+
     def forward(self, x):
         # log-determinants add along a chain, so the accumulator starts at
         # zero; `ones_like` seeded it with the column count until 0.6.5,
@@ -757,189 +788,393 @@ class Sigmoid(_Warping):
         return 1 / (1 + _tf.math.exp(-x))
 
 
-class ContinuousNormalizingFlow(_Warping):
+class _ContinuousFlow(_Warping):
+    """What the continuous flows share: time knots, the solver, both
+    integration directions and the sweep contract.
+
+    A subclass owns one representation of the velocity field -- its
+    parameters, `refresh` (which settles the field into `_state`, a dict
+    of tensors), `_field` and `_field_and_divergence`. The settled state
+    rides the solver's `constants` rather than the closure: the adjoint
+    computes gradients for the state being integrated, for Variables read
+    inside the field and for `constants`, but a tensor merely captured is
+    cut -- which silently detached the field's weights from training when
+    this was first written the obvious way.
+
+    `forward` and `backward` deliberately do not refresh themselves: the
+    likelihood calls `refresh()` once per entry point, where the old
+    per-invocation refresh was most of the flow's measured cost.
+    """
     _mixes = True
 
-    # Built by `refresh` rather than by the constructor, which starts them at
-    # None: the declarations say what they become, so the methods that index
-    # them are not read as indexing None.
-    base_ip: "_tf.Tensor | None"
-    inducing_points: "_tf.Tensor"
-    alpha: "_tf.Tensor"
-    chol_space: "_tf.Tensor | None"
-    chol_time: "_tf.Tensor | None"
-
-    def __init__(self, size, inducing_points=20, n_steps=10, step=0.01):
+    def __init__(self, size, n_steps=10, rtol=1e-6):
         super().__init__()
         self._size_in = size
         self._size_out = size
+        self.n_knots = n_steps
+        self.rtol = float(rtol)
+        self._solver = _tfp.math.ode.DormandPrince(
+            rtol=self.rtol, atol=self.rtol * 1e-2)
+        self.knots = _tf.constant(
+            _np.linspace(0.0, 1.0, n_steps), _tf.float64)
+        self._state = None
+
+        self._add_parameter(
+            'rng_time', _gpr.PositiveParameter(1.0, 0.1, 10.0)
+        )
+
+    def _time_cross(self, t):
+        """`k_time(t, knots)`, `[n_knots]` for a scalar `t`."""
+        rng = self.parameters['rng_time'].get_value()
+        dif = (t - self.knots) / rng
+        return _tf.exp(-3.0 * dif ** 2)
+
+    def _time_cholesky(self):
+        knot_col = self.knots[:, None]
+        rng = self.parameters['rng_time'].get_value()
+        dif = _tftools.pairwise_dist(knot_col, knot_col) / rng
+        cov = _tf.exp(-3.0 * dif ** 2)
+        return _tf.linalg.cholesky(
+            cov + _tf.eye(self.n_knots, dtype=_tf.float64) * 1e-6)
+
+    def refresh(self):
+        raise NotImplementedError
+
+    def _field(self, x, t, **state):
+        raise NotImplementedError
+
+    def _field_and_divergence(self, x, t, **state):
+        raise NotImplementedError
+
+    def _settled(self):
+        if self._state is None:
+            raise RuntimeError(
+                "the flow's field is not settled: call refresh() first "
+                "(the likelihood does this once per entry point)")
+        return self._state
+
+    def forward(self, x):
+        state = self._settled()
+        x = _tf.convert_to_tensor(x, _tf.float64)
+        augmented = _tf.concat(
+            [x, _tf.zeros([_tf.shape(x)[0], 1], _tf.float64)], axis=1)
+
+        def ode_fn(t, y, **state):
+            field, divergence = self._field_and_divergence(
+                y[:, :self.size_in], t, **state)
+            return _tf.concat([field, divergence[:, None]], axis=1)
+
+        out = self._solver.solve(
+            ode_fn, 0.0, augmented, solution_times=[1.0],
+            constants=state).states[0]
+        return out[:, :self.size_in], out[:, self.size_in]
+
+    def backward(self, x):
+        state = self._settled()
+        x = _tf.convert_to_tensor(x, _tf.float64)
+
+        # the same settled field, time reversed: the round trip misses by
+        # the solver tolerance, not by a scheme mismatch
+        def ode_fn(t, y, **state):
+            return -self._field(y, 1.0 - t, **state)
+
+        return self._solver.solve(
+            ode_fn, 0.0, x, solution_times=[1.0],
+            constants=state).states[0]
+
+    def flow_history(self, x):
+        """The trajectory at the knot times, for inspection."""
+        self.refresh()
+        x = _tf.convert_to_tensor(x, _tf.float64)
+
+        def ode_fn(t, y, **state):
+            return self._field(y, t, **state)
+
+        times = _np.linspace(0.0, 1.0, self.n_knots + 1)[1:]
+        states = self._solver.solve(
+            ode_fn, 0.0, x, solution_times=times,
+            constants=self._settled()).states
+        return [_np.asarray(x)] + [_np.asarray(s) for s in states]
+
+    def initialize(self, x, weights=None):
+        """Settles the field and passes the data through.
+
+        Nothing here is data-dependent -- the field's geometry is fixed by
+        construction -- so unlike every other data-dependent start this
+        one only exists to hand the next link what the chain threads.
+        """
+        self.refresh()
+        x, _ = self.forward(x)
+        return x
+
+
+class ContinuousNormalizingFlow(_ContinuousFlow):
+    """A continuous-time flow on a fixed, separable space-time field.
+
+    The velocity field is a deterministic Gaussian-kernel interpolant over
+    anchors that never move: Sobol points covering the `[-5, 5]` box (the
+    chain leads with a `ZScore`, so the flow sees whitened units) crossed
+    with regular time knots on `[0, 1]`, the covariance factorizing as
+    `K_space (x) K_time`. `refresh` settles the field with one Cholesky per
+    factor; `forward` then integrates the augmented state `(x, log_det)`
+    with an adaptive Dormand-Prince solver, and `backward` integrates the
+    *same* field with time reversed, so the round trip is exact to the
+    solver tolerance rather than to a scheme mismatch. The divergence
+    driving the log-determinant is analytic -- the derivative of the
+    spatial kernel factor -- and the map decays to the identity away from
+    the box, so nothing steep ever reaches the tails.
+    """
+
+    # Built by `refresh` rather than by the constructor, which starts them
+    # at None: the declarations say what they become, so the methods that
+    # read them are not read as indexing None.
+    alpha: "_tf.Tensor | None"
+    chol_space: "_tf.Tensor | None"
+    chol_time: "_tf.Tensor | None"
+
+    def __init__(self, size, inducing_points=20, n_steps=10, step=0.01,
+                 rtol=1e-6):
+        """
+        Initializer for ContinuousNormalizingFlow.
+
+        Parameters
+        ----------
+        size
+            Number of components. The flow exists to mix them; a single
+            component is `Spline`'s job.
+        inducing_points
+            Number of spatial anchors -- Sobol points covering the
+            `[-5, 5]` box, fixed by construction.
+        n_steps
+            Number of time knots of the field over `[0, 1]`.
+        step
+            Accepted so saves from versions before 0.6.9 replay, and
+            ignored: the integration interval is fixed at `[0, 1]` and the
+            amplitude parameter carries the scale.
+        rtol
+            Relative tolerance of the solver, shared by both directions
+            and by the log-determinant.
+        """
+        super().__init__(size, n_steps=n_steps, rtol=rtol)
         self.n_ip = inducing_points
-        self.base_ip = None
-        # self.ip_weight = None
-        self.inducing_points = None
-        self.n_steps = n_steps
-        self.step = step
+
+        # fixed by construction: deterministic Sobol coverage of the box,
+        # so there is nothing data-dependent to persist and nothing for
+        # `initialize` to place. The generator is local on purpose -- the
+        # anchors are geometry, not a draw the package seed should move
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            unit = _rnd.sobol_engine(
+                size, _np.random.default_rng(0)).random(inducing_points)
+        self.anchors = _tf.constant((unit - 0.5) * 10.0, _tf.float64)
 
         self.alpha = None
         self.chol_space = None
         self.chol_time = None
-        self.time = _tf.constant(_np.arange(self.n_steps)[:, None], _tf.float64)
-        # self.mean = None
-        # self.std = None
 
         self._add_parameter(
             'alpha_white',
             _gpr.RealParameter(
-                _rnd.rng().normal(scale=1e-3, size=[inducing_points, size, n_steps]),
+                _rnd.rng().normal(
+                    scale=1e-2, size=[inducing_points, size, n_steps]),
                 _np.full([inducing_points, size, n_steps], -10),
                 _np.full([inducing_points, size, n_steps], 10)
             )
         )
         self._add_parameter(
-            'amp', _gpr.PositiveParameter(1, 0.01, 100, fixed=False)
+            'amp', _gpr.PositiveParameter(1, 0.01, 100)
         )
         self._add_parameter(
-            'rng_space', _gpr.PositiveParameter(
-                _np.ones([n_steps]),  _np.ones([n_steps]) * 0.1, _np.ones([n_steps]) * 10
-            )
+            'rng_space', _gpr.PositiveParameter(3.0, 0.5, 20.0)
         )
 
-    def covariance_matrix_space(self, x_1, x_2, t):
-        rng_space = self.parameters['rng_space'].get_value()[t]
-        dist_space = _tftools.pairwise_dist(x_1, x_2) / rng_space
-        cov_space = _tf.exp(- 3 * dist_space ** 2)
-        return cov_space
-
-    def covariance_matrix_space_d1(self, x_1, x_2, t):
-        rng_space = self.parameters['rng_space'].get_value()[t]
-        dif = - (x_1[:, None, :] - x_2[None, :, :]) / rng_space  # [data, data, size]
-        cov_space = self.covariance_matrix_space(x_1, x_2, t)  # [data, data]
-        cov_d1 = 6 * cov_space[:, :, None] * dif
-        return cov_d1
+    def _space_cross(self, x):
+        """`k_space(x, anchors)`, `[n, m]`."""
+        rng = self.parameters['rng_space'].get_value()
+        dist = _tftools.pairwise_dist(x, self.anchors) / rng
+        return _tf.exp(-3.0 * dist ** 2)
 
     def refresh(self):
+        amp = self.parameters['amp'].get_value()
         alpha_white = self.parameters['alpha_white'].get_value()
-        amp = self.parameters['amp'].get_value()
-        inducing_points = _tf.constant(self.base_ip, _tf.float64)
-        all_ip = []
-        fields = []
-        all_cov_inv = []
 
-        for i in range(self.n_steps):
-            cov_space = self.covariance_matrix_space(inducing_points, inducing_points, i)
-            cov_space = cov_space + _tf.eye(self.n_ip, dtype=_tf.float64) * 1e-6
-            chol_space = _tf.linalg.cholesky(cov_space)
-            cov_space_inv = _tf.linalg.cholesky_solve(
-                chol_space,
-                _tf.eye(self.n_ip, dtype=_tf.float64)
-            )
-            field = _tf.matmul(chol_space, alpha_white[:, :, i]) * amp
+        cov_space = self._space_cross(self.anchors)
+        chol_space = _tf.linalg.cholesky(
+            cov_space + _tf.eye(self.n_ip, dtype=_tf.float64) * 1e-6)
+        chol_time = self._time_cholesky()
 
-            # Midpoint
-            x_mid = inducing_points + self.step / 2 * field
-            cov_space = self.covariance_matrix_space(x_mid, x_mid, i)
-            cov_space = cov_space + _tf.eye(self.n_ip, dtype=_tf.float64) * 1e-6
-            chol_space = _tf.linalg.cholesky(cov_space)
-            field_mid = _tf.matmul(chol_space, alpha_white[:, :, i]) * amp
+        # whitened weights to interpolation coefficients, one triangular
+        # solve per Kronecker factor: the coefficients are
+        # `L_space^{-T} W L_time^{-1}`, so the field's values at the
+        # anchor-knot lattice come out as `L_space W L_time^T` -- a unit-
+        # variance draw's scale, whatever the ranges hold
+        white = _tf.transpose(alpha_white, [1, 0, 2])  # [size, m, K]
+        half = _tf.linalg.triangular_solve(
+            chol_space[None], white, lower=True, adjoint=True)
+        coef = _tf.transpose(_tf.linalg.triangular_solve(
+            chol_time[None], _tf.transpose(half, [0, 2, 1]),
+            lower=True, adjoint=True), [0, 2, 1])
 
-            all_ip.append(inducing_points)
-            fields.append(field)
-            all_cov_inv.append(cov_space_inv)
+        self.alpha = _tf.transpose(coef, [1, 0, 2]) * amp  # [m, size, K]
+        self.chol_space = chol_space
+        self.chol_time = chol_time
+        self._state = {'alpha': self.alpha}
 
-            inducing_points = inducing_points + self.step * field_mid
-        self.inducing_points = _tf.stack(all_ip, axis=-1)
-        fields = _tf.stack(fields, axis=-1)
-        cov_space_inv = _tf.stack(all_cov_inv, axis=0)
+    def _coefficients(self, t, alpha):
+        """The spatial coefficients at time `t`, `[m, size]`."""
+        return _tf.einsum('msk,k->ms', alpha, self._time_cross(t))
 
-        alpha = _tf.einsum('top,pst->ost', cov_space_inv, fields) / amp**2
-        self.alpha = alpha
+    def _field(self, x, t, alpha):
+        return _tf.matmul(self._space_cross(x), self._coefficients(t, alpha))
 
-        # last_ip = self.inducing_points[:, :, -1]
-        # self.mean = _tf.reduce_sum(self.ip_weight[:, None] * last_ip, axis=0, keepdims=True)
-        # self.std = _tf.sqrt(_tf.reduce_sum(self.ip_weight[:, None] * (last_ip - self.mean)**2,
-        #                                    axis=0, keepdims=True))
+    def _field_and_divergence(self, x, t, alpha):
+        rng = self.parameters['rng_space'].get_value()
+        coef = self._coefficients(t, alpha)
+        ks = self._space_cross(x)
+        field = _tf.matmul(ks, coef)
 
-    def get_field(self, x, t):
-        amp = self.parameters['amp'].get_value()
-        cov_space = self.covariance_matrix_space(x, self.inducing_points[:, :, t], t)
-        field = _tf.einsum('op,ps->os', cov_space, self.alpha[:, :, t])
-        return field * amp**2
+        # d k(x, x_i) / d x_s is analytic, so the divergence needs no
+        # estimator: differentiate the spatial factor and contract
+        dif = x[:, None, :] - self.anchors[None, :, :]
+        grad = -6.0 * dif / rng ** 2 * ks[:, :, None]
+        divergence = _tf.einsum('nms,ms->n', grad, coef)
+        return field, divergence
 
-    def get_gradient(self, x, t):
-        amp = self.parameters['amp'].get_value()
-        cov_space = self.covariance_matrix_space_d1(x, self.inducing_points[:, :, t], t)
-        grad = _tf.einsum('ops,ps->os', cov_space, self.alpha[:, :, t])
-        return grad * amp**2
 
-    # def forward(self, x):
-    #     self.refresh()
-    #     for i in range(self.n_steps):
-    #         # Midpoint
-    #         field = self.get_field(x, i)
-    #         x_mid = x + self.step / 2 * field
-    #         field_mid = self.get_field(x_mid, i)
-    #         x = x + self.step * field_mid
-    #     # x = (x - self.mean) / self.std
-    #     return x
+class TensorProductFlow(_ContinuousFlow):
+    """A continuous-time flow on a gridded field with CP-structured weights.
 
-    def backward(self, x):
-        self.refresh()
-        # x = x * self.std + self.mean
-        for i in range(self.n_steps):
-            j = self.n_steps - 1 - i
-            # Midpoint
-            field = self.get_field(x, j)
-            x_mid = x - self.step / 2 * field
-            field_mid = self.get_field(x_mid, j)
-            x = x - self.step * field_mid
-        return x
+    The field lives on the full `(size + 1)`-dimensional lattice -- a
+    regular grid on each `[-5, 5]` axis crossed with the time knots -- and
+    escapes the curse of dimensionality by never forming the lattice: the
+    weight tensor is a rank-`R` canonical polyadic sum of per-axis
+    vectors, `sum_r lambda_r a_r^(1) (x) ... (x) a_r^(size) (x) a_r^(t)
+    (x) a_r^(c)` with a component axis, and because the kernel is
+    separable the field factorizes through it into one-dimensional kernel
+    sums: `O(R (size * grid + knots))` per evaluation, with the grid
+    tensor's `grid^size * knots` entries never materialized. Whitening
+    survives the structure too -- a Kronecker-factored operator acts
+    axis-wise on CP factors -- so the coefficients cost one small
+    triangular solve per axis. The divergence is exact, the derivative
+    landing on one axis' factor at a time.
 
-    def forward(self, x):
-        self.refresh()
-        grads = []
-        norm = []
-        for i in range(self.n_steps):
-            # Midpoint
-            field = self.get_field(x, i)
-            x_mid = x + self.step / 2 * field
-            field_mid = self.get_field(x_mid, i)
-            grad = self.get_gradient(x_mid, i)
-            grads.append(_tf.reduce_sum(grad, axis=1, keepdims=True))
-            norm.append(_tf.reduce_sum(grad**2, axis=1, keepdims=True))
-            x = x + self.step * field_mid
-        total_grad = _tf.add_n(grads) * self.step
-        total_norm = _tf.add_n(norm) * self.step
+    A zero factor would gate its whole rank's gradients, so every factor
+    initializes at unit scale and the per-rank amplitude `weights` alone
+    holds the field near the identity at the start.
+    """
 
-        log_det = _tf.reduce_sum(total_grad - total_norm * 0.5, axis=1)
-        return x, log_det
+    def __init__(self, size, grid=9, rank=5, n_steps=10, rtol=1e-6):
+        """
+        Initializer for TensorProductFlow.
 
-    def flow_history(self, x):
-        self.refresh()
-        history = [x]
-        for i in range(self.n_steps):
-            field = self.get_field(x, i)
-            x_mid = x + self.step / 2 * field
-            field_mid = self.get_field(x_mid, i)
-            x = x + self.step * field_mid
-            history.append(x.numpy())
-        return history
+        Parameters
+        ----------
+        size
+            Number of components. The flow exists to mix them.
+        grid
+            Nodes per axis of the regular `[-5, 5]` grid.
+        rank
+            Number of canonical-polyadic terms -- the capacity knob.
+        n_steps
+            Number of time knots of the field over `[0, 1]`.
+        rtol
+            Relative tolerance of the solver, shared by both directions
+            and by the log-determinant.
+        """
+        super().__init__(size, n_steps=n_steps, rtol=rtol)
+        self.grid = grid
+        self.rank = rank
+        self.nodes = _tf.constant(_np.linspace(-5.0, 5.0, grid), _tf.float64)
 
-    def initialize(self, x, weights=None):
-        cluster = _KMeans(self.n_ip).fit(x)
+        rng = _rnd.rng()
+        self._add_parameter(
+            'factors_space',
+            _gpr.RealParameter(
+                rng.normal(size=[size, grid, rank]),
+                _np.full([size, grid, rank], -10.0),
+                _np.full([size, grid, rank], 10.0)))
+        self._add_parameter(
+            'factors_time',
+            _gpr.RealParameter(
+                rng.normal(size=[n_steps, rank]),
+                _np.full([n_steps, rank], -10.0),
+                _np.full([n_steps, rank], 10.0)))
+        self._add_parameter(
+            'factors_component',
+            _gpr.RealParameter(
+                rng.normal(size=[size, rank]),
+                _np.full([size, rank], -10.0),
+                _np.full([size, rank], 10.0)))
+        self._add_parameter(
+            'weights',
+            _gpr.RealParameter(
+                rng.normal(scale=1e-2, size=[rank]),
+                _np.full([rank], -10.0), _np.full([rank], 10.0)))
+        self._add_parameter(
+            'rng_space',
+            _gpr.PositiveParameter(
+                _np.full([size], 3.0), _np.full([size], 0.5),
+                _np.full([size], 20.0)))
 
-        cl_mean = _np.mean(cluster.cluster_centers_, axis=0, keepdims=True)
+    def _axis_cross(self, x):
+        """The one-dimensional kernel of every coordinate against the grid,
+        `[n, size, grid]`."""
+        rng = self.parameters['rng_space'].get_value()
+        dif = (x[:, :, None] - self.nodes[None, None, :]) / rng[None, :, None]
+        return _tf.exp(-3.0 * dif ** 2)
 
-        self.base_ip = (cluster.cluster_centers_ - cl_mean) * 1.1 + cl_mean
-        # self.ip_weight = _np.array([_np.sum(cluster.labels_ == i)
-        #                             for i in range(self.n_ip)])
-        # self.ip_weight = self.ip_weight / _np.sum(self.ip_weight)
+    def refresh(self):
+        rng = self.parameters['rng_space'].get_value()
+        dif = (self.nodes[:, None] - self.nodes[None, :])[None, :, :] \
+            / rng[:, None, None]
+        cov = _tf.exp(-3.0 * dif ** 2) \
+            + _tf.eye(self.grid, dtype=_tf.float64)[None] * 1e-6
+        chol_space = _tf.linalg.cholesky(cov)  # [size, grid, grid]
+        chol_time = self._time_cholesky()
 
-        # x_min = _np.min(x, axis=0, keepdims=True)
-        # x_max = _np.max(x, axis=0, keepdims=True)
-        # self.base_ip = _np.random.uniform(x_min, x_max, size=[self.n_ip, self.size_out])
+        # whitening acts axis by axis on the factors and keeps the rank
+        c_space = _tf.linalg.triangular_solve(
+            chol_space, self.parameters['factors_space'].get_value(),
+            lower=True, adjoint=True)  # [size, grid, rank]
+        c_time = _tf.linalg.triangular_solve(
+            chol_time, self.parameters['factors_time'].get_value(),
+            lower=True, adjoint=True)  # [knots, rank]
+        components = self.parameters['factors_component'].get_value() \
+            * self.parameters['weights'].get_value()[None, :]  # [size, rank]
 
-        x, _ = self.forward(x)
-        return x
+        self._state = {'c_space': c_space, 'c_time': c_time,
+                       'components': components}
+
+    def _pieces(self, x, t, c_space, c_time):
+        axis = self._axis_cross(x)
+        along = _tf.einsum('ndm,dmr->ndr', axis, c_space)  # [n, size, rank]
+        in_time = _tf.einsum('k,kr->r', self._time_cross(t), c_time)
+        return axis, along, in_time
+
+    def _field(self, x, t, c_space, c_time, components):
+        _, along, in_time = self._pieces(x, t, c_space, c_time)
+        product = _tf.reduce_prod(along, axis=1)  # [n, rank]
+        return _tf.einsum('nr,r,sr->ns', product, in_time, components)
+
+    def _field_and_divergence(self, x, t, c_space, c_time, components):
+        rng = self.parameters['rng_space'].get_value()
+        axis, along, in_time = self._pieces(x, t, c_space, c_time)
+        product = _tf.reduce_prod(along, axis=1)
+        field = _tf.einsum('nr,r,sr->ns', product, in_time, components)
+
+        # d f_s / d x_s differentiates the s-th axis' factor and leaves the
+        # others' product alone: exact, one axis at a time
+        dif = (x[:, :, None] - self.nodes[None, None, :]) \
+            / rng[None, :, None] ** 2
+        d_along = _tf.einsum('ndm,dmr->ndr', -6.0 * dif * axis, c_space)
+        divergence = _tf.zeros([_tf.shape(x)[0]], _tf.float64)
+        for s in range(self.size_in):
+            others = _tf.reduce_prod(
+                _tf.concat([along[:, :s], along[:, s + 1:]], axis=1), axis=1)
+            divergence = divergence + _tf.einsum(
+                'nr,nr,r,r->n', d_along[:, s], others, in_time,
+                components[s])
+        return field, divergence
 
 
 class PCA(_Warping):

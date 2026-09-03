@@ -924,7 +924,7 @@ class VGPNetwork(_GPModel):
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
             # prediction
-            mu, var, sims, _, _ = self.latent_network.predict(
+            mu, var, sims, _ = self.latent_network.predict(
                 x, x_var=x_var, n_sim=samples, seed=[seed, 0])
 
             mu = _tf.transpose(mu[:, :, 0])
@@ -1189,7 +1189,7 @@ class VGPNetwork(_GPModel):
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
         with _tf.name_scope("Prediction"):
-            pred_mu, pred_var, pred_sim, pred_exp_var, _ = \
+            pred_mu, pred_var, pred_sim, pred_exp_var = \
                 self.latent_network.predict(
                     x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0]
                 )
@@ -1385,7 +1385,7 @@ class VGPNetwork(_GPModel):
 
         def batch_measure(x, x_var, n_splits):
             with _latent.simulation_rule(self.options.qmc_simulations):
-                _, _, sims, _, _ = self.latent_network.predict(
+                _, _, sims, _ = self.latent_network.predict(
                     x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
             sims = _tf.split(_tf.transpose(sims, [1, 0, 2]),
                              self.lik_sizes, axis=1)
@@ -1461,7 +1461,7 @@ class VGPNetwork(_GPModel):
                 % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
 
         def batch_moments(x, x_var, n_splits):
-            mu, var, _, _, _ = self.latent_network.predict(
+            mu, var, _, _ = self.latent_network.predict(
                 x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
             mu = _tf.split(_tf.transpose(mu[:, :, 0]), self.lik_sizes, axis=1)
             var = _tf.split(_tf.transpose(var), self.lik_sizes, axis=1)
@@ -2685,3 +2685,77 @@ class ProjectedVGP(VGPNetwork):
                     self.likelihoods, variable_inputs):
                 output.append(lik.predict(mu, var, sim, exp_var, include_noise=include_noise, **v_inp))
             return output
+
+
+def search_throw(model: "VGPNetwork", fault: "_gpr.Parametric",
+                 throws: _types.ArrayLike, iterations: int = 50,
+                 learning_rate: float = 0.1, parameter: str = "throw",
+                 refine: int = 0) -> "tuple[float, list]":
+    """
+    Chooses a fault's throw among candidates, on the bound.
+
+    A fault's throw does not always train from zero: the bound is flat
+    in it away from the right value, with a categorical likelihood or with
+    several faults it was measured not to move at all. This is the search
+    that gradient descent cannot do. For each candidate the model is
+    restored to the state it started in, the throw set, a short burst of
+    training run with a fresh optimizer, and the bound at its end recorded;
+    the best candidate is set on the restored model, which is then trained
+    as usual. A workflow rather than something a model is, like `refine`
+    and `cross_validate`.
+
+    Parameters
+    ----------
+    model
+        The model, built and possibly trained; left in its starting state
+        with the chosen throw set and a fresh optimizer at
+        `learning_rate`.
+    fault
+        The `FaultDisplacement` (any transform holding the parameter).
+    throws
+        The candidate values.
+    iterations
+        Training iterations per candidate.
+    learning_rate
+        The rate of the bursts, and of the optimizer the model is left
+        with.
+    parameter
+        The parameter searched, `"throw"` or `"strike_slip"`.
+    refine
+        Further passes, each over five candidates spanning one step of the
+        previous pass either side of its best.
+
+    Returns
+    -------
+    best : float
+        The candidate chosen.
+    passes : list of (candidates, scores)
+        One pair of arrays per pass, the score being the bound each
+        candidate reached, mean of its burst's last fifth.
+    """
+    candidates = _np.asarray(throws, dtype=float).ravel()
+    value, shape, position, _, _ = model.get_parameter_values(complete=True)
+    start = len(model.training_log)
+    passes = []
+    best = float(candidates[0])
+    for level in range(refine + 1):
+        scores = []
+        for throw in candidates:
+            model.update_parameters(value, shape, position)
+            fault.parameters[parameter].set_value(float(throw))
+            model.set_learning_rate(learning_rate)
+            model.train_full(max_iter=iterations)
+            burst = model.training_log[-max(1, iterations // 5):]
+            scores.append(float(_np.mean(burst)))
+        scores = _np.asarray(scores)
+        passes.append((candidates, scores))
+        best = float(candidates[int(_np.nanargmax(scores))])
+        if level < refine:
+            spacing = (candidates.max() - candidates.min()) \
+                / max(len(candidates) - 1, 1)
+            candidates = _np.linspace(best - spacing, best + spacing, 5)
+    del model.training_log[start:]
+    model.update_parameters(value, shape, position)
+    fault.parameters[parameter].set_value(best)
+    model.set_learning_rate(learning_rate)
+    return best, passes

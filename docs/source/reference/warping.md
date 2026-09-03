@@ -15,6 +15,7 @@ decides how the likelihood integrates the noise.
 .. automodule:: geoml.warping
    :members: Identity, ZScore, Center, Scale, Log, Softplus, Sigmoid,
              Spline, ChainedWarping, Rotation, PCA, RobustPCA,
-             CenteredLogRatio, ScaledSimplex, ContinuousNormalizingFlow
+             CenteredLogRatio, ScaledSimplex, ContinuousNormalizingFlow,
+             TensorProductFlow
    :show-inheritance:
 ```

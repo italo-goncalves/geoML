@@ -960,6 +960,268 @@ class Interactive(_base.Selection):
             yaxis={"title": {"text": "measured"},
                    "autorange": "reversed"})
 
+    def swath(self, predicted, axis=0, bins=12, where=None, weights=None,
+              quantiles=(0.05, 0.95), height=None,
+              width=None) -> "_go.Figure":
+        """
+        The data's mean against the model's, slab by slab along one axis.
+
+        The check that localizes conditional bias instead of aggregating it
+        away. The data's means are declustered and the model's run only
+        over the ground `where` names -- the reach `assign_from_data`
+        writes -- so the comparison describes the deposit rather than the
+        drilling; with simulations, the band between two quantiles of the
+        realizations' slab means is drawn. Draws the continuous variable
+        when one was given, else the categorical one as stacked shares.
+
+        A swath draws slab aggregates, not locations, so like `variogram`
+        it carries no row index for the dashboard to link on.
+
+        Parameters
+        ----------
+        predicted, axis, bins, where, weights, quantiles
+            As in `Explorer.swath`.
+        """
+        if self.continuous is not None:
+            return self._continuous_swath(predicted, axis, bins, where,
+                                          weights, quantiles, height, width)
+        var = self._require_categorical("swath")
+        result = _prep.categorical_swath(self.data, predicted, var.name,
+                                         axis, bins, weights, where)
+        figure = _subplots(rows=2, cols=1, shared_xaxes=True,
+                           row_heights=[0.75, 0.25], vertical_spacing=0.05)
+        for k, label in enumerate(result["labels"]):
+            color = self._color(k, label)
+            for side, share, offset in (
+                    ("data", result["data_share"][:, k], "data"),
+                    ("model", result["model_share"][:, k], "model")):
+                figure.add_trace(_go.Bar(
+                    x=result["centre"], y=_np.nan_to_num(share),
+                    width=0.42 * (result["hi"] - result["lo"]),
+                    offsetgroup=offset, legendgroup=label, name=label,
+                    showlegend=side == "data",
+                    marker={"color": color,
+                            "pattern": {"shape": "/" if side == "model"
+                                        else ""}},
+                    hovertemplate="%s, %s: %%{y:.2f}<extra></extra>"
+                                  % (label, side)), row=1, col=1)
+        figure.add_trace(_go.Bar(
+            x=result["centre"], y=result["data_count"],
+            width=0.9 * (result["hi"] - result["lo"]),
+            marker={"color": self._color(3, "data"), "opacity": 0.5},
+            name="samples", showlegend=False,
+            hovertemplate="%{y} samples<extra></extra>"), row=2, col=1)
+        figure.update_layout(barmode="stack")
+        figure.update_yaxes(title_text="share (data | model, hatched)",
+                            range=[0, 1], row=1, col=1)
+        figure.update_yaxes(title_text="samples", row=2, col=1)
+        figure.update_xaxes(title_text=result["axis"], row=2, col=1)
+        return self._finish(
+            figure, title="%s: %sshares along %s"
+            % (var.name, "declustered " if result["declustered"] else "",
+               result["axis"]),
+            height=height or 480, width=width)
+
+    def proportions(self, predicted, where=None, weights=None, height=None,
+                    width=None) -> "_go.Figure":
+        """
+        The data's category shares against the model's, one bar pair each.
+
+        The whole-model reading of the categorical `swath`: the data's
+        declustered share of each category beside the model's expected
+        share over the ground `where` names, each block at its own volume.
+        Like `swath` it draws aggregates, not locations, so it carries no
+        row index for the dashboard to link on.
+
+        Parameters
+        ----------
+        predicted, where, weights
+            As in `Explorer.proportions`.
+        """
+        var = self._require_categorical("proportions")
+        result = _prep.proportions(self.data, predicted, var.name, weights,
+                                   where)
+        colors = [self._color(k, label)
+                  for k, label in enumerate(result["labels"])]
+        figure = _go.Figure()
+        for side, share, pattern in (("data", result["data_share"], ""),
+                                     ("model", result["model_share"], "/")):
+            figure.add_trace(_go.Bar(
+                x=result["labels"], y=share, name=side,
+                marker={"color": colors, "pattern": {"shape": pattern}},
+                hovertemplate="%%{x}, %s: %%{y:.3f}<extra></extra>" % side))
+        figure.update_layout(barmode="group")
+        figure.update_yaxes(title_text="share (data | model, hatched)")
+        figure.update_xaxes(title_text="%d samples, %d model locations"
+                            % (result["data_count"], result["model_count"]))
+        return self._finish(
+            figure, title="%s: %sshares, data against the model"
+            % (var.name, "declustered " if result["declustered"] else ""),
+            height=height or 420, width=width)
+
+    def contact(self, contacts, pair, domain=None, bins=6, max_distance=None,
+                quantiles=(0.25, 0.75), height=None,
+                width=None) -> "_go.Figure":
+        """
+        The grade against its distance down the hole to a domain contact.
+
+        Contact analysis on the data alone: every sample placed by its
+        signed distance down the hole to the nearest contact between the
+        two domains of `pair`, faint behind the binned length-weighted
+        mean, a band between two sample quantiles, and the counts below.
+        A step at zero is a hard boundary, a ramp a soft one. The samples
+        are locations, so they carry the row index the dashboard links on.
+
+        Parameters
+        ----------
+        contacts, pair, domain, bins, max_distance, quantiles
+            As in `Explorer.contact`.
+        """
+        var = self._require_continuous("contact")
+        result = _prep.contact(self.data, var.name, contacts, pair,
+                               domain=domain, bins=bins,
+                               max_distance=max_distance, quantiles=quantiles)
+        color = self._color(3, "data")
+        figure = _subplots(rows=2, cols=1, shared_xaxes=True,
+                           row_heights=[0.75, 0.25], vertical_spacing=0.05)
+        x, low = _prep.step_path(result["lo"], result["hi"],
+                                 result["band_lo"])
+        _, high = _prep.step_path(result["lo"], result["hi"],
+                                  result["band_hi"])
+        _, mean = _prep.step_path(result["lo"], result["hi"], result["mean"])
+        figure.add_trace(_go.Scatter(
+            x=x, y=low, mode="lines", line={"width": 0},
+            showlegend=False, hoverinfo="skip"), row=1, col=1)
+        figure.add_trace(_go.Scatter(
+            x=x, y=high, mode="lines", line={"width": 0},
+            fill="tonexty", fillcolor="rgba(214, 96, 77, 0.2)",
+            name="%.0f-%.0f%% of samples"
+            % tuple(100 * q for q in result["quantiles"]),
+            hoverinfo="skip"), row=1, col=1)
+        figure.add_trace(_go.Scatter(
+            x=x, y=mean, mode="lines", line={"color": color, "width": 2.0},
+            name="mean by length" if result["weighted"] else "mean",
+            hovertemplate="mean %{y:.4g}<extra></extra>"), row=1, col=1)
+        figure.add_trace(_go.Scatter(
+            x=result["distance"], y=result["value"], mode="markers",
+            marker={"size": 4, "color": color, "opacity": 0.35},
+            customdata=result["rows"], name="samples",
+            hovertemplate="%{x:.1f} m: %{y:.4g}<extra></extra>"),
+            row=1, col=1)
+        figure.add_trace(_go.Bar(
+            x=result["centre"], y=result["count"],
+            width=0.9 * (result["hi"] - result["lo"]),
+            marker={"color": color, "opacity": 0.5},
+            name="samples per bin", showlegend=False,
+            hovertemplate="%{y} samples<extra></extra>"), row=2, col=1)
+        figure.add_vline(x=0.0, line={"color": "black", "width": 1},
+                         opacity=0.6, row="all", col=1)
+        figure.update_yaxes(title_text=var.name, row=1, col=1)
+        figure.update_yaxes(title_text="samples", row=2, col=1)
+        figure.update_xaxes(title_text="distance down the hole: %s  |  %s"
+                            % result["pair"], row=2, col=1)
+        return self._finish(
+            figure, title="%s across the %s | %s contact"
+            % (var.name, *result["pair"]),
+            height=height or 480, width=width)
+
+    def _continuous_swath(self, predicted, axis, bins, where, weights,
+                          quantiles, height, width):
+        var = self._require_continuous("swath")
+        panels = _prep.swath(self.data, predicted, var.name, axis=axis,
+                             bins=bins, weights=weights, where=where,
+                             quantiles=quantiles)
+        rows, columns = _prep.grid_shape(len(panels))
+        titles = []
+        for row in range(rows):
+            titles += [panels[row * columns + c]["label"]
+                       if row * columns + c < len(panels) else ""
+                       for c in range(columns)]
+            titles += [""] * columns
+        figure = _subplots(
+            rows=2 * rows, cols=columns, shared_xaxes=True,
+            row_heights=[0.75, 0.25] * rows, vertical_spacing=0.05,
+            horizontal_spacing=0.1, subplot_titles=titles,
+            specs=[[{"secondary_y": r % 2 == 1} for _ in range(columns)]
+                   for r in range(2 * rows)])
+        for i, panel in enumerate(panels):
+            row, column = divmod(i, columns)
+            self._swath(figure, panel, 2 * row + 1, column + 1, quantiles,
+                        legend=i == 0)
+            figure.update_xaxes(title_text=panel["axis"], row=2 * row + 2,
+                                col=column + 1)
+        return self._finish(
+            figure, title="%s: declustered data against the model along %s"
+            % (var.name, panels[0]["axis"]),
+            height=height or 150 + 380 * rows, width=width,
+            legend={"orientation": "h", "x": 0.5, "xanchor": "center",
+                    "y": 1.0, "yanchor": "bottom"})
+
+    def _swath(self, figure, panel, row, column, quantiles, legend):
+        """One component of `swath`: means and band above, support below."""
+        x, model = _prep.step_path(panel["lo"], panel["hi"],
+                                   panel["model_mean"])
+        _, data = _prep.step_path(panel["lo"], panel["hi"],
+                                  panel["data_mean"])
+        model_color, data_color = self._color(0, "model"), \
+            self._color(3, "data")
+        if panel["band_lo"] is not None:
+            _, low = _prep.step_path(panel["lo"], panel["hi"],
+                                     panel["band_lo"])
+            _, high = _prep.step_path(panel["lo"], panel["hi"],
+                                      panel["band_hi"])
+            figure.add_trace(_go.Scatter(
+                x=x, y=low, mode="lines", line={"width": 0},
+                showlegend=False, hoverinfo="skip"), row=row, col=column)
+            figure.add_trace(_go.Scatter(
+                x=x, y=high, mode="lines", line={"width": 0},
+                fill="tonexty", fillcolor="rgba(31, 111, 139, 0.2)",
+                name="model: %.0f-%.0f%% of realizations"
+                % (100 * quantiles[0], 100 * quantiles[1]),
+                showlegend=legend, hoverinfo="skip"), row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=x, y=model, mode="lines",
+            line={"color": model_color, "width": 2.0},
+            name="model mean", showlegend=legend,
+            hovertemplate="model %{y:.4g}<extra></extra>"),
+            row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=x, y=data, mode="lines",
+            line={"color": data_color, "width": 1.4},
+            name="data mean", showlegend=legend,
+            hovertemplate="data %{y:.4g}<extra></extra>"),
+            row=row, col=column)
+        figure.add_trace(_go.Scatter(
+            x=panel["centre"], y=panel["data_mean"], mode="markers",
+            marker={"size": 6, "color": data_color},
+            customdata=_np.stack([panel["data_count"],
+                                  panel["data_weight"]], axis=1),
+            showlegend=False,
+            hovertemplate="data %{y:.4g}<br>%{customdata[0]} samples, "
+                          "%{customdata[1]:.1f} effective<extra></extra>"),
+            row=row, col=column)
+        figure.update_yaxes(title_text=panel["label"], row=row, col=column)
+
+        figure.add_trace(_go.Bar(
+            x=panel["centre"], y=panel["data_count"],
+            width=0.9 * (panel["hi"] - panel["lo"]),
+            marker={"color": data_color, "opacity": 0.5},
+            name="samples", showlegend=False,
+            hovertemplate="%{y} samples<extra></extra>"),
+            row=row + 1, col=column)
+        _, count = _prep.step_path(panel["lo"], panel["hi"],
+                                   panel["model_count"])
+        figure.add_trace(_go.Scatter(
+            x=x, y=count, mode="lines",
+            line={"color": model_color, "width": 1.0},
+            name="model cells", showlegend=False,
+            hovertemplate="%{y} cells<extra></extra>"),
+            row=row + 1, col=column, secondary_y=True)
+        figure.update_yaxes(title_text="samples", row=row + 1, col=column,
+                            secondary_y=False)
+        figure.update_yaxes(title_text="cells", row=row + 1, col=column,
+                            secondary_y=True, showgrid=False)
+
     def spread_check(self, bins=8, height=None, width=None) -> "_go.Figure":
         """
         Whether the noise the model fitted is the noise the data has.

@@ -167,3 +167,37 @@ def test_metrics_read_only_the_measured_rows(monkeypatch):
     for key in ("Bias (prediction)", "CRPS (simulations)",
                 "Goodness (simulations)", "Variogram score (simulations)"):
         assert key in metrics.index
+
+
+def test_get_simulations_refuses_past_the_threshold(monkeypatch):
+    """`get_simulations` is the one deliberate materializer: fine while the
+    store is small, refused past the size the store class spills to disk
+    at, with the two scale-safe reads named in the message."""
+    grid, var, sims = _grid2d_with_simulations(n_sim=4)
+    assert np.allclose(var.get_simulations(), sims)
+
+    monkeypatch.setattr(storage, "DEFAULT_THRESHOLD", sims.nbytes - 1)
+    with pytest.raises(MemoryError, match=r"simulation\(i\).*row_bands"):
+        var.get_simulations()
+    # the scale-safe reads are untouched
+    assert np.allclose(var.simulation(1).values, sims[:, 1])
+    assert len(var.simulations.row_bands()) >= 1
+
+
+def test_a_vector_variable_is_refused_on_its_total(monkeypatch):
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame(rng.uniform(size=(30, 2)), columns=["X", "Y"])
+    point = geoml.data.PointData(frame, ["X", "Y"])
+    point.add_vector_variable("v", ["a", "b", "c"], rng.normal(size=(30, 3)))
+    var = point.variables["v"]
+    var.allocate_simulations(2)
+    for label in var.labels:
+        var.components[label].simulations[:, :] = rng.normal(size=(30, 2))
+    assert var.get_simulations().shape == (30, 2, 3)
+
+    one = 30 * 2 * 8
+    # each component fits under the threshold on its own; the three do not
+    monkeypatch.setattr(storage, "DEFAULT_THRESHOLD", 2 * one)
+    assert var.components["a"].get_simulations().shape == (30, 2)
+    with pytest.raises(MemoryError, match="'v'|v holds"):
+        var.get_simulations()
