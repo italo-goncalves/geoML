@@ -173,13 +173,13 @@ mean "no better than quoting the average grade".
 
 | inducing points | training | metals, rmse / sd | goodness | rock accuracy |
 |---|---|---|---|---|
-| 259, the data alone | 56 s | 0.90 | 0.47 | 0.70 |
-| 380, data + an 11 × 11 backbone | 69 s | 0.91 | 0.50 | 0.66 |
-| **700, data + 21 × 21, four experts** | **204 s** | **0.91** | **0.52** | **0.70** |
-| 1220, data + 31 × 31, four experts | 308 s | 0.91 | 0.50 | 0.63 |
+| 259, the data alone | 63 s | 0.91 | 0.46 | 0.70 |
+| 380, data + an 11 × 11 backbone | 83 s | 0.91 | 0.48 | 0.67 |
+| **700, data + 21 × 21, four experts** | **216 s** | **0.91** | **0.47** | **0.68** |
+| 1220, data + 31 × 31, four experts | 334 s | 0.91 | 0.46 | 0.64 |
 
 **The metals' score does not move.** Nearly five times the inducing
-points, five and a half times the training, and the held-out error is flat
+points, more than five times the training, and the held-out error is flat
 to the second decimal; the rock's accuracy wobbles around 0.7 and is
 lowest at the largest set.
 

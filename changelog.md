@@ -317,6 +317,25 @@ the manual in one process, the manual's seventeen chapters alone in the
 other — same coverage, each process bounded. The workflow comment
 records the next lever (one subprocess per chapter) in case the manual
 job ever goes the same way.
+* **The manual runs against the checkout it sits in.** `docs/manual/run_blocks.py`
+put nothing on the path, so launched as a script it found `geoml` only
+where the package was installed — which CI does and a working checkout
+does not, so `test_manual` failed every chapter at its first block on
+the release run and had only ever been green where an editable install
+happened to stand in. The runner now puts the repository root first on
+`sys.path`, and the chapters prove the tree under test wherever they
+run. The release run regenerated seventeen figures, every shape claim
+checked against the fresh output (the residual variogram's high
+first bin, the fans tracking the data, Portlandian's zeros), and
+chapter 16's inducing-point table was remeasured on the corrected
+`Linear` node: the metals' error stays flat at 0.91, the goodness
+column settles 0.02–0.05 lower, the rock's accuracy still wobbles
+around 0.7 and is still lowest at the largest set. Chapter 3's
+ladder was spot-checked at its two smallest rungs on both datasets —
+every three-seed mean within 0.01 of the recorded row, inside the
+seed-to-seed spread, which is what a reformulation of `chol_r` that
+changes nothing but rounding should do — and its table stands as
+measured at 0.6.8.
 
 ## version 0.6.8
 * **The manual's numbers are measured again, and the figures with them.**
