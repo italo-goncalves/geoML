@@ -113,11 +113,16 @@ times, `Log → RobustPCA → ZScore → SinhArcsinh → ZScore` 0.957 / 0.487 /
 chains sit at 1e-5 to 1e-6, and the links train 20–40% faster. `Arcsinh`
 alone over-covers (0.936 on Walker) and is the zero-tolerant logarithm
 rather than a normalizer. **The standing recommendation moves**: for a
-single positive grade `YeoJohnson → ZScore`, for a vector of grades
+single positive grade `BoxCox → ZScore` (Yeo-Johnson scored a hair
+better on Walker but maps the whole line to itself, so a latent draw
+below zero comes back a negative grade; Box-Cox's floor keeps the
+chain's promise), for a centred column `YeoJohnson → ZScore`, for a
+vector of grades
 `BoxCox → RobustPCA → ZScore → SinhArcsinh → ZScore`; `Spline` stays for
 saved models and as an optional two-knot refinement behind a link. The
-manual's chains still use the spline; switching them is a chapter-by-
-chapter decision with figures to regenerate.
+manual's seven spline chains were switched the same day: `BoxCox →
+ZScore` on Walker Lake (chapters 4, 5, 7, 11, 13, 15) and the vector
+chain on Jura (chapter 16), figures and quoted numbers re-earned.
 
 ## version 0.6.9
 * **The latent-node protocol is two primitives and one composer.** Every

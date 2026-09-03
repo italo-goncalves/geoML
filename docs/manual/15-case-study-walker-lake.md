@@ -35,7 +35,8 @@ explore.scene(clip=[0, 0.99]).savefig("figures/15-samples.png", dpi=150,
 ![The samples](figures/15-samples.png)
 
 Two decisions fall straight out of looking. The long right tail wants a
-positivity warping with a trainable spline behind it (chapter 4), and the
+power link that keeps the grade positive and trains its exponent
+(chapter 4), and the
 banded, uneven sampling means a random validation split would lie
 (chapter 13).
 
@@ -58,10 +59,8 @@ gp = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Scale(1),
-    geoml.warping.Softplus(1),
-    geoml.warping.ZScore(1),
-    geoml.warping.Spline(1, knots_per_arm=4))
+    geoml.warping.BoxCox(1),
+    geoml.warping.ZScore(1))
 
 model = geoml.models.VGPNetwork(
     walker, "V",

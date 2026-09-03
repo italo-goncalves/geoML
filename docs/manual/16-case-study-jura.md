@@ -132,15 +132,19 @@ weights decide how much.
 
 The likelihood is where the metals' awkwardness is handled. `Laplace` has
 heavier tails than a Gaussian, which is what the extreme values in this
-dataset want, and the chain does the rest: `Log` for non-negativity,
-`RobustPCA` to decorrelate the seven columns, `Spline` for what asymmetry
-is left, and `ZScore` to hand the field something standardized.
+dataset want, and the chain does the rest: `BoxCox` for non-negativity,
+with an exponent per metal that trains (the logarithm is its one end),
+`RobustPCA` to decorrelate the seven columns, `SinhArcsinh` for the
+skewness and tail weight left in each rotated column, and a `ZScore` on
+either side of it, since it expects a standardized column and the field
+expects one back.
 
 ```python
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Log(len(elements)),
+    geoml.warping.BoxCox(len(elements)),
     geoml.warping.RobustPCA(len(elements), len(elements)),
-    geoml.warping.Spline(len(elements), knots_per_arm=5),
+    geoml.warping.ZScore(len(elements)),
+    geoml.warping.SinhArcsinh(len(elements)),
     geoml.warping.ZScore(len(elements)))
 
 model = geoml.models.VGPNetwork(
@@ -173,15 +177,15 @@ mean "no better than quoting the average grade".
 
 | inducing points | training | metals, rmse / sd | goodness | rock accuracy |
 |---|---|---|---|---|
-| 259, the data alone | 63 s | 0.91 | 0.46 | 0.70 |
-| 380, data + an 11 × 11 backbone | 83 s | 0.91 | 0.48 | 0.67 |
-| **700, data + 21 × 21, four experts** | **216 s** | **0.91** | **0.47** | **0.68** |
-| 1220, data + 31 × 31, four experts | 334 s | 0.91 | 0.46 | 0.64 |
+| 259, the data alone | 75 s | 0.91 | 0.41 | 0.70 |
+| 380, data + an 11 × 11 backbone | 98 s | 0.91 | 0.43 | 0.67 |
+| **700, data + 21 × 21, four experts** | **216 s** | **0.91** | **0.45** | **0.70** |
+| 1220, data + 31 × 31, four experts | 343 s | 0.92 | 0.44 | 0.67 |
 
 **The metals' score does not move.** Nearly five times the inducing
-points, more than five times the training, and the held-out error is flat
-to the second decimal; the rock's accuracy wobbles around 0.7 and is
-lowest at the largest set.
+points, four and a half times the training, and the held-out error moves
+by less than a hundredth; the rock's accuracy wobbles between 0.67 and
+0.70 with no trend.
 
 Chapter 3 ran the same sweep on the plainest possible version of this
 dataset — a stationary model, a Gaussian likelihood, no walked input — and
@@ -205,7 +209,7 @@ blind spot worth naming: a number that does not move is not always a number
 that has looked.
 
 Where the table *is* decisive is cost. If you want this model and not its
-map, the data's own locations give the same score in a quarter of the time.
+map, the data's own locations give the same score in a third of the time.
 
 ## 16.4 Did the warping do its job?
 
