@@ -690,6 +690,369 @@ class Scale(ZScore):
         return x * std
 
 
+def _profile_start(x, weights, candidates, transform, log_jacobian):
+    """The candidate that makes a transformed column most Gaussian.
+
+    Box and Cox's criterion: the Gaussian log-likelihood of the transformed
+    values with their mean and variance profiled out, plus the log-Jacobian
+    of the transform -- on declustering weights where given. Every
+    parametric link below takes its data-dependent start from it; training
+    refines the value from there.
+    """
+    x = _np.asarray(x, dtype=float).ravel()
+    w = _np.ones_like(x) if weights is None \
+        else _np.asarray(weights, dtype=float).ravel()
+    w = w / w.sum()
+    best, best_value = candidates[0], -_np.inf
+    for candidate in candidates:
+        with _np.errstate(all="ignore"):
+            z = transform(x, candidate)
+            jac = log_jacobian(x, candidate)
+        if not (_np.all(_np.isfinite(z)) and _np.all(_np.isfinite(jac))):
+            continue
+        mean = (w * z).sum()
+        var = (w * (z - mean) ** 2).sum()
+        if not var > 0:
+            continue
+        value = -0.5 * _np.log(var) + (w * jac).sum()
+        if value > best_value:
+            best, best_value = candidate, value
+    return best
+
+
+def _power_np(u, lam):
+    return u if abs(lam) < 1e-8 else _np.expm1(lam * u) / lam
+
+
+def _log_cosh(a):
+    """`log(cosh(a))` without overflow: `|a| - log 2 + log1p(exp(-2|a|))`."""
+    a = _tf.abs(a)
+    return a - _np.log(2.0) + _tf.math.log1p(_tf.exp(-2.0 * a))
+
+
+class BoxCox(_Warping):
+    """
+    Box-Cox power transform with a trainable exponent.
+
+    Maps ``x`` to ``((x + shift)**λ - 1) / λ``, the logarithm at ``λ = 0``,
+    with one exponent per component. The exponent starts at the value that
+    makes the column most Gaussian -- the profile likelihood of Box and Cox
+    -- and trains with the model. For positive data it is the power link
+    between the logarithm and the identity, and its inverse is a root
+    rather than an exponential, which is what keeps a latent draw in the
+    tail from blowing up the way `Log.backward` does.
+
+    Parameters
+    ----------
+    size
+        Number of components.
+    shift
+        A positive value added to the data before the power, for zeros.
+    exponent
+        The starting exponent, one value or one per component;
+        `initialize` replaces it.
+
+    Notes
+    -----
+    The exponent is kept in ``[0, 2]``. With ``λ > 0`` the transformed
+    values are bounded below by ``-1/λ``; a latent draw past that bound has
+    no pre-image and `backward` returns the floor, a value of zero, which
+    is finite and harmless. A negative exponent bounds them *above*, and
+    the inverse then blows up toward that bound -- measured on Jura at 826
+    times the data's maximum on tail draws, with the mean prediction
+    destroyed in one arm -- so negative exponents are not offered.
+
+    References
+    ----------
+    Box, G. E. P., & Cox, D. R. (1964). An analysis of transformations.
+    *Journal of the Royal Statistical Society: Series B*, 26(2), 211-252.
+    """
+    _EXPONENT_LIMITS = (0.0, 2.0)
+    _GRID = _np.linspace(0.0, 2.0, 81)
+
+    def __init__(self, size, shift=1e-6, exponent=1.0):
+        super().__init__()
+        self._size_in = size
+        self._size_out = size
+        if shift <= 0:
+            raise ValueError("shift must be positive")
+        self.shift = float(shift)
+        low, high = self._EXPONENT_LIMITS
+        self._add_parameter("exponent", _gpr.RealParameter(
+            _np.broadcast_to(_np.asarray(exponent, dtype=float), [size]).copy(),
+            _np.full([size], low), _np.full([size], high)))
+
+    @staticmethod
+    def _power(u, lam):
+        """`(exp(λ u) - 1) / λ`, and `u` at `λ = 0`; every branch finite,
+        so the `where` differentiates cleanly."""
+        small = _tf.abs(lam) < 1e-8
+        safe = _tf.where(small, _tf.ones_like(lam), lam)
+        return _tf.where(small, u, _tf.math.expm1(safe * u) / safe)
+
+    @staticmethod
+    def _root(y, lam):
+        """The inverse of `_power`: `log(1 + λ y) / λ`, and `y` at `λ = 0`,
+        the argument floored where a draw has no pre-image."""
+        small = _tf.abs(lam) < 1e-8
+        safe = _tf.where(small, _tf.ones_like(lam), lam)
+        inner = _tf.maximum(1.0 + safe * y, 1e-12)
+        return _tf.where(small, y, _tf.math.log(inner) / safe)
+
+    def forward(self, x):
+        lam = self.parameters["exponent"].get_value()[None, :]
+        u = _tf.math.log(x + self.shift)
+        log_det = _tf.reduce_sum((lam - 1.0) * u, axis=1)
+        return self._power(u, lam), log_det
+
+    def backward(self, x):
+        lam = self.parameters["exponent"].get_value()[None, :]
+        return _tf.exp(self._root(x, lam)) - self.shift
+
+    def initialize(self, x, weights=None):
+        x = _np.asarray(x, dtype=float)
+        shift = self.shift
+        starts = [
+            _profile_start(
+                x[:, i], weights, self._GRID,
+                lambda v, c: _power_np(_np.log(v + shift), c),
+                lambda v, c: (c - 1.0) * _np.log(v + shift))
+            for i in range(self.size_in)]
+        if not self.parameters["exponent"].fixed:
+            self.parameters["exponent"].set_value(_np.array(starts))
+        return super().initialize(x, weights)
+
+
+class YeoJohnson(_Warping):
+    """
+    Yeo-Johnson power transform with a trainable exponent.
+
+    Box-Cox extended to the whole real line: the power ``λ`` acts on
+    ``1 + x`` for ``x >= 0`` and the power ``2 - λ`` on ``1 - x`` for
+    ``x < 0``, so the map is smooth through zero, the identity at
+    ``λ = 1``, and needs no shift. One exponent per component, started at
+    the most Gaussian value by the profile likelihood and trained with the
+    model. The link for a centred or residual column, where `BoxCox`
+    cannot go.
+
+    Parameters
+    ----------
+    size
+        Number of components.
+    exponent
+        The starting exponent, one value or one per component;
+        `initialize` replaces it.
+
+    Notes
+    -----
+    The exponent is kept in ``[0, 2]``, where both powers are non-negative
+    and the inverse is defined for every real value. Outside it one side
+    of the map is bounded and its inverse blows up toward the bound, the
+    hazard `BoxCox` documents.
+
+    References
+    ----------
+    Yeo, I.-K., & Johnson, R. A. (2000). A new family of power
+    transformations to improve normality or symmetry. *Biometrika*, 87(4),
+    954-959.
+    """
+    _EXPONENT_LIMITS = (0.0, 2.0)
+    _GRID = _np.linspace(0.0, 2.0, 81)
+
+    def __init__(self, size, exponent=1.0):
+        super().__init__()
+        self._size_in = size
+        self._size_out = size
+        low, high = self._EXPONENT_LIMITS
+        self._add_parameter("exponent", _gpr.RealParameter(
+            _np.broadcast_to(_np.asarray(exponent, dtype=float), [size]).copy(),
+            _np.full([size], low), _np.full([size], high)))
+
+    def forward(self, x):
+        lam = self.parameters["exponent"].get_value()[None, :]
+        # each branch sees only its own side, so the unselected one stays
+        # finite and the `where` differentiates cleanly
+        up = _tf.math.log1p(_tf.maximum(x, 0.0))
+        down = _tf.math.log1p(_tf.maximum(-x, 0.0))
+        positive = x >= 0.0
+        warped = _tf.where(positive, BoxCox._power(up, lam),
+                           -BoxCox._power(down, 2.0 - lam))
+        log_det = _tf.reduce_sum(
+            _tf.where(positive, (lam - 1.0) * up, (1.0 - lam) * down), axis=1)
+        return warped, log_det
+
+    def backward(self, x):
+        lam = self.parameters["exponent"].get_value()[None, :]
+        up = _tf.maximum(x, 0.0)
+        down = _tf.maximum(-x, 0.0)
+        return _tf.where(x >= 0.0,
+                         _tf.math.expm1(BoxCox._root(up, lam)),
+                         -_tf.math.expm1(BoxCox._root(down, 2.0 - lam)))
+
+    @staticmethod
+    def _forward_np(v, c):
+        return _np.where(v >= 0, _power_np(_np.log1p(_np.maximum(v, 0)), c),
+                         -_power_np(_np.log1p(_np.maximum(-v, 0)), 2.0 - c))
+
+    @staticmethod
+    def _log_jacobian_np(v, c):
+        return _np.where(v >= 0, (c - 1.0) * _np.log1p(_np.maximum(v, 0)),
+                         (1.0 - c) * _np.log1p(_np.maximum(-v, 0)))
+
+    def initialize(self, x, weights=None):
+        x = _np.asarray(x, dtype=float)
+        starts = [
+            _profile_start(x[:, i], weights, self._GRID,
+                           self._forward_np, self._log_jacobian_np)
+            for i in range(self.size_in)]
+        if not self.parameters["exponent"].fixed:
+            self.parameters["exponent"].set_value(_np.array(starts))
+        return super().initialize(x, weights)
+
+
+class Arcsinh(_Warping):
+    """
+    Inverse hyperbolic sine warping, with a trainable scale.
+
+    Maps ``x`` to ``asinh(x / scale)``: the identity for values small
+    against the scale, the logarithm of ``2 |x| / scale`` far from it, on
+    both sides of zero. Tolerates zeros and negatives with no shift, which
+    is what recommends it over `Log` for a variable that is skewed but not
+    strictly positive. The scale starts at the value that makes the column
+    most Gaussian and trains with the model.
+
+    Parameters
+    ----------
+    size
+        Number of components.
+    scale
+        The starting scale, one value or one per component; `initialize`
+        replaces it.
+
+    References
+    ----------
+    Johnson, N. L. (1949). Systems of frequency curves generated by methods
+    of translation. *Biometrika*, 36(1-2), 149-176.
+
+    Burbidge, J. B., Magee, L., & Robb, A. L. (1988). Alternative
+    transformations to handle extreme values of the dependent variable.
+    *Journal of the American Statistical Association*, 83(401), 123-127.
+    """
+    def __init__(self, size, scale=1.0):
+        super().__init__()
+        self._size_in = size
+        self._size_out = size
+        self._add_parameter("scale", _gpr.PositiveParameter(
+            _np.broadcast_to(_np.asarray(scale, dtype=float), [size]).copy(),
+            _np.full([size], 1e-9), _np.full([size], 1e9)))
+
+    def forward(self, x):
+        scale = self.parameters["scale"].get_value()[None, :]
+        log_det = -0.5 * _tf.reduce_sum(_tf.math.log(x ** 2 + scale ** 2), axis=1)
+        return _tf.asinh(x / scale), log_det
+
+    def backward(self, x):
+        scale = self.parameters["scale"].get_value()[None, :]
+        return scale * _tf.sinh(x)
+
+    def initialize(self, x, weights=None):
+        x = _np.asarray(x, dtype=float)
+        starts = []
+        for i in range(self.size_in):
+            spread = float(_np.std(x[:, i])) or 1.0
+            starts.append(_profile_start(
+                x[:, i], weights, spread * _np.logspace(-2.0, 2.0, 81),
+                lambda v, c: _np.arcsinh(v / c),
+                lambda v, c: -0.5 * _np.log(v ** 2 + c ** 2)))
+        if not self.parameters["scale"].fixed:
+            self.parameters["scale"].set_value(_np.array(starts))
+        return super().initialize(x, weights)
+
+
+class SinhArcsinh(_Warping):
+    """
+    Sinh-arcsinh warping, with trainable skewness and tail weight.
+
+    Maps ``x`` to ``sinh(δ asinh(x) - ε)``: ``ε`` skews the distribution,
+    ``δ`` sets its tail weight (below one heavier than the Gaussian, above
+    one lighter), and ``ε = 0, δ = 1`` is the identity. The inverse is
+    closed form, ``sinh((asinh(z) + ε) / δ)``. Meant for a column already
+    centred and scaled, as by `ZScore`: the curvature of the map sits at
+    unit scale. The two parameters start at the values that make the
+    column most Gaussian and train with the model. Between them they cover
+    what `Arcsinh` and Johnson's S_U system do.
+
+    Parameters
+    ----------
+    size
+        Number of components.
+    skewness
+        The starting ``ε``, one value or one per component; `initialize`
+        replaces it.
+    tailweight
+        The starting ``δ``, likewise.
+
+    References
+    ----------
+    Jones, M. C., & Pewsey, A. (2009). Sinh-arcsinh distributions.
+    *Biometrika*, 96(4), 761-780.
+    """
+    _SKEW_GRID = _np.linspace(-2.0, 2.0, 21)
+    _TAIL_GRID = _np.logspace(_np.log10(0.25), _np.log10(4.0), 21)
+
+    def __init__(self, size, skewness=0.0, tailweight=1.0):
+        super().__init__()
+        self._size_in = size
+        self._size_out = size
+        self._add_parameter("skewness", _gpr.RealParameter(
+            _np.broadcast_to(_np.asarray(skewness, dtype=float), [size]).copy(),
+            _np.full([size], -3.0), _np.full([size], 3.0)))
+        self._add_parameter("tailweight", _gpr.PositiveParameter(
+            _np.broadcast_to(_np.asarray(tailweight, dtype=float), [size]).copy(),
+            _np.full([size], 0.1), _np.full([size], 10.0)))
+
+    def forward(self, x):
+        skew = self.parameters["skewness"].get_value()[None, :]
+        tail = self.parameters["tailweight"].get_value()[None, :]
+        inner = tail * _tf.asinh(x) - skew
+        log_det = _tf.reduce_sum(
+            _tf.math.log(tail) + _log_cosh(inner)
+            - 0.5 * _tf.math.log1p(x ** 2), axis=1)
+        return _tf.sinh(inner), log_det
+
+    def backward(self, x):
+        skew = self.parameters["skewness"].get_value()[None, :]
+        tail = self.parameters["tailweight"].get_value()[None, :]
+        return _tf.sinh((_tf.asinh(x) + skew) / tail)
+
+    @staticmethod
+    def _forward_np(v, c):
+        skew, tail = c
+        return _np.sinh(tail * _np.arcsinh(v) - skew)
+
+    @staticmethod
+    def _log_jacobian_np(v, c):
+        skew, tail = c
+        inner = _np.abs(tail * _np.arcsinh(v) - skew)
+        return (_np.log(tail) + inner - _np.log(2.0) + _np.log1p(_np.exp(-2.0 * inner))
+                - 0.5 * _np.log1p(v ** 2))
+
+    def initialize(self, x, weights=None):
+        x = _np.asarray(x, dtype=float)
+        candidates = [(e, d) for e in self._SKEW_GRID for d in self._TAIL_GRID]
+        starts = [
+            _profile_start(x[:, i], weights, candidates,
+                           self._forward_np, self._log_jacobian_np)
+            for i in range(self.size_in)]
+        if not self.parameters["skewness"].fixed:
+            self.parameters["skewness"].set_value(
+                _np.array([s for s, _ in starts]))
+        if not self.parameters["tailweight"].fixed:
+            self.parameters["tailweight"].set_value(
+                _np.array([t for _, t in starts]))
+        return super().initialize(x, weights)
+
+
 class ChainedWarping(_Warping):
     """
     Chains multiple Warping objects.

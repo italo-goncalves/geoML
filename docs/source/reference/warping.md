@@ -14,6 +14,7 @@ decides how the likelihood integrates the noise.
 ```{eval-rst}
 .. automodule:: geoml.warping
    :members: Identity, ZScore, Center, Scale, Log, Softplus, Sigmoid,
+             BoxCox, YeoJohnson, Arcsinh, SinhArcsinh,
              Spline, ChainedWarping, Rotation, PCA, RobustPCA,
              CenteredLogRatio, ScaledSimplex, ContinuousNormalizingFlow,
              TensorProductFlow
