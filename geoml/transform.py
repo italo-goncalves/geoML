@@ -37,6 +37,18 @@ import tensorflow as _tf
 
 class _Transform(_gpr.Parametric):
     """An abstract class for variable transformations"""
+    # affine -- the Jacobian is the same at every point -- which is what
+    # lets `latent.GaussianInput` carry an input variance through in one
+    # matrix product; the nonlinear ones (`Periodic`, the faults) keep the
+    # default and are differentiated at every point. Declared per class and
+    # checked against a numerical Jacobian by `test_gaussian_input.py`.
+    _linear = False
+
+    @property
+    def linear(self):
+        """Whether the transform is affine, its Jacobian constant."""
+        return self._linear
+
         
     def refresh(self):
         pass
@@ -50,6 +62,8 @@ class _Transform(_gpr.Parametric):
 class Identity(_Transform):
     """The identity transformation"""
     
+    _linear = True
+
     def __call__(self, x):
         with _tf.name_scope("Identity_transform"):
             return x
@@ -57,6 +71,8 @@ class Identity(_Transform):
 
 class Isotropic(_Transform):
     """Isotropic range"""
+    _linear = True
+
     def __init__(self, r: float = 1.0):
         """
         Initializer for Isotropic.
@@ -87,6 +103,8 @@ class Isotropic(_Transform):
 
 
 class _Ellipsoidal(_Transform):
+    _linear = True
+
     def __init__(self):
         super().__init__()
         self._anis = None
@@ -468,6 +486,8 @@ class ProjectionTo1D(_Transform):
     """
     Projection of high-dimensional data to a line.
     """
+    _linear = True
+
     def __init__(self, n_dim):
         """
         Initializer for ProjectionTo1D.
@@ -493,6 +513,8 @@ class ProjectionTo1D(_Transform):
 
 class AnisotropyARD(_Transform):
     """Automatic Relevance Detection"""
+
+    _linear = True
 
     def __init__(self, n_dim):
         """
@@ -543,6 +565,10 @@ class ChainedTransform(_Transform):
         for tr in transforms:
             self._register(tr)
 
+    @property
+    def linear(self):
+        return all(tr.linear for tr in self.transforms)
+
     def __call__(self, x):
         for tr in self.transforms:
             x = tr.__call__(x)
@@ -558,6 +584,8 @@ class SelectVariables(_Transform):
 
     Returns the specified columns of the input, discarding the others.
     """
+    _linear = True
+
     def __init__(self, index):
         """
         Variable selection.
@@ -586,6 +614,8 @@ class NormalizeWithBoundingBox(_Transform):
     Uses a `BoundingBox` object as guide to normalize the data. All columns will be contained in the [-3, 3] interval.
 
     """
+    _linear = True
+
     def __init__(self, box):
         """
         Normalization with a bounding box.
@@ -636,6 +666,8 @@ class Concatenate(ChainedTransform):
 
 
 class RandomProjections(_Transform):
+    _linear = True
+
     def __init__(self, n_dim, n_directions, seed=1234):
         super().__init__()
         self.n_directions = n_directions

@@ -16,6 +16,17 @@ latent variables and holds the inducing points. It is *deterministic by
 design*, because coordinates are facts, and its `transform` is the door
 where anisotropy, projections or a fault step in. That is chapter 2's
 ellipsoid, made composable.
+`GaussianInput` is the same node for inputs that are not facts: a mean
+and a variance per coordinate, which is what a `GaussianData` container
+holds (chapter 10). It is built for a high-dimensional input with missing
+entries, each given the mean and variance it could have, and it serves an
+uncertain location the same way. The variance rides through the transform
+and `UncertainInputGP` integrates over it by quadrature, so such a row is
+used for what it says rather than dropped or imputed. `BasicGP` reads an
+uncertain input through an inflated kernel instead, which was measured
+to understate the resulting spread several times over: pair the two for
+missing entries. For a location error a noise term already absorbs,
+`BasicGP` was measured the better choice.
 
 **Workers.** `BasicGP(parent, size=k)` is the GP node of chapter 3. The
 `size` argument gives it $k$ latent columns that share one kernel and one

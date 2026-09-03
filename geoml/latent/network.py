@@ -772,6 +772,90 @@ class BasicInput(_RootLatentVariable):
         return mu[:, :, None], _tf.zeros_like(mu), _tf.zeros_like(mu)
 
 
+def _input_jacobian_squared(transform, x):
+    """`(d x_tr_j / d x_i)^2` at every row of `x`, as [n, n_dim, size].
+
+    One forward-mode pass per input coordinate -- never nested, which is the
+    combination that crashes (see the kernels row of CLAUDE.md) -- squared,
+    so that a per-coordinate input variance maps to the transformed space as
+    the diagonal of `J diag(var) J^T`.
+    """
+    n_dim = x.shape[1]
+    columns = []
+    for i in range(n_dim):
+        tangent = _tf.ones_like(x) * _tf.one_hot(i, n_dim, dtype=_tf.float64)
+        with _tf.autodiff.ForwardAccumulator(x, tangent) as acc:
+            x_tr = transform(x)
+        columns.append(_tf.square(acc.jvp(x_tr)))
+    return _tf.stack(columns, axis=1)
+
+
+class GaussianInput(BasicInput):
+    """
+    Input node for uncertain inputs.
+
+    Takes each input as a Gaussian -- a mean and a variance per coordinate,
+    which is what a `GaussianData` container holds -- and hands the network
+    both, where `BasicInput` hands it the mean alone. The case it is built
+    for is a high-dimensional input with missing entries: an entry that is
+    not known is given the mean and variance it could have, and the expected
+    kernel the GP nodes carry integrates over it, so the row is used for what
+    it says rather than dropped or imputed. An uncertain location in space is
+    the same mechanism in three coordinates.
+
+    The variance is carried through the transform as the diagonal of
+    ``J diag(var) J^T``: exactly for an affine transform (the ellipsoids,
+    projections, ARD, selections -- `transform.linear`), where the Jacobian
+    is read off one probe point and applied as one matrix product, and to
+    first order through a nonlinear one (`Periodic`, the faults), where it is
+    measured at every point. Inducing points are exact. Given no variance the
+    node is `BasicInput` to the last bit.
+
+    Parameters
+    ----------
+    inducing_points
+        A `PointData` object, or a list of these objects.
+    transform
+        An object from the `transform` module for normalization.
+    fix_transform
+        Whether to fix the transform parameters to prevent them from
+        changing during training.
+    center
+        Whether to center the data, based on the inducing points' bounding
+        box.
+    name
+        A name for this node, shown in the printed network and accepted by
+        `get_node`. Numbered automatically if omitted.
+
+    See Also
+    --------
+    BasicInput : the deterministic input.
+    geoml.data.GaussianData : the container carrying a variance per
+        coordinate.
+    """
+    def propagate(self, x, x_var=None):
+        x_c = x - self.center
+        x_tr = self.transform(x_c)
+        if x_var is None:
+            var_tr = _tf.zeros_like(x_tr)
+        elif self.transform.linear:
+            # an affine map has one Jacobian everywhere: read it off a
+            # single probe point and the variance maps in one product. Read
+            # here rather than stashed by `refresh`: a tensor made inside the
+            # traced refresh cannot be used from another graph, and the
+            # probe costs `n_dim` passes on one row
+            probe = _tf.zeros([1, x.shape[1]], _tf.float64)
+            jacobian_sq = _input_jacobian_squared(self.transform, probe)[0]
+            var_tr = _tf.matmul(x_var, jacobian_sq)
+        else:
+            var_tr = _tf.reduce_sum(
+                _input_jacobian_squared(self.transform, x_c)
+                * x_var[:, :, None], axis=1)
+        self._sim_state = (x_tr,)
+        self._explained_var = _tf.zeros_like(_tf.transpose(x_tr))
+        return x_tr, var_tr
+
+
 class Stack(_Operation):
     """
     Latent variable stacking.
@@ -1260,6 +1344,133 @@ class AdditiveGP(BasicGP):
             cov = cov * norm
             cov = _tf.reduce_mean(cov, axis=-1)
             return cov
+
+
+class UncertainInputGP(BasicGP):
+    """
+    GP node that integrates over the uncertainty of its input.
+
+    `BasicGP` reads an uncertain input through an inflated covariance --
+    Paciorek's nonstationary form, a valid kernel for any stationary
+    correlation -- and takes its moments as if the input were one point
+    under that kernel. Against the exact mixture over the input's Gaussian
+    that path understates the predictive variance several times over and
+    misplaces the mean once the input variance reaches a tenth of the
+    squared range. This node computes the mixture instead: `n_nodes`
+    scrambled Sobol points of the input's Gaussian, the deterministic
+    posterior at each of them, and the mixture's moments out -- the mean of
+    the means, the mean of the variances plus the variance of the means.
+    Each realization is drawn at a node of its own, so the simulations
+    carry the mixture as well. Nothing depends on the kernel.
+
+    Parameters
+    ----------
+    parent
+        The node whose output is the input. Its variance is what is
+        integrated over: a `GaussianInput` root, or any GP node above.
+    size
+        Number of latent variables.
+    kernel
+        A kernel object from `geoml.kernels`.
+    fix_range
+        Whether to fix the range parameters.
+    isotropic
+        Whether to use a single range for every input dimension.
+    range_prior
+        As in `BasicGP`.
+    n_nodes
+        Quadrature points per input. A power of two keeps the Sobol
+        sequence balanced.
+    name
+        A name for this node, shown in the printed network and accepted by
+        `get_node`. Numbered automatically if omitted.
+
+    See Also
+    --------
+    BasicGP : the node this extends.
+    GaussianInput : the root that supplies an input variance.
+
+    Notes
+    -----
+    The cost is `n_nodes` cross-covariances per prediction or training step
+    where `BasicGP` computes one, and the same factor in memory for them.
+    Given an input with no variance the node is `BasicGP`.
+    """
+    def __init__(self, parent, size=1, kernel=None, fix_range=False,
+                 isotropic=False, range_prior=2.0, n_nodes=32, name=None):
+        super().__init__(parent, size=size, kernel=kernel,
+                         fix_range=fix_range, isotropic=isotropic,
+                         range_prior=range_prior, name=name)
+        self.n_nodes = int(n_nodes)
+        # the input's Gaussian sampled once: scrambled Sobol through the
+        # normal quantile, the scramble drawn from the package RNG so that
+        # `set_seed` fixes it, and kept as a fixed parameter so that a saved
+        # model replays the same nodes
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            points = _rnd.sobol_engine(self.parent.size, _rnd.rng()) \
+                .random(self.n_nodes)
+        nodes = _special.ndtri(points)
+        self._add_parameter("nodes", _gpr.RealParameter(
+            nodes, _np.full_like(nodes, -10.0), _np.full_like(nodes, 10.0),
+            fixed=True))
+
+    def _moments(self, x, x_var=None):
+        with _tf.name_scope("uncertain_input_moments"):
+            nodes = self.parameters["nodes"].get_value()       # [q, d]
+            q = self.n_nodes
+            if x_var is None:
+                x_var = _tf.zeros_like(x)
+            # the standard deviation, with a finite gradient at zero: the
+            # root's derivative is infinite there and, multiplied by a zero
+            # from an exact input, turns every gradient NaN; both branches
+            # of a `where` are differentiated, so the unselected one must be
+            # finite too
+            positive = x_var > 0.0
+            sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, x_var, 1.0)),
+                           _tf.zeros_like(x_var))
+            # every node of every point, stacked along the batch axis, and
+            # the deterministic posterior at all of them in one pass
+            at_nodes = x[None, :, :] + sd[None, :, :] * nodes[:, None, :]  # [q, n, d]
+            stacked = _tf.reshape(at_nodes, [-1, x.shape[1]])
+            cov_cross, mu, weights, w_mu, w_var, w_exp_var = \
+                super()._moments(stacked, None)
+
+            # the mixture's moments over the nodes
+            mean_q = _tf.reshape(w_mu[:, :, 0], [self.size, q, -1])
+            var_q = _tf.reshape(w_var, [self.size, q, -1])
+            exp_q = _tf.reshape(w_exp_var, [self.size, q, -1])
+            mean = _tf.reduce_mean(mean_q, axis=1)
+            spread = _tf.reduce_mean((mean_q - mean[:, None, :]) ** 2, axis=1)
+            var = _tf.reduce_mean(var_q, axis=1) + spread
+            exp_var = _tf.reduce_mean(exp_q, axis=1)
+            return cov_cross, mu, weights, mean[:, :, None], var, exp_var
+
+    def simulate(self, n_sim, seed=(0, 0)):
+        cov_cross, mu, weights = self._swept()
+        q = self.n_nodes
+        with _tf.name_scope("uncertain_input_simulation"):
+            # each realization sits at a node of its own, so the ensemble
+            # samples the input's uncertainty as well as the posterior's
+            which = _tf.range(n_sim) % q
+            rnd = [
+                _simulation_normals([self.size, m, n_sim], seed)
+                for m in self.root.n_ip
+            ]
+            sims = []
+            for a, b, c, d, m in zip(cov_cross, self.chol_r, rnd, mu,
+                                     self.root.n_ip):
+                a_sel = _tf.gather(_tf.reshape(a, [q, -1, m]), which)
+                d_sel = _tf.gather(
+                    _tf.reshape(d[:, :, 0], [self.size, q, -1]), which, axis=1)
+                draws = _tf.matmul(b, c)                            # [size, m, n_sim]
+                sims.append(_tf.einsum("snm,zms->zns", a_sel, draws)
+                            + _tf.transpose(d_sel, [0, 2, 1]))
+            w_sel = _tf.gather(
+                _tf.reshape(weights, [self.root.n_experts, self.size, q, -1]),
+                which, axis=2)
+            w_sel = _tf.transpose(w_sel, [0, 1, 3, 2])              # [E, size, n, n_sim]
+            return _tf.reduce_sum(_tf.stack(sims, axis=0) * w_sel, axis=0)
 
 
 class Linear(_FunctionalLatentVariable):

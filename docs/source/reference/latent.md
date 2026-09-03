@@ -14,7 +14,7 @@ The constructors' own arguments are documented in their docstrings.
 
 ```{eval-rst}
 .. automodule:: geoml.latent.network
-   :members: BasicInput, GradientConstrainedInput
+   :members: BasicInput, GaussianInput, GradientConstrainedInput
    :show-inheritance:
 ```
 
@@ -26,6 +26,8 @@ The constructors' own arguments are documented in their docstrings.
    :members:
    :show-inheritance:
 .. autoclass:: AdditiveGP
+   :show-inheritance:
+.. autoclass:: UncertainInputGP
    :show-inheritance:
 .. autoclass:: MultiStructureGP
    :show-inheritance:

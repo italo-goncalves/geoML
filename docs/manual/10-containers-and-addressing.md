@@ -1,7 +1,9 @@
 # 10. Containers and addressing
 
 Everything a model reads or writes lives in a **container**: `PointData`
-for scattered samples, `Grid1D`/`Grid2D`/`Grid3D` for regular lattices,
+for scattered samples (`GaussianData` when their coordinates carry a
+variance, which chapter 5's `GaussianInput` reads), `Grid1D`/`Grid2D`/
+`Grid3D` for regular lattices,
 `BlockSet3D` for the refinable block model of chapter 8, plus the
 directional and mesh types the later chapters use. They differ in how they
 hold coordinates and agree on everything else, and this chapter is about
