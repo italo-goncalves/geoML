@@ -65,7 +65,7 @@ backbone = geoml.data.inducing.combine(
     jura_train,
     geoml.data.Grid2D(start=[0, 0], end=[6, 6], n=[21, 21]))
 
-inducing = geoml.data.inducing.experts(backbone, 4)
+inducing = geoml.data.inducing.experts(backbone, 4, seed=1234)
 
 print(backbone.n_data, "inducing points, split into", len(inducing),
       "experts holding", sum(part.n_data for part in inducing),
