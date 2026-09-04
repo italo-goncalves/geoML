@@ -1657,6 +1657,7 @@ def _fresh_variational_state(model):
 
 def cross_validate(model: VGPNetwork, folds: str = "fold",
                    refit: str = "variational", iterations: int = 200,
+                   method: str = "full", epochs: int = 50,
                    n_sim: int = 20, n_nodes: int = 32,
                    path: _types.PathLike | None = None
                    ) -> "tuple[_data._SpatialData, _pd.DataFrame]":
@@ -1689,7 +1690,23 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         warm-start every trainable parameter from its trained value and
         continue on the reduced data.
     iterations
-        Training iterations per fold.
+        Training iterations per fold, under `method="full"`. Ignored under
+        `method="svi"`, which counts in `epochs`.
+    method
+        `"full"` to refit each fold on all its data at every iteration, or
+        `"svi"` to refit in minibatches of
+        `options.training_batch_size` -- the same choice as
+        :meth:`VGPNetwork.train_full` against
+        :meth:`VGPNetwork.train_svi`, and worth making for the same
+        reason: a fold refit costs the whole reduced data set per
+        iteration whatever is frozen, so a model too large to train
+        full-batch is too large to cross-validate that way.
+    epochs
+        Passes over each fold's data, under `method="svi"`. A separate
+        argument from `iterations` because the two count different things:
+        an epoch is one visit to the data in batches, so it is many
+        gradient steps, and the numbers that make sense for one are wrong
+        for the other.
     n_sim
         Latent realizations, for the out-of-fold predictions and the
         measurement samples alike.
@@ -1722,6 +1739,12 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     including each fold's -- the concession kriging cross-validation also
     makes when it keeps the variogram fixed. Design record and measurements:
     `docs/cross-validation.md`.
+
+    Under `method="svi"` the convergence rule, if `options.training_tolerance`
+    is set, reads one value an epoch -- the mean bound over its batches --
+    rather than one an iteration, so it needs a few epochs before it can
+    fire at all. On a short refit that is worth knowing: too few epochs and
+    the rule never speaks; the cap does the stopping.
     """
     data = model.data
     labels = _np.asarray(data.get_metadata(folds))
@@ -1737,6 +1760,9 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     if refit not in ("variational", "all"):
         raise ValueError(
             "refit must be 'variational' or 'all', got %r" % (refit,))
+    if method not in ("full", "svi"):
+        raise ValueError(
+            "method must be 'full' or 'svi', got %r" % (method,))
 
     cleanup = path is None
     if cleanup:
@@ -1760,7 +1786,12 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                                _persistence.load_model(saved, data=data[~held]))
             if refit == "variational":
                 _fresh_variational_state(fold_model)
-            fold_model.train_full(max_iter=iterations)
+            # the batch size rides in the model's own options, so the fold
+            # copy already has whatever the original was trained with
+            if method == "svi":
+                fold_model.train_svi(epochs=epochs)
+            else:
+                fold_model.train_full(max_iter=iterations)
             fold_model.predict(oof, n_sim=n_sim, include_noise=True,
                                where=held)
 

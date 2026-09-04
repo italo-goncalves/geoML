@@ -48,7 +48,7 @@ k-means pre-clustering is the only draw). Coordinates only — the common case;
 a feature-space variant would be a different distance matrix into the same
 builder.
 
-## The driver: `models.cross_validate(model, folds, refit, iterations)`
+## The driver: `models.cross_validate(model, folds, refit, method)`
 
 The VGP has no closed-form LOO (Rasmussen & Williams §5.4.2 is for the
 closed-form GP), and retraining from scratch per fold is what the driver
@@ -75,6 +75,26 @@ The conceded leakage, stated in the docstring: hyperparameters and warping
 saw all the data — the same concession kriging makes when it keeps the
 variogram. `refit="all"` trades the other way (warm-start everything, freeze
 nothing new). Leave-one-hole-out is `folds` pointed at a hole-id column.
+
+**The refit can be minibatched.** `method="svi"` sends each fold to
+`train_svi` instead of `train_full`, in batches of
+`options.training_batch_size` — which the fold copy already carries, the
+options riding in the saved model, so nothing new is passed in. It matters
+because freezing parameters does not make an iteration cheaper: a full-batch
+refit costs the whole reduced data set per step whatever is on the tape, so
+a model too large to train full-batch is too large to cross-validate that
+way. The passes are counted by a **separate** argument, `epochs`, because an
+epoch is one visit to the data in batches and therefore many gradient steps:
+a number that suits `iterations` is wrong for `epochs`, and one argument
+serving both would silently be read the wrong way. Two things follow the
+choice. `options.training_tolerance`, if set, judges once an epoch on the
+mean bound over its batches rather than once an iteration, so a short refit
+may never give it enough to fire and the cap does the stopping. And
+`train_svi` does not index the variables' `training_input` per batch (a
+commented-out attempt sits beside it), which costs nothing while the only
+payload is `RockTypeVariable`'s `is_boundary` — accepted by both categorical
+likelihoods and read by neither — and would need fixing first the day a
+censoring mask or a per-datum support rides that channel.
 
 ### E1 — the measurement that settled the refit question
 

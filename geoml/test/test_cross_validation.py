@@ -209,6 +209,52 @@ def test_bad_arguments_are_refused_before_any_work(walker_cv):
         geoml.models.cross_validate(model, folds="nope")
     with pytest.raises(ValueError, match="refit"):
         geoml.models.cross_validate(model, refit="bogus")
+    with pytest.raises(ValueError, match="method"):
+        geoml.models.cross_validate(model, method="minibatch")
+
+
+# --------------------------------------------------------------------------- #
+# refitting each fold in minibatches
+# --------------------------------------------------------------------------- #
+def test_the_folds_can_be_refitted_by_svi(walker_cv, monkeypatch):
+    """`method="svi"` refits each fold in batches of the size the model's
+    own options carry, and answers the same questions the full-batch run
+    does: every row predicted out of fold, and the same score table."""
+    model, walker, full_oof, full_scores = walker_cv
+    # the fixture's model is shared, so the batch size is put back after
+    monkeypatch.setattr(model.options, "training_batch_size", 200)
+
+    oof, scores = geoml.models.cross_validate(
+        model, method="svi", epochs=3, n_sim=8, n_nodes=8)
+
+    assert np.all(np.isfinite(np.asarray(oof.values("V/prediction"))))
+    assert list(scores.columns) == list(full_scores.columns)
+    assert set(scores["fold"]) == set(full_scores["fold"])
+    assert scores[scores["fold"] == "all"]["n"].item() == walker.n_data
+    # a different route to the same kind of answer, not the same numbers
+    assert np.all(np.isfinite(scores[
+        ["rmse", "mae", "bias", "crps", "goodness"]].to_numpy(dtype=float)))
+
+
+def test_the_epochs_are_what_svi_counts(walker_cv, monkeypatch):
+    """`iterations` counts gradient steps and `epochs` counts passes over
+    the data, so the two arguments are separate and only one is read."""
+    model, walker, _, _ = walker_cv
+    monkeypatch.setattr(model.options, "training_batch_size", 200)
+
+    seen = []
+    original = geoml.models.VGPNetwork.train_svi
+
+    def spy(self, epochs=100):
+        seen.append(epochs)
+        return original(self, epochs=epochs)
+
+    monkeypatch.setattr(geoml.models.VGPNetwork, "train_svi", spy)
+    geoml.models.cross_validate(
+        model, method="svi", epochs=2, iterations=999, n_sim=4, n_nodes=4)
+
+    # one refit per fold, each given the epochs and not the iterations
+    assert seen == [2, 2, 2]
 
 
 # --------------------------------------------------------------------------- #

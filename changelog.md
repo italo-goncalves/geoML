@@ -1,4 +1,22 @@
 ## version 0.6.10
+* **`cross_validate(method="svi")` refits each fold in minibatches.** The
+driver hard-coded `train_full`, so a fold refit was always full-batch even
+where the model itself had been trained by SVI -- and freezing parameters
+does not make an iteration cheaper, since the cost is the whole reduced
+data set per step whatever is on the tape. A model too large to train
+full-batch was therefore too large to cross-validate. The batch size needs
+no new argument: it is `options.training_batch_size`, riding in the saved
+model, so the fold copy already carries it. The passes are counted by a
+separate `epochs`, not by `iterations`, because an epoch is one visit to
+the data in batches and therefore many gradient steps, and a number that
+suits one is wrong for the other. Two things follow the choice, both in
+the docstring: `options.training_tolerance` then judges once an epoch on
+the mean bound over its batches, so a short refit may never give it enough
+to fire; and `train_svi` does not index the variables' `training_input`
+per batch, which costs nothing while the only payload is
+`RockTypeVariable`'s `is_boundary` -- accepted by both categorical
+likelihoods and read by neither -- and would need fixing first the day a
+censoring mask or a per-datum support rides that channel.
 * **Variables carry a unit, and a composition's parts keep theirs.** A
 grade reported in percent was stored as a fraction and came back as one:
 the divisor lived in the drillhole conversion, was applied on the way in
