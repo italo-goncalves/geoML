@@ -1017,8 +1017,10 @@ class _PointBased(_SpatialData):
             What each part is measured in -- `"%"`, `"ppm"`, `"g/t"`, or a
             number to divide by. One per label, or a mapping naming some of
             them. Undeclared parts are read as fractions, which is what the
-            whole composition was before units existed. With `rest`, the
-            mapping may name `"rest"` as well; it is a fraction otherwise.
+            whole composition was before units existed. With `rest`, a
+            sequence naming the parts given here is enough -- the rest is
+            added by this method and holds a fraction -- and either a longer
+            sequence or a mapping keyed `"rest"` gives it a unit of its own.
         rest : bool
             Whether to add a further part holding whatever is left of the
             whole. Recommended wherever the parts are a few assayed metals:
@@ -1026,9 +1028,17 @@ class _PointBased(_SpatialData):
             a rest turns them into shares of what was measured.
         """
         labels = list(labels)
+        declared = units
         if rest:
+            # the rest is generated here, so a sequence of units naming the
+            # parts the caller actually has is already complete: the rest
+            # takes none and holds a fraction. A sequence long enough to
+            # reach it names it instead, and a mapping may name it by key.
+            if units is not None and not isinstance(units, dict) \
+                    and len(list(units)) == len(labels):
+                declared = list(units) + [None]
             labels = labels + ["rest"]
-        per_label = _units_per_label(units, labels)
+        per_label = _units_per_label(declared, labels)
 
         if measurements is not None:
             measurements = _prepare_composition(

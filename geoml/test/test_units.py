@@ -268,6 +268,32 @@ def test_zeros_are_replaced_in_the_columns_own_unit():
     np.testing.assert_allclose(stored[1, 1], 1.5)     # half of 3 %
 
 
+@pytest.mark.parametrize("units,expected", [
+    # the rest is added here, so naming the parts the caller has is enough
+    (["%", "ppm"], ["%", "ppm", None]),
+    # a sequence long enough to reach the rest names it
+    (["%", "ppm", "fraction"], ["%", "ppm", "fraction"]),
+    # and so does a mapping keyed by it
+    ({"a": "%", "b": "ppm", "rest": "%"}, ["%", "ppm", "%"]),
+    # a mapping that leaves it out is the ordinary case
+    ({"a": "%", "b": "ppm"}, ["%", "ppm", None]),
+])
+def test_a_generated_rest_takes_a_unit_only_where_one_is_given(units, expected):
+    point = _composition(units=units)
+    metals = point.get("metals")
+    assert [metals.components[c].unit for c in metals.labels] == expected
+    # whatever it is called, the model is handed one whole
+    np.testing.assert_allclose(metals.get_measurements()[0].sum(axis=1), 1.0)
+
+
+def test_a_sequence_of_the_wrong_length_is_still_refused():
+    point = _points()
+    with pytest.raises(ValueError, match="3 unit"):
+        point.add_compositional_variable(
+            "c", ["p", "q", "r", "s"], np.ones((12, 4)),
+            units=["%", "ppm", "%"], rest=True)
+
+
 def test_the_measurements_must_match_the_labels():
     point = _points()
     with pytest.raises(ValueError, match="part"):

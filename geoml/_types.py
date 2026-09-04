@@ -68,5 +68,8 @@ Labels = Sequence[str]
 Unit = Union[str, float]
 
 # Units for a variable's several components: one per label, or a mapping
-# from label to unit. `None` leaves them undeclared.
-Units = Union[Mapping[str, Unit], Sequence[Unit], None]
+# from label to unit. `None` in place of the whole leaves them all
+# undeclared, and `None` in place of one leaves that one undeclared -- a
+# mapping does it by leaving the label out, a sequence by naming it.
+Units = Union[Mapping[str, Union[Unit, None]], Sequence[Union[Unit, None]],
+              None]

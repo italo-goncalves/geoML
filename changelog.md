@@ -30,7 +30,11 @@ brings the samples back). The gate, `test_units.py`: the same composition
 told it is in percent and told nothing trains to a **bit-identical** bound
 and reports every column a factor of a hundred apart, ten thousand for a
 variance, with 30 % and 0.30 naming one cut-off and the same shares above
-it. The composition machinery moved with the unit table from
+it. Units for a composition come as a mapping or as one per label, and with
+`rest=True` a sequence naming the parts the caller actually has is
+complete: the generated rest goes undeclared, holding a fraction, unless
+a longer sequence or a `"rest"` key gives it a unit of its own. The
+composition machinery moved with the unit table from
 `drillhole.py` to the containers, so a data-frame user gets what a
 drillhole user got — missing rows, the zero substitution, the rest part,
 the closure — and a row nothing touches keeps its numbers to the last bit.
