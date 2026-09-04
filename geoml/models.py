@@ -53,7 +53,9 @@ _tfd = _tfp.distributions
 # returns the whole answer as one array per variable -- every batch kept in
 # a list and concatenated at the end, so the chunks and the result are both
 # live for that moment -- and the answer is `n_sim * n_nodes` values a row
-# for each column: 5 KB a row at the defaults, measured. Ungoverned, a
+# for each column: 5 KB a row at the defaults, measured. **The peak is twice
+# that**: a 92 MB answer was measured to cost 182 MB of resident memory, the
+# concatenate holding the parts and the whole at once. Ungoverned, a
 # cross-validation fold over a few million rows asks for tens of gigabytes
 # and the Linux OOM killer ends the session, which is what happened on
 # 2026-09-04 (63 GB resident, the notebook's kernel killed outright).
@@ -1385,9 +1387,10 @@ class VGPNetwork(_GPModel):
         MemoryError
             If the answer would not fit. It is held whole, by design, and
             costs `n_sim * n_nodes * 8` bytes a row for each column of each
-            variable -- 5 KB a row at the defaults, measured. The ceiling is
-            `models.MEASUREMENT_LIMIT`, and the message names the ways under
-            it.
+            variable -- 5 KB a row at the defaults, and twice that at the
+            peak, while the batches and the assembled whole are both live.
+            The ceiling is `models.MEASUREMENT_LIMIT`, and the message names
+            the ways under it.
 
         See Also
         --------

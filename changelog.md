@@ -3,7 +3,7 @@
 the whole answer as one array per variable -- every batch kept in a list and
 concatenated at the end -- costing `n_sim * n_nodes * 8` bytes a row for
 each column, which is 5 KB a row at the defaults (measured, exactly the
-shape arithmetic). Nothing checked that, so a cross-validation over a few
+shape arithmetic, and twice that at the peak while the batches and the assembled whole are both live -- a 92 MB answer measured 182 MB resident). Nothing checked that, so a cross-validation over a few
 million rows asked for tens of gigabytes and the Linux OOM killer ended the
 session rather than raising: a notebook lost its kernel this way on
 2026-09-04, 63 GB resident against WSL's 62 GB, with the GPU never

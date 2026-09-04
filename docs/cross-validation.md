@@ -99,7 +99,9 @@ censoring mask or a per-datum support rides that channel.
 **The scoring is what costs memory, not the refit.** Each fold is scored
 through `predict_measurements`, which returns its whole answer as one array
 per variable — `n_sim * n_nodes * 8` bytes a row for each column, 5 KB a row
-at the defaults, measured. Nothing checked that until 2026-09-04, when a
+at the defaults, and **twice that at the peak**: a 92 MB answer was measured
+to cost 182 MB resident, the concatenate holding the parts and the assembled
+whole at once. Nothing checked that until 2026-09-04, when a
 notebook running a cross-validation had its kernel killed by the Linux OOM
 killer: 63 GB resident against WSL's 62 GB, host RAM, the GPU never
 involved. The call now refuses past `models.MEASUREMENT_LIMIT` (2 GB) before
