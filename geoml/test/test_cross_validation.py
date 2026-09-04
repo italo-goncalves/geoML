@@ -243,6 +243,64 @@ def test_a_request_too_large_to_hold_is_refused_before_any_work(walker_cv):
         model.predict_measurements(walker, n_sim=1, n_nodes=huge)
 
 
+def test_the_batches_are_the_whole_answer_in_pieces(walker_cv):
+    """`measurement_batches` is what `predict_measurements` assembles, so
+    the two must agree row for row -- and the rows it hands over must say
+    where they came from."""
+    model, walker, _, _ = walker_cv
+
+    whole = model.predict_measurements(walker, n_sim=4, n_nodes=8)["V"]
+
+    seen, pieces = [], []
+    for rows, batch in model.measurement_batches(walker, n_sim=4, n_nodes=8):
+        seen.append(np.asarray(rows))
+        pieces.append(batch["V"])
+    streamed = np.concatenate(pieces, axis=0)
+
+    assert np.array_equal(np.concatenate(seen), np.arange(walker.n_data))
+    np.testing.assert_array_equal(streamed, whole)
+
+
+def test_more_than_one_batch_is_actually_produced(walker_cv, monkeypatch):
+    """The equivalence above would be vacuous if everything arrived in one
+    piece, so the batch size is cut until it does not."""
+    model, walker, _, _ = walker_cv
+    monkeypatch.setattr(model.options, "prediction_batch_size", 64)
+
+    rows = [np.asarray(r) for r, _ in
+            model.measurement_batches(walker, n_sim=2, n_nodes=2)]
+    assert len(rows) > 1
+    assert sum(r.size for r in rows) == walker.n_data
+
+
+def test_the_scores_do_not_depend_on_the_batch_size(walker_cv, monkeypatch):
+    """The point of the accumulators: sums and a count, never a mean of
+    means, so a fold read in many small pieces scores exactly as one read
+    in a few large ones.
+
+    The seed is reset before each run because the fold models' fresh
+    variational state is drawn from the package RNG, so two consecutive
+    runs are otherwise not comparable at all -- which is what this test
+    caught first.
+    """
+    model, walker, _, _ = walker_cv
+
+    geoml.set_seed(4321)
+    monkeypatch.setattr(model.options, "prediction_batch_size", 100000)
+    _, wide = geoml.models.cross_validate(
+        model, iterations=5, n_sim=8, n_nodes=8)
+
+    geoml.set_seed(4321)
+    monkeypatch.setattr(model.options, "prediction_batch_size", 37)
+    _, narrow = geoml.models.cross_validate(
+        model, iterations=5, n_sim=8, n_nodes=8)
+
+    columns = ["rmse", "mae", "bias", "crps", "goodness", "n"]
+    np.testing.assert_allclose(
+        wide[columns].to_numpy(dtype=float),
+        narrow[columns].to_numpy(dtype=float), rtol=1e-12, atol=0.0)
+
+
 def test_a_request_that_fits_is_left_alone(walker_cv):
     model, walker, _, _ = walker_cv
     just_under = int(

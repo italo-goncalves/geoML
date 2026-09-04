@@ -104,10 +104,30 @@ to cost 182 MB resident, the concatenate holding the parts and the assembled
 whole at once. Nothing checked that until 2026-09-04, when a
 notebook running a cross-validation had its kernel killed by the Linux OOM
 killer: 63 GB resident against WSL's 62 GB, host RAM, the GPU never
-involved. The call now refuses past `models.MEASUREMENT_LIMIT` (2 GB) before
-doing any work. The peak is set by the **largest held-out fold**, not by the
-data, so more folds is the cheapest way under it; lowering `n_sim` or
-`n_nodes` is the other, and they multiply.
+involved. That call now refuses past `models.MEASUREMENT_LIMIT` (2 GB)
+before doing any work.
+
+**So the driver stopped materializing them.** Every statistic taken of these
+samples reduces the sample axis one row at a time — `coverage` builds a
+central interval per location and counts the fraction inside, CRPS is per
+row, so are the point errors and the PIT — so nothing needs two rows'
+samples at once. `VGPNetwork.measurement_batches` yields `(rows, samples)`
+per batch and the fold loop folds each batch into **sufficient statistics**:
+counts and sums, never a mean of means, since batches differ in size and a
+short one must not weigh like a long one. Those are the same statistics the
+pooled row already used, so one accumulator now serves both, a fold read in
+batches and a pooling read fold by fold being the same arithmetic. Measured
+on 18 800 rows whose samples come to 92 MB: **+75 MB peak materialized
+against +0 MB streamed**, the same rmse to six decimals, slightly faster.
+The two tests that make it safe are the equivalence ones — the batches
+concatenate to exactly what the whole call returns, and the scores agree to
+1e-12 whether a fold arrives in one piece or in eighty.
+
+One trap that test found: two consecutive `cross_validate` runs are not
+comparable at all unless the seed is reset between them, because
+`_fresh_variational_state` draws `alpha_white_` from the package RNG, so the
+second run's fold models start somewhere else. Nothing to do with batching —
+but it is what a naive equivalence test measures first.
 
 ### E1 — the measurement that settled the refit question
 

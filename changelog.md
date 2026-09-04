@@ -1,4 +1,24 @@
 ## version 0.6.10
+* **The measurement samples can be consumed a batch at a time, and
+cross-validation now does.** `VGPNetwork.measurement_batches` yields
+`(rows, samples)` per batch -- the same values `predict_measurements`
+assembles, in the pieces it assembles them from, already in the variable's
+own units so a streaming caller can compare them against assays without
+waiting for an assembly that never happens. Every statistic taken of these
+samples reduces the sample axis one row at a time (coverage builds a
+central interval per location, CRPS is per row, so are the point errors and
+the PIT), so a caller that accumulates as it goes never holds more than a
+batch. `cross_validate` was rewritten that way: sufficient statistics --
+counts and sums, never a mean of means, since batches differ in size --
+folded per batch, then per fold into the pooled row, which is the same
+arithmetic the pooled row already used. Measured on 18 800 rows whose
+samples come to 92 MB: **+75 MB peak materialized against +0 MB streamed**,
+the same rmse to six decimals, and slightly faster. Two tests pin it: the
+batches concatenate to exactly what the whole call returns, and the scores
+are identical to 1e-12 whether a fold arrives in one piece or in eighty.
+The plotting figures were left on the materializing door on purpose -- they
+cache the samples on the `Selection` to reuse across figures, and they draw
+validation sets small enough that the guard is the right protection.
 * **`predict_measurements` refuses a request it cannot hold.** It returns
 the whole answer as one array per variable -- every batch kept in a list and
 concatenated at the end -- costing `n_sim * n_nodes * 8` bytes a row for

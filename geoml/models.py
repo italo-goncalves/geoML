@@ -1396,25 +1396,12 @@ class VGPNetwork(_GPModel):
         --------
         predict : the ground, with the noise integrated out.
         """
-        if newdata.rows_per_location != 1:
-            raise ValueError(
-                "a measurement is of a point, and %s fans each location out "
-                "into %d rows; ask this of the data the model was trained "
-                "from, or of a validation set"
-                % (type(newdata).__name__, newdata.rows_per_location))
-        if self.data.n_dim != newdata.n_dim:
-            raise ValueError("dimension of newdata is incompatible with model")
-
-        # a likelihood with no warping has no measurement to describe, so it
-        # is passed over rather than asked
-        wanted = [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
-                  if lik.warped]
+        wanted = self._measured_variables()
 
         # Refused before any work rather than discovered part way through:
-        # every batch is kept and concatenated at the end, so the answer is
-        # held whole and its size is known from the shapes alone. Sized in
-        # bytes rather than rows because a vector variable costs a column
-        # each and the two node counts multiply.
+        # this door holds the answer whole, and its size is known from the
+        # shapes alone. Sized in bytes rather than rows because a vector
+        # variable costs a column each and the two node counts multiply.
         wanted_bytes = sum(newdata.n_data * lik.size * n_sim * n_nodes * 8
                            for _, lik in wanted)
         if wanted_bytes > MEASUREMENT_LIMIT:
@@ -1424,10 +1411,73 @@ class VGPNetwork(_GPModel):
                 "`models.MEASUREMENT_LIMIT` holds. Ask about fewer "
                 "locations -- more cross-validation folds make each one "
                 "smaller -- or lower n_sim or n_nodes, which multiply: the "
-                "sample is their product"
+                "sample is their product. `measurement_batches` has no "
+                "ceiling: it hands the same samples over a batch at a time"
                 % (newdata.n_data, n_sim, n_nodes,
                    wanted_bytes / 1024 ** 3,
                    MEASUREMENT_LIMIT / 1024 ** 3))
+
+        chunks = {v: [] for v, _ in wanted}
+        for _, batch in self.measurement_batches(newdata, n_sim, n_nodes):
+            for v, values in batch.items():
+                chunks[v].append(values)
+        return {v: _np.concatenate(parts, axis=0)
+                for v, parts in chunks.items()}
+
+    def _measured_variables(self):
+        """The variables a measurement can be described for, with their
+        likelihoods. A likelihood with no warping has none -- a categorical
+        one's noise lives in the probabilities -- so it is passed over
+        rather than asked."""
+        return [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
+                if lik.warped]
+
+    def measurement_batches(self, newdata: "_data._SpatialData",
+                            n_sim: int = 20, n_nodes: int = 32):
+        """The measurement samples, a batch of locations at a time.
+
+        What :meth:`predict_measurements` returns whole, yielded in the
+        pieces it assembles it from. The samples are the largest thing this
+        model produces -- `n_sim * n_nodes` values a row for each column,
+        5 KB a row at the defaults -- and every statistic taken of them
+        (coverage, CRPS, the point errors, a PIT) reduces the sample axis
+        one row at a time, so a caller that accumulates as it goes never
+        holds more than a batch. That is what :func:`cross_validate` does,
+        and it is why this door carries no size ceiling where the other one
+        must.
+
+        Parameters
+        ----------
+        newdata
+            Locations to ask about, as for :meth:`predict_measurements`.
+        n_sim
+            Latent realizations per location.
+        n_nodes
+            Equal-share noise values per realization.
+
+        Yields
+        ------
+        rows : ndarray
+            Indices into `newdata` of the locations in this batch.
+        samples : dict of str to ndarray
+            One `(len(rows), size, n_sim * n_nodes)` array per variable
+            whose likelihood carries a warping, in the variable's own
+            units.
+
+        See Also
+        --------
+        predict_measurements : the same samples, assembled and returned.
+        """
+        if newdata.rows_per_location != 1:
+            raise ValueError(
+                "a measurement is of a point, and %s fans each location out "
+                "into %d rows; ask this of the data the model was trained "
+                "from, or of a validation set"
+                % (type(newdata).__name__, newdata.rows_per_location))
+        if self.data.n_dim != newdata.n_dim:
+            raise ValueError("dimension of newdata is incompatible with model")
+
+        wanted = self._measured_variables()
 
         def batch_measure(x, x_var, n_splits):
             with _latent.simulation_rule(self.options.qmc_simulations):
@@ -1438,16 +1488,16 @@ class VGPNetwork(_GPModel):
             return [lik.measurement_samples(sim, n_nodes)
                     for sim, lik in zip(sims, self.likelihoods) if lik.warped]
 
-        chunks = {v: [] for v, _ in wanted}
-        for _, output in self._over_batches(newdata, batch_measure):
-            for (v, _), values in zip(wanted, output):
-                chunks[v].append(_np.asarray(values))
-        # in the variable's own units: a composition's parts reach the model
-        # as fractions of the whole, and what is handed back is compared
-        # with assays
-        return {v: self.data.variables[v].from_model_units(
-                    _np.concatenate(parts, axis=0))
-                for v, parts in chunks.items()}
+        for rows, output in self._over_batches(newdata, batch_measure):
+            # in the variable's own units, here rather than at the end: a
+            # composition's parts reach the model as fractions of the whole,
+            # and a streaming caller compares them against assays batch by
+            # batch, so the conversion cannot wait for an assembly that
+            # never happens
+            yield rows, {
+                v: self.data.variables[v].from_model_units(
+                    _np.asarray(values))
+                for (v, _), values in zip(wanted, output)}
 
     def responsibilities(self, newdata: "_data._SpatialData",
                          store: bool = True) -> "dict[str, _np.ndarray]":
@@ -1842,9 +1892,13 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                                where=held)
 
             held_points = oof[held]
-            samples = fold_model.predict_measurements(
-                held_points, n_sim=n_sim, n_nodes=n_nodes)
-            for v, sample in samples.items():
+            held_rows = _np.flatnonzero(held)
+
+            # the truth is small -- one value a row per column -- so it is
+            # read once for the fold and indexed per batch; only the samples
+            # are large enough to be worth streaming
+            truths = {}
+            for v, _ in fold_model._measured_variables():
                 y_true, has_value = \
                     held_points.variables[v].get_measurements()
                 y_true = _np.asarray(y_true, dtype=float)
@@ -1853,73 +1907,112 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                     y_true = y_true[:, None]
                 if has_value.ndim == 1:
                     has_value = has_value[:, None]
+                # not `labels`: that name holds the fold assignments here,
+                # and shadowing it made every fold after the first read
+                # `held` as a scalar False
+                parts = getattr(held_points.variables[v], "labels", None)
+                truths[v] = (y_true, has_value,
+                             [v] if parts is None else list(parts))
 
-                components = getattr(held_points.variables[v], "labels", None)
-                components = [v] if components is None else list(components)
-                for c, component in enumerate(components):
-                    measured = has_value[:, min(c, has_value.shape[1] - 1)] \
-                        == 1
-                    if not measured.any():
-                        continue
-                    truth = y_true[measured, c]
-                    draw = sample[measured, c, :]
-                    point = draw.mean(axis=1)
-                    nominal, observed = _metrics.coverage(truth, draw)
-                    n = int(measured.sum())
-                    score_crps = _metrics.crps(truth, draw)
+            # One pass over the fold's samples, a batch at a time, folding
+            # each into sufficient statistics -- counts and sums, never
+            # means of means, since batches differ in size. The samples are
+            # the only large thing here and this way none of them outlives
+            # its batch.
+            fold_acc = {}
+            for batch, samples in fold_model.measurement_batches(
+                    held_points, n_sim=n_sim, n_nodes=n_nodes):
+                for v, sample in samples.items():
+                    y_true, has_value, components = truths[v]
+                    for c, component in enumerate(components):
+                        column = has_value[batch, min(
+                            c, has_value.shape[1] - 1)]
+                        measured = column == 1
+                        if not measured.any():
+                            continue
+                        truth = y_true[batch, c][measured]
+                        draw = sample[measured, c, :]
+                        _accumulate(fold_acc.setdefault(
+                            (v, component), _fresh_scores()), truth, draw)
 
-                    # where each assay fell inside its own predictive
-                    # distribution (mid-rank, so ties split evenly) --
-                    # what `conformalize` calibrates on
-                    u = (draw < truth[:, None]).mean(axis=1) \
-                        + 0.5 * (draw == truth[:, None]).mean(axis=1)
-                    column = pit.setdefault(
-                        (v, component),
-                        _np.full(data.n_data, _np.nan))
-                    column[_np.flatnonzero(held)[measured]] = u
-                    rows.append({
-                        "variable": v, "component": component, "fold": fold,
-                        "n": n,
-                        "rmse": _metrics.rmse(truth, point),
-                        "mae": _metrics.mae(truth, point),
-                        "bias": _metrics.bias(truth, point),
-                        "crps": score_crps,
-                        "goodness": _metrics.goodness(nominal, observed),
-                    })
+                        # where each assay fell inside its own predictive
+                        # distribution (mid-rank, so ties split evenly) --
+                        # what `conformalize` calibrates on
+                        u = (draw < truth[:, None]).mean(axis=1) \
+                            + 0.5 * (draw == truth[:, None]).mean(axis=1)
+                        stored = pit.setdefault(
+                            (v, component),
+                            _np.full(data.n_data, _np.nan))
+                        stored[held_rows[batch][measured]] = u
 
-                    # sufficient statistics, so the pooled row needs no
-                    # second pass over the samples
-                    a = acc.setdefault((v, component), {
-                        "n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0,
-                        "crps": 0.0,
-                        "observed": _np.zeros_like(observed),
-                        "nominal": nominal,
-                    })
-                    a["n"] += n
-                    a["sse"] += float(((point - truth) ** 2).sum())
-                    a["sae"] += float(_np.abs(point - truth).sum())
-                    a["se"] += float((point - truth).sum())
-                    a["crps"] += score_crps * n
-                    a["observed"] = a["observed"] + observed * n
+            for key, a in fold_acc.items():
+                v, component = key
+                rows.append(dict(_scores_from(a), variable=v,
+                                 component=component, fold=fold))
+                pooled = acc.setdefault(key, _fresh_scores())
+                _merge(pooled, a)
     finally:
         if cleanup:
             _shutil.rmtree(path, ignore_errors=True)
 
     for (v, component), a in acc.items():
-        n = a["n"]
-        rows.append({
-            "variable": v, "component": component, "fold": "all", "n": n,
-            "rmse": float(_np.sqrt(a["sse"] / n)),
-            "mae": a["sae"] / n,
-            "bias": a["se"] / n,
-            "crps": a["crps"] / n,
-            "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
-        })
+        rows.append(dict(_scores_from(a), variable=v, component=component,
+                         fold="all"))
 
     for (v, component), column in pit.items():
         oof.add_metadata(_pit_column(v, component), column)
 
     return oof, _pd.DataFrame(rows)
+
+
+def _fresh_scores():
+    """An empty accumulator for one component's held-out scores.
+
+    Sufficient statistics rather than the scores themselves, so that a fold
+    read in batches and a pooling read fold by fold are the same arithmetic:
+    sums and a count, never a mean of means, which would weight a short
+    batch like a long one.
+    """
+    return {"n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0, "crps": 0.0,
+            "observed": None, "nominal": None}
+
+
+def _accumulate(a, truth, draw):
+    """Fold one batch of measured rows into an accumulator."""
+    point = draw.mean(axis=1)
+    n = int(truth.size)
+    nominal, observed = _metrics.coverage(truth, draw)
+
+    a["n"] += n
+    a["sse"] += float(((point - truth) ** 2).sum())
+    a["sae"] += float(_np.abs(point - truth).sum())
+    a["se"] += float((point - truth).sum())
+    a["crps"] += float(_metrics.crps(truth, draw)) * n
+    a["nominal"] = nominal
+    a["observed"] = observed * n if a["observed"] is None \
+        else a["observed"] + observed * n
+
+
+def _merge(into, other):
+    """Fold one accumulator into another -- a fold into the pooled row."""
+    for key in ("n", "sse", "sae", "se", "crps"):
+        into[key] += other[key]
+    into["nominal"] = other["nominal"]
+    into["observed"] = other["observed"] if into["observed"] is None \
+        else into["observed"] + other["observed"]
+
+
+def _scores_from(a):
+    """The reported scores of one accumulator."""
+    n = a["n"]
+    return {
+        "n": n,
+        "rmse": float(_np.sqrt(a["sse"] / n)),
+        "mae": a["sae"] / n,
+        "bias": a["se"] / n,
+        "crps": a["crps"] / n,
+        "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
+    }
 
 
 def _pit_column(name, component):
