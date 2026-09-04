@@ -96,6 +96,17 @@ payload is `RockTypeVariable`'s `is_boundary` — accepted by both categorical
 likelihoods and read by neither — and would need fixing first the day a
 censoring mask or a per-datum support rides that channel.
 
+**The scoring is what costs memory, not the refit.** Each fold is scored
+through `predict_measurements`, which returns its whole answer as one array
+per variable — `n_sim * n_nodes * 8` bytes a row for each column, 5 KB a row
+at the defaults, measured. Nothing checked that until 2026-09-04, when a
+notebook running a cross-validation had its kernel killed by the Linux OOM
+killer: 63 GB resident against WSL's 62 GB, host RAM, the GPU never
+involved. The call now refuses past `models.MEASUREMENT_LIMIT` (2 GB) before
+doing any work. The peak is set by the **largest held-out fold**, not by the
+data, so more folds is the cheapest way under it; lowering `n_sim` or
+`n_nodes` is the other, and they multiply.
+
 ### E1 — the measurement that settled the refit question
 
 Walker Lake `V` (470 points), single-GP model (10×10 inducing grid,

@@ -214,6 +214,45 @@ def test_bad_arguments_are_refused_before_any_work(walker_cv):
 
 
 # --------------------------------------------------------------------------- #
+# the measurement samples are held whole, so their size is guarded
+# --------------------------------------------------------------------------- #
+def test_measurement_samples_cost_what_the_shapes_say(walker_cv):
+    """The guard's arithmetic, against the array it is guarding: one value
+    per realization per noise node per column, in float64."""
+    model, walker, _, _ = walker_cv
+    samples = model.predict_measurements(walker, n_sim=4, n_nodes=8)["V"]
+
+    assert samples.shape == (walker.n_data, 1, 4 * 8)
+    assert samples.nbytes == walker.n_data * 1 * 4 * 8 * 8
+
+
+def test_a_request_too_large_to_hold_is_refused_before_any_work(walker_cv):
+    """It returns the whole answer as one array, so a request for tens of
+    gigabytes has to be refused rather than attempted -- the OOM killer
+    ends the session instead of raising."""
+    model, walker, _, _ = walker_cv
+
+    # 470 rows is small; the node counts are what make it enormous
+    huge = int(np.ceil(
+        geoml.models.MEASUREMENT_LIMIT / (walker.n_data * 8))) + 1
+    with pytest.raises(MemoryError, match="past the"):
+        model.predict_measurements(walker, n_sim=huge, n_nodes=1)
+
+    # and the message names the knobs that get you under it
+    with pytest.raises(MemoryError, match="n_sim or n_nodes"):
+        model.predict_measurements(walker, n_sim=1, n_nodes=huge)
+
+
+def test_a_request_that_fits_is_left_alone(walker_cv):
+    model, walker, _, _ = walker_cv
+    just_under = int(
+        geoml.models.MEASUREMENT_LIMIT / (walker.n_data * 8) * 0.5)
+    assert just_under > 1
+    samples = model.predict_measurements(walker, n_sim=2, n_nodes=2)
+    assert samples["V"].shape == (walker.n_data, 1, 4)
+
+
+# --------------------------------------------------------------------------- #
 # refitting each fold in minibatches
 # --------------------------------------------------------------------------- #
 def test_the_folds_can_be_refitted_by_svi(walker_cv, monkeypatch):

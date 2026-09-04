@@ -49,6 +49,21 @@ import warnings
 import tensorflow_probability as _tfp
 _tfd = _tfp.distributions
 
+# How much `predict_measurements` will hold in RAM before it refuses. It
+# returns the whole answer as one array per variable -- every batch kept in
+# a list and concatenated at the end, so the chunks and the result are both
+# live for that moment -- and the answer is `n_sim * n_nodes` values a row
+# for each column: 5 KB a row at the defaults, measured. Ungoverned, a
+# cross-validation fold over a few million rows asks for tens of gigabytes
+# and the Linux OOM killer ends the session, which is what happened on
+# 2026-09-04 (63 GB resident, the notebook's kernel killed outright).
+# A fixed ceiling rather than a share of free memory: a limit that moves
+# with the machine makes the same script fail in one place and not another,
+# and there is no portable way to ask. Generous on purpose -- 400 000 rows
+# of a scalar variable at the defaults -- since the point is to stop the
+# catastrophe, not to police ordinary use.
+MEASUREMENT_LIMIT = 2 * 1024 ** 3
+
 
 class _ModelOptions:
     def __init__(self, verbose=True, prediction_batch_size=20000,
@@ -1365,6 +1380,15 @@ class VGPNetwork(_GPModel):
             their noise lives in the probabilities, leaving no value for a
             measurement to scatter around.
 
+        Raises
+        ------
+        MemoryError
+            If the answer would not fit. It is held whole, by design, and
+            costs `n_sim * n_nodes * 8` bytes a row for each column of each
+            variable -- 5 KB a row at the defaults, measured. The ceiling is
+            `models.MEASUREMENT_LIMIT`, and the message names the ways under
+            it.
+
         See Also
         --------
         predict : the ground, with the noise integrated out.
@@ -1382,6 +1406,25 @@ class VGPNetwork(_GPModel):
         # is passed over rather than asked
         wanted = [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
                   if lik.warped]
+
+        # Refused before any work rather than discovered part way through:
+        # every batch is kept and concatenated at the end, so the answer is
+        # held whole and its size is known from the shapes alone. Sized in
+        # bytes rather than rows because a vector variable costs a column
+        # each and the two node counts multiply.
+        wanted_bytes = sum(newdata.n_data * lik.size * n_sim * n_nodes * 8
+                           for _, lik in wanted)
+        if wanted_bytes > MEASUREMENT_LIMIT:
+            raise MemoryError(
+                "measurement samples for %d location(s) at n_sim=%d and "
+                "n_nodes=%d come to %.1f GB, past the %.1f GB "
+                "`models.MEASUREMENT_LIMIT` holds. Ask about fewer "
+                "locations -- more cross-validation folds make each one "
+                "smaller -- or lower n_sim or n_nodes, which multiply: the "
+                "sample is their product"
+                % (newdata.n_data, n_sim, n_nodes,
+                   wanted_bytes / 1024 ** 3,
+                   MEASUREMENT_LIMIT / 1024 ** 3))
 
         def batch_measure(x, x_var, n_splits):
             with _latent.simulation_rule(self.options.qmc_simulations):

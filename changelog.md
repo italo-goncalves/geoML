@@ -1,4 +1,19 @@
 ## version 0.6.10
+* **`predict_measurements` refuses a request it cannot hold.** It returns
+the whole answer as one array per variable -- every batch kept in a list and
+concatenated at the end -- costing `n_sim * n_nodes * 8` bytes a row for
+each column, which is 5 KB a row at the defaults (measured, exactly the
+shape arithmetic). Nothing checked that, so a cross-validation over a few
+million rows asked for tens of gigabytes and the Linux OOM killer ended the
+session rather than raising: a notebook lost its kernel this way on
+2026-09-04, 63 GB resident against WSL's 62 GB, with the GPU never
+involved. `get_simulations` was given exactly this guard in 0.6.9 and this
+path was missed. It now computes the size from the shapes before any work
+and raises a `MemoryError` past `models.MEASUREMENT_LIMIT` (2 GB, about
+400 000 rows of a scalar variable at the defaults), naming the three ways
+under it -- fewer locations, more folds, or lower node counts. A fixed
+ceiling rather than a share of free memory, so the same script does not
+pass on one machine and fail on another.
 * **`cross_validate(method="svi")` refits each fold in minibatches.** The
 driver hard-coded `train_full`, so a fold refit was always full-batch even
 where the model itself had been trained by SVI -- and freezing parameters
