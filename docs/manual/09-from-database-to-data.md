@@ -21,13 +21,24 @@ column is declared), `categorical`, `density`, `recovery` (composites by
 length, never weights a grade, converts to metadata), `flag` and `ignore`.
 
 A column may also declare what it is measured in — `units={"Pb": "%",
-"Ag": "ppm"}` at construction, or `set_unit` afterwards. That declaration
-travels with the column through renaming and compositing and lands on the
-variable the conversion builds. On an ordinary grade it is a label, naming
-an axis and riding an export; on a part of a composition it is the number
-the part is divided by, which is the subject of §9.4. Validation reports a
-value above the whole its unit measures — 120 in a column called a
-percentage — because that is the shape a mislabelled unit takes.
+"Ag": "ppm"}` at construction, or afterwards on a database somebody else
+built:
+
+```
+holes.set_unit("assay", {"Pb": "%", "Ag": "g/t"})
+```
+
+That declaration travels with the column through renaming and compositing
+and lands on the variable the conversion builds. On an ordinary grade it is
+a label, naming an axis and riding an export; on a part of a composition it
+is the number the part is divided by, which is the subject of §9.4.
+Validation reports a value above the whole its unit measures — 120 in a
+column called a percentage — because that is the shape a mislabelled unit
+takes.
+
+Declare the units before compositing. `set_unit` changes the table the
+database holds, in place, and a composite is a new object: it carries the
+units it was given but no longer shares them.
 
 Desurveying is minimum curvature, with a straight-line fallback along the
 collar attitude and a warning when a hole has neither. Interval
@@ -156,7 +167,8 @@ The first row is percentages, the second the same three numbers as
 fractions of one whole. Nothing but the doors ever sees the second.
 
 > **In the code.** `geoml.data.DrillholeData` and `IntervalTable` in
-> `data/drillhole.py`: `add_intervals`, `set_role`, `set_unit`,
+> `data/drillhole.py`: `add_intervals`, `set_role`, `set_unit` (on the
+> table for one column, on the database for a whole table), `rename`,
 > `rename_table`,
 > `drop_table`, the three composites, `as_point_data(position=,
 > drop_missing=)`, `get_contacts` and `as_classification_input`. One

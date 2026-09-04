@@ -1201,6 +1201,37 @@ class DrillholeData(_data._SpatialData):
         self.intervals[table].rename(columns)
         return self
 
+    def set_unit(self, table: str,
+                 units: "dict[str, _types.Unit | None]") -> "DrillholeData":
+        """
+        Declares what the columns of one interval table are measured in.
+
+        Several at a time, which is how they are usually read off an assay
+        certificate; see `IntervalTable.set_unit()` for what a unit is worth.
+        Declare them before compositing: the units travel with the columns
+        into whatever a composite or a subset returns, but those are new
+        objects, so a declaration made on one does not reach the other.
+
+        Parameters
+        ----------
+        table : str
+            Name of the interval table.
+        units : dict
+            Maps each column to its unit -- ``"%"``, ``"ppm"``, ``"g/t"``,
+            or a number to divide by. ``None`` takes a declaration back.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+        """
+        if table not in self.intervals:
+            raise ValueError(
+                f"there is no table named {table}; found "
+                f"{list(self.intervals.keys())}")
+        for column, unit in units.items():
+            self.intervals[table].set_unit(column, unit)
+        return self
+
     def rename_table(self, name: str, new_name: str) -> "DrillholeData":
         """
         Renames an interval table, keeping its position.

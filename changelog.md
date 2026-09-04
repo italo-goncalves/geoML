@@ -7,7 +7,12 @@ a composition spoke in fractions of the whole whatever the assay said.
 `unit=` is now a fact of the variable — declared on
 `add_continuous_variable`, `add_vector_variable`,
 `add_compositional_variable` and `derive`, or on an interval table's
-column (`units=` at construction, `set_unit` after), where it travels
+column (`units=` at construction; afterwards
+`IntervalTable.set_unit(column, unit)` for one, or the database-level
+`DrillholeData.set_unit(table, {column: unit})` for a whole table, which
+is how an assay certificate reads — all three change the table the
+database holds, in place, so declare them before compositing, whose
+copies carry the units but no longer share them), where it travels
 through renaming and compositing onto the variable the conversion builds.
 Being a `_NODE_ATTRS` fact it rides `tree()`, the Zarr store, `copy_to`,
 `carry_to` and subsetting off the one declaration; a store written before

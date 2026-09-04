@@ -702,6 +702,23 @@ def test_a_unit_can_be_set_and_taken_back():
         table.set_unit("cu", "%")
 
 
+def test_the_database_declares_a_table_s_units_in_one_call():
+    holes = _unit_holes()
+    returned = holes.set_unit("assay", {"pb": "%", "ag": "ppm"})
+
+    assert returned is holes
+    assert holes.intervals["assay"].units == {"pb": "%", "ag": "ppm"}
+
+    # and takes one back
+    holes.set_unit("assay", {"ag": None})
+    assert holes.intervals["assay"].units == {"pb": "%"}
+
+    with pytest.raises(ValueError, match="no table named"):
+        holes.set_unit("lithology", {"pb": "%"})
+    with pytest.raises(ValueError, match="not in table"):
+        holes.set_unit("assay", {"cu": "%"})
+
+
 def test_a_unit_travels_with_a_renamed_column():
     table = _unit_holes(units={"pb": "%"}).intervals["assay"]
     table.rename({"pb": "Pb_pct"})
