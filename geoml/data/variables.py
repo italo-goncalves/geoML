@@ -41,6 +41,68 @@ from geoml.data.base import (
 # inside the class is not read as that alias.
 _Attr = _Attribute
 
+# What to divide a column by to turn its unit into a fraction of the whole.
+# Lives here rather than in `drillhole`, where it started, because a
+# composition's parts carry their unit as a fact of the variable and the
+# drillhole is only one of the doors data comes in by; `drillhole` re-exports
+# it, so `geoml.data.drillhole.UNITS` still resolves.
+UNITS = {"fraction": 1.0, "ratio": 1.0, "1": 1.0,
+         "%": 100.0, "pct": 100.0, "percent": 100.0, "wt%": 100.0,
+         "ppm": 1e6, "g/t": 1e6, "mg/kg": 1e6,
+         "ppb": 1e9, "ug/kg": 1e9, "mg/t": 1e9}
+
+
+def _divisor(unit):
+    """What to divide a column by to turn its unit into a fraction.
+
+    A number is taken as the divisor itself; a string is looked up in
+    `UNITS`. `None` means undeclared, which is a fraction: that is what
+    makes an undeclared composition behave exactly as it did before units
+    existed.
+    """
+    if unit is None:
+        return 1.0
+    if isinstance(unit, (int, float)) and not isinstance(unit, bool):
+        if unit <= 0:
+            raise ValueError(f"a unit divisor must be positive, got {unit}")
+        return float(unit)
+
+    key = str(unit).strip().lower()
+    if key not in UNITS:
+        raise ValueError(
+            f"unknown unit {unit!r}; expected one of {sorted(UNITS)}, or a "
+            f"number to divide the column by")
+    return UNITS[key]
+
+
+def _units_per_label(units, labels):
+    """`{label: unit}` from a mapping, a sequence, or nothing.
+
+    A variable's parts are named, so a mapping is the spelling that cannot
+    be got wrong; a sequence is accepted in the labels' own order, and a
+    label the mapping does not name is undeclared rather than an error --
+    a composition's `rest` is exactly that case.
+    """
+    if units is None:
+        return {label: None for label in labels}
+    if isinstance(units, dict):
+        unknown = [key for key in units if key not in labels]
+        if unknown:
+            raise ValueError(
+                "units given for %s, which %s not among the labels %s"
+                % (", ".join(repr(u) for u in unknown),
+                   "is" if len(unknown) == 1 else "are",
+                   ", ".join(repr(str(lb)) for lb in labels)))
+        return {label: units.get(label) for label in labels}
+    units = list(units)
+    if len(units) != len(labels):
+        raise ValueError(
+            "%d unit(s) given for %d label(s); pass a mapping from label to "
+            "unit where only some are declared"
+            % (len(units), len(labels)))
+    return dict(zip(labels, units))
+
+
 def _store_bytes(store):
     return int(_np.prod(store.shape)) * _np.dtype(store.dtype).itemsize
 
@@ -325,6 +387,18 @@ class _Variable(_TreeNode):
                 "`allocate_simulations` first" % str(self.name))
         return self.simulations
 
+    def from_model_units(self, values):
+        """Values as the model produced them, in this variable's own units.
+
+        The identity for everything the model reads directly -- a variable's
+        unit is a label there, and the numbers never left the units they
+        arrived in. A composition overrides it: its parts reach the model as
+        fractions of the whole, so what comes back has to be put into the
+        unit each part was assayed in. `values` carries the component axis
+        second, as everything the model hands back does.
+        """
+        return values
+
     def get_measurements(self):
         raise NotImplementedError
 
@@ -562,13 +636,21 @@ class ContinuousVariable(_Variable):
         Under a `Mixture` likelihood, how likely each measurement is to have
         come from each of its noise components, indexed by the component's
         position. Empty otherwise; written by `set_responsibilities`.
+    unit : str, float or None
+        What the values are measured in -- `"%"`, `"ppm"`, `"g/t"`, or a
+        number. On a variable a model reads directly this is a **label**:
+        the values go to the likelihood as they stand, and the unit travels
+        so that a figure can say what an axis is in and an export can record
+        it. On a part of a `CompositionalVariable` it is also the divisor
+        that turns the value into a fraction of the whole, since parts in
+        different units cannot be added up. `None` is undeclared.
     """
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
                    "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
                       "responsibilities")
-    _NODE_ATTRS = ("cutoffs",)
+    _NODE_ATTRS = ("cutoffs", "unit")
 
     measurements: _Attribute
     latent_mean: _Attribute
@@ -578,19 +660,27 @@ class ContinuousVariable(_Variable):
     noise_variance: _Attribute
     simulations: _storage.ArrayStore | None
     cutoffs: list[float] | None
+    unit: "str | float | None"
     quantiles: dict[float, _Attribute]
     probabilities: dict[float, _Attribute]
     proportions: dict[float, _Attribute]
     divided: dict[float, _Attribute]
     responsibilities: dict[int, _Attribute]
 
-    def __init__(self, name, coordinates, measurements=None):
+    def __init__(self, name, coordinates, measurements=None, unit=None):
         super().__init__(name, coordinates)
 
         if measurements is None:
             self.measurements = self._Attribute(coordinates)
         else:
             self.measurements = self._Attribute(coordinates, measurements)
+
+        # What the values are measured in. A fact of the variable, so it
+        # rides `tree()`, Zarr and every rebuild off `_NODE_ATTRS` rather
+        # than being carried by hand in each of them.
+        self.unit = None
+        if unit is not None:
+            self.set_unit(unit)
 
         self.latent_mean = self._Attribute(coordinates)
         self.latent_variance = self._Attribute(coordinates)
@@ -634,6 +724,23 @@ class ContinuousVariable(_Variable):
         # likelihood; empty under every other one. See `set_responsibilities`.
         self.responsibilities = _col.OrderedDict()
 
+    def set_unit(self, unit: "_types.Unit | None") -> "ContinuousVariable":
+        """What the values are measured in.
+
+        A label here: the values reach the likelihood as they stand, and the
+        unit travels with the variable so that a figure can say what an axis
+        is in and an export can record it. Anything is accepted, `UNITS`
+        holding only the ones that can also be *divided* by -- which is what
+        a part of a composition needs, and what `_Component.set_unit`
+        insists on.
+        """
+        self.unit = unit
+        return self
+
+    def divisor(self) -> float:
+        """What to divide this variable's values by to make them fractions."""
+        return _divisor(self.unit)
+
     def set_cutoffs(self, cutoffs: _types.Cutoffs) -> "ContinuousVariable":
         """The grades this variable is judged against.
 
@@ -647,7 +754,18 @@ class ContinuousVariable(_Variable):
         return self
 
     def prediction_input(self):
-        return {} if self.cutoffs is None else {"cutoffs": self.cutoffs}
+        return {} if self.cutoffs is None \
+            else {"cutoffs": self._model_cutoffs()}
+
+    def _model_cutoffs(self):
+        """The cut-offs as the model reads them.
+
+        The same numbers here -- a variable a model reads directly is in
+        whatever units it was measured in, and its unit is a label. A part
+        of a composition overrides this: its cut-off is declared in its own
+        unit and the model works in fractions.
+        """
+        return list(self.cutoffs or [])
 
     def get_measurements(self):
         values = self.measurements.values.copy()[:, None]
@@ -906,8 +1024,8 @@ class DerivedVariable(ContinuousVariable):
     """
     _NODE_ATTRS = ContinuousVariable._NODE_ATTRS + ("parents",)
 
-    def __init__(self, name, coordinates, parents=None):
-        super().__init__(name, coordinates)
+    def __init__(self, name, coordinates, parents=None, unit=None):
+        super().__init__(name, coordinates, unit=unit)
         self.parents = list(parents) if parents is not None else None
 
     def _from(self):
@@ -939,7 +1057,8 @@ class VectorVariable(_Variable):
     _DICT_FAMILIES = ("responsibilities",)
     _LABEL_KIND = "components"
 
-    def __init__(self, name, coordinates, labels, measurements=None):
+    def __init__(self, name, coordinates, labels, measurements=None,
+                 units=None):
         super().__init__(name, coordinates)
 
         if measurements is not None \
@@ -948,6 +1067,7 @@ class VectorVariable(_Variable):
 
         self.labels = labels
         self._length = len(labels)
+        units = _units_per_label(units, labels)
 
         self.components = {}
         for i, label in enumerate(labels):
@@ -955,6 +1075,7 @@ class VectorVariable(_Variable):
                 label,
                 coordinates,
                 measurements[:, i] if measurements is not None else None,
+                unit=units[label],
             )
 
         self.uncertainty = self._Attribute(coordinates)
@@ -983,7 +1104,7 @@ class VectorVariable(_Variable):
         fewer than the widest is padded with infinity, which nothing is ever
         above, so its spare columns come back empty and `update` drops them.
         """
-        declared = [self.components[label].cutoffs or [] for label in
+        declared = [self.components[label]._model_cutoffs() for label in
                     self.labels]
         widest = max(len(row) for row in declared) if declared else 0
         if widest == 0:
@@ -1014,12 +1135,13 @@ class VectorVariable(_Variable):
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
-                        *args, **kwargs):
+                        units=None, *args, **kwargs):
         new_var = cls(
             name,
             coordinates,
             labels=columns,
             measurements=df.loc[:, columns].values,
+            units=units,
         )
         return new_var
 
@@ -1078,21 +1200,59 @@ class _Component(ContinuousVariable):
     latent_mean: "_Attr | None"
     latent_variance: "_Attr | None"
 
-    def __init__(self, name, coordinates, measurements=None):
-        super().__init__(name, coordinates, measurements)
+    def __init__(self, name, coordinates, measurements=None, unit=None):
+        super().__init__(name, coordinates, measurements, unit=unit)
         self.latent_mean = None
         self.latent_variance = None
 
+    def set_unit(self, unit):
+        """The part's unit, which here is also a divisor.
+
+        Parts in different units cannot be added up, so a composition's
+        unit has to be one the package can convert: a name from `UNITS` or
+        a number. Checked when it is declared rather than at the door,
+        where the message would arrive a training run late.
+        """
+        _divisor(unit)
+        self.unit = unit
+        return self
+
+    def _model_cutoffs(self):
+        # declared in the part's own unit; the model works in fractions
+        divisor = self.divisor()
+        return [c / divisor for c in (self.cutoffs or [])]
+
     def update(self, idx, **kwargs):
-        self.prediction.values[idx] = kwargs["prediction"].numpy()
-        self._sim_store()[idx, :] = kwargs["simulations"].numpy()
+        # The model speaks in fractions of the whole -- it has to, since
+        # the parts are added up -- and this part is stored, reported and
+        # contoured in the unit it was assayed in. So the crossing happens
+        # here, once, and everything downstream of it (quantiles, cut-off
+        # shares, grade-tonnage, the plots) is already in the right unit
+        # without knowing that units exist. A variance carries the square.
+        scale = self.divisor()
+
+        self.prediction.values[idx] = kwargs["prediction"].numpy() * scale
+        self._sim_store()[idx, :] = kwargs["simulations"].numpy() * scale
 
         if "dispersion" in kwargs.keys():
-            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+            self.dispersion.values[idx] = \
+                kwargs["dispersion"].numpy() * scale ** 2
 
         if "noise_variance" in kwargs.keys():
             self.noise_variance.values[idx] = \
-                kwargs["noise_variance"].numpy()
+                kwargs["noise_variance"].numpy() * scale ** 2
+
+        for key, target in (("proportions", self.proportions),
+                            ("divided", self.divided)):
+            # a share is a share whatever the unit; the cut-offs they are
+            # indexed by are this part's own, as declared
+            if key not in kwargs.keys():
+                continue
+            values = kwargs[key].numpy()
+            for i, cutoff in enumerate(self.cutoffs or []):
+                if cutoff not in target:
+                    target[cutoff] = self._Attribute(self.coordinates)
+                target[cutoff].values[idx] = values[:, i]
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -1104,20 +1264,53 @@ class _Component(ContinuousVariable):
 
 
 class CompositionalVariable(VectorVariable):
-    def __init__(self, name, coordinates, labels, measurements=None):
-        super().__init__(name, coordinates, labels, measurements)
+    """A composition, each part in its own unit.
+
+    The parts are stored, reported and simulated in the units they were
+    measured in -- percent, ppm, g/t -- and turned into fractions of the
+    whole only where the model reads them, since parts in different units
+    cannot be added up. `add_compositional_variable` is the door that
+    prepares them; the two crossings are `get_measurements` here and
+    `_Component.update` on the way back.
+    """
+
+    def __init__(self, name, coordinates, labels, measurements=None,
+                 units=None):
+        super().__init__(name, coordinates, labels, measurements, units)
+        units = _units_per_label(units, labels)
         for i, label in enumerate(labels):
             self.components[label] = _Component(
                 label,
                 coordinates,
-                measurements[:, i] if measurements is not None else None)
+                measurements[:, i] if measurements is not None else None,
+                unit=units[label])
+
+    def divisors(self):
+        """What each part is divided by to become a fraction, in order."""
+        return _np.array([self.components[label].divisor()
+                          for label in self.labels], dtype=float)
+
+    def from_model_units(self, values):
+        """Model-space values (fractions) in the parts' own units.
+
+        `values` has the component axis second, as everything the model
+        hands back does.
+        """
+        scale = self.divisors()
+        values = _np.asarray(values, dtype=float)
+        shape = [1] * values.ndim
+        shape[1] = scale.size
+        return values * scale.reshape(shape)
 
     def get_measurements(self):
         # not allowing partial missing data
         out = [self.components[label].measurements.values.to_numpy()
                for label in self.labels]
 
-        out = _np.stack(out, axis=1)
+        # each part divided by its own unit, so that they can be added up:
+        # 1 % and 10 000 ppm are the same fraction, and only in fractions
+        # does a row sum to one
+        out = _np.stack(out, axis=1) / self.divisors()[None, :]
         total = _np.sum(out, axis=1, keepdims=True)
         total = _np.where(_np.abs(total - 1) < 1e-10, 1.0, _np.nan)
         out = out * total
@@ -1143,12 +1336,13 @@ class CompositionalVariable(VectorVariable):
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
-                        *args, **kwargs):
+                        units=None, *args, **kwargs):
         new_var = cls(
             name,
             coordinates,
             labels=columns,
-            measurements=df.loc[:, columns].values)
+            measurements=df.loc[:, columns].values,
+            units=units)
         return new_var
 
     def update(self, idx, **kwargs):
@@ -1157,16 +1351,29 @@ class CompositionalVariable(VectorVariable):
         # a part varies inside a block, and is assayed, on its own account
         dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
         noise = _tf.unstack(kwargs["noise_variance"], axis=1)
+        blank = [None] * len(self.labels)
+        shares = {
+            key: (_tf.unstack(kwargs[key], axis=1)
+                  if key in kwargs.keys() else blank)
+            for key in ("proportions", "divided")}
 
-        for lb, p, s, d, nv in zip(
+        for i, (lb, p, s, d, nv) in enumerate(zip(
                 self.labels,
-                prediction, simulations, dispersion, noise):
-            self.components[lb].update(idx, **{
+                prediction, simulations, dispersion, noise)):
+            values = {
                 "prediction": p,
                 "simulations": s,
                 "dispersion": d,
                 "noise_variance": nv
-            })
+            }
+            for key, unstacked in shares.items():
+                column = unstacked[i]
+                if column is not None:
+                    # padded out to the widest part, as `prediction_input`
+                    # built it; this one takes the cut-offs it declared
+                    declared = len(self.components[lb].cutoffs or [])
+                    values[key] = column[:, :declared]
+            self.components[lb].update(idx, **values)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
@@ -1176,8 +1383,12 @@ class CompositionalVariable(VectorVariable):
         metrics.columns = self.labels
 
         comp_true, has_value = self.get_measurements()
+        # `get_measurements` closes the parts into fractions, and the
+        # Aitchison distance is not invariant to scaling one part alone, so
+        # the predictions are put on the same footing before comparing
         comp_pred = _np.stack([self.components[c].prediction.values.to_numpy()
                                for c in self.labels], axis=1)
+        comp_pred = comp_pred / self.divisors()[None, :]
         comp_true = comp_true[has_value[:, 0] == 1]
         comp_pred = comp_pred[has_value[:, 0] == 1]
         ad = _gmlmetrics.aitchison_distance(comp_true, comp_pred)

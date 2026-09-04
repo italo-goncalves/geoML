@@ -496,11 +496,13 @@ def test_composition_is_closed_without_a_rest():
     np.testing.assert_allclose(parts[0], [0.25, 0.75])
 
 
-def _composition(frame, units=None, **group):
+def _composition_variable(frame, units=None, **group):
     """Runs a small table through the composition machinery.
 
     Values are read as plain fractions unless `units` says otherwise, so the
-    expected results below can be written down directly.
+    expected results below can be written down directly. The parts are
+    stored in whatever unit they were given in; `get_measurements` is where
+    they become one whole.
     """
     holes = _drillholes(collar=_collar(dip=90.0, azimuth=0.0,
                                        length=2.0 * len(frame)))
@@ -513,10 +515,18 @@ def _composition(frame, units=None, **group):
     if units is None:
         units = {c: "fraction" for c in frame.columns
                  if c not in ("HoleID", "From", "To")}
-    group.setdefault("columns", units)
+    group.setdefault("columns", units if units else
+                     [c for c in frame.columns
+                      if c not in ("HoleID", "From", "To")])
     point = holes.composite_to("assay").as_point_data(
         compositional={"metals": group}, drop_missing=False)
-    metals = point.variables["metals"]
+    return point.variables["metals"]
+
+
+def _composition(frame, units=None, **group):
+    """`(labels, stored parts)` of the composition `_composition_variable`
+    builds -- the spelling most of the tests below want."""
+    metals = _composition_variable(frame, units, **group)
     return list(metals.components.keys()), np.stack(
         [np.asarray(c.measurements.values)
          for c in metals.components.values()], axis=1)
@@ -536,14 +546,29 @@ def test_units_are_converted_so_the_parts_can_be_added_up():
         pd.DataFrame({"pb": [1.0], "ag": [10000.0]}),
         units={"pb": "%", "ag": "ppm"}, rest=True)
 
-    # 1 % and 10000 ppm are the same fraction
-    np.testing.assert_allclose(parts[0], [0.01, 0.01, 0.98])
+    # the assay's own numbers are what is stored
+    np.testing.assert_allclose(parts[0], [1.0, 10000.0, 0.98])
+    # and 1 % and 10000 ppm are the same fraction of the whole
+    np.testing.assert_allclose(parts[0] / [100.0, 1e6, 1.0], [0.01, 0.01, 0.98])
+
+
+def test_the_model_sees_one_whole_whatever_the_parts_are_measured_in():
+    """The crossing `get_measurements` makes: parts in their own units on
+    one side, fractions summing to one on the other."""
+    metals = _composition_variable(
+        pd.DataFrame({"pb": [1.0], "ag": [10000.0]}),
+        units={"pb": "%", "ag": "ppm"}, rest=True)
+
+    values, has_value = metals.get_measurements()
+    np.testing.assert_allclose(values[0], [0.01, 0.01, 0.98])
+    np.testing.assert_allclose(values.sum(axis=1), 1.0)
+    assert np.all(has_value == 1.0)
 
 
 def test_a_unit_may_be_given_as_a_number():
     names, parts = _composition(
         pd.DataFrame({"pb": [5.0]}), units={"pb": 100.0}, rest=True)
-    np.testing.assert_allclose(parts[0], [0.05, 0.95])
+    np.testing.assert_allclose(parts[0], [5.0, 0.95])
 
 
 def test_an_unknown_unit_is_rejected():
@@ -551,10 +576,16 @@ def test_an_unknown_unit_is_rejected():
         _composition(pd.DataFrame({"pb": [1.0]}), units={"pb": "carats"})
 
 
-def test_units_are_required():
-    with pytest.raises(ValueError, match="mapping from column name to unit"):
-        _composition(pd.DataFrame({"pb": [1.0], "zn": [1.0]}),
-                     units=["pb", "zn"])
+def test_undeclared_units_are_read_as_fractions_and_said_so():
+    """A list of columns is a legal group -- the units come from the table
+    where it declares them -- but parts left undeclared are fractions, and
+    a composition of raw assays read that way is a mistake worth naming."""
+    with pytest.warns(UserWarning, match="declare no unit"):
+        names, parts = _composition(
+            pd.DataFrame({"pb": [1.0], "zn": [1.0]}), units={})
+
+    assert names == ["pb", "zn"]
+    np.testing.assert_allclose(parts[0], [0.5, 0.5])
 
 
 def test_the_rest_varies_with_how_much_was_measured():
@@ -565,7 +596,9 @@ def test_the_rest_varies_with_how_much_was_measured():
     assert names == ["pb", "zn", "rest"]
     # a barren sample is nearly all rest; a rich one much less so
     np.testing.assert_allclose(parts[:, 2], [0.98, 0.80])
-    np.testing.assert_allclose(parts.sum(axis=1), 1.0)
+    # the parts are in percent, so it is the fractions that sum to one
+    fractions = parts / [100.0, 100.0, 1.0]
+    np.testing.assert_allclose(fractions.sum(axis=1), 1.0)
     assert np.all(parts > 0)
 
 
@@ -576,10 +609,11 @@ def test_the_rest_falls_back_to_the_minimum_when_there_is_no_room():
             units={"pb": "%", "zn": "%"}, rest=True)
 
     # the second sample's parts sum to 1.2, so they are scaled to make room
-    # for a rest of 0.01, the smallest part anywhere
-    np.testing.assert_allclose(parts[0], [0.01, 0.01, 0.98])
-    np.testing.assert_allclose(parts[1], [0.495, 0.495, 0.01])
-    np.testing.assert_allclose(parts.sum(axis=1), 1.0)
+    # for a rest of 0.01, the smallest part anywhere -- 49.5 % each
+    np.testing.assert_allclose(parts[0], [1.0, 1.0, 0.98])
+    np.testing.assert_allclose(parts[1], [49.5, 49.5, 0.01])
+    fractions = parts / [100.0, 100.0, 1.0]
+    np.testing.assert_allclose(fractions.sum(axis=1), 1.0)
     assert np.all(parts > 0)
 
 
@@ -631,12 +665,115 @@ def test_a_missing_row_does_not_set_the_replacement_scale():
     np.testing.assert_allclose(parts[0], raw / raw.sum())
 
 
+# --------------------------------------------------------------------------- #
+# units declared on the table
+# --------------------------------------------------------------------------- #
+def _unit_holes(units=None, values=None):
+    """One hole with a two-column assay table, the units as given."""
+    holes = _drillholes(collar=_collar(dip=90.0, azimuth=0.0, length=6.0))
+    frame = pd.DataFrame(values or {"pb": [1.0, 2.0, 3.0],
+                                    "ag": [10.0, 20.0, 30.0]})
+    frame["HoleID"] = "H1"
+    frame["From"] = 2.0 * np.arange(len(frame))
+    frame["To"] = frame["From"] + 2.0
+    holes.add_intervals("assay", frame, hole="HoleID", fr="From", to="To",
+                        units=units)
+    return holes
+
+
+def test_a_table_declares_what_a_column_is_measured_in():
+    table = _unit_holes(units={"pb": "%", "ag": "ppm"}).intervals["assay"]
+
+    assert table.units == {"pb": "%", "ag": "ppm"}
+    assert "pb: grade (%)" in str(table)
+    assert "ag: grade (ppm)" in str(table)
+
+
+def test_a_unit_can_be_set_and_taken_back():
+    table = _unit_holes().intervals["assay"]
+    table.set_unit("pb", "g/t")
+    assert table.units == {"pb": "g/t"}
+    table.set_unit("pb", None)
+    assert table.units == {}
+
+    with pytest.raises(ValueError, match="unknown unit"):
+        table.set_unit("pb", "carats")
+    with pytest.raises(ValueError, match="not in table"):
+        table.set_unit("cu", "%")
+
+
+def test_a_unit_travels_with_a_renamed_column():
+    table = _unit_holes(units={"pb": "%"}).intervals["assay"]
+    table.rename({"pb": "Pb_pct"})
+    assert table.units == {"Pb_pct": "%"}
+
+
+def test_units_survive_compositing():
+    holes = _unit_holes(units={"pb": "%", "ag": "ppm"})
+    composited = holes.composite(length=3.0)
+    assert composited.intervals["assay"].units == {"pb": "%", "ag": "ppm"}
+
+
+def test_the_conversion_puts_the_unit_on_the_variable():
+    point = _unit_holes(units={"pb": "%", "ag": "ppm"}) \
+        .composite_to("assay").as_point_data()
+
+    assert point.get("pb").unit == "%"
+    assert point.get("ag").unit == "ppm"
+    # and the values are untouched: on a variable a model reads directly the
+    # unit is a label
+    np.testing.assert_allclose(
+        np.asarray(point.get("pb").measurements.values), [1.0, 2.0, 3.0])
+
+
+def test_a_vector_group_takes_its_units_from_the_table():
+    point = _unit_holes(units={"pb": "%", "ag": "ppm"}) \
+        .composite_to("assay").as_point_data(vector={"metals": ["pb", "ag"]})
+
+    metals = point.get("metals")
+    assert [metals.components[c].unit for c in ("pb", "ag")] == ["%", "ppm"]
+
+
+def test_a_composition_may_name_its_columns_and_take_the_units_from_the_table():
+    point = _unit_holes(units={"pb": "%", "ag": "ppm"}) \
+        .composite_to("assay").as_point_data(
+            compositional={"metals": {"columns": ["pb", "ag"], "rest": True}})
+
+    metals = point.get("metals")
+    assert metals.labels == ["pb", "ag", "rest"]
+    assert [metals.components[c].unit for c in ("pb", "ag")] == ["%", "ppm"]
+    # stored as assayed, one whole where the model reads them
+    np.testing.assert_allclose(
+        np.asarray(metals.components["pb"].measurements.values), [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(metals.get_measurements()[0].sum(axis=1), 1.0)
+
+
+def test_a_bare_list_is_a_composition_group():
+    point = _unit_holes(units={"pb": "%", "ag": "ppm"}) \
+        .composite_to("assay").as_point_data(
+            compositional={"metals": ["pb", "ag"]})
+
+    assert point.get("metals").labels == ["pb", "ag"]
+
+
+def test_a_value_above_its_own_whole_is_reported():
+    with pytest.warns(UserWarning, match="above one whole"):
+        _unit_holes(units={"pb": "%"},
+                     values={"pb": [1.0, 120.0, 3.0]})
+
+
 def test_the_same_grade_in_different_units_gives_the_same_composition():
-    as_percent = _composition(pd.DataFrame({"pb": [1.0, 10.0]}),
-                              units={"pb": "%"}, rest=True)[1]
-    as_ppm = _composition(pd.DataFrame({"pb": [10000.0, 100000.0]}),
-                          units={"pb": "ppm"}, rest=True)[1]
-    np.testing.assert_allclose(as_percent, as_ppm)
+    as_percent = _composition_variable(pd.DataFrame({"pb": [1.0, 10.0]}),
+                                       units={"pb": "%"}, rest=True)
+    as_ppm = _composition_variable(pd.DataFrame({"pb": [10000.0, 100000.0]}),
+                                   units={"pb": "ppm"}, rest=True)
+    # the stored numbers differ, as they should -- the assay's own
+    np.testing.assert_allclose(
+        np.asarray(as_ppm.components["pb"].measurements.values),
+        np.asarray(as_percent.components["pb"].measurements.values) * 1e4)
+    # what the model is given is the same composition either way
+    np.testing.assert_allclose(as_percent.get_measurements()[0],
+                               as_ppm.get_measurements()[0])
 
 
 # --------------------------------------------------------------------------- #

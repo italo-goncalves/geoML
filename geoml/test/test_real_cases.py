@@ -262,17 +262,21 @@ def test_arctic_lake_composition():
     grid = geoml.data.Grid1D(10, n=96, step=1.0)
     model.predict(grid, n_sim=20)
 
-    # the predicted parts must still form a composition
+    # the predicted parts must still form a composition -- reported in the
+    # units they were measured in (the loader declares percent), so it is
+    # the fractions of the whole that add up
+    variable = grid.variables["comp"]
+    divisors = variable.divisors()
     predicted = np.stack(
-        [grid.variables["comp"].components[p].prediction.as_series(sigma=3)
+        [variable.components[p].prediction.as_series(sigma=3)
          for p in parts], axis=1)
     assert predicted.shape == (96, 3)
     assert np.all(np.isfinite(predicted))
-    assert np.allclose(predicted.sum(axis=1), 1.0, atol=1e-6)
+    assert np.allclose((predicted / divisors).sum(axis=1), 1.0, atol=1e-6)
 
-    simulations = grid.variables["comp"].get_simulations()
+    simulations = variable.get_simulations()
     assert simulations.shape == (96, 20, 3)
-    assert np.allclose(simulations.sum(axis=2), 1.0, atol=1e-6)
+    assert np.allclose((simulations / divisors).sum(axis=2), 1.0, atol=1e-6)
 
 
 # --------------------------------------------------------------------------- #

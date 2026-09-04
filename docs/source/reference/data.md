@@ -48,11 +48,20 @@ so that splitting keeps it tiling exactly. Design record:
 What a container holds at each location: measurements, and everything a
 model writes back.
 
+A variable may declare what it is measured in — `unit="g/t"`, `unit="%"`,
+or a number to divide by. On a variable a model reads directly the unit is
+a label: it names an axis and rides an export, and no number changes. On a
+part of a `CompositionalVariable` it is also the divisor, because parts in
+different units cannot be added up and a composition is defined by its sum;
+there the parts are stored, predicted and simulated in the units they were
+assayed in, becoming fractions of the whole only where the model reads and
+writes them. `UNITS` is the table of names the package can divide by.
+
 ```{eval-rst}
 .. automodule:: geoml.data.variables
    :members: ContinuousVariable, VectorVariable, CompositionalVariable,
              CategoricalVariable, RockTypeVariable, BinaryVariable,
-             DerivedVariable
+             DerivedVariable, UNITS
    :show-inheritance:
 ```
 

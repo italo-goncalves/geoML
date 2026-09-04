@@ -21,6 +21,7 @@ The point-based containers: `_SpatialData` (what every container is),
 import copy as _copy
 import inspect as _inspect
 import json as _json
+import warnings as _warnings
 from collections.abc import Sequence
 from typing import Any as _Any
 
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _TreeNode, _frame_from_columns
 from geoml.data.variables import *
-from geoml.data.variables import _Variable
+from geoml.data.variables import _Variable, _divisor, _units_per_label
 
 
 def _balanced_assignment(cluster, sizes, k):
@@ -67,6 +68,111 @@ def _balanced_assignment(cluster, sizes, k):
         fold_of_cluster[c] = f
         load[f] += cluster_size[c]
     return fold_of_cluster[cluster]
+
+
+def _prepare_composition(values, labels, units, rest, name):
+    """The parts of a composition, ready to be stored.
+
+    Handles what a raw assay needs before it can be modelled, in the order
+    the steps have to happen -- and returns the parts **in their own
+    units**, the closure having been worked out in fractions, since only
+    there does a row sum to one:
+
+    1. Every column is divided by its unit, so that the parts become
+       fractions of the same whole and can be added up. This is why the
+       unit of each part has to be declared.
+    2. A row missing any one of its parts is marked missing entirely. The
+       parts of a composition only carry information relative to each
+       other, so a row that is short of one of them cannot be used.
+    3. Non-positive parts are replaced by half the smallest positive value
+       of their own column, the usual substitution for values below
+       detection. A log-ratio transform cannot take a zero.
+    4. With `rest`, a further part is added holding whatever is left of the
+       whole. Where the parts leave no room -- they already account for
+       everything, or for more than everything -- the rest is held at the
+       smallest positive part found anywhere and those samples are scaled
+       down to fit. Without it the rows are closed instead.
+
+    A row nothing above touches keeps the numbers it came with, to the last
+    bit: it is written back rather than divided and multiplied by its own
+    unit, so a table that arrives clean is stored exactly as it was read.
+    """
+    values = _np.asarray(values, dtype=float)
+    given = labels[:-1] if rest else labels
+    if values.ndim != 2 or values.shape[1] != len(given):
+        raise ValueError(
+            "%r has %d part(s) to fill%s but the measurements have shape %s"
+            % (name, len(given), " (besides the rest)" if rest else "",
+               (values.shape,)))
+
+    divisors = _np.array([_divisor(units[label]) for label in given])
+    parts = values / divisors[None, :]
+    changed = _np.zeros(values.shape[0], dtype=bool)
+
+    missing = _np.any(_np.isnan(parts), axis=1)
+    if missing.any():
+        partly = missing.sum() - int(_np.all(_np.isnan(parts), axis=1).sum())
+        if partly > 0:
+            _warnings.warn(
+                f"{partly} sample(s) are missing some but not all parts of "
+                f"the composition; they were marked missing entirely")
+        parts[missing] = _np.nan
+        changed |= missing
+
+    for i, label in enumerate(given):
+        with _np.errstate(invalid="ignore"):
+            replace = parts[:, i] <= 0
+        if not replace.any():
+            continue
+        positive = parts[parts[:, i] > 0, i]
+        if positive.size == 0:
+            _warnings.warn(
+                f"every value of {label} is non-positive, so there is no "
+                f"scale to replace them with; they were left alone")
+            continue
+        parts[replace, i] = 0.5 * positive.min()
+        changed |= replace
+
+    def written(rows):
+        """The parts in their own units, the untouched rows kept verbatim."""
+        out = values.copy()
+        out[rows] = parts[rows] * divisors[None, :]
+        return out
+
+    if not rest:
+        with _np.errstate(invalid="ignore"):
+            total = parts.sum(axis=1, keepdims=True)
+            # a row already closed is left alone rather than divided by a
+            # number that is one to within rounding
+            open_row = ~(_np.abs(total[:, 0] - 1.0) < 1e-10)
+            parts = _np.where(open_row[:, None], parts / total, parts)
+        return written(changed | open_row)
+
+    with _np.errstate(invalid="ignore"):
+        positive = parts[parts > 0]
+    if positive.size == 0:
+        raise ValueError(
+            "the composition has no positive value anywhere, so there is no "
+            "room to place a rest in")
+    minimum = positive.min()
+
+    total = parts.sum(axis=1)
+    residual = 1.0 - total
+    with _np.errstate(invalid="ignore"):
+        crowded = residual < minimum
+    if crowded.any():
+        _warnings.warn(
+            f"{crowded.sum()} sample(s) leave no room for a rest, their parts "
+            f"already accounting for the whole; they were scaled down so that "
+            f"the rest could take the smallest part found, {minimum:.3g}. "
+            f"Check the units if this affects many samples")
+        parts[crowded] *= ((1.0 - minimum) / total[crowded])[:, None]
+        residual = _np.where(crowded, minimum, residual)
+        changed |= crowded
+
+    rest_divisor = _divisor(units[labels[-1]])
+    return _np.concatenate(
+        [written(changed), residual[:, None] * rest_divisor], axis=1)
 
 
 class _SpatialData(_TreeNode):
@@ -183,7 +289,30 @@ class _SpatialData(_TreeNode):
         if table:
             target.field_data["geoml_paths"] = _np.array(
                 [_json.dumps(table)])
+        units = self.units()
+        if units:
+            # what each column is measured in, keyed by the same path the
+            # table above maps back to: a viewer reading a grade off an
+            # export has no other way to know whether it is a percentage
+            target.field_data["geoml_units"] = _np.array(
+                [_json.dumps({str(path): unit
+                              for path, unit in units.items()})])
         return target
+
+    def units(self) -> "dict[str, _types.Unit]":
+        """What each variable is measured in, by path.
+
+        Only the ones that declare a unit; a variable's parts are listed
+        under their own paths, since a composition's parts each carry their
+        own. The keys are the paths `get` takes.
+        """
+        found = {}
+        for variable in self.variables.values():
+            for path, node in variable.walk():
+                unit = getattr(node, "unit", None)
+                if unit is not None:
+                    found[str(path)] = unit
+        return found
 
     @property
     def rows_per_location(self):
@@ -236,7 +365,7 @@ class _SpatialData(_TreeNode):
                 f"found {list(self.metadata.keys())}")
         return self.metadata[name].to_numpy()
 
-    def derive(self, names, function, arguments):
+    def derive(self, names, function, arguments, units=None):
         """
         Computes new variables from existing ones, realization by realization.
 
@@ -270,6 +399,10 @@ class _SpatialData(_TreeNode):
             realization-wise, and a variable without realizations has no
             place in it. A per-location constant comes in as metadata:
             ``"_metadata/density"``.
+        units : str, float, mapping or sequence
+            What the derived values are measured in -- one per name, or a
+            mapping naming some of them. A label, as on any variable a
+            model reads directly.
 
         Returns
         -------
@@ -277,6 +410,9 @@ class _SpatialData(_TreeNode):
         """
         single = isinstance(names, str)
         names = [names] if single else list(names)
+        if units is not None and not isinstance(units, (dict, list, tuple)):
+            units = [units]
+        per_name = _units_per_label(units, names)
 
         columns = []
         n_sim = None
@@ -312,7 +448,8 @@ class _SpatialData(_TreeNode):
         new_vars = []
         for name in names:
             variable = DerivedVariable(
-                name, self, parents=[str(p) for p in arguments])
+                name, self, parents=[str(p) for p in arguments],
+                unit=per_name[name])
             variable.allocate_simulations(n_sim)
             self.variables[name] = variable
             new_vars.append(variable)
@@ -712,7 +849,8 @@ class _PointBased(_SpatialData):
 
     def add_continuous_variable(
             self, name: str,
-            measurements: _types.ArrayLike | None = None) -> None:
+            measurements: _types.ArrayLike | None = None,
+            unit: "_types.Unit | None" = None) -> None:
         """
         Adds a continuous variable to this point set.
 
@@ -722,16 +860,40 @@ class _PointBased(_SpatialData):
             Variable name.
         measurements
             The variable's values, one per data location.
+        unit
+            What the values are measured in -- `"%"`, `"ppm"`, `"g/t"`, or
+            a number. A label here: the model reads the values as they
+            stand, and the unit travels so that a figure can say what an
+            axis is in and an export can record it.
         """
         # self.variables[name] = ContinuousVariable(
         #     name, self, measurements, quantiles=quantiles,
         #     probabilities=probabilities)
-        self.variables[name] = ContinuousVariable(name, self, measurements)
+        self.variables[name] = ContinuousVariable(
+            name, self, measurements, unit=unit)
 
     def add_vector_variable(
             self, name: str, labels: _types.Labels | None = None,
-            measurements: _types.ArrayLike | None = None) -> None:
-        self.variables[name] = VectorVariable(name, self, labels, measurements)
+            measurements: _types.ArrayLike | None = None,
+            units: _types.Units = None) -> None:
+        """
+        Adds a vector variable to this point set.
+
+        Parameters
+        ----------
+        name
+            Variable name.
+        labels
+            One name per component.
+        measurements
+            A matrix with one column per component.
+        units
+            What the components are measured in: one per label, or a
+            mapping naming some of them. Labels here, as for a continuous
+            variable -- the components go to the model as they stand.
+        """
+        self.variables[name] = VectorVariable(
+            name, self, labels, measurements, units=units)
 
     def add_categorical_variable(
             self, name: str, labels: _types.Labels | None = None,
@@ -820,9 +982,27 @@ class _PointBased(_SpatialData):
 
     def add_compositional_variable(
             self, name: str, labels: _types.Labels,
-            measurements: _types.ArrayLike | None = None) -> None:
+            measurements: _types.ArrayLike | None = None,
+            units: _types.Units = None, rest: bool = False) -> None:
         """
         Adds a compositional variable to this data set.
+
+        The parts are kept in the units they were measured in and turned
+        into fractions of the whole only where the model reads them, so
+        everything reported of them -- predictions, simulations, quantiles,
+        the two variances -- comes back in the unit each part was assayed
+        in. Declaring the units is what makes that possible: parts in
+        different units cannot be added up, and a composition is defined by
+        its sum.
+
+        What the values are put through, in this order: a row missing any
+        one part is marked missing entirely, the parts of a composition
+        carrying information only relative to each other; non-positive
+        parts are replaced by half the smallest positive value of their own
+        column, since a log-ratio transform cannot take a zero; and the
+        rows are closed, either by adding a `rest` part holding whatever is
+        left of the whole or by scaling each row to sum to one. Data that
+        already arrives closed and positive is left exactly as it is.
 
         Parameters
         ----------
@@ -831,11 +1011,31 @@ class _PointBased(_SpatialData):
         labels : tuple
             The labels for each part in the composition.
         measurements : array-like
-            A rank 2 matrix containing the compositions. It is assumed to be strictly positive and its rows must
-            add to 1.
+            A rank 2 matrix containing the compositions, one column per
+            label, each in its own unit.
+        units : mapping or sequence
+            What each part is measured in -- `"%"`, `"ppm"`, `"g/t"`, or a
+            number to divide by. One per label, or a mapping naming some of
+            them. Undeclared parts are read as fractions, which is what the
+            whole composition was before units existed. With `rest`, the
+            mapping may name `"rest"` as well; it is a fraction otherwise.
+        rest : bool
+            Whether to add a further part holding whatever is left of the
+            whole. Recommended wherever the parts are a few assayed metals:
+            their own numbers then survive untouched, where closing without
+            a rest turns them into shares of what was measured.
         """
+        labels = list(labels)
+        if rest:
+            labels = labels + ["rest"]
+        per_label = _units_per_label(units, labels)
+
+        if measurements is not None:
+            measurements = _prepare_composition(
+                measurements, labels, per_label, rest, name)
+
         self.variables[name] = CompositionalVariable(
-            name, self, labels, measurements)
+            name, self, labels, measurements, units=per_label)
 
     def get_batched_coordinates(self, index=None):
         if index is None:

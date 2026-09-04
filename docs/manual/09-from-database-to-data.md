@@ -20,6 +20,15 @@ declared once: `grade` (composited by length × density when a `density`
 column is declared), `categorical`, `density`, `recovery` (composites by
 length, never weights a grade, converts to metadata), `flag` and `ignore`.
 
+A column may also declare what it is measured in — `units={"Pb": "%",
+"Ag": "ppm"}` at construction, or `set_unit` afterwards. That declaration
+travels with the column through renaming and compositing and lands on the
+variable the conversion builds. On an ordinary grade it is a label, naming
+an axis and riding an export; on a part of a composition it is the number
+the part is divided by, which is the subject of §9.4. Validation reports a
+value above the whole its unit measures — 120 in a column called a
+percentage — because that is the shape a mislabelled unit takes.
+
 Desurveying is minimum curvature, with a straight-line fallback along the
 collar attitude and a warning when a hole has neither. Interval
 coordinates are never stored. They are computed on demand, which is what
@@ -96,8 +105,59 @@ figure.savefig("figures/09-ararangua-classification.png", dpi=150,
 
 ![The classification input: interior points and contacts](figures/09-ararangua-classification.png)
 
+## 9.4 Compositions: several metals, one whole
+
+A composition is a set of parts that share a whole, and the whole is what
+makes a log-ratio transform meaningful. Assays do not arrive that way: lead
+is reported in percent, silver in grams per tonne, and the two cannot be
+added up until both are fractions of the same rock. That is why a
+compositional group is declared with its units.
+
+```
+metals = holes.as_point_data(
+    compositional={"metals": {"columns": ["Pb", "Ag"], "rest": True}})
+```
+
+With the units on the table, the group names its columns and nothing else.
+Where the table declares none, name them in the group itself —
+`{"columns": {"Pb_pct": "%", "Ag_ppm": "ppm"}, "rest": True}` — and a part
+left undeclared is read as a fraction, with a warning saying so. This
+database logs no assays, so the code above is written out rather than run;
+the bundled Arctic lake set is a composition and shows what comes of it.
+
+Three things happen on the way in. A row missing any one part is marked
+missing entirely, since the parts only carry information relative to each
+other. Non-positive values are replaced by half the smallest positive value
+of their own column, the usual substitution below detection, because a
+log-ratio cannot take a zero. And the row is closed: with `rest=True` a
+further part is added holding whatever is left of the whole, which is the
+one to reach for when the parts are a few assayed metals, because their own
+numbers then survive untouched. Closing without a rest turns them into
+shares of what was measured instead.
+
+**The parts keep their units.** Lead stays in percent everywhere you look
+at it — its prediction, its realizations, its quantiles, its dispersion
+inside a block, the scatter a fresh sample would show. Only at the two
+doors where the model reads and writes does it become a fraction of the
+whole, which is where it has to be one. A cut-off is declared in the part's
+own unit for the same reason. The container will tell you what it is
+holding, and the variable will show you both sides:
+
+```python
+lake = geoml.datasets.arctic_lake()
+print(lake.units())
+
+sediment = lake.get("comp")
+print("stored, as logged:", sediment.values("Sand/measurements")[:3])
+print("as the model reads it:", sediment.get_measurements()[0][:3])
+```
+
+The first row is percentages, the second the same three numbers as
+fractions of one whole. Nothing but the doors ever sees the second.
+
 > **In the code.** `geoml.data.DrillholeData` and `IntervalTable` in
-> `data/drillhole.py`: `add_intervals`, `set_role`, `rename_table`,
+> `data/drillhole.py`: `add_intervals`, `set_role`, `set_unit`,
+> `rename_table`,
 > `drop_table`, the three composites, `as_point_data(position=,
 > drop_missing=)`, `get_contacts` and `as_classification_input`. One
 > sign-convention gotcha the constructor exposes as `dip_positive_down`:

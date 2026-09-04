@@ -77,10 +77,26 @@ def numeric_values(var):
     labels : list
         A name per column.
     """
-    values, has_value = var.get_measurements()
+    _, has_value = var.get_measurements()
     measured = _np.all(has_value == 1.0, axis=1)
-    labels = [str(label) for label in getattr(var, "labels", [var.name])]
+
+    # the stored columns rather than what `get_measurements` hands the
+    # model: a composition's parts reach it as fractions of the whole, and
+    # a figure shows the units they were measured in -- the same units every
+    # other figure reads `prediction` and `noise_variance` in
+    components = getattr(var, "components", None)
+    parts = [var] if components is None \
+        else [components[label] for label in var.labels]
+    values = _np.stack([part.measurements.values.to_numpy() for part in parts],
+                       axis=1)
+    labels = [axis_label(part) for part in parts]
     return _np.asarray(values, dtype=float), measured, labels
+
+
+def axis_label(part):
+    """A continuous variable's name, with its unit where it declares one."""
+    unit = getattr(part, "unit", None)
+    return str(part.name) if unit is None else "%s (%s)" % (part.name, unit)
 
 
 def category_values(var):
@@ -644,7 +660,7 @@ def prediction_values(container: "_data._SpatialData", name: str):
                 % name)
         measured_values.append(part.measurements.values.to_numpy())
         predicted_values.append(part.prediction.values.to_numpy())
-        labels.append(str(part.name))
+        labels.append(axis_label(part))
 
     measured_values = _np.stack(measured_values, axis=1).astype(float)
     predicted_values = _np.stack(predicted_values, axis=1).astype(float)
@@ -2261,6 +2277,9 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
 
     return {"cutoff": cutoffs, "tonnage": tonnage, "grade": mean_grade,
             "metal": metal, "unit": extent if density is None else "mass",
+            # what the grade itself is measured in, where it says so; `unit`
+            # above is the tonnage's extent and was named first
+            "grade_unit": getattr(var, "unit", None),
             "kept": kept, "total": total}
 
 

@@ -351,8 +351,11 @@ def arctic_lake():
     raw_data = _pd.read_csv(file)
 
     arctic_lake_data = _data.PointData(raw_data, ["Depth (m)"])
+    # the file holds percentages, and the parts are kept in them: the
+    # composition is closed where the model reads it, not in the container
     arctic_lake_data.add_compositional_variable(
         "comp", labels=['Sand', 'Silt', 'Clay'],
-        measurements=raw_data.values[:, :3] / 100)
+        measurements=raw_data.values[:, :3],
+        units={'Sand': '%', 'Silt': '%', 'Clay': '%'})
 
     return arctic_lake_data

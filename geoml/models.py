@@ -1396,7 +1396,11 @@ class VGPNetwork(_GPModel):
         for _, output in self._over_batches(newdata, batch_measure):
             for (v, _), values in zip(wanted, output):
                 chunks[v].append(_np.asarray(values))
-        return {v: _np.concatenate(parts, axis=0)
+        # in the variable's own units: a composition's parts reach the model
+        # as fractions of the whole, and what is handed back is compared
+        # with assays
+        return {v: self.data.variables[v].from_model_units(
+                    _np.concatenate(parts, axis=0))
                 for v, parts in chunks.items()}
 
     def responsibilities(self, newdata: "_data._SpatialData",

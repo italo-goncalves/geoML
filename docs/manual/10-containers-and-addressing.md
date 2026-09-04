@@ -142,6 +142,13 @@ facts of chapter 9, sits under `_metadata/`:
 print(sorted(str(path) for path in walker.select("**"))[:6])
 ```
 
+Besides its columns, a variable carries a few **facts** — the cut-offs it
+is judged against, and the unit it is measured in. They are not arrays, and
+`tree()` prints them beside the variable's name; `container.units()` lists
+every declared unit by path. Everything a column holds is in that unit,
+which for a composition's part means the one it was assayed in rather than
+the fraction the model works with (§9.4).
+
 ## 10.3 Getting the numbers out
 
 Three doors, by destination, and one of them is not an export at all.

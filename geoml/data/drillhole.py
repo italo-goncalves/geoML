@@ -27,6 +27,7 @@ import pyvista as _pv
 
 import geoml._types as _types
 import geoml.data.containers as _data
+import geoml.data.variables as _variables
 import geoml.viz.plotly as _py
 
 from typing import TYPE_CHECKING
@@ -46,11 +47,11 @@ DEPTH = "DEPTH"
 
 ROLES = ("grade", "categorical", "density", "recovery", "flag", "ignore")
 
-# what to divide a column by to turn it into a fraction of the whole
-UNITS = {"fraction": 1.0, "ratio": 1.0, "1": 1.0,
-         "%": 100.0, "pct": 100.0, "percent": 100.0, "wt%": 100.0,
-         "ppm": 1e6, "g/t": 1e6, "mg/kg": 1e6,
-         "ppb": 1e9, "ug/kg": 1e9, "mg/t": 1e9}
+# What to divide a column by to turn it into a fraction of the whole. The
+# table lives with the variables now -- a unit is a fact of the variable and
+# the drillhole is one of the doors data comes in by -- and is re-exported
+# here because that is where it was first published.
+UNITS = _variables.UNITS
 
 _TOL = 1e-6
 
@@ -358,6 +359,12 @@ class IntervalTable(object):
     they are numeric and ``ignore`` otherwise; `set_role()` corrects them
     afterwards. `__str__` prints the roles in force.
 
+    A column may also declare what it is measured in -- ``units={"Pb": "%",
+    "Ag": "ppm"}`` -- which travels with it through compositing and onto the
+    variable the conversion builds. It is a label on an ordinary grade, and
+    the divisor on a part of a composition, where parts in different units
+    have to be brought to a common whole before they can be added up.
+
     Attributes
     ----------
     data : DataFrame
@@ -365,13 +372,15 @@ class IntervalTable(object):
         columns renamed to HOLEID, FROM and TO.
     roles : dict
         Column name to role.
+    units : dict
+        Column name to unit, for the columns that declare one.
     name : str
         A label for the table, used in messages.
     """
 
     def __init__(self, data, hole="HOLEID", fr="FROM", to="TO",
                  grades=None, categorical=None, density=None, recovery=None,
-                 flags=None, ignore=None, name=None):
+                 flags=None, ignore=None, units=None, name=None):
         """
         Initializer for IntervalTable.
 
@@ -385,6 +394,9 @@ class IntervalTable(object):
             Columns with the start and end depths of each interval.
         grades, categorical, density, recovery, flags, ignore : str or list
             Columns to assign to each role.
+        units : dict
+            Column name to unit -- ``"%"``, ``"ppm"``, ``"g/t"``, or a number
+            to divide by. Columns not named here are undeclared.
         name : str
             A label for the table.
         """
@@ -402,6 +414,7 @@ class IntervalTable(object):
         self.data = data.sort_values([HOLE, FROM]).reset_index(drop=True)
         self.name = name
         self.roles = {}
+        self.units = {}
 
         for column in self.value_columns:
             self.roles[column] = \
@@ -412,13 +425,16 @@ class IntervalTable(object):
                               ("flag", flags), ("ignore", ignore)):
             for column in _as_list(columns):
                 self.set_role(column, role)
+        for column, unit in (units or {}).items():
+            self.set_unit(column, unit)
 
     @classmethod
-    def _from_canonical(cls, data, roles, name=None):
+    def _from_canonical(cls, data, roles, name=None, units=None):
         """Builds a table from data that is already in canonical form."""
         new_table = cls.__new__(cls)
         new_table.data = data
         new_table.roles = dict(roles)
+        new_table.units = dict(units or {})
         new_table.name = name
         return new_table
 
@@ -434,7 +450,10 @@ class IntervalTable(object):
         s += f"totalling {self.length.sum():.1f} m\n\n"
         s += "Column roles:\n"
         for column in self.value_columns:
-            s += f"  {column}: {self.roles[column]}\n"
+            s += f"  {column}: {self.roles[column]}"
+            if column in self.units:
+                s += f" ({self.units[column]})"
+            s += "\n"
         return s
 
     def __repr__(self):
@@ -479,9 +498,28 @@ class IntervalTable(object):
         self.roles[column] = role
         return self
 
+    def set_unit(self, column: str, unit: "_types.Unit | None") -> "IntervalTable":
+        """Declares what a column is measured in.
+
+        A label on an ordinary grade, and the divisor on a part of a
+        composition, where parts in different units have to be brought to a
+        common whole before they can be added up. Anything `UNITS` names, or
+        a number to divide by; `None` takes the declaration back.
+        """
+        if column not in self.data.columns:
+            raise ValueError(
+                f"column {column} is not in table {self.name}; found "
+                f"{self.value_columns}")
+        if unit is None:
+            self.units.pop(column, None)
+            return self
+        _variables._divisor(unit)
+        self.units[column] = unit
+        return self
+
     def rename(self, columns: "dict[str, str]") -> "IntervalTable":
         """
-        Renames value columns, carrying their roles with them.
+        Renames value columns, carrying their roles and units with them.
 
         The roles are held beside the data, keyed by column name, so renaming
         the data frame's columns directly leaves them behind: the column
@@ -528,6 +566,8 @@ class IntervalTable(object):
         self.data = self.data.rename(columns=columns)
         self.roles = {columns.get(str(name), name): role
                       for name, role in self.roles.items()}
+        self.units = {columns.get(str(name), name): unit
+                      for name, unit in self.units.items()}
         return self
 
     def validate(self, on_error="warn", collar=None):
@@ -538,7 +578,9 @@ class IntervalTable(object):
         with no collar are errors: the aggregation assumes intervals within a
         hole are sorted and disjoint. Gaps and intervals running past the end
         of the hole are only reported, since assay tables are legitimately
-        incomplete.
+        incomplete, and so is a value above the whole its declared unit
+        measures -- 120 in a column called a percentage -- which is the shape
+        a mislabelled unit takes.
 
         Parameters
         ----------
@@ -583,6 +625,16 @@ class IntervalTable(object):
             report(_np.concatenate([[False], gaps]),
                    "gap after the previous interval", "warning")
 
+        for column, unit in self.units.items():
+            # a value above the whole its unit measures is the shape a
+            # mislabelled column takes: ppm read as percent, most often
+            numeric = _np.asarray(
+                _pd.to_numeric(data[column], errors="coerce"), dtype=float)
+            with _np.errstate(invalid="ignore"):
+                report(numeric > _variables._divisor(unit),
+                       "%s is above one whole in %s" % (column, unit),
+                       "warning")
+
         if collar is not None:
             report(~_pd.Index(hole).isin(collar.index),
                    "hole is not in the collar table", "error")
@@ -616,7 +668,8 @@ class IntervalTable(object):
         """A copy of this table containing the given holes only."""
         keep = self.data[HOLE].isin(list(holes))
         return self._from_canonical(
-            self.data.loc[keep].reset_index(drop=True), self.roles, self.name)
+            self.data.loc[keep].reset_index(drop=True), self.roles, self.name,
+            self.units)
 
     def category_legend(self, column: str) -> _pd.DataFrame:
         """
@@ -736,7 +789,7 @@ class IntervalTable(object):
 
         roles = dict(self.roles)
         roles[target] = "categorical"
-        return self._from_canonical(data, roles, self.name)
+        return self._from_canonical(data, roles, self.name, self.units)
 
     def aggregate_onto(self, targets):
         """
@@ -813,7 +866,7 @@ class IntervalTable(object):
                 overlap, n_target)
 
         return self._from_canonical(out[self.data.columns], self.roles,
-                                    self.name)
+                                    self.name, self.units)
 
 
 # --------------------------------------------------------------------------- #
@@ -1481,7 +1534,7 @@ class DrillholeData(_data._SpatialData):
         new_object.intervals = dict(self.intervals)
         new_object.intervals[table] = IntervalTable._from_canonical(
             source.data.loc[match].reset_index(drop=True), source.roles,
-            source.name)
+            source.name, source.units)
         new_object._update_bounding_box()
         return new_object
 
@@ -1616,7 +1669,7 @@ class DrillholeData(_data._SpatialData):
         new_object = _copy.copy(self)
         new_object.intervals = dict(self.intervals)
         new_object.intervals[name] = IntervalTable._from_canonical(
-            filled, table.roles, table.name)
+            filled, table.roles, table.name, table.units)
         new_object._update_bounding_box()
         return new_object
 
@@ -1668,15 +1721,19 @@ class DrillholeData(_data._SpatialData):
             The default puts it at the centre.
         compositional : dict
             Groups of columns to convert to compositional variables, as
-            ``{name: {"columns": {"Pb_pct": "%", "Ag_ppm": "ppm"}, "rest":
-            True}}``. Each column is named with its unit, which is needed to
-            add the parts up; see `UNITS`, or give a number to divide by. A
-            row missing any part is marked missing entirely; non-positive
-            parts are replaced by half the smallest positive value of their
-            column, since a log-ratio transform cannot take a zero; and with
-            "rest" a further part is added holding whatever is left of the
-            whole, so that the composition sums to one. Without "rest" the
-            parts are closed instead.
+            ``{name: {"columns": ["Pb", "Ag"], "rest": True}}`` where the
+            table declares the units, or as ``{name: {"columns": {"Pb_pct":
+            "%", "Ag_ppm": "ppm"}, "rest": True}}`` where it does not; a
+            bare list of columns is the same without a rest. The units are
+            what lets the parts be added up -- see `UNITS`, or give a number
+            to divide by -- and each part is kept in its own unit, becoming
+            a fraction only where the model reads it. A row missing any part
+            is marked missing entirely; non-positive parts are replaced by
+            half the smallest positive value of their column, since a
+            log-ratio transform cannot take a zero; and with "rest" a
+            further part is added holding whatever is left of the whole.
+            Without it the parts are closed instead, which turns them into
+            shares of what was measured.
         vector : dict
             Groups of columns to convert to vector variables, as
             ``{name: [columns]}``.
@@ -1700,10 +1757,17 @@ class DrillholeData(_data._SpatialData):
             + [t.data[t.value_columns].reset_index(drop=True) for t in tables],
             axis=1)
 
+        # what each column is measured in, as the tables declare it
+        column_units = {}
+        for table in tables:
+            column_units.update(table.units)
+
+        groups = {name: _composition_group(name, group, column_units)
+                  for name, group in (compositional or {}).items()}
+
         claimed = set()
-        for group in (compositional or {}).values():
-            claimed.update(group["columns"] if isinstance(group, dict)
-                           else group)
+        for columns, _, _ in groups.values():
+            claimed.update(columns)
         for columns in (vector or {}).values():
             claimed.update(columns)
 
@@ -1743,18 +1807,22 @@ class DrillholeData(_data._SpatialData):
 
         for column in numeric:
             point.add_continuous_variable(
-                column, frame[column].values.astype(float))
+                column, frame[column].values.astype(float),
+                unit=column_units.get(column))
         for column in categorical:
             labels = _pd.unique(frame[column].dropna())
             point.add_categorical_variable(
                 column, labels, measurements=frame[column].values)
         for name, columns in (vector or {}).items():
+            columns = list(columns)
             point.add_vector_variable(
-                name, list(columns),
-                frame[list(columns)].values.astype(float))
-        for name, group in (compositional or {}).items():
-            columns, parts = _prepare_composition(frame, group)
-            point.add_compositional_variable(name, columns, parts)
+                name, columns, frame[columns].values.astype(float),
+                units={c: column_units[c] for c in columns
+                       if c in column_units})
+        for name, (columns, units, rest) in groups.items():
+            point.add_compositional_variable(
+                name, columns, frame[columns].values.astype(float),
+                units=units, rest=rest)
 
         return point
 
@@ -1952,106 +2020,40 @@ class DrillholeData(_data._SpatialData):
         return _py.segments_3d(points, values, colors, **kwargs)
 
 
-def _divisor(unit):
-    """What to divide a column by to turn its unit into a fraction."""
-    if isinstance(unit, (int, float)) and not isinstance(unit, bool):
-        if unit <= 0:
-            raise ValueError(f"a unit divisor must be positive, got {unit}")
-        return float(unit)
+def _composition_group(name, group, column_units):
+    """`(columns, units, rest)` from one entry of the `compositional` map.
 
-    key = str(unit).strip().lower()
-    if key not in UNITS:
-        raise ValueError(
-            f"unknown unit {unit!r}; expected one of {sorted(UNITS)}, or a "
-            f"number to divide the column by")
-    return UNITS[key]
-
-
-def _prepare_composition(frame, group):
+    Three spellings, all reaching the same place. A bare list of columns
+    takes each one's unit from the table that declares it; a dict with
+    ``"columns"`` as a list does the same and may ask for a ``"rest"``; and
+    a dict with ``"columns"`` as a mapping names the units outright, which
+    is what to reach for when the table says nothing.
     """
-    Builds the parts of a compositional variable.
+    rest = False
+    if isinstance(group, dict):
+        columns = group.get("columns")
+        rest = bool(group.get("rest", False))
+        if columns is None:
+            raise ValueError(
+                f"the composition {name!r} names no columns; give them as "
+                f"{{'columns': ['Pb', 'Ag'], 'rest': True}}, or as a mapping "
+                f"from column to unit where the table declares none")
+    else:
+        columns = group
 
-    Handles the processing a raw assay table needs before it can be modelled,
-    in the order the steps have to happen:
+    if isinstance(columns, dict):
+        units = dict(columns)
+        columns = list(columns.keys())
+    else:
+        columns = list(columns)
+        units = {c: column_units[c] for c in columns if c in column_units}
 
-    1. Every column is divided by its unit, so all the parts become fractions
-       of the same whole and can be added up. This is why the unit of each
-       column has to be declared.
-    2. A row missing any one of its parts is marked missing entirely. The
-       parts of a composition only carry information relative to each other,
-       so a row that is short of one of them cannot be used.
-    3. Non-positive parts are replaced by half the smallest positive value of
-       their own column, the usual substitution for values below detection.
-       A log-ratio transform cannot take a zero.
-    4. The rest is added, holding whatever is left of the whole: one minus the
-       sum of the other parts. Where the parts leave no room -- they already
-       account for everything, or for more than everything -- the rest is held
-       at ``min_rest``, the smallest positive part found anywhere, and those
-       samples are scaled down to fit. Every part is then strictly positive
-       and the composition sums to one.
-    """
-    if not isinstance(group, dict) or not isinstance(group.get("columns"),
-                                                     dict):
-        raise ValueError(
-            "the columns of a composition must be given as a mapping from "
-            "column name to unit, as {'Pb_pct': '%', 'Ag_ppm': 'ppm'}; the "
-            f"units are needed to add the parts up. Expected one of "
-            f"{sorted(UNITS)}, or a number to divide the column by")
-
-    columns = list(group["columns"].keys())
-    rest = group.get("rest", False)
-
-    parts = frame[columns].values.astype(float)
-    for i, column in enumerate(columns):
-        parts[:, i] = parts[:, i] / _divisor(group["columns"][column])
-
-    missing = _np.any(_np.isnan(parts), axis=1)
-    if missing.any():
-        partly = missing.sum() - int(_np.all(_np.isnan(parts), axis=1).sum())
-        if partly > 0:
-            _warnings.warn(
-                f"{partly} sample(s) are missing some but not all parts of "
-                f"the composition; they were marked missing entirely")
-        parts[missing] = _np.nan
-
-    for i, column in enumerate(columns):
-        with _np.errstate(invalid="ignore"):
-            replace = parts[:, i] <= 0
-        if not replace.any():
-            continue
-        positive = parts[parts[:, i] > 0, i]
-        if positive.size == 0:
-            _warnings.warn(
-                f"every value of {column} is non-positive, so there is no "
-                f"scale to replace them with; they were left alone")
-            continue
-        parts[replace, i] = 0.5 * positive.min()
-
-    if not rest:
-        # a missing row sums to NaN, and so stays missing
-        with _np.errstate(invalid="ignore", divide="ignore"):
-            return columns, parts / parts.sum(axis=1, keepdims=True)
-
-    with _np.errstate(invalid="ignore"):
-        positive = parts[parts > 0]
-    if positive.size == 0:
-        raise ValueError(
-            "the composition has no positive value anywhere, so there is no "
-            "room to place a rest in")
-    minimum = positive.min()
-
-    total = parts.sum(axis=1)
-    residual = 1.0 - total
-    with _np.errstate(invalid="ignore"):
-        crowded = residual < minimum
-    if crowded.any():
+    undeclared = [c for c in columns if units.get(c) is None]
+    if undeclared:
         _warnings.warn(
-            f"{crowded.sum()} sample(s) leave no room for a rest, their parts "
-            f"already accounting for the whole; they were scaled down so that "
-            f"the rest could take the smallest part found, {minimum:.3g}. "
-            f"Check the units if this affects many samples")
-        parts[crowded] *= ((1.0 - minimum) / total[crowded])[:, None]
-        residual = _np.where(crowded, minimum, residual)
+            f"the parts {undeclared} of the composition {name!r} declare no "
+            f"unit and are read as fractions; parts in different units "
+            f"cannot be added up, so declare them on the table "
+            f"(`set_unit`) or in the group")
+    return columns, units, rest
 
-    parts = _np.concatenate([parts, residual[:, None]], axis=1)
-    return columns + ["rest"], parts

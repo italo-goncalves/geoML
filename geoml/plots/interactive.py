@@ -1487,9 +1487,13 @@ class Interactive(_base.Selection):
             title += " (%d of %d blocks, %s ≤ %g)" % (
                 curves["kept"], curves["total"], named, max_uncertainty)
 
+        graded = name if curves["grade_unit"] is None \
+            else "%s, %s" % (name, curves["grade_unit"])
+        in_units = "" if curves["grade_unit"] is None \
+            else " (%s)" % curves["grade_unit"]
         return self._finish(
             figure, title=title, height=height or 470, width=width,
-            xaxis={"title": {"text": "cut-off grade (%s)" % name}},
+            xaxis={"title": {"text": "cut-off grade (%s)" % graded}},
             # only the tonnage: the grade axis spans one order of magnitude at
             # most and a log scale would say nothing
             yaxis={"title": {"text": curves["unit"] + " above the cut-off",
@@ -1497,7 +1501,7 @@ class Interactive(_base.Selection):
                    "tickfont": {"color": _style.color(0)},
                    "type": "log" if log_mass else "linear",
                    "gridcolor": self._faint(_style.color(0))},
-            yaxis2={"title": {"text": "mean grade above the cut-off",
+            yaxis2={"title": {"text": "mean grade above the cut-off" + in_units,
                               "font": {"color": _style.color(1)}},
                     "tickfont": {"color": _style.color(1)},
                     "gridcolor": self._faint(_style.color(1)),

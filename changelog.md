@@ -1,4 +1,42 @@
 ## version 0.6.10
+* **Variables carry a unit, and a composition's parts keep theirs.** A
+grade reported in percent was stored as a fraction and came back as one:
+the divisor lived in the drillhole conversion, was applied on the way in
+and forgotten, so every prediction, realization, quantile and variance of
+a composition spoke in fractions of the whole whatever the assay said.
+`unit=` is now a fact of the variable — declared on
+`add_continuous_variable`, `add_vector_variable`,
+`add_compositional_variable` and `derive`, or on an interval table's
+column (`units=` at construction, `set_unit` after), where it travels
+through renaming and compositing onto the variable the conversion builds.
+Being a `_NODE_ATTRS` fact it rides `tree()`, the Zarr store, `copy_to`,
+`carry_to` and subsetting off the one declaration; a store written before
+this loads with none. On a variable a model reads directly it is a
+**label**: it names an axis (`prepare.axis_label`, both backends), rides
+the pyvista and geoh5 exports as `field_data["geoml_units"]`, is listed by
+`container.units()`, and changes no number. On a part of a
+`CompositionalVariable` it is also the **divisor**, and the parts are
+stored, predicted, simulated and reported in the units they were assayed
+in — the crossing to fractions of the whole happens at the two model doors
+(`get_measurements` divides, `_Component.update` multiplies, a variance by
+the square) and at the two side doors (`prediction_input` puts a cut-off
+declared in the part's own unit into fractions, `predict_measurements`
+brings the samples back). The gate, `test_units.py`: the same composition
+told it is in percent and told nothing trains to a **bit-identical** bound
+and reports every column a factor of a hundred apart, ten thousand for a
+variance, with 30 % and 0.30 naming one cut-off and the same shares above
+it. The composition machinery moved with the unit table from
+`drillhole.py` to the containers, so a data-frame user gets what a
+drillhole user got — missing rows, the zero substitution, the rest part,
+the closure — and a row nothing touches keeps its numbers to the last bit.
+A drillhole composition group may now name its columns as a list and take
+their units from the table; `validate` reports a value above the whole its
+unit measures, which is the shape a mislabelled unit takes. Two things
+fixed in passing: `CompositionalVariable.update` dropped `proportions` and
+`divided`, so a cut-off declared on a part was never filled, and the
+Aitchison distance in its metrics compared closed measurements against
+unclosed predictions. `datasets.arctic_lake()` declares its percentages
+instead of dividing them away.
 * **The manual's CI job runs one chapter per process.** The v0.6.9
 tag was the first release since v0.6.5 whose full-suite job
 survived the runner, and the job holding the manual alone was
