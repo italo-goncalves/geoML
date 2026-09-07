@@ -712,7 +712,7 @@ def test_the_tonnage_counts_every_block_at_its_own_size():
 
     assert np.allclose(after["tonnage"], before["tonnage"])
     assert np.allclose(after["grade"], before["grade"], equal_nan=True)
-    assert after["unit"] == "mass"
+    assert after["extent"] == "mass"
 
 
 def test_a_half_refined_model_reports_the_same_tonnage():
@@ -730,7 +730,7 @@ def test_a_half_refined_model_reports_the_same_tonnage():
 
     after = prepare.grade_tonnage(mixed, "g", cutoffs=cutoffs)
     assert np.allclose(after["tonnage"], before["tonnage"])
-    assert after["unit"] == "volume"
+    assert after["extent"] == "volume"
 
 
 def test_the_export_is_one_welded_hexahedron_per_block():

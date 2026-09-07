@@ -1,4 +1,24 @@
 ## version 0.6.10
+* **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
+the project's ubiquitous language: the ground against a measurement, the
+three variances, support, expert, realization, warping against transform --
+what each word means here and which near-synonyms to avoid. The language was
+real and precise already but spread across a very long instruction file,
+docstrings and the manual, with no page organized by *concept*.
+`docs/roadmap.md` is the other half: the open work with sizes, the ideas
+tried and dropped with the numbers that killed them, and the tools refused
+on a structural mismatch. The rejections are the valuable part -- they exist
+so an idea is not re-proposed -- and until now they lived outside the
+repository, invisible to anyone but the assistant that recorded them. Both
+are linked from the top of `CLAUDE.md`; the roadmap is published under the
+documentation site's internals.
+* **`grade_tonnage` stopped calling two different things `unit`.** Its
+returned dict used `unit` for what the tonnage accumulates -- `"area"`,
+`"volume"`, `"mass"` -- which collided with the physical units added to
+variables earlier in this release, and the first fix simply added
+`grade_unit` beside it. The key is now `extent` for what is accumulated and
+`unit` for what the grade is measured in, which is what both words mean
+everywhere else in the package.
 * **The measurement samples can be consumed a batch at a time, and
 cross-validation now does.** `VGPNetwork.measurement_batches` yields
 `(rows, samples)` per batch -- the same values `predict_measurements`

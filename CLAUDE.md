@@ -125,6 +125,15 @@ Rules:
 
 # Project: geoML
 
+Two files at the root of the project answer questions this one does not.
+**`CONTEXT.md` is the glossary** — what each word means here and which
+near-synonyms to avoid; reach for it when a term is doing two jobs, and add
+to it when a distinction is settled. **`docs/roadmap.md` is the open work
+and the closed questions** — items with sizes, ideas measured and rejected
+with the numbers that killed them, and tools refused on structure. Check it
+before proposing anything: the rejections are there so an idea is not
+re-proposed, and a new item belongs there rather than in a session note.
+
 Machine learning models for spatial/geoscientific data, centered on **variational Gaussian processes**. TensorFlow / TensorFlow-Probability backend, all computation in `float64`. GPL-3 (dual-licensed; see README). Since 0.6.0 the package is five subpackages plus the flat survivors (no `src/` layout): `data/` (containers, variables, meshes, blocks, drillholes, inducing helpers, Zarr io), `latent/` (the modelling paradigms), `math/`, `stats/`, `viz/`, and flat `models`, `likelihood`, `kernels`, `transform`, `warping`, `parameter`, `datasets`, `metrics`, `persistence`, `storage` — the first six pinned flat because **saved models replay their dotted paths** (`persistence._resolve` imports `geoml.likelihood.Gaussian` and friends by name). Facades re-export everything the old flat modules held, and one-line shims sit at every old path (`geoml/tftools.py`, `geoml/drillhole.py`, ...) for one release — a class recorded in a save must keep its old path importable forever.
 
 ## Module map

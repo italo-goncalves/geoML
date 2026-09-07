@@ -2192,10 +2192,11 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
     -------
     dict
         `cutoff` `(n_cutoffs,)`; `tonnage`, `grade` and `metal`
-        `(n_cutoffs, n_realizations)`; `unit`, which is the extent of a block
-        or `"mass"` depending on whether a density was given; and `kept` and
-        `total`, the blocks that survived the uncertainty filter and the
-        blocks there were.
+        `(n_cutoffs, n_realizations)`; `extent`, what is accumulated above
+        the cut-off -- a block's own extent, or `"mass"` where a density
+        was given; `unit`, what the grade is measured in where it says so;
+        and `kept` and `total`, the blocks that survived the uncertainty
+        filter and the blocks there were.
     """
     volume = block_volume(container)
     # a block of a two-dimensional grid has an area, not a volume, and saying
@@ -2276,10 +2277,12 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
         mean_grade = _np.where(tonnage > 0, metal / tonnage, _np.nan)
 
     return {"cutoff": cutoffs, "tonnage": tonnage, "grade": mean_grade,
-            "metal": metal, "unit": extent if density is None else "mass",
-            # what the grade itself is measured in, where it says so; `unit`
-            # above is the tonnage's extent and was named first
-            "grade_unit": getattr(var, "unit", None),
+            "metal": metal,
+            # what is being accumulated above the cut-off -- a length, an
+            # area, a volume, or a mass where a density was given
+            "extent": extent if density is None else "mass",
+            # and what the grade itself is measured in, where it says so
+            "unit": getattr(var, "unit", None),
             "kept": kept, "total": total}
 
 

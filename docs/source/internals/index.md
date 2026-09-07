@@ -7,6 +7,7 @@ author six months later — rather than for its users.
 ```{toctree}
 :maxdepth: 1
 
+roadmap
 variable-block-models
 variable-paths
 cross-validation

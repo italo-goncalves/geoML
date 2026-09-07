@@ -1316,14 +1316,14 @@ class Explorer(_base.Selection):
                 # magnitude at most and a log scale would say nothing
                 axes.set_yscale("log")
 
-            graded = name if curves["grade_unit"] is None \
-                else "%s, %s" % (name, curves["grade_unit"])
+            graded = name if curves["unit"] is None \
+                else "%s, %s" % (name, curves["unit"])
             axes.set_xlabel("cut-off grade (%s)" % graded)
-            axes.set_ylabel(curves["unit"] + " above the cut-off",
+            axes.set_ylabel(curves["extent"] + " above the cut-off",
                             color=_style.color(0))
             grade_axes.set_ylabel("mean grade above the cut-off"
-                                  + ("" if curves["grade_unit"] is None
-                                     else " (%s)" % curves["grade_unit"]),
+                                  + ("" if curves["unit"] is None
+                                     else " (%s)" % curves["unit"]),
                                   color=_style.color(1))
             title = "Grade and tonnage"
             if curves["kept"] < curves["total"]:

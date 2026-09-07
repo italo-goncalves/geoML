@@ -1188,7 +1188,7 @@ def test_without_a_density_the_curve_is_in_volume(blocks):
     curves = prepare.grade_tonnage(blocks, "grade", cutoffs=5)
 
     # a two-dimensional grid gives an area, and the axis has to say so
-    assert curves["unit"] == "area"
+    assert curves["extent"] == "area"
     cell = 2.0 * 5.0
     assert np.allclose(curves["tonnage"][0], blocks.n_data * cell)
 
@@ -1198,7 +1198,7 @@ def test_a_density_turns_the_volume_into_a_mass(blocks):
     mass = prepare.grade_tonnage(blocks, "grade", density="fixed_density",
                                  cutoffs=5)
 
-    assert mass["unit"] == "mass"
+    assert mass["extent"] == "mass"
     assert np.allclose(mass["tonnage"], 3.0 * volume["tonnage"])
 
 
