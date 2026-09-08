@@ -757,13 +757,18 @@ class VGPNetwork(_GPModel):
     data
         The training data, a container from the :mod:`geoml.data` module.
     variables
-        The name of a variable in `data` to model, or a list of names.
+        The name of a variable in `data` to model, a list of names, or a
+        mapping from each name to its likelihood -- in which case
+        `likelihoods` is left out.
     likelihoods
         A likelihood from :mod:`geoml.likelihood`, or a list of one per
         variable, in the same order as `variables`.
     latent_network
-        The network's terminal node, from :mod:`geoml.latent`. Its size must
-        match the likelihoods' sizes summed.
+        The tree's leaves, from :mod:`geoml.latent`: a list of nodes, one
+        per likelihood and in the same order, each sized as its likelihood;
+        or a single node serving every likelihood, sized as their sizes
+        summed and split among them in order. Several leaves may share
+        parents, or sit on separate trees with roots of their own.
     directional_data
         Structural measurements, whose variable is taken as the gradient of
         the modelled field.
@@ -772,6 +777,11 @@ class VGPNetwork(_GPModel):
 
     Attributes
     ----------
+    leaves : list
+        The tree's output nodes, one per likelihood or one for all.
+    latent_network
+        The single leaf, where there is one. A model with several leaves
+        raises here and points at `leaves`.
     training_log : list of float
         The evidence lower bound at each iteration of the last training run.
 
@@ -790,26 +800,78 @@ class VGPNetwork(_GPModel):
     """
 
     def __init__(self, data: "_data.PointData",
-                 variables: "str | Sequence[str]",
-                 likelihoods: "_lk._Likelihood | Sequence[_lk._Likelihood]",
-                 latent_network: "_latent.network._LatentVariable",
+                 variables: "str | Sequence[str] | dict",
+                 likelihoods: "_lk._Likelihood | Sequence[_lk._Likelihood] | None" = None,
+                 latent_network: "_latent.network._LatentVariable | Sequence[_latent.network._LatentVariable] | None" = None,
                  directional_data: "_data.DirectionalData | None" = None,
                  options: "GPOptions | None" = None):
         super().__init__(options=options)
 
         self.data = data
-        self.latent_network = self._register(latent_network)
 
-        if isinstance(likelihoods, _lk._Likelihood):
-            likelihoods = [likelihoods]
-        self.likelihoods: "list[_lk._Likelihood]" = list(likelihoods)
+        # `variables={"Rock": lik, ...}` names each likelihood beside its
+        # variable, which is the spelling that cannot get the order wrong
+        if isinstance(variables, dict):
+            if likelihoods is not None:
+                raise ValueError(
+                    "the likelihoods were given twice: once beside each "
+                    "variable and once as `likelihoods`; give one or the "
+                    "other")
+            names, likelihoods = list(variables.keys()), list(variables.values())
+        else:
+            names = [variables] if isinstance(variables, str) \
+                else list(variables)
+            if likelihoods is None:
+                raise ValueError(
+                    "no likelihoods: pass one per variable, or name each "
+                    "beside its variable as `variables={name: likelihood}`")
+            if isinstance(likelihoods, _lk._Likelihood):
+                likelihoods = [likelihoods]
+            likelihoods = list(likelihoods)
+        self.variables: list[str] = names
+        self.likelihoods: "list[_lk._Likelihood]" = likelihoods
+        if len(self.likelihoods) != len(self.variables):
+            raise ValueError(
+                "%d variable(s) but %d likelihood(s); each variable takes "
+                "exactly one" % (len(self.variables), len(self.likelihoods)))
         self.lik_sizes = [lik.size for lik in self.likelihoods]
         for likelihood in self.likelihoods:
             self._register(likelihood)
 
-        if isinstance(variables, str):
-            variables = [variables]
-        self.variables: list[str] = list(variables)
+        # The tree's leaves, and which likelihoods each one serves. A list
+        # is one leaf per likelihood; a single node serves them all and is
+        # split among them by size, which is the shape every model had before
+        # a list was accepted. Nothing in between: a leaf serving some of
+        # the likelihoods but not others would need the join this replaces.
+        if latent_network is None:
+            raise ValueError("no latent network: pass the tree's leaves")
+        self.leaves: "list[_latent.network._LatentVariable]"
+        if isinstance(latent_network, (list, tuple)):
+            self.leaves = list(latent_network)
+            if len(self.leaves) != len(self.likelihoods):
+                raise ValueError(
+                    "%d leaves for %d likelihood(s); a list of leaves takes "
+                    "one per likelihood, in the same order, or pass a single "
+                    "node to serve them all"
+                    % (len(self.leaves), len(self.likelihoods)))
+            self._leaf_groups = [[i] for i in range(len(self.likelihoods))]
+        else:
+            self.leaves = [_cast(_latent.network._LatentVariable,
+                                 latent_network)]
+            self._leaf_groups = [list(range(len(self.likelihoods)))]
+        for leaf, group in zip(self.leaves, self._leaf_groups):
+            self._register(leaf)
+            wanted = sum(self.lik_sizes[i] for i in group)
+            if leaf.size != wanted:
+                raise ValueError(
+                    "leaf %s has size %d where its likelihood%s need%s %d"
+                    % (leaf.name, leaf.size,
+                       "s" if len(group) > 1 else "",
+                       "" if len(group) > 1 else "s", wanted))
+        # the cached refresh trace lives on the model, there being no single
+        # node to hang it on once there are several leaves
+        self._refresh_graph = None
+
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
         y, has_value = [], []
@@ -885,7 +947,14 @@ class VGPNetwork(_GPModel):
         for v, lik in zip(self.variables, self.likelihoods):
             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
         s += "\nLatent layer:\n"
-        s += str(self.latent_network)
+        if len(self.leaves) == 1:
+            s += str(self.leaves[0])
+        else:
+            # one leaf per likelihood, each written under the variable it
+            # serves; a parent two leaves share appears under both, which is
+            # what the tree looks like from either leaf
+            for v, leaf in zip(self.variables, self.leaves):
+                s += "[%s]\n%s\n" % (v, str(leaf))
         return s
 
     def to_dot(self, legend=True, rankdir="BT"):
@@ -905,12 +974,65 @@ class VGPNetwork(_GPModel):
             amsgrad=True
         )
 
+    @property
+    def latent_network(self):
+        """The tree's single leaf, where there is one.
+
+        Every model built before a list of leaves was accepted has exactly
+        one, and everything that read it keeps working. A model with several
+        leaves has no single output node to hand back, and says so rather
+        than returning sometimes a node and sometimes a list.
+        """
+        if len(self.leaves) == 1:
+            return self.leaves[0]
+        raise AttributeError(
+            "this model has %d leaves, one per likelihood; read `leaves`"
+            % len(self.leaves))
+
+    def _nodes(self):
+        """Every node of the tree, each once, leaves included.
+
+        The union over the leaves' ancestors: a parent shared by two leaves
+        is one node, and must be refreshed, priced in the KL and reset by
+        cross-validation exactly once. Order is fixed by first sighting so
+        that anything zipped against it lines up from one call to the next.
+        """
+        seen, nodes = set(), []
+        for leaf in self.leaves:
+            for node in [leaf] + leaf.get_unique_parents():
+                if id(node) not in seen:
+                    seen.add(id(node))
+                    nodes.append(node)
+        return nodes
+
+    def _refresh(self, jitter):
+        for leaf in self.leaves:
+            leaf.refresh(jitter)
+
+    def _by_likelihood(self, per_leaf, axis=1):
+        """Per-likelihood tensors from per-leaf ones, in likelihood order.
+
+        A leaf serving one likelihood hands its tensor straight over; one
+        serving several is split among them by size along `axis` -- the
+        split every model used to make of its single node, now made only
+        where a leaf actually serves more than one.
+        """
+        out: "list[_Any]" = [None] * len(self.likelihoods)
+        for tensor, group in zip(per_leaf, self._leaf_groups):
+            if len(group) == 1:
+                out[group[0]] = tensor
+                continue
+            sizes = [self.lik_sizes[i] for i in group]
+            for i, piece in zip(group, _tf.split(tensor, sizes, axis=axis)):
+                out[i] = piece
+        return out
+
     @_tf.function
     def _training_elbo(self, x, y, has_value, training_inputs,
                        x_dir=None, directions=None, y_dir=None,
                        has_value_directions=None, x_var=None,
                        samples=20, seed=0, jitter=1e-6):
-        self.latent_network.refresh(jitter)
+        self._refresh(jitter)
 
         # ELBO
         elbo = self._log_lik(x, y, has_value, training_inputs,
@@ -921,10 +1043,9 @@ class VGPNetwork(_GPModel):
             elbo = elbo + self._log_lik_directions(
                 x_dir, directions, y_dir, has_value_directions)
 
-        # KL-divergence
-        unique_nodes = self.latent_network.get_unique_parents()
-        unique_nodes.append(self.latent_network)
-        kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
+        # KL-divergence, over every node once: a parent two leaves share
+        # is one distribution and pays one price
+        kl = _tf.add_n([node.kl_divergence() for node in self._nodes()])
 
         # The MAP term: point-estimated parameters that declare a prior pay
         # its log-density here, making the objective a bound on
@@ -940,20 +1061,22 @@ class VGPNetwork(_GPModel):
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
-            # prediction
-            mu, var, sims, _ = self.latent_network.predict(
-                x, x_var=x_var, n_sim=samples, seed=[seed, 0])
-
-            mu = _tf.transpose(mu[:, :, 0])
-            var = _tf.transpose(var)
-            sims = _tf.transpose(sims, [1, 0, 2])
+            # prediction, one leaf at a time, then handed to the likelihoods
+            # each leaf serves
+            mus, vars_, simss = [], [], []
+            for leaf in self.leaves:
+                mu, var, sims, _ = leaf.predict(
+                    x, x_var=x_var, n_sim=samples, seed=[seed, 0])
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+                simss.append(_tf.transpose(sims, [1, 0, 2]))
 
             # likelihood
             y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.lik_sizes, axis=1)
-            var = _tf.split(var, self.lik_sizes, axis=1)
+            mu = self._by_likelihood(mus)
+            var = self._by_likelihood(vars_)
             hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.lik_sizes, axis=1)
+            sims = self._by_likelihood(simss)
 
             elbo = _tf.constant(0.0, _tf.float64)
             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
@@ -971,12 +1094,16 @@ class VGPNetwork(_GPModel):
     @_tf.function
     def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
         with _tf.name_scope("batched_elbo_directions"):
-            # prediction
-            mu, var, _ = self.latent_network.predict_directions(
-                x_dir, directions)
-
-            mu = _tf.transpose(mu[:, :, 0])
-            var = _tf.transpose(var)
+            # prediction, per leaf; the directional likelihood is one column
+            # at a time, so the leaves' columns are joined and split by
+            # column rather than by likelihood
+            mus, vars_ = [], []
+            for leaf in self.leaves:
+                mu, var, _ = leaf.predict_directions(x_dir, directions)
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+            mu = _tf.concat(mus, axis=1) if len(mus) > 1 else mus[0]
+            var = _tf.concat(vars_, axis=1) if len(vars_) > 1 else vars_[0]
 
             # likelihood
             y_s = _tf.split(y_dir, self.var_lengths_dir, axis=1)
@@ -1206,20 +1333,19 @@ class VGPNetwork(_GPModel):
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
         with _tf.name_scope("Prediction"):
-            pred_mu, pred_var, pred_sim, pred_exp_var = \
-                self.latent_network.predict(
-                    x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0]
-                )
+            mus, vars_, sims, exp_vars = [], [], [], []
+            for leaf in self.leaves:
+                mu, var, sim, exp_var = leaf.predict(
+                    x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0])
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+                sims.append(_tf.transpose(sim, [1, 0, 2]))
+                exp_vars.append(_tf.transpose(exp_var))
 
-            pred_mu = _tf.transpose(pred_mu[:, :, 0])
-            pred_var = _tf.transpose(pred_var)
-            pred_sim = _tf.transpose(pred_sim, [1, 0, 2])
-            pred_exp_var = _tf.transpose(pred_exp_var)
-
-            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
-            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
-            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+            pred_mu = self._by_likelihood(mus)
+            pred_var = self._by_likelihood(vars_)
+            pred_sim = self._by_likelihood(sims)
+            pred_exp_var = self._by_likelihood(exp_vars)
 
             output = []
             for mu, var, sim, exp_var, lik, v_inp in zip(
@@ -1328,11 +1454,12 @@ class VGPNetwork(_GPModel):
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
         with _latent.propagation_rule(self.options.expert_propagation):
-            if hasattr(self.latent_network, "cache_prediction_state"):
-                _latent.refresh_cached(self.latent_network,
-                                       self.options.jitter)
+            if all(hasattr(leaf, "cache_prediction_state")
+                   for leaf in self.leaves):
+                _latent.refresh_cached(self.leaves, self.options.jitter,
+                                       owner=self)
             else:
-                self.latent_network.refresh(self.options.jitter)
+                self._refresh(self.options.jitter)
 
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
@@ -1480,11 +1607,14 @@ class VGPNetwork(_GPModel):
         wanted = self._measured_variables()
 
         def batch_measure(x, x_var, n_splits):
+            per_leaf = []
             with _latent.simulation_rule(self.options.qmc_simulations):
-                _, _, sims, _ = self.latent_network.predict(
-                    x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
-            sims = _tf.split(_tf.transpose(sims, [1, 0, 2]),
-                             self.lik_sizes, axis=1)
+                for leaf in self.leaves:
+                    _, _, sims, _ = leaf.predict(
+                        x, x_var=x_var, n_sim=n_sim,
+                        seed=[self.options.seed, 0])
+                    per_leaf.append(_tf.transpose(sims, [1, 0, 2]))
+            sims = self._by_likelihood(per_leaf)
             return [lik.measurement_samples(sim, n_nodes)
                     for sim, lik in zip(sims, self.likelihoods) if lik.warped]
 
@@ -1561,10 +1691,14 @@ class VGPNetwork(_GPModel):
                 % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
 
         def batch_moments(x, x_var, n_splits):
-            mu, var, _, _ = self.latent_network.predict(
-                x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
-            mu = _tf.split(_tf.transpose(mu[:, :, 0]), self.lik_sizes, axis=1)
-            var = _tf.split(_tf.transpose(var), self.lik_sizes, axis=1)
+            mus, vars_ = [], []
+            for leaf in self.leaves:
+                mu, var, _, _ = leaf.predict(
+                    x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+            mu = self._by_likelihood(mus)
+            var = self._by_likelihood(vars_)
             return [(m, v) for m, v, lik
                     in zip(mu, var, self.likelihoods)
                     if isinstance(lik, _lk.Mixture)]
@@ -1740,8 +1874,7 @@ def _fresh_variational_state(model):
     for parameter in model._all_parameters:
         parameter.fix()
 
-    network = model.latent_network
-    for node in [network] + network.get_unique_parents():
+    for node in model._nodes():
         for name, parameter in node.parameters.items():
             for prefix, init in _VARIATIONAL_STATE.items():
                 if name.startswith(prefix):
@@ -2810,18 +2943,16 @@ class ProjectedVGP(VGPNetwork):
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
-            # prediction
-            sims = self.latent_network.predict(x, n_sim=samples, seed=[seed, 0])
-
-            mu = sims[:, :, 0]  # dummy
-            var = sims[:, :, 0]**2  # dummy
+            # prediction, per leaf
+            per_leaf = [leaf.predict(x, n_sim=samples, seed=[seed, 0])
+                        for leaf in self.leaves]
+            sims = self._by_likelihood(per_leaf)
+            mu = [s[:, :, 0] for s in sims]          # dummy
+            var = [s[:, :, 0] ** 2 for s in sims]    # dummy
 
             # likelihood
             y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.lik_sizes, axis=1)
-            var = _tf.split(var, self.lik_sizes, axis=1)
             hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.lik_sizes, axis=1)
 
             elbo = _tf.constant(0.0, _tf.float64)
             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
@@ -2839,19 +2970,15 @@ class ProjectedVGP(VGPNetwork):
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
                      n_sim=1, seed=0, jitter=1e-6, include_noise=True):
         # `predict_raw` is inherited: it compiles this the way the options ask.
-        self.latent_network.refresh(jitter)
+        self._refresh(jitter)
 
         with _tf.name_scope("Prediction"):
-            pred_sim = self.latent_network.predict(x_new, n_sim=n_sim, seed=[seed, 0])
-
-            pred_mu = pred_sim[:, :, 0]  # dummy
-            pred_var = pred_sim[:, :, 0]**2  # dummy
-            pred_exp_var = pred_var   # dummy
-
-            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
-            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
-            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+            per_leaf = [leaf.predict(x_new, n_sim=n_sim, seed=[seed, 0])
+                        for leaf in self.leaves]
+            pred_sim = self._by_likelihood(per_leaf)
+            pred_mu = [s[:, :, 0] for s in pred_sim]         # dummy
+            pred_var = [s[:, :, 0] ** 2 for s in pred_sim]   # dummy
+            pred_exp_var = pred_var                          # dummy
 
             output = []
             for mu, var, sim, exp_var, lik, v_inp in zip(

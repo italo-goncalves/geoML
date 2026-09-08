@@ -1,4 +1,36 @@
 ## version 0.6.10
+* **A tree's leaves are the points of contact with the likelihoods.**
+`VGPNetwork` took one node, so a model with two likelihoods had to end in
+a `Concatenate` whose only purpose was to be split apart again -- eight
+`tf.split` sites undoing a join made a moment earlier -- and the diagram
+drew that join as if it were part of the model. `latent_network=` now takes
+a list of leaves, one per likelihood in order, and `variables={"Rock": lik,
+...}` names each likelihood beside its variable with `likelihoods=` left
+out. The single node is still accepted and still split among the
+likelihoods it serves, bit-identically: twelve iterations of the manual's
+Jura two-likelihood model reach the same bound to the last bit before and
+after. A list of leaves on a shared root agrees with the `Concatenate` of
+them to 1e-10 (the arithmetic is ordered differently, so not to the bit);
+a parent two leaves share is priced by the KL, reset by cross-validation
+and refreshed once, the tree being walked as the identity-deduplicated
+union of the leaves' ancestors; persistence keeps it shared, as it already
+kept any shared node. `latent_network` became a property -- the leaf when
+there is one, an error naming `leaves` when there are several -- and the
+diagram draws each likelihood off its own leaf, so chapter 16's
+`Concatenate_1` box is gone from its own figure. **Independent trees
+work**: leaves on roots of their own, no join at all, which is the use this
+was for -- one tree with inducing points near the drillholes, another
+gridded for geophysics. Measured on Jura over three seeds against the same
+two leaves on one shared root of 120 points: the metals identical
+(0.949/0.477 against 0.950/0.478 rmse/crps over sd), the rock five points
+of accuracy worse on its own coarser tree of 40, the two-tree model a third
+faster to train. Found on the way: a terminal `Stack` already joined two
+trees -- it propagates no inducing points, so nothing can sit on top of it
+-- while a terminal `Concatenate` over two roots raises, its `root` being
+`None`; that is the difference between the two, and `Concatenate` stays for
+chapter 5's deep input and for saved models. Chapter 16 uses the list form;
+`test_leaves.py` pins the spellings, the refusals, the equivalence, the
+diagram, persistence, cross-validation and the two-tree gate.
 * **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
 the project's ubiquitous language: the ground against a measurement, the
 three variances, support, expert, realization, warping against transform --

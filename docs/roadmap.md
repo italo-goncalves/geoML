@@ -18,34 +18,14 @@ file is for the cross-cutting ones. Design records for finished work are the
 
 ## 1. Modelling and inference
 
-**M — Several points of contact between the network and the likelihoods.**
-`VGPNetwork` takes one leaf node, so a model with more than one likelihood
-has to end in a `Concatenate` whose only purpose is to be split apart again:
-eight `tf.split` sites on `lik_sizes` in `models.py` undo a join made a
-moment earlier. The second cost is the one that prompted this — the node is
-bookkeeping rather than modelling, so `tree()` and `to_dot()` show a join
-that is not part of the model's logic. Chapter 16's Jura network is exactly
-that: `Concatenate(rock_gp, LinearCombination(trend, metal_gp))`, two heads
-with nothing to say to each other. Wanted, either spelling or both:
-`latent_network=` accepting a list of nodes matching the likelihoods, or
-`variables=` accepting a dict naming each variable's likelihood, leaving
-`likelihoods=` empty. To settle: the concatenated path must keep working
-(saved models replay the constructor call, and `Concatenate` is legitimate
-where heads genuinely share a field); the split sites become a loop over
-heads, which also removes the ordering trap the manual has to explain; and
-a parent shared by two heads must still be counted once in the KL and the
-MAP prior, which `get_unique_parents()` does today.
-
-**S–M — Do independent roots work?** Deliberately separate from the item
-above. Everything assumes one root: `Stack.same_root` gates inducing-point
-propagation on it, `BasicInput` fixes the expert count, and batching walks
-one coordinate set. A network whose heads sit on different inducing sets —
-coarse for a rock type, fine for a grade — is neither obviously supported
-nor obviously broken; nobody has tried. The experiment is a two-head model
-on two `BasicInput`s over the same data, a few iterations, against the same
-model on one shared root: does it build, does the bound behave, does the
-gradient reach every parameter. Answer this before designing the item above,
-since it decides whether that one must carry roots as well as heads.
+(The tree's leaves as the points of contact with the likelihoods, and
+independent trees: **done 2026-09-05, 0.6.10** — see "Settled by
+measurement" below for the numbers. `VGPNetwork` takes a list of leaves,
+one per likelihood, or a mapping from each variable to its likelihood; the
+single node is still accepted and still split, bit-identically. Leaves on
+roots of their own work with no join at all, which is what a tree of
+inducing points near the drillholes beside a gridded tree for geophysics
+needs.)
 
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
@@ -234,10 +214,10 @@ signature of a 16 GB runner accumulating TensorFlow, matplotlib and pyvista.
 read the `manual` job. If it ever dies the same way again, the next lever is
 not a longer timeout.
 
-**S — Chapter 16's figures regenerate reproducibly at the next full-suite
-run.** Its expert partition is now seeded; the figures that run produces are
-the ones to commit, together with a check of the §16.5 prose against what
-the seeded model prints.
+(Chapter 16's figures: **verified 2026-09-05** — rerun through the manual's
+own runner after the leaves change, the seeded chapter reproduced every
+committed figure byte for byte, and the §16.5 prose matches what the model
+prints: Portlandian at a balanced accuracy of 0.5 and a Jaccard of zero.)
 
 **S — Retire the 0.6.0 deprecation shims in 0.7.0.** Ten one-line modules.
 The check that decides the item has been run: `persistence._resolve` replays
@@ -257,7 +237,24 @@ that attempt.
 
 ## Settled by measurement
 
-These were tried. The numbers are why they are not in the package.
+These were tried. The numbers are why they are, or are not, in the package.
+
+**Independent trees work, and the bookkeeping join is gone** (2026-09-05).
+Two leaves on roots of their own — a `BasicGP` on 40 k-means inducing
+points for the rock type, another on 120 for the seven metals, no join
+anywhere — against the same two leaves on one shared root of 120, on Jura
+held out, three seeds, 600 iterations: the metals identical (rmse/sd 0.949
+against 0.950, crps/sd 0.477 against 0.478), the rock five points of
+accuracy worse (0.630 against 0.680) on its own coarser tree, the bound
+lower by the same token (−6167 against −6122), and the two-tree model a
+third faster to train (33 s against 44 s). So a tree costs what its own
+inducing set costs and affects only the variable it carries, which is the
+property the drillhole-tree-plus-geophysics-tree use needs. Two facts from
+the way there: a terminal `Stack` already joined two trees (it propagates
+no inducing points, so nothing can sit on it), while a terminal
+`Concatenate` over two roots raises, its `root` being `None`; and the old
+single-node path survives the refactor to the last bit — twelve iterations
+of the manual's Jura model, same bound before and after.
 
 **A full-covariance variational family is not the answer to interval
 tightening — a richer family makes it worse** (2026-09-02). A `FullGP` with

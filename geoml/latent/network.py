@@ -154,7 +154,7 @@ def _graph_state(node):
     return state
 
 
-def refresh_cached(network, jitter=1e-6):
+def refresh_cached(network, jitter=1e-6, owner=None):
     """
     Refreshes a network once and snapshots it for prediction.
 
@@ -162,32 +162,48 @@ def refresh_cached(network, jitter=1e-6):
     prediction, but running it eagerly pays Python overhead for each of the
     K x K covariance blocks a multi-expert network builds -- at 32 experts that
     is most of a `predict` call. Tracing it collapses those into one graph
-    call. The trace is kept on the network, so predicting again does not
-    rebuild it, and it reads the parameters live, so it also follows further
-    training.
+    call. The trace is kept -- on `owner`, or on the node -- so predicting
+    again does not rebuild it, and it reads the parameters live, so it also
+    follows further training.
 
     Parameters
     ----------
     network
-        The output node of a latent network.
+        The output node of a latent network, or a list of its leaves -- a
+        model with one leaf per likelihood, whose leaves may share parents
+        or sit on separate trees. Every node is refreshed and snapshotted
+        once whichever way it is reached.
     jitter : float
         Small value added to the covariance matrices for numerical stability.
+    owner
+        Where to keep the trace. A list of leaves has no single node to hang
+        it on, so the model passes itself.
     """
+    leaves = list(network) if isinstance(network, (list, tuple)) \
+        else [network]
+    holder = owner if owner is not None else leaves[0]
+
     # the propagation rule is a Python-level branch inside `refresh`, so it
     # is baked into the trace and must key the cache with the jitter
     key = (jitter, _EXPERT_PROPAGATION)
-    cached = network._refresh_graph
+    cached = holder._refresh_graph
     if cached is None or cached[0] != key:
         # fixed once, so that the values coming back keep lining up with the
-        # nodes they belong to
-        nodes = list(set(network.get_unique_parents()) | {network})
+        # nodes they belong to; a parent two leaves share is listed once
+        seen, nodes = set(), []
+        for leaf in leaves:
+            for node in [leaf] + leaf.get_unique_parents():
+                if id(node) not in seen:
+                    seen.add(id(node))
+                    nodes.append(node)
 
         def traced():
-            network.refresh(jitter)
+            for leaf in leaves:
+                leaf.refresh(jitter)
             return [_graph_state(node) for node in nodes]
 
         cached = (key, _tf.function(traced), nodes)
-        network._refresh_graph = cached
+        holder._refresh_graph = cached
 
     _, traced_refresh, nodes = cached
     for node, state in zip(nodes, traced_refresh()):

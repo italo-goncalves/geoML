@@ -121,13 +121,15 @@ class _Diagram(object):
             % (tail, head, size, ", dir=both" if both else ""))
 
 
-def _add_network(diagram, top, coordinates=None):
-    """Walks everything feeding `top`, and returns the box it ended on.
+def _add_network(diagram, tops, coordinates=None):
+    """Walks everything feeding the `tops`, and returns their boxes.
 
-    Every node is boxed before any arrow is drawn: a node's role depends on
-    what feeds it, so it cannot be settled while looking at it from below.
+    One walk for all the leaves rather than one per leaf: a parent two
+    leaves share is then boxed once and its arrows drawn once. Every node is
+    boxed before any arrow is drawn, since a node's role depends on what
+    feeds it and cannot be settled while looking at it from below.
     """
-    nodes, seen, stack = [], set(), [top]
+    nodes, seen, stack = [], set(), list(reversed(tops))
     while len(stack) > 0:
         node = stack.pop()
         if id(node) in seen:
@@ -152,18 +154,21 @@ def _add_network(diagram, top, coordinates=None):
             diagram.arrow(diagram.ids[id(parent)], diagram.ids[id(node)],
                           parent.size)
 
-    return diagram.ids[id(top)]
+    return [diagram.ids[id(top)] for top in tops]
 
 
-def _add_head(diagram, model, source):
-    """The likelihoods hanging off the network: warpings, then variables.
+def _add_likelihoods(diagram, model, sources):
+    """The likelihoods hanging off the leaves: warpings, then variables.
 
-    The warpings are drawn backwards, the way the model generates a value
-    rather than the way it reads one, so the arrows run with the rest of the
-    diagram. `Identity` is left out, having nothing to show.
+    `sources` is one box per likelihood -- the leaf that serves it, which is
+    the same box for every likelihood a single node serves and a box of its
+    own where the model was given one leaf each. The warpings are drawn
+    backwards, the way the model generates a value rather than the way it
+    reads one, so the arrows run with the rest of the diagram. `Identity` is
+    left out, having nothing to show.
     """
-    for name, likelihood, size in zip(model.variables, model.likelihoods,
-                                      model.lik_sizes):
+    for name, likelihood, size, source in zip(
+            model.variables, model.likelihoods, model.lik_sizes, sources):
         warping = getattr(likelihood, "warping", None)
         chain = list(getattr(warping, "warpings", [warping]))
         chain = [w for w in chain
@@ -233,19 +238,23 @@ def to_dot(obj, legend=True, rankdir="BT"):
     dot : str
         The diagram, to save to a `.dot` file or hand to a Graphviz viewer.
     """
-    network = getattr(obj, "latent_network", None)
-    model = obj if network is not None else None
+    leaves = getattr(obj, "leaves", None)
+    model = obj if leaves is not None else None
     if model is None:
-        network = obj
+        leaves = [obj]
 
     coordinates = None
     if model is not None:
         coordinates = getattr(model.data, "coordinate_labels", None)
 
     diagram = _Diagram()
-    source = _add_network(diagram, network, coordinates)
+    # every leaf drawn from its root; the boxes are keyed by identity, so a
+    # parent two leaves share is drawn once and both arrows land on it
+    tops = _add_network(diagram, leaves, coordinates)
     if model is not None:
-        _add_head(diagram, model, source)
+        sources = [tops[k] for k, group in enumerate(model._leaf_groups)
+                   for _ in group]
+        _add_likelihoods(diagram, model, sources)
 
     lines = ["digraph geoml {",
              "    rankdir=%s;" % rankdir,

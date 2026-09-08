@@ -108,6 +108,26 @@ likelihood observes. The modelling structure, as distinct from the
 likelihood that connects it to data.
 _Avoid_: architecture, layers
 
+**Tree**:
+A latent network read from its root — the inducing points — outward. A
+model may hold several *independent trees*, each on its own root: one with
+inducing points near the drillholes, say, and a gridded one for geophysics.
+_Avoid_: graph, branch (a branch is part of a tree)
+
+**Leaf**:
+An output node of a tree — the node a likelihood reads. One leaf per
+likelihood is the normal shape; a single leaf may serve several likelihoods
+by being split by their sizes.
+_Avoid_: head, output layer, terminal
+
+**Stack** and **Concatenate** are two joins with one difference:
+`Concatenate` propagates inducing points, so a node can sit on top of it,
+and therefore demands that its parents share a root; `Stack` joins latent
+variables from separate trees and propagates nothing, so nothing can sit on
+top of it. Neither is a modelling choice — a join that exists only so a
+model can be split again is bookkeeping, and belongs in the model's
+constructor, not in its tree.
+
 **Inducing point**:
 One of the locations the variational approximation is pinned at. They are
 chosen, not trained, and their number is what governs cost.

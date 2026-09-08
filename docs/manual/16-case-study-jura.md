@@ -115,11 +115,9 @@ trend = geoml.latent.Linear(
 metal_gp = geoml.latent.BasicGP(
     root, size=len(elements), kernel=geoml.kernels.Spherical())
 
-# the model's output: rock indicators first, then the metals, matching the
-# order of the variables and likelihoods below
-network = geoml.latent.Concatenate(
-    rock_gp,
-    geoml.latent.LinearCombination(trend, metal_gp))
+# the tree's two leaves: the rock indicators, and the metals with their
+# geological trend added. Each is read by its own likelihood below
+leaves = [rock_gp, geoml.latent.LinearCombination(trend, metal_gp)]
 ```
 
 That is a different move from making the rock fields a *parent* of the
@@ -149,11 +147,10 @@ warping = geoml.warping.ChainedWarping(
 
 model = geoml.models.VGPNetwork(
     data=jura_train,
-    variables=["Rock", "Elements"],
-    likelihoods=[
-        geoml.likelihood.CategoricalGaussianIndicator(len(rocks)),
-        geoml.likelihood.Laplace(warping=warping)],
-    latent_network=network,
+    variables={
+        "Rock": geoml.likelihood.CategoricalGaussianIndicator(len(rocks)),
+        "Elements": geoml.likelihood.Laplace(warping=warping)},
+    latent_network=leaves,
     options=geoml.models.GPOptions(prediction_batch_size=1000,
                                    jitter=1e-6, verbose=False))
 
