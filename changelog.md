@@ -31,6 +31,14 @@ trees -- it propagates no inducing points, so nothing can sit on top of it
 chapter 5's deep input and for saved models. Chapter 16 uses the list form;
 `test_leaves.py` pins the spellings, the refusals, the equivalence, the
 diagram, persistence, cross-validation and the two-tree gate.
+**Fixed before release (2026-09-08)**: the refactor registered the
+likelihoods before the leaves, and a save file stores the parameters by
+position in `all_parameters` -- registration order -- so every model saved
+by 0.6.9 refused to open with a shape mismatch at the first slot. The tree
+is registered first again, as it always was; a model saved by the 0.6.9
+extract opens and predicts identically, and `test_model_persistence.py`
+pins the order. A model saved by the working tree between 2026-09-05 and
+this fix carries the flipped order and will not open; retrain it.
 * **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
 the project's ubiquitous language: the ground against a measurement, the
 three variances, support, expert, realization, warping against transform --

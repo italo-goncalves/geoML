@@ -835,8 +835,6 @@ class VGPNetwork(_GPModel):
                 "%d variable(s) but %d likelihood(s); each variable takes "
                 "exactly one" % (len(self.variables), len(self.likelihoods)))
         self.lik_sizes = [lik.size for lik in self.likelihoods]
-        for likelihood in self.likelihoods:
-            self._register(likelihood)
 
         # The tree's leaves, and which likelihoods each one serves. A list
         # is one leaf per likelihood; a single node serves them all and is
@@ -868,6 +866,14 @@ class VGPNetwork(_GPModel):
                     % (leaf.name, leaf.size,
                        "s" if len(group) > 1 else "",
                        "" if len(group) > 1 else "s", wanted))
+        # The likelihoods are registered AFTER the tree. A save file stores
+        # the parameters by position in `all_parameters`, which is
+        # registration order, so this order is part of the format: every
+        # model saved since the first release put the tree's parameters
+        # first, and registering the likelihoods before the leaves (as the
+        # leaves refactor briefly did) made every older save refuse to open.
+        for likelihood in self.likelihoods:
+            self._register(likelihood)
         # the cached refresh trace lives on the model, there being no single
         # node to hang it on once there are several leaves
         self._refresh_graph = None

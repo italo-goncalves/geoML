@@ -27,6 +27,73 @@ roots of their own work with no join at all, which is what a tree of
 inducing points near the drillholes beside a gridded tree for geophysics
 needs.)
 
+**S — Sibling GP nodes draw the same whitened normals** (measured
+2026-09-08). `_simulation_normals(shape, seed)` is stateless in its two
+arguments and TensorFlow's stream is a prefix across shapes (measured), so
+two GP nodes handed the same seed in one sweep draw the same numbers,
+component for component. `Stack.simulate` — and so `Concatenate` — hands
+its seed to every parent unchanged, and the model's per-leaf loops
+(`_predict_raw`, `measurement_batches`, `ProjectedVGP`'s two) hand
+`[seed, 0]` to every leaf; only `LinearCombination`, `ProductOfExperts` and
+their kin offset by the parent's index. Measured on Jura, rock GP (5) and
+metals GP (7) as two leaves on one root, 30 iterations, 300 realizations at
+100 held-out points: the latent realizations of rock component *j* and
+metal component *j* correlate at **0.995** per location, and at 0.000 with
+the second leaf's seed offset by one (`/c/Users/Public/leaf_sims.py`). The
+moments are untouched and so is every per-variable score; what reads the
+coupling is anything *joint* across variables — a derived variable, a
+grade share inside a simulated domain, the pairing the item below wants —
+and it is a coupling nobody modelled. Gate B of the leaves work compared
+the list form against the `Concatenate`, which shares the same way, so it
+could not see this. Fix: a per-node key folded into the seed — offsetting
+by index collides (leaf 1 at `seed + 1` meets leaf 0's second parent at
+`seed + 1`), so fold the node's `name` (unique in a tree, stable under a
+save's replay) into the seed's second entry at the one draw site. It
+changes the numbers every saved model replays, not their distribution;
+say so in the changelog. Test: two equal-size leaves, correlation at zero.
+
+**M–L — Propagate individual realizations through the tree** (requested
+2026-09-08). What happens today: moments at every node. `_GPNode.propagate`
+takes the parent's mean and variance and evaluates the expected kernel over
+that variance (`covariance_matrix(x, ip, x_var, ip_var)`), so a parent's
+uncertainty is integrated analytically, and the node's `simulate` draws
+fresh normals about the mean at the parent's *mean* — a parent's
+realizations never enter a GP node. The pathwise ride the 0.6.9 protocol
+built is over the *operation* nodes only (`Linear`, `LinearCombination`,
+`Stack`, ...); `GPWalk` steps by the walker's mean. Across leaves, the
+realizations are paired only through a shared parent's own draw (stateless,
+so realization *k* of a shared parent is the same in every leaf) and
+otherwise unrelated: no leaf reads another's realization. Two wants, worth
+separating. **(1) Within a tree, through a GP node**: the child evaluated
+at each parent realization `x^(k)` with the plain kernel (`x_var=None`),
+one draw each — the doubly stochastic route (Salimbeni & Deisenroth 2017)
+beside the moment-matching one the bound is trained with (Damianou &
+Lawrence 2013; the expected kernel of Titsias & Lawrence 2010). Cost:
+`n_sim` kernel evaluations of `[n, m]` where there is one, looped over
+realizations so memory stays at one; the whitened `chol_r @ rnd` is shared.
+Prediction-only first — training keeps the moment bound, so the ensemble's
+spread then differs from the variance the bound optimized; measure coverage
+and CRPS both ways on a deep model, held-out. Training by sampling is a
+different model with a different bound. **(2) Across leaves, the case
+asked for**: assays controlled by lithology should respect each
+realization's boundary — realization *k* of the grade conditioned on
+realization *k* of the rock. Needs (a) an edge from the rock's leaf into
+the grade's tree, which the network never has today — the same missing edge
+and per-realization gate the "Mixtures of GP nodes" item names as its
+second design; (b) a per-realization gate: the rock realization's label
+(the likelihood's rule, `ind_skew`'s best category, applied today to the
+leaf's sims inside `_CategoricalLikelihood`) selecting, per realization,
+which regime's field the grade draws from; (c) the sweep carrying the
+rock's realizations to the grade leaf — `_predict_raw` predicts the leaves
+one by one on the same stateless seed, so a shared parent already pairs
+exactly, and a gate node would pair the same way once the rock's sims are
+stamped as sweep state. This is the geostatistical cascade — domains
+simulated, then grades within each realization's domains — made joint.
+Gate: a synthetic two-regime field with a boundary; the paired ensemble's
+tonnage-above-cut-off distribution against the truth, versus today's
+unpaired ensemble and the hard-domained workflow. Both (1) and (2)
+presuppose the sibling-normals fix above, or the pairing means nothing.
+
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
 the detection limit by universal practice, and that biases exactly the low
@@ -163,6 +230,39 @@ solids turned into that column by the fraction each block sits inside.
 Read it after calibration: the ladder measured 0.86 coverage at nominal
 0.90 on Jura, and a relative error off overconfident intervals flatters the
 deposit by exactly that.
+
+**S–M — Batched prediction from a latent node, into a container**
+(requested 2026-09-05). A node's `predict(x, x_var, n_sim, seed)` returns
+the raw four-tuple — mean, variance, simulations, explained variance — and
+nothing else: no batching, no refresh (a caller must `refresh` the tree by
+hand first, or the inducing points still point into the last training
+graph), and no container to land in. Everything that makes a model's
+prediction usable — `_over_batches`, the refresh-once-and-snapshot of
+`refresh_cached`, writing into a variable — lives on `VGPNetwork`, so the
+intermediate values of a tree are reachable only by hand: the benchmark
+that measured chapter 17's walked coordinates read them through
+`interpolate` in hand-cut chunks. Yet those intermediates are what a
+reader asks for — where a `GPWalk` moved the coordinates, what a shared
+parent says before two leaves diverge, what a `Linear` trend contributes —
+for interpretability, or curiosity. Wanted: `node.predict_into(container,
+n_sim=)` or `model.predict_node(node, container, n_sim=)`, batched and
+refreshed like the model's own `predict`, at any node of the tree. **The
+open design question is where the result lives.** Raw arrays are the cheap
+answer and lose the tree addressing, Zarr and the plots. A new variable
+kind is the better one — a *latent* variable of `size` columns holding
+`latent_mean`, `latent_variance` and the simulations, which is exactly the
+shape `ContinuousVariable` already keeps for a model's own output, minus
+what a node has none of: measurements, a likelihood, a unit, a
+back-transform. Declaring it through `_ZARR_ATTRS`/`_DICT_FAMILIES` makes
+the frame, pyvista, Zarr, subsetting and carrying free, as they are for
+every variable. To settle: whether it sits under a name of its own or
+under the variable whose tree it belongs to (`Elements/_latent/walked`),
+what `predict` on a block model does with it (sub-block fan-out and
+`_aggregate` are the likelihood's, and a node has no likelihood — the
+honest answer is point support only, refused on a `BlockSet3D`), and that
+the model's own `predict` keeps writing `latent_mean`/`latent_variance` on
+the measured variable as it does, this being a second door rather than a
+replacement.
 
 **M — Integrated gradients for explainability.** Attribution of a
 prediction to its inputs, computed as a quadrature sum of gradients along a
