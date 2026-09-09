@@ -166,6 +166,46 @@ Three findings:
    re-initializes instead — fresh init is structurally ignorant, and the
    question dissolves.
 
+### The fold model is one model (2026-09-08)
+
+The driver used to rebuild a fold model from the file for every fold. On
+the Tom v6 model (20k rows, 2000 inducing points in ten experts, a
+`GPWalk`) a five-fold SVI run took the WSL kernel down in its fifth fold,
+on a machine WSL sees 62 GB of. Measured on a 5000-row copy of that model
+(`/c/Users/Public/cv_leak.py` and the probes beside it):
+
+| what | growth |
+|---|---|
+| per fold, `jit_predict=True` (the notebook's setting) | +2.8 GB |
+| per fold, `jit_predict=False` | +2.6 GB |
+| after the run, `gc.collect()` | 0 returned |
+| a model built, trained one epoch and dropped, CPU or GPU | +1.4-1.5 GB retained |
+| a second `train_svi` call on the same model | +200 MB retained |
+| a model built, *predicted* and dropped | 0 retained |
+
+The retention is TensorFlow's, and it is the training step's: a traced
+function that takes gradients through a nested traced call leaves its
+concrete functions, their forward/backward rewrites and the optimizer's
+`tf.cond` branch graphs alive in reference cycles the garbage collector
+cannot break (a plain TensorFlow reproduction, no geoML, leaks the same
+way: 244 graphs and 750 MB a model). Dismantling those graphs by hand,
+emptying the eager context's function library, clearing its kernel cache
+and trimming the heap together halve the growth and cap none of it -- 0.6
+GB a model stays in the C++ runtime, in the glibc heap, and no public
+knob reaches it. So the fix is not to build a model per fold. One fold
+model is rebuilt from the file around the first fold's rows; every later
+fold swaps its rows in (`_set_data`: the container, the stacked
+measurements and their mask, and the count the minibatch bound scales by,
+which became a `tf.Variable` so the trace reads the new value), restores
+the file's parameters (`update_parameters` from a snapshot taken at the
+load) and zeroes the optimizer's moment estimates and step count in place
+(`_reset_optimizer`, so the traced step that captured the optimizer stays
+valid). `_training_step` is cached on the model and rebuilt only when the
+variables or the optimizer object change, with `reduce_retracing` so
+differing row counts share one relaxed trace. The same five-fold run:
+3.2 GB in total where it was 13.4, and 121 s where it was 463, the
+rebuild, the retrace and the XLA compile of prediction paid once.
+
 ## The variogram: `prepare.variogram`, drawn by both backends
 
 The experimental semivariogram of the measurements, with one thin curve per

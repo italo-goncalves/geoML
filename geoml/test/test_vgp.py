@@ -419,3 +419,36 @@ def test_options_saved_before_jit_predict_still_open():
 
     assert "jit_predict" not in vars(old)
     assert old.jit_predict is False
+
+
+def test_the_training_step_is_traced_once_per_model():
+    """Two training calls share one traced step; a new learning rate --
+    a new optimizer, its rate baked into the trace -- rebuilds it. A step
+    trace is never returned to the process (TensorFlow keeps the graph
+    machinery of a differentiated function resident), so one per call was
+    a 200 MB leak per call."""
+    import geoml
+    geoml.set_seed(1234)
+    walker, _ = geoml.datasets.walker()
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(walker, 30, seed=0),
+        transform=geoml.transform.Isotropic(50))
+    model = geoml.models.VGPNetwork(
+        walker, "V", geoml.likelihood.Gaussian(),
+        geoml.latent.BasicGP(root, size=1),
+        options=geoml.models.GPOptions(verbose=False, training_samples=4))
+
+    model.train_full(max_iter=2)
+    _, optimizer, step = model._step
+    # two on the first call: TensorFlow traces a function that creates
+    # variables (the optimizer's slots) once more for the steady state
+    traced = step.experimental_get_tracing_count()
+    model.train_full(max_iter=2)
+    assert model._step[2] is step
+    assert step.experimental_get_tracing_count() == traced
+
+    model.set_learning_rate(1e-3)
+    model.train_full(max_iter=2)
+    assert model._step[2] is not step
+    assert model._step[1] is model.optimizer
+

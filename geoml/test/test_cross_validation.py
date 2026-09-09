@@ -357,6 +357,77 @@ def test_the_epochs_are_what_svi_counts(walker_cv, monkeypatch):
 # --------------------------------------------------------------------------- #
 # the calibration
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# one fold model for every fold
+# --------------------------------------------------------------------------- #
+
+def test_one_fold_model_serves_every_fold(monkeypatch):
+    """The fold model is rebuilt from the file once. Every later fold swaps
+    its rows in, restores the file's parameters and zeroes the optimizer's
+    memory in place, so it starts exactly where a reloaded model would --
+    and the training step is traced once for all of them (plus at most the
+    relaxed retrace the second row count asks for), which is what keeps a
+    run's memory flat: a model rebuilt per fold left 2.6 GB of graph
+    machinery behind each time, and TensorFlow never returns it."""
+    model, walker, grid = _walker_model()
+    model.train_full(max_iter=20)
+    walker.spatial_k_fold(grid, k=4, seed=0)
+    labels = np.asarray(walker.get_metadata("fold"))
+    file_noise = float(np.asarray(
+        model.likelihoods[0].parameters["noise"].get_value()).ravel()[0])
+
+    loads = []
+    real_load = geoml.persistence.load_model
+
+    def spying_load(path, data=None):
+        loaded = real_load(path, data=data)
+        loads.append(loaded)
+        return loaded
+    monkeypatch.setattr(geoml.models._persistence, "load_model", spying_load)
+
+    starts = []
+    real_train = geoml.models.VGPNetwork.train_full
+
+    def recording_train(self, max_iter=1000):
+        starts.append(dict(
+            n_data=self.data.n_data,
+            noise=float(np.asarray(
+                self.likelihoods[0].parameters["noise"].get_value()).ravel()[0]),
+            optimizer=max([float(np.abs(v.numpy()).max())
+                           for v in self.optimizer.variables] or [0.0]),
+            traces=0 if self._step is None
+            else self._step[2].experimental_get_tracing_count()))
+        real_train(self, max_iter=max_iter)
+    monkeypatch.setattr(geoml.models.VGPNetwork, "train_full", recording_train)
+
+    # refit="all" trains the noise too, so the restore is observable
+    geoml.models.cross_validate(model, refit="all", iterations=10,
+                                n_sim=4, n_nodes=4)
+
+    assert len(loads) == 1
+    assert [s["n_data"] for s in starts] == \
+        [int((labels != f).sum()) for f in np.unique(labels)]
+    assert all(np.isclose(s["noise"], file_noise) for s in starts)
+    assert all(s["optimizer"] == 0.0 for s in starts)
+    # fold 1 traces the step (twice: TensorFlow traces a function that
+    # creates variables -- the optimizer's slots -- once more); the first
+    # fold with a different row count adds one relaxed trace, and every
+    # later one, whatever its count, rides that -- never one per fold
+    step = loads[0]._step[2]
+    assert starts[1]["traces"] <= 2
+    assert step.experimental_get_tracing_count() <= 3
+
+
+def test_set_data_refuses_a_container_of_another_dimension():
+    model, walker, _ = _walker_model()
+    frame = walker.as_data_frame()[["X", "Y"]]
+    frame["Z"] = 0.0
+    other = geoml.data.PointData(frame, ["X", "Y", "Z"])
+    other.add_continuous_variable("V", np.zeros(other.n_data))
+    with pytest.raises(ValueError, match="dimensions"):
+        model._set_data(other)
+
+
 def _pit_of(truth, samples):
     return (samples < truth[:, None]).mean(axis=1) \
         + 0.5 * (samples == truth[:, None]).mean(axis=1)

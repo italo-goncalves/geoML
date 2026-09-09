@@ -880,14 +880,14 @@ class VGPNetwork(_GPModel):
 
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
-        y, has_value = [], []
-        for v in self.variables:
-            y_v, h_v = data.variables[v].get_measurements()
-            y.append(y_v)
-            has_value.append(h_v)
-        self.y = _np.concatenate(y, axis=1)
-        self.has_value = _np.concatenate(has_value, axis=1)
-        self.total_data = _np.sum(self.has_value)
+        self.y, self.has_value = self._stacked_measurements(data)
+        # a variable rather than a number: the traced bound scales a batch
+        # by it, and `_set_data` changes it in place so the trace stays valid
+        self.total_data = _tf.Variable(
+            float(_np.sum(self.has_value)), dtype=_tf.float64, trainable=False)
+        # the one traced training step this model reuses -- see
+        # `_training_step`
+        self._step = None
 
         # initializing likelihoods -- declustered where the data carries
         # the column `container.decluster()` keeps, so the warpings start
@@ -1127,6 +1127,50 @@ class VGPNetwork(_GPModel):
 
             return elbo
 
+    def _stacked_measurements(self, data):
+        """The measurements of every modelled variable side by side, and
+        the mask of which cells hold one."""
+        y, has_value = [], []
+        for v in self.variables:
+            y_v, h_v = data.variables[v].get_measurements()
+            y.append(y_v)
+            has_value.append(h_v)
+        return _np.concatenate(y, axis=1), _np.concatenate(has_value, axis=1)
+
+    def _set_data(self, data):
+        """Point the model at another container of the same variables.
+
+        For a workflow that trains one model on several subsets of its data
+        -- cross-validation swaps the training rows in fold by fold --
+        without rebuilding it, so the traced training step, the refresh and
+        the prediction graphs are all reused. Replaces exactly what the
+        constructor derived from the data: the container, the stacked
+        measurements and their mask, and the count the minibatch bound
+        scales by. The likelihoods are not re-initialized: the warpings
+        keep their state, as a reloaded model keeps it.
+        """
+        if data.n_dim != self.data.n_dim:
+            raise ValueError(
+                "the new data has %d dimensions where the model's has %d"
+                % (data.n_dim, self.data.n_dim))
+        lengths = [data.variables[v].length for v in self.variables]
+        if lengths != self.var_lengths:
+            raise ValueError(
+                "the new data's variables have lengths %s where the model's "
+                "have %s" % (lengths, self.var_lengths))
+        self.data = data
+        self.y, self.has_value = self._stacked_measurements(data)
+        self.total_data.assign(float(_np.sum(self.has_value)))
+
+    def _reset_optimizer(self):
+        """Zero the optimizer's memory in place -- its moment estimates and
+        the step count its learning-rate schedule reads -- leaving the
+        optimizer object, and so the traced step that captured it, where
+        they are. `set_learning_rate` replaces the object instead, which a
+        new rate needs and which costs a retrace."""
+        for variable in self.optimizer.variables:
+            variable.assign(_tf.zeros(variable.shape, variable.dtype))
+
     def _training_step(self, variables, training_inputs):
         """
         One traced training step: the ELBO, its gradient and the update.
@@ -1139,10 +1183,31 @@ class VGPNetwork(_GPModel):
         more time in the optimizer than in the model itself: 278 ms a step
         against 98 ms traced.
 
-        Built once per call to `train_full`/`train_svi` and reused for every
-        iteration; building it per iteration would retrace each time and cost
-        far more than it saves.
+        Built once per model and kept on it, so `train_full` and `train_svi`
+        calls -- and the folds of a cross-validation, which swap the data in
+        under one model -- share a trace. A trace is never returned to the
+        process: TensorFlow's graph machinery for a step with gradients
+        stays resident after the function dies (its concrete functions,
+        their gradient rewrites and the optimizer's branch graphs hold
+        each other in cycles the garbage collector cannot break), measured
+        at 200 MB a step trace and 1.5-2.6 GB a model on the Tom v6 model,
+        so a new one per call is a leak. The step is rebuilt only when the
+        variables or the optimizer object change (`set_learning_rate`
+        replaces the optimizer, and a new rate is baked into the trace), or
+        when a variable hands the bound a payload -- `RockTypeVariable`'s
+        boundary column rides the trace as a constant, so it cannot serve
+        another data set. `reduce_retracing` lets the last, shorter batch
+        of an epoch and the folds' differing row counts share one relaxed
+        trace instead of a static trace each.
         """
+        payload = any(len(inp) > 0 for inp in training_inputs)
+        if self._step is not None and not payload:
+            cached_variables, optimizer, step = self._step
+            if optimizer is self.optimizer \
+                    and len(cached_variables) == len(variables) \
+                    and all(a is b for a, b in zip(cached_variables, variables)):
+                return step
+
         directions = {}
         if self.directional_data is not None:
             directions = dict(
@@ -1154,7 +1219,7 @@ class VGPNetwork(_GPModel):
                 has_value_directions=_tf.constant(
                     self.has_value_dir, _tf.float64))
 
-        @_tf.function
+        @_tf.function(reduce_retracing=True)
         def step(x, y, has_value, x_var):
             with _tf.GradientTape() as tape:
                 loss = - self._training_elbo(
@@ -1166,6 +1231,8 @@ class VGPNetwork(_GPModel):
             self.optimizer.apply_gradients(
                 zip(tape.gradient(loss, variables), variables))
 
+        if not payload:
+            self._step = (tuple(variables), self.optimizer, step)
         return step
 
     def train_full(self, max_iter: int = 1000) -> None:
@@ -1898,14 +1965,20 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                    ) -> "tuple[_data._SpatialData, _pd.DataFrame]":
     """Score a model on folds it never saw, with one short refit per fold.
 
-    The trained model is saved once. Each fold gets a copy rebuilt around the
-    data with that fold removed; under `refit="variational"` its variational
-    state -- the part of a trained model that encodes the data -- is
-    re-initialized and every other parameter frozen, so the fold model starts
-    ignorant of the held-out rows, and only that state is refitted. The fold
-    model then predicts its held-out rows, and only those, into one shared
-    copy of the training data. Folds partition the data, so every location
-    ends up predicted by a model that never saw it.
+    The trained model is saved once and one fold model is rebuilt from the
+    file, around the data with the first fold removed; every later fold
+    swaps its own training rows into that same model, restores the file's
+    parameters and zeroes the optimizer's memory, all in place, so each
+    fold starts exactly where a reloaded model would while the graphs
+    traced for the first serve them all (a model rebuilt per fold leaves
+    its graph machinery resident for the life of the process -- see
+    Notes). Under `refit="variational"` the variational state -- the part
+    of a trained model that encodes the data -- is re-initialized and every
+    other parameter frozen, so the fold model starts ignorant of the
+    held-out rows, and only that state is refitted. The fold model then
+    predicts its held-out rows, and only those, into one shared copy of
+    the training data. Folds partition the data, so every location ends up
+    predicted by a model that never saw it.
 
     Scores are of *measurements*: the held-out values are samples, so each
     fold model is asked through :meth:`VGPNetwork.predict_measurements`.
@@ -1980,6 +2053,14 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     rather than one an iteration, so it needs a few epochs before it can
     fire at all. On a short refit that is worth knowing: too few epochs and
     the rule never speaks; the cap does the stopping.
+
+    Memory is flat across folds by construction. TensorFlow keeps the graph
+    machinery of a differentiated function resident after the function
+    dies, so a fold model built and dropped per fold cost 2.6 GB a fold on
+    a 5000-row copy of a real model and took a five-fold run on the full
+    data past a 62 GB machine; one model with its rows swapped costs one
+    model, and the same run measured 3.2 GB in total and 3.8x faster, the
+    rebuild, the retrace and any XLA compilation being paid once.
     """
     data = model.data
     labels = _np.asarray(data.get_metadata(folds))
@@ -2015,10 +2096,28 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     pit = {}
     try:
         _persistence.save_model(model, saved)
+        fold_model = None
         for fold in fold_names:
             held = labels == fold
-            fold_model = _cast(VGPNetwork,
-                               _persistence.load_model(saved, data=data[~held]))
+            if fold_model is None:
+                # Rebuilt from the file once, around the first fold's rows.
+                # Every later fold swaps its rows in, restores the file's
+                # parameters and zeroes the optimizer's memory, all in
+                # place, so it starts exactly where a reloaded model would
+                # while the graphs traced for the first fold serve it. A
+                # model rebuilt per fold left 2.6 GB of graph machinery
+                # behind each time (TensorFlow never returns it; see
+                # `_training_step`), which is what took a five-fold run on
+                # the Tom v6 model past the machine's memory.
+                fold_model = _cast(
+                    VGPNetwork,
+                    _persistence.load_model(saved, data=data[~held]))
+                value, shape, position, _, _ = \
+                    fold_model.get_parameter_values(complete=True)
+            else:
+                fold_model._set_data(data[~held])
+                fold_model.update_parameters(value, shape, position)
+                fold_model._reset_optimizer()
             if refit == "variational":
                 _fresh_variational_state(fold_model)
             # the batch size rides in the model's own options, so the fold

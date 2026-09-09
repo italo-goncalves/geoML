@@ -39,6 +39,37 @@ is registered first again, as it always was; a model saved by the 0.6.9
 extract opens and predicts identically, and `test_model_persistence.py`
 pins the order. A model saved by the working tree between 2026-09-05 and
 this fix carries the flipped order and will not open; retrain it.
+* **Cross-validation reuses one fold model, and a model's training step is
+traced once.** A five-fold run on the Tom v6 model (20k rows, 2000
+inducing points in ten experts) took the WSL kernel down in its fifth
+fold. Measured on a 5000-row copy: the process grew 2.6-2.8 GB *per
+fold*, with or without XLA, and none of it came back when the fold models
+died -- TensorFlow keeps the graph machinery of a differentiated function
+resident after the function is gone (its concrete functions, their
+gradient rewrites and the optimizer's branch graphs hold each other in
+reference cycles the garbage collector cannot break, and the C++ side
+behind them stays even when those are dismantled by hand: the eager
+context's function library emptied, its kernel cache cleared and the heap
+trimmed, a model still left 0.6 GB behind). Prediction's graphs are
+freed; a step with gradients is not. So the driver no longer rebuilds a
+model per fold: one fold model is rebuilt from the file around the first
+fold's rows, and every later fold swaps its rows in (`_set_data`, which
+replaces exactly what the constructor derived from the data), restores
+the file's parameters and zeroes the optimizer's memory in place, so it
+starts where a reloaded model would while the first fold's traces serve
+it. The count the minibatch bound scales by became a variable the trace
+reads, and `_training_step` is cached on the model -- rebuilt only when
+the variables or the optimizer change (`set_learning_rate` replaces the
+optimizer) or a variable hands the bound a payload -- with
+`reduce_retracing` so the folds' differing row counts and an epoch's last
+short batch share one relaxed trace. The same run: 3.2 GB in total where
+it was 13.4, 121 s where it was 463. Repeated `train_full`/`train_svi`
+calls on one model, which traced a new step each time (200 MB a call,
+never returned), share the one trace now. Pinned by
+`test_the_training_step_is_traced_once_per_model` (`test_vgp.py`) and
+`test_one_fold_model_serves_every_fold` (one load, each fold on its own
+rows, the file's parameters and a zeroed optimizer at every fold start,
+at most three traces over four folds).
 * **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
 the project's ubiquitous language: the ground against a measurement, the
 three variances, support, expert, realization, warping against transform --
