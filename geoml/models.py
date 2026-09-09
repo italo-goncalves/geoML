@@ -1498,11 +1498,22 @@ class VGPNetwork(_GPModel):
             )
 
         for batch, output in self._over_batches(newdata, batch_pred, where):
-            for v, upd in zip(self.variables, output):
-                newdata.variables[v].update(batch, **upd)
+            for v, lik, upd in zip(self.variables, self.likelihoods, output):
+                # A vector variable hands the latent moments to its
+                # components only when column i is component i's own, which
+                # an elementwise warping guarantees; under a rotation or a
+                # projection no latent column belongs to any one component,
+                # and storing one under a component's name would be wrong
+                # in a way nobody would catch.
+                elementwise = lik.warped and lik.warping.elementwise
+                newdata.variables[v].update(batch, elementwise=elementwise,
+                                            **upd)
 
-    def _over_batches(self, newdata, call, where=None):
-        """Runs `call(coordinates, variance, n_splits)` over `newdata`.
+    def _over_batches(self, newdata, call, where=None, with_rows=False):
+        """Runs `call(coordinates, variance, n_splits)` over `newdata` --
+        `call(coordinates, variance, n_splits, rows)` under `with_rows`, for
+        a caller that keeps something per location and must hand each
+        batch its own slice.
 
         A discretized block fans out into several rows before it reaches the
         model, so the batch is measured in those rows: otherwise
@@ -1542,8 +1553,10 @@ class VGPNetwork(_GPModel):
             data_coords, splits = newdata.get_batched_coordinates(batch)
             data_var, _ = newdata.get_batched_variance(batch)
 
-            yield batch, call(_tf.constant(data_coords, _tf.float64),
-                              _tf.constant(data_var, _tf.float64), splits)
+            x = _tf.constant(data_coords, _tf.float64)
+            x_var = _tf.constant(data_var, _tf.float64)
+            yield batch, (call(x, x_var, splits, batch) if with_rows
+                          else call(x, x_var, splits))
 
         if self.options.verbose:
             print("\n")
@@ -1572,7 +1585,10 @@ class VGPNetwork(_GPModel):
             Latent realizations per location.
         n_nodes
             Equal-share noise values per realization, so that the two axes
-            pool into one sample.
+            pool into one sample. The nodes are rotated at random per
+            location and realization from the model's seed, so the sample
+            is unbiased in every moment, reaches the tails, and is
+            independent between locations.
 
         Returns
         -------
@@ -1679,7 +1695,36 @@ class VGPNetwork(_GPModel):
 
         wanted = self._measured_variables()
 
-        def batch_measure(x, x_var, n_splits):
+        # One uniform per location, component and realization, from a
+        # stream seeded by the model, so a location's sample is the same
+        # whatever batch computed it -- and drawn a batch at a time rather
+        # than held whole, this door having promised never to hold more
+        # than a batch. It rotates the equal-share noise nodes (see
+        # `_Likelihood._measurement_nodes`): without it every location in a
+        # column carried the same noise value, and the strata's midpoints
+        # carried 0.89 of a Laplace's noise variance in warped space, 35-47%
+        # of the `noise_variance` column through Jura's spline in data
+        # units, at the default n_nodes -- measured 2026-09-09,
+        # `docs/cross-validation.md`. The stream restarts from the seed on
+        # every call, so two containers of one size get the same uniforms
+        # row for row: nothing to a per-row score, and a caller reading
+        # samples jointly across calls should know.
+        def rotation(k, size, rows):
+            """The rows' slice of the k-th variable's `(n_data, size,
+            n_sim)` stream, drawn without generating what comes before it:
+            PCG64 spends exactly one 64-bit output per double, so advancing
+            by the rows' offset lands where a whole draw would."""
+            first, last = int(rows[0]), int(rows[-1])
+            # the generator `default_rng` would build, named so that its
+            # `advance` is on the type
+            bits = _np.random.PCG64(
+                _np.random.SeedSequence([self.options.seed, 1, k]))
+            bits.advance(first * size * n_sim)
+            block = _np.random.Generator(bits).random(
+                (last - first + 1, size, n_sim))
+            return block[_np.asarray(rows) - first]
+
+        def batch_measure(x, x_var, n_splits, rows):
             per_leaf = []
             with _latent.simulation_rule(self.options.qmc_simulations):
                 for leaf in self.leaves:
@@ -1688,10 +1733,16 @@ class VGPNetwork(_GPModel):
                         seed=[self.options.seed, 0])
                     per_leaf.append(_tf.transpose(sims, [1, 0, 2]))
             sims = self._by_likelihood(per_leaf)
-            return [lik.measurement_samples(sim, n_nodes)
-                    for sim, lik in zip(sims, self.likelihoods) if lik.warped]
+            measured = [(sim, lik) for sim, lik in zip(sims, self.likelihoods)
+                        if lik.warped]
+            return [lik.measurement_samples(
+                        sim, n_nodes,
+                        shift=_tf.constant(rotation(k, lik.size, rows),
+                                           _tf.float64))
+                    for k, (sim, lik) in enumerate(measured)]
 
-        for rows, output in self._over_batches(newdata, batch_measure):
+        for rows, output in self._over_batches(newdata, batch_measure,
+                                               with_rows=True):
             # in the variable's own units, here rather than at the end: a
             # composition's parts reach the model as fractions of the whole,
             # and a streaming caller compares them against assays batch by

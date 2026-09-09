@@ -27,31 +27,6 @@ roots of their own work with no join at all, which is what a tree of
 inducing points near the drillholes beside a gridded tree for geophysics
 needs.)
 
-**S — Sibling GP nodes draw the same whitened normals** (measured
-2026-09-08). `_simulation_normals(shape, seed)` is stateless in its two
-arguments and TensorFlow's stream is a prefix across shapes (measured), so
-two GP nodes handed the same seed in one sweep draw the same numbers,
-component for component. `Stack.simulate` — and so `Concatenate` — hands
-its seed to every parent unchanged, and the model's per-leaf loops
-(`_predict_raw`, `measurement_batches`, `ProjectedVGP`'s two) hand
-`[seed, 0]` to every leaf; only `LinearCombination`, `ProductOfExperts` and
-their kin offset by the parent's index. Measured on Jura, rock GP (5) and
-metals GP (7) as two leaves on one root, 30 iterations, 300 realizations at
-100 held-out points: the latent realizations of rock component *j* and
-metal component *j* correlate at **0.995** per location, and at 0.000 with
-the second leaf's seed offset by one (`/c/Users/Public/leaf_sims.py`). The
-moments are untouched and so is every per-variable score; what reads the
-coupling is anything *joint* across variables — a derived variable, a
-grade share inside a simulated domain, the pairing the item below wants —
-and it is a coupling nobody modelled. Gate B of the leaves work compared
-the list form against the `Concatenate`, which shares the same way, so it
-could not see this. Fix: a per-node key folded into the seed — offsetting
-by index collides (leaf 1 at `seed + 1` meets leaf 0's second parent at
-`seed + 1`), so fold the node's `name` (unique in a tree, stable under a
-save's replay) into the seed's second entry at the one draw site. It
-changes the numbers every saved model replays, not their distribution;
-say so in the changelog. Test: two equal-size leaves, correlation at zero.
-
 **M–L — Propagate individual realizations through the tree** (requested
 2026-09-08). What happens today: moments at every node. `_GPNode.propagate`
 takes the parent's mean and variance and evaluates the expected kernel over
@@ -92,7 +67,7 @@ simulated, then grades within each realization's domains — made joint.
 Gate: a synthetic two-regime field with a boundary; the paired ensemble's
 tonnage-above-cut-off distribution against the truth, versus today's
 unpaired ensemble and the hard-domained workflow. Both (1) and (2)
-presuppose the sibling-normals fix above, or the pairing means nothing.
+presupposed the sibling-normals fix, done 2026-09-10 (settled below).
 
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
@@ -231,6 +206,36 @@ Read it after calibration: the ladder measured 0.86 coverage at nominal
 0.90 on Jura, and a relative error off overconfident intervals flatters the
 deposit by exactly that.
 
+**S — A `Mixture`'s measurement samples bisect over the whole batch**
+(measured 2026-09-09). Rotating the noise nodes per location made the
+mixture quantile's sixty bisections run over `(n_nodes, n, size, n_sim)`
+rather than over `n_nodes` values: 18 s against 0.1 for a 20 000-row batch
+at the defaults on the CPU, 2.6 against 1.7 on the GPU. Only the
+`Mixture` likelihood pays it, only through `predict_measurements`. If it
+matters: bisect once on the unrotated node grid per component and
+interpolate the rotated `u` through the monotone quantile, or halve the
+iteration count (a bracket the width of the widest component reaches
+1e-14 in about fifty).
+
+**S–M — `noise_variance` off an eight-node quadrature for an exponential-
+tailed noise through a convex link** (measured 2026-09-10). The second
+moment `integrated_backward` writes comes off the same eight Gauss–Hermite
+nodes as the value, mapped through the noise law's quantile. For a
+Gaussian law it is exact to 0.3% against a 200-node reference; for the
+epsilon-insensitive (Laplace, once `epsilon` trains to zero) through Jura's
+spline chain it reads +19%/−20% of the exact law (Cu at the median and
+the 90th percentile latent) and 0.63× under a Box-Cox link, the outermost
+node pair carrying 10–50% of the value. The quantity itself is the
+problem: with a log link the Laplace tail's second moment has a pole at
+`2·sigma_log / c_rate = 1`, and Cu's fit sat at 0.956 — ±5% of `c_rate`,
+under a nat of bound, moves the data-unit variance between 2.6 and 9.6
+times the sill. Two things to do: (a) a diagnostic — compute `2·sigma/c`
+per column after training and warn above ~0.8 that the measurement
+variance is dominated by extrapolated tail and `noise_variance`
+unreliable; (b) more or better-placed nodes for the exponential-tailed
+laws (the Sobol path already uses 64), gated on the 200-node reference.
+Context: `docs/benchmarks/jura_noise_footing.py` and the record.
+
 **M–L — Cheaper cross-validation: fewer refits, or none** (requested
 2026-09-08). Since 2026-09-08 the driver costs one refit per fold and
 nothing else (one fold model, its rows swapped in; the rebuild and the
@@ -368,6 +373,60 @@ that attempt.
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**A vector variable's components never received their latent moments —
+fixed** (2026-09-10, 0.6.10). `VectorVariable.update` now forwards `mean`
+and `variance` when the model says the latent columns are the components'
+own (`elementwise=`, from the likelihood's warping); a rotation or a
+projection leaves them NaN rather than mislabel a mixed column, and a
+composition's parts stay None by design. `test_plots.py`, both ways.
+
+**Sibling GP nodes drew the same whitened normals — fixed** (2026-09-10,
+0.6.10). Measured 0.995 cross-leaf correlation of the latent realizations
+on Jura, 0.000 with the seed offset; the node's name, numbered within the
+tree and replayed by a save, is now folded into the seed at the one draw
+function; under the Sobol rule it also permutes the realization order per
+node, since two linear-matrix scrambles of one sequence stayed paired at
+0.37; under 0.2 after, both rules, replay kept, `test_leaves.py`. The experts of one node still share their normals
+across the overlap, deliberately.
+
+**Jura's metals: the likelihood is the lever, not the link** (2026-09-10).
+The parametric links were the first recommendation for copper's fan at
+three times the data under the epsilon-insensitive likelihood; measured,
+none of them fixes it (Box-Cox 3.2, Yeo-Johnson 2.2, robust ZScore 2.7),
+and trained to 1200 iterations the excess spreads to six metals
+(1.3–2.6×). A Laplace tail through a log-like link has a second moment
+with a pole at `2·sigma_log/c_rate = 1`; copper sat at 0.956. The
+multivariate Gaussian on the same chain puts every metal within 0.97–1.41,
+goodness 0.86 → 0.96, rmse equal, CRPS within 1%, confirmed on the true
+held-out set — chosen against a bound 200 nats lower. The two-scale
+mixture's tight fan is under-dispersion (goodness below the baseline at
+64 draws); not recommended. Three skeptics; record in
+`docs/cross-validation.md`, `docs/benchmarks/jura_noise_footing.py`.
+
+**Measurement samples on rotated nodes — done** (2026-09-09, 0.6.10).
+The strata's midpoints carried 35-47% of `EpsilonInsensitive`'s noise
+variance on Jura's Pb, Cu and Cr at the default 32 nodes and put one
+noise value on every location of a column. Rotated modulo one by a
+uniform per location, component and realization from the model's seed:
+the samples' warped-space variance at 0.985-1.014 of the law's on every
+metal and on Walker, their variogram on the lifted ground fan (Zn
+0.97-1.00 by lag, Walker 0.999-1.001) where it sat 1.3-2.8x below,
+locations decorrelated, batch invariance kept. `test_measurement_samples.py`.
+
+**The variogram figure's noise lift is exact; the gap it shows is the
+model's** (2026-09-09). The fan is the ground realizations (noise
+integrated out) raised by the pair-averaged `noise_variance`; against an
+honest Monte Carlo measurement fan (noise drawn independently per location
+from the fitted likelihood, back-transformed) the lifted fan sits at
+0.993-1.002 on Walker and 0.95-1.03 on every Jura metal under Gaussian and
+epsilon-insensitive likelihoods with a spline warping, within Monte Carlo
+noise at every lag, three measurers each audited and re-run by a skeptic
+at another seed. Nor is in-sample conditioning the gap: the same fans on
+the out-of-fold container move by 0.02-0.05. What remains is the model's
+own total variance (Walker: noise 0.88 of the sill plus ground 0.48, a
+fresh measurement scattered 1.36 times the data). Record in
+`docs/cross-validation.md`.
 
 **The leaf-only refit leaks, and more than the warm start** (2026-09-09).
 `refit="leaves"` — re-initialize and refit the variational state of the

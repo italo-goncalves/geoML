@@ -1469,10 +1469,65 @@ def test_the_uncertainty_may_be_an_attribute_of_the_variable(blocks):
     assert curves["kept"] == int(np.sum(variance <= 1.0))
 
 
+def test_a_vector_variable_hands_its_components_their_latent_moments(
+        trained):
+    """Under an elementwise warping latent column i is component i's own,
+    so each component's `latent_mean`/`latent_variance` is filled -- they
+    used to stay NaN, `VectorVariable.update` forwarding everything but
+    those two -- and the parent's `uncertainty` is their mean across the
+    components, which pins the columns to the right components."""
+    model, point = trained
+    grid = geoml.data.Grid2D(start=[0, 0], n=[6, 6], step=[15, 15])
+    model.predict(grid, n_sim=4)
+
+    vector = grid.variables["v"]
+    variances = []
+    for label in vector.labels:
+        component = vector.components[label]
+        mean = component.latent_mean.values.to_numpy()
+        variance = component.latent_variance.values.to_numpy()
+        assert np.all(np.isfinite(mean))
+        assert np.all(variance > 0)
+        variances.append(variance)
+
+    assert np.allclose(np.mean(variances, axis=0),
+                       vector.uncertainty.values.to_numpy())
+
+
+def test_a_mixing_warping_leaves_the_components_latent_moments_empty():
+    """A projection's latent columns are mixtures of the components, so no
+    column is any one of them and the components' latent moments stay
+    NaN rather than carry a mixture under one label."""
+    geoml.set_seed(7)
+    point, rng = _points(n=30)
+    point.add_vector_variable("v", ["a", "b", "c"], rng.normal(size=(30, 3)))
+    warping = geoml.warping.ChainedWarping(
+        geoml.warping.ZScore(3), geoml.warping.PCA(3, 2))
+    inducing = geoml.data.Grid2D(start=[0, 0], n=[4, 4], step=[30, 30])
+    network = geoml.latent.BasicGP(
+        geoml.latent.BasicInput(inducing,
+                                transform=geoml.transform.Isotropic(40)),
+        size=2, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "v", geoml.likelihood.MultivariateGaussian(3, warping),
+        network,
+        options=geoml.models.GPOptions(verbose=False, training_samples=5))
+    model.train_full(max_iter=2)
+    model.predict(point, n_sim=4)
+
+    vector = point.variables["v"]
+    assert np.all(np.isfinite(vector.uncertainty.values.to_numpy()))
+    for label in vector.labels:
+        component = vector.components[label]
+        assert np.all(np.isfinite(component.prediction.values.to_numpy()))
+        assert np.all(np.isnan(component.latent_mean.values.to_numpy()))
+        assert np.all(np.isnan(component.latent_variance.values.to_numpy()))
+
+
 def test_the_uncertainty_may_belong_to_the_variable_that_contains_the_grade(
         trained):
-    """The ordinary case for a vector variable: a component has
-    `latent_variance` set to None and no uncertainty of its own, so the column
+    """A component of a vector variable has no uncertainty of its own, and
+    its `latent_variance` is empty under a mixing warping, so the column
     that exists is the parent's."""
     model, point = trained
     grid = geoml.data.Grid2D(start=[0, 0], n=[8, 8], step=[12, 12])
@@ -1481,10 +1536,11 @@ def test_the_uncertainty_may_belong_to_the_variable_that_contains_the_grade(
     doubt = np.linspace(0.0, 1.0, grid.n_data)
     grid.variables["v"].uncertainty.values[:] = doubt
 
-    # the component carries a latent_variance of its own, but nothing wrote
-    # one, and an empty column must not stop the search short of the parent
+    # the component carries a latent_variance of its own, left empty here as
+    # a mixing warping leaves it, and an empty column must not stop the
+    # search short of the parent
     component = grid.variables["v"].components["a"]
-    assert np.all(np.isnan(component.latent_variance.values.to_numpy()))
+    component.latent_variance.values[:] = np.nan
 
     curves = prepare.grade_tonnage(grid, "a", cutoffs=3,
                                    uncertainty="uncertainty",
@@ -1990,9 +2046,15 @@ def test_the_lift_matches_noise_actually_drawn_per_location(trained):
     variogram of a realization with an independent error added at every
     location. Only the variance of that error enters, never its shape, which
     is why nothing has to be drawn in the figure itself.
+
+    Both sides with fixed weights: the declustering cell is chosen from the
+    values, so weights chosen afresh from each noisy draw depend on the
+    noise, and the expectation of that estimator sits above the lift
+    (measured 5-10% at 2000 draws, seed-independent). The figure itself
+    keeps the cell chosen on the measurements for every curve.
     """
     _, point = trained
-    panel = prepare.variogram(point, "v", n_lags=5)[0]
+    panel = prepare.variogram(point, "v", n_lags=5, decluster=False)[0]
 
     part = point.variables["v"].components["a"]
     variance = part.noise_variance.values.to_numpy().astype(float).ravel()
@@ -2004,7 +2066,8 @@ def test_the_lift_matches_noise_actually_drawn_per_location(trained):
         noisy = column + rng.normal(0.0, np.sqrt(variance))
         check = geoml.data.PointData.from_array(np.asarray(point.coordinates))
         check.add_continuous_variable("r", noisy)
-        drawn.append(prepare.variogram(check, "r", n_lags=5)[0]["data"])
+        drawn.append(prepare.variogram(check, "r", n_lags=5,
+                                       decluster=False)[0]["data"])
 
     assert np.allclose(np.mean(drawn, axis=0), panel["realizations"][3],
                        rtol=0.05)

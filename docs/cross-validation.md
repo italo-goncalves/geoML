@@ -290,6 +290,157 @@ a metric. It is therefore an estimate that never reaches zero, to be read as
 a ranking between models on the same data; the figure is what to reach for
 when the size of the disagreement matters.
 
+### The noise lift is exact, measured (2026-09-09)
+
+The question: the fan is the stored realizations of the *ground* (each one
+`E[g(z + eps) | z]`, the noise integrated out through `integrated_backward`)
+raised by the pair-averaged `(v_i + v_j) / 2` from the `noise_variance`
+column; no noise draw enters. Is that lift enough to put the fan on the
+measurements' footing, or does a nonlinear warping leave something out?
+Measured on Walker (Gaussian likelihood, `ZScore -> Spline`, 100 inducing
+points) and on Jura's seven metals (`MultivariateGaussian` and the author's
+`EpsilonInsensitive`, both under `ZScore -> Spline`, 60 inducing points),
+300 iterations, 64 realizations at the data locations, fifteen declustered
+lags; every curve on the same pairs and weights (the copies' data curves
+asserted equal to 1e-12). The reference is an honest Monte Carlo
+measurement fan: noise drawn independently per location, realization and
+column from the fitted likelihood's own quantile in warped space and
+back-transformed. Three measurers, each audited and re-run by a skeptic at
+seed 4321 with other sample sizes (`/c/Users/Public/vario_*.py`,
+`verify_*.py`).
+
+| case | lifted fan / honest measurement fan, per lag | paired z |
+|---|---|---|
+| Walker, Gaussian, ZScore->Spline | 0.993 - 1.002 (re-run 0.9985 - 1.0022) | within 1.33 (re-run 0.57) |
+| Jura Zn, MultivariateGaussian | 0.997 - 1.006; all seven metals 0.993 - 1.007 | within 2.0 |
+| Jura Zn, EpsilonInsensitive | 0.973 - 1.017; all metals 0.95 - 1.03 | within 1.7 |
+
+So the lift is exactly what independent measurement noise adds, at every
+lag, whatever the warping's bend, as the algebra says: a measurement is the
+ground value plus a zero-mean error independent between locations, the
+cross term averages away, and the pair's excess is half the two variances.
+The 8-node Gauss-Hermite second moment the lift reads agrees with a
+200-node reference to 0.1-0.3% in the declustered mean. The correction is
+not the reason a fan and a data curve disagree.
+
+**Nor is the conditioning.** In-sample the realizations are conditioned on
+the very measurements whose errors the lift adds back, so a double count
+was the next suspect. The same fans on `cross_validate`'s out-of-fold
+container (`/c/Users/Public/vario_oof.py`; the data curve is the same, only
+the realizations change) barely move:
+
+| lifted fan / data curve, short / mid / long lags | in-sample | out-of-fold |
+|---|---|---|
+| Walker V | 1.26 / 1.30 / 1.28 | 1.28 / 1.33 / 1.30 |
+| Jura Zn | 0.86 / 0.97 / 1.17 | 0.90 / 1.07 / 1.24 |
+| Jura Pb | 0.49 / 0.69 / 0.72 | 0.51 / 0.71 / 0.73 |
+| Jura Cd | 1.03 / 1.12 / 1.27 | 1.05 / 1.17 / 1.30 |
+
+What the gap measures is the model's own total variance. On Walker the
+fitted noise is 0.88 of the declustered sill and the ground's long-lag
+variance another 0.48, so the model scatters a fresh measurement 1.36
+times what the data do, in-sample and out-of-fold alike; Jura splits by
+metal, lead at two thirds of the data, chromium and nickel a tenth over,
+cadmium on the mark. That is the figure doing its job — the same
+over- or under-dispersion `spread_check` and the coverage scores read
+marginally — and the honest place to read it stays the out-of-fold
+container.
+
+**Found on the way, about `predict_measurements`, not about the figure.**
+(1) `_measurement_values` returns the noise node as `(n_nodes, size, 1)`,
+so within one column every location carries the *same* noise value in
+warped space: the columns are right marginally (what the accuracy plot,
+the PITs, CRPS and coverage read) and wrong jointly — a variogram of them
+rides the raw ground fan (the shift cancels in every pair), and so would a
+regional sum or mean of measurements. (2) The equal-share midpoint nodes
+carry less than the noise variance: 0.98 of it for a Gaussian at 64 nodes,
+but for `EpsilonInsensitive`'s exponential tails only 35-47% at the
+default 32 nodes on lead, copper and chromium, so those samples' spread
+understates the model's own noise by half or more. Both were cured at
+once the same day by rotating the strata — a uniform per location,
+component and realization from the model's seed, modulo one — which keeps
+every moment unbiased, reaches the tails with their probability, and
+decorrelates the locations: measured after, the samples' warped-space
+variance at 0.985-1.014 of the law's on every metal and on Walker, and a
+variogram of the samples on the lifted fan (Zn 0.97-1.00 by lag, Walker
+0.999-1.001; `/c/Users/Public/meas_gate.py`). Two footnotes: the 35-47%
+is a data-unit ratio against the `noise_variance` column through Jura's
+spline — in warped space the midpoints carry 0.89 of an exponential-tailed
+law's variance and 0.96 of a Gaussian's at 32 nodes; and E1's crps and
+goodness above were produced on the midpoint nodes and would move by a
+few percent at most on a re-run.
+
+### Jura's metals: the likelihood, not the link (2026-09-10)
+
+The figures above showed copper and lead's fans at three times the data
+under the author's epsilon-insensitive likelihood with a `ZScore -> Spline`
+warping. The guide's parametric links were the first recommendation; they
+were measured, and they are not the lever. `docs/benchmarks/jura_noise_footing.py`:
+one `BasicGP` of size 7 on the same 60 k-means inducing points, the same
+seed and the same five spatial folds for every arm, judged on the lifted
+fan against the data curve out of fold (`|log(fan/data)|` averaged over
+lag bands and metals) and on the out-of-fold scores. A first pass at 300
+iterations over nine arms — four links under the epsilon-insensitive
+likelihood, two under the multivariate Gaussian, two under the two-scale
+mixture, a robust ZScore under the epsilon-insensitive — was reviewed by
+three skeptics, who found (a) no arm converged at 300 iterations and the
+Gaussian arms were the furthest from it, (b) a size-7 mixture trains on an
+eight-draw Monte Carlo bound the other arms do not, 57 nats optimistic, and
+loses its edge at 64 draws, and (c) the mechanism claim stronger than
+drafted. The arms that matter were rerun to 1200 iterations:
+
+| arm, 1200 iterations | rmse/sd | crps/sd | goodness | fan/data, mid lags, per metal (Cd Co Cr Cu Ni Pb Zn) |
+|---|---|---|---|---|
+| spline / epsilon-insensitive (the baseline) | 0.939 | 0.484 | 0.864 | 1.40 1.33 2.35 2.18 1.35 2.60 0.92 |
+| spline / multivariate Gaussian | 0.942 | 0.487 | 0.959 | 1.27 0.97 1.30 1.41 1.00 1.20 1.15 |
+| boxcox / multivariate Gaussian | 0.938 | 0.487 | 0.957 | 1.61 0.94 1.24 1.16 0.97 0.73 1.14 |
+| robust spline / mixture, 64 draws | 0.950 | 0.496 | 0.851 | 0.96 0.90 1.01 1.11 0.86 0.90 0.81 |
+
+Seed-to-seed spread on the first pass was 0.001–0.017 on every column, so
+the gaps are real. What the table says:
+
+1. **Under the epsilon-insensitive likelihood no link fixes copper, and
+   trained longer the excess spreads**: at 1200 iterations six of the seven
+   fans sit 1.3–2.6 times the data. The reason is the law's tail, not the
+   fit: `epsilon` trains to zero (a Laplace), the fitted noise width on
+   copper is the same as the Gaussian's in log units (0.457 against
+   0.442), and a Laplace tail pushed back through a log-like link has a
+   second moment with a pole at `2·sigma_log / c_rate = 1` — copper's fit
+   sat at 0.956, where ±5% of `c_rate`, under a nat of bound, moves the
+   data-unit variance between 2.6 and 9.6 times the sill. Under the spline
+   chain the culprit is the steep outer segment on *both* sides (the 0.5%
+   quantile of a copper measurement was −130 ppm). A Gaussian of the same
+   warped variance through the same link gives 0.7–1.6 times the sill.
+   Which metals blow up is predicted by `2·sigma_log/c` alone: lead at
+   0.54 did not under Box-Cox, cadmium at 0.79 did.
+2. **The multivariate Gaussian on the same chain puts every metal within
+   0.97–1.41 of the data** (copper the worst at 1.41), lifts goodness from
+   0.86 to 0.96, and costs nothing in rmse and under 1% in CRPS. On Jura's
+   true held-out set (100 points, both seeds) the picture repeats: the
+   epsilon arm's copper fan 2.4 times the held-out curve against 0.6–0.7
+   for the Gaussian arms, goodness 0.91 against 0.94 for Box-Cox, rmse
+   equal, CRPS within 2%. The bound prefers the epsilon-insensitive by
+   200 nats on the same chain (−5882 against −6085): the Gaussian is chosen
+   *against* the model's own evidence, on out-of-fold calibration, because
+   the excess the bound rewards is tail mass beyond the 99.5% quantile that
+   the in-sample residuals never test.
+3. **The mixture is not recommended.** Its tight fan (mean |log| 0.135)
+   is under-dispersion, not calibration: out of fold it claims 25% less
+   variance than the residuals show, its goodness falls below the
+   baseline's at 64 training draws, and its eight-draw bound is
+   optimistic by 57 nats and seed-sensitive.
+
+**The recommendation for Jura's metals**: keep the chain, change the
+likelihood — `MultivariateGaussian` under `ZScore -> Spline` for the best
+footing, or under `BoxCox -> ZScore` for the best calibration (goodness
+0.957, copper 1.16, cadmium 1.6 over, lead 0.73 under), both trained past
+300 iterations. Two side findings went to the roadmap: the eight-node
+quadrature behind `noise_variance` is ±20% for an exponential-tailed noise
+through a convex link, and a vector variable's components never receive
+their latent moments. Figures:
+`docs/benchmarks/figures/jura_footing_{spline_epsilon,spline_gaussian,boxcox_gaussian,spline-robust_mixture}_it1200_*_oof.png`;
+every arm's numbers in `jura_footing_*.csv` beside them.
+
 ## The calibration: `models.conformalize` / `ConformalCalibration`
 
 Split conformal on the out-of-fold PITs `cross_validate` leaves behind as

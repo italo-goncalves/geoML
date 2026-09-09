@@ -1145,7 +1145,7 @@ class VectorVariable(_Variable):
         )
         return new_var
 
-    def update(self, idx, **kwargs):
+    def update(self, idx, elementwise=False, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
         # each component is dispersed inside a block, and measured, on its own
@@ -1157,12 +1157,24 @@ class VectorVariable(_Variable):
             key: (_tf.unstack(kwargs[key], axis=1)
                   if key in kwargs.keys() else blank)
             for key in ("proportions", "divided")}
+        # The latent field's columns are the components' own only under an
+        # elementwise warping, which is what the model says with
+        # `elementwise`; a rotation or a projection leaves no column that
+        # is any one component's, and then the components' latent moments
+        # stay empty rather than carry a mixture under one label.
+        moments = {
+            key: (_tf.unstack(kwargs[key], axis=1)
+                  if elementwise and key in kwargs.keys() else blank)
+            for key in ("mean", "variance")}
 
         for i, (lb, p, s, d, nv) in enumerate(zip(self.labels, prediction,
                                                   simulations, dispersion,
                                                   noise)):
             values = {"average_sim": p, "simulations": s, "dispersion": d,
                       "noise_variance": nv}
+            for key, unstacked in moments.items():
+                if unstacked[i] is not None:
+                    values[key] = unstacked[i]
             for key, unstacked in shares.items():
                 column = unstacked[i]
                 if column is not None:

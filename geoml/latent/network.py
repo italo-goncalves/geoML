@@ -28,6 +28,7 @@ import tensorflow as _tf
 import tensorflow_probability as _tfp
 import contextlib as _contextlib
 import warnings as _warnings
+import zlib as _zlib
 from scipy import special as _special
 
 _tfd = _tfp.distributions
@@ -106,7 +107,26 @@ def propagation_rule(rule):
         _EXPERT_PROPAGATION = previous
 
 
-def _simulation_normals(shape, seed):
+def _node_seed(seed, key):
+    """The seed for one node's draw: the sweep's seed with the node's name
+    folded into its second entry.
+
+    Every draw in a sweep is handed the same seed, so without the fold two
+    GP nodes of one size on one root drew the same numbers -- measured
+    2026-09-08: the latent realizations of Jura's rock and metal leaves
+    correlated at 0.995, component for component, a coupling nobody
+    modelled. A node's name is numbered within its tree and replayed by a
+    save, so the fold is stable across a reload; a CRC rather than `hash`,
+    which Python salts per process. A node with no name yet (one drawn
+    outside a model) keeps the bare seed.
+    """
+    if key is None:
+        return seed
+    digest = _zlib.crc32(str(key).encode("utf-8")) & 0x7FFFFFFF
+    return [seed[0], seed[1] + digest]
+
+
+def _simulation_normals(shape, seed, key=None):
     """Standard normals shaped `[size, n, n_sim]` for the posterior draws.
 
     Monte Carlo is a stateless draw. Under `simulation_rule(True)` the same
@@ -116,8 +136,18 @@ def _simulation_normals(shape, seed):
     than by chance. `shape` and `seed` are Python values at trace time, which
     is what lets the points be computed once and embedded as a constant.
     Either way the numbers are fixed by the seed, so a value does not depend
-    on the batch that computed it.
+    on the batch that computed it. `key` -- the drawing node's name -- is
+    folded into the seed (`_node_seed`), so two nodes handed one seed draw
+    different numbers. Under the Sobol rule a different scramble is not
+    enough: SciPy's is a linear matrix scramble, whose leading bit stays a
+    linear function of the base digits, so two scrambles of one sequence
+    keep their points paired (measured: the leaves' latent realizations
+    still correlated at 0.37). So the realizations are also put in an order
+    of the node's own, drawn from the same seed: each node keeps its evenly
+    spread set, and realization k of one node no longer sits beside
+    realization k of another.
     """
+    seed = _node_seed(seed, key)
     if not _QMC_SIMULATIONS:
         return _tf.random.stateless_normal(
             shape=shape, seed=seed, dtype=_tf.float64)
@@ -130,6 +160,8 @@ def _simulation_normals(shape, seed):
         _warnings.simplefilter("ignore")
         points = _rnd.sobol_engine(size * n, rng).random(n_sim)
     normals = _special.ndtri(_np.clip(points, 1e-6, 1 - 1e-6))
+    if key is not None:
+        normals = normals[rng.permutation(n_sim)]
     return _tf.constant(
         normals.reshape([n_sim, size, n]).transpose([1, 2, 0]), _tf.float64)
 
@@ -665,7 +697,8 @@ class _GPNode(_FunctionalLatentVariable):
         cov_cross, mu, weights = self._swept()
         with _tf.name_scope("gp_simulation"):
             rnd = [
-                _simulation_normals([self.size, n, n_sim], seed)
+                _simulation_normals([self.size, n, n_sim], seed,
+                                    key=self.name)
                 for n in self.root.n_ip
             ]
             sims = [
@@ -1470,7 +1503,8 @@ class UncertainInputGP(BasicGP):
             # samples the input's uncertainty as well as the posterior's
             which = _tf.range(n_sim) % q
             rnd = [
-                _simulation_normals([self.size, m, n_sim], seed)
+                _simulation_normals([self.size, m, n_sim], seed,
+                                    key=self.name)
                 for m in self.root.n_ip
             ]
             sims = []
@@ -2518,7 +2552,8 @@ class GPWalk(_FunctionalLatentVariable):
         var = _tf.transpose(walker_var)
 
         # samples are coherent among data points
-        rnd = _simulation_normals([self.size, 1, n_sim], seed)
+        rnd = _simulation_normals([self.size, 1, n_sim], seed,
+                                  key=self.name)
         return mu + rnd * _tf.sqrt(var[:, :, None])
 
 
@@ -3049,7 +3084,8 @@ class GradientConstrainedInput(_RootLatentVariable):
         cov_cross, mu, weights = self._swept()
         with _tf.name_scope("constrained_root_simulation"):
             rnd = [
-                _simulation_normals([self.size, n + d, n_sim], seed)
+                _simulation_normals([self.size, n + d, n_sim], seed,
+                                    key=self.name)
                 for n, d in zip(self.n_ip, self.n_dir)
             ]
             sims = [

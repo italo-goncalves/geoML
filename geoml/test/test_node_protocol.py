@@ -50,9 +50,9 @@ def test_moment_path_draws_no_normals(monkeypatch):
     calls = []
     original = network._simulation_normals
 
-    def counting(shape, seed):
+    def counting(shape, seed, key=None):
         calls.append(tuple(shape))
-        return original(shape, seed)
+        return original(shape, seed, key=key)
 
     monkeypatch.setattr(network, "_simulation_normals", counting)
 

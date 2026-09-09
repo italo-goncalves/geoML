@@ -302,3 +302,60 @@ def test_two_leaves_on_two_trees_train_predict_and_reload(tmp_path):
     restored.predict(held, n_sim=4)
     np.testing.assert_allclose(
         np.asarray(held.values("Elements/Zn/prediction"), dtype=float), whole)
+
+
+# --------------------------------------------------------------------------- #
+# the draw is keyed by the node
+# --------------------------------------------------------------------------- #
+
+def _latent_correlation(model, rock, metal, coords, qmc):
+    """The median over locations and components of the correlation, across
+    realizations, between rock component j and metal component j."""
+    import tensorflow as tf
+    from geoml.latent import network
+    model._refresh(1e-6)
+    x = tf.constant(coords)
+    with network.simulation_rule(qmc):
+        rock.propagate(x)
+        metal.propagate(x)
+        seed = [model.options.seed, 0]
+        a = np.asarray(rock.simulate(200, seed))
+        b = np.asarray(metal.simulate(200, seed))
+    k = min(a.shape[0], b.shape[0])
+    return np.median([abs(np.corrcoef(a[j, i], b[j, i])[0, 1])
+                      for j in range(k) for i in range(a.shape[1])])
+
+
+@pytest.mark.parametrize("qmc", [False, True])
+def test_sibling_leaves_draw_independent_normals(qmc):
+    """Two GP leaves on one root, handed the same seed, used to draw the
+    same whitened normals component for component: their latent
+    realizations correlated at 0.995 (measured 2026-09-08). The node's
+    name is folded into the seed now, under Monte Carlo and under the
+    Sobol rule alike."""
+    train, held, n_rock, n_el = _jura()
+    _, rock, metal = _two_leaves(train, n_rock, n_el)
+    model = geoml.models.VGPNetwork(
+        train, ["Rock", "Elements"], _likelihoods(n_rock, n_el),
+        [rock, metal], options=_options())
+    model.train_full(max_iter=5)
+
+    assert _latent_correlation(
+        model, rock, metal, held.coordinates[:60], qmc) < 0.2
+
+
+def test_the_draw_is_keyed_by_the_name_and_stable():
+    """Two keys, two draws; one key, the same draw twice; no key, the bare
+    stateless draw as before."""
+    import tensorflow as tf
+    from geoml.latent import network
+    a = np.asarray(network._simulation_normals([2, 5, 3], [7, 0], key="BasicGP_1"))
+    b = np.asarray(network._simulation_normals([2, 5, 3], [7, 0], key="BasicGP_2"))
+    again = np.asarray(network._simulation_normals([2, 5, 3], [7, 0], key="BasicGP_1"))
+    bare = np.asarray(network._simulation_normals([2, 5, 3], [7, 0]))
+    plain = np.asarray(tf.random.stateless_normal([2, 5, 3], seed=[7, 0], dtype=tf.float64))
+
+    assert not np.allclose(a, b)
+    assert np.array_equal(a, again)
+    assert np.array_equal(bare, plain)
+

@@ -85,6 +85,88 @@ the same refit from an interior trained on the fold's rows alone scores
 put the contacts. Kept as a diagnostic of that memory, like `refit="all"`,
 and not for scoring; E2 in `docs/cross-validation.md`,
 `docs/benchmarks/leaf_refit.py`.
+* **A vector variable's components receive their latent moments.**
+`VectorVariable.update` forwarded everything but `mean` and `variance`, so
+every component carried a `latent_mean` and a `latent_variance` -- declared,
+exported, listed -- that stayed NaN after a prediction. They are filled now
+when latent column i is component i's own, which an elementwise warping
+guarantees (the default `ZScore`, and the recommended `ZScore -> Spline`
+chain); `predict` says so at the door with `elementwise=`, read from the
+likelihood's warping. Under a rotation or a projection no latent column
+belongs to any one component, so the columns stay empty rather than carry
+a mixture under a component's label -- the same rule the transformed-pairs
+figure numbers its columns by. A composition's parts keep no latent
+moments, as before: its warping mixes by construction. One consequence:
+`uncertainty="latent_variance"` when grading a component now finds that
+component's own, where it used to fall through to the parent's
+`uncertainty`.
+* **A GP node's draw is keyed by its name.** Every draw in a sweep is
+handed the model's seed, and the draw is stateless in shape and seed, so
+two GP nodes of one size on one root -- `Stack`, `Concatenate` and the
+per-leaf loops hand every node the same seed -- drew the same whitened
+normals: the latent realizations of Jura's rock and metal leaves
+correlated at 0.995 component for component, a coupling nobody modelled
+that any joint read across variables saw (measured 2026-09-08). The node's
+name, numbered within its tree and replayed by a save, is folded into the
+seed's second entry at the one draw function (`_node_seed`, a CRC rather
+than Python's per-process `hash`). Under the Sobol rule a different
+scramble was not enough -- SciPy's is a linear matrix scramble, whose
+leading bit stays a linear function of the base digits, so two scrambles
+of one sequence kept their points paired and the leaves still correlated
+at 0.37 -- so the realizations are also put in an order of the node's own,
+drawn from the same seed: each node keeps its evenly spread set, and
+realization k of one node no longer sits beside realization k of another.
+The correlation reads under 0.2 both ways now, a saved model still replays
+its simulations, and a node drawn outside a model keeps the bare seed. The numbers every model draws change -- the
+distribution does not. The experts of one node still share their normals
+across the overlap, as before.
+* **Jura's metals: the likelihood, not the link** (`docs/benchmarks/jura_noise_footing.py`).
+The variogram figure put copper and lead's fans at three times the data
+under the epsilon-insensitive likelihood; the parametric links were tried
+first and none fixes it — a Laplace tail (`epsilon` trains to zero) pushed
+back through a log-like link has a second moment with a pole at
+`2·sigma_log/c_rate = 1`, and copper sat at 0.956. The multivariate
+Gaussian on the same chain puts every metal within 0.97–1.41 of the data,
+goodness 0.86 → 0.96, at the same rmse and within 1% on CRPS, on the folds
+and on the true held-out set; the two-scale mixture's tighter fan is
+under-dispersion and is not recommended. Three skeptics reviewed the
+comparison; the arms that matter were rerun to 1200 iterations. Record in
+`docs/cross-validation.md`.
+* **Measurement samples on rotated equal-share nodes.** `predict_measurements`
+and `measurement_batches` built a fresh measurement on the strata's
+midpoints, one fixed set of noise values for every location. Found while
+verifying the variogram figure's noise lift (which is exact; see the record):
+the midpoints carry less than the noise variance -- in warped space 0.96
+of a Gaussian's at 32 nodes, 0.89 of a Laplace's, 0.87 of a Student's t
+at five degrees; through Jura's spline warping, in data units against the
+`noise_variance` column, 35-47% on lead, copper and chromium -- so a
+heavy-tailed likelihood's accuracy plot, CRPS and coverage read narrower
+than the model; and every location in a column carried the *same* noise value in
+warped space, right per location and wrong across them (a variogram of
+the samples rode the raw ground fan, the common shift cancelling in every
+pair). The nodes are now rotated modulo one by a uniform per location,
+component and realization (`_measurement_nodes(n_nodes, shift)`, a
+Cranley-Patterson rotation, the Sobol set for a mixing warping likewise),
+drawn once per call for the whole container from the model's seed and
+drawn a batch at a time by advancing the stream to the batch's rows, so
+a location's sample is the same whatever batch computed it and the
+streaming door still holds no more than a batch. The rotated lattice
+keeps one point per stratum, each marginally uniform (the Sobol set of a
+mixing warping stays unbiased but is no longer a net): every finite
+moment of the pooled sample is unbiased, the tails appear with their
+probability, and locations decorrelate. Measured after: the samples'
+variance in warped space at 0.985-1.014 of the law's on every Jura metal
+and on Walker, and a variogram of the samples on the lifted ground fan
+(Zn 0.97-1.00 by lag, Walker 0.999-1.001) where it sat 1.3-2.8x below.
+The mean of a location's samples now returns the prediction to Monte
+Carlo precision rather than exactly, which one test states. One cost: a
+`Mixture`'s samples bisect its quantile over the whole rotated set of a
+batch, 18 s against 0.1 for a 20 000-row batch on the CPU (2.6 against
+1.7 on the GPU); on the roadmap if it ever matters.
+`test_measurement_samples.py` pins the rest: the variance for Gaussian,
+Laplace and epsilon-insensitive noise, one node per stratum, locations
+that never share a value, the mixture quantile under rotation, and the
+door seeded, batch-invariant and independent between locations.
 * **The transformed-pairs figure feeds the warping what the model fed it.**
 `prepare.warped_values` sent the stored columns -- a composition's parts in
 the ppm and percent they were assayed in -- through a warping the model had
