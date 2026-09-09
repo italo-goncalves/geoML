@@ -426,8 +426,9 @@ def test_the_data_goes_through_the_models_own_warping(trained):
     model, point = trained
     warped, measured, labels = prepare.warped_values(model, "v")
 
-    values, _, _ = prepare.numeric_values(point.variables["v"])
-    expected, _ = model.likelihoods[0].warping.forward(values[measured])
+    values, _ = point.variables["v"].get_measurements()
+    expected, _ = model.likelihoods[0].warping.forward(
+        np.asarray(values, dtype=float)[measured])
 
     assert np.allclose(warped, np.asarray(expected))
     # numbered, not named after what was measured: a warping may rotate or
@@ -445,6 +446,44 @@ def test_only_measured_rows_are_warped(trained):
 
     assert len(warped) == int(np.sum(measured))
     assert np.all(np.isfinite(warped))
+
+
+def test_the_warping_is_fed_model_units_not_measured_ones():
+    """A composition's parts reach the model as fractions of the whole,
+    which is what its warping was initialized on. Feeding the figure the
+    stored ppm and percent instead put the log of each part's divisor on
+    every warped column as an offset: a centred log-ratio of scaled parts
+    shifts by exactly that, and a PCA centred on the fractions cannot take
+    it back out. The warped columns are centred, as the model sees them."""
+    geoml.set_seed(7)
+    point, rng = _points(n=30)
+    ag = rng.uniform(10.0, 500.0, 30)          # ppm
+    pb = rng.uniform(0.1, 5.0, 30)             # %
+    point.add_compositional_variable(
+        "assay", ["ag", "pb"], np.stack([ag, pb], axis=1),
+        units={"ag": "ppm", "pb": "%"}, rest=True)
+    warping = geoml.warping.ChainedWarping(
+        geoml.warping.CenteredLogRatio(3), geoml.warping.PCA(3, 2))
+    inducing = geoml.data.Grid2D(start=[0, 0], n=[3, 3], step=[50, 50])
+    network = geoml.latent.BasicGP(
+        geoml.latent.BasicInput(inducing), size=2)
+    model = geoml.models.VGPNetwork(
+        point, "assay", geoml.likelihood.MultivariateGaussian(3, warping),
+        network, options=geoml.models.GPOptions(verbose=False,
+                                                training_samples=4))
+    model.train_full(max_iter=1)
+
+    warped, measured, _ = prepare.warped_values(model, "assay")
+
+    values, _ = point.variables["assay"].get_measurements()
+    expected, _ = warping.forward(np.asarray(values, dtype=float)[measured])
+    assert np.allclose(warped, np.asarray(expected))
+    assert np.abs(warped.mean(axis=0)).max() < 1e-8
+    # and the stored columns would not have been: the offsets are the logs
+    # of the divisors, several units of a whitened component
+    stored, _, _ = prepare.numeric_values(point.variables["assay"])
+    off, _ = warping.forward(stored[measured])
+    assert np.abs(np.asarray(off).mean(axis=0)).max() > 1.0
 
 
 def test_a_likelihood_with_no_warping_has_nothing_to_transform():

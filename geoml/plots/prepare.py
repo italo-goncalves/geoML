@@ -287,7 +287,15 @@ def warped_values(model, name: str):
             "%s carries no warping, so there is nothing to transform"
             % type(likelihood).__name__)
 
-    values, measured, _ = numeric_values(variable(model.data, name))
+    # What the model fed the warping -- `get_measurements`, a composition's
+    # parts as fractions of the whole, the rows closed -- rather than the
+    # stored columns `numeric_values` shows in their measured units. The
+    # warping was initialized on the former; sending ppm and percent
+    # through it put the log of each part's divisor on every warped column
+    # as an offset, and the figure showed components centred at 6 and -5.
+    values, has_value = variable(model.data, name).get_measurements()
+    values = _np.asarray(values, dtype=float)
+    measured = _np.all(_np.asarray(has_value) == 1.0, axis=1)
     warped, _ = warping.forward(values[measured])
     warped = _np.asarray(warped, dtype=float)
 

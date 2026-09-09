@@ -1931,7 +1931,35 @@ _VARIATIONAL_STATE = {
 }
 
 
-def _fresh_variational_state(model):
+def _terminal_gp_nodes(model):
+    """The GP nodes nearest the likelihoods: from each leaf down through
+    operation nodes, stopping at the first GP node.
+
+    A leaf is often an operation node with no variational state of its own
+    -- `Linear(cat, size=2)` over a rock GP, `LinearCombination(trend,
+    metal_gp)` -- so the state that conditions on a likelihood's data is
+    found below it. A node can be terminal for one likelihood and interior
+    for another; it counts once.
+    """
+    found = []
+
+    def visit(node):
+        if isinstance(node, _latent.network._GPNode):
+            if not any(node is seen for seen in found):
+                found.append(node)
+        elif isinstance(node, _latent.network._Operation):
+            for parent in node.parents:
+                visit(parent)
+        elif isinstance(node, _latent.network._FunctionalLatentVariable):
+            visit(node.parent)
+        # a root has no state to free
+
+    for leaf in model.leaves:
+        visit(leaf)
+    return found
+
+
+def _fresh_variational_state(model, nodes=None):
     """Freeze what one fold cannot change; forget what it can.
 
     The variational state -- `alpha_white_*`, `delta_*` and `bias_*` on every
@@ -1943,11 +1971,14 @@ def _fresh_variational_state(model):
     the fitted variogram, made once and said out loud in `cross_validate`'s
     docstring. The fresh values are drawn from the package generator, so
     `geoml.set_seed` makes the whole procedure reproducible.
+
+    `nodes` restricts the forgetting to those nodes (`refit="leaves"` passes
+    the terminal GP nodes); every other node's state is frozen with the rest.
     """
     for parameter in model._all_parameters:
         parameter.fix()
 
-    for node in model._nodes():
+    for node in model._nodes() if nodes is None else nodes:
         for name, parameter in node.parameters.items():
             for prefix, init in _VARIATIONAL_STATE.items():
                 if name.startswith(prefix):
@@ -1994,9 +2025,16 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         :meth:`~geoml.data.PointData.spatial_k_fold` writes. Any labelling
         works: a hole-id column gives leave-one-hole-out.
     refit
-        `"variational"` to refit the variational state alone, or `"all"` to
-        warm-start every trainable parameter from its trained value and
-        continue on the reduced data.
+        `"variational"` to refit the variational state alone, re-initialized
+        on every node; `"leaves"` to re-initialize and refit it on the
+        terminal GP nodes only -- the GP nearest each likelihood, found from
+        the leaf down through operation nodes -- keeping the interior (a
+        `GPWalk`'s field, a shared parent) as all the data taught it --
+        measured to score 20% past the honest reference on Jura, the
+        interior remembering the held-out rows, so a diagnostic of that
+        memory rather than a score (E2 in `docs/cross-validation.md`); or
+        `"all"` to warm-start every trainable parameter from its trained
+        value and continue on the reduced data.
     iterations
         Training iterations per fold, under `method="full"`. Ignored under
         `method="svi"`, which counts in `epochs`.
@@ -2073,9 +2111,10 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         raise ValueError(
             "cross-validation needs at least 2 folds; column '%s' holds %d"
             % (folds, fold_names.size))
-    if refit not in ("variational", "all"):
+    if refit not in ("variational", "leaves", "all"):
         raise ValueError(
-            "refit must be 'variational' or 'all', got %r" % (refit,))
+            "refit must be 'variational', 'leaves' or 'all', got %r"
+            % (refit,))
     if method not in ("full", "svi"):
         raise ValueError(
             "method must be 'full' or 'svi', got %r" % (method,))
@@ -2120,6 +2159,9 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                 fold_model._reset_optimizer()
             if refit == "variational":
                 _fresh_variational_state(fold_model)
+            elif refit == "leaves":
+                _fresh_variational_state(
+                    fold_model, nodes=_terminal_gp_nodes(fold_model))
             # the batch size rides in the model's own options, so the fold
             # copy already has whatever the original was trained with
             if method == "svi":

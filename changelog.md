@@ -70,6 +70,32 @@ never returned), share the one trace now. Pinned by
 `test_one_fold_model_serves_every_fold` (one load, each fold on its own
 rows, the file's parameters and a zeroed optimizer at every fold start,
 at most three traces over four folds).
+* **`cross_validate(refit="leaves")`, and what it measured.** Re-initializes
+and refits the variational state of the *terminal GP nodes* only — from
+each leaf down through operation nodes to the first GP
+(`_terminal_gp_nodes`), so `Linear(cat, size=2)`'s state is `cat`'s —
+keeping the interior (a `GPWalk`'s field, a shared parent) as all the data
+taught it. Proposed as the honest refit, on the reasoning that the interior
+encodes the spatial pattern and the conditioning to data happens at the
+leaves; measured on chapter 16's Jura tree over three seeds to score
+20% *past* the scratch gold (rmse/sd 0.80 against 0.99) and past the warm
+start (0.92), the rock's out-of-fold accuracy at 0.91 against 0.83, while
+the same refit from an interior trained on the fold's rows alone scores
+1.00 — the gold. The displacement field remembers where the held-out holes
+put the contacts. Kept as a diagnostic of that memory, like `refit="all"`,
+and not for scoring; E2 in `docs/cross-validation.md`,
+`docs/benchmarks/leaf_refit.py`.
+* **The transformed-pairs figure feeds the warping what the model fed it.**
+`prepare.warped_values` sent the stored columns -- a composition's parts in
+the ppm and percent they were assayed in -- through a warping the model had
+initialized on `get_measurements`, the parts as fractions of the whole. A
+centred log-ratio of scaled parts shifts every column by the log of its
+divisor, and a PCA centred on the fractions cannot take that out, so on
+the Tom v6 assays "as the model sees it" showed components centred at 6
+and -5 where the EDA's PCA of the same data was centred at zero. It reads
+`get_measurements` now, so the figure is centred as the model is; the
+scale still differs from the EDA's PCA, whose scores keep their
+eigenvalues where the warping's are whitened.
 * **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
 the project's ubiquitous language: the ground against a measurement, the
 three variances, support, expert, realization, warping against transform --

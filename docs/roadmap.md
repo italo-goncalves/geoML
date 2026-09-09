@@ -231,43 +231,6 @@ Read it after calibration: the ladder measured 0.86 coverage at nominal
 0.90 on Jura, and a relative error off overconfident intervals flatters the
 deposit by exactly that.
 
-**S–M — Cross-validation freeing only the leaves' variational state**
-(requested 2026-09-08). Today `_fresh_variational_state` walks every node
-of the tree (`model._nodes()`), re-initializes `alpha_white_*`, `delta_*`
-and `bias_*` on each and fixes everything else, so a fold refit re-learns
-the whole tree's inducing values from the training rows. The proposal:
-re-initialize and unfix only the leaves' state — the nodes that touch the
-likelihoods — and keep the interior as all the data taught it: a
-`GPWalk`'s field, a shared parent two leaves read. **The rationale (the
-author's, 2026-09-08)**: the interior encodes the spatial pattern the model
-learned, and the conditioning to data happens at the leaves; keeping it is
-the same kind of concession kriging makes when it keeps the variogram
-fitted on all the data. The nodes to free are the *terminal GP nodes*, not
-`model.leaves` as such: a leaf is often an operation node with no state of
-its own (Tom v6's rock leaf is `Linear(cat, size=2)`, its state in `cat`
-below; chapter 16's is `LinearCombination(trend, metal_gp)`), so walk down
-from each leaf through operation nodes and stop at the first GP node. A
-node can be terminal for one likelihood and interior for another (`cat`
-is read by the grade leaf's kernel) and is then refit. Cheaper (the walk's
-field holds three of Tom v6's seven inducing-value columns) and likely
-closer to the scratch gold, the interior being what a short refit from a
-fresh state fits worst (E1's fresh-50 scored below the gold). **The risk
-is the one E1 measured**: the data conditions every node — the bound's
-likelihood term backpropagates into the interior's inducing values, so a
-walk field's state is the posterior of the deformation given all the rows,
-held-out ones included, with far more capacity than three variogram
-numbers — and warm-starting the whole state scored 3–8% better than the
-honest scratch reference, which was called residual memory rather than
-skill; E1 cannot apportion that between leaf and interior, Walker's single
-GP having no interior. Going *past* the gold is the signature to watch
-for. Cheap to try now that one fold
-model serves every fold: a `refit="leaves"` spelling beside
-`"variational"`/`"all"`. Gate: E1's protocol on a model *with* an interior
-(Walker's single GP has none — Jura's shared root under two leaves, or
-Walker under a `GPWalk`), scratch gold against fresh-all against
-fresh-leaves, held-out rmse/crps/goodness and the time column; the
-question it answers is whether the interior's memory shows in the scores.
-
 **M–L — Cheaper cross-validation: fewer refits, or none** (requested
 2026-09-08). Since 2026-09-08 the driver costs one refit per fold and
 nothing else (one fold model, its rows swapped in; the rebuild and the
@@ -292,8 +255,9 @@ approximate for VI, exact in the limit the leaves-only item above
 approaches; (c) **closed-form leave-out for a terminal leaf given the
 interior** (Sundararajan & Keerthi 2001; Rasmussen & Williams §5.4.2): the
 leaf's conditional given the inducing values is a GP with the classic
-closed form, which is the leaves-only refit taken to zero iterations — the
-same residual-memory caveat, said out loud. The bar any of them must clear
+closed form, which is the leaves-only refit taken to zero iterations — and
+E2 (2026-09-09) measured that refit leaking 20% past the gold, so this
+inherits the verdict unless the interior is refit too. The bar any of them must clear
 is E1's: reusing all-data state has to beat the scratch reference by
 honest means, and a 3–8% edge is the size of a leak, not of a method.
 
@@ -404,6 +368,19 @@ that attempt.
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**The leaf-only refit leaks, and more than the warm start** (2026-09-09).
+`refit="leaves"` — re-initialize and refit the variational state of the
+terminal GP nodes only, the interior kept as all the data taught it, the
+author's proposal that the interior encodes the spatial pattern and the
+conditioning to data happens at the leaves. On chapter 16's Jura tree
+(the displacement field the interior), five spatial folds, three seeds:
+rmse/sd 0.80 against the scratch gold's 0.99 and the warm start's 0.92, rock
+out-of-fold accuracy 0.91 against 0.83 (in-sample 0.97). The same refit
+from an interior trained on the fold's rows alone scores 1.00 — the gold.
+The field remembers where the held-out holes put the contacts, and
+freezing it keeps that memory intact where warm training lets it drift.
+Kept as a diagnostic, not a score; E2 in `docs/cross-validation.md`.
 
 **Independent trees work, and the bookkeeping join is gone** (2026-09-05).
 Two leaves on roots of their own — a `BasicGP` on 40 k-means inducing

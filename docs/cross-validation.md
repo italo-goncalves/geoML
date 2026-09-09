@@ -166,6 +166,69 @@ Three findings:
    re-initializes instead — fresh init is structurally ignorant, and the
    question dissolves.
 
+### E2 — the leaf-only refit, measured (2026-09-09)
+
+The author's proposal: the interior encodes the spatial pattern and the
+conditioning to data happens at the leaves, so re-initialize and refit only
+the terminal GP nodes (`refit="leaves"`, `_terminal_gp_nodes`: from each leaf
+down through operation nodes to the first GP) and keep the interior as all
+the data taught it. Measured on chapter 16's Jura tree — a two-column
+displacement GP walked, the rock GP on the walked coordinates, the metals as
+their own GP plus a `Linear` trend read from the rock GP; the interior is the
+displacement field — five spatial folds (`spatial_k_fold` against the
+held-out set), 60 inducing points, three seeds, the same inducing set in
+every arm (`docs/benchmarks/leaf_refit.py`). Scores are pooled out-of-fold
+over the seven metals, rmse and CRPS over each metal's sd averaged, plus the
+rock's balanced accuracy from the OOF container. Times are from seed 0's
+solo run only; the other runs shared the GPU five ways.
+
+| arm | seeds | rmse/sd | crps/sd | goodness | rock accuracy | seed-0 time |
+|---|---|---|---|---|---|---|
+| in-sample-300 | 1 | 0.699 | 0.371 | 0.890 | 0.971 | — |
+| fresh-all-50 | 3 | 0.927 | 0.496 | 0.911 | 0.815 | 41 s |
+| fresh-leaves-50 | 3 | 0.856 | 0.452 | 0.930 | 0.919 | 31 s |
+| fresh-all-200 | 3 | 0.921 | 0.493 | 0.930 | 0.803 | 84 s |
+| fresh-leaves-200 | 3 | 0.798 | 0.420 | 0.929 | 0.909 | 57 s |
+| warm-200 | 3 | 0.918 | 0.487 | 0.903 | 0.864 | 107 s |
+| scratch-400 | 3 | 0.991 | 0.535 | 0.898 | 0.825 | 212 s |
+| scratch-300 | 3 | 0.970 | 0.520 | 0.923 | 0.825 | — |
+| scratch-600 | 3 | 1.026 | 0.559 | 0.856 | 0.828 | — |
+| scratch-leaves-200 | 3 | 1.001 | 0.543 | 0.868 | 0.827 | — |
+
+Two protocols. **Reuse** is the driver's: one model trained 300 iterations
+on all the rows, then `refit="variational"` (fresh-all), `refit="leaves"`
+(fresh-leaves), `refit="all"` (warm, E1's leak reference) and a fresh model
+per fold trained 400 iterations (scratch, the gold). **Honest** builds a
+fresh model per fold and applies the *same* leaf-only refit to it — an
+interior that never saw the held-out rows — after 600 iterations
+(scratch-leaves), with the fold model also scored at 300 and 600.
+
+1. **From the all-data interior the leaf-only refit scores 20% past the
+   gold** (rmse/sd 0.80 against scratch's 0.99) and past the warm start
+   (0.92), which E1 had already called residual memory; fresh-all sits at
+   0.92. The rock's out-of-fold accuracy under it is 0.91, against 0.83 for
+   scratch and 0.97 in-sample: the held-out rows are being predicted about
+   as well as the training rows.
+2. **From a fold-trained interior the same refit scores like scratch**
+   (1.00 against 0.97 at 300 and 1.03 at 600 iterations; rock 0.83). The
+   protocol is not better; the interior was remembering.
+3. So the interior *is* conditioned on the data, and with far more capacity
+   than a variogram: the displacement field bends space so the contacts
+   the held-out holes logged become sharp, and a rock GP re-initialized on
+   the training rows alone finds them there. Freezing that field keeps
+   its memory intact, which is why the leak is *larger* than the warm
+   start's — warm training lets the field drift toward the reduced data's
+   optimum.
+4. A side reading: the fresh fold models score worse at 600 iterations than
+   at 300 (1.03 against 0.97) while their bound keeps rising, the mild
+   overfitting past the data count already on record.
+
+`refit="leaves"` stays in the driver the way `refit="all"` does — as a
+diagnostic of how much the interior remembers, documented as such — and is
+not for scoring. The closed-form leave-out of a terminal leaf given the
+interior (candidate (c) of the cheaper-cross-validation item) inherits the
+same verdict, being this refit taken to zero iterations.
+
 ### The fold model is one model (2026-09-08)
 
 The driver used to rebuild a fold model from the file for every fold. On
@@ -265,7 +328,7 @@ they belong:
 
 ## Tests
 
-`geoml/test/test_cross_validation.py` (18): the fold builder (beats random on
+`geoml/test/test_cross_validation.py` (31): the fold builder (beats random on
 W, atoms never split, deterministic, refusals), the driver (every row
 out-of-fold, table pooled, held-out worse than in-sample, original model
 untouched, fresh state ignorant with everything else frozen), and the

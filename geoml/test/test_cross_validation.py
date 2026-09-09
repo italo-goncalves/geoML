@@ -418,6 +418,49 @@ def test_one_fold_model_serves_every_fold(monkeypatch):
     assert step.experimental_get_tracing_count() <= 3
 
 
+def test_the_leaves_refit_frees_only_the_terminal_gp_nodes():
+    """`refit="leaves"` re-initializes the GP nearest each likelihood -- found
+    from the leaf down through operation nodes, here a `Linear` over the
+    GP -- and leaves the interior, a `GPWalk`'s field, exactly as trained
+    and fixed."""
+    geoml.set_seed(1234)
+    walker, grid = geoml.datasets.walker()
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(walker, 30, seed=0),
+        transform=geoml.transform.Isotropic(50))
+    field = geoml.latent.BasicGP(root, size=2)
+    walked = geoml.latent.GPWalk(field, n_steps=3)
+    gp = geoml.latent.BasicGP(walked, size=1)
+    leaf = geoml.latent.Linear(gp, size=1)
+    model = geoml.models.VGPNetwork(
+        walker, "V", geoml.likelihood.Gaussian(), leaf,
+        options=geoml.models.GPOptions(verbose=False, training_samples=4))
+    model.train_full(max_iter=5)
+
+    terminal = geoml.models._terminal_gp_nodes(model)
+    assert len(terminal) == 1 and terminal[0] is gp
+
+    before = np.asarray(field.parameters["alpha_white_0"].get_value()).copy()
+    geoml.models._fresh_variational_state(model, nodes=terminal)
+
+    assert np.array_equal(
+        np.asarray(field.parameters["alpha_white_0"].get_value()), before)
+    assert field.parameters["alpha_white_0"].fixed
+    assert np.abs(np.asarray(gp.parameters["alpha_white_0"].get_value())).max() < 0.1
+    assert not gp.parameters["alpha_white_0"].fixed
+    assert leaf.parameters["weights"].fixed if "weights" in leaf.parameters \
+        else all(p.fixed for p in leaf.parameters.values())
+
+
+def test_the_leaves_refit_runs_and_the_bad_spelling_is_refused(walker_cv):
+    model, walker, _, _ = walker_cv
+    oof, scores = geoml.models.cross_validate(
+        model, refit="leaves", iterations=5, n_sim=4, n_nodes=4)
+    assert set(scores["fold"]) == set(walker.get_metadata("fold")) | {"all"}
+    with pytest.raises(ValueError, match="refit"):
+        geoml.models.cross_validate(model, refit="leafs")
+
+
 def test_set_data_refuses_a_container_of_another_dimension():
     model, walker, _ = _walker_model()
     frame = walker.as_data_frame()[["X", "Y"]]
