@@ -552,7 +552,8 @@ class Explorer(_base.Selection):
                    label="simulated")
 
     def prediction_scatter(self, component=None, kind="scatter", alpha=0.6,
-                           bins=60, log_counts=False, figsize=None, size=10) -> "_plt.Figure":
+                           bins=60, log_counts=False, trim=None, figsize=None,
+                           size=10) -> "_plt.Figure":
         """
         What was predicted against what was measured.
 
@@ -577,6 +578,16 @@ class Explorer(_base.Selection):
             Bins along each axis, for `kind="hist2d"`.
         log_counts : bool
             Colour the cells by the logarithm of the count.
+        trim : pair of floats
+            Leave the outliers out, as quantiles: `[0, 0.99]` for a variable
+            with a long right tail, which is most assays. Without it a few
+            values far from the rest set the limits and squeeze everything
+            else into a corner. The window runs from the lower quantile of
+            the measured or the predicted values, whichever is lower, to the
+            upper quantile of whichever is higher, and a location outside it
+            on either axis is left out of the panel and its margins. Each
+            panel is trimmed on its own, and counts in a corner how many it
+            left out.
         """
         self._check_kind(kind)
         var = self._require_continuous("prediction_scatter")
@@ -591,10 +602,15 @@ class Explorer(_base.Selection):
             true, predicted = true[:, [index]], predicted[:, [index]]
             labels = [component]
 
+        kept = [_prep.inside_trim(true[:, i], predicted[:, i], trim)
+                for i in range(len(labels))]
+
         if len(labels) == 1:
-            return self._joint_scatter(true[:, 0], predicted[:, 0], labels[0],
+            return self._joint_scatter(true[kept[0], 0],
+                                       predicted[kept[0], 0], labels[0],
                                        figsize, size, kind, alpha, bins,
-                                       log_counts)
+                                       log_counts,
+                                       left_out=int(_np.sum(~kept[0])))
 
         rows, columns = _prep.grid_shape(len(labels))
         with _style.context():
@@ -603,8 +619,10 @@ class Explorer(_base.Selection):
                 figsize=figsize or (3.0 * columns, 2.8 * rows))
             flat = axes.ravel()
             for i, label in enumerate(labels):
-                self._draw_agreement(flat[i], true[:, i], predicted[:, i],
-                                     size, kind, alpha, bins, log_counts)
+                self._draw_agreement(flat[i], true[kept[i], i],
+                                     predicted[kept[i], i], size, kind, alpha,
+                                     bins, log_counts,
+                                     left_out=int(_np.sum(~kept[i])))
                 flat[i].set_title(label)
                 flat[i].set_xlabel("measured")
                 flat[i].set_ylabel("predicted")
@@ -1535,7 +1553,7 @@ class Explorer(_base.Selection):
                    va="top", bbox=_style.LABEL_BOX)
 
     def _draw_agreement(self, panel, true, predicted, size, kind="scatter",
-                        alpha=0.6, bins=60, log_counts=False):
+                        alpha=0.6, bins=60, log_counts=False, left_out=0):
         """Predicted against measured, with the line they would sit on."""
         self._draw_points(panel, true, predicted, size, kind, alpha, bins,
                           log_counts, color=_style.color(0))
@@ -1550,8 +1568,16 @@ class Explorer(_base.Selection):
         panel.set_xlim(low - margin, high + margin)
         panel.set_ylim(low - margin, high + margin)
 
+        if left_out:
+            # a trimmed panel is not showing everything, and says so
+            panel.text(0.05, 0.9, "outliers left out: %d of %d"
+                       % (left_out, len(true) + left_out),
+                       transform=panel.transAxes, fontsize=7,
+                       color="#2b2b2b", va="top", bbox=_style.LABEL_BOX)
+
     def _joint_scatter(self, true, predicted, label, figsize, size,
-                       kind="scatter", alpha=0.6, bins=60, log_counts=False):
+                       kind="scatter", alpha=0.6, bins=60, log_counts=False,
+                       left_out=0):
         """One variable, with the two distributions along the sides."""
         with _style.context():
             figure = _plt.figure(figsize=figsize or (5.5, 5.5))
@@ -1564,7 +1590,7 @@ class Explorer(_base.Selection):
             right = figure.add_subplot(grid[1, 1], sharey=main)
 
             self._draw_agreement(main, true, predicted, size, kind, alpha,
-                                 bins, log_counts)
+                                 bins, log_counts, left_out)
             top.hist(true, bins=25, color=_style.color(0), alpha=0.65)
             right.hist(predicted, bins=25, orientation="horizontal",
                        color=_style.color(0), alpha=0.65)

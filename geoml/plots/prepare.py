@@ -687,6 +687,48 @@ def prediction_values(container: "_data._SpatialData", name: str):
             _np.where(both)[0])
 
 
+def inside_trim(measured: _types.ArrayLike, predicted: _types.ArrayLike,
+                trim: "_types.ArrayLike | None" = None):
+    """
+    Which locations a predicted-against-measured panel keeps under a trim.
+
+    A few values far from the rest set the limits of such a panel and
+    squeeze everything else into a corner of it. Naming a pair of quantiles
+    sets a window instead, running from the lower quantile of the measured
+    or the predicted values, whichever is lower, to the upper quantile of
+    whichever is higher; a location outside it on either axis is left out.
+    `[0, 0.99]` takes off the long right tail of an assay, `[0.01, 0.99]`
+    both ends.
+
+    Returns a boolean mask over the locations, every one kept when `trim`
+    is None.
+    """
+    measured = _np.asarray(measured, dtype=float)
+    predicted = _np.asarray(predicted, dtype=float)
+    if trim is None:
+        return _np.ones(len(measured), dtype=bool)
+
+    levels = _np.asarray(trim, dtype=float).ravel()
+    if len(levels) != 2 or not _np.all((levels >= 0) & (levels <= 1)) \
+            or levels[0] >= levels[1]:
+        raise ValueError(
+            "trim takes two quantiles between 0 and 1, the lower first: "
+            "[0, 0.99] leaves out the long right tail, [0.01, 0.99] both "
+            "ends. Got %r" % (levels.tolist(),))
+
+    # each end from whichever side reaches further, so that only what would
+    # stretch the window is left out: trimming each axis by its own
+    # quantiles would also drop the highest predictions, which a smoothing
+    # model packs well inside the measured range -- points that stretch
+    # nothing, and the very ones that show the smoothing
+    low = min(_np.quantile(measured, levels[0]),
+              _np.quantile(predicted, levels[0]))
+    high = max(_np.quantile(measured, levels[1]),
+               _np.quantile(predicted, levels[1]))
+    return ((measured >= low) & (measured <= high)
+            & (predicted >= low) & (predicted <= high))
+
+
 def _bin_edges(values, bins):
     """Where to cut, from a count or from the positions themselves."""
     if _np.ndim(bins) > 0:

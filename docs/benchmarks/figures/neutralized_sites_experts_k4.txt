@@ -1,0 +1,26 @@
+experts, k = 4: 9 expert(s), [36, 36, 36, 36, 36, 36, 36, 36, 36] inducing points; trained in 123 s
+delta: share at the upper bound 0.00, median 0.296
+identity check, max |change| in prediction: 4.07e-08
+alpha entries clipped at +-10 by the inducing-point arms: 454
+
+arm              rmse  latent var, held rows   inducing removed
+in-sample       181.9                  0.071                   
+delta-only      204.2                  0.135               0.25
+sites           291.0                  0.135               0.25
+sites+ring      396.5                  0.504               0.56
+krige           205.1                  0.135               0.25
+krige+ring      306.0                  0.504               0.56
+prior           243.5                  0.135               0.25
+prior-reversed    233.7                  0.135               0.25
+prior-fold-last    204.5                  0.135               0.25
+mean-kept       204.5                  0.135               0.25
+mean-kept+ring    300.5                  0.504               0.56
+mean-zeroed     204.6                  0.135               0.25
+zeroed-no-prior    304.5                  0.135               0.25
+exact, all      177.8                                          
+rows            213.7                  0.071                   
+rows+delta      224.7                  0.135                   
+refit-1000      246.8                  0.073                   
+truth           170.7
+time: inducing-point arms 16.2 s, row arms 42.9 s; refits 368 s
+done

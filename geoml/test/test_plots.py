@@ -1197,6 +1197,70 @@ def test_only_the_two_kinds_are_accepted(trained):
             kind="hexbin")
 
 
+def test_a_trim_leaves_out_only_what_would_stretch_the_window():
+    """A smoothing model packs its highest predictions well inside the
+    measured range. Trimming each axis by its own quantiles would drop them,
+    and they stretch nothing."""
+    measured = np.append(np.arange(100.0), 1000.0)
+    predicted = 20 + 0.5 * measured
+    predicted[-1] = 30.0            # the far assay, smoothed towards the rest
+
+    kept = prepare.inside_trim(measured, predicted, [0, 0.99])
+
+    assert not kept[-1]
+    assert kept[:-1].all()          # the highest prediction among them
+
+
+def test_without_a_trim_every_location_is_kept():
+    measured = np.append(np.arange(100.0), 1000.0)
+    assert prepare.inside_trim(measured, measured, None).all()
+    assert prepare.inside_trim(measured, measured, [0, 1]).all()
+
+
+@pytest.mark.parametrize("bad", [[0.99], [0.9, 0.1], [0, 1.5], [-0.1, 0.9]])
+def test_a_trim_is_two_quantiles_the_lower_first(bad):
+    with pytest.raises(ValueError, match="two quantiles"):
+        prepare.inside_trim(np.arange(10.0), np.arange(10.0), bad)
+
+
+def test_a_trimmed_scatter_says_how_many_it_left_out(trained):
+    _, point = trained
+    true, predicted, labels, _ = prepare.prediction_values(point, "v")
+    column = labels.index("b")
+    kept = prepare.inside_trim(true[:, column], predicted[:, column],
+                               [0, 0.9])
+    assert not kept.all()
+
+    figure = geoml.plots.Explorer(point, continuous="v").prediction_scatter(
+        component="b", trim=[0, 0.9])
+    main, top, right = figure.axes
+
+    assert len(main.collections[0].get_offsets()) == kept.sum()
+    # the margins are of the same points
+    assert sum(bar.get_height() for bar in top.patches) == kept.sum()
+    assert sum(bar.get_width() for bar in right.patches) == kept.sum()
+    assert [text.get_text() for text in main.texts] == [
+        "outliers left out: %d of %d" % ((~kept).sum(), len(kept))]
+
+
+def test_an_untrimmed_scatter_has_nothing_to_say(trained):
+    _, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v").prediction_scatter(
+        component="b")
+    assert not figure.axes[0].texts
+
+
+def test_each_panel_is_trimmed_on_its_own(trained):
+    _, point = trained
+    true, predicted, _, _ = prepare.prediction_values(point, "v")
+    figure = geoml.plots.Explorer(point, continuous="v").prediction_scatter(
+        trim=[0, 0.9])
+
+    for i, panel in enumerate(_visible(figure)):
+        kept = prepare.inside_trim(true[:, i], predicted[:, i], [0, 0.9])
+        assert len(panel.collections[0].get_offsets()) == kept.sum()
+
+
 # --------------------------------------------------------------------------- #
 # grade and tonnage
 # --------------------------------------------------------------------------- #

@@ -178,6 +178,20 @@ and -5 where the EDA's PCA of the same data was centred at zero. It reads
 `get_measurements` now, so the figure is centred as the model is; the
 scale still differs from the EDA's PCA, whose scores keep their
 eigenvalues where the warping's are whitened.
+* **`prediction_scatter(trim=...)` leaves the outliers out.** A few assays
+far from the rest set the limits of the scatter and squeezed everything
+else into a corner, most of the panel left blank. `trim` names a pair of
+quantiles, as `scene`'s `clip` does -- `[0, 0.99]` for a long right tail
+-- and the window runs from the lower quantile of the measured or the
+predicted values, whichever is lower, to the upper quantile of whichever
+is higher. A location outside it on either axis leaves the cloud and both
+margins, and the panel counts in a corner how many did. Each end comes
+from whichever side reaches further so that only what would stretch the
+window goes: trimming each axis by its own quantiles would also drop the
+highest predictions, which a smoothing model packs well inside the
+measured range. Named `trim` rather than `clip` because it drops points,
+where `clip` drops nothing. Both backends; `prepare.inside_trim` holds the
+arithmetic.
 * **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
 the project's ubiquitous language: the ground against a measurement, the
 three variances, support, expert, realization, warping against transform --

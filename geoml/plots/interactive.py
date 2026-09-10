@@ -748,8 +748,8 @@ class Interactive(_base.Selection):
             barmode="overlay")
 
     def prediction_scatter(self, component=None, kind="scatter", alpha=0.6,
-                           bins=60, log_counts=False, size=6, height=None,
-                           width=None) -> "_go.Figure":
+                           bins=60, log_counts=False, trim=None, size=6,
+                           height=None, width=None) -> "_go.Figure":
         """
         What was predicted against what was measured.
 
@@ -772,6 +772,16 @@ class Interactive(_base.Selection):
             Bins along each axis, for `kind="hist2d"`.
         log_counts : bool
             Colour the cells by the logarithm of the count.
+        trim : pair of floats
+            Leave the outliers out, as quantiles: `[0, 0.99]` for a variable
+            with a long right tail, which is most assays. Without it a few
+            values far from the rest set the limits and squeeze everything
+            else into a corner. The window runs from the lower quantile of
+            the measured or the predicted values, whichever is lower, to the
+            upper quantile of whichever is higher, and a location outside it
+            on either axis is left out of the panel and its margins. Each
+            panel is trimmed on its own, and counts in a corner how many it
+            left out.
         """
         self._check_kind(kind)
         var = self._require_continuous("prediction_scatter")
@@ -786,19 +796,24 @@ class Interactive(_base.Selection):
             true, predicted = true[:, [index]], predicted[:, [index]]
             labels = [component]
 
+        kept = [_prep.inside_trim(true[:, i], predicted[:, i], trim)
+                for i in range(len(labels))]
+
         if len(labels) == 1:
-            return self._joint(true[:, 0], predicted[:, 0], rows, labels[0],
-                               kind, alpha, bins, log_counts, size, height,
-                               width)
+            return self._joint(true[kept[0], 0], predicted[kept[0], 0],
+                               rows[kept[0]], labels[0], kind, alpha, bins,
+                               log_counts, size, height, width,
+                               left_out=int(_np.sum(~kept[0])))
 
         panels, columns = _prep.grid_shape(len(labels))
         figure = _subplots(rows=panels, cols=columns, subplot_titles=labels,
                            horizontal_spacing=0.08)
         for i, label in enumerate(labels):
             row, column = divmod(i, columns)
-            self._agreement(figure, true[:, i], predicted[:, i], rows, kind,
-                            alpha, bins, log_counts, size, row + 1, column + 1,
-                            legend=False)
+            self._agreement(figure, true[kept[i], i], predicted[kept[i], i],
+                            rows[kept[i]], kind, alpha, bins, log_counts, size,
+                            row + 1, column + 1, legend=False,
+                            left_out=int(_np.sum(~kept[i])))
         figure.update_xaxes(title_text="measured", row=panels)
         figure.update_yaxes(title_text="predicted", col=1)
 
@@ -1761,7 +1776,7 @@ class Interactive(_base.Selection):
     # predicted against measured
     # ------------------------------------------------------------------ #
     def _agreement(self, figure, true, predicted, rows, kind, alpha, bins,
-                   log_counts, size, row, column, legend=True):
+                   log_counts, size, row, column, legend=True, left_out=0):
         """Predicted against measured, with the line they would sit on."""
         self._pair(figure, true, predicted, rows, kind, alpha, size, bins,
                    log_counts, _style.color(0), "measured", legend, row,
@@ -1779,8 +1794,19 @@ class Interactive(_base.Selection):
         figure.update_xaxes(range=window, row=row, col=column)
         figure.update_yaxes(range=window, row=row, col=column)
 
+        if left_out:
+            # a trimmed panel is not showing everything, and says so
+            figure.add_annotation(
+                xref="x domain", yref="y domain", row=row, col=column,
+                x=0.05, y=0.95, xanchor="left", yanchor="top",
+                text="outliers left out: %d of %d"
+                     % (left_out, len(true) + left_out),
+                font={"size": 9}, showarrow=False,
+                bgcolor="rgba(255,255,255,0.5)", bordercolor=INK,
+                borderwidth=0.6, borderpad=2)
+
     def _joint(self, true, predicted, rows, label, kind, alpha, bins,
-               log_counts, size, height, width):
+               log_counts, size, height, width, left_out=0):
         """One variable, with the two distributions along the sides."""
         figure = _subplots(
             rows=2, cols=2, column_widths=[0.82, 0.18],
@@ -1788,7 +1814,8 @@ class Interactive(_base.Selection):
             horizontal_spacing=0.02, vertical_spacing=0.02)
 
         self._agreement(figure, true, predicted, rows, kind, alpha, bins,
-                        log_counts, size, 2, 1, legend=False)
+                        log_counts, size, 2, 1, legend=False,
+                        left_out=left_out)
         self._bars(figure, true, rows,
                    _np.histogram_bin_edges(true, bins=25),
                    _style.color(0), "measured", False, 1, 1)

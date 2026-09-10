@@ -236,35 +236,149 @@ unreliable; (b) more or better-placed nodes for the exponential-tailed
 laws (the Sobol path already uses 64), gated on the 200-node reference.
 Context: `docs/benchmarks/jura_noise_footing.py` and the record.
 
-**M–L — Cheaper cross-validation: fewer refits, or none** (requested
-2026-09-08). Since 2026-09-08 the driver costs one refit per fold and
-nothing else (one fold model, its rows swapped in; the rebuild and the
-retrace are gone), so what is left to cut is the refit itself: `epochs`
-times `folds`, on the full 20k-row Tom v6 model eleven minutes a fold.
-Candidates, cheapest first, each to be scored on E1's protocol against the
-scratch gold with its cost beside it: (a) **leave-fold-out by importance
-sampling** on the variational posterior — one pass, no refit: reweight the
-posterior draws by the inverse of the fold's likelihood (Vehtari, Gelman &
-Gabry 2017, PSIS-LOO; Vehtari et al. 2016 for Gaussian latent variable
-models); a sparse posterior over inducing values barely moves for one
-point, so the weights are benign for LOO, but the folds here are *blocks*
-built to match the prediction task's distances (`spatial_k_fold`), and
-the weights degrade with the block's size — the Pareto-k diagnostic says
-where it stops being honest, and LOO on densely drilled ground overstates
-skill by construction, so LOO is not the target; (b) **the cavity**: the
-variational posterior is Gaussian in whitened coordinates, so a fold's
-contribution can be *subtracted* in natural parameters the way EP forms a
-cavity distribution, one natural-gradient step from the full posterior
-with the fold's likelihood removed instead of a refit from a fresh state —
-approximate for VI, exact in the limit the leaves-only item above
-approaches; (c) **closed-form leave-out for a terminal leaf given the
-interior** (Sundararajan & Keerthi 2001; Rasmussen & Williams §5.4.2): the
-leaf's conditional given the inducing values is a GP with the classic
-closed form, which is the leaves-only refit taken to zero iterations — and
-E2 (2026-09-09) measured that refit leaking 20% past the gold, so this
-inherits the verdict unless the interior is refit too. The bar any of them must clear
-is E1's: reusing all-data state has to beat the scratch reference by
-honest means, and a 3–8% edge is the size of a leak, not of a method.
+**M–L — Cheaper cross-validation** (requested 2026-09-08). Since
+2026-09-08 the driver costs one refit per fold and nothing else, on the
+full 20k-row Tom v6 model eleven minutes a fold.
+
+*Current proposal: leave-expert-out (the author's, 2026-09-10).* Remove one
+expert at a time from a trained multi-expert model, predict the data with
+no retraining, and weigh each point's leave-one-expert-out predictions by
+the trained expert weights; a single-expert model is small enough for
+`cross_validate`. First look on Walker V, `docs/benchmarks/leave_expert_out.py`
+(grid experts at step 26, range 50, `ZScore -> Spline`, 500 iterations, one
+seed), rmse against the samples:
+
+| experts | in-sample | leave-out, weighted | leave-out, home expert | refit on home-expert folds | spatial folds (today) | truth, exhaustive grid |
+|---|---|---|---|---|---|---|
+| 4 | 193 | 317 | 367 | 336 | 223 | 180 |
+| 9 | 182 | 301 | 442 | 348 | 222 | 171 |
+| 16 | 181 | 276 | 447 | 376 | 222 | 172 |
+
+Leave-out took 1–3 s, against 50–350 s for the refit and 50–110 s for
+today's route. Three findings. (1) The literal reset is not a removal: an
+expert set to the fresh-init values kept 12–67% of its weight on its home
+points, and with `delta` at its upper bound up to 15%; exact removal is a
+mask on the weights before they are normalized. (2) Removing an expert
+removes *capacity*, not data: the experts are trained jointly and
+co-adapt, so the survivors were never taught to cover the removed
+expert's ground. The home-expert score sits 9–27% above an honest refit on
+the same folds, and at points three or more experts share it is 2.3–2.6
+times the in-sample error, not near it -- the overlap leak one would fear
+is not what happens. (3) The larger error is geometric: an expert's region
+is a far larger hole than the prediction target has, so even the honest
+refit on expert-shaped folds reads 1.9–2.2 times the true error, where
+today's spatial folds read 24–30% over it. Next, before any code: the same
+arms on Jura with experts (its 100 held-out points as the truth) and two
+more Walker seeds, adding CRPS and the coverage a conformal cut from each
+arm's PITs achieves on the truth set; kill if leave-out stays more than 20%
+from the truth on most layouts. If it survives: a non-trainable mask on
+the multi-expert root, read wherever the weights are normalized (both
+`get_expert_weights` sites in `BasicGP` and in `MultiStructureGP`, the
+consensus cross-prediction included, so one trace serves every expert),
+and `models.leave_expert_out` returning what `cross_validate` returns.
+
+*Then: neutralizing the fold's inducing points through `delta` (the
+author's, 2026-09-10), measured in `docs/benchmarks/neutralized_sites.py`.*
+As stated it cannot work: the posterior mean `k_x K^-1 L a + b` never
+reads `delta`, so the held-out prediction stays at its in-sample value and
+only the variance moves. Removing the points properly, as
+pseudo-observations whose targets reproduce the trained mean, reads 17–23%
+above the honest refit; dropping them and kriging from the kept means reads
+in-sample; a one-step ring overshoots either way. A datum's information is
+spread by its kriging weights over every inducing point within reach, so
+no assignment of inducing points to folds removes it cleanly -- the flaw
+leave-expert-out has too, which makes its gate above likely moot. Putting
+the diagonal on the *prior* instead (`cov = covariance_matrix(ip, ip) +
+jitter` in `BasicGP.refresh`, the trained state kept) is not well defined:
+the whitened mean is a sequence of innovations in the Cholesky order, so
+changing some points' prior changes what every later coordinate means.
+The same trained model and folds read 243 and 238 (one expert, nine) in
+the stored order, 238 and 217 with the order reversed, and 203 and 205
+with the fold's points last -- which is exactly the kriging arm, since
+that order keeps the kept points' posterior means. A score that moves when
+the inducing points are relabelled cannot be trusted, even where one order
+lands near the refit. Keeping the inducing means while the prior changes
+(the author's three steps: `m = L a`, the diagonal added, `a' =
+chol(K')^-1 m`) removes the order and lands on the kriging arm exactly,
+since the mean at x becomes `k_x K'^-1 m`: 203 and 205, 4–7% under the
+converged refit; with the one-step ring 283 and 272, 27–29% over it. Every
+held-out sample sits within 0.35 kernel ranges of a kept inducing point
+(median; 0.7 at most), whose posterior mean already carries what the
+sample said. `docs/benchmarks/filtered_prior.py` writes two readings
+into `BasicGP.refresh` explicitly, each checked against BasicGP at zero
+filter and against its own closed-form limit at a filter of 1e6. The
+author's definition -- after the three steps, K' replaces K in every
+formula, `K' + D` included, nothing else adjusted -- reproduces the
+wrapper's mean-kept arm (the same latent variances to three decimals, rmse
+within 0.1), so that arm had computed it; its limit is the kriging of the
+kept inducing means with the variance `1 - k_k (K_kk + D_kk)^-1 k_k`. The
+other reading keeps the trained posterior q(u) = N(m, S) whole, S computed
+under the trained prior, and lands at in-sample: 202–206 with one expert,
+182–185 with nine. Across k = 4, 5 and 10 the two read 202–207 and
+182–205 where the converged refit reads 219–235 and 213–247, and neither
+responds to the fold size. Filtering inducing points, whichever way it is
+written, predicts from a posterior fitted with the fold's measurements.
+Zeroing the filtered points' means as well changes nothing,
+since the prior diagonal has already taken their weight; zeroing them
+under the stored prior instead pins the fold's inducing values to the
+prior mean, reads 265–389, and needs whitened values past the ±10 bound.
+Across k = 4, 5 and 10 (`neutralized_sites_*_k*.txt`) the nearest-location
+rule barely moves -- 202–207 with one expert, 201–205 with nine -- while
+the converged refit moves with the fold size, 219–235 and 213–247: the kept
+inducing points sit beside every held-out location whatever the fold, so
+the rule is blind to the one thing cross-validation measures. The row
+solve follows the refit at every k with one expert (within 0.4%) and sits
+6–13% under it with nine (3–9% with the fold's `delta` at the bound), the
+gap largest at k = 4. The same
+trick on the *data's* noise diagonal does work: a held-out row at infinite
+noise is a row left out, and for a Gaussian leaf with the hyperparameters,
+warping and noise frozen the bound is exactly quadratic in the whitened
+means and biases, so the fold optimum is one ridge solve over the training
+rows (item (1) of the shelf below, reached from this side). rmse against
+the samples, Walker V, one seed:
+
+| layout | in-sample | `delta` only | sites | krige | rows | rows, fold's `delta` at bound | refit-200 | refit-1000 | truth |
+|---|---|---|---|---|---|---|---|---|---|
+| one expert | 202.3 | 203.3 | 268.4 | 203.9 | 218.6 | 218.9 | 225.2 | 219.0 | 187.4 |
+| nine experts | 181.9 | 203.6 | 259.7 | 204.1 | 198.6 | 207.3 | 221.8 | 213.0 | 170.7 |
+
+The row solve took 2–4 s for five folds against 83–305 s for the
+1000-iteration refit. With one expert it matches the converged refit to
+0.2%; with nine it sits 3–7% under it, the spread's role in the expert
+weights being what the refit re-solves and the solve does not (the
+refit's own score moved 4% between 200 and 1000 iterations, so part of
+the gap may be the refit's). Adam's 500-iteration state was itself 2–6%
+short of the exact optimum on all rows. Scope, if it is gated: Gaussian or
+multivariate Gaussian leaves under any frozen warping, single-layer; a
+deep tree's interior keeps E2's memory. The gate: CRPS and the coverage of
+a conformal cut from its PITs, Jura's held-out set, more seeds, and a
+refit run to convergence for the experts.
+
+*Shelved 2026-09-10, by the author's decision, for something simpler and
+more general.* The candidates a four-angle review produced; the structural
+claims were checked against the code, no saving was measured. (1)
+Closed-form refit for Gaussian leaves: with the hyperparameters frozen the
+bound is exactly quadratic in the whitened means and biases (the mean is
+linear in them, the variance and the expert weights depend on `delta`
+alone, the KL is quadratic, the 64-node quadrature of a Gaussian
+log-density is exact), so the refit is one ridge solve per column and
+every fold comes from one pass, the full-data statistics minus the
+block's; `delta`'s optimum never sees the measured values, only where the
+samples sit, so a frozen all-data `delta` leaks the held-out *locations*.
+(2) Score only some folds of the partition. (3) An honest ridge start for
+the fold's leaves. (4) Newton passes for non-Gaussian leaves -- the
+rock-type likelihood's objective is the log of a probability under q, not
+an expected log-density, so its site weights must be the second derivative
+in the mean, not `-2 dl/dvar`, which goes negative on misclassified rows.
+(5) Measure the refit's budget and stop on the gradient norm. (6) Refit
+only the experts near the fold, with compact folds -- nothing to gain on
+Walker, Jura or Tom v6, which are too few ranges across. (7) Newton-CG over
+the whole network, interior included -- a small gradient certifies a
+stationary point, not the basin a fresh fit would reach. (8) Hoist the
+frozen root out of the training step. (9) All folds in one traced loop.
+With them go the older candidates this item carried: importance-sampling
+leave-out on blocks, the EP-style cavity, and the closed-form leaf under a
+frozen interior (E2's verdict stands).
 
 **S–M — Batched prediction from a latent node, into a container**
 (requested 2026-09-05). A node's `predict(x, x_var, n_sim, seed)` returns

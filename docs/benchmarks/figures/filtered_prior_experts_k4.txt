@@ -1,0 +1,13 @@
+experts, k = 4: 9 expert(s), [36, 36, 36, 36, 36, 36, 36, 36, 36] inducing points; trained in 96 s
+everywhere -- no filter against BasicGP: max |diff| prediction 5.0e-08, latent mean 1.1e-10, latent variance 0.0e+00
+everywhere -- filter 1e6 against its closed-form limit: max |diff| latent mean 2.7e-09, variance 4.0e-07
+kept -- no filter against BasicGP: max |diff| prediction 0.0e+00, latent mean 0.0e+00, latent variance 0.0e+00
+kept -- filter 1e6 against its closed-form limit: max |diff| latent mean 2.7e-09, variance 1.9e-06
+
+arm                              rmse  latent var, held rows
+in-sample                       181.9                  0.071
+everywhere, 100                 204.6                  0.135
+everywhere, 1e+06               204.6                  0.136
+kept, 100                       184.6                  0.077
+kept, 1e+06                     184.7                  0.077
+done
