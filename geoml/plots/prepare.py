@@ -26,6 +26,7 @@ instead of against pictures.
 from collections.abc import Sequence
 
 import numpy as _np
+import scipy.sparse as _sparse
 import scipy.spatial as _spatial
 import scipy.stats as _stats
 
@@ -590,6 +591,144 @@ def normal_curve(values: _types.ArrayLike, low: float, high: float,
     density = _np.exp(-0.5 * ((x - mean) / deviation) ** 2) \
         / (deviation * _np.sqrt(2 * _np.pi))
     return x, density
+
+
+def summary_statistics(values: _types.ArrayLike) -> "dict[str, float]":
+    """
+    The numbers a distribution is summed up by.
+
+    The moments are those of the values themselves, in their population
+    form, and the kurtosis is the excess over a normal's, so a normal reads
+    0 on the skewness and the kurtosis alike. The coefficient of variation
+    is the standard deviation over the mean, and missing where the mean is
+    not positive, which leaves it meaning nothing. Values that are not
+    finite are left out.
+
+    Returns
+    -------
+    dict
+        `n`, `mean`, `std`, `cv`, `skewness`, `kurtosis`, `min`, `q1`,
+        `median`, `q3` and `max`.
+    """
+    values = _np.asarray(values, dtype=float).ravel()
+    values = values[_np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("there are no finite values to sum up")
+
+    mean = float(values.mean())
+    deviation = float(values.std())
+    centred = values - mean
+    if deviation > 0:
+        skewness = float(_np.mean(centred ** 3)) / deviation ** 3
+        kurtosis = float(_np.mean(centred ** 4)) / deviation ** 4 - 3.0
+    else:
+        skewness = kurtosis = _np.nan
+    q1, median, q3 = (float(q) for q in _np.quantile(values,
+                                                     [0.25, 0.5, 0.75]))
+    return {"n": int(values.size), "mean": mean, "std": deviation,
+            "cv": deviation / mean if mean > 0 else _np.nan,
+            "skewness": skewness, "kurtosis": kurtosis,
+            "min": float(values.min()), "q1": q1, "median": median,
+            "q3": q3, "max": float(values.max())}
+
+
+def statistics_lines(statistics: "dict[str, float]") -> "list[str]":
+    """
+    Summary statistics as lines of text for a box in a monospace font.
+
+    Two columns, aligned: the count and the moments on the left, the order
+    statistics on the right. A value in the variable's units keeps four
+    significant figures and a ratio -- the coefficient of variation, the
+    skewness, the kurtosis -- two decimals. A number that is missing reads
+    as a dash.
+    """
+    def number(value, pattern="%.4g"):
+        if not _np.isfinite(value):
+            return "-"
+        text = pattern % value
+        # a value that rounds to nothing carries no sign
+        return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+    left = [("n", "%d" % statistics["n"]),
+            ("mean", number(statistics["mean"])),
+            ("sd", number(statistics["std"])),
+            ("CV", number(statistics["cv"], "%.2f")),
+            ("skew", number(statistics["skewness"], "%.2f")),
+            ("kurt", number(statistics["kurtosis"], "%.2f"))]
+    right = [("min", number(statistics["min"])),
+             ("Q1", number(statistics["q1"])),
+             ("median", number(statistics["median"])),
+             ("Q3", number(statistics["q3"])),
+             ("max", number(statistics["max"])),
+             ("", "")]
+
+    def width(pairs, item):
+        return max(len(pair[item]) for pair in pairs)
+
+    lines = []
+    for (name, value), (other, figure) in zip(left, right):
+        line = "%-*s %*s" % (width(left, 0), name, width(left, 1), value)
+        if other:
+            line += "   %-*s %*s" % (width(right, 0), other,
+                                     width(right, 1), figure)
+        lines.append(line)
+    return lines
+
+
+def statistics_side(counts: _types.ArrayLike) -> str:
+    """
+    The upper corner a box of statistics takes over a histogram.
+
+    The one over whichever half of the bins has the lower bars: the right,
+    for the long tail of an assay.
+
+    Parameters
+    ----------
+    counts
+        The height of the tallest bar in each bin, left to right.
+
+    Returns
+    -------
+    str
+        `"left"` or `"right"`.
+    """
+    counts = _np.asarray(counts, dtype=float)
+    half = len(counts) // 2
+    left = float(counts[:half].max()) if half else 0.0
+    right = float(counts[half:].max()) if len(counts) > half else 0.0
+    return "right" if right <= left else "left"
+
+
+def statistics_top(counts: _types.ArrayLike, edges: _types.ArrayLike,
+                   low: float, high: float, height: float) -> float:
+    """
+    How tall a histogram's axis has to be for its bars to clear a box.
+
+    Every bar whose bin reaches under the box has to end below it, with a
+    little room to spare; the bars beside it may run as high as they like.
+
+    Parameters
+    ----------
+    counts
+        The height of the tallest bar in each bin, left to right.
+    edges
+        The bins' edges.
+    low, high
+        Where the box starts and ends along the axis, in the axis's units.
+    height
+        How much of the axis's height the box covers, from the top.
+
+    Returns
+    -------
+    float
+        The top the axis needs.
+    """
+    counts = _np.asarray(counts, dtype=float)
+    edges = _np.asarray(edges, dtype=float)
+    under = (edges[1:] > low) & (edges[:-1] < high)
+    tallest = float(counts[under].max()) if _np.any(under) else 0.0
+    return max(1.05 * float(counts.max()),
+               1.02 * tallest / max(1.0 - height, 0.1))
 
 
 def continuous_parts(var) -> "list[_data.ContinuousVariable]":
@@ -2334,6 +2473,243 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
             # and what the grade itself is measured in, where it says so
             "unit": getattr(var, "unit", None),
             "kept": kept, "total": total}
+
+
+def dispersion_by_support(container: "_data.BlockSet3D", name: str,
+                          component: "str | None" = None) -> "list[dict]":
+    """
+    The within-block standard deviation at every block size a block set has.
+
+    Each block's `dispersion` says how much the ground varies inside it, on
+    the block's own support. Merging the blocks into their parents, level by
+    level up to the coarsest, gives the same number at every size the
+    lattice has, so it can be read against the block size.
+
+    A parent is never predicted; it is put together from the blocks inside
+    it. Its dispersion is theirs, volume-weighted, plus how much their block
+    values differ among themselves -- taken realization by realization, a
+    realization being the one thing that comes across a regrouping exactly,
+    and averaged over the realizations as a block's own dispersion is. Every
+    realization the variable holds is used, read a band of blocks at a time.
+
+    A parent missing any of its ground -- a block never predicted, such as
+    one a `where=` filter left out -- is left out at that size and at every
+    size above it, as `BlockSet3D.group` refuses a partial family.
+
+    Parameters
+    ----------
+    container
+        The block set.
+    name
+        The continuous variable.
+    component
+        One component of a vector or compositional variable; every one by
+        default.
+
+    Returns
+    -------
+    list of dict
+        One per component, in label order, with `name`, `label` and `sizes`:
+        one dict per level, the finest first, holding `level`, `size` (the
+        block size along each axis), `deviation` (the within-block standard
+        deviation of every block of that size), `depth` (how many times the
+        refinement split inside each: 0 for a block it left whole), `rms`
+        (the root mean square of `deviation`, the dispersion of the ground
+        within blocks of that size), `count`, `share` (of the set's volume
+        the blocks cover) and `left_out` (blocks of that size missing some
+        of their ground).
+
+    Raises
+    ------
+    ValueError
+        If the container is not a `BlockSet3D`, or the variable carries no
+        dispersion or no simulations.
+    KeyError
+        If `component` names no component of the variable.
+    """
+    if not isinstance(container, _data.BlockSet3D):
+        raise ValueError(
+            "the dispersion by block size merges blocks into their parents, "
+            "which needs a BlockSet3D; got a %s" % type(container).__name__)
+
+    var = variable(container, name)
+    parts = continuous_parts(var)
+    if component is not None:
+        parts = [part for part in parts if str(part.name) == str(component)]
+        if not parts:
+            raise KeyError("no component %r in %r; found %s"
+                           % (component, name, component_names(var)))
+
+    return [{"name": str(part.name), "label": axis_label(part),
+             "sizes": _dispersion_sizes(container, part)} for part in parts]
+
+
+def _dispersion_sizes(blocks, part):
+    """`dispersion_by_support` for one column."""
+    dispersion = _np.asarray(part.dispersion.values.to_numpy(), dtype=float)
+    leaf = _np.isfinite(dispersion)
+    if not _np.any(leaf):
+        raise ValueError(
+            "%r carries no dispersion; a model writes one when it predicts "
+            "onto blocks, and a derived variable has none" % str(part.name))
+    store = getattr(part, "simulations", None)
+    if store is None or len(getattr(store, "shape", ())) != 2:
+        raise ValueError(
+            "%r carries no simulations, which a parent's dispersion is put "
+            "together from" % str(part.name))
+
+    level = _np.asarray(blocks.level)
+    ratio = _np.array(blocks.discretization, dtype=_np.int64)
+    volume = _np.prod(blocks._size, axis=1)         # in base cells
+    finest = int(level[leaf].max())
+    n_sim = int(store.shape[1])
+
+    def cells(coarse):
+        """A block's volume at level `coarse`, in base cells."""
+        return int(_np.prod(blocks._coarse_size // ratio ** coarse))
+
+    # every block finer than a level, numbered by its ancestor there
+    parents = {}
+    for coarse in range(finest):
+        inside = leaf & (level > coarse)
+        _, inverse = _np.unique(blocks._ancestor(coarse)[inside],
+                                return_inverse=True)
+        index = _np.full(blocks.n_data, -1, dtype=_np.int64)
+        index[inside] = inverse.ravel()
+        parents[coarse] = (index, int(index.max()) + 1)
+
+    # The realizations enter shifted by their mean: the spread between
+    # blocks is a difference of two sums of squares, and a grade far from
+    # zero would otherwise leave it at the mercy of rounding.
+    prediction = _np.asarray(part.prediction.values.to_numpy(), dtype=float)
+    finite = _np.isfinite(prediction) & leaf
+    shift = float(prediction[finite].mean()) if _np.any(finite) else 0.0
+
+    # A parent's realizations are sums over blocks that sit anywhere in the
+    # store -- a split appends its children at the end -- so they are
+    # gathered band by band into one row per parent and realization. Where
+    # that many rows would not fit, the realizations are taken a slice at a
+    # time, each slice another pass over the store.
+    rows = sum(n for _, n in parents.values())
+    per_pass = max(1, int(_storage.DEFAULT_THRESHOLD // (8 * max(rows, 1))))
+    square = _np.zeros(blocks.n_data)
+    between = {coarse: _np.zeros(n) for coarse, (_, n) in parents.items()}
+    for first in range(0, n_sim, per_pass):
+        columns = slice(first, min(first + per_pass, n_sim))
+        sums = {coarse: _np.zeros((n, columns.stop - columns.start))
+                for coarse, (_, n) in parents.items()}
+        for band in store.row_bands():
+            keep = _np.flatnonzero(leaf[band])
+            if keep.size == 0:
+                continue
+            values = _np.asarray(store[band, columns], dtype=float)
+            values = values[keep] - shift
+            keep = keep + band.start
+            square[keep] += _np.sum(values ** 2, axis=1)
+            for coarse, (index, n) in parents.items():
+                parent = index[keep]
+                used = parent >= 0
+                if not _np.any(used):
+                    continue
+                count = int(_np.count_nonzero(used))
+                gather = _sparse.csr_matrix(
+                    (volume[keep[used]] / cells(coarse),
+                     (parent[used], _np.arange(count))), shape=(n, count))
+                sums[coarse] += gather @ values[used]
+        for coarse in parents:
+            between[coarse] += _np.sum(sums[coarse] ** 2, axis=1)
+
+    total = float(volume.sum())
+    sizes = []
+    for coarse in range(finest, -1, -1):
+        whole = leaf & (level == coarse)
+        variance = [dispersion[whole]]
+        depth = [_np.zeros(int(_np.count_nonzero(whole)), dtype=_np.int64)]
+        left_out = int(_np.count_nonzero(~leaf & (level == coarse)))
+        if coarse in parents:
+            index, n = parents[coarse]
+            inside = index >= 0
+            weight = volume[inside] / cells(coarse)
+            # the law of total variance, realization by realization: what
+            # varies inside the blocks, plus how their values differ
+            within = _np.bincount(index[inside], minlength=n,
+                                  weights=weight * dispersion[inside])
+            spread = _np.bincount(index[inside], minlength=n,
+                                  weights=weight * square[inside] / n_sim) \
+                - between[coarse] / n_sim
+            covered = _np.bincount(index[inside], minlength=n,
+                                   weights=volume[inside])
+            complete = covered == cells(coarse)
+            deepest = _np.zeros(n, dtype=_np.int64)
+            _np.maximum.at(deepest, index[inside], level[inside] - coarse)
+            variance.append((within + spread)[complete])
+            depth.append(deepest[complete])
+            left_out += int(_np.count_nonzero(~complete))
+
+        variance = _np.maximum(_np.concatenate(variance), 0.0)
+        count = len(variance)
+        sizes.append({
+            "level": coarse,
+            "size": blocks.base_step * (blocks._coarse_size
+                                        // ratio ** coarse),
+            "deviation": _np.sqrt(variance),
+            "depth": _np.concatenate(depth),
+            "rms": float(_np.sqrt(variance.mean())) if count else _np.nan,
+            "count": count,
+            "share": count * cells(coarse) / total,
+            "left_out": left_out})
+    return sizes
+
+
+def split_label(depth: int) -> str:
+    """How many times the refinement split inside a block, in words."""
+    names = {0: "left whole", 1: "split once", 2: "split twice"}
+    return names.get(int(depth), "split %d times" % int(depth))
+
+
+def support_tick(entry: dict) -> "list[str]":
+    """The lines naming one block size on the axis of
+    `dispersion_by_support`: the size, then how much of the set it is."""
+    lines = [" × ".join("%g" % side for side in entry["size"]),
+             "%d block%s, %.0f%%" % (entry["count"],
+                                     "" if entry["count"] == 1 else "s",
+                                     100 * entry["share"])]
+    if entry["left_out"]:
+        lines.append("%d left out" % entry["left_out"])
+    return lines
+
+
+def jitter(n: int, width: float = 0.5) -> _types.FloatArray:
+    """Offsets spreading `n` points across a strip `width` wide.
+
+    Taken from the golden-ratio sequence rather than at random, so a figure
+    comes out the same every time and the points spread evenly whatever
+    their number.
+    """
+    return ((_np.arange(n) * 0.6180339887498949 % 1.0 - 0.5)
+            * width).astype(_np.float64)
+
+
+def support_strip(sizes: "list[dict]", most: int = 5000) -> "list[tuple]":
+    """The points of `dispersion_by_support` drawn as a strip.
+
+    One `(depth, x, y)` per depth of splitting, `x` being the position of
+    the block's size plus a spread across the strip. At most about `most`
+    blocks of each size are kept, taken by striding through them.
+    """
+    x, y, depth = [], [], []
+    for position, entry in enumerate(sizes):
+        if entry["count"] == 0:
+            continue
+        pick = _np.arange(0, entry["count"],
+                          max(1, int(_np.ceil(entry["count"] / most))))
+        x.append(position + jitter(len(pick)))
+        y.append(entry["deviation"][pick])
+        depth.append(entry["depth"][pick])
+    if not x:
+        return []
+    x, y, depth = (_np.concatenate(a) for a in (x, y, depth))
+    return [(int(d), x[depth == d], y[depth == d]) for d in _np.unique(depth)]
 
 
 def grid_shape(n_panels):

@@ -821,6 +821,21 @@ class BlockSet3D(PointData):
         return self._coarse_size[None, :] \
             // ratio[None, :] ** self._level[:, None]
 
+    def _ancestor(self, level):
+        """Each block's ancestor at `level`, as one integer per block.
+
+        The flat lattice index of the ancestor's lower corner, which names it
+        among the blocks of that level. A block at `level` is its own
+        ancestor, and one coarser than `level` has none there and reads -1.
+        """
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        size = self._coarse_size // ratio ** int(level)
+        corner = (self._origin // size[None, :]) * size[None, :]
+        shape = self.lattice_shape
+        key = (corner[:, 0] * shape[1] + corner[:, 1]) * shape[2] \
+            + corner[:, 2]
+        return _np.where(self._level >= int(level), key, -1)
+
     @property
     def block_size(self):
         return self._size * self.base_step

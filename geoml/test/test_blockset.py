@@ -100,6 +100,30 @@ def test_the_children_land_where_the_sub_blocks_were():
     assert np.allclose(sub, children)
 
 
+@pytest.mark.parametrize("discretization", [(2, 2, 2), (2, 2, 1)])
+def test_a_block_names_its_ancestor_at_any_coarser_level(discretization):
+    blocks = _blockset(discretization)
+    parent = blocks._ancestor(0)[5]
+    fine = blocks.split([5])
+    finer = fine.split(np.flatnonzero(fine.level == 1)[:1])
+
+    # every descendant of the split block reads its name at the top, and a
+    # grandchild its own parent's one level down
+    below = finer.level > 0
+    assert np.all(finer._ancestor(0)[below] == parent)
+    grandchildren = finer.level == 2
+    assert len(np.unique(finer._ancestor(1)[grandchildren])) == 1
+    # a block is its own ancestor at its own level, and one coarser than the
+    # level asked has none there
+    assert len(np.unique(finer._ancestor(1)[finer.level == 1])) == \
+        np.count_nonzero(finer.level == 1)
+    assert np.all(finer._ancestor(1)[finer.level == 0] == -1)
+    # and the families the names draw are the ones `group` takes
+    assert np.count_nonzero(finer._ancestor(1) ==
+                            finer._ancestor(1)[grandchildren][0]) == \
+        int(np.prod(discretization))
+
+
 def test_a_discretization_that_cannot_refine_is_refused():
     with pytest.raises(ValueError, match="cannot refine"):
         geoml.data.BlockSet3D(START, N, STEP, discretization=(1, 1, 1),

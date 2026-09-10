@@ -86,7 +86,8 @@ def _prepare_composition(values, labels, units, rest, name):
        other, so a row that is short of one of them cannot be used.
     3. Non-positive parts are replaced by half the smallest positive value
        of their own column, the usual substitution for values below
-       detection. A log-ratio transform cannot take a zero.
+       detection. A log-ratio transform cannot take a zero. How many were
+       replaced in each part is reported in one warning.
     4. With `rest`, a further part is added holding whatever is left of the
        whole. Where the parts leave no room -- they already account for
        everything, or for more than everything -- the rest is held at the
@@ -119,6 +120,7 @@ def _prepare_composition(values, labels, units, rest, name):
         parts[missing] = _np.nan
         changed |= missing
 
+    zeros = {}
     for i, label in enumerate(given):
         with _np.errstate(invalid="ignore"):
             replace = parts[:, i] <= 0
@@ -132,6 +134,13 @@ def _prepare_composition(values, labels, units, rest, name):
             continue
         parts[replace, i] = 0.5 * positive.min()
         changed |= replace
+        zeros[label] = int(replace.sum())
+    if zeros:
+        _warnings.warn(
+            f"zero or negative values in {name!r} were replaced by half the "
+            f"smallest positive value of their own part: "
+            + ", ".join(f"{label} {count}" for label, count in zeros.items())
+            + f" (of {int((~missing).sum())} samples)")
 
     def written(rows):
         """The parts in their own units, the untouched rows kept verbatim."""
@@ -999,10 +1008,11 @@ class _PointBased(_SpatialData):
         one part is marked missing entirely, the parts of a composition
         carrying information only relative to each other; non-positive
         parts are replaced by half the smallest positive value of their own
-        column, since a log-ratio transform cannot take a zero; and the
-        rows are closed, either by adding a `rest` part holding whatever is
-        left of the whole or by scaling each row to sum to one. Data that
-        already arrives closed and positive is left exactly as it is.
+        column, since a log-ratio transform cannot take a zero, and a
+        warning says how many in each part; and the rows are closed, either
+        by adding a `rest` part holding whatever is left of the whole or by
+        scaling each row to sum to one. Data that already arrives closed and
+        positive is left exactly as it is.
 
         Parameters
         ----------

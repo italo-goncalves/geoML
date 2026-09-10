@@ -541,6 +541,21 @@ def test_zeros_are_replaced_by_half_the_smallest_positive_of_their_column():
     np.testing.assert_allclose(parts, raw / raw.sum(axis=1, keepdims=True))
 
 
+def test_the_zeros_replaced_are_counted_part_by_part():
+    """A negative value is a below-detection code and counts as a zero."""
+    with pytest.warns(UserWarning, match=r"pb 2, zn 1 \(of 4 samples\)"):
+        _composition(pd.DataFrame({"pb": [-0.5, 0.0, 4.0, 6.0],
+                                   "zn": [1.0, 0.0, 3.0, 2.0],
+                                   "cu": [1.0, 2.0, 3.0, 4.0]}))
+
+
+def test_a_composition_with_no_zeros_reports_none():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _composition(pd.DataFrame({"pb": [1.0, 4.0], "zn": [1.0, 3.0]}))
+    assert not [w for w in caught if "zero or negative" in str(w.message)]
+
+
 def test_units_are_converted_so_the_parts_can_be_added_up():
     names, parts = _composition(
         pd.DataFrame({"pb": [1.0], "ag": [10000.0]}),

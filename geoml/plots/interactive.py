@@ -214,13 +214,27 @@ class Interactive(_base.Selection):
     # ------------------------------------------------------------------ #
     # figures
     # ------------------------------------------------------------------ #
-    def histogram(self, bins=25, height=None, width=None) -> "_go.Figure":
+    def histogram(self, bins=25, statistics=True, height=None,
+                  width=None) -> "_go.Figure":
         """
         The distribution of the continuous variable, one panel per component.
 
         Split by category when there is one: the populations are drawn over
         each other with a common set of bins, so their spreads can be compared
         rather than only their shapes.
+
+        Parameters
+        ----------
+        bins : int or sequence
+            How many bins, or where their edges are.
+        statistics : bool
+            Sum each panel up in a box: the count, the mean, the standard
+            deviation, the coefficient of variation, the skewness and the
+            kurtosis, beside the minimum, the quartiles, the median and the
+            maximum. They are of every measured value, the categories
+            pooled, and the kurtosis is the excess over a normal's. The box
+            sits over the half of the bins with the lower bars, and the axis
+            is raised so that none of those runs under it.
         """
         var = self._require_continuous("histogram")
         values, measured, labels = _prep.numeric_values(var)
@@ -232,20 +246,31 @@ class Interactive(_base.Selection):
         # of the one above, and both live in the gap between the two
         figure = _subplots(rows=rows, cols=columns, subplot_titles=labels,
                            vertical_spacing=min(0.4 / rows, 0.2))
+        height = height or 100 + 250 * rows
+        # about how many pixels a panel takes, for the text plotly lays out
+        # in the page; a figure left to fill its page is taken as 900 wide
+        panel = (((width or 900) - 150) / columns * 0.85,
+                 (height - 100) / rows * 0.75)
 
         for i, label in enumerate(labels):
             row, column = divmod(i, columns)
             edges = _np.histogram_bin_edges(values[measured, i], bins=bins)
+            tallest = _np.zeros(len(edges) - 1)
             for j, (name, mask) in enumerate(series):
                 keep = measured if mask is None else mask
                 self._bars(figure, values[keep, i], _np.where(keep)[0], edges,
                            self._color(j, name), name or var.name, i == 0,
                            row + 1, column + 1)
+                drawn = values[keep, i]
+                tallest = _np.maximum(tallest, _np.histogram(
+                    drawn[_np.isfinite(drawn)], bins=edges)[0])
+            if statistics:
+                self._statistics(figure, values[measured, i], tallest, edges,
+                                 row + 1, column + 1, panel)
 
         figure.update_yaxes(title_text="count", col=1)
         return self._finish(
-            figure, title=var.name,
-            height=height or 100 + 250 * rows, width=width,
+            figure, title=var.name, height=height, width=width,
             barmode="overlay",
             legend={"title": {"text": getattr(self.categorical, "name", "")}})
 
@@ -1544,6 +1569,136 @@ class Interactive(_base.Selection):
         red, green, blue = (int(color[i:i + 2], 16) for i in (1, 3, 5))
         return "rgba(%d,%d,%d,0.25)" % (red, green, blue)
 
+    def dispersion_by_support(self, component=None, kind="box", alpha=0.2,
+                              most=5000, size=5, height=None,
+                              width=None) -> "_go.Figure":
+        """
+        How much the ground varies inside a block, against the block's size.
+
+        Only a `BlockSet3D` has blocks of several sizes. Every block is merged
+        into its parent, level by level up to the coarsest, so each size the
+        lattice has holds a distribution: the within-block standard deviation
+        of every block of that size, the finest on the left. The line joins
+        each size's root mean square, the dispersion of the ground within
+        blocks of that size. A parent is put together from the blocks inside
+        it, realization by realization, and never predicted.
+
+        A block the refinement left whole reads its dispersion off its own
+        sub-blocks, one position per child, and one put together from its
+        descendants off all of theirs. Fewer positions see less of the
+        ground, so at one size a block left whole reads lower than a split
+        block over the same ground; `kind="jitter"` colours every block by
+        how many times the refinement split it, which is where that shows.
+        Each size's label gives how many blocks it holds and the share of
+        the volume they cover: the fine sizes exist only where the
+        refinement went, so the distributions are of different ground.
+
+        A block put together from others is a row of no container, so the
+        points carry no row for a dashboard to link on.
+
+        Parameters
+        ----------
+        component : str
+            One component of a vector variable, drawn on its own.
+        kind : str
+            `"box"`, `"violin"` or `"jitter"`, the last one point per block,
+            coloured by how many times the refinement split it.
+        alpha : float
+            How opaque each point is, for `kind="jitter"`. Low by default:
+            a size can hold thousands of blocks, and where they pile up is
+            what there is to see.
+        most : int
+            About how many blocks of each size `kind="jitter"` draws, taken
+            by striding through them; the box and the violin use them all.
+        size : float
+            Point size, for `kind="jitter"`.
+
+        See Also
+        --------
+        geoml.plots.prepare.dispersion_by_support : the numbers drawn here.
+        """
+        self._check_kind(kind, ("box", "violin", "jitter"))
+        var = self._require_continuous("dispersion_by_support")
+        panels = _prep.dispersion_by_support(self.data, var.name,
+                                             component=component)
+
+        rows, columns = _prep.grid_shape(len(panels))
+        figure = _subplots(rows=rows, cols=columns,
+                           subplot_titles=[panel["label"] for panel in panels],
+                           horizontal_spacing=0.08)
+        for i, panel in enumerate(panels):
+            row, column = divmod(i, columns)
+            self._support(figure, panel, kind, most, size, alpha, row + 1,
+                          column + 1, legend=i == 0)
+        return self._finish(
+            figure, title="%s: dispersion by block size" % var.name,
+            height=height or 140 + 380 * rows, width=width)
+
+    def _support(self, figure, panel, kind, most, size, alpha, row, column,
+                 legend):
+        """One component of `dispersion_by_support`."""
+        sizes = panel["sizes"]
+        position = _np.arange(len(sizes), dtype=float)
+        filled = [i for i, entry in enumerate(sizes) if entry["count"]]
+        colour = _style.color(0)
+
+        # a strip is drawn per depth below, not per size
+        for i in ([] if kind == "jitter" else filled):
+            values = sizes[i]["deviation"]
+            common = {"x": _np.full(len(values), position[i]), "y": values,
+                      "name": _prep.support_tick(sizes[i])[0],
+                      "showlegend": False}
+            if kind == "box":
+                trace = _go.Box(width=0.5, boxpoints="outliers",
+                                marker={"color": colour, "size": 3},
+                                line={"color": colour},
+                                fillcolor=self._faint(colour), **common)
+            else:
+                trace = _go.Violin(width=0.7, points=False,
+                                   line={"color": colour},
+                                   fillcolor=self._faint(colour),
+                                   meanline={"visible": False},
+                                   box={"visible": True}, **common)
+            figure.add_trace(trace, row=row, col=column)
+
+        if kind == "jitter":
+            # the blocks split least are the fewest at the coarse sizes and
+            # the ones the colours are for, so they are drawn last, on top;
+            # the legend keeps them first
+            for depth, x, y in reversed(_prep.support_strip(sizes, most)):
+                label = _prep.split_label(depth)
+                colour = self._color(depth, label)
+                figure.add_trace(_go.Scatter(
+                    x=x, y=y, mode="markers",
+                    marker={"size": size, "opacity": alpha,
+                            "color": colour, "line": {"width": 0}},
+                    name=label, legendgroup=label, showlegend=False,
+                    hovertemplate="%{y:.4g}<extra></extra>"),
+                    row=row, col=column)
+                if legend:
+                    # the points are faint on purpose, and a legend draws
+                    # them as they are; an empty trace in the same group
+                    # carries the key at full strength, and clicking it
+                    # still hides the strip
+                    figure.add_trace(_go.Scatter(
+                        x=[None], y=[None], mode="markers",
+                        marker={"size": 8, "color": colour},
+                        name=label, legendgroup=label, legendrank=depth,
+                        hoverinfo="skip"), row=row, col=column)
+
+        self._line(figure, position[filled],
+                   [sizes[i]["rms"] for i in filled], INK, row, column,
+                   width=1.4, name="root mean square", legend=legend)
+        figure.update_xaxes(
+            tickvals=position,
+            ticktext=["<br>".join(_prep.support_tick(entry))
+                      for entry in sizes],
+            range=[-0.6, len(sizes) - 0.4], title_text="block size",
+            row=row, col=column)
+        # from zero, so a change with size reads at its true scale
+        figure.update_yaxes(title_text="within-block standard deviation",
+                            rangemode="tozero", row=row, col=column)
+
     # ------------------------------------------------------------------ #
     # the matrix
     # ------------------------------------------------------------------ #
@@ -1638,6 +1793,42 @@ class Interactive(_base.Selection):
             raise ValueError(
                 "upper must be 'hist2d', 'density' or 'correlation'; got %r"
                 % upper)
+
+    @staticmethod
+    def _statistics(figure, values, tallest, edges, row, column, panel):
+        """A panel's summary statistics, in the corner its bars leave free.
+
+        `panel` is about how many pixels the panel takes across and down.
+        Plotly lays the text out in the page, so the share of the panel the
+        box covers is worked out from the font: a monospace character about
+        0.6 of the size across, a line about 1.3 of it down, and the frame's
+        padding around them.
+        """
+        lines = _prep.statistics_lines(_prep.summary_statistics(values))
+        side = _prep.statistics_side(tallest)
+        font = 9
+        across = (0.6 * font * max(len(line) for line in lines) + 8) \
+            / panel[0]
+        down = (1.3 * font * len(lines) + 8) / panel[1]
+        span = float(edges[-1] - edges[0])
+        if side == "right":
+            low, high = edges[-1] - (across + 0.02) * span, edges[-1]
+        else:
+            low, high = edges[0], edges[0] + (across + 0.02) * span
+        top = _prep.statistics_top(tallest, edges, low, high, down + 0.02)
+
+        # the columns are lined up with spaces, which a label collapses
+        # unless they cannot break
+        text = "<br>".join(line.replace(" ", "\u00a0") for line in lines)
+        figure.add_annotation(
+            xref="x domain", yref="y domain", row=row, col=column,
+            x=0.98 if side == "right" else 0.02, y=0.98, xanchor=side,
+            yanchor="top", align="left", text=text, showarrow=False,
+            font={"size": font, "family": "Courier New, monospace",
+                  "color": INK},
+            bgcolor="rgba(255,255,255,0.8)", bordercolor=INK,
+            borderwidth=0.6, borderpad=3)
+        figure.update_yaxes(range=[0.0, top], row=row, col=column)
 
     def _correlation(self, figure, x, y, column, row, n, corner=False):
         """What the eye is being asked about, as a number."""
@@ -1795,10 +1986,12 @@ class Interactive(_base.Selection):
         figure.update_yaxes(range=window, row=row, col=column)
 
         if left_out:
-            # a trimmed panel is not showing everything, and says so
+            # a trimmed panel is not showing everything, and says so -- in
+            # the corner a smoothing model leaves empty, since it never
+            # gives the highest measurements the lowest predictions
             figure.add_annotation(
                 xref="x domain", yref="y domain", row=row, col=column,
-                x=0.05, y=0.95, xanchor="left", yanchor="top",
+                x=0.95, y=0.05, xanchor="right", yanchor="bottom",
                 text="outliers left out: %d of %d"
                      % (left_out, len(true) + left_out),
                 font={"size": 9}, showarrow=False,

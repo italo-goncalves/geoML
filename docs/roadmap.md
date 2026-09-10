@@ -69,6 +69,56 @@ tonnage-above-cut-off distribution against the truth, versus today's
 unpaired ensemble and the hard-domained workflow. Both (1) and (2)
 presupposed the sibling-normals fix, done 2026-09-10 (settled below).
 
+**M–L — Merging subcompositions** (requested 2026-09-10). Some
+compositional data sets are missing data in a structured way: the same
+elements unassayed in a large share of the samples, as a campaign that ran
+a shorter suite leaves them. `_prepare_composition` marks a row missing
+entirely when any part is missing, so one composition over every element
+throws those samples away, and modelling the sparse elements as a separate
+variable gives up the closure. The proposal: two compositions. The
+*master* holds the elements every sample has, the partially missing ones
+aggregated into its rest (`rest=True` already does that for whatever is
+not listed). The *subcomposition* holds the partially missing elements as
+shares of the master's rest, trained only on the samples that carry them.
+Correlations between the two sets of latent variables may link them. After
+prediction the two are joined realization by realization: the master's
+rest `r` in each realization is split into that realization's
+subcomposition proportions `q`, part *i* becoming `r·q_i` of the whole,
+and the prediction, the quantiles and both variances are taken over the
+joined realizations -- never the product of the two predictions, which
+drops whatever correlation links `r` and `q`.
+
+What exists: two compositional variables on one container, each with its
+own likelihood and warping, on two leaves of one tree (0.6.10). A shared
+parent is what correlates them, and it is also what pairs their
+realizations: realization *k* of a shared parent is the same in every leaf
+(the item above), while two separate GP leaves draw independently since
+the node-keyed draws. A sample without the partially missing elements is a
+missing row for the subcomposition's likelihood, which training already
+skips. `container.derive` already applies a function once per realization,
+walking the realizations in bands.
+
+What it needs: (1) the subcomposition's own rest -- what the master's rest
+holds beyond the partially missing elements -- without which the split
+would hand the whole rest to them. Building it means dividing those
+elements by the master's rest in fractions of the whole, with the crowding
+problem `_prepare_composition` already settles for a rest (samples where
+they account for all of it or more). One constructor taking both groups
+from one table is the natural door, units carried as 0.6.10 carries them.
+(2) The join, into one `CompositionalVariable` holding every part in its
+own unit -- `derive` would give loose continuous variables, one per part.
+(3) Block support: a block's stored realizations are averages over its
+sub-blocks, and the average of a product is not the product of the
+averages, so on a block model the join belongs inside the prediction, per
+sub-block, before `_aggregate`; on points the stored realizations suffice.
+
+Gate: Jura's seven metals with two hidden over a spatially contiguous share
+of the samples, as a shorter campaign would leave them. The joined model
+against one composition over the complete rows only, with the full-data
+model as the ceiling: rmse, CRPS and coverage on the hidden elements, the
+common elements no worse, and every joined realization summing to the
+whole.
+
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
 the detection limit by universal practice, and that biases exactly the low
@@ -431,6 +481,42 @@ drillhole planning.
 
 **S — Surface I/O residue.** OBJ/PLY/STL both ways, the vendor formats, and
 any attribute travelling with the geometry. Nothing has demanded them yet.
+
+**M — Mesh operations through `pyvista-manifold`** (requested
+2026-09-10), to make them easier and simpler. `pyvista-manifold` is
+PyVista's own accessor (MIT, 0.1.1 of May 2026) over Manifold
+(`manifold3d>=3.0`), "a fast and reliable boolean / CSG library for
+triangle meshes": `mesh.manifold.union`/`difference`/`intersection`/
+`batch_boolean`, `split`/`split_by_plane`/`trim_by_plane`/`decompose`,
+`simplify(tolerance)`, hulls, refinement, and `volume`/`genus`/`is_valid`.
+Today a boolean between bodies is `_resolved` (apart or nested, answered
+exactly from the vertices) in front of `_implicit_combine` (signed distance
+on a ~2M-cell grid, `_banded_distance`, the forked `_signed_distance`
+queries) -- about 330 lines of `meshes.py`, exact only to the grid's step
+and saying so in a warning. Booleans computed on the triangles would retire
+most of that and give back the exactness lost with VTK's filter in 0.6.7.
+Three constraints. **Solids only**: the inputs must be closed and not
+self-intersecting, so body against body can move, `clip_meshes`' extruded
+ground included, while a sheet kept a sheet (`Surface3D` ∩ body) keeps
+today's route. **float32 inside Manifold**: at mine-grid coordinates that
+is the 0.25 m quantization the painted contour already had to escape, so
+every conversion goes through `_local_frame`, which rounds a shared corner
+off for VTK today, or through `to_mesh64()`. **Invalid input is not
+refused**: a mesh that is not a closed manifold still converts and
+"downstream operations may misbehave", so `is_valid` gates every call; and
+a crash cannot be caught, which is how VTK's filter was lost, so no process
+boundary may be skipped unless the gate shows none. The package is young
+(six stars, nine open issues, 2026-09) and wants pyvista 0.48 against the
+0.47 floor; `manifold3d` itself is the fallback if the accessor stalls. A
+hard dependency if it passes: an optional extra would keep both engines,
+and none of the simplification. Gate: the contour-derived shells that
+segfaulted VTK (836 triangles and up, at the origin and at 1e6) and the 15
+Assen rock-pair intersections (95 s today) -- no crash, every result a
+consistent `Solid3D`, volumes within the implicit engine's step of today's,
+and the time. Separately, `simplify(tolerance)` against `simplify(max_error)`:
+vtkDecimatePro's own metric measured 7× loose at tight budgets, so
+Manifold's tolerance is checked against the original the same way
+(`_DistanceQueries`) before it replaces anything.
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a

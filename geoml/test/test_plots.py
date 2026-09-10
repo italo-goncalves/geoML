@@ -219,6 +219,78 @@ def test_a_histogram_has_one_panel_per_component(jura):
     assert len(_visible(figure)) == 7
 
 
+def test_every_histogram_panel_is_summed_up(jura):
+    figure = geoml.plots.Explorer(jura, continuous="Elements").histogram()
+    values, measured, _ = prepare.numeric_values(jura.variables["Elements"])
+    for i, panel in enumerate(_visible(figure)):
+        (box,) = panel.texts
+        summary = prepare.summary_statistics(values[measured, i])
+        assert box.get_text() == "\n".join(prepare.statistics_lines(summary))
+
+        # and no bar runs under it
+        corners = box.get_window_extent().get_points()
+        low, high = panel.transData.inverted().transform(corners)[:, 0]
+        bottom = panel.transAxes.inverted().transform(corners)[0, 1]
+        for bar in panel.patches:
+            if bar.get_x() + bar.get_width() > low and bar.get_x() < high:
+                assert bar.get_height() / panel.get_ylim()[1] < bottom
+
+    plain = geoml.plots.Explorer(jura, continuous="Elements").histogram(
+        statistics=False)
+    assert not any(panel.texts for panel in plain.axes)
+
+
+def test_the_summary_statistics_are_the_moments_of_the_values_themselves():
+    from scipy import stats
+    values = np.array([1.0, 2.0, 3.0, 4.0, 10.0, np.nan])
+    finite = values[np.isfinite(values)]
+    summary = prepare.summary_statistics(values)
+
+    assert summary["n"] == 5
+    assert np.isclose(summary["mean"], finite.mean())
+    assert np.isclose(summary["std"], finite.std())
+    assert np.isclose(summary["cv"], finite.std() / finite.mean())
+    # the population form, and the kurtosis in excess of a normal's
+    assert np.isclose(summary["skewness"], stats.skew(finite))
+    assert np.isclose(summary["kurtosis"], stats.kurtosis(finite))
+    assert (summary["min"], summary["median"], summary["max"]) == \
+        (1.0, 3.0, 10.0)
+    assert np.allclose([summary["q1"], summary["q3"]],
+                       np.quantile(finite, [0.25, 0.75]))
+
+
+def test_what_a_column_cannot_say_reads_as_a_dash():
+    constant = prepare.summary_statistics(np.full(4, 2.0))
+    assert np.isnan(constant["skewness"]) and np.isnan(constant["kurtosis"])
+    # a coefficient of variation means nothing about a centred column
+    centred = prepare.summary_statistics(np.array([-1.0, 0.0, 1.0]))
+    assert np.isnan(centred["cv"])
+
+    lines = prepare.statistics_lines(centred)
+    assert len(lines) == 6
+    assert lines[3].split()[:2] == ["CV", "-"]
+    # a ratio that rounds to nothing carries no sign
+    nearly = dict(centred, kurtosis=-0.0004)
+    assert prepare.statistics_lines(nearly)[5].split() == ["kurt", "0.00"]
+    # and the columns line up: every label on the right starts at one place
+    assert len({line.index(label) for line, label in
+                zip(lines, ["min", "Q1", "median", "Q3", "max"])}) == 1
+
+
+def test_the_box_sits_over_the_lower_half_and_the_bars_clear_it():
+    counts, edges = [10, 30, 20, 5, 2, 1], np.arange(7.0)
+    # a long right tail leaves the right half nearly empty, a long left one
+    # the left
+    assert prepare.statistics_side(counts) == "right"
+    assert prepare.statistics_side([1, 2, 5, 20, 30, 10]) == "left"
+    # over the last three bins, the tallest bar overall sets the top ...
+    assert np.isclose(prepare.statistics_top(counts, edges, 3.0, 6.0, 0.4),
+                      31.5)
+    # ... and a box reaching over the peak raises it until the peak clears
+    assert np.isclose(prepare.statistics_top(counts, edges, 1.5, 6.0, 0.4),
+                      1.02 * 30 / 0.6)
+
+
 def test_a_pairs_plot_leaves_out_the_half_that_repeats(jura):
     figure = geoml.plots.Explorer(
         jura, continuous="Elements", categorical="Rock").pairs()

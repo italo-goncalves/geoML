@@ -174,6 +174,23 @@ def test_a_histogram_has_a_panel_per_component_and_a_trace_per_category(eda):
     assert figure.layout.title.text == "Elements"
 
 
+def test_every_histogram_panel_is_summed_up(eda, jura):
+    figure = eda.histogram()
+    boxes = [a for a in figure.layout.annotations if "mean" in a.text]
+    assert len(boxes) == 7
+
+    values, measured, _ = prepare.numeric_values(jura.variables["Elements"])
+    lines = prepare.statistics_lines(
+        prepare.summary_statistics(values[measured, 0]))
+    # pooled over the rock types, and lined up with spaces that cannot
+    # break, or plotly would collapse the columns
+    assert boxes[0].text == "<br>".join(line.replace(" ", chr(0xA0))
+                                        for line in lines)
+    assert boxes[0].xref == "x domain"
+    # the subplot titles alone, without it
+    assert len(eda.histogram(statistics=False).layout.annotations) == 7
+
+
 def test_a_category_is_named_in_the_legend_once(eda):
     figure = eda.histogram()
     named = [trace.name for trace in figure.data if trace.showlegend]

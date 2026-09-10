@@ -178,6 +178,53 @@ and -5 where the EDA's PCA of the same data was centred at zero. It reads
 `get_measurements` now, so the figure is centred as the model is; the
 scale still differs from the EDA's PCA, whose scores keep their
 eigenvalues where the warping's are whitened.
+* **Histograms carry their summary statistics.** Every panel of
+`histogram` sums its values up in a box, on both backends: the count, the
+mean, the standard deviation, the coefficient of variation, the skewness
+and the kurtosis beside the minimum, the quartiles, the median and the
+maximum; `statistics=False` leaves it out. The moments are the values' own,
+in population form, and the kurtosis is the excess over a normal's; with
+categories drawn, the statistics are of every measured value, the
+categories pooled. The box takes the upper corner over the half of the
+bins with the lower bars -- the right, for the long tail of an assay -- and
+the axis rises until no bar runs under it: measured exactly once the layout
+is settled in matplotlib, estimated from the font and the panel's size in
+plotly, which lays its text out in the page. `prepare.summary_statistics`,
+`statistics_lines`, `statistics_side` and `statistics_top` hold the
+arithmetic.
+* **`dispersion_by_support`: how much the ground varies inside a block,
+against the block's size.** A `BlockSet3D` holds blocks of several sizes,
+and a block's `dispersion` is the spread of its sub-blocks on its own
+support. The new figure merges every block into its parent, level by level
+up to the coarsest, and draws the within-block standard deviation of every
+block of each size as a box, a violin or a jittered strip, the strip
+coloured by how many times the refinement split inside each block, with a
+line through each size's root mean square, on an axis from zero so the
+change with size reads at its scale; the strip's points are faint by
+default (`alpha=0.2`) and its key is not. A parent is never predicted:
+its dispersion is its blocks', volume-weighted, plus how much their values
+differ among themselves, taken realization by realization from the stored
+simulations. That is the law of total variance, exact against a brute-force
+spread of planted values, and it is the reading `group`'s docstring already
+allows, a realization being what comes across a regrouping exactly. Every
+stored realization is used, read a band of blocks at a time, and a parent
+missing some of its ground is left out at its size and every size above.
+Two things to read it with. The fine sizes exist only where the refinement
+went, so each size is different ground; its label gives the count and the
+share of the volume. And a block left whole reads its dispersion off its 8
+sub-blocks where a split one reads off 64 positions or more, so over the
+same ground it reads lower: a linear trend loses a quarter of its variance
+at two positions a side against six percent at four, an uncorrelated field
+an eighth against under two percent. On a refined synthetic model the root
+mean square doubles per level (0.038, 0.081, 0.164) and the blocks left
+whole sit at the bottom of each size's spread. Both backends;
+`prepare.dispersion_by_support` and `BlockSet3D._ancestor` underneath.
+* **A composition says how many zeros it replaced.**
+`add_compositional_variable`, and every drillhole conversion through it,
+replaces a zero or negative part with half the smallest positive value of
+its own column, and did so without a word. A warning now counts the
+replacements part by part, with the number of samples they are out of, so
+a part that sits mostly below detection is seen before it is modelled.
 * **`prediction_scatter(trim=...)` leaves the outliers out.** A few assays
 far from the rest set the limits of the scatter and squeezed everything
 else into a corner, most of the panel left blank. `trim` names a pair of
@@ -185,13 +232,20 @@ quantiles, as `scene`'s `clip` does -- `[0, 0.99]` for a long right tail
 -- and the window runs from the lower quantile of the measured or the
 predicted values, whichever is lower, to the upper quantile of whichever
 is higher. A location outside it on either axis leaves the cloud and both
-margins, and the panel counts in a corner how many did. Each end comes
-from whichever side reaches further so that only what would stretch the
-window goes: trimming each axis by its own quantiles would also drop the
-highest predictions, which a smoothing model packs well inside the
-measured range. Named `trim` rather than `clip` because it drops points,
-where `clip` drops nothing. Both backends; `prepare.inside_trim` holds the
-arithmetic.
+margins, and the panel counts how many did in its lower-right corner, the
+one a smoothing model leaves empty: it never gives the highest
+measurements the lowest predictions, where the upper left holds the low
+assays it pulled up (the note first sat there and hid two of chapter 14's
+Cd points). Each end comes from whichever side reaches further so that
+only what would stretch the window goes: trimming each axis by its own
+quantiles would also drop the highest predictions, which a smoothing model
+packs well inside the measured range. Named `trim` rather than `clip`
+because it drops points, where `clip` drops nothing. Both backends;
+`prepare.inside_trim` holds the arithmetic. Chapter 14's scatter uses
+`[0, 0.95]`, four or five of each panel's hundred held-out samples left
+out; rerunning the chapter also refreshed its accuracy figure, which
+predated this release's changes to the measurement samples (goodness
+moved by 0.02 at most).
 * **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
 the project's ubiquitous language: the ground against a measurement, the
 three variances, support, expert, realization, warping against transform --
