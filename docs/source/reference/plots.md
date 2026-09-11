@@ -40,7 +40,8 @@ how they are tested.
              component_names, prediction_values, spread_check, variogram,
              swath, categorical_swath, proportions, contact,
              grade_tonnage, training_curve, moving_average, realizations,
-             realization_store
+             realization_store, volume_dispersion, connectivity,
+             mesh_section
 ```
 
 ## Style

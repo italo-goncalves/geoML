@@ -347,6 +347,23 @@ def _box(low, high, offset):
 
 @pytest.mark.parametrize("offset", [np.zeros(3),
                                     np.array([500000.0, 7000000.0, 300.0])])
+def test_an_answer_touching_itself_comes_back_a_body(offset):
+    """Two quadrants of a slab left meeting along one edge: Manifold keeps
+    the edge twice, and welded by position it would be an edge four
+    triangles share -- a Mesh3D with no volume."""
+    slab = _box([0.0, 0.0, 0.0], [2.0, 2.0, 1.0], offset)
+    first = _box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], offset)
+    second = _box([1.0, 1.0, 0.0], [2.0, 2.0, 1.0], offset)
+    left = slab.difference(first).difference(second)
+    assert isinstance(left, Solid3D)
+    assert left.volume == pytest.approx(2.0, abs=1e-4)
+    assert len(left.split()) == 2
+    # and it goes back into Manifold as a body
+    assert left.union(first).volume == pytest.approx(3.0, abs=1e-4)
+
+
+@pytest.mark.parametrize("offset", [np.zeros(3),
+                                    np.array([500000.0, 7000000.0, 300.0])])
 def test_a_film_thinner_than_any_grid_is_measured_exactly(offset):
     """Adjacent rock domains meet along films far thinner than any grid
     step the booleans could afford, and a grid inflated them to its own

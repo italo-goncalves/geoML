@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -171,10 +171,18 @@ class Mesh3D(_PointBased):
     consistent : bool
         Whether the triangles agree about which way is out. A closed mesh
         that is not consistent bounds nothing that can be tested.
+    provenance : dict
+        What the mesh was made from, where whatever made it says so: a
+        contour records the column, the level, the side it closes on and
+        its budgets, and a `MeshSet` adds its limits and the realization.
+        Empty otherwise. It travels with `to_zarr` and `to_geoh5`.
     """
+
+    provenance: dict
 
     def __init__(self, points, triangles, normals):
         super().__init__()
+        self.provenance = {}
 
         if points.shape[1] != 3:
             raise ValueError("points must be an array with 3 columns")
@@ -1182,9 +1190,50 @@ def _from_manifold(body, shift):
     if body.is_empty():
         return _empty_solid()
     mesh = body.to_mesh64()
-    points = _np.asarray(mesh.vert_properties, dtype=float)[:, :3] + shift
+    points = _np.asarray(mesh.vert_properties, dtype=float)[:, :3]
     triangles = _np.asarray(mesh.tri_verts, dtype=_np.int64).reshape(-1, 3)
-    return mesh3d(points, triangles, _gmt.vertex_normals(points, triangles))
+    answer = mesh3d(points + shift, triangles,
+                    _gmt.vertex_normals(points, triangles))
+    if type(answer) is not Mesh3D:
+        return answer
+    moved = _separated(points, triangles)
+    if moved is points:
+        return answer
+    return mesh3d(moved + shift, triangles,
+                  _gmt.vertex_normals(moved, triangles))
+
+
+# How far apart the two copies of a vertex Manifold keeps twice are moved,
+# each into its own side, in coordinate units: past the six decimals every
+# welding here rounds to, and far below anything a model resolves.
+_TOUCH_SEPARATION = 1e-5
+
+
+def _separated(points, triangles):
+    """Manifold's vertices, the copies of any it keeps twice moved apart.
+
+    An answer that touches itself -- a difference whose pieces meet along
+    an edge, two shells closed against the same face of a model and
+    subtracted -- is a closed, consistent manifold in Manifold's own
+    numbering, the touch held as separate vertices at one position. geoML
+    measures closedness and winding by position, welding coincident
+    vertices first, and welded the touch is an edge four triangles share:
+    a body read as a `Mesh3D` with no volume (measured on the Assen FeO_total
+    shells, every band between two cut-offs). Moved a hundred-thousandth
+    of a unit into their own side, along the normal of the triangles each
+    belongs to, the copies stay apart through every welding. Returns
+    `points` itself where nothing is kept twice.
+    """
+    rounded = _np.round(points, 6)
+    _, inverse, counts = _np.unique(rounded, axis=0, return_inverse=True,
+                                    return_counts=True)
+    twice = counts[_np.ravel(inverse)] > 1
+    if not twice.any():
+        return points
+    moved = _np.array(points, dtype=float)
+    moved[twice] -= _TOUCH_SEPARATION * _gmt.vertex_normals(
+        points, triangles)[twice]
+    return moved
 
 
 def _reaches_across(sheet, box):

@@ -9,6 +9,7 @@ author six months later — rather than for its users.
 
 roadmap
 variable-block-models
+mesh-sets
 variable-paths
 cross-validation
 parameter-priors

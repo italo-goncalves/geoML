@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2019  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -32,6 +32,7 @@ import vtk as _vtk
 
 import geoml._types as _types
 import geoml.math.geometry as _gmt
+import geoml.storage as _storage
 
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _closing_value
@@ -99,18 +100,23 @@ def _blockdata(cls):
 
     old_init = cls.__init__
 
-    def new_init(self, start, n, step=None, end=None, labels=None, discretization=None):
-        old_init(self, start=start, n=n, step=step, end=end, labels=labels)
+    def new_init(self, start, n, step=None, end=None, labels=None,
+                 discretization=None, **kwargs):
+        # `end` only where it was given, and anything else straight through:
+        # a turned grid takes its angles here and has no `end` to be handed
+        if end is not None:
+            kwargs["end"] = end
+        old_init(self, start=start, n=n, step=step, labels=labels, **kwargs)
         if discretization is None:
             discretization = [1] * self.n_dim
         self.discretization = discretization
 
-        lo = _np.array([axis.min() for axis in self.grid])
-        hi = _np.array([axis.max() for axis in self.grid])
-        self._bounding_box = BoundingBox(
-            lo - _np.array(self.step_size) / 2,
-            hi + _np.array(self.step_size) / 2,
-        )
+        half = _np.array(self.step_size) / 2
+        lo = _np.array([axis.min() for axis in self.grid]) - half
+        hi = _np.array([axis.max() for axis in self.grid]) + half
+        # a turned box reaches furthest at its corners, where it is turned
+        corners = _np.array(list(_iter.product(*zip(lo, hi))), dtype=float)
+        self._bounding_box = BoundingBox.from_array(self._to_world(corners))
 
         sub_grid = _np.array(
             list(_iter.product(
@@ -122,9 +128,11 @@ def _blockdata(cls):
         sub_grid /= _np.array(self.discretization)[None, :]
         self.sub_grid = sub_grid
 
+    # `sub_grid` is counted in the grid's own frame, as `grid` is, and turns
+    # with it on the way out
     def discretized_coordinates(self, index):
         center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
-        return self.sub_grid + center
+        return self._to_world(self.sub_grid + center)
 
     def inducing_grid(self, index):
         center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
@@ -132,16 +140,19 @@ def _blockdata(cls):
         discr = _np.array(self.discretization)[None, :]
         # grid = grid * (discr + 1) / (discr - 1) + center
         grid = grid * (discr + 2) / (discr + 1) + center
-        return PointData.from_array(grid)
+        return PointData.from_array(self._to_world(grid))
 
     def get_batched_coordinates(self, index):
         if index is None:
             index = _np.arange(self._n_data)
 
         centers = _np.asarray(self.coordinates[index])
+        # the centres are placed already; an offset from one only turns
+        offsets = self.sub_grid if self._transform is None \
+            else _np.matmul(self.sub_grid, self._transform[1])
         # block-major, one temporary instead of one per block: block b owns
         # rows b*k to (b+1)*k, which is what `_aggregate` averages back
-        coords = (centers[:, None, :] + self.sub_grid[None, :, :])
+        coords = (centers[:, None, :] + offsets[None, :, :])
         coords = coords.reshape(-1, centers.shape[1])
 
         splits = None if _np.prod(self.discretization) == 1 else len(index)
@@ -324,9 +335,9 @@ class Blocks3D(Grid3D):
         Only a **uniform** spacing has a geoML container: a true tartan
         grid — uneven cells along an axis — is refused with the axis
         named. An unrotated model comes back as a `Blocks3D`; a rotated
-        one as a `RotatedBlockSet3D` with `max_levels=0`, there being no
-        rotated regular-grid class — the blocks, their rotation and
-        block-support prediction all work, and nothing can be refined.
+        one as a `RotatedBlockSet3D` with `max_levels=0` — the blocks,
+        their rotation and block-support prediction all work, nothing can
+        be refined, and `as_blocks3d` makes it a `RotatedBlocks3D`.
         Float cell data becomes continuous variables and referenced data
         categorical ones, as in `PointData.from_geoh5`. Needs the
         `geoh5py` package: `pip install geoml[geoh5]`.
@@ -369,6 +380,61 @@ class Blocks3D(Grid3D):
             blocks.add_categorical_variable(column, labels=labels,
                                             measurements=values)
         return blocks
+
+
+@_blockdata
+class RotatedBlocks3D(RotatedGrid3D):
+    """
+    A regular block model turned about its first block.
+
+    `Blocks3D` with an azimuth, a dip and a rake, as `RotatedGrid3D` is
+    `Grid3D` with them. The blocks are counted in the model's own frame and
+    turned about the first block's centre where coordinates leave -- the
+    centres, the sub-blocks a prediction averages over, the exported cells
+    -- and turned back where they come in (`index_data`, and so
+    `aggregate`). `BlockSet3D.as_blocks3d` returns one for a
+    `RotatedBlockSet3D`, with the same angles and the same pivot.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first block, which the model turns about.
+    n : array-like
+        Number of blocks along each of the model's own axes.
+    step : array-like
+        Size of a block along each of them.
+    labels : list, optional
+        Coordinate names.
+    discretization : array-like, optional
+        Sub-blocks per axis, averaged over to predict a block. One by
+        default, which predicts each block at its centre.
+    azimuth, dip, rake : float
+        The rotation in degrees, as `RotatedGrid3D` takes it. Given by
+        keyword.
+    """
+
+    def as_pyvista(self, simulations=False, include="**"):
+        """
+        Converts this object to a pyvista one, carrying its variables.
+
+        The cells of a `Blocks3D` of the same shape, turned into place as
+        one piece, so that each cell's centre is its block's.
+
+        Parameters
+        ----------
+        simulations
+            Which simulations to include: `False` for none (the default, since
+            each one is a full-length array in the exported object), `True` for
+            all of them, an `int` for the first n, or a sequence of indices.
+        """
+        pv_blocks = _pv.ImageData(
+            dimensions=_np.array(self.grid_size) + 1,
+            spacing=self.step_size,
+            origin=_np.array([ax[0] for ax in self.grid])
+            - _np.array(self.step_size) / 2
+        )
+        return self._turned(self._finish_pyvista(
+            pv_blocks, "blocks", simulations, include))
 
 
 def _ghost_shell(origin, size, shape):
@@ -671,6 +737,140 @@ def _contour_column(blocks, path) -> "tuple[VariablePath, _Attribute]":
                 % (str(path), ", ".join(str(name) for name in parts)))
         raise ValueError("%r holds no prediction to contour" % str(path))
     return path / "prediction", column
+
+
+def _add_rows(target, at, values):
+    """`target[at] += values`, rows bound for the same place summed first."""
+    order = _np.argsort(at, kind="stable")
+    at = at[order]
+    starts = _np.flatnonzero(_np.r_[True, at[1:] != at[:-1]])
+    target[at[starts]] += _np.add.reduceat(values[order], starts, axis=0)
+
+
+class _Grouping:
+    """The blocks of a set gathered into the blocks of its coarsest level.
+
+    `cell` names the coarse block each block falls in and `volume` how many
+    base cells it holds, so its share of that block (`weight`) is a ratio of
+    integers. A coarse block that is one of the set's blocks whole is `whole`
+    and keeps it exactly -- `source` says which. The rest are gathered from
+    their parts, and what that means for a column is the column's to say
+    (`_Variable._coarsen_into`); these are the operations it says it with.
+    A value missing in any part is missing in the whole, which is what keeps
+    a partial answer from passing for one.
+    """
+
+    def __init__(self, cell, volume, cell_volume, n_cells):
+        self.cell = cell
+        self.volume = volume
+        self.weight = volume / float(cell_volume)
+        self.n_cells = n_cells
+        self._alone = volume == cell_volume
+        self.source = _np.full(n_cells, -1, dtype=_np.int64)
+        self.source[cell[self._alone]] = _np.flatnonzero(self._alone)
+        self.whole = self.source >= 0
+
+    def mean(self, values, valid=None):
+        """The volume-weighted mean of a column over each coarse block.
+
+        `valid` marks the parts holding a value, for a column that cannot
+        say so itself; a block kept whole is taken as it stands.
+        """
+        values = _np.asarray(values, dtype=float)
+        if valid is not None:
+            values = _np.where(valid | self._alone, values, _np.nan)
+        return _np.bincount(self.cell, weights=self.weight * values,
+                            minlength=self.n_cells)
+
+    def kept(self, values, missing):
+        """A column where a coarse block is one block whole, `missing`
+        where it is gathered from parts."""
+        values = _np.asarray(values)
+        out = _np.full(self.n_cells, missing, dtype=values.dtype)
+        out[self.whole] = values[self.source[self.whole]]
+        return out
+
+    def realizations(self, store, target, valid=None, shift=None):
+        """Each realization's volume-weighted mean, written into `target`.
+
+        Realization `i` of a coarse block is the mean of realization `i` of
+        its parts: pairing them any other way would invent a correlation the
+        model never produced. The source is read a band of rows at a time
+        and gathered into as many coarse blocks as a working array of the
+        store's spill size holds, so neither store is held whole; more coarse
+        blocks than that cost another pass over the source each.
+
+        With `shift` -- one number per coarse block, near its mean -- the
+        same pass returns how far the parts sit from their block, the
+        variance between them averaged over the realizations. The moments
+        are taken about the shift so that their difference keeps its digits,
+        and a block kept whole comes out at exactly zero.
+        """
+        n_sim = int(store.shape[1])
+        # the sum, and with a shift the two moments about it
+        moments = 1 if shift is None else 3
+        rows = max(1, _storage.DEFAULT_THRESHOLD
+                   // (8 * moments * max(n_sim, 1)))
+        keep = None if valid is None else valid | self._alone
+        spread = None if shift is None else _np.full(self.n_cells, _np.nan)
+        bands = store.row_bands()
+        for lo in range(0, self.n_cells, rows):
+            hi = min(lo + rows, self.n_cells)
+            sums = _np.zeros((moments, hi - lo, n_sim))
+            for band in bands:
+                cell = self.cell[band]
+                inside = (cell >= lo) & (cell < hi)
+                if not _np.any(inside):
+                    continue
+                values = _np.asarray(store[band], dtype=float)[inside]
+                if keep is not None:
+                    values[~keep[band][inside]] = _np.nan
+                weight = self.weight[band][inside][:, None]
+                at = cell[inside] - lo
+                _add_rows(sums[0], at, weight * values)
+                if shift is not None:
+                    offset = values - shift[cell[inside]][:, None]
+                    _add_rows(sums[1], at, weight * offset)
+                    _add_rows(sums[2], at, weight * offset * offset)
+            target[lo:hi, :] = sums[0]
+            if spread is not None:
+                spread[lo:hi] = _np.mean(
+                    _np.maximum(sums[2] - sums[1] * sums[1], 0.0), axis=1)
+        return spread
+
+    def gathered(self, column):
+        """A metadata column over the coarse blocks, gathered as `aggregate`
+        gathers one but weighed by volume: a coded column keeps the label
+        holding most of the block, none on a tie; a boolean one holds where
+        it held throughout; a number averages."""
+        values = column.values.to_numpy()
+        if column.labels is not None:
+            return self._dominant(values)
+        if values.dtype == bool:
+            out = self.kept(values, False)
+            broken = _np.bincount(self.cell, weights=(~values).astype(float),
+                                  minlength=self.n_cells) > 0
+            out[~self.whole] = ~broken[~self.whole]
+            return out
+        return self.mean(values)
+
+    def _dominant(self, codes):
+        """The code holding most of each gathered block's volume, counted in
+        base cells so that a tie is exact; missing codes do not vote."""
+        out = self.kept(codes, -1)
+        voting = ~self.whole[self.cell] & (codes >= 0)
+        if not _np.any(voting):
+            return out
+        votes = _pd.DataFrame({"cell": self.cell[voting],
+                               "code": codes[voting],
+                               "volume": self.volume[voting]})
+        votes = votes.groupby(["cell", "code"])["volume"].sum().reset_index()
+        most = votes.groupby("cell")["volume"].transform("max")
+        winners = votes[votes["volume"] == most].groupby("cell")["code"].agg(
+            ["first", "size"])
+        settled = winners[winners["size"] == 1]
+        out[settled.index.to_numpy()] = settled["first"].to_numpy()
+        return out
 
 
 class BlockSet3D(PointData):
@@ -1090,6 +1290,82 @@ class BlockSet3D(PointData):
                 fresh.labels = column.labels
                 new.metadata[name] = fresh
         return new
+
+    def as_blocks3d(self) -> "Blocks3D | RotatedBlocks3D":
+        """This model at its coarsest level, as a regular block model.
+
+        One block per coarsest-level block, in `Blocks3D`'s own order and
+        with this model's discretization, so a block that was never split is
+        the same block on the same support and keeps every column exactly.
+        Where the model was refined, each coarse block is gathered from the
+        blocks inside it, weighted by volume:
+
+        - a column that is a mean over a block's sub-blocks -- `prediction`,
+          the latent moments, `noise_variance`, the shares below each
+          cut-off, a category's probability and entropy -- takes the mean of
+          its parts', which is that same mean over the whole block;
+        - every realization is averaged index by index, the parts'
+          realization `i` making the block's realization `i`;
+        - what is read off the realizations is read again: the quantiles,
+          the probabilities, the `dispersion` -- the parts' mean dispersion
+          plus the spread between them -- and the predicted category, the
+          winner of the averaged probabilities;
+        - anything else is missing, none of it following from the parts:
+          `divided`, the measurements, a binary variable's entropy.
+
+        A coarse block with any part that holds nothing -- a block `where=`
+        kept from being predicted, say -- holds nothing either, so a partial
+        answer never passes for a whole one. Metadata is gathered as
+        `aggregate` gathers it, by volume: a number averages, a coded column
+        keeps the label holding most of the block (none on a tie), and a
+        boolean one holds where it held throughout.
+
+        Returns
+        -------
+        Blocks3D or RotatedBlocks3D
+            A `RotatedBlocks3D` for a `RotatedBlockSet3D`, with the same
+            angles and turning about the same point.
+
+        See Also
+        --------
+        group : the coarsening that leaves a parent missing instead, since
+            the change of support is otherwise the model's to re-predict.
+
+        Notes
+        -----
+        A derived variable is averaged like any other, which suits a
+        quantity that adds up over a volume. One that does not needs `derive`
+        again on the result, where its function sees the coarse blocks.
+        """
+        coarse = self._coarse_size
+        n = self.lattice_shape // coarse
+        index = self._origin // coarse[None, :]
+        # the regular model counts its blocks x fastest (`Grid3D._generate`)
+        cell = index[:, 0] + n[0] * (index[:, 1] + n[1] * index[:, 2])
+        grouping = _Grouping(cell, _np.prod(self._size, axis=1),
+                             int(_np.prod(coarse)), int(_np.prod(n)))
+
+        blocks = self._coarsest(n, coarse * self.base_step)
+        for name, variable in self.variables.items():
+            fresh = variable.__class__.from_variable(blocks, variable)
+            variable._copy_attrs_into(fresh)
+            variable._coarsen_into(fresh, grouping)
+            blocks.variables[name] = fresh
+        for name, column in self.metadata.items():
+            values = grouping.gathered(column)
+            fresh = _Attribute(blocks, values, dtype=values.dtype)
+            fresh.labels = column.labels
+            blocks.metadata[name] = fresh
+        return blocks
+
+    def _coarsest(self, n, step) -> "Blocks3D | RotatedBlocks3D":
+        """The empty regular model `as_blocks3d` fills: `n` blocks of `step`
+        over this model's box."""
+        return Blocks3D(start=self.box_corner + step / 2, n=n, step=step,
+                        # added to the grid's arguments by `_blockdata`
+                        discretization=list(  # type: ignore[call-arg]
+                            self.discretization),
+                        labels=list(self.coordinate_labels))
 
     # ------------------------------------------------------------------ #
     # geoh5 interchange
@@ -1894,11 +2170,34 @@ class BlockSet3D(PointData):
         path, column = _contour_column(self, path)
         if not column._has_content():
             raise ValueError("nothing under %r to contour" % str(path))
-        label = str(path)
-
-        value = float(value)
         values = _np.asarray(column.values, dtype=float).ravel()
-        span = (float(_np.nanmin(values)), float(_np.nanmax(values)))
+        surface = self._contour_values(values, value, str(path),
+                                       supersample=supersample, close=close)
+        if surface is None:
+            raise ValueError(
+                "no surface at %g; %r runs from %g to %g"
+                % (float(value), str(path), float(_np.nanmin(values)),
+                   float(_np.nanmax(values))))
+        if simplify is not None:
+            surface = surface.simplify(simplify)
+        surface.provenance = {
+            "source": str(path), "value": float(value),
+            "close": None if not close
+            else ("above" if close is True else str(close)),
+            "supersample": int(supersample),
+            "simplify": None if simplify is None else float(simplify)}
+        return surface
+
+    def _contour_values(self, values, value, label, supersample=0,
+                        close=False):
+        """`get_contour` on an array of block values rather than a column.
+
+        What a mesh set contours every realization through, the column
+        already read. None where the field never reaches `value`: an empty
+        answer is a fact about a realization rather than an error, and the
+        caller decides which it is.
+        """
+        value = float(value)
         cap = None
         if close:
             # `_closing_value` is asked only which side is kept, and raises
@@ -1943,9 +2242,7 @@ class BlockSet3D(PointData):
                                         self.box_corner, value, label,
                                         background)
         if len(faces) == 0:
-            raise ValueError(
-                "no surface at %g; %r runs from %g to %g"
-                % (value, label, span[0], span[1]))
+            return None
         # the lattice frame is where the contour is exact; a rotated
         # set turns the finished vertices, as its `_hex_mesh` does
         verts = self._to_world(verts)
@@ -1961,9 +2258,7 @@ class BlockSet3D(PointData):
             welded = mesh.cell_data_to_point_data().contour(
                 [value], scalars=label)
             if welded.n_cells == 0:
-                raise ValueError(
-                    "no surface at %g; %r runs from %g to %g"
-                    % (value, label, span[0], span[1]))
+                return None
             welded = welded.triangulate()
             verts = _np.asarray(welded.points, dtype=float)
             faces = _np.asarray(welded.faces).reshape(-1, 4)[:, 1:]
@@ -1972,9 +2267,6 @@ class BlockSet3D(PointData):
             verts, faces = _gmt.drop_degenerate_faces(verts, faces)
             surface = mesh3d(verts, faces,
                              _gmt.vertex_normals(verts, faces))
-
-        if simplify is not None:
-            surface = surface.simplify(simplify)
         return surface
 
 
@@ -2047,6 +2339,17 @@ class RotatedBlockSet3D(BlockSet3D):
         mesh = super()._hex_mesh(origin, size, step)
         mesh.points = self._to_world(_np.asarray(mesh.points, dtype=float))
         return mesh
+
+    def _coarsest(self, n, step):
+        # the same angles about the same point, so every block that was never
+        # split lands where it was
+        return RotatedBlocks3D(start=self._pivot, n=n, step=step,
+                               azimuth=self.azimuth, dip=self.dip,
+                               rake=self.rake,
+                               # added to the grid's arguments by `_blockdata`
+                               discretization=list(  # type: ignore[call-arg]
+                                   self.discretization),
+                               labels=list(self.coordinate_labels))
 
     @classmethod
     def from_data(cls, data, step, margin=0.1, decimals=0,

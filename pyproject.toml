@@ -97,6 +97,7 @@ include = [
     "geoml/data/grids.py",
     "geoml/data/blocks.py",
     "geoml/data/meshes.py",
+    "geoml/data/meshsets.py",
     "geoml/data/geoh5.py",
     "geoml/data/drillhole.py",
     "geoml/plots/base.py",

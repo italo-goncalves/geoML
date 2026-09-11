@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -105,6 +105,19 @@ def _units_per_label(units, labels):
 
 def _store_bytes(store):
     return int(_np.prod(store.shape)) * _np.dtype(store.dtype).itemsize
+
+
+def _missing_value(attribute):
+    """What an empty row of `attribute` holds: the missing code of a coded
+    column, False in a flag, the empty string in text, NaN in a number."""
+    kind = _np.dtype(attribute.values.dtype).kind
+    if attribute.labels is not None or kind in "iu":
+        return -1
+    if kind == "b":
+        return False
+    if kind == "O":
+        return ""
+    return _np.nan
 
 
 def _refuse_past_threshold(nbytes, name):
@@ -315,6 +328,64 @@ class _Variable(_TreeNode):
 
         for name, component in (getattr(self, "components", None) or {}).items():
             component._carry_into(new.components[name], keep)
+
+    # The columns that are a mean over a block's sub-blocks, and the families
+    # of them: a coarser block's is then the volume-weighted mean of its
+    # parts', exactly. What `_coarsen_into` averages; a column left out of
+    # these is left missing wherever a block is gathered, never wrong.
+    _BLOCK_MEANS: "tuple[str, ...]" = ()
+    _BLOCK_MEAN_FAMILIES: "tuple[str, ...]" = ()
+
+    def _coarsen_into(self, new, grouping, valid=None):
+        """Fill an already-built variable on coarser blocks from this one.
+
+        `grouping` (built by `BlockSet3D.as_blocks3d`) says which coarse
+        block each of this variable's blocks falls in and what share of it
+        each holds. A coarse block that is one of them whole keeps every
+        column as it stands. One gathered from parts takes the
+        volume-weighted mean of the columns `_BLOCK_MEANS` and
+        `_BLOCK_MEAN_FAMILIES` declare, and of every realization index by
+        index; it leaves everything else missing, and a subclass recomputes
+        what those averages settle. `valid` marks the parts that were
+        predicted, for a kind whose columns cannot say so themselves.
+
+        Apart from `as_blocks3d` for the same reason `_carry_into` is apart
+        from `carry_to`: a variable holding components fills the ones its
+        own `from_variable` just built.
+        """
+        for role in self._ZARR_ATTRS:
+            old = getattr(self, role, None)
+            if old is None or getattr(new, role, None) is None:
+                continue
+            if role in self._BLOCK_MEANS:
+                values = grouping.mean(old.values.to_numpy(), valid)
+            else:
+                values = grouping.kept(old.values.to_numpy(),
+                                       _missing_value(old))
+            fresh = self._Attribute(new.coordinates, values,
+                                    dtype=values.dtype)
+            fresh.labels = None if old.labels is None else list(old.labels)
+            setattr(new, role, fresh)
+
+        self._coarsen_realizations(new, grouping, valid)
+
+        for family in self._DICT_FAMILIES:
+            target = getattr(new, family)
+            for key, old in (getattr(self, family, None) or {}).items():
+                if family in self._BLOCK_MEAN_FAMILIES:
+                    values = grouping.mean(old.values.to_numpy(), valid)
+                else:
+                    values = grouping.kept(old.values.to_numpy(), _np.nan)
+                target[key] = self._Attribute(new.coordinates, values)
+
+        for name, component in (getattr(self, "components", None) or {}).items():
+            component._coarsen_into(new.components[name], grouping, valid)
+
+    def _coarsen_realizations(self, new, grouping, valid):
+        """The realizations on the coarser blocks, averaged index by index."""
+        if self._ZARR_HAS_SIMS and self.simulations is not None:
+            new.allocate_simulations(self.simulations.shape[1])
+            grouping.realizations(self.simulations, new._sim_store(), valid)
 
     def _subset_into(self, new, item):
         """Fill a copy with the `item` rows of this node, column by column.
@@ -651,6 +722,11 @@ class ContinuousVariable(_Variable):
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
                       "responsibilities")
     _NODE_ATTRS = ("cutoffs", "unit")
+    # `dispersion` and the quantile families are read again off the
+    # realizations instead (`_coarsen_realizations`, `_coarsen_into`)
+    _BLOCK_MEANS = ("latent_mean", "latent_variance", "prediction",
+                    "noise_variance")
+    _BLOCK_MEAN_FAMILIES = ("proportions",)
 
     measurements: _Attribute
     latent_mean: _Attribute
@@ -910,6 +986,41 @@ class ContinuousVariable(_Variable):
             (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
             owner=self.coordinates)
 
+    def _coarsen_realizations(self, new, grouping, valid):
+        # The spread between the parts comes out of the same pass as their
+        # mean: a block's dispersion is its parts' mean dispersion plus how
+        # far they sit from one another, realization by realization -- the
+        # variance of a mixture, and the "larger by exactly what the grouping
+        # absorbed" of `group`. About the block's prediction, which the
+        # scalar columns have already averaged.
+        if self.simulations is None:
+            return
+        new.allocate_simulations(self.simulations.shape[1])
+        centre = new.prediction.values.to_numpy()
+        between = grouping.realizations(
+            self.simulations, new._sim_store(), valid,
+            shift=_np.where(_np.isfinite(centre), centre, 0.0))
+        within = grouping.mean(self.dispersion.values.to_numpy(), valid)
+        new.dispersion = self._Attribute(new.coordinates, within + between)
+
+    def _coarsen_into(self, new, grouping, valid=None):
+        super()._coarsen_into(new, grouping, valid)
+        if self.simulations is None:
+            return
+        # read again off the averaged realizations, at the same keys; a block
+        # kept whole keeps its own, which the same reading would reproduce
+        for family, reset in (("quantiles", new.reset_quantiles),
+                              ("probabilities", new.reset_probabilities)):
+            old = getattr(self, family)
+            if not old:
+                continue
+            reset(list(old))
+            fresh = getattr(new, family)
+            for key in fresh:
+                kept = grouping.kept(old[key].values.to_numpy(), _np.nan)
+                fresh[key] = self._Attribute(new.coordinates, _np.where(
+                    grouping.whole, kept, fresh[key].values.to_numpy()))
+
     def compute_metrics(self, alpha=0.05):
         """
         Scores this variable's prediction against its own measurements.
@@ -1055,6 +1166,7 @@ class VectorVariable(_Variable):
     # the mixture is over the row, so the responsibilities belong to the
     # variable rather than to its components -- one answer per location
     _DICT_FAMILIES = ("responsibilities",)
+    _BLOCK_MEANS = ("uncertainty",)
     _LABEL_KIND = "components"
 
     def __init__(self, name, coordinates, labels, measurements=None,
@@ -1423,6 +1535,9 @@ class _Category(_Variable):
                    "indicator_variance", "indicator_predicted")
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("proportions", "divided")
+    _BLOCK_MEANS = ("probability", "indicator_mean", "indicator_variance",
+                    "indicator_predicted")
+    _BLOCK_MEAN_FAMILIES = ("proportions",)
 
     def __init__(self, name, coordinates, indicator):
         super().__init__(name, coordinates)
@@ -1483,6 +1598,9 @@ class RockTypeVariable(_Variable):
 
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
                    "measurements_a", "measurements_b", "boundary")
+    # taken per sub-block and then averaged (`_resolve`); `predicted` is read
+    # again off the averaged probabilities (`_coarsen_into`)
+    _BLOCK_MEANS = ("entropy", "uncertainty")
     _LABEL_KIND = "categories"
 
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
@@ -1655,6 +1773,23 @@ class RockTypeVariable(_Variable):
                 values["divided"] = cut
             self.components[lb].update(idx, **values)
 
+    def _coarsen_into(self, new, grouping, valid=None):
+        # A category's probability reads 0 where nothing was predicted, not
+        # missing, so the parts that were are told apart by their label
+        predicted = self.predicted.values.to_numpy() >= 0
+        valid = predicted if valid is None else valid & predicted
+        super()._coarsen_into(new, grouping, valid)
+
+        # the winner of the averaged probabilities, as `update` names it
+        probability = _np.stack(
+            [new.components[label].probability.values.to_numpy()
+             for label in self.labels], axis=1)
+        gathered = ~grouping.whole & _np.all(_np.isfinite(probability),
+                                             axis=1)
+        codes = new.predicted.values.to_numpy().copy()
+        codes[gathered] = _np.argmax(probability[gathered], axis=1)
+        new.predicted.values[:] = codes
+
     def training_input(self, idx=None):
         if idx is None:
             idx = _np.arange(self.coordinates.n_data)
@@ -1806,6 +1941,10 @@ class BinaryVariable(_Variable):
     _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
                    "probability", "entropy", "uncertainty",
                    "latent_mean", "latent_variance")
+    # `entropy` and `uncertainty` are functions of the block's own
+    # probability, not means over it, and stay out; `predicted` is read
+    # again off the averaged probability (`_coarsen_into`)
+    _BLOCK_MEANS = ("probability", "latent_mean", "latent_variance")
     _LABEL_KIND = "categories"
     _ZARR_HAS_SIMS = True
 
@@ -1903,6 +2042,20 @@ class BinaryVariable(_Variable):
         self.probability.values[idx] = prob
 
         self._sim_store()[idx, :] = sims
+
+    def _coarsen_into(self, new, grouping, valid=None):
+        # the probability reads 0 where nothing was predicted, not missing,
+        # so the parts that were are told apart by their label
+        predicted = self.predicted.values.to_numpy() >= 0
+        valid = predicted if valid is None else valid & predicted
+        super()._coarsen_into(new, grouping, valid)
+
+        # the positive class at one half or more, as `update` has it
+        probability = new.probability.values.to_numpy()
+        gathered = ~grouping.whole & _np.isfinite(probability)
+        codes = new.predicted.values.to_numpy().copy()
+        codes[gathered] = _np.where(probability[gathered] < 0.5, 1, 0)
+        new.predicted.values[:] = codes
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(

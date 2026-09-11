@@ -22,14 +22,16 @@ against. Everything is addressed by **tree path** —
 
 ## Blocks
 
-`Blocks3D` is the regular block model; `BlockSet3D` is the variable-size
-one, where every block's origin and size are whole numbers of a base cell
-so that splitting keeps it tiling exactly. Design record:
-{doc}`../internals/variable-block-models`.
+`Blocks3D` is the regular block model and `RotatedBlocks3D` the same one
+turned; `BlockSet3D` is the variable-size one, where every block's origin
+and size are whole numbers of a base cell so that splitting keeps it tiling
+exactly. `BlockSet3D.as_blocks3d` hands a refined model back as a regular
+one at its coarsest level, a gathered block averaged from its parts by
+volume. Design record: {doc}`../internals/variable-block-models`.
 
 ```{eval-rst}
 .. automodule:: geoml.data.blocks
-   :members: Blocks3D, BlockSet3D, RotatedBlockSet3D
+   :members: Blocks3D, RotatedBlocks3D, BlockSet3D, RotatedBlockSet3D
    :show-inheritance:
 ```
 
@@ -40,6 +42,22 @@ so that splitting keeps it tiling exactly. Design record:
    :members: Mesh3D, Surface3D, Solid3D, DTM3D, mesh3d,
              NotClosedError, InconsistentMeshError, NotSingleValuedError,
              MeshTypeError
+   :show-inheritance:
+```
+
+## Mesh sets
+
+Every contour of one column at once: a block model contoured at each of a
+variable's cut-offs, or once per category, for the prediction and for each
+realization, as one read-only mapping -- `shells[0.5]`,
+`shells["BIF"]`, `shells.simulations[4][0.5]`. The set cuts its meshes to
+limits, checks that shells nest and categories do not overlap, and
+measures volumes, bands, tonnage and how the realizations' volumes spread.
+Design record: {doc}`../internals/mesh-sets`.
+
+```{eval-rst}
+.. automodule:: geoml.data.meshsets
+   :members: MeshSet
    :show-inheritance:
 ```
 

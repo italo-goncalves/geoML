@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,7 +18,8 @@ Spatial data, one module per concern: `base` the container tree (errors,
 paths, traversal, the attribute), `variables` the variable family,
 `containers` the point-based containers, `grids` the regular grids,
 `meshes` the triangulated surfaces and solids, `blocks` the block models,
-`io` the Zarr persistence, `geoh5` the Geoscience ANALYST interchange,
+`io` the Zarr persistence, `meshsets` every contour of a column as one
+set, `geoh5` the Geoscience ANALYST interchange,
 `drillhole` the drilling databases and `inducing` the inducing-point
 helpers.
 
@@ -33,6 +34,7 @@ from geoml.data.grids import *
 from geoml.data.meshes import *
 from geoml.data.blocks import *
 from geoml.data.io import *
+from geoml.data.meshsets import *
 # The private bases other modules and user code hold instances of.
 from geoml.data.base import _Attribute
 from geoml.data.variables import _Variable
@@ -42,5 +44,5 @@ from geoml.data.containers import _SpatialData
 # module here costs nothing -- and without it `geoml.data.geoh5.Workspace`
 # would only resolve after some `to_geoh5` call had imported it first.
 from geoml.data import (base, variables, containers, grids, meshes, blocks,
-                        io, geoh5, drillhole, inducing)
+                        io, meshsets, geoh5, drillhole, inducing)
 from geoml.data.drillhole import DrillholeData, IntervalTable

@@ -503,6 +503,11 @@ drillhole planning.
 
 ## 4. Data, I/O and interchange
 
+(Mesh sets: **done 2026-09-11, 0.6.10** — see "Settled by measurement"
+below for the numbers. `MeshSet` contours a block model or a grid at every
+cut-off, or once per category, for the prediction and every realization,
+and holds the bodies as one mapping with the reports a set can make.)
+
 (Mesh operations through Manifold: **booleans done 2026-09-10, 0.6.10** —
 see "Settled by measurement" below for the numbers. `Solid3D`'s union,
 intersection and difference go to manifold3d itself and are exact; the
@@ -511,6 +516,36 @@ geoML's.)
 
 **S — Surface I/O residue.** OBJ/PLY/STL both ways, the vendor formats, and
 any attribute travelling with the geometry. Nothing has demanded them yet.
+
+**S — `RotatedBlocks3D` has no geoh5 door.** Built 2026-09-11 as what
+`BlockSet3D.as_blocks3d` returns for a rotated set. A geoh5 BlockModel
+carries one rotation, about the vertical, so a `to_geoh5` would write a
+model turned in azimuth only, dip and rake refused as the octree writer
+refuses them, with its origin at the turned lattice corner --
+`write_grid_blocks` takes the corner from the centres' minimum, which is
+right only unturned. `Blocks3D.from_geoh5` could then return a rotated
+BlockModel as a `RotatedBlocks3D` rather than today's
+`RotatedBlockSet3D(max_levels=0)`; that changes a return type, which is
+why it waits for a user.
+
+**S — `get_contour(close=)` meets its own cap edge-on, and rounds the
+box's edges.** Found building mesh sets on the Assen block model
+(2026-09-11). FeO_total at 0.7 keeps a layer one cell thick against the
+top of the lattice; the painted surface comes back closed but with one edge
+shared by four triangles, at (233, 27..28, 160) in the lattice frame, where
+the surface meets the cap edge-on -- no winding repair settles that -- and
+`_contour_values` sends a `Mesh3D` to the welded-mesh fallback, which came
+back *open*, 44 edges in small loops on the planes where the closing ghosts
+change size: the fallback made it worse. Contoured 1e-9 lower the shell
+closes, and `MeshSet` retries that way (`_NUDGES`, the move recorded as
+`nudge`); `get_contour` itself does not. Separately, a body closed against
+the box rounds the box's edges by about half a boundary block, the painted
+value at an edge corner averaging one cell inside with three reflected
+outside: three slabs filling an 80 m box of 10 m blocks leave 5% of it
+uncovered, which a categorical set's `check()` reads as gap. Wanted: a
+cap whose face and edge corners sit on the level exactly without leaving
+the ghost shell a surface of its own, and a fallback that is not worse
+than what it replaces.
 
 **S — `simplify` keeps half its promise.** Found measuring it against
 Manifold's (2026-09-10, `docs/benchmarks/manifold_features.py`), on the
@@ -524,6 +559,26 @@ within half the budget, and every gentler cut starts from it, so a body
 the pre-pass broke stays broken however little is cut after. The reverse
 check costs a locator on each candidate, where today's is built once on
 the original.
+
+**M — A categorical realization's bodies do not tile the model.** Found
+building mesh sets on the Assen rocks (2026-09-11, `docs/mesh-sets.md`).
+Each category is contoured on its own field -- its draw against the best
+of the others, the rule the likelihood decides by -- and where the draws
+are rough from block to block the corner values two neighbours' fields
+paint disagree about where their contact runs: three realizations' six
+bodies overlap by 141 000 to 162 000 m³, about 1.1% of the model, and leave
+0.75-0.84% uncovered, where the prediction's smooth fields agree to
+0.008%. A realization's rock volumes carry that much double counting;
+`repair` with a priority order settles the overlaps, not the gaps. What
+would settle both is one contour of the partition rather than one per
+category -- a multi-material marching cubes, each interface drawn once
+and handed to both sides.
+
+**S — Mesh set workers scale 2.2 times on eight.** 25 Assen realizations
+took 672 s past the prediction, 27 s each, against 59 s in one process
+(2026-09-11). Not investigated: candidates are the parent writing every
+mesh to the store as the results arrive, the arrays pickled back from the
+workers (about 50 MB a mesh), and VTK's own threads inside each worker.
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a
@@ -580,6 +635,33 @@ that attempt.
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**Mesh sets — done** (2026-09-11, 0.6.10). `geoml/data/meshsets.py`;
+design record `docs/mesh-sets.md`, measurements
+`docs/benchmarks/mesh_sets.py`. The gate the item set, on the Assen block
+model (908 237 blocks, 25 realizations, eight workers): the prediction's
+four FeO_total shells cross each other by 1.8e-15 m³ as contoured and no
+realization's by more than 7e-15; simplified to 1 m and nested again, the
+nesting took nothing back -- so `repair` stays off by default. A
+realization costs 59 s in one process at four cut-offs, 27 s each on eight
+workers; the Fe set took 800 s whole, the six rocks 1024 s, the largest
+worker 6.8 and 9.1 GB. What the set measured: the prediction's shell at
+0.85 holds 1.42 Mm³ where the realizations hold 1.65 / 2.18 / 3.00
+(P10/P50/P90), smaller than 23 of the 25, while at 0.6, below the median
+grade, it is larger than three in four -- the smoothing a mean field does
+at either tail -- and every realization holds more BIF than the prediction,
+by a third at the median. The rock set's prediction bodies overlap by 0.008%
+of the model and leave 0.1% uncovered, mostly the box's rounded edges; a
+realization's overlap by 1.1% and leave 0.8% (an open item in §4). Found
+and settled on the way: a band between two shells closed against the same
+face touched itself, which geoML's welding read as a `Mesh3D` -- fixed in
+the booleans (`_separated`); and a contour meeting its own cap edge-on,
+which a set now retries a hair off its level, recorded as `nudge` (7 of
+the 104 Fe meshes needed it, one at 1e-4 of the span, and 8 of the 156 rock
+bodies, of which one did not close even so). The item as filed asked for tonnage from the
+realizations' own bands too: that is `realization_table`, opt-in, since it
+asks the blocks near every band of every realization about their
+sub-blocks.
 
 **Solid booleans through manifold3d — done** (2026-09-10, 0.6.10).
 `docs/benchmarks/manifold_booleans.py` and `manifold_features.py`, on the

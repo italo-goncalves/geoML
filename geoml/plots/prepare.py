@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -2717,3 +2717,209 @@ def grid_shape(n_panels):
     columns = int(_np.ceil(_np.sqrt(n_panels)))
     rows = int(_np.ceil(n_panels / columns))
     return rows, columns
+
+
+# --------------------------------------------------------------------------- #
+# mesh sets
+# --------------------------------------------------------------------------- #
+def key_label(shells: "_data.MeshSet", key) -> str:
+    """A mesh set's key as a figure writes it: a category's name, or the
+    cut-off as a number."""
+    return str(key) if shells.kind == "category" else "%g" % key
+
+
+def key_axis(shells: "_data.MeshSet") -> str:
+    """What the keys of a mesh set are, for the axis they run along."""
+    if shells.kind == "category":
+        return "category"
+    if "probability_of" in shells.provenance:
+        return "probability"
+    return "cut-off" if shells.unit is None else "cut-off (%s)" % shells.unit
+
+
+def volume_dispersion(shells: "_data.MeshSet",
+                      relative: bool = False) -> dict:
+    """
+    What `volume_dispersion` draws: every realization's mesh volume at each
+    cut-off or category, beside the prediction's.
+
+    Read off what the set measured as each realization was made, so no mesh
+    is loaded.
+
+    Parameters
+    ----------
+    shells
+        A set built with its realizations.
+    relative
+        Whether to divide every volume by the prediction's, so that the
+        prediction reads one.
+
+    Returns
+    -------
+    dict
+        `labels`, one per key; `values`, the realizations' volumes at each
+        key; `prediction`, the prediction's; `title`; `axis`, what the
+        volumes are; `keys`, what the keys are.
+    """
+    table = shells.realization_volumes()
+    summary = shells.volume_dispersion()
+    values, prediction = [], []
+    for key in shells:
+        held = table[key].to_numpy(dtype=float)
+        held = held[_np.isfinite(held)]
+        own = float(summary.loc[key, "prediction"])
+        if relative:
+            held = held / own if own > 0 else _np.full(held.shape, _np.nan)
+            own = 1.0 if own > 0 else _np.nan
+        values.append(held)
+        prediction.append(own)
+    return {"labels": [key_label(shells, key) for key in shells],
+            "values": values, "prediction": _np.asarray(prediction),
+            "relative": relative,
+            "title": "%s: volume by realization" % shells.path,
+            "axis": "volume over the prediction's" if relative
+            else "volume",
+            "keys": key_axis(shells)}
+
+
+def connectivity(shells: "_data.MeshSet") -> dict:
+    """
+    What `connectivity` draws: how many pieces each mesh is in, and the
+    largest one's share of its volume.
+
+    Returns
+    -------
+    dict
+        `labels`; `x`, the cut-offs or the categories' positions;
+        `numeric`, whether `x` is a scale; `largest` and `pieces`, the
+        prediction's; `band`, the realizations' P10 and P90 of the largest
+        share, `median` their P50 and `pieces_median` the pieces' P50 --
+        None without realizations; `title`; `keys`.
+    """
+    frame = shells.connectivity()
+    numeric = shells.kind != "category"
+    if numeric:
+        x = _np.asarray(list(shells), dtype=float)
+    else:
+        x = _np.arange(len(shells), dtype=float)
+    held = "largest_p10" in frame
+    band = None
+    if held:
+        band = (frame["largest_p10"].to_numpy(dtype=float),
+                frame["largest_p90"].to_numpy(dtype=float))
+    return {"labels": [key_label(shells, key) for key in shells],
+            "x": x, "numeric": numeric,
+            "largest": frame["largest"].to_numpy(dtype=float),
+            "pieces": frame["pieces"].to_numpy(dtype=float),
+            "band": band,
+            "median": frame["largest_p50"].to_numpy(dtype=float)
+            if held else None,
+            "pieces_median": frame["pieces_p50"].to_numpy(dtype=float)
+            if held else None,
+            "title": "%s: connectivity" % shells.path,
+            "keys": key_axis(shells)}
+
+
+def mesh_section(shells: "_data.MeshSet", axis, value: float,
+                 variable=None, resolution: "float | None" = None) -> dict:
+    """
+    What `section` draws: where each mesh of a set crosses a plane, and
+    what the model holds on it.
+
+    Parameters
+    ----------
+    shells
+        The set.
+    axis
+        The coordinate held fixed, by index or by label.
+    value
+        Where along it the plane sits.
+    variable
+        A continuous variable or component of the set's container, drawn
+        beneath the lines; nothing is drawn beneath without one.
+    resolution
+        The spacing to sample the variable at on the plane. The finest
+        block by default, or a grid's own spacing.
+
+    Returns
+    -------
+    dict
+        `lines`, for every key's label a list of `(n, 2)` polylines in the
+        plane; `axes`, the labels of the two in-plane coordinates; `image`,
+        the sampled variable or None; `title`; `keys`.
+    """
+    data = shells.data
+    labels = [str(label) for label in
+              (getattr(data, "coordinate_labels", None) or ("X", "Y", "Z"))]
+    if isinstance(axis, (int, _np.integer)):
+        index = int(axis)
+    else:
+        lowered = [label.lower() for label in labels]
+        wanted = str(axis).lower()
+        index = lowered.index(wanted) if wanted in lowered \
+            else "xyz".index(wanted)
+    plane = [i for i in range(3) if i != index]
+    cut = shells.section(index, value)
+    lines = {key_label(shells, key): [line[:, plane] for line in cut[key]]
+             for key in shells}
+    image = None
+    if variable is not None and data is not None:
+        image = section_image(data, variable, index, value, resolution)
+    return {"lines": lines, "axes": (labels[plane[0]], labels[plane[1]]),
+            "image": image, "keys": key_axis(shells),
+            "title": "%s: section at %s = %g" % (shells.path, labels[index],
+                                                 value)}
+
+
+def section_image(container, var, index: int, value: float,
+                  resolution: "float | None" = None) -> "dict | None":
+    """
+    A variable's prediction sampled on a plane across one axis.
+
+    A block model answers exactly which block holds each sample; any other
+    container its nearest location, left empty past half a cell's diagonal.
+    At most 600 samples a side.
+
+    Returns
+    -------
+    dict or None
+        `values` `(n_v, n_u)`, `extent` `(u_min, u_max, v_min, v_max)` and
+        `label`; None when the variable holds no prediction.
+    """
+    column = getattr(var, "prediction", None)
+    if column is None or not column._has_content():
+        return None
+    values = _np.asarray(column.values, dtype=float).ravel()
+    low = _np.ravel(container.bounding_box.min)
+    high = _np.ravel(container.bounding_box.max)
+    plane = [i for i in range(3) if i != index]
+    if resolution is None:
+        step = getattr(container, "base_step", None)
+        if step is None:
+            step = getattr(container, "step_size", None)
+        if step is not None:
+            resolution = float(_np.min(_np.asarray(step, dtype=float)[plane]))
+        else:
+            resolution = float(_np.max(high - low)) / 200.0
+    counts = [int(min(600, max(2, _np.ceil((high[i] - low[i]) / resolution))))
+              for i in plane]
+    u = _np.linspace(low[plane[0]], high[plane[0]], counts[0] + 1)
+    v = _np.linspace(low[plane[1]], high[plane[1]], counts[1] + 1)
+    grid_u, grid_v = _np.meshgrid((u[:-1] + u[1:]) / 2, (v[:-1] + v[1:]) / 2)
+    points = _np.zeros((grid_u.size, 3))
+    points[:, plane[0]] = grid_u.ravel()
+    points[:, plane[1]] = grid_v.ravel()
+    points[:, index] = float(value)
+    if isinstance(container, _data.BlockSet3D):
+        found = container.index_data(_data.PointData.from_array(points))
+        sampled = _np.where(found >= 0, values[_np.maximum(found, 0)],
+                            _np.nan)
+    else:
+        coordinates = _np.asarray(container.coordinates, dtype=float)
+        step = _np.asarray(getattr(container, "step_size", resolution),
+                           dtype=float) * _np.ones(3)
+        distance, nearest = _spatial.KDTree(coordinates).query(points)
+        sampled = _np.where(distance <= 0.5 * float(_np.linalg.norm(step)),
+                            values[nearest], _np.nan)
+    return {"values": sampled.reshape(grid_u.shape),
+            "extent": (u[0], u[-1], v[0], v[-1]), "label": var.name}

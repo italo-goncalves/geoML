@@ -178,6 +178,104 @@ and -5 where the EDA's PCA of the same data was centred at zero. It reads
 `get_measurements` now, so the figure is centred as the model is; the
 scale still differs from the EDA's PCA, whose scores keep their
 eigenvalues where the warping's are whitened.
+* **Mesh sets: every contour of a column, the realizations' too, as one
+set.** `geoml.data.MeshSet(blocks, "Comp/Fe", limits={"topography":
+topo})` contours a block model or a grid at every cut-off the variable
+declares -- or once per category, keyed by name -- and holds the bodies as
+a read-only mapping, `shells[0.5]`; every realization is contoured as well,
+in forked workers, each realization a set of its own read on access from a
+Zarr store, `shells.simulations[4][0.5]`. Limits keep a sheet's underneath
+or a body's inside, exclusions take theirs away, and every boolean runs in
+one Manifold frame. `check()` measures exactly how far the shells fail to
+nest or the categories overlap, and the gap they leave; `repair()` enforces
+it. `table(density=, grade=)` gives each cut-off's volume, band, what each
+limit took, pieces, crossing and the blocks' own volume, and with a grade
+each band's tonnage, mean, metal and the realizations' P10-P90 of metal in
+the prediction's bands; `realization_table` the same in each realization's
+own bands; `volume_dispersion()` the realizations' volumes against the
+prediction's, measured as each was made. Also `probability` (the bodies
+where a cut-off is cleared with given probability), `connectivity`,
+`spacing`, `compare`, `section`, `simplify` (nested again after),
+`drop_pieces`, `clip`/`exclude`, `assign`, `crossed_by`, `to_zarr`/`open`,
+`to_geoh5`, `export_dxf` (a layer per mesh), `as_pyvista` and `plot`; three
+figures in both backends, `volume_dispersion`, `connectivity` and
+`section`. A categorical realization picks its category by `rule=`,
+`"largest"` for `CategoricalGaussianIndicator` and `"priority"` for the
+hierarchical likelihood, the container not recording which drew it.
+Measured on the Assen block model (908 237 blocks, 25 realizations,
+eight workers): FeO_total at four cut-offs in 800 s and the six rocks in
+1024 s; the shells nest as contoured, to 1e-14 m3, so `repair` stays
+off; at 0.85 the prediction's shell holds 1.42 Mm3 against the
+realizations' 1.65 / 2.18 / 3.00 (P10/P50/P90); and a realization's six
+rock bodies overlap by about 1.1% of the model where the prediction's
+overlap by 0.008%, which the roadmap keeps open. A contour that will not
+close is retried a hair off its level, recorded as `nudge`: `get_contour`
+can meet its own closing cap edge-on (7 of 104 Fe meshes, 8 of 156
+rock bodies). Design record `docs/mesh-sets.md`; `test_meshsets.py`
+(51 tests).
+* **A boolean whose answer touches itself comes back a body.** Two
+bodies whose difference leaves pieces meeting along an edge -- every band
+between two grade shells closed against the same face of a block model,
+on the Assen shells -- are a closed, consistent manifold in Manifold's own
+numbering, the touch kept as coincident vertices. geoML measures winding
+by position, welding first, and the weld turned the touch into an edge
+four triangles share: the answer came back a `Mesh3D` with no volume.
+Each copy of such a vertex now moves a hundred-thousandth of a unit into
+its own side, only where the first reading fails, and the answer is a
+`Solid3D` that goes back into Manifold as one. Two tests, at the origin and
+at mine coordinates.
+* **A contour says what it was made from.** `get_contour` on a block model
+records the column, the level, the side it closes on and its budgets in
+the mesh's new `provenance`, which `to_zarr` keeps and `to_geoh5` writes
+into the object's metadata; a mesh set adds its limits, the realization
+and any nudge. `BlockSet3D.get_contour` became a wrapper over
+`_contour_values`, which contours an array and answers None where the field
+misses the level.
+* **`BlockSet3D.as_blocks3d()`: a refined model at its coarsest level, as a
+regular one.** One block per coarsest-level block, in `Blocks3D`'s order
+and with the set's discretization, for software that reads a regular grid.
+A block never split is the same block on the same support and keeps every
+column bit for bit. A block gathered from finer ones takes the
+volume-weighted mean of the columns that are means over a block's
+sub-blocks -- the prediction, the latent moments, `noise_variance`, the
+shares below a cut-off, a category's probability and entropy, declared per
+class in `_BLOCK_MEANS` and `_BLOCK_MEAN_FAMILIES` so a new column is
+missing until someone says it averages -- and of every realization index
+by index, streamed in bands so neither store is held whole. What is read
+off the realizations is read again: the quantiles and probabilities, the
+dispersion (the parts' mean dispersion plus the spread between them, the
+variance of a mixture, taken in the same pass) and the predicted category,
+the winner of the averaged probabilities. The rest -- `divided`, the
+measurements, a binary variable's entropy -- is missing, none of it
+following from the parts, and a block with any part that holds nothing
+holds nothing (a category's probability reads 0 where nothing was
+predicted, so its label is what marks the parts). Metadata is gathered as
+`aggregate` gathers it, by volume: numbers average, a coded column keeps
+the label holding most of the block, a tie counted exactly in base cells
+and left empty, and a flag holds where it held throughout -- a boolean
+stays a boolean, since a share would read `True` in every `where=`. This
+averages where `group` still leaves a parent missing: a conversion to a
+regular grid is where the change of support is wanted (decided
+2026-09-11). Mass is conserved to rounding, the prediction and every
+realization (3e-16 relative on a three-level set). `test_as_blocks3d.py`
+(15 tests).
+* **`RotatedBlocks3D`: the regular block model, turned.** `_blockdata`
+applied to `RotatedGrid3D` as it is to `Grid3D`: the decorator now passes
+the grid's own keywords through (the angles) and sends the block box and
+the sub-block offsets through the grid's `_to_world`, new on
+`_GriddedData` and what `_generate` turns rows with too. It predicts at
+block support, aggregates through its rotation, exports its cells turned
+into place, round-trips through Zarr and is fitted by `from_data` as the
+grid is; `as_blocks3d` returns one for a `RotatedBlockSet3D`, with the same
+angles about the same pivot, and it predicts what the equivalent
+`RotatedBlockSet3D(max_levels=0)` does. The class the data page once
+documented without its existing is real now. Not yet: a geoh5 BlockModel
+from it, and `Blocks3D.from_geoh5` still returns a rotated model as a
+`RotatedBlockSet3D(max_levels=0)` (roadmap).
+* **Fixed: `RotatedGrid3D.as_pyvista` failed on pyvista 0.49**, which
+refuses an `ImageData.transform` that does not say whether it is in place.
+The turn is now `_turned`, shared with `RotatedBlocks3D`, and a test pins
+the exported nodes where the grid's coordinates are.
 * **The booleans are exact: Manifold replaces the signed-distance
 grid.** `Solid3D.union`/`intersection`/`difference`, and every cut that
 ends in one (`clip_meshes`, a body divided by a sheet), now go to

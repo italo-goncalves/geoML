@@ -1,0 +1,79 @@
+908237 blocks, 32 CPUs, 8 workers
+
+== FeO_total at [0.6, 0.7, 0.8, 0.85]
+the prediction's shells alone                                127.9 s
+one realization besides, in this process                     186.6 s
+every realization, 8 workers                                 800.0 s
+peak memory: 5.5 GB here, 6.8 GB the largest worker
+failures: []
+              volume    raw_volume  pieces   largest  blocks_volume      band   band_volume      crossing
+cutoff                                                                                                   
+0.60    9.723774e+06  9.723774e+06       2  0.999983      9721374.0   0.6–0.7  3.289630e+06           NaN
+0.70    6.434144e+06  6.434144e+06       4  0.981277      6430196.0   0.7–0.8  2.749713e+06  1.790235e-15
+0.80    3.684431e+06  3.684431e+06       2  1.000000      3687584.0  0.8–0.85  2.268715e+06  0.000000e+00
+0.85    1.415716e+06  1.415716e+06       5  0.634057      1413867.0    ≥ 0.85  1.415716e+06  0.000000e+00
+       kind  first  second        volume         share
+0  crossing   0.70     0.6  1.790235e-15  2.782398e-22
+1  crossing   0.80     0.7  0.000000e+00  0.000000e+00
+2  crossing   0.85     0.8  0.000000e+00  0.000000e+00
+          prediction          mean             sd           p10           p50           p90  rank    gained      lost  pieces  pieces_p50
+cutoff                                                                                                                                   
+0.60    9.723774e+06  9.289675e+06  697791.635524  8.327006e+06  9.329563e+06  9.970613e+06  0.76  0.076967  0.121610       2         3.0
+0.70    6.434144e+06  6.864108e+06  592113.913640  6.168197e+06  6.863878e+06  7.605525e+06  0.24  0.185545  0.118720       4         6.0
+0.80    3.684431e+06  4.121937e+06  529152.821333  3.505616e+06  4.027497e+06  4.847811e+06  0.24  0.322986  0.204242       2         9.0
+0.85    1.415716e+06  2.277783e+06  550187.274998  1.654067e+06  2.184747e+06  2.998525e+06  0.08  0.871948  0.263022       5        10.0
+        pieces   largest  largest_p10  largest_p50  largest_p90  pieces_p50
+cutoff                                                                     
+0.60         2  0.999983     0.998310     1.000060     1.000719         3.0
+0.70         4  0.981277     0.931517     0.989563     1.000794         6.0
+0.80         2  1.000000     0.918860     0.961911     0.983505         9.0
+0.85         5  0.634057     0.564670     0.887293     0.986290        10.0
+largest crossing in any realization's set: 7.14e-15 m3
+simplified to 1 m, nested again                               37.8 s
+what nesting the simplified shells took back:
+0.60    0.0
+0.70    0.0
+0.80    0.0
+0.85    0.0
+Name: removed, dtype: float64
+triangles as contoured and simplified: [1039960, 844050, 613930, 359568] [257676, 201848, 613930, 359568]
+
+== Simple Rock, one body per rock
+the prediction's bodies and every realization's             1024.0 s
+peak memory: 5.5 GB here, 9.1 GB the largest worker
+failures: [{'realization': 17, 'key': 'Limestone', 'error': "NotClosedError: the contour of 'Simple Rock' at 0 does not close into a body, even healed and moved a ten-thousandth of its span either side: where the ground kept thins against the model's edge, its surface can meet the closing cap edge-on, and a column with missing values leaves holes a contour runs into"}]
+                         volume    raw_volume  pieces   largest  blocks_volume     overlap
+category                                                                                  
+BIF                8.175253e+05  8.175253e+05       1  1.000000       819308.0  112.249570
+Calcitic Hematite  3.586897e+06  3.586897e+06       2  0.977878      3588584.0  614.218263
+Diabase            2.009817e+06  2.009817e+06       3  0.692966      2012306.0  362.656504
+Hematite           2.464420e+06  2.464420e+06       2  0.999779      2465404.0  465.404370
+Limestone          2.871849e+06  2.871849e+06       1  1.000000      2873326.0  232.959373
+Shale              1.416536e+06  1.416536e+06       5  0.441210      1419952.0  360.227666
+       kind              first             second        volume         share
+0   overlap                BIF  Calcitic Hematite      2.110662  2.581770e-06
+1   overlap                BIF            Diabase     67.178029  8.217241e-05
+2   overlap                BIF           Hematite     42.094425  5.149006e-05
+3   overlap                BIF          Limestone      0.000000  0.000000e+00
+4   overlap                BIF              Shale      0.866454  1.059849e-06
+5   overlap  Calcitic Hematite            Diabase    120.113839  5.976358e-05
+6   overlap  Calcitic Hematite           Hematite    216.553487  8.787199e-05
+7   overlap  Calcitic Hematite          Limestone    119.182661  4.150032e-05
+8   overlap  Calcitic Hematite              Shale    156.257613  1.103096e-04
+9   overlap            Diabase           Hematite    142.992708  7.114714e-05
+10  overlap            Diabase          Limestone      0.313734  1.561007e-07
+11  overlap            Diabase              Shale     32.058194  2.263139e-05
+12  overlap           Hematite          Limestone      3.090661  1.254113e-06
+13  overlap           Hematite              Shale     60.673089  4.283200e-05
+14  overlap          Limestone              Shale    110.372317  7.791703e-05
+15      gap              (all)                     12908.689141  9.794982e-04
+                     prediction          mean             sd           p10           p50           p90      rank    gained      lost  pieces  pieces_p50
+category                                                                                                                                                
+BIF                8.175253e+05  1.294352e+06  266851.111877  9.670571e+05  1.274397e+06  1.598961e+06  0.000000  0.951153  0.367898       1        26.0
+Calcitic Hematite  3.586897e+06  3.267464e+06  399543.397079  2.761683e+06  3.318095e+06  3.613620e+06  0.880000  0.275965  0.365021       2        18.0
+Diabase            2.009817e+06  2.109171e+06  372459.295488  1.601574e+06  2.201946e+06  2.485387e+06  0.400000  0.476803  0.427368       3        21.0
+Hematite           2.464420e+06  2.770967e+06  411411.563661  2.274532e+06  2.683223e+06  3.252453e+06  0.240000  0.422897  0.298508       2        19.0
+Limestone          2.871849e+06  2.296987e+06  540661.677081  1.669873e+06  2.277939e+06  2.740152e+06  0.916667  0.292705  0.492876       1        22.0
+Shale              1.416536e+06  1.483132e+06  405542.615032  9.399962e+05  1.499375e+06  2.017898e+06  0.440000  0.730898  0.683884       5        28.0
+realizations 0, 12, 24: overlap [141184.1246, 147384.8313, 161502.5647] m3, gap share [0.00815, 0.00836, 0.00745]
+done

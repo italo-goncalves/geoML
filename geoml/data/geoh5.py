@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -333,12 +333,17 @@ def write_surface(mesh, workspace, name, replace=True, folder=None):
         parent = _folder(wrapper, folder)
         if replace:
             wrapper._discard(name, geoh5.objects.Surface, parent)
-        geoh5.objects.Surface.create(
+        surface = geoh5.objects.Surface.create(
             wrapper._handle,
             vertices=_np.asarray(mesh.coordinates, dtype=float),
             cells=_np.asarray(mesh.triangles),
             name=str(name),
             **({"parent": parent} if parent is not None else {}))
+        if getattr(mesh, "provenance", None):
+            # what the surface was contoured from, which the geometry
+            # alone cannot say
+            surface.metadata = {
+                "geoml_provenance": _json.dumps(mesh.provenance)}
     finally:
         if owned:
             wrapper.close()

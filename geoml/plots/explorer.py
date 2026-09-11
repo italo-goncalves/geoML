@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -1505,6 +1505,217 @@ class Explorer(_base.Selection):
             handle.set_alpha(1.0)
         # from zero, so a change with size reads at its true scale
         axes.set_ylim(bottom=0.0)
+
+    def volume_dispersion(self, shells: "_data.MeshSet", kind: str = "box",
+                          relative: bool = False, alpha: float = 0.2,
+                          size: float = 18,
+                          figsize=None) -> "_plt.Figure":
+        """
+        How much the realizations' meshes vary in volume, against the
+        prediction's.
+
+        For every cut-off or category of a `MeshSet` built with its
+        realizations, the distribution of the realizations' mesh volumes,
+        with the prediction's marked. The prediction is smoother than any
+        realization, so its mesh tends to hold less volume at a high cut-off
+        and more at a low one; how far it sits from the middle of the
+        distribution is how far one mesh misreports the volume, and the
+        spread is what no single mesh can show. The figure reads what the
+        set measured as it was made, and loads no mesh.
+
+        Parameters
+        ----------
+        shells
+            A `MeshSet` built with `simulations=True`.
+        kind : str
+            `"box"`, `"violin"` or `"jitter"`, the last one point per
+            realization.
+        relative : bool
+            Whether to divide every volume by the prediction's.
+        alpha : float
+            How opaque each point is, for `kind="jitter"`.
+        size : float
+            Point size, for `kind="jitter"`.
+
+        See Also
+        --------
+        geoml.plots.prepare.volume_dispersion : the numbers drawn here.
+        geoml.data.MeshSet.volume_dispersion : the same, as a table.
+        """
+        self._check_kind(kind, ("box", "violin", "jitter"))
+        panel = _prep.volume_dispersion(shells, relative=relative)
+        values = panel["values"]
+        position = _np.arange(len(values), dtype=float)
+        filled = [i for i, held in enumerate(values) if held.size]
+        with _style.context():
+            figure, axes = _plt.subplots(
+                figsize=figsize or (max(4.8, 1.0 * len(values) + 2.4), 3.9))
+            if kind == "box" and filled:
+                drawn = axes.boxplot(
+                    [values[i] for i in filled], positions=position[filled],
+                    widths=0.5, patch_artist=True,
+                    medianprops={"color": "#2b2b2b"},
+                    flierprops={"markersize": 2, "alpha": 0.5})
+                for box in drawn["boxes"]:
+                    box.set_facecolor(_style.color(0))
+                    box.set_alpha(0.6)
+            elif kind == "violin":
+                spread = [i for i in filled if _np.ptp(values[i]) > 0]
+                if spread:
+                    drawn = axes.violinplot(
+                        [values[i] for i in spread],
+                        positions=position[spread], widths=0.7,
+                        showmedians=True)
+                    for body in drawn["bodies"]:
+                        body.set_facecolor(_style.color(0))
+                        body.set_alpha(0.6)
+            elif kind == "jitter":
+                for i in filled:
+                    axes.scatter(
+                        position[i] + _prep.jitter(len(values[i])),
+                        values[i], s=size, alpha=alpha, linewidths=0,
+                        color=_style.color(0),
+                        label="realization" if i == filled[0] else None)
+            axes.scatter(position, panel["prediction"], marker="D", s=36,
+                         color="#2b2b2b", zorder=3, label="prediction")
+            if relative:
+                axes.axhline(1.0, color="#2b2b2b", linewidth=0.8,
+                             linestyle=":")
+            axes.set_xticks(position)
+            axes.set_xticklabels(panel["labels"])
+            axes.set_xlim(-0.6, len(values) - 0.4)
+            axes.set_xlabel(panel["keys"])
+            axes.set_ylabel(panel["axis"])
+            # the points are faint on purpose; their key is not
+            legend = axes.legend(loc="best", fontsize="small")
+            for handle in legend.legend_handles:
+                handle.set_alpha(1.0)
+            # from zero, so a spread reads at its true scale
+            axes.set_ylim(bottom=0.0)
+            axes.set_title(panel["title"])
+            figure.tight_layout()
+        return figure
+
+    def connectivity(self, shells: "_data.MeshSet",
+                     figsize=None) -> "_plt.Figure":
+        """
+        Whether the ground above each cut-off holds together.
+
+        Two panels for a `MeshSet`: the share of each mesh's volume in its
+        largest piece, and how many pieces it is in. Read along the
+        cut-offs the first is a connectivity curve -- where it drops, the
+        ground breaks into pods -- and where the set holds realizations
+        their P10 to P90 is drawn as a band, their median dashed.
+
+        Parameters
+        ----------
+        shells
+            The set.
+
+        See Also
+        --------
+        geoml.plots.prepare.connectivity : the numbers drawn here.
+        """
+        panel = _prep.connectivity(shells)
+        x = panel["x"]
+        marker = "o" if panel["numeric"] else "D"
+        line = "-" if panel["numeric"] else "none"
+        with _style.context():
+            figure, axes = _plt.subplots(1, 2, figsize=figsize or (9.6, 3.9))
+            share, count = axes
+            if panel["band"] is not None:
+                if panel["numeric"]:
+                    share.fill_between(x, panel["band"][0], panel["band"][1],
+                                       color=_style.color(0), alpha=0.25,
+                                       linewidth=0,
+                                       label="realizations, P10–P90")
+                else:
+                    share.vlines(x, panel["band"][0], panel["band"][1],
+                                 color=_style.color(0), linewidth=6,
+                                 alpha=0.35, label="realizations, P10–P90")
+                share.plot(x, panel["median"], color=_style.color(0),
+                           linestyle="--" if panel["numeric"] else "none",
+                           marker="_", label="realizations, P50")
+                count.plot(x, panel["pieces_median"], color=_style.color(0),
+                           linestyle="--" if panel["numeric"] else "none",
+                           marker="_", label="realizations, P50")
+            share.plot(x, panel["largest"], color="#2b2b2b", marker=marker,
+                       linestyle=line, label="prediction")
+            count.plot(x, panel["pieces"], color="#2b2b2b", marker=marker,
+                       linestyle=line, label="prediction")
+            share.set_ylim(0.0, 1.05)
+            share.set_ylabel("largest piece's share of the volume")
+            count.set_ylim(bottom=0.0)
+            count.set_ylabel("pieces")
+            for axis in axes:
+                axis.set_xlabel(panel["keys"])
+                if not panel["numeric"]:
+                    axis.set_xticks(x)
+                    axis.set_xticklabels(panel["labels"])
+                axis.legend(loc="best", fontsize="small")
+            figure.suptitle(panel["title"])
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+        return figure
+
+    def section(self, shells: "_data.MeshSet", axis, value: float,
+                component: "str | None" = None,
+                resolution: "float | None" = None,
+                figsize=None) -> "_plt.Figure":
+        """
+        Every mesh of a set where it crosses a plane, over the model.
+
+        The lines each mesh draws on a plane across one axis, a colour per
+        cut-off or category, over the prediction of the continuous variable
+        this selection names -- a grade under its own shells, or under a
+        rock model's contacts. Without a continuous variable, the lines
+        alone.
+
+        Parameters
+        ----------
+        shells
+            The set.
+        axis
+            The coordinate held fixed, by index or by label.
+        value
+            Where along it the plane sits.
+        component : str
+            For a vector variable, the component to draw beneath.
+        resolution : float
+            The spacing the prediction is sampled at on the plane.
+
+        See Also
+        --------
+        geoml.plots.prepare.mesh_section : the numbers drawn here.
+        geoml.data.MeshSet.section : the lines, as arrays.
+        """
+        beneath = self.continuous
+        if beneath is not None and component is not None:
+            beneath = beneath.components[component]
+        panel = _prep.mesh_section(shells, axis, value, variable=beneath,
+                                   resolution=resolution)
+        with _style.context():
+            figure, axes = _plt.subplots(figsize=figsize or (6.4, 5.2))
+            image = panel["image"]
+            if image is not None:
+                drawn = axes.imshow(image["values"], origin="lower",
+                                    extent=image["extent"], cmap=self.cmap,
+                                    aspect="equal", interpolation="nearest")
+                figure.colorbar(drawn, ax=axes, label=image["label"],
+                                shrink=0.8)
+            for i, (label, lines) in enumerate(panel["lines"].items()):
+                color = self._color(i, label)
+                for j, line in enumerate(lines):
+                    axes.plot(line[:, 0], line[:, 1], color=color,
+                              linewidth=1.4, label=label if j == 0 else None)
+            axes.set_aspect("equal")
+            axes.set_xlabel(panel["axes"][0])
+            axes.set_ylabel(panel["axes"][1])
+            if any(panel["lines"].values()):
+                axes.legend(loc="best", fontsize="small",
+                            title=panel["keys"])
+            axes.set_title(panel["title"])
+            figure.tight_layout()
+        return figure
 
     # ------------------------------------------------------------------ #
     # drawing
