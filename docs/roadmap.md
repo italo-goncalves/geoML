@@ -288,9 +288,11 @@ Context: `docs/benchmarks/jura_noise_footing.py` and the record.
 
 **M–L — Cheaper cross-validation** (requested 2026-09-08). Since
 2026-09-08 the driver costs one refit per fold and nothing else, on the
-full 20k-row Tom v6 model eleven minutes a fold.
+full 20k-row Tom v6 model eleven minutes a fold. The requirement, the
+author's (2026-09-10): the answer must be general, serving any likelihood
+and any network configuration.
 
-*Current proposal: leave-expert-out (the author's, 2026-09-10).* Remove one
+*Leave-expert-out (the author's, 2026-09-10).* Remove one
 expert at a time from a trained multi-expert model, predict the data with
 no retraining, and weigh each point's leave-one-expert-out predictions by
 the trained expert weights; a single-expert model is small enough for
@@ -317,15 +319,20 @@ times the in-sample error, not near it -- the overlap leak one would fear
 is not what happens. (3) The larger error is geometric: an expert's region
 is a far larger hole than the prediction target has, so even the honest
 refit on expert-shaped folds reads 1.9–2.2 times the true error, where
-today's spatial folds read 24–30% over it. Next, before any code: the same
-arms on Jura with experts (its 100 held-out points as the truth) and two
-more Walker seeds, adding CRPS and the coverage a conformal cut from each
-arm's PITs achieves on the truth set; kill if leave-out stays more than 20%
-from the truth on most layouts. If it survives: a non-trainable mask on
-the multi-expert root, read wherever the weights are normalized (both
-`get_expert_weights` sites in `BasicGP` and in `MultiStructureGP`, the
-consensus cross-prediction included, so one trace serves every expert),
-and `models.leave_expert_out` returning what `cross_validate` returns.
+today's spatial folds read 24–30% over it. *Shelved 2026-09-10, by the
+author's decision, for missing the requirement above:* it needs a
+multi-expert model, and it shares the flaw measured below for the
+inducing-point filters -- a datum's information sits in the kept
+neighbours' trained state, which no removal reaches. Were it taken up
+again, its gate stood at the same arms on Jura with experts (its 100
+held-out points as the truth) and two more Walker seeds, adding CRPS and
+the coverage a conformal cut from each arm's PITs achieves on the truth
+set, killed if leave-out stayed more than 20% from the truth on most
+layouts; and its build at a non-trainable mask on the multi-expert root,
+read wherever the weights are normalized (both `get_expert_weights` sites
+in `BasicGP` and in `MultiStructureGP`, the consensus cross-prediction
+included, so one trace serves every expert), with `models.leave_expert_out`
+returning what `cross_validate` returns.
 
 *Then: neutralizing the fold's inducing points through `delta` (the
 author's, 2026-09-10), measured in `docs/benchmarks/neutralized_sites.py`.*
@@ -368,6 +375,20 @@ under the trained prior, and lands at in-sample: 202–206 with one expert,
 182–205 where the converged refit reads 219–235 and 213–247, and neither
 responds to the fold size. Filtering inducing points, whichever way it is
 written, predicts from a posterior fitted with the fold's measurements.
+The author's projected prior (2026-09-10) is singular as written, both as
+`K + Delta - K (K + Delta)^-1 K` and as `K + Delta - K_.k K_kk^-1 K_k.`: its
+kept rows and columns are exactly zero, since `K - K (K + Delta)^-1 K =
+K (K + Delta)^-1 Delta` and Delta is zero there (4e-16 against K's own 1 on
+Walker's layout), so it cannot stand in for K. With K_kk kept on that block
+(`projected` in `filtered_prior.py`) it reads 203.1–203.3 with one expert,
+the kriging limit again, and with nine it falls with the filter from 423 at
+Delta = 1 to the limit by 1000, crossing the refit at a filter that moves
+with the fold size: 214.7, 210.4 and 203.3 at Delta = 100 for k = 4, 5 and
+10, where the refit reads 246.8, 213.0 and 214.4. Short of the limit the
+prior no longer agrees with the kernel's cross-covariance: the latent
+variance at the held-out rows collapses to 0.000–0.003 at Delta = 10 and
+below, and the expert weights follow it
+(`filtered_prior_*_projected*.txt`).
 Zeroing the filtered points' means as well changes nothing,
 since the prior diagonal has already taken their weight; zeroing them
 under the stored prior instead pins the fold's inducing values to the
@@ -398,11 +419,14 @@ The row solve took 2–4 s for five folds against 83–305 s for the
 weights being what the refit re-solves and the solve does not (the
 refit's own score moved 4% between 200 and 1000 iterations, so part of
 the gap may be the refit's). Adam's 500-iteration state was itself 2–6%
-short of the exact optimum on all rows. Scope, if it is gated: Gaussian or
-multivariate Gaussian leaves under any frozen warping, single-layer; a
-deep tree's interior keeps E2's memory. The gate: CRPS and the coverage of
-a conformal cut from its PITs, Jura's held-out set, more seeds, and a
-refit run to convergence for the experts.
+short of the exact optimum on all rows. *Shelved 2026-09-10, by the
+author's decision, for missing the requirement above:* the solve is exact
+only for Gaussian or multivariate Gaussian leaves under a frozen warping on
+a single layer -- another likelihood needs Newton passes, each a solve like
+this one, and a deep tree's interior keeps E2's memory -- and with several
+experts `delta` has to be refit beside it. Were it taken up again, its gate
+stood at CRPS and the coverage of a conformal cut from its PITs, Jura's
+held-out set, more seeds, and a refit run to convergence for the experts.
 
 *Shelved 2026-09-10, by the author's decision, for something simpler and
 more general.* The candidates a four-angle review produced; the structural
@@ -479,44 +503,27 @@ drillhole planning.
 
 ## 4. Data, I/O and interchange
 
+(Mesh operations through Manifold: **booleans done 2026-09-10, 0.6.10** —
+see "Settled by measurement" below for the numbers. `Solid3D`'s union,
+intersection and difference go to manifold3d itself and are exact; the
+rest of what Manifold offers was measured and replaces nothing of
+geoML's.)
+
 **S — Surface I/O residue.** OBJ/PLY/STL both ways, the vendor formats, and
 any attribute travelling with the geometry. Nothing has demanded them yet.
 
-**M — Mesh operations through `pyvista-manifold`** (requested
-2026-09-10), to make them easier and simpler. `pyvista-manifold` is
-PyVista's own accessor (MIT, 0.1.1 of May 2026) over Manifold
-(`manifold3d>=3.0`), "a fast and reliable boolean / CSG library for
-triangle meshes": `mesh.manifold.union`/`difference`/`intersection`/
-`batch_boolean`, `split`/`split_by_plane`/`trim_by_plane`/`decompose`,
-`simplify(tolerance)`, hulls, refinement, and `volume`/`genus`/`is_valid`.
-Today a boolean between bodies is `_resolved` (apart or nested, answered
-exactly from the vertices) in front of `_implicit_combine` (signed distance
-on a ~2M-cell grid, `_banded_distance`, the forked `_signed_distance`
-queries) -- about 330 lines of `meshes.py`, exact only to the grid's step
-and saying so in a warning. Booleans computed on the triangles would retire
-most of that and give back the exactness lost with VTK's filter in 0.6.7.
-Three constraints. **Solids only**: the inputs must be closed and not
-self-intersecting, so body against body can move, `clip_meshes`' extruded
-ground included, while a sheet kept a sheet (`Surface3D` ∩ body) keeps
-today's route. **float32 inside Manifold**: at mine-grid coordinates that
-is the 0.25 m quantization the painted contour already had to escape, so
-every conversion goes through `_local_frame`, which rounds a shared corner
-off for VTK today, or through `to_mesh64()`. **Invalid input is not
-refused**: a mesh that is not a closed manifold still converts and
-"downstream operations may misbehave", so `is_valid` gates every call; and
-a crash cannot be caught, which is how VTK's filter was lost, so no process
-boundary may be skipped unless the gate shows none. The package is young
-(six stars, nine open issues, 2026-09) and wants pyvista 0.48 against the
-0.47 floor; `manifold3d` itself is the fallback if the accessor stalls. A
-hard dependency if it passes: an optional extra would keep both engines,
-and none of the simplification. Gate: the contour-derived shells that
-segfaulted VTK (836 triangles and up, at the origin and at 1e6) and the 15
-Assen rock-pair intersections (95 s today) -- no crash, every result a
-consistent `Solid3D`, volumes within the implicit engine's step of today's,
-and the time. Separately, `simplify(tolerance)` against `simplify(max_error)`:
-vtkDecimatePro's own metric measured 7× loose at tight budgets, so
-Manifold's tolerance is checked against the original the same way
-(`_DistanceQueries`) before it replaces anything.
+**S — `simplify` keeps half its promise.** Found measuring it against
+Manifold's (2026-09-10, `docs/benchmarks/manifold_features.py`), on the
+Assen shells. The budget is checked one way only, the simplified faces
+against the original: at 0.5 m the simplified BIF shell sat within 0.46 m
+of the original, and the original's vertices up to 0.72 m from it. And at
+2 m both shells come back unchanged after 4–8 s -- the last resort, for a
+mesh every cut breaks -- where 0.5 m took them down 22 and 16 times. A
+likely cause, unverified: at 2 m the quadric pre-pass is accepted, being
+within half the budget, and every gentler cut starts from it, so a body
+the pre-pass broke stays broken however little is cut after. The reverse
+check costs a locator on each candidate, where today's is built once on
+the original.
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a
@@ -573,6 +580,33 @@ that attempt.
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**Solid booleans through manifold3d — done** (2026-09-10, 0.6.10).
+`docs/benchmarks/manifold_booleans.py` and `manifold_features.py`, on the
+six Assen rock shells (325k–681k triangles each, at mine coordinates). The
+bodies go to manifold3d welded, in double precision and in the pair's
+local frame, and a status other than NoError is raised rather than
+returned empty: the 15 pair intersections, a union and two differences
+took 15 s against the signed-distance grid's 141 s, with no crash in 54
+isolated calls, every answer a consistent `Solid3D`, and the block shells
+that crashed VTK's filter pass in-process. The rocks meet along films
+thinner than the grid's 1.1–1.75 m step, and its 14 non-empty
+intersections read 5 to 5231 times the exact volume, or next to nothing
+(0.0002 m³ against 1.70); the union and the differences agreed to
+0.01–0.44%. **Not the `pyvista-manifold` accessor** the item asked for:
+it casts to float32, and gave inconsistent meshes in 4 of 18 jobs in the
+local frame and 15 of 18 at mine coordinates, so its pyvista 0.48 floor is
+not needed either. **Nothing else of Manifold's replaces geoML's own**:
+`Manifold.simplify` is 20–60 times faster but strayed past its tolerance
+on real shells (at 0.5 m, 0.88–0.97 m out and 1.1–2.7 m back; at 2 m up to
+5.4 m out and 14.6 m back, and an inconsistent mesh on Hematite);
+`decompose` finds `split`'s pieces but costs as much once they are handed
+back, and takes solids only; `level_set` wants a function rather than
+samples and ran 5–8 times slower than flying edges, for half the volume
+error at twice the triangles. Measuring the films exposed `signed_volume`
+summing about the world origin, fixed the same day (a millimetre film 23%
+off at a northing of 7,000 km). What the comparison found open in
+`simplify` is an item of its own in §4.
 
 **A vector variable's components never received their latent moments —
 fixed** (2026-09-10, 0.6.10). `VectorVariable.update` now forwards `mean`

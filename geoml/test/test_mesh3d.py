@@ -48,6 +48,19 @@ def test_a_body_measures_its_area_and_volume():
     assert np.isclose(box.area, 2 * (2 * 3 + 2 * 4 + 3 * 4))
 
 
+def test_a_bodys_volume_does_not_depend_on_where_it_sits():
+    """The tetrahedra are taken about the vertices' own centre. About the
+    origin, a small body at mine-grid coordinates cancelled down to its
+    volume within rounding: a millimetre film read 23% wrong at a northing
+    of 7,000 km."""
+    unit = pv.Box(bounds=(0, 1, 0, 1, 0, 1)).triangulate()
+    triangles = unit.faces.reshape(-1, 4)[:, 1:]
+    film = np.asarray(unit.points, dtype=float) * [0.001, 10.0, 10.0]
+    for offset in (np.zeros(3), np.array([500000.0, 7000000.0, 300.0])):
+        volume = geoml.math.geometry.signed_volume(film + offset, triangles)
+        assert np.isclose(abs(volume), 0.1, rtol=1e-9)
+
+
 def test_the_measurements_are_taken_at_construction():
     sheet = _sheet()
 

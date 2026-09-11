@@ -541,12 +541,14 @@ def signed_volume(points, triangles):
     """
     The volume a closed surface encloses, negative if it is wound inwards.
 
-    Each triangle forms a tetrahedron with the origin, whose signed volume is
-    a sixth of the determinant of its corners; over a closed surface those
-    add up to what it encloses, wherever the origin happens to be. The sign
-    is the useful part: it says which way the triangles face taken together,
-    which is what an inside/outside test must know and cannot learn from any
-    one of them.
+    Each triangle forms a tetrahedron with a fixed point, whose signed volume
+    is a sixth of the determinant of its corners; over a closed surface those
+    add up to what it encloses, wherever the point happens to be. The point
+    is the vertices' own centre rather than the origin, whose tetrahedra at
+    mine-grid coordinates are vast and cancel one another down to the
+    answer within rounding. The sign is the useful part: it says which way
+    the triangles face taken together, which is what an inside/outside test
+    must know and cannot learn from any one of them.
 
     Parameters
     ----------
@@ -561,7 +563,12 @@ def signed_volume(points, triangles):
         Positive where the triangles face outwards, negative where they face
         in. Meaningless for a surface that is not closed.
     """
-    corners = _np.asarray(points, dtype=float)[_np.asarray(triangles)]
+    points = _np.asarray(points, dtype=float)
+    if len(points) > 0:
+        # about the origin, a millimetre film read 23% wrong at a northing
+        # of 7,000 km
+        points = points - points.mean(axis=0)
+    corners = points[_np.asarray(triangles)]
     return float(_np.sum(_np.einsum(
         "ij,ij->i", corners[:, 0],
         _np.cross(corners[:, 1], corners[:, 2]))) / 6.0)

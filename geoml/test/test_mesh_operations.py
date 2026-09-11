@@ -15,7 +15,8 @@ import pyvista as pv
 
 import geoml
 from geoml.data import (Mesh3D, Surface3D, Solid3D, DTM3D, mesh3d,
-                        MeshTypeError, NotSingleValuedError, NotClosedError)
+                        MeshTypeError, NotSingleValuedError, NotClosedError,
+                        InconsistentMeshError)
 
 
 def _build(mesh, cls=None):
@@ -321,39 +322,72 @@ def test_clipping_a_sheet_holds_at_mine_grid_coordinates():
     assert np.isclose(far.area, reference.area, rtol=1e-6)
 
 
-def test_a_failed_boolean_falls_back_to_the_implicit_grid(monkeypatch):
-    """A failed boolean answers with an empty mesh, which reads exactly like
-    two bodies that never cross -- and VTK logs errors in the legitimate
-    cases too, so the errors cannot arbitrate. The vertices can: these
-    spheres overlap, so each has vertices on both sides of the other, the
-    empty answer is known to be a failure, and the implicit engine answers
-    instead -- exact to its grid step, and said out loud."""
-    monkeypatch.setattr(pv.PolyData, "boolean_intersection",
-                        lambda self, other, *a, **k: pv.PolyData())
-    ball = _build(pv.Sphere(radius=4.0, center=(0, 0, 0),
-                            theta_resolution=40, phi_resolution=40), Solid3D)
-    other = _build(pv.Sphere(radius=4.0, center=(2, 0, 0),
-                             theta_resolution=40, phi_resolution=40), Solid3D)
+def test_the_booleans_are_exact_on_the_triangles():
+    """Two boxes overlapping in a box: every answer is exact, not a grid's
+    approximation of it."""
+    one = _build(pv.Box(bounds=(0, 2, 0, 2, 0, 2)), Solid3D)
+    two = _build(pv.Box(bounds=(1, 3, 0, 2, 0, 2)), Solid3D)
 
-    with pytest.warns(UserWarning, match="implicit grid"):
-        cut = ball.intersection(other)
+    assert np.isclose(one.intersection(two).volume, 4.0, rtol=1e-12)
+    assert np.isclose(one.union(two).volume, 12.0, rtol=1e-12)
+    assert np.isclose(one.difference(two).volume, 4.0, rtol=1e-12)
 
-    assert isinstance(cut, Solid3D)
-    # the lens of two r=4 spheres 2 apart: pi (4 R + d)(2 R - d)^2 / 12
-    lens = np.pi * (4 * 4.0 + 2.0) * (2 * 4.0 - 2.0) ** 2 / 12
-    assert np.isclose(cut.volume, lens, rtol=0.05)
+
+def _box(low, high, offset):
+    """A box in double precision. pyvista's own sources hold float32
+    points, which cannot place a millimetre at mine coordinates: a box
+    edge at 9.999 lands on 10.0 once moved 500 km."""
+    unit = pv.Box(bounds=(0, 1, 0, 1, 0, 1)).triangulate()
+    points = np.asarray(unit.points, dtype=float) \
+        * (np.asarray(high) - np.asarray(low)) + low + offset
+    triangles = unit.faces.reshape(-1, 4)[:, 1:]
+    return mesh3d(points, triangles,
+                  geoml.math.geometry.vertex_normals(points, triangles))
+
+
+@pytest.mark.parametrize("offset", [np.zeros(3),
+                                    np.array([500000.0, 7000000.0, 300.0])])
+def test_a_film_thinner_than_any_grid_is_measured_exactly(offset):
+    """Adjacent rock domains meet along films far thinner than any grid
+    step the booleans could afford, and a grid inflated them to its own
+    thickness: the Assen intersections read up to 5000 times the exact
+    volume. A millimetre film, at the origin and at mine coordinates."""
+    one = _box([0.0, 0.0, 0.0], [10.0, 10.0, 10.0], offset)
+    two = _box([9.999, 0.0, 0.0], [20.0, 10.0, 10.0], offset)
+
+    film = one.intersection(two)
+    assert isinstance(film, Solid3D)
+    assert np.isclose(film.volume, 0.001 * 10 * 10, rtol=1e-6)
+
+
+def test_a_body_manifold_refuses_is_named_not_answered_with_nothing(
+        monkeypatch):
+    """An engine that fails by returning nothing reads exactly like two
+    bodies that never meet -- the trap VTK's filter set -- so a body
+    Manifold will not take is refused out loud."""
+    import geoml.data.meshes as meshes
+
+    one = _build(pv.Box(bounds=(0, 2, 0, 2, 0, 2)), Solid3D)
+    two = _build(pv.Box(bounds=(1, 3, 0, 2, 0, 2)), Solid3D)
+    weld = meshes._gmt.weld
+
+    def spoiled(points, triangles, precision=6):
+        points, triangles = weld(points, triangles, precision)
+        return np.full_like(points, np.nan), triangles
+
+    monkeypatch.setattr(meshes._gmt, "weld", spoiled)
+    with pytest.raises(InconsistentMeshError, match="Manifold cannot take"):
+        one.intersection(two)
 
 
 def test_the_contoured_shell_cuts_after_all():
-    """The real failing case: VTK's exact filter drops whole patches when a
-    contoured shell meets a box, and the implicit engine is what answers.
-    Either engine may serve -- the volume must be right regardless."""
+    """The real failing case: VTK's exact filter dropped whole patches when a
+    contoured shell met a box. The volume must be right whichever engine
+    answers."""
     shell = _contoured_shell()
     box = _build(pv.Box(bounds=(5.0, 15.0, 5.0, 15.0, 5.0, 15.0)), Solid3D)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        cut = shell.intersection(box)
+    cut = shell.intersection(box)
 
     rng = np.random.default_rng(0)
     pts = rng.uniform([5, 5, 5], [15, 15, 15], [200000, 3])
@@ -414,19 +448,17 @@ def test_two_block_model_shells_combine(operation):
     """The reported crash. `vtkIntersectionPolyDataFilter` **segfaults** on
     contour-derived bodies -- measured from 836 triangles upwards, at the
     origin and at mine-grid coordinates, and on the same shells cleaned,
-    de-slivered and decimated -- so the exact engine is not consulted at all
-    any more and everything crossing goes to the implicit one.
+    de-slivered and decimated -- so VTK's filter is not consulted at all, and
+    Manifold, which takes these shells, answers in-process.
 
     A regression here does not fail this test: it takes the whole test
     runner down with it, which is the loudest signal available and the
-    reason the engine was dropped rather than guarded.
+    reason VTK's engine was dropped rather than guarded.
     """
     one, two = _block_shell([60.0, 80.0, 80.0]), _block_shell([100.0, 80.0, 80.0])
     assert isinstance(one, Solid3D) and isinstance(two, Solid3D)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        combined = getattr(one, operation)(two)
+    combined = getattr(one, operation)(two)
 
     assert isinstance(combined, Solid3D)
     assert combined.volume > 0
@@ -434,48 +466,6 @@ def test_two_block_model_shells_combine(operation):
         assert combined.volume > max(one.volume, two.volume)
     if operation == "intersection":
         assert combined.volume < min(one.volume, two.volume)
-
-
-def test_a_lying_locator_cannot_carry_the_surface_out_of_the_region(
-        monkeypatch):
-    """The implicit engine's distance sign is a pseudonormal's, and on a
-    real 2.5M-triangle ore envelope it was measured wrong forty metres
-    outside the body -- a cone of -43 where +40 was true -- which carried
-    the zero surface out through the grid margin and returned the
-    intersection of two closed bodies as an open sheet. Ray casting was
-    tried as the replacement sign and measured *worse* (a ray through a
-    degenerate patch flips the parity of every point in its shadow), so no
-    oracle can promise a truthful field. The region clamp is what makes
-    closure unconditional: the answer cannot exist outside the region box,
-    so the box's own signed distance caps the field 1.5 cells out,
-    whatever the locators report inside. Here the lie is injected
-    directly, reaching through the grid's top margin, and the boolean
-    must close anyway.
-    """
-    import geoml.data.meshes as meshes
-
-    one = _build(pv.Sphere(radius=5.0, center=(0, 0, 0),
-                           theta_resolution=40, phi_resolution=40), Solid3D)
-    two = _build(pv.Sphere(radius=5.0, center=(6, 0, 0),
-                           theta_resolution=40, phi_resolution=40), Solid3D)
-
-    truthful = meshes._signed_distance
-
-    def lying(body, points):
-        answer = truthful(body, points)
-        bogus = ((points[:, 2] > 4.0)
-                 & (np.abs(points[:, 0] - 3.0) < 1.0)
-                 & (np.abs(points[:, 1]) < 1.0))
-        return np.where(bogus, -40.0, answer)
-
-    monkeypatch.setattr(meshes, "_signed_distance", lying)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        crossed = one.intersection(two)
-
-    assert isinstance(crossed, Solid3D)
-    assert crossed.volume > 0
 
 
 def test_a_flap_left_by_decimation_does_not_break_the_rebuild():

@@ -15,7 +15,10 @@ requires-python = ">=3.10"
 # Hard floors are API facts: zarr 3 (zarr.create_array), pyvista 0.47
 # (select_interior_points, added 0.47.0), tensorflow-probability[tf] 0.24
 # (the extra that brings tf-keras), vtk 9.1 (vtkLogger control; imported
-# directly by data/meshes.py). The rest are era markers -- versions
+# directly by data/meshes.py), manifold3d 3.5 (the version the booleans
+# were measured on; they hand bodies over through its double-precision
+# Mesh64, whose first release the changelog does not name). The rest are
+# era markers -- versions
 # comfortably older than anything verified, so a truly ancient environment
 # fails at pip with a legible message instead of at runtime.
 dependencies = [
@@ -24,6 +27,7 @@ dependencies = [
     "numpy>=1.26",
     "pyvista>=0.47",
     "vtk>=9.1",
+    "manifold3d>=3.5",
     "tensorflow>=2.16",
     "tensorflow-probability[tf]>=0.24",
     "scipy>=1.11",

@@ -178,6 +178,42 @@ and -5 where the EDA's PCA of the same data was centred at zero. It reads
 `get_measurements` now, so the figure is centred as the model is; the
 scale still differs from the EDA's PCA, whose scores keep their
 eigenvalues where the warping's are whitened.
+* **The booleans are exact: Manifold replaces the signed-distance
+grid.** `Solid3D.union`/`intersection`/`difference`, and every cut that
+ends in one (`clip_meshes`, a body divided by a sheet), now go to
+manifold3d, a new hard dependency (`manifold3d>=3.5`): the bodies welded,
+moved to the pair's rounded corner and handed over in double precision,
+the answer always a consistent body, a refusal raised rather than
+returned empty. The grid was exact only to its step, and the films
+between adjacent rock domains are thinner than any step it could afford:
+on the six Assen shells (325k-681k triangles at mine coordinates) its 14
+non-empty pair intersections read 5 to 5231 times the exact volume, and
+one film 0.0002 m3 against 1.70. Manifold answered the 15 pairs, a union
+and two differences exactly in 15 s against 141 s, with no crash in 54
+isolated calls, and the contour-derived block shells that crashed VTK's
+filter pass in-process. The pyvista-manifold accessor was measured and not
+used: it casts to float32, and returned inconsistent meshes in 4 of 18
+jobs in the local frame and 15 of 18 at mine coordinates. `meshes.py`
+loses the grid -- `_implicit_combine`, the banded fields, the per-call
+signed-distance pool, `_resolved`'s crossing probes -- 256 lines net, and
+the UserWarning naming the step goes with it. An exact answer keeps both
+inputs' triangles, so a union comes back larger (1.26M triangles against
+the grid's 242k). Manifold's `simplify`, `decompose` and `level_set` were
+measured against geoML's own and not adopted: `simplify` is 20-60 times
+faster but strayed past its tolerance on the real shells (at 0.5 m,
+0.9-1.0 m out and up to 2.7 m back; at 2 m, 14.6 m back on BIF and an
+inconsistent mesh on Hematite); `decompose` finds `split`'s pieces but
+costs as much once they are handed back, and takes solids only;
+`level_set` wants a function rather than samples and ran 5-8 times slower
+than flying edges. `docs/benchmarks/manifold_booleans.py`,
+`manifold_features.py`.
+* **A body's volume no longer depends on where it sits.**
+`math.geometry.signed_volume` summed tetrahedra against the world origin,
+and at mine-grid coordinates those cancel down to a small body's volume
+within rounding: a millimetre film read 23% wrong at a northing of 7,000
+km, and the Assen film volumes moved by up to 8% once corrected. It sums
+about the vertices' centre now, which is the same answer for any closed
+surface.
 * **Histograms carry their summary statistics.** Every panel of
 `histogram` sums its values up in a box, on both backends: the count, the
 mean, the standard deviation, the coefficient of variation, the skewness

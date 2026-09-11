@@ -1,8 +1,9 @@
 """The filtered prior written into the GP's own methods, Walker V, 2026-09-10.
 
 Usage: python docs/benchmarks/filtered_prior.py <single|experts> [k=5]
+       [modes=everywhere,kept] [filters=100,1e6]
 
-Two rewrites of `BasicGP.refresh` for a terminal node, each with a filtering
+Rewrites of `BasicGP.refresh` for a terminal node, each with a filtering
 diagonal Delta on the prior of the fold's inducing points (the
 nearest-location rule: an inducing point belongs to the fold of its nearest
 datum; every copy of a location is filtered, in every expert):
@@ -23,6 +24,13 @@ kept        the trained posterior q(u) = N(m, S) kept whole, S = (K^-1 +
             so no large matrices are subtracted), and the root G L^-T chol(W).
             As Delta grows: the same mean, and the variance
             1 - k_k K_kk^-1 k_k + k_k K_kk^-1 S_kk K_kk^-1 k_k.
+projected   the author's projected prior (2026-09-10), K' = K + Delta -
+            K_.k K_kk^-1 K_k., then as `everywhere`. Taken literally it is
+            zero on the kept rows and columns -- K_kk - K_kk K_kk^-1 K_kk --
+            and singular, so the kept block keeps K_kk: the kept points keep
+            their prior, and the fold's points get the part of theirs the kept
+            ones do not explain, S = K_rr - K_rk K_kk^-1 K_kr, plus Delta,
+            independent of the rest. The same limit as `everywhere`.
 
 Both are checked against BasicGP with no filter and against their
 closed-form limits at a filter of 1e6. The cross-covariance k(x, z) and the
@@ -46,10 +54,18 @@ from geoml.latent.network import BasicGP  # noqa: E402
 
 LAYOUT = sys.argv[1]
 K_FOLDS = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+MODES = tuple(sys.argv[3].split(",")) if len(sys.argv) > 3 \
+    else ("everywhere", "kept")
+FILTERS = tuple(float(v) for v in sys.argv[4].split(",")) \
+    if len(sys.argv) > 4 else (1e2, 1e6)
 STEP, RANGE, ITER, JITTER = 26.0, 50.0, 500, 1e-6
-FILTERS = (1e2, 1e6)
+# modes and filters asked for by name write a file of their own
 OUT = os.path.join(root, "docs", "benchmarks", "figures",
-                   "filtered_prior_%s_k%d.txt" % (LAYOUT, K_FOLDS))
+                   "filtered_prior_%s_k%d%s%s.txt" % (
+                       LAYOUT, K_FOLDS,
+                       "_" + "_".join(MODES) if len(sys.argv) > 3 else "",
+                       "_f" + "-".join("%g" % v for v in FILTERS)
+                       if len(sys.argv) > 4 else ""))
 
 
 def say(*args):
@@ -135,11 +151,21 @@ def _refresh(mode, jitter):
 
         # the filtered prior (step 2)
         f = FILTER[i]
-        Kf = K + tf.linalg.diag(f)
+        if mode == "projected":
+            # K_kk^-1 embedded in the full matrix: (M K M + I - M)^-1 is
+            # blockdiag(K_kk^-1, I), and M on both sides leaves K_kk^-1
+            # alone; K_kk goes back on the kept block, which the formula
+            # would leave at zero
+            M = tf.linalg.diag(tf.cast(tf.equal(f, 0.0), tf.float64))
+            embedded = M @ tf.linalg.inv(M @ K @ M + eye - M) @ M
+            Kf = K - K @ embedded @ K + M @ K @ M + tf.linalg.diag(f)
+            Kf = 0.5 * (Kf + tf.transpose(Kf))
+        else:
+            Kf = K + tf.linalg.diag(f)
         Lf = tf.linalg.cholesky(Kf)
         Kf_inv = tf.linalg.cholesky_solve(Lf, eye)
 
-        if mode == "everywhere":
+        if mode in ("everywhere", "projected"):
             # new whitened values from the new Cholesky (step 3), then
             # BasicGP.refresh with Kf in place of K in every formula
             a_f = tf.linalg.triangular_solve(
@@ -216,7 +242,7 @@ def limit_check(mode, refresh):
         Kkk = K[np.ix_(keep, keep)]
         proj = np.linalg.solve(Kkk, k.T).T
         mean_ref = proj @ m[keep] + b
-        if mode == "everywhere":
+        if mode in ("everywhere", "projected"):
             smooth = Kkk + np.diag(d[keep]) + np.eye(keep.sum()) * JITTER
             var_ref = 1.0 - np.sum(np.linalg.solve(smooth, k.T).T * k, axis=1)
         else:
@@ -234,7 +260,7 @@ def limit_check(mode, refresh):
 
 
 results = {}
-for mode in ("everywhere", "kept"):
+for mode in MODES:
     refresh = use(mode)
     set_filter(None, 0.0)
     identity = predict()

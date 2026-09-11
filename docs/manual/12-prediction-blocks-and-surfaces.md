@@ -83,8 +83,9 @@ What comes back is a real mesh object with invariants rather than a soup
 of triangles. `Surface3D` never closes, `Solid3D` always closes and knows
 its `volume`, and a mesh that satisfies neither is refused rather than
 passed along quietly. Solids support `union`, `intersection` and
-`difference`, with a robust fallback where exact geometry fails, which
-warns and states its resolution when it is used. `simplify(max_error)`
+`difference`, worked out exactly on the triangles, down to the thin
+films where adjacent domains overlap. A pair the engine cannot take
+raises an error rather than coming back empty. `simplify(max_error)`
 decimates against a geometric budget it actually verifies, and `from_dxf`
 and `export_dxf` exchange geometry with the rest of the mining world.
 

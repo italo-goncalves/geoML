@@ -1,0 +1,136 @@
+BIF                 324970 triangles, volume 8.173e+05
+Calcitic Hematite   666226 triangles, volume 3.586e+06
+Diabase             537350 triangles, volume 2.009e+06
+Hematite            620126 triangles, volume 2.464e+06
+Limestone           680832 triangles, volume 2.871e+06
+Shale               538368 triangles, volume 1.415e+06
+
+BIF intersection Calcitic Hematite
+implicit         4.5 s  Solid3D  volume 0.0001852        16 tris step 1.1
+manifold64       0.0 s  Solid3D  volume 1.70258      1322 tris status NoError/NoError, converted in 0.7 s
+accessor32       0.0 s  Solid3D  volume 1.70258      1322 tris valid True/True
+  at mine        0.0 s  Mesh3D   volume 1.68279       994 tris valid True/True
+
+BIF intersection Diabase
+implicit         5.1 s  Solid3D  volume 619.881      1144 tris step 1.36
+manifold64       0.1 s  Solid3D  volume 51.1043     34870 tris status NoError/NoError, converted in 0.6 s
+accessor32       0.1 s  Solid3D  volume 51.1043     34864 tris valid True/True
+  at mine        0.2 s  Mesh3D   volume 51.5508     24514 tris valid True/True
+
+BIF intersection Hematite
+implicit         5.3 s  Solid3D  volume 331.527      1006 tris step 1.36
+manifold64       0.1 s  Solid3D  volume 31.7294     21616 tris status NoError/NoError, converted in 0.7 s
+accessor32       0.2 s  Mesh3D   volume 31.7294     21614 tris valid True/True
+  at mine        0.2 s  Mesh3D   volume 27.4873     10638 tris valid True/True
+
+BIF intersection Limestone
+implicit        21.4 s  empty    volume 0         0 tris step None
+manifold64       0.0 s  empty    volume 0         0 tris status NoError/NoError, converted in 0.7 s
+accessor32       0.0 s  empty    volume 0         0 tris valid True/True
+  at mine        0.0 s  empty    volume 0         0 tris valid True/True
+
+BIF intersection Shale
+implicit        18.0 s  Solid3D  volume 55.5315       196 tris step 1.36
+manifold64       0.0 s  Solid3D  volume 0.438487       204 tris status NoError/NoError, converted in 0.6 s
+accessor32       0.0 s  Solid3D  volume 0.438486       204 tris valid True/True
+  at mine        0.0 s  Solid3D  volume 0.25        30 tris valid True/True
+
+Calcitic Hematite intersection Diabase
+implicit         5.1 s  Solid3D  volume 2326.31      5312 tris step 1.36
+manifold64       0.1 s  Solid3D  volume 100.053     41750 tris status NoError/NoError, converted in 0.8 s
+accessor32       0.0 s  Solid3D  volume 100.053     41748 tris valid True/True
+  at mine        0.1 s  Mesh3D   volume 98.5207     23940 tris valid True/True
+
+Calcitic Hematite intersection Hematite
+implicit         5.6 s  Solid3D  volume 4237.37      6054 tris step 1.38
+manifold64       0.1 s  Solid3D  volume 184.016    106304 tris status NoError/NoError, converted in 0.9 s
+accessor32       0.2 s  Mesh3D   volume 184.016    106292 tris valid True/True
+  at mine        0.2 s  Mesh3D   volume 183.773     78632 tris valid True/True
+
+Calcitic Hematite intersection Limestone
+implicit         5.9 s  Solid3D  volume 8191.75      4764 tris step 1.7
+manifold64       0.1 s  Solid3D  volume 65.7859     50060 tris status NoError/NoError, converted in 0.9 s
+accessor32       0.1 s  Solid3D  volume 65.786     50056 tris valid True/True
+  at mine        0.3 s  Mesh3D   volume 68.4423     32900 tris valid True/True
+
+Calcitic Hematite intersection Shale
+implicit         5.5 s  Solid3D  volume 6078.74      5352 tris step 1.72
+manifold64       0.1 s  Solid3D  volume 106.874     34762 tris status NoError/NoError, converted in 0.8 s
+accessor32       0.1 s  Solid3D  volume 106.874     34762 tris valid True/True
+  at mine        0.1 s  Mesh3D   volume 105.841     26252 tris valid True/True
+
+Diabase intersection Hematite
+implicit         5.4 s  Solid3D  volume 581.033      1176 tris step 1.54
+manifold64       0.1 s  Solid3D  volume 109.162     57964 tris status NoError/NoError, converted in 0.8 s
+accessor32       0.1 s  Solid3D  volume 109.162     57962 tris valid True/True
+  at mine        0.3 s  Mesh3D   volume 106.367     35322 tris valid True/True
+
+Diabase intersection Limestone
+implicit         5.5 s  Solid3D  volume 950.729      1726 tris step 1.34
+manifold64       0.0 s  Solid3D  volume 0.181754       272 tris status NoError/NoError, converted in 0.8 s
+accessor32       0.0 s  Solid3D  volume 0.181753       272 tris valid True/True
+  at mine        0.0 s  Solid3D  volume 0.247105       112 tris valid True/True
+
+Diabase intersection Shale
+implicit         5.1 s  Solid3D  volume 103.191       252 tris step 1.54
+manifold64       0.0 s  Solid3D  volume 18.4131     10090 tris status NoError/NoError, converted in 0.7 s
+accessor32       0.0 s  Solid3D  volume 18.4131     10090 tris valid True/True
+  at mine        0.1 s  Mesh3D   volume 17.2025      5928 tris valid True/True
+
+Hematite intersection Limestone
+implicit         5.9 s  Solid3D  volume 6813.49      8244 tris step 1.36
+manifold64       0.0 s  Solid3D  volume 1.97484      2202 tris status NoError/NoError, converted in 0.9 s
+accessor32       0.0 s  Solid3D  volume 1.97484      2202 tris valid True/True
+  at mine        0.0 s  Mesh3D   volume 2.25614       852 tris valid True/True
+
+Hematite intersection Shale
+implicit         5.3 s  Solid3D  volume 1507.69      2516 tris step 1.56
+manifold64       0.0 s  Solid3D  volume 46.1171     16380 tris status NoError/NoError, converted in 0.8 s
+accessor32       0.0 s  Solid3D  volume 46.1171     16378 tris valid True/True
+  at mine        0.1 s  Mesh3D   volume 45.7611     10924 tris valid True/True
+
+Limestone intersection Shale
+implicit         5.5 s  Solid3D  volume 1127.22      1956 tris step 1.75
+manifold64       0.1 s  Solid3D  volume 54.6968     18248 tris status NoError/NoError, converted in 0.8 s
+accessor32       0.1 s  Solid3D  volume 54.6968     18248 tris valid True/True
+  at mine        0.1 s  Mesh3D   volume 52.1514     12192 tris valid True/True
+
+Hematite union Calcitic Hematite
+implicit         6.6 s  Solid3D  volume 6.07695e+06    242342 tris step 1.84
+manifold64       0.3 s  Solid3D  volume 6.05013e+06   1259992 tris status NoError/NoError, converted in 0.9 s
+accessor32       0.3 s  Mesh3D   volume 6.05013e+06   1259980 tris valid True/True
+  at mine        0.4 s  Mesh3D   volume 6.05014e+06   1163980 tris valid True/True
+
+Hematite difference Calcitic Hematite
+implicit         7.0 s  Solid3D  volume 2.47268e+06    233600 tris step 1.56
+manifold64       0.2 s  Solid3D  volume 2.46383e+06    660126 tris status NoError/NoError, converted in 0.9 s
+accessor32       0.2 s  Mesh3D   volume 2.46383e+06    660124 tris valid True/True
+  at mine        0.3 s  Mesh3D   volume 2.46384e+06    596364 tris valid True/True
+
+BIF difference Shale
+implicit        18.4 s  Solid3D  volume 817413    143458 tris step 1.36
+manifold64       0.1 s  Solid3D  volume 817318    325082 tris status NoError/NoError, converted in 0.6 s
+accessor32       0.1 s  Solid3D  volume 817318    325082 tris valid True/True
+  at mine        0.1 s  Mesh3D   volume 817316    318044 tris valid True/True
+
+times, every job both engines finished: implicit 141.1 s, manifold64 15.2 s (conversion included)
+job                                      implicit     manifold64      diff    step
+BIF inter Calcitic                      0.0001852        1.70258   -99.99%     1.1
+BIF inter Diabase                         619.881        51.1043  1112.97%    1.36
+BIF inter Hematite                        331.527        31.7294   944.86%    1.36
+BIF inter Limeston                              0              0     0.00%    None
+BIF inter Shale                           55.5315       0.438487 12564.35%    1.36
+Calcitic inter Diabase                    2326.31        100.053  2225.07%    1.36
+Calcitic inter Hematite                   4237.37        184.016  2202.72%    1.38
+Calcitic inter Limeston                   8191.75        65.7859 12352.13%     1.7
+Calcitic inter Shale                      6078.74        106.874  5587.77%    1.72
+Diabase inter Hematite                    581.033        109.162   432.27%    1.54
+Diabase inter Limeston                    950.729       0.181754 522985.41%    1.34
+Diabase inter Shale                       103.191        18.4131   460.42%    1.54
+Hematite inter Limeston                   6813.49        1.97484 344914.55%    1.36
+Hematite inter Shale                      1507.69        46.1171  3169.27%    1.56
+Limeston inter Shale                      1127.22        54.6968  1960.86%    1.75
+Hematite union Calcitic               6.07695e+06    6.05013e+06     0.44%    1.84
+Hematite diffe Calcitic               2.47268e+06    2.46383e+06     0.36%    1.56
+BIF diffe Shale                            817413         817318     0.01%    1.36
+done
