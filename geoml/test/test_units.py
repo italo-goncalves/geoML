@@ -12,6 +12,8 @@ The gate is `test_a_declared_unit_changes_nothing_but_the_scale`: the same
 data as percentages and as fractions must train to the same bound and report
 a factor of a hundred apart, the variances by its square.
 """
+import warnings
+
 import numpy as np
 import pytest
 
@@ -304,8 +306,8 @@ def test_the_measurements_must_match_the_labels():
 # --------------------------------------------------------------------------- #
 # the gate
 # --------------------------------------------------------------------------- #
-def _trained(values, units, cutoff, iterations=15):
-    """A composition trained on the same numbers, told a different unit."""
+def _model(values, units, cutoff, iterations=15):
+    """A composition trained on `values`, told they are in `units`."""
     geoml.set_seed(1234)
     data = geoml.data.PointData.from_array(
         np.linspace(0.0, 100.0, 30)[:, None], ["depth"])
@@ -322,7 +324,12 @@ def _trained(values, units, cutoff, iterations=15):
         data, "c", geoml.likelihood.MultivariateGaussian(3, chain), gp,
         options=geoml.models.GPOptions(verbose=False))
     model.train_full(max_iter=iterations)
+    return model
 
+
+def _trained(values, units, cutoff, iterations=15):
+    """A composition trained on the same numbers, told a different unit."""
+    model = _model(values, units, cutoff, iterations)
     target = geoml.data.Grid1D(0.0, n=12, step=8.0)
     model.predict(target, n_sim=6)
     samples = model.predict_measurements(target, n_sim=6, n_nodes=4)["c"]
@@ -375,10 +382,54 @@ def test_a_declared_unit_changes_nothing_but_the_scale(gate):
 
 
 def test_a_cut_off_names_the_same_ground_in_either_unit(gate):
-    """30 % and 0.30 are one cut-off, so the share of each block above it
-    is the same number."""
+    """30 % and 0.30 are one cut-off, so the share of each block at or
+    below it is the same number."""
     percent, plain = gate
     np.testing.assert_allclose(percent["shares"], plain["shares"])
+
+
+def _percent_model():
+    values = np.random.default_rng(3).dirichlet([6.0, 3.0, 11.0], size=30)
+    return _model(values * 100.0, {"p": "%", "q": "%", "r": "%"}, 30.0)
+
+
+def _target_in_ppm(model, cutoff):
+    """A container already holding the composition, its first part
+    declared in ppm."""
+    target = geoml.data.Grid1D(0.0, n=12, step=8.0)
+    model.data.get("c").copy_to(target)
+    target.get("c/p").set_unit("ppm").set_cutoffs([cutoff])
+    return target
+
+
+def test_a_part_declaring_another_cut_off_takes_the_models_in_its_unit():
+    """A target part declaring 25 % files the model's shares at 30 % under
+    its own number unless it takes the model's cut-off first -- converted
+    to the part's own unit, which here is not the training data's."""
+    model = _percent_model()
+    fresh = geoml.data.Grid1D(0.0, n=12, step=8.0)
+    model.predict(fresh, n_sim=6)
+
+    target = _target_in_ppm(model, 250_000.0)
+    with pytest.warns(UserWarning, match="cut-offs"):
+        model.predict(target, n_sim=6)
+
+    part = target.get("c/p")
+    assert part.cutoffs == [pytest.approx(300_000.0)]
+    np.testing.assert_array_equal(
+        np.asarray(part.proportions[part.cutoffs[0]].values),
+        np.asarray(fresh.get("c/p").proportions[30.0].values))
+
+
+def test_a_part_naming_the_same_ground_in_another_unit_keeps_its_number():
+    model = _percent_model()
+    target = _target_in_ppm(model, 300_000.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(target, n_sim=6)
+
+    assert not [w for w in caught if "cut-offs" in str(w.message)]
+    assert target.get("c/p").cutoffs == [300_000.0]
 
 
 # --------------------------------------------------------------------------- #

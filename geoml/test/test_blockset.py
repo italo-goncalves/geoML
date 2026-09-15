@@ -435,6 +435,47 @@ def test_the_cutoffs_travel_with_the_variable():
     assert list(blocks.variables["au"].divided) == [1.0]
 
 
+def test_a_cutoff_taken_away_takes_its_shares_with_it():
+    """Or its `divided` column would keep voting on where `refine` splits,
+    for a decision nobody is making any more."""
+    model = _ore_model()
+    model.data.variables["au"].set_cutoffs([1.0, 2.0])
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+    assert sorted(blocks.block_shares()) == ["au @ 1", "au @ 2"]
+
+    au = blocks.variables["au"].set_cutoffs([2.0])
+    assert list(au.proportions) == [2.0]
+    assert list(au.divided) == [2.0]
+    assert list(blocks.block_shares()) == ["au @ 2"]
+
+
+def test_a_target_whose_cutoffs_were_moved_takes_the_models():
+    """The model computes its shares at the cut-offs of the data it was
+    trained on, and a container already holding the variable files them
+    by position under its own. A cut-off moved on one side and not the
+    other put the right numbers under the wrong value; the target takes the
+    model's now, says so, and holds exactly what a fresh container gets."""
+    model = _ore_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=8)
+
+    model.data.variables["au"].set_cutoffs([1.5])
+    with pytest.warns(UserWarning, match="cut-offs"):
+        model.predict(blocks, n_sim=8)
+    fresh = _ore_blocks()
+    model.predict(fresh, n_sim=8)
+
+    au = blocks.variables["au"]
+    assert au.cutoffs == [1.5]
+    assert list(au.proportions) == [1.5]
+    assert list(au.divided) == [1.5]
+    for family in ("proportions", "divided"):
+        np.testing.assert_array_equal(
+            getattr(au, family)[1.5].values.to_numpy(),
+            getattr(fresh.variables["au"], family)[1.5].values.to_numpy())
+
+
 def test_a_share_of_a_block_is_between_none_and_all_of_it():
     model = _ore_model()
     blocks = _ore_blocks()
@@ -589,6 +630,25 @@ def test_a_vector_variables_components_each_bring_their_own_cutoffs():
     refined = geoml.models.refine(model, blocks, n_sim=8)
     assert refined.is_full()
     assert (refined.n_data > blocks.n_data) == bool(np.any(wanted))
+
+
+def test_a_vector_part_declaring_other_cutoffs_takes_the_models():
+    """A part declaring more cut-offs than the model computed used to fail
+    with an unrelated index error, and one declaring fewer lost the model's
+    columns without a word."""
+    model = _vector_model()
+    blocks = _ore_blocks()
+    model.data.variables["metals"].copy_to(blocks)
+    metals = blocks.variables["metals"]
+    metals.components["zn"].set_cutoffs([1.0, 2.0])
+    metals.components["pb"].set_cutoffs(None)
+
+    with pytest.warns(UserWarning, match="cut-offs"):
+        model.predict(blocks, n_sim=8)
+
+    assert metals.components["zn"].cutoffs == [1.0]
+    assert metals.components["pb"].cutoffs == [0.5]
+    assert sorted(blocks.block_shares()) == ["metals pb @ 0.5", "metals zn @ 1"]
 
 
 def test_only_the_named_variables_get_a_say():

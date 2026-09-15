@@ -213,6 +213,19 @@ whether they ride the data object (the `GaussianData` precedent, which also
 reaches prediction) or the variable channel (training-only, needs nothing
 new).
 
+**S — Directional data ignored under a variable named as a string**
+(found by reading, 2026-09-15, not run). `VGPNetwork.__init__` pairs the
+directional measurements with the variables by iterating the raw
+`variables` argument, so `variables="Rock"` walks the letters, looks up
+`"R"`, finds nothing and trains on no directional measurement at all. A
+list or the mapping spelling is unaffected. Iterate the normalized names.
+
+**S — A GP node that fails to build is left among its parent's children**
+(found by reading, 2026-09-15). `_FunctionalLatentVariable.__init__`
+appends the node to `parent.children` before `_GPNode.__init__` can raise
+`BrokenPropagationError`, so a caller that catches the error and goes on
+holds a parent with a child that does not exist. Register the child last.
+
 ---
 
 ## 2. Fitting and initialization
@@ -525,6 +538,12 @@ the method's crux and is not obvious for spatial inputs. Attribution of the
 *uncertainty* is a separate and possibly more interesting question for
 drillhole planning.
 
+**S — `refit="leaves"` leaves a `GradientConstrainedInput` as it was**
+(found by reading, 2026-09-15). `models._terminal_gp_nodes` treats it as a
+stateless root, although it carries `alpha_white`, `delta` and `bias` of
+its own, so a leaves refit over a gradient-constrained model keeps what
+that node learned from the held-out rows. Count it among the GP nodes.
+
 ---
 
 ## 4. Data, I/O and interchange
@@ -666,14 +685,24 @@ demand it, phase two is a lattice-free `FreeBlocks3D` with per-block sizes
 as a real attribute — block-support prediction and tonnage still work,
 refinement and contour-cutting do not.
 
+**M — Save a container into the store it was opened from.** Refused since
+0.6.13, because `to_zarr` emptied the store before copying the arrays it
+was reading from it, and wrote back NaN. What a notebook wants after
+`open`, a prediction and `to_zarr(same path)` is an in-place write: the
+arrays already in the store stay, the new variables' arrays are added, the
+removed ones deleted and the root attribute rewritten -- what
+`MeshSet.to_zarr` already does for its description alone. The same for a
+model loaded and saved over its own store.
+
 ---
 
 ## 5. Housekeeping, docs and release
 
-(The tag's `full` CI job dying at 93%: **done 2026-09-15, 0.6.12, not yet
-seen on a tag**. On the v0.6.10 and v0.6.11 tags the suite ran clean to
-93-95% and was cancelled with no test failing; as one pytest process it
-peaks at 23.1 GB, and the runner has 16. The job runs one process per
+(The tag's `full` CI job dying at 93%: **done 2026-09-15, 0.6.12, and
+passed on the v0.6.12 tag in 37 minutes**, the first full job to pass on
+a tag since v0.6.9's. On the v0.6.10 and v0.6.11 tags the suite ran clean
+to 93-95% and was cancelled with no test failing; as one pytest process
+it peaks at 23.1 GB, and the runner has 16. The job runs one process per
 test file now: under a 14 GB cap every file passed, the heaviest peaking
 at 6.1 GB.)
 
@@ -748,6 +777,126 @@ progress -- among them `pd.concat` on a `list[DataFrame | None]` and a
 `pop` handed `int | None`. First find out whether CI's pyright sees them or
 only this environment, and which versions it runs: library drift would
 call for a pin or a note, not code.
+
+---
+
+## 6. What GeoScape needs
+
+GeoScape is a UI that calls geoML: it draws networks, writes the Scripts
+that build and run them, and reads what they leave behind. Its repository
+(`C:\Repos\geoscape`, same owner) keeps what it needs from geoML in
+`docs/geoml-requirements.md`, revised 2026-09-15 against 0.6.11, and the
+catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
+is that list's numbering, and M3 and M4 its milestones. Three items are
+met already: one leaf per likelihood (item 2) and names replayed by a save
+(item 5), both in 0.6.10, and `geoml.__version__` at run time (item 7).
+
+What GeoScape builds on, where a change must be flagged to it rather than
+made quietly: dotted class paths importable forever, already policy;
+constructor arguments as the whole persisted story, since the editor
+exposes nothing else; the Fourier-feature classes kept internal; **batch
+invariance**, a location's realizations independent of the call that
+computed them given the same fit, seed and count
+(`test_predicting_only_the_new_blocks_gives_the_same_answer`), which a
+per-location residual draw would break; and node names seeding the draws,
+GeoScape never renaming a node once created.
+
+**L — The catalogue** (GeoScape's item 1, blocks M4). The network editor
+offers nothing geoML has not declared. `geoml.catalogue.build()` and
+`python -m geoml.catalogue [path]` write JSON with sorted keys,
+byte-identical for one version, keyed by the dotted paths persistence
+resolves (`geoml.latent.network.BasicGP`, not a re-export). Signatures,
+defaults and docstrings come from `inspect`; what introspection cannot
+know -- category, size rule, parents, whether inducing points propagate,
+the variable types a likelihood accepts -- comes from a declaration on each
+class beside its code, and a test fails on any public class in a covered
+module without one. The spec leaves to geoML the size rules of `GPWalk`,
+`Stack`, `ProductOfExperts`, `RadialTrend`, `AdditiveGP` and
+`MultiStructureGP`; whether `GradientConstrainedInput` is an input like the
+others; the variable-type names and properties; the shape of a
+`covariance` entry; and which loader a predict step names, both of which
+exist today: `VGPNetwork.open(path)`, inherited from `_GPModel`, and
+`persistence.load_model`. Read off the code on 2026-09-15: `GPWalk` is its
+parent's size, the parent a GP of the walker's size; `Stack` the sum of
+its parents, `ProductOfExperts` their common size, neither propagating;
+`RadialTrend` its `size`, propagating where its parent does; `AdditiveGP`
+and `MultiStructureGP` their `size`, GP nodes like `BasicGP`;
+`GradientConstrainedInput` an input with a `size` of its own and a
+covariance where `BasicInput` takes a transform; a covariance an ordinary
+class entry (`Covariance(kernel, transform)`, `Sum`, `Product`, `Scale`,
+`Linear`); and the loader `VGPNetwork.open`, public, annotated, the save
+carrying its containers. Nothing checks which variable a likelihood is
+bound to, only the sizes, so `accepts` is a declaration a test verifies.
+The spec needs four amendments: `propagates_inducing` true only when every
+parent propagates and all share one root (`Add`, `LinearCombination`); a
+category a parent must belong to (`GPWalk`'s, a GP); a likelihood's size
+following its warping's; and no object defaults.
+
+Found while planning it, each something the catalogue's own tests would
+catch: `Identity()` and `Periodic()` passed explicitly cannot be saved --
+neither they nor `_Transform` define `__init__`, and `Parametric.__init__`
+is not wrapped, so no arguments are recorded; `BasicInput`,
+`kernels.Covariance` and `kernels.Linear` share one `Identity()` built at
+import; `Concatenate` declares that it propagates without asking its
+parents, so a GP on a `Concatenate` of a `Multiply` is built and fails at
+refresh; an operation given no parents fails with an `IndexError`;
+`GPWalk` does not check that its parent is a GP, nor `MultiStructureGP`
+that it has two structures; `warping.__all__` lacks the four parametric
+links, `kernels.__all__` `Covariance` and `RationalQuadratic`; and
+`NormalizeWithBoundingBox` cannot be saved, a `BoundingBox` not being
+encodable.
+
+(GeoScape's items 4, 6, 9, 10, 11, 12 and 14: **done 2026-09-15, for
+0.6.13**; the changelog has the detail. A target whose cut-offs differ from
+the model's takes the model's, in its own unit and with a warning -- the
+user chose re-keying over raising -- and `set_cutoffs` drops the shares of
+the cut-offs it removes. The stopping rule's trail and `train_svi`'s
+shuffle belong to the phase, so chunks reproduce one call bit for bit, and
+`converged` tells a Script when to stop calling. Every store writer keeps
+the root attributes not starting with `geoml`, and none writes over a store
+something still reads from, which had been silent data loss for an opened
+container, a loaded model and a mesh-set realization. The cross-validation
+container round-trips, tested, its score columns documented; chapters 8
+and 10 say at or below, and a category's share is the share inside it, so
+GeoScape flips grades only. `docs/source/reference/stores.md` documents
+the stores, the mesh set's attribute gaining `groups`, the layout pinned
+by `test_the_store_is_laid_out_as_its_reference_page_says`.)
+
+**S — The reproducibility contract, written down** (GeoScape's item 8).
+GeoScape's lineage promises that a Run replays, and the promise must be the
+engine's. `set_seed` before construction is the one path; what it does not
+cover has to be said -- CPU against GPU, TensorFlow's nondeterministic
+kernels, and chapter 16 differing from run to run on one machine, found at
+the 0.6.12 release (§5), which is why that item comes first.
+
+**M — A progress hook** (GeoScape's item 13). An optional callback, or a
+`logging` channel, reporting what is done, the total where it is known,
+and the bound: per iteration in `train_full` and `train_svi`, per batch in
+`predict`, per pass in `refine`, per body and realization in a mesh set,
+per fold in `cross_validate`. Today GeoScape parses the `\r` lines of
+standard output and trains in chunks, which leans on the convergence item
+above.
+
+**M — A mesh set openable mid-build, and `unpredicted()` everywhere**
+(GeoScape's item 15). `to_zarr` writes the `geoml_meshset` attribute once;
+written up front and after each realization, a cancelled contour would
+keep what it finished. And only `BlockSet3D` has `unpredicted()`, where
+GeoScape resumes a cancelled prediction on any container. Until then its
+Scripts contour one realization a call.
+
+**M — Chunks that split the realization axis** (GeoScape's item 3, M3,
+performance). `ArrayStore` spills and `to_zarr` chunk the location axis
+only, so a chunk holds whole rows and one realization of a
+`(5 000 000, 100)` run reads every chunk, about 4 GB. A policy splitting
+axis 1 once `n_sim` is large, for both, that keeps the row-wise reductions
+(`row_bands`, the quantiles) to one pass over the store.
+
+Outside the code, from the same list: a contributor licence agreement
+before the first outside contribution is merged; and title in writing, with
+no institutional claim, before any geoML code ships inside something
+RockAnalytica distributes -- the desktop helper (M7), a self-hosted tier,
+or a `geoscape-cli` that imports geoML. Version 1 and the cloud need
+neither, Scripts being text and portal services not distribution.
 
 ---
 

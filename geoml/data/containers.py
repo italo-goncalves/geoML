@@ -21,6 +21,7 @@ The point-based containers: `_SpatialData` (what every container is),
 import copy as _copy
 import inspect as _inspect
 import json as _json
+import os as _os
 import warnings as _warnings
 from collections.abc import Sequence
 from typing import Any as _Any
@@ -198,6 +199,9 @@ class _SpatialData(_TreeNode):
     _n_dim: int
     _n_data: int
     _bounding_box: _Any
+    # the store `open` rebuilt this container from, whose arrays it goes on
+    # reading on disk; None for one built in memory
+    _store_path: "str | None" = None
 
     def __init__(self):
         # zero rather than None: an empty container has no locations and
@@ -794,13 +798,25 @@ class _SpatialData(_TreeNode):
         All point-based containers and variable types are supported;
         ``DrillholeData`` is not (it is raw input data, not a prediction
         target).
+
+        A store already at ``path`` is replaced, except for the root
+        attributes other programs wrote there: every one whose key does not
+        start with ``geoml`` is kept.
+
+        Raises
+        ------
+        ValueError
+            If this container was opened from ``path``, or from a store
+            inside or around it: its arrays are still read from there, and
+            would be deleted before they were copied.
         """
         # imported late: the Zarr writers name every container class, and
         # those classes subclass what this module defines
         from geoml.data.io import (
-            _GEOML_ZARR_FORMAT, _write_container, _write_metadata,
-            _write_variable)
-        group = _zarr.open_group(path, mode="w")
+            _GEOML_ZARR_FORMAT, _open_for_writing, _refuse_overwriting,
+            _write_container, _write_metadata, _write_variable)
+        _refuse_overwriting(self._store_path, path, "this container")
+        group = _open_for_writing(path)
         meta = {"geoml_format": _GEOML_ZARR_FORMAT,
                 "container": _write_container(group, self),
                 "metadata": _write_metadata(group, self),
@@ -836,6 +852,7 @@ class _SpatialData(_TreeNode):
         _rebuild_metadata(container, group, meta.get("metadata", {}))
         for vmeta in meta["variables"].values():
             _rebuild_variable(container, group, vmeta)
+        container._store_path = _os.fspath(path)
         return container
 
 

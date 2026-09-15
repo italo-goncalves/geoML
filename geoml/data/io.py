@@ -19,8 +19,11 @@ Container persistence: the Zarr writers and rebuilders behind
 name and rebuilt by the dispatch here, so moving a class between modules
 never invalidates a store.
 """
+import os as _os
+
 import numpy as _np
 import pandas as _pd
+import zarr as _zarr
 
 import geoml.math.geometry as _gmt
 import geoml.storage as _storage
@@ -43,6 +46,47 @@ from geoml.data.blocks import *
 # `quantile_0.5`). Stores written at format 1 are not read back -- agreed at
 # the time of the change, everything in use being refreshed after it.
 _GEOML_ZARR_FORMAT = 2
+
+
+def _open_for_writing(path):
+    """`zarr.open_group(path, mode="w")`, keeping what someone else wrote.
+
+    `mode="w"` empties the directory, and with it the root attributes
+    another program left on the store -- a provenance hash, say. geoML's own
+    live under keys starting with `geoml` (`geoml`, `geoml_meshset`,
+    `geoml_model`), so every other root attribute of a store already at
+    `path` is written back. Arrays and groups are replaced.
+    """
+    try:
+        kept = {key: value
+                for key, value in dict(_zarr.open_group(path, mode="r").attrs)
+                .items() if not key.startswith("geoml")}
+    except (FileNotFoundError, ValueError):
+        # nothing there yet, or an array rather than a group
+        kept = {}
+    group = _zarr.open_group(path, mode="w")
+    if kept:
+        group.attrs.update(kept)
+    return group
+
+
+def _refuse_overwriting(source, path, what):
+    """Raise, before anything is deleted, when writing to `path` would empty
+    `source`: a store something still reads its arrays from, lying at
+    `path`, inside it or around it."""
+    if source is None:
+        return
+    source, target = (_os.path.realpath(_os.fspath(p)) for p in (source, path))
+    try:
+        common = _os.path.commonpath([source, target])
+    except ValueError:
+        # on two different drives
+        return
+    if common in (source, target):
+        raise ValueError(
+            "%s reads its arrays from %r, and writing to %r would delete them "
+            "before they were copied; write to another path"
+            % (what, source, _os.fspath(path)))
 
 
 def _write_container(group, container):

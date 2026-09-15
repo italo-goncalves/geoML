@@ -35,8 +35,10 @@ Cut-offs make it operational. Declared once, on the data
 container predicted from it, and each block reports two different things
 about each cut-off:
 
-- `proportions` is the share of the block above the cut-off, the
-  recoverable fraction, the number a grade–tonnage curve integrates;
+- `proportions` is the share of the block at or below the cut-off, over
+  its sub-blocks and realizations; one minus it is the recoverable
+  fraction above, the number a grade–tonnage curve integrates. A
+  category's is the share of the block inside the category;
 - `divided` is how often the *realizations disagree about whether the
   cut-off crosses the block*. This is the one that licenses refinement. A
   block whose realizations all agree, all ore or all waste, holds one

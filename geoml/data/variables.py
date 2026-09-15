@@ -534,6 +534,41 @@ class _Variable(_TreeNode):
         self._copy_attrs_into(new)
         coordinates.variables[self.name] = new
 
+    def _adopt_cutoffs(self, source):
+        """Take the cut-offs of `source` wherever this variable's differ.
+
+        A model computes its shares against the cut-offs of the variable it
+        was trained on, and `update` files them by position under this
+        variable's own. Where the two name different ground the answer would
+        land under the wrong value, so this variable takes the model's,
+        converted to its own unit, and `set_cutoffs` drops the shares of the
+        ones it gives up.
+
+        Returns
+        -------
+        list of tuple
+            `(path, old, new)` for every node whose cut-offs changed.
+        """
+        theirs = dict(source.walk())
+        changed = []
+        for path, node in self.walk():
+            other = theirs.get(path)
+            # the cut-offs are a grade's, a part's or a component's; a
+            # category's is always zero
+            if not isinstance(node, ContinuousVariable) \
+                    or not isinstance(other, ContinuousVariable):
+                continue
+            if node._model_cutoffs() == other._model_cutoffs():
+                continue
+            # verbatim while the unit is the training node's, so that the
+            # number comes back as declared rather than rounded through the
+            # model's unit and back
+            new = other.cutoffs if node.unit == other.unit \
+                else node._from_model_cutoffs(other._model_cutoffs())
+            changed.append((path, node.cutoffs, new))
+            node.set_cutoffs(new)
+        return changed
+
     def update(self, idx, **kwargs):
         raise NotImplementedError
 
@@ -787,8 +822,8 @@ class ContinuousVariable(_Variable):
         # which is the answer for the rest component of a composition.
         self.cutoffs = None
         # For each of them, how much of each block sits at or below it, over
-        # the sub-blocks and the realizations both -- the recoverable share,
-        # and what a partial-block report wants.
+        # the sub-blocks and the realizations both -- the complement of the
+        # recoverable share, and what a partial-block report wants.
         self.proportions = _col.OrderedDict()
         # And for each, how often the cut-off passes *through* the block:
         # the share of realizations whose sub-blocks fall on both sides. A
@@ -823,10 +858,17 @@ class ContinuousVariable(_Variable):
         They travel with the variable, so a model trained on data that
         declares them hands them to every block model predicted from it, and
         `refine` knows what the blocks have to be resolved against without
-        being told a second time.
+        being told a second time. The `proportions` and `divided` columns of
+        a cut-off no longer declared are dropped.
         """
         self.cutoffs = None if cutoffs is None else \
             [float(c) for c in _np.atleast_1d(cutoffs)]
+        # a share filed under a cut-off nobody declares any more would keep
+        # voting on where `refine` splits
+        kept = set(self.cutoffs or [])
+        for family in (self.proportions, self.divided):
+            for cutoff in [c for c in family if c not in kept]:
+                del family[cutoff]
         return self
 
     def prediction_input(self):
@@ -842,6 +884,11 @@ class ContinuousVariable(_Variable):
         unit and the model works in fractions.
         """
         return list(self.cutoffs or [])
+
+    def _from_model_cutoffs(self, cutoffs):
+        """`_model_cutoffs` undone: cut-offs as the model reads them, back
+        in this variable's own unit."""
+        return list(cutoffs)
 
     def get_measurements(self):
         values = self.measurements.values.copy()[:, None]
@@ -961,8 +1008,8 @@ class ContinuousVariable(_Variable):
                 # columns its parent has already trimmed away
                 continue
             # the model asked the *training* variable what the cut-offs were,
-            # and the answer is being filed against this one; they match
-            # unless somebody has moved one of them since
+            # and the answer is being filed against this one; `predict` has
+            # made this one declare the same (`_adopt_cutoffs`)
             if len(cutoffs) != values.shape[1]:
                 raise ValueError(
                     "%r was predicted against %d cut-off(s) but declares %s; "
@@ -1345,6 +1392,10 @@ class _Component(ContinuousVariable):
         # declared in the part's own unit; the model works in fractions
         divisor = self.divisor()
         return [c / divisor for c in (self.cutoffs or [])]
+
+    def _from_model_cutoffs(self, cutoffs):
+        divisor = self.divisor()
+        return [c * divisor for c in cutoffs]
 
     def update(self, idx, **kwargs):
         # The model speaks in fractions of the whole -- it has to, since

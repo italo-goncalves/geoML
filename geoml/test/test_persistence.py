@@ -8,6 +8,7 @@ backends, and the reloaded container must still be predictable into.
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 
 import geoml
 
@@ -250,3 +251,57 @@ def test_cutoffs_and_shares_survive_the_round_trip(tmp_path):
     assert reloaded.cutoffs == [1.5]
     assert np.allclose(back.values("v/proportions/1.5"), [0.2, 0.8])
     assert np.allclose(back.values("v/divided/1.5"), [1.0, 0.0])
+
+
+# --------------------------------------------------------------------------- #
+# rewriting a store
+# --------------------------------------------------------------------------- #
+def _point():
+    rng = np.random.default_rng(0)
+    point = geoml.data.PointData(
+        pd.DataFrame(rng.uniform(0, 100, (20, 2)), columns=["c0", "c1"]),
+        ["c0", "c1"])
+    point.add_continuous_variable("v", rng.normal(size=20))
+    return point
+
+
+def test_a_rewrite_keeps_the_attributes_other_programs_wrote(tmp_path):
+    """A program annotating geoML's output -- a provenance hash, say -- does
+    so on the store's root, and a rewrite used to take it away. geoML's own
+    keys start with `geoml`, and only those are its to replace."""
+    path = str(tmp_path / "pts.zarr")
+    point = _point()
+    point.to_zarr(path)
+    root = zarr.open_group(path, mode="r+")
+    root.attrs["geoscape/hash"] = "abc123"
+    root.attrs["geoml_stale"] = "reserved"
+
+    point.add_continuous_variable("w", np.arange(20.0))
+    point.to_zarr(path)
+
+    attrs = dict(zarr.open_group(path, mode="r").attrs)
+    assert attrs["geoscape/hash"] == "abc123"
+    assert "geoml_stale" not in attrs
+    assert "w" in geoml.data.PointData.open(path).variables
+
+
+def test_a_container_is_never_written_over_the_store_it_reads(tmp_path):
+    """An opened container goes on reading its arrays from its store, so
+    writing it back there emptied the store first and filled it with NaN,
+    without a word. Refused, and the store left as it was; so is writing
+    into a store inside it, or around it."""
+    path = tmp_path / "pts.zarr"
+    point = _point()
+    point.to_zarr(str(path))
+    values = np.asarray(point.variables["v"].measurements.values).copy()
+
+    opened = geoml.data.PointData.open(str(path))
+    for target in (path, path / "inner.zarr", tmp_path):
+        with pytest.raises(ValueError, match="reads its arrays"):
+            opened.to_zarr(str(target))
+
+    again = geoml.data.PointData.open(str(path))
+    np.testing.assert_array_equal(
+        np.asarray(again.variables["v"].measurements.values), values)
+    # anywhere else is fine
+    opened.to_zarr(str(tmp_path / "copy.zarr"))
