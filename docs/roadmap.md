@@ -701,6 +701,18 @@ value 0.135, and keeps the default. Chapter 5 described its chain as
 chapter 4's "with a `Scale` in front" and credited "the softplus in the
 chain" with its positivity, neither of which it held; corrected with it.)
 
+**S — Chapters 16 and 17 no longer reproduce their figures byte for
+byte** (found 2026-09-15, at the 0.6.12 release run). Chapter 16 changes
+from run to run: two runs of one checkout printed rmse 0.765 / 2.645 /
+... / 32.830 and 0.768 / 2.646 / ... / 32.831, its six figures moved by up
+to a fifth of their pixels, invisibly, and one of three runs landed back on
+the committed figures. Chapter 17 comes back the same in three runs, on
+0.6.12's code and on 0.6.11's, but not as committed on 2026-08-19, at
+under 0.6% of its pixels. Both reproduced exactly at the 0.6.11 release
+the day before, so this release's code is not the cause, and RobustPCA's
+MCD start is seeded from the package RNG. The committed figures were kept.
+Find the nondeterminism before a release leans on figure diffs again.
+
 (Chapter 16's figures: **verified 2026-09-05** — rerun through the manual's
 own runner after the leaves change, the seeded chapter reproduced every
 committed figure byte for byte, and the §16.5 prose matches what the model

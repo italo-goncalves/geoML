@@ -57,6 +57,12 @@ cannot go, and the docstring's promise of a zero floor held only for the
 default shift, to a millionth. The `shift` docstring now says to set it to
 the order of the smallest positive value where there are zeros. One test
 in `test_parametric_warpings.py`, one assertion there changed.
+* **The release run**: the full suite, 1636 tests, and every chapter of
+the manual. Every chapter's figures came back as committed, the six this
+release changed among them, but for two: chapter 16 differs from run to
+run and chapter 17 from its committed figures, invisibly and on 0.6.11's
+code as much as on 0.6.12's. Both keep their committed figures, and the
+nondeterminism is on the roadmap.
 
 ## version 0.6.11
 * **Fixed: meshes could not be stored where VTK is 9.7.** VTK 9.7 hands its
