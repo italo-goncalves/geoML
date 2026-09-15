@@ -209,11 +209,268 @@ def test_bad_arguments_are_refused_before_any_work(walker_cv):
         geoml.models.cross_validate(model, folds="nope")
     with pytest.raises(ValueError, match="refit"):
         geoml.models.cross_validate(model, refit="bogus")
+    with pytest.raises(ValueError, match="method"):
+        geoml.models.cross_validate(model, method="minibatch")
+
+
+# --------------------------------------------------------------------------- #
+# the measurement samples are held whole, so their size is guarded
+# --------------------------------------------------------------------------- #
+def test_measurement_samples_cost_what_the_shapes_say(walker_cv):
+    """The guard's arithmetic, against the array it is guarding: one value
+    per realization per noise node per column, in float64."""
+    model, walker, _, _ = walker_cv
+    samples = model.predict_measurements(walker, n_sim=4, n_nodes=8)["V"]
+
+    assert samples.shape == (walker.n_data, 1, 4 * 8)
+    assert samples.nbytes == walker.n_data * 1 * 4 * 8 * 8
+
+
+def test_a_request_too_large_to_hold_is_refused_before_any_work(walker_cv):
+    """It returns the whole answer as one array, so a request for tens of
+    gigabytes has to be refused rather than attempted -- the OOM killer
+    ends the session instead of raising."""
+    model, walker, _, _ = walker_cv
+
+    # 470 rows is small; the node counts are what make it enormous
+    huge = int(np.ceil(
+        geoml.models.MEASUREMENT_LIMIT / (walker.n_data * 8))) + 1
+    with pytest.raises(MemoryError, match="past the"):
+        model.predict_measurements(walker, n_sim=huge, n_nodes=1)
+
+    # and the message names the knobs that get you under it
+    with pytest.raises(MemoryError, match="n_sim or n_nodes"):
+        model.predict_measurements(walker, n_sim=1, n_nodes=huge)
+
+
+def test_the_batches_are_the_whole_answer_in_pieces(walker_cv):
+    """`measurement_batches` is what `predict_measurements` assembles, so
+    the two must agree row for row -- and the rows it hands over must say
+    where they came from."""
+    model, walker, _, _ = walker_cv
+
+    whole = model.predict_measurements(walker, n_sim=4, n_nodes=8)["V"]
+
+    seen, pieces = [], []
+    for rows, batch in model.measurement_batches(walker, n_sim=4, n_nodes=8):
+        seen.append(np.asarray(rows))
+        pieces.append(batch["V"])
+    streamed = np.concatenate(pieces, axis=0)
+
+    assert np.array_equal(np.concatenate(seen), np.arange(walker.n_data))
+    np.testing.assert_array_equal(streamed, whole)
+
+
+def test_more_than_one_batch_is_actually_produced(walker_cv, monkeypatch):
+    """The equivalence above would be vacuous if everything arrived in one
+    piece, so the batch size is cut until it does not."""
+    model, walker, _, _ = walker_cv
+    monkeypatch.setattr(model.options, "prediction_batch_size", 64)
+
+    rows = [np.asarray(r) for r, _ in
+            model.measurement_batches(walker, n_sim=2, n_nodes=2)]
+    assert len(rows) > 1
+    assert sum(r.size for r in rows) == walker.n_data
+
+
+def test_the_scores_do_not_depend_on_the_batch_size(walker_cv, monkeypatch):
+    """The point of the accumulators: sums and a count, never a mean of
+    means, so a fold read in many small pieces scores exactly as one read
+    in a few large ones.
+
+    The seed is reset before each run because the fold models' fresh
+    variational state is drawn from the package RNG, so two consecutive
+    runs are otherwise not comparable at all -- which is what this test
+    caught first.
+    """
+    model, walker, _, _ = walker_cv
+
+    geoml.set_seed(4321)
+    monkeypatch.setattr(model.options, "prediction_batch_size", 100000)
+    _, wide = geoml.models.cross_validate(
+        model, iterations=5, n_sim=8, n_nodes=8)
+
+    geoml.set_seed(4321)
+    monkeypatch.setattr(model.options, "prediction_batch_size", 37)
+    _, narrow = geoml.models.cross_validate(
+        model, iterations=5, n_sim=8, n_nodes=8)
+
+    columns = ["rmse", "mae", "bias", "crps", "goodness", "n"]
+    np.testing.assert_allclose(
+        wide[columns].to_numpy(dtype=float),
+        narrow[columns].to_numpy(dtype=float), rtol=1e-12, atol=0.0)
+
+
+def test_a_request_that_fits_is_left_alone(walker_cv):
+    model, walker, _, _ = walker_cv
+    just_under = int(
+        geoml.models.MEASUREMENT_LIMIT / (walker.n_data * 8) * 0.5)
+    assert just_under > 1
+    samples = model.predict_measurements(walker, n_sim=2, n_nodes=2)
+    assert samples["V"].shape == (walker.n_data, 1, 4)
+
+
+# --------------------------------------------------------------------------- #
+# refitting each fold in minibatches
+# --------------------------------------------------------------------------- #
+def test_the_folds_can_be_refitted_by_svi(walker_cv, monkeypatch):
+    """`method="svi"` refits each fold in batches of the size the model's
+    own options carry, and answers the same questions the full-batch run
+    does: every row predicted out of fold, and the same score table."""
+    model, walker, full_oof, full_scores = walker_cv
+    # the fixture's model is shared, so the batch size is put back after
+    monkeypatch.setattr(model.options, "training_batch_size", 200)
+
+    oof, scores = geoml.models.cross_validate(
+        model, method="svi", epochs=3, n_sim=8, n_nodes=8)
+
+    assert np.all(np.isfinite(np.asarray(oof.values("V/prediction"))))
+    assert list(scores.columns) == list(full_scores.columns)
+    assert set(scores["fold"]) == set(full_scores["fold"])
+    assert scores[scores["fold"] == "all"]["n"].item() == walker.n_data
+    # a different route to the same kind of answer, not the same numbers
+    assert np.all(np.isfinite(scores[
+        ["rmse", "mae", "bias", "crps", "goodness"]].to_numpy(dtype=float)))
+
+
+def test_the_epochs_are_what_svi_counts(walker_cv, monkeypatch):
+    """`iterations` counts gradient steps and `epochs` counts passes over
+    the data, so the two arguments are separate and only one is read."""
+    model, walker, _, _ = walker_cv
+    monkeypatch.setattr(model.options, "training_batch_size", 200)
+
+    seen = []
+    original = geoml.models.VGPNetwork.train_svi
+
+    def spy(self, epochs=100):
+        seen.append(epochs)
+        return original(self, epochs=epochs)
+
+    monkeypatch.setattr(geoml.models.VGPNetwork, "train_svi", spy)
+    geoml.models.cross_validate(
+        model, method="svi", epochs=2, iterations=999, n_sim=4, n_nodes=4)
+
+    # one refit per fold, each given the epochs and not the iterations
+    assert seen == [2, 2, 2]
 
 
 # --------------------------------------------------------------------------- #
 # the calibration
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# one fold model for every fold
+# --------------------------------------------------------------------------- #
+
+def test_one_fold_model_serves_every_fold(monkeypatch):
+    """The fold model is rebuilt from the file once. Every later fold swaps
+    its rows in, restores the file's parameters and zeroes the optimizer's
+    memory in place, so it starts exactly where a reloaded model would --
+    and the training step is traced once for all of them (plus at most the
+    relaxed retrace the second row count asks for), which is what keeps a
+    run's memory flat: a model rebuilt per fold left 2.6 GB of graph
+    machinery behind each time, and TensorFlow never returns it."""
+    model, walker, grid = _walker_model()
+    model.train_full(max_iter=20)
+    walker.spatial_k_fold(grid, k=4, seed=0)
+    labels = np.asarray(walker.get_metadata("fold"))
+    file_noise = float(np.asarray(
+        model.likelihoods[0].parameters["noise"].get_value()).ravel()[0])
+
+    loads = []
+    real_load = geoml.persistence.load_model
+
+    def spying_load(path, data=None):
+        loaded = real_load(path, data=data)
+        loads.append(loaded)
+        return loaded
+    monkeypatch.setattr(geoml.models._persistence, "load_model", spying_load)
+
+    starts = []
+    real_train = geoml.models.VGPNetwork.train_full
+
+    def recording_train(self, max_iter=1000):
+        starts.append(dict(
+            n_data=self.data.n_data,
+            noise=float(np.asarray(
+                self.likelihoods[0].parameters["noise"].get_value()).ravel()[0]),
+            optimizer=max([float(np.abs(v.numpy()).max())
+                           for v in self.optimizer.variables] or [0.0]),
+            traces=0 if self._step is None
+            else self._step[2].experimental_get_tracing_count()))
+        real_train(self, max_iter=max_iter)
+    monkeypatch.setattr(geoml.models.VGPNetwork, "train_full", recording_train)
+
+    # refit="all" trains the noise too, so the restore is observable
+    geoml.models.cross_validate(model, refit="all", iterations=10,
+                                n_sim=4, n_nodes=4)
+
+    assert len(loads) == 1
+    assert [s["n_data"] for s in starts] == \
+        [int((labels != f).sum()) for f in np.unique(labels)]
+    assert all(np.isclose(s["noise"], file_noise) for s in starts)
+    assert all(s["optimizer"] == 0.0 for s in starts)
+    # fold 1 traces the step (twice: TensorFlow traces a function that
+    # creates variables -- the optimizer's slots -- once more); the first
+    # fold with a different row count adds one relaxed trace, and every
+    # later one, whatever its count, rides that -- never one per fold
+    step = loads[0]._step[2]
+    assert starts[1]["traces"] <= 2
+    assert step.experimental_get_tracing_count() <= 3
+
+
+def test_the_leaves_refit_frees_only_the_terminal_gp_nodes():
+    """`refit="leaves"` re-initializes the GP nearest each likelihood -- found
+    from the leaf down through operation nodes, here a `Linear` over the
+    GP -- and leaves the interior, a `GPWalk`'s field, exactly as trained
+    and fixed."""
+    geoml.set_seed(1234)
+    walker, grid = geoml.datasets.walker()
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(walker, 30, seed=0),
+        transform=geoml.transform.Isotropic(50))
+    field = geoml.latent.BasicGP(root, size=2)
+    walked = geoml.latent.GPWalk(field, n_steps=3)
+    gp = geoml.latent.BasicGP(walked, size=1)
+    leaf = geoml.latent.Linear(gp, size=1)
+    model = geoml.models.VGPNetwork(
+        walker, "V", geoml.likelihood.Gaussian(), leaf,
+        options=geoml.models.GPOptions(verbose=False, training_samples=4))
+    model.train_full(max_iter=5)
+
+    terminal = geoml.models._terminal_gp_nodes(model)
+    assert len(terminal) == 1 and terminal[0] is gp
+
+    before = np.asarray(field.parameters["alpha_white_0"].get_value()).copy()
+    geoml.models._fresh_variational_state(model, nodes=terminal)
+
+    assert np.array_equal(
+        np.asarray(field.parameters["alpha_white_0"].get_value()), before)
+    assert field.parameters["alpha_white_0"].fixed
+    assert np.abs(np.asarray(gp.parameters["alpha_white_0"].get_value())).max() < 0.1
+    assert not gp.parameters["alpha_white_0"].fixed
+    assert leaf.parameters["weights"].fixed if "weights" in leaf.parameters \
+        else all(p.fixed for p in leaf.parameters.values())
+
+
+def test_the_leaves_refit_runs_and_the_bad_spelling_is_refused(walker_cv):
+    model, walker, _, _ = walker_cv
+    oof, scores = geoml.models.cross_validate(
+        model, refit="leaves", iterations=5, n_sim=4, n_nodes=4)
+    assert set(scores["fold"]) == set(walker.get_metadata("fold")) | {"all"}
+    with pytest.raises(ValueError, match="refit"):
+        geoml.models.cross_validate(model, refit="leafs")
+
+
+def test_set_data_refuses_a_container_of_another_dimension():
+    model, walker, _ = _walker_model()
+    frame = walker.as_data_frame()[["X", "Y"]]
+    frame["Z"] = 0.0
+    other = geoml.data.PointData(frame, ["X", "Y", "Z"])
+    other.add_continuous_variable("V", np.zeros(other.n_data))
+    with pytest.raises(ValueError, match="dimensions"):
+        model._set_data(other)
+
+
 def _pit_of(truth, samples):
     return (samples < truth[:, None]).mean(axis=1) \
         + 0.5 * (samples == truth[:, None]).mean(axis=1)

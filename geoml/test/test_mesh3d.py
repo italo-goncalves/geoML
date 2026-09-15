@@ -48,6 +48,19 @@ def test_a_body_measures_its_area_and_volume():
     assert np.isclose(box.area, 2 * (2 * 3 + 2 * 4 + 3 * 4))
 
 
+def test_a_bodys_volume_does_not_depend_on_where_it_sits():
+    """The tetrahedra are taken about the vertices' own centre. About the
+    origin, a small body at mine-grid coordinates cancelled down to its
+    volume within rounding: a millimetre film read 23% wrong at a northing
+    of 7,000 km."""
+    unit = pv.Box(bounds=(0, 1, 0, 1, 0, 1)).triangulate()
+    triangles = unit.faces.reshape(-1, 4)[:, 1:]
+    film = np.asarray(unit.points, dtype=float) * [0.001, 10.0, 10.0]
+    for offset in (np.zeros(3), np.array([500000.0, 7000000.0, 300.0])):
+        volume = geoml.math.geometry.signed_volume(film + offset, triangles)
+        assert np.isclose(abs(volume), 0.1, rtol=1e-9)
+
+
 def test_the_measurements_are_taken_at_construction():
     sheet = _sheet()
 
@@ -143,6 +156,40 @@ def test_faces_that_bound_nothing_are_dropped():
         loose, np.concatenate([triangles, face, face]))
     assert len(clean) == len(triangles)
     assert geoml.math.geometry.reversed_edges(kept, clean) == 0
+
+
+def _touching_cubes():
+    """Two unit cubes meeting along one vertical edge, welded there."""
+    a_points, a_triangles = _arrays(pv.Box(bounds=(0, 1, 0, 1, 0, 1)))
+    b_points, b_triangles = _arrays(pv.Box(bounds=(1, 2, 1, 2, 0, 1)))
+    points = np.concatenate([a_points, b_points])
+    triangles = np.concatenate([a_triangles, b_triangles + len(a_points)])
+    return geoml.math.geometry.weld(points, triangles)
+
+
+def test_bodies_touching_along_an_edge_are_split_apart():
+    """Welded, two bodies touching along an edge give it four triangles:
+    neither closed nor wound one way in any reading, and no winding repair
+    settles it. A contour makes exactly this where its surface meets the
+    closing cap edge-on. Split, each body keeps its own copy of the edge."""
+    points, triangles = _touching_cubes()
+    assert type(mesh3d(points, triangles, geoml.math.geometry.vertex_normals(
+        points, triangles))) is Mesh3D
+
+    split, parted = geoml.math.geometry.split_touching_edges(points, triangles)
+    # the two ends of the edge, once each more
+    assert len(split) == len(points) + 2
+    moved = geoml.data.meshes._separated(split, parted)
+    body = mesh3d(moved, parted,
+                  geoml.math.geometry.vertex_normals(moved, parted))
+    assert isinstance(body, Solid3D)
+    assert body.volume == pytest.approx(2.0, rel=1e-4)
+
+
+def test_a_surface_with_no_edge_shared_thrice_is_handed_back_as_it_came():
+    points, triangles = _arrays(pv.Box())
+    split, parted = geoml.math.geometry.split_touching_edges(points, triangles)
+    assert split is points and parted is triangles
 
 
 def test_a_doubled_patch_is_resurrected_from_its_rim_inward():

@@ -13,9 +13,10 @@
 # training, matplotlib and pyvista RSS accumulating across 1200+ tests
 # plus the whole manual). `test_manual.py` -- seventeen chapters of real
 # model training, the heaviest single item and where the kills landed --
-# runs alone in its own process; everything else runs in the other. If
-# the manual job ever dies the same way, the next lever is one
-# subprocess per chapter inside `run_blocks.py`, not a longer timeout.
+# runs alone in its own process; everything else runs in the other. On
+# the v0.6.9 tag the manual job died the same way on its own (exit 143
+# at 22 minutes of 90), so `test_manual.py` now runs one subprocess per
+# chapter; a longer timeout was never the lever.
 
 name: tests
 

@@ -230,6 +230,137 @@ def test_from_data_fits_and_covers():
 
 
 # --------------------------------------------------------------------------- #
+# the rotated regular model
+# --------------------------------------------------------------------------- #
+def _turned_blocks(**kwargs):
+    kwargs.setdefault("azimuth", 30.0)
+    kwargs.setdefault("dip", 10.0)
+    kwargs.setdefault("rake", 5.0)
+    return geoml.data.RotatedBlocks3D(
+        [10.0, 20.0, 30.0], [4, 3, 2], [10.0, 10.0, 5.0],
+        discretization=[2, 2, 2], **kwargs)
+
+
+def _plain_blocks():
+    return geoml.data.Blocks3D(start=[10.0, 20.0, 30.0], n=[4, 3, 2],
+                               step=[10.0, 10.0, 5.0],
+                               discretization=[2, 2, 2])
+
+
+def test_unturned_it_is_the_blocks3d_it_turns():
+    zero = _turned_blocks(azimuth=0.0, dip=0.0, rake=0.0)
+    plain = _plain_blocks()
+
+    assert np.allclose(np.asarray(zero.coordinates),
+                       np.asarray(plain.coordinates))
+    assert np.allclose(zero.get_batched_coordinates(None)[0],
+                       plain.get_batched_coordinates(None)[0])
+    assert np.allclose(zero.bounding_box.as_array(),
+                       plain.bounding_box.as_array())
+
+
+def test_its_sub_blocks_and_its_box_turn_with_it():
+    blocks = _turned_blocks()
+    coords, splits = blocks.get_batched_coordinates(None)
+    assert splits == blocks.n_data
+    per_block = coords.reshape(blocks.n_data, -1, 3)
+
+    # the sub-blocks average back to their block's centre, and turning them
+    # moves no distance between them
+    assert np.allclose(per_block.mean(axis=1),
+                       np.asarray(blocks.coordinates))
+    flat = _plain_blocks().get_batched_coordinates(None)[0]
+    flat = flat.reshape(blocks.n_data, -1, 3)
+    assert np.allclose(
+        np.linalg.norm(per_block[:, :, None] - per_block[:, None], axis=3),
+        np.linalg.norm(flat[:, :, None] - flat[:, None], axis=3))
+
+    # the box is the turned block box, measured at its corners
+    start, n, step = (np.array([10.0, 20.0, 30.0]), np.array([4, 3, 2]),
+                      np.array([10.0, 10.0, 5.0]))
+    lo, hi = start - step / 2, start + (n - 0.5) * step
+    corners = np.array([[a, b, c] for a in (lo[0], hi[0])
+                        for b in (lo[1], hi[1]) for c in (lo[2], hi[2])])
+    turned = (corners - start) @ blocks.rotation_matrix() + start
+    assert np.allclose(blocks.bounding_box.min[0], turned.min(axis=0))
+    assert np.allclose(blocks.bounding_box.max[0], turned.max(axis=0))
+
+
+def test_it_finds_its_own_centres_and_aggregates_through_its_rotation():
+    blocks = _turned_blocks()
+    centres = geoml.data.PointData.from_array(np.asarray(blocks.coordinates))
+    assert np.array_equal(blocks._cell_of(centres), np.arange(blocks.n_data))
+
+    centres.add_continuous_variable("g", np.arange(float(blocks.n_data)))
+    blocks.aggregate(centres)
+    assert np.allclose(blocks.values("g/measurements"),
+                       np.arange(float(blocks.n_data)))
+
+
+def test_its_cells_export_where_its_blocks_are():
+    blocks = _turned_blocks()
+    blocks.add_continuous_variable("g", np.arange(float(blocks.n_data)))
+    mesh = blocks.as_pyvista()
+
+    assert mesh.n_cells == blocks.n_data
+    assert np.allclose(mesh.cell_centers().points,
+                       np.asarray(blocks.coordinates), atol=1e-8)
+    volume = mesh.compute_cell_sizes(volume=True).cell_data["Volume"]
+    assert np.allclose(volume, 10.0 * 10.0 * 5.0)
+    assert np.allclose(mesh.cell_data["g - measurements"],
+                       np.arange(float(blocks.n_data)))
+
+
+def test_a_rotated_grid_exports_its_nodes_where_they_are():
+    """pyvista 0.49 refuses a transform that does not say whether it is in
+    place, which the turned export used to leave unsaid."""
+    grid = geoml.data.RotatedGrid3D(start=[10.0, 20.0, 30.0], n=[4, 3, 2],
+                                    step=[10.0, 10.0, 5.0], azimuth=30.0,
+                                    dip=10.0)
+    grid.add_continuous_variable("g", np.arange(float(grid.n_data)))
+    mesh = grid.as_pyvista()
+
+    assert np.allclose(mesh.points, np.asarray(grid.coordinates), atol=1e-8)
+    assert np.allclose(mesh.point_data["g - measurements"],
+                       np.arange(float(grid.n_data)))
+
+
+def test_the_rotated_model_survives_a_zarr_round_trip(tmp_path):
+    blocks = _turned_blocks()
+    blocks.add_continuous_variable("g", np.arange(float(blocks.n_data)))
+
+    path = str(tmp_path / "turned.zarr")
+    blocks.to_zarr(path)
+    back = geoml.data.RotatedBlocks3D.open(path)
+
+    assert type(back) is geoml.data.RotatedBlocks3D
+    assert (back.azimuth, back.dip, back.rake) == (30.0, 10.0, 5.0)
+    assert back.discretization == [2, 2, 2]
+    assert np.allclose(np.asarray(back.coordinates),
+                       np.asarray(blocks.coordinates))
+    assert np.allclose(back.get_batched_coordinates(None)[0],
+                       blocks.get_batched_coordinates(None)[0])
+    assert np.allclose(back.values("g/measurements"),
+                       np.arange(float(blocks.n_data)))
+
+
+def test_the_rotated_model_is_fitted_to_data_as_the_grid_is():
+    rng = np.random.default_rng(2)
+    cloud = rng.uniform(0, 60, size=(300, 3)) * [1.0, 0.4, 0.1]
+    tilted = geoml.data.PointData.from_array(
+        cloud @ geoml.math.geometry.rotation_matrix(25.0, 5.0, 0.0))
+
+    blocks = geoml.data.RotatedBlocks3D.from_data(tilted, step=[10.0, 10.0,
+                                                               2.0])
+    assert type(blocks) is geoml.data.RotatedBlocks3D
+    assert blocks.azimuth == np.round(blocks.azimuth, 0)
+    coords = np.asarray(tilted.coordinates)
+    assert np.all(blocks.bounding_box.min[0] <= coords.min(axis=0) + 1e-9)
+    assert np.all(blocks.bounding_box.max[0] >= coords.max(axis=0) - 1e-9)
+    assert np.all(blocks._cell_of(tilted) >= 0)
+
+
+# --------------------------------------------------------------------------- #
 # one aggregate
 # --------------------------------------------------------------------------- #
 def _measured_points():

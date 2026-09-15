@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -333,12 +333,17 @@ def write_surface(mesh, workspace, name, replace=True, folder=None):
         parent = _folder(wrapper, folder)
         if replace:
             wrapper._discard(name, geoh5.objects.Surface, parent)
-        geoh5.objects.Surface.create(
+        surface = geoh5.objects.Surface.create(
             wrapper._handle,
             vertices=_np.asarray(mesh.coordinates, dtype=float),
             cells=_np.asarray(mesh.triangles),
             name=str(name),
             **({"parent": parent} if parent is not None else {}))
+        if getattr(mesh, "provenance", None):
+            # what the surface was contoured from, which the geometry
+            # alone cannot say
+            surface.metadata = {
+                "geoml_provenance": _json.dumps(mesh.provenance)}
     finally:
         if owned:
             wrapper.close()
@@ -403,6 +408,23 @@ def _payload(container, include, simulations, association=None):
     return payload, table
 
 
+def _metadata(container, table, **extra):
+    """What travels beside the data: the name-to-path table, the units of
+    whatever declares one, and whatever the caller adds.
+
+    A grade read out of a geoh5 file is a number with no scale attached, so
+    a viewer has no way of knowing a column is a percentage unless the file
+    says so.
+    """
+    meta = {"geoml_paths": _json.dumps(table)}
+    units = container.units()
+    if units:
+        meta["geoml_units"] = _json.dumps(
+            {str(path): unit for path, unit in units.items()})
+    meta.update(extra)
+    return meta
+
+
 def write_points(container, workspace, name, include: str = "**",
                  simulations: "bool | int | Sequence[int]" = False,
                  replace: bool = True, folder: "str | None" = None):
@@ -422,7 +444,7 @@ def write_points(container, workspace, name, include: str = "**",
         if payload:
             points.add_data(payload)
         if table:
-            points.metadata = {"geoml_paths": _json.dumps(table)}
+            points.metadata = _metadata(container, table)
     finally:
         if owned:
             wrapper.close()
@@ -505,10 +527,9 @@ def write_blocks(blocks, workspace, name, include: str = "**",
                                   association="CELL")
         if payload:
             tree.add_data(payload)
-        tree.metadata = {
-            "geoml_paths": _json.dumps(table),
-            "geoml_lattice": _json.dumps(
-                {"max_levels": int(blocks.max_levels)})}
+        tree.metadata = _metadata(
+            blocks, table,
+            geoml_lattice=_json.dumps({"max_levels": int(blocks.max_levels)}))
     finally:
         if owned:
             wrapper.close()
@@ -633,7 +654,7 @@ def write_grid_blocks(blocks, workspace, name, include: str = "**",
         if payload:
             model.add_data(payload)
         if table:
-            model.metadata = {"geoml_paths": _json.dumps(table)}
+            model.metadata = _metadata(blocks, table)
     finally:
         if owned:
             wrapper.close()

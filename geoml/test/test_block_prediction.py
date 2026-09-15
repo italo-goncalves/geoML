@@ -244,16 +244,21 @@ def _measurement_points(n=25):
 
 def test_the_measurement_set_averages_back_to_the_prediction():
     """It is the same computation, stopped one step earlier: average the
-    nodes and the prediction comes back."""
+    nodes and the prediction comes back -- to the Monte Carlo precision the
+    rotated nodes allow. The strata's midpoints used to average back
+    exactly, by their symmetry; rotated per location they average back
+    well within the noise's spread over the root of the sample size -- a
+    stratified mean is far tighter than that."""
     model = _model()
     points = _measurement_points()
     model.predict(points, n_sim=6)
     samples = model.predict_measurements(points, n_sim=6)["v"]
 
     assert samples.shape == (points.n_data, 1, 6 * 32)
-    assert np.allclose(samples.mean(axis=2)[:, 0],
-                       points.variables["v"].prediction.values.to_numpy(),
-                       atol=1e-8)
+    prediction = points.variables["v"].prediction.values.to_numpy()
+    noise = points.variables["v"].noise_variance.values.to_numpy()
+    error = np.abs(samples.mean(axis=2)[:, 0] - prediction)
+    assert np.all(error < 4 * np.sqrt(noise / (6 * 32)))
 
 
 def test_a_measurement_scatters_more_than_the_ground():

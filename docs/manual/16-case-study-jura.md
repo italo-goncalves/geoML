@@ -45,8 +45,9 @@ explore.pairs(kind="scatter").savefig("figures/16-pairs.png", dpi=150,
 Two arguments for the joint model, both visible before any modelling. The
 histograms grouped by rock type show several metals shifting distribution
 with the geology, so the rock type is informative about the grades. The
-pair plot shows the metals are strongly correlated with each other and
-skewed, which is what the warping chain below has to deal with.
+pair plot shows the metals are strongly correlated with each other, and
+four of them — cadmium, copper, lead and zinc — skewed, which is what the
+warping chain below has to deal with.
 
 ## 16.2 A non-stationary network, and how one variable reaches another
 
@@ -65,7 +66,7 @@ backbone = geoml.data.inducing.combine(
     jura_train,
     geoml.data.Grid2D(start=[0, 0], end=[6, 6], n=[21, 21]))
 
-inducing = geoml.data.inducing.experts(backbone, 4)
+inducing = geoml.data.inducing.experts(backbone, 4, seed=1234)
 
 print(backbone.n_data, "inducing points, split into", len(inducing),
       "experts holding", sum(part.n_data for part in inducing),
@@ -115,11 +116,9 @@ trend = geoml.latent.Linear(
 metal_gp = geoml.latent.BasicGP(
     root, size=len(elements), kernel=geoml.kernels.Spherical())
 
-# the model's output: rock indicators first, then the metals, matching the
-# order of the variables and likelihoods below
-network = geoml.latent.Concatenate(
-    rock_gp,
-    geoml.latent.LinearCombination(trend, metal_gp))
+# the tree's two leaves: the rock indicators, and the metals with their
+# geological trend added. Each is read by its own likelihood below
+leaves = [rock_gp, geoml.latent.LinearCombination(trend, metal_gp)]
 ```
 
 That is a different move from making the rock fields a *parent* of the
@@ -132,24 +131,27 @@ weights decide how much.
 
 The likelihood is where the metals' awkwardness is handled. `Laplace` has
 heavier tails than a Gaussian, which is what the extreme values in this
-dataset want, and the chain does the rest: `Log` for non-negativity,
-`RobustPCA` to decorrelate the seven columns, `Spline` for what asymmetry
-is left, and `ZScore` to hand the field something standardized.
+dataset want, and the chain does the rest: `BoxCox` for non-negativity,
+with an exponent per metal that trains (the logarithm is its one end),
+`RobustPCA` to decorrelate the seven columns, `SinhArcsinh` for the
+skewness and tail weight left in each rotated column, and a `ZScore` on
+either side of it, since it expects a standardized column and the field
+expects one back.
 
 ```python
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Log(len(elements)),
+    geoml.warping.BoxCox(len(elements)),
     geoml.warping.RobustPCA(len(elements), len(elements)),
-    geoml.warping.Spline(len(elements), knots_per_arm=5),
+    geoml.warping.ZScore(len(elements)),
+    geoml.warping.SinhArcsinh(len(elements)),
     geoml.warping.ZScore(len(elements)))
 
 model = geoml.models.VGPNetwork(
     data=jura_train,
-    variables=["Rock", "Elements"],
-    likelihoods=[
-        geoml.likelihood.CategoricalGaussianIndicator(len(rocks)),
-        geoml.likelihood.Laplace(warping=warping)],
-    latent_network=network,
+    variables={
+        "Rock": geoml.likelihood.CategoricalGaussianIndicator(len(rocks)),
+        "Elements": geoml.likelihood.Laplace(warping=warping)},
+    latent_network=leaves,
     options=geoml.models.GPOptions(prediction_batch_size=1000,
                                    jitter=1e-6, verbose=False))
 
@@ -173,15 +175,15 @@ mean "no better than quoting the average grade".
 
 | inducing points | training | metals, rmse / sd | goodness | rock accuracy |
 |---|---|---|---|---|
-| 259, the data alone | 63 s | 0.91 | 0.46 | 0.70 |
-| 380, data + an 11 × 11 backbone | 83 s | 0.91 | 0.48 | 0.67 |
-| **700, data + 21 × 21, four experts** | **216 s** | **0.91** | **0.47** | **0.68** |
-| 1220, data + 31 × 31, four experts | 334 s | 0.91 | 0.46 | 0.64 |
+| 259, the data alone | 75 s | 0.91 | 0.41 | 0.70 |
+| 380, data + an 11 × 11 backbone | 98 s | 0.91 | 0.43 | 0.67 |
+| **700, data + 21 × 21, four experts** | **216 s** | **0.91** | **0.45** | **0.70** |
+| 1220, data + 31 × 31, four experts | 343 s | 0.92 | 0.44 | 0.67 |
 
 **The metals' score does not move.** Nearly five times the inducing
-points, more than five times the training, and the held-out error is flat
-to the second decimal; the rock's accuracy wobbles around 0.7 and is
-lowest at the largest set.
+points, four and a half times the training, and the held-out error moves
+by less than a hundredth; the rock's accuracy wobbles between 0.67 and
+0.70 with no trend.
 
 Chapter 3 ran the same sweep on the plainest possible version of this
 dataset — a stationary model, a Gaussian likelihood, no walked input — and
@@ -205,7 +207,7 @@ blind spot worth naming: a number that does not move is not always a number
 that has looked.
 
 Where the table *is* decisive is cost. If you want this model and not its
-map, the data's own locations give the same score in a quarter of the time.
+map, the data's own locations give the same score in a third of the time.
 
 ## 16.4 Did the warping do its job?
 
@@ -221,8 +223,10 @@ figure.savefig("figures/16-transformed.png", dpi=150, bbox_inches="tight")
 
 ![The metals as the model sees them](figures/16-transformed.png)
 
-Down the diagonal, each column should sit under the standard normal drawn
-over it. Off the diagonal, the clouds should be round and the correlations
+Down the diagonal, each column should sit under the normal drawn over it,
+one of the column's own mean and spread: the warping's trained scale need
+not be one, the GP's amplitude absorbing it, so it is the shape that is
+read. Off the diagonal, the clouds should be round and the correlations
 near zero. The columns are numbered rather than named, because after a
 rotation a column is a mixture of the measured elements rather than any one
 of them. Leaning clouds here are dependence the model is about to assume
@@ -262,12 +266,17 @@ explore.simulation_pairs().savefig("figures/16-simulation-pairs.png",
 
 `compute_metrics` reports per component: seven columns for the metals, and
 balanced accuracy and friends per rock class. That is the table a report
-wants, and the accuracy figure is its calibration column drawn.
+wants. The accuracy figure is its calibration column done honestly: it
+scores samples of a measurement, where the table's goodness reads the
+stored simulations and so reads low (§16.3).
 
 One column in the rock table is worth reading before it is mistaken for a
 bug. Portlandian comes back with a balanced accuracy of 0.5 and a Jaccard
 of zero, which is what those statistics say about a class the model never
-predicts anywhere. It is the rarest formation in the training set, the
+predicts anywhere. Its precision is empty, there being no call of it to be
+right or wrong, and the disagreement rows say the same in their own terms:
+all of its error is quantity and none of it allocation, a proportion wrong
+rather than a place. It is the rarest formation in the training set, the
 other four outvote it at every location, and no amount of fitting will
 change that without telling the model the class matters more than its
 frequency suggests. A rare domain that matters is a modelling decision, not

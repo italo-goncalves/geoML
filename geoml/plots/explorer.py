@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -91,13 +91,27 @@ class Explorer(_base.Selection):
     # ------------------------------------------------------------------ #
     # figures
     # ------------------------------------------------------------------ #
-    def histogram(self, bins=25, figsize=None) -> "_plt.Figure":
+    def histogram(self, bins=25, statistics=True,
+                  figsize=None) -> "_plt.Figure":
         """
         The distribution of the continuous variable, one panel per component.
 
         Split by category when there is one: the populations are drawn over
         each other with a common set of bins, so their spreads can be compared
         rather than only their shapes.
+
+        Parameters
+        ----------
+        bins : int or sequence
+            How many bins, or where their edges are.
+        statistics : bool
+            Sum each panel up in a box: the count, the mean, the standard
+            deviation, the coefficient of variation, the skewness and the
+            kurtosis, beside the minimum, the quartiles, the median and the
+            maximum. They are of every measured value, the categories
+            pooled, and the kurtosis is the excess over a normal's. The box
+            sits over the half of the bins with the lower bars, and the axis
+            is raised so that none of those runs under it.
         """
         var = self._require_continuous("histogram")
         values, measured, labels = _prep.numeric_values(var)
@@ -108,19 +122,26 @@ class Explorer(_base.Selection):
         with _style.context():
             figure, axes = _plt.subplots(
                 rows, columns, squeeze=False,
-                figsize=figsize or (3.2 * columns, 2.6 * rows))
+                figsize=figsize or ((3.6 if statistics else 3.2) * columns,
+                                    (2.9 if statistics else 2.6) * rows))
             flat = axes.ravel()
 
+            boxes = []
             for i, label in enumerate(labels):
                 column = values[:, i]
                 edges = _np.histogram_bin_edges(column[measured], bins=bins)
+                tallest = _np.zeros(len(edges) - 1)
                 for j, (name, mask) in enumerate(series):
                     keep = measured if mask is None else mask
-                    flat[i].hist(column[keep], bins=edges,
-                                 color=self._color(j, name), alpha=0.65,
-                                 label=name)
+                    counts, _, _ = flat[i].hist(
+                        column[keep], bins=edges, color=self._color(j, name),
+                        alpha=0.65, label=name)
+                    tallest = _np.maximum(tallest, counts)
                 flat[i].set_title(label)
                 flat[i].set_ylabel("count")
+                if statistics:
+                    boxes.append((flat[i], self._draw_statistics(
+                        flat[i], column[measured], tallest), edges, tallest))
 
             for extra in flat[len(labels):]:
                 extra.set_visible(False)
@@ -130,6 +151,10 @@ class Explorer(_base.Selection):
             figure.suptitle(var.name)
             figure.tight_layout(
                 rect=(0, 0, fraction if self.categorical is not None else 1, 1))
+            # a box's share of its panel is only known once the panels have
+            # their size, so the bars are cleared of it last
+            for panel, box, edges, tallest in boxes:
+                self._clear_statistics(panel, box, edges, tallest)
         return figure
 
     def pairs(self, kind="scatter", alpha=0.7, bins=60, log_counts=False,
@@ -392,8 +417,9 @@ class Explorer(_base.Selection):
 
         Two things worth checking before trusting a fitted model, and both are
         easier to see than to test. Down the diagonal, whether the warping
-        made each variable Gaussian: the standard normal it is aiming at is
-        drawn over each histogram. Off the diagonal, whether what is left is
+        made each variable Gaussian: a normal of the column's own mean and
+        spread is drawn over each histogram, so the shape is judged and not
+        the scale. Off the diagonal, whether what is left is
         independent: a round cloud with a correlation near zero is what the
         model assumes, and a tilted or curved one is structure it will not
         capture.
@@ -552,7 +578,8 @@ class Explorer(_base.Selection):
                    label="simulated")
 
     def prediction_scatter(self, component=None, kind="scatter", alpha=0.6,
-                           bins=60, log_counts=False, figsize=None, size=10) -> "_plt.Figure":
+                           bins=60, log_counts=False, trim=None, figsize=None,
+                           size=10) -> "_plt.Figure":
         """
         What was predicted against what was measured.
 
@@ -577,6 +604,16 @@ class Explorer(_base.Selection):
             Bins along each axis, for `kind="hist2d"`.
         log_counts : bool
             Colour the cells by the logarithm of the count.
+        trim : pair of floats
+            Leave the outliers out, as quantiles: `[0, 0.99]` for a variable
+            with a long right tail, which is most assays. Without it a few
+            values far from the rest set the limits and squeeze everything
+            else into a corner. The window runs from the lower quantile of
+            the measured or the predicted values, whichever is lower, to the
+            upper quantile of whichever is higher, and a location outside it
+            on either axis is left out of the panel and its margins. Each
+            panel is trimmed on its own, and counts in a corner how many it
+            left out.
         """
         self._check_kind(kind)
         var = self._require_continuous("prediction_scatter")
@@ -591,10 +628,15 @@ class Explorer(_base.Selection):
             true, predicted = true[:, [index]], predicted[:, [index]]
             labels = [component]
 
+        kept = [_prep.inside_trim(true[:, i], predicted[:, i], trim)
+                for i in range(len(labels))]
+
         if len(labels) == 1:
-            return self._joint_scatter(true[:, 0], predicted[:, 0], labels[0],
+            return self._joint_scatter(true[kept[0], 0],
+                                       predicted[kept[0], 0], labels[0],
                                        figsize, size, kind, alpha, bins,
-                                       log_counts)
+                                       log_counts,
+                                       left_out=int(_np.sum(~kept[0])))
 
         rows, columns = _prep.grid_shape(len(labels))
         with _style.context():
@@ -603,8 +645,10 @@ class Explorer(_base.Selection):
                 figsize=figsize or (3.0 * columns, 2.8 * rows))
             flat = axes.ravel()
             for i, label in enumerate(labels):
-                self._draw_agreement(flat[i], true[:, i], predicted[:, i],
-                                     size, kind, alpha, bins, log_counts)
+                self._draw_agreement(flat[i], true[kept[i], i],
+                                     predicted[kept[i], i], size, kind, alpha,
+                                     bins, log_counts,
+                                     left_out=int(_np.sum(~kept[i])))
                 flat[i].set_title(label)
                 flat[i].set_xlabel("measured")
                 flat[i].set_ylabel("predicted")
@@ -1316,10 +1360,14 @@ class Explorer(_base.Selection):
                 # magnitude at most and a log scale would say nothing
                 axes.set_yscale("log")
 
-            axes.set_xlabel("cut-off grade (%s)" % name)
-            axes.set_ylabel(curves["unit"] + " above the cut-off",
+            graded = name if curves["unit"] is None \
+                else "%s, %s" % (name, curves["unit"])
+            axes.set_xlabel("cut-off grade (%s)" % graded)
+            axes.set_ylabel(curves["extent"] + " above the cut-off",
                             color=_style.color(0))
-            grade_axes.set_ylabel("mean grade above the cut-off",
+            grade_axes.set_ylabel("mean grade above the cut-off"
+                                  + ("" if curves["unit"] is None
+                                     else " (%s)" % curves["unit"]),
                                   color=_style.color(1))
             title = "Grade and tonnage"
             if curves["kept"] < curves["total"]:
@@ -1333,6 +1381,340 @@ class Explorer(_base.Selection):
             handles = [axes.lines[-1], grade_axes.lines[-1]]
             axes.legend(handles, [line.get_label() for line in handles],
                         loc="center right")
+            figure.tight_layout()
+        return figure
+
+    def dispersion_by_support(self, component=None, kind="box", alpha=0.2,
+                              most=5000, figsize=None,
+                              size=6) -> "_plt.Figure":
+        """
+        How much the ground varies inside a block, against the block's size.
+
+        Only a `BlockSet3D` has blocks of several sizes. Every block is merged
+        into its parent, level by level up to the coarsest, so each size the
+        lattice has holds a distribution: the within-block standard deviation
+        of every block of that size, the finest on the left. The line joins
+        each size's root mean square, the dispersion of the ground within
+        blocks of that size. A parent is put together from the blocks inside
+        it, realization by realization, and never predicted.
+
+        A block the refinement left whole reads its dispersion off its own
+        sub-blocks, one position per child, and one put together from its
+        descendants off all of theirs. Fewer positions see less of the
+        ground, so at one size a block left whole reads lower than a split
+        block over the same ground; `kind="jitter"` colours every block by
+        how many times the refinement split it, which is where that shows.
+        Each size's label gives how many blocks it holds and the share of
+        the volume they cover: the fine sizes exist only where the
+        refinement went, so the distributions are of different ground.
+
+        Parameters
+        ----------
+        component : str
+            One component of a vector variable, drawn on its own.
+        kind : str
+            `"box"`, `"violin"` or `"jitter"`, the last one point per block,
+            coloured by how many times the refinement split it.
+        alpha : float
+            How opaque each point is, for `kind="jitter"`. Low by default:
+            a size can hold thousands of blocks, and where they pile up is
+            what there is to see.
+        most : int
+            About how many blocks of each size `kind="jitter"` draws, taken
+            by striding through them; the box and the violin use them all.
+        size : float
+            Point size, for `kind="jitter"`.
+
+        See Also
+        --------
+        geoml.plots.prepare.dispersion_by_support : the numbers drawn here.
+        """
+        self._check_kind(kind, ("box", "violin", "jitter"))
+        var = self._require_continuous("dispersion_by_support")
+        panels = _prep.dispersion_by_support(self.data, var.name,
+                                             component=component)
+
+        rows, columns = _prep.grid_shape(len(panels))
+        with _style.context():
+            figure, axes = _plt.subplots(
+                rows, columns, squeeze=False,
+                figsize=figsize or (4.8 * columns, 3.9 * rows))
+            flat = axes.ravel()
+            for i, panel in enumerate(panels):
+                self._draw_support(flat[i], panel, kind, most, size, alpha)
+                flat[i].set_title(panel["label"])
+            for extra in flat[len(panels):]:
+                extra.set_visible(False)
+            figure.suptitle("%s: dispersion by block size" % var.name)
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+        return figure
+
+    def _draw_support(self, axes, panel, kind, most, size, alpha):
+        """One component of `dispersion_by_support`."""
+        sizes = panel["sizes"]
+        position = _np.arange(len(sizes), dtype=float)
+        filled = [i for i, entry in enumerate(sizes) if entry["count"]]
+
+        if kind == "box":
+            drawn = axes.boxplot(
+                [sizes[i]["deviation"] for i in filled],
+                positions=position[filled], widths=0.5, patch_artist=True,
+                medianprops={"color": "#2b2b2b"},
+                flierprops={"markersize": 2, "alpha": 0.5})
+            for box in drawn["boxes"]:
+                box.set_facecolor(_style.color(0))
+                box.set_alpha(0.6)
+        elif kind == "violin":
+            # a density needs a spread to be drawn: a size holding one block,
+            # or blocks that all read the same, is marked where it sits
+            spread = [i for i in filled if _np.ptp(sizes[i]["deviation"]) > 0]
+            if spread:
+                drawn = axes.violinplot(
+                    [sizes[i]["deviation"] for i in spread],
+                    positions=position[spread], widths=0.7,
+                    showmedians=True)
+                for body in drawn["bodies"]:
+                    body.set_facecolor(_style.color(0))
+                    body.set_alpha(0.6)
+            single = [i for i in filled if i not in spread]
+            if single:
+                axes.scatter(position[single],
+                             [sizes[i]["deviation"][0] for i in single],
+                             marker="_", s=300, color=_style.color(0))
+        else:
+            for depth, x, y in _prep.support_strip(sizes, most):
+                label = _prep.split_label(depth)
+                # the blocks split least are the fewest at the coarse sizes
+                # and the ones the colours are for, so they go on top
+                axes.scatter(x, y, s=size, alpha=alpha, linewidths=0,
+                             color=self._color(depth, label), label=label,
+                             zorder=1.0 + 1.0 / (1.0 + depth))
+
+        axes.plot(position[filled], [sizes[i]["rms"] for i in filled],
+                  color="#2b2b2b", marker="o", markersize=3, linewidth=1.2,
+                  label="root mean square")
+        axes.set_xticks(position)
+        axes.set_xticklabels(
+            ["\n".join(_prep.support_tick(entry)) for entry in sizes],
+            fontsize=7)
+        axes.set_xlim(-0.6, len(sizes) - 0.4)
+        axes.set_xlabel("block size")
+        axes.set_ylabel("within-block standard deviation")
+        # the points are faint on purpose; their key is not
+        legend = axes.legend(loc="upper left", fontsize="small")
+        for handle in legend.legend_handles:
+            handle.set_alpha(1.0)
+        # from zero, so a change with size reads at its true scale
+        axes.set_ylim(bottom=0.0)
+
+    def volume_dispersion(self, shells: "_data.MeshSet", kind: str = "box",
+                          relative: bool = False, alpha: float = 0.2,
+                          size: float = 18,
+                          figsize=None) -> "_plt.Figure":
+        """
+        How much the realizations' meshes vary in volume, against the
+        prediction's.
+
+        For every cut-off or category of a `MeshSet` built with its
+        realizations, the distribution of the realizations' mesh volumes,
+        with the prediction's marked. The prediction is smoother than any
+        realization, so its mesh tends to hold less volume at a high cut-off
+        and more at a low one; how far it sits from the middle of the
+        distribution is how far one mesh misreports the volume, and the
+        spread is what no single mesh can show. The figure reads what the
+        set measured as it was made, and loads no mesh.
+
+        Parameters
+        ----------
+        shells
+            A `MeshSet` built with `simulations=True`.
+        kind : str
+            `"box"`, `"violin"` or `"jitter"`, the last one point per
+            realization.
+        relative : bool
+            Whether to divide every volume by the prediction's.
+        alpha : float
+            How opaque each point is, for `kind="jitter"`.
+        size : float
+            Point size, for `kind="jitter"`.
+
+        See Also
+        --------
+        geoml.plots.prepare.volume_dispersion : the numbers drawn here.
+        geoml.data.MeshSet.volume_dispersion : the same, as a table.
+        """
+        self._check_kind(kind, ("box", "violin", "jitter"))
+        panel = _prep.volume_dispersion(shells, relative=relative)
+        values = panel["values"]
+        position = _np.arange(len(values), dtype=float)
+        filled = [i for i, held in enumerate(values) if held.size]
+        with _style.context():
+            figure, axes = _plt.subplots(
+                figsize=figsize or (max(4.8, 1.0 * len(values) + 2.4), 3.9))
+            if kind == "box" and filled:
+                drawn = axes.boxplot(
+                    [values[i] for i in filled], positions=position[filled],
+                    widths=0.5, patch_artist=True,
+                    medianprops={"color": "#2b2b2b"},
+                    flierprops={"markersize": 2, "alpha": 0.5})
+                for box in drawn["boxes"]:
+                    box.set_facecolor(_style.color(0))
+                    box.set_alpha(0.6)
+            elif kind == "violin":
+                spread = [i for i in filled if _np.ptp(values[i]) > 0]
+                if spread:
+                    drawn = axes.violinplot(
+                        [values[i] for i in spread],
+                        positions=position[spread], widths=0.7,
+                        showmedians=True)
+                    for body in drawn["bodies"]:
+                        body.set_facecolor(_style.color(0))
+                        body.set_alpha(0.6)
+            elif kind == "jitter":
+                for i in filled:
+                    axes.scatter(
+                        position[i] + _prep.jitter(len(values[i])),
+                        values[i], s=size, alpha=alpha, linewidths=0,
+                        color=_style.color(0),
+                        label="realization" if i == filled[0] else None)
+            axes.scatter(position, panel["prediction"], marker="D", s=36,
+                         color="#2b2b2b", zorder=3, label="prediction")
+            if relative:
+                axes.axhline(1.0, color="#2b2b2b", linewidth=0.8,
+                             linestyle=":")
+            axes.set_xticks(position)
+            axes.set_xticklabels(panel["labels"])
+            axes.set_xlim(-0.6, len(values) - 0.4)
+            axes.set_xlabel(panel["keys"])
+            axes.set_ylabel(panel["axis"])
+            # the points are faint on purpose; their key is not
+            legend = axes.legend(loc="best", fontsize="small")
+            for handle in legend.legend_handles:
+                handle.set_alpha(1.0)
+            # from zero, so a spread reads at its true scale
+            axes.set_ylim(bottom=0.0)
+            axes.set_title(panel["title"])
+            figure.tight_layout()
+        return figure
+
+    def connectivity(self, shells: "_data.MeshSet",
+                     figsize=None) -> "_plt.Figure":
+        """
+        Whether the ground above each cut-off holds together.
+
+        Two panels for a `MeshSet`: the share of each mesh's volume in its
+        largest piece, and how many pieces it is in. Read along the
+        cut-offs the first is a connectivity curve -- where it drops, the
+        ground breaks into pods -- and where the set holds realizations
+        their P10 to P90 is drawn as a band, their median dashed.
+
+        Parameters
+        ----------
+        shells
+            The set.
+
+        See Also
+        --------
+        geoml.plots.prepare.connectivity : the numbers drawn here.
+        """
+        panel = _prep.connectivity(shells)
+        x = panel["x"]
+        marker = "o" if panel["numeric"] else "D"
+        line = "-" if panel["numeric"] else "none"
+        with _style.context():
+            figure, axes = _plt.subplots(1, 2, figsize=figsize or (9.6, 3.9))
+            share, count = axes
+            if panel["band"] is not None:
+                if panel["numeric"]:
+                    share.fill_between(x, panel["band"][0], panel["band"][1],
+                                       color=_style.color(0), alpha=0.25,
+                                       linewidth=0,
+                                       label="realizations, P10–P90")
+                else:
+                    share.vlines(x, panel["band"][0], panel["band"][1],
+                                 color=_style.color(0), linewidth=6,
+                                 alpha=0.35, label="realizations, P10–P90")
+                share.plot(x, panel["median"], color=_style.color(0),
+                           linestyle="--" if panel["numeric"] else "none",
+                           marker="_", label="realizations, P50")
+                count.plot(x, panel["pieces_median"], color=_style.color(0),
+                           linestyle="--" if panel["numeric"] else "none",
+                           marker="_", label="realizations, P50")
+            share.plot(x, panel["largest"], color="#2b2b2b", marker=marker,
+                       linestyle=line, label="prediction")
+            count.plot(x, panel["pieces"], color="#2b2b2b", marker=marker,
+                       linestyle=line, label="prediction")
+            share.set_ylim(0.0, 1.05)
+            share.set_ylabel("largest piece's share of the volume")
+            count.set_ylim(bottom=0.0)
+            count.set_ylabel("pieces")
+            for axis in axes:
+                axis.set_xlabel(panel["keys"])
+                if not panel["numeric"]:
+                    axis.set_xticks(x)
+                    axis.set_xticklabels(panel["labels"])
+                axis.legend(loc="best", fontsize="small")
+            figure.suptitle(panel["title"])
+            figure.tight_layout(rect=(0, 0, 1, 0.95))
+        return figure
+
+    def section(self, shells: "_data.MeshSet", axis, value: float,
+                component: "str | None" = None,
+                resolution: "float | None" = None,
+                figsize=None) -> "_plt.Figure":
+        """
+        Every mesh of a set where it crosses a plane, over the model.
+
+        The lines each mesh draws on a plane across one axis, a colour per
+        cut-off or category, over the prediction of the continuous variable
+        this selection names -- a grade under its own shells, or under a
+        rock model's contacts. Without a continuous variable, the lines
+        alone.
+
+        Parameters
+        ----------
+        shells
+            The set.
+        axis
+            The coordinate held fixed, by index or by label.
+        value
+            Where along it the plane sits.
+        component : str
+            For a vector variable, the component to draw beneath.
+        resolution : float
+            The spacing the prediction is sampled at on the plane.
+
+        See Also
+        --------
+        geoml.plots.prepare.mesh_section : the numbers drawn here.
+        geoml.data.MeshSet.section : the lines, as arrays.
+        """
+        beneath = self.continuous
+        if beneath is not None and component is not None:
+            beneath = beneath.components[component]
+        panel = _prep.mesh_section(shells, axis, value, variable=beneath,
+                                   resolution=resolution)
+        with _style.context():
+            figure, axes = _plt.subplots(figsize=figsize or (6.4, 5.2))
+            image = panel["image"]
+            if image is not None:
+                drawn = axes.imshow(image["values"], origin="lower",
+                                    extent=image["extent"], cmap=self.cmap,
+                                    aspect="equal", interpolation="nearest")
+                figure.colorbar(drawn, ax=axes, label=image["label"],
+                                shrink=0.8)
+            for i, (label, lines) in enumerate(panel["lines"].items()):
+                color = self._color(i, label)
+                for j, line in enumerate(lines):
+                    axes.plot(line[:, 0], line[:, 1], color=color,
+                              linewidth=1.4, label=label if j == 0 else None)
+            axes.set_aspect("equal")
+            axes.set_xlabel(panel["axes"][0])
+            axes.set_ylabel(panel["axes"][1])
+            if any(panel["lines"].values()):
+                axes.legend(loc="best", fontsize="small",
+                            title=panel["keys"])
+            axes.set_title(panel["title"])
             figure.tight_layout()
         return figure
 
@@ -1524,6 +1906,29 @@ class Explorer(_base.Selection):
                    alpha=0.8)
 
     @staticmethod
+    def _draw_statistics(axes, values, tallest):
+        """A panel's summary statistics, in the corner its bars leave free."""
+        side = _prep.statistics_side(tallest)
+        # the lines stay flush left inside the box whichever corner it takes
+        return axes.text(0.97 if side == "right" else 0.03, 0.97,
+                         "\n".join(_prep.statistics_lines(
+                             _prep.summary_statistics(values))),
+                         transform=axes.transAxes, ha=side, va="top",
+                         multialignment="left", family="monospace",
+                         fontsize=6.5, bbox=_style.LABEL_BOX)
+
+    @staticmethod
+    def _clear_statistics(axes, box, edges, tallest):
+        """Raise a panel's axis until no bar runs under its statistics."""
+        # the frame reaches its padding past the text: a quarter of the size
+        pad = 0.25 * box.get_fontsize() * axes.figure.dpi / 72.0
+        corners = box.get_window_extent().padded(pad).get_points()
+        low, high = axes.transData.inverted().transform(corners)[:, 0]
+        bottom = axes.transAxes.inverted().transform(corners)[0, 1]
+        axes.set_ylim(0.0, _prep.statistics_top(tallest, edges, low, high,
+                                                1.0 - bottom))
+
+    @staticmethod
     def _annotate_correlation(panel, x, y):
         """What the eye is being asked about, as a number."""
         panel.text(0.05, 0.9, "r = %.2f" % _np.corrcoef(x, y)[0, 1],
@@ -1531,7 +1936,7 @@ class Explorer(_base.Selection):
                    va="top", bbox=_style.LABEL_BOX)
 
     def _draw_agreement(self, panel, true, predicted, size, kind="scatter",
-                        alpha=0.6, bins=60, log_counts=False):
+                        alpha=0.6, bins=60, log_counts=False, left_out=0):
         """Predicted against measured, with the line they would sit on."""
         self._draw_points(panel, true, predicted, size, kind, alpha, bins,
                           log_counts, color=_style.color(0))
@@ -1546,8 +1951,19 @@ class Explorer(_base.Selection):
         panel.set_xlim(low - margin, high + margin)
         panel.set_ylim(low - margin, high + margin)
 
+        if left_out:
+            # a trimmed panel is not showing everything, and says so -- in
+            # the corner a smoothing model leaves empty, since it never
+            # gives the highest measurements the lowest predictions
+            panel.text(0.95, 0.05, "outliers left out: %d of %d"
+                       % (left_out, len(true) + left_out),
+                       transform=panel.transAxes, fontsize=7,
+                       color="#2b2b2b", ha="right", va="bottom",
+                       bbox=_style.LABEL_BOX)
+
     def _joint_scatter(self, true, predicted, label, figsize, size,
-                       kind="scatter", alpha=0.6, bins=60, log_counts=False):
+                       kind="scatter", alpha=0.6, bins=60, log_counts=False,
+                       left_out=0):
         """One variable, with the two distributions along the sides."""
         with _style.context():
             figure = _plt.figure(figsize=figsize or (5.5, 5.5))
@@ -1560,7 +1976,7 @@ class Explorer(_base.Selection):
             right = figure.add_subplot(grid[1, 1], sharey=main)
 
             self._draw_agreement(main, true, predicted, size, kind, alpha,
-                                 bins, log_counts)
+                                 bins, log_counts, left_out)
             top.hist(true, bins=25, color=_style.color(0), alpha=0.65)
             right.hist(predicted, bins=25, orientation="horizontal",
                        color=_style.color(0), alpha=0.65)

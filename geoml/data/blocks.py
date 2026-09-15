@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2019  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -32,6 +32,7 @@ import vtk as _vtk
 
 import geoml._types as _types
 import geoml.math.geometry as _gmt
+import geoml.storage as _storage
 
 from geoml.data.base import *
 from geoml.data.base import _Attribute, _closing_value
@@ -44,7 +45,8 @@ from geoml.data.grids import (
     _TOL_COVER, _aggregate_onto, _cover_box, _fitted_rotation)
 from geoml.data.meshes import *
 from geoml.data.meshes import (
-    _below_sheet, _mesh_test, _uncovered_rule, _within_body)
+    _below_sheet, _clip_to_box, _mesh_test, _separated, _uncovered_rule,
+    _within_body)
 
 def _sub_block_shares(blocks, test, rows=None):
     """The share of each block's sub-blocks that `test` accepts.
@@ -99,18 +101,23 @@ def _blockdata(cls):
 
     old_init = cls.__init__
 
-    def new_init(self, start, n, step=None, end=None, labels=None, discretization=None):
-        old_init(self, start=start, n=n, step=step, end=end, labels=labels)
+    def new_init(self, start, n, step=None, end=None, labels=None,
+                 discretization=None, **kwargs):
+        # `end` only where it was given, and anything else straight through:
+        # a turned grid takes its angles here and has no `end` to be handed
+        if end is not None:
+            kwargs["end"] = end
+        old_init(self, start=start, n=n, step=step, labels=labels, **kwargs)
         if discretization is None:
             discretization = [1] * self.n_dim
         self.discretization = discretization
 
-        lo = _np.array([axis.min() for axis in self.grid])
-        hi = _np.array([axis.max() for axis in self.grid])
-        self._bounding_box = BoundingBox(
-            lo - _np.array(self.step_size) / 2,
-            hi + _np.array(self.step_size) / 2,
-        )
+        half = _np.array(self.step_size) / 2
+        lo = _np.array([axis.min() for axis in self.grid]) - half
+        hi = _np.array([axis.max() for axis in self.grid]) + half
+        # a turned box reaches furthest at its corners, where it is turned
+        corners = _np.array(list(_iter.product(*zip(lo, hi))), dtype=float)
+        self._bounding_box = BoundingBox.from_array(self._to_world(corners))
 
         sub_grid = _np.array(
             list(_iter.product(
@@ -122,9 +129,11 @@ def _blockdata(cls):
         sub_grid /= _np.array(self.discretization)[None, :]
         self.sub_grid = sub_grid
 
+    # `sub_grid` is counted in the grid's own frame, as `grid` is, and turns
+    # with it on the way out
     def discretized_coordinates(self, index):
         center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
-        return self.sub_grid + center
+        return self._to_world(self.sub_grid + center)
 
     def inducing_grid(self, index):
         center = _np.array([g[i] for g, i in zip(self.grid, index)])[None, :]
@@ -132,16 +141,19 @@ def _blockdata(cls):
         discr = _np.array(self.discretization)[None, :]
         # grid = grid * (discr + 1) / (discr - 1) + center
         grid = grid * (discr + 2) / (discr + 1) + center
-        return PointData.from_array(grid)
+        return PointData.from_array(self._to_world(grid))
 
     def get_batched_coordinates(self, index):
         if index is None:
             index = _np.arange(self._n_data)
 
         centers = _np.asarray(self.coordinates[index])
+        # the centres are placed already; an offset from one only turns
+        offsets = self.sub_grid if self._transform is None \
+            else _np.matmul(self.sub_grid, self._transform[1])
         # block-major, one temporary instead of one per block: block b owns
         # rows b*k to (b+1)*k, which is what `_aggregate` averages back
-        coords = (centers[:, None, :] + self.sub_grid[None, :, :])
+        coords = (centers[:, None, :] + offsets[None, :, :])
         coords = coords.reshape(-1, centers.shape[1])
 
         splits = None if _np.prod(self.discretization) == 1 else len(index)
@@ -324,9 +336,9 @@ class Blocks3D(Grid3D):
         Only a **uniform** spacing has a geoML container: a true tartan
         grid — uneven cells along an axis — is refused with the axis
         named. An unrotated model comes back as a `Blocks3D`; a rotated
-        one as a `RotatedBlockSet3D` with `max_levels=0`, there being no
-        rotated regular-grid class — the blocks, their rotation and
-        block-support prediction all work, and nothing can be refined.
+        one as a `RotatedBlockSet3D` with `max_levels=0` — the blocks,
+        their rotation and block-support prediction all work, nothing can
+        be refined, and `as_blocks3d` makes it a `RotatedBlocks3D`.
         Float cell data becomes continuous variables and referenced data
         categorical ones, as in `PointData.from_geoh5`. Needs the
         `geoh5py` package: `pip install geoml[geoh5]`.
@@ -371,24 +383,79 @@ class Blocks3D(Grid3D):
         return blocks
 
 
+@_blockdata
+class RotatedBlocks3D(RotatedGrid3D):
+    """
+    A regular block model turned about its first block.
+
+    `Blocks3D` with an azimuth, a dip and a rake, as `RotatedGrid3D` is
+    `Grid3D` with them. The blocks are counted in the model's own frame and
+    turned about the first block's centre where coordinates leave -- the
+    centres, the sub-blocks a prediction averages over, the exported cells
+    -- and turned back where they come in (`index_data`, and so
+    `aggregate`). `BlockSet3D.as_blocks3d` returns one for a
+    `RotatedBlockSet3D`, with the same angles and the same pivot.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first block, which the model turns about.
+    n : array-like
+        Number of blocks along each of the model's own axes.
+    step : array-like
+        Size of a block along each of them.
+    labels : list, optional
+        Coordinate names.
+    discretization : array-like, optional
+        Sub-blocks per axis, averaged over to predict a block. One by
+        default, which predicts each block at its centre.
+    azimuth, dip, rake : float
+        The rotation in degrees, as `RotatedGrid3D` takes it. Given by
+        keyword.
+    """
+
+    def as_pyvista(self, simulations=False, include="**"):
+        """
+        Converts this object to a pyvista one, carrying its variables.
+
+        The cells of a `Blocks3D` of the same shape, turned into place as
+        one piece, so that each cell's centre is its block's.
+
+        Parameters
+        ----------
+        simulations
+            Which simulations to include: `False` for none (the default, since
+            each one is a full-length array in the exported object), `True` for
+            all of them, an `int` for the first n, or a sequence of indices.
+        """
+        pv_blocks = _pv.ImageData(
+            dimensions=_np.array(self.grid_size) + 1,
+            spacing=self.step_size,
+            origin=_np.array([ax[0] for ax in self.grid])
+            - _np.array(self.step_size) / 2
+        )
+        return self._turned(self._finish_pyvista(
+            pv_blocks, "blocks", simulations, include))
+
+
 def _ghost_shell(origin, size, shape):
     """Mirror images of the boundary cells, in all 26 directions.
 
     A ghost is its partner's reflection across the face, edge or corner they
     share, so their corners coincide exactly and the corner averaging cannot
-    tear along the box surface -- the mismatch between neighbouring ghosts of
-    different sizes does not matter, since every one of them lands outside
-    the kept region and no surface runs between them. What each holds is
-    `_ghost_values` business.
+    tear along the box surface. What each holds is up to the caller: a copy
+    of its partner's value carries the field past the box as it stands at
+    the box, for the box to cut the surface off exactly, and `_ghost_values`
+    puts the cap on the box faces instead, where nothing will cut it.
 
-    **The diagonals are not optional**, though they read as though they
-    should be: nothing crosses a box edge from inside, but the closing cap
-    itself runs along the boundary, and where two face ghosts meet without
-    the diagonal between them the cap reaches the shell's own edge and stops
-    there. That is a hole in the body, and it is the common case rather than
-    a corner one -- `close="below"` keeps the region under the value, which
-    on most models touches every face, so its cap ran the length of all
-    twelve box edges and tore along each.
+    **The diagonals are not optional** for the second, though they read as
+    though they should be: nothing crosses a box edge from inside, but the
+    cap itself runs along the boundary, and where two face ghosts meet
+    without the diagonal between them the cap reaches the shell's own edge
+    and stops there. That is a hole in the body, and it is the common case
+    rather than a corner one -- `close="below"` keeps the region under the
+    value, which on most models touches every face, so its cap ran the
+    length of all twelve box edges and tore along each.
     """
     ghost_origin, ghost_size, ghost_parent = [], [], []
     for direction in _iter.product((-1, 0, 1), repeat=3):
@@ -420,6 +487,12 @@ def _ghost_shell(origin, size, shape):
 def _ghost_values(parent_values, value, keep_above):
     """What each ghost holds, so the cap lands on the box face.
 
+    The way a closed contour is capped when the box cannot cut it: where
+    Manifold will not take the surface carried past the box as a body, and
+    in the welded mesh, which has no padding to close against. Every face
+    point of a kept block then sits exactly at the level, which rounds the
+    body's edges on the box by about half a boundary block.
+
     A ghost is the mirror of the block it stands against, and the value it
     carries decides where between the two centres the surface crosses. The
     **reflection about the contour level**, `2 * value - v`, puts that
@@ -444,13 +517,62 @@ def _ghost_values(parent_values, value, keep_above):
     return _np.where(kept, 2.0 * value - parent_values, parent_values)
 
 
+def _lattice_corners(origin, size, span):
+    """The distinct lattice points the blocks' corners fall on, and each
+    block's eight corners as indices into them.
+
+    `origin` and `size` count lattice cells and `span` is the number of
+    points along each axis. The points come back as sorted z-major keys, so
+    one z-slab of them is one contiguous run. This is the welding of
+    `_hex_mesh`, done in integers, and on a big model it was most of a
+    contour's memory: the corners as an `n x 8 x 3` int64 array, their
+    keys, and `np.unique`'s sorted copy, argsort and int64 inverse, over
+    the 7 to 12 million cells of a Tom v6 contour, took 4 to 8 GB. Here the
+    keys are built a corner at a time, sorted once, and each key's rank
+    among the distinct points scattered back through the sort into 32-bit
+    integers wherever the keys number fewer than 2**31, every temporary
+    freed as the next one exists. Finding the ranks by `searchsorted` into
+    the distinct points instead is leaner still and was measured 17 times
+    slower than `np.unique`, the argsort 1.4 times faster.
+    """
+    origin = _np.asarray(origin, dtype=_np.int64)
+    size = _np.asarray(size, dtype=_np.int64)
+    span = _np.asarray(span, dtype=_np.int64)
+    keys = _np.empty((len(origin), 8), dtype=_np.int64)
+    for j, corner in enumerate(_gmt.HEX_CORNERS):
+        at = origin + corner * size
+        keys[:, j] = (at[:, 2] * span[1] + at[:, 1]) * span[0] + at[:, 0]
+    rank = _np.int32 if keys.size < 2 ** 31 else _np.int64
+    if keys.size == 0:
+        return _np.zeros(0, dtype=_np.int64), _np.zeros((0, 8), dtype=rank)
+    flat = keys.ravel()
+    order = _np.argsort(flat)
+    ordered = flat[order]
+    del keys, flat
+    fresh = _np.empty(len(ordered), dtype=bool)
+    fresh[0] = True
+    _np.not_equal(ordered[1:], ordered[:-1], out=fresh[1:])
+    distinct = ordered[fresh]
+    del ordered
+    group = _np.cumsum(fresh, dtype=rank)
+    group -= 1
+    del fresh
+    index = _np.empty(len(group), dtype=rank)
+    index[order] = group
+    return distinct, index.reshape(-1, 8)
+
+
 # the largest slab _painted_contour will hold at once, in cells: two of
 # these in float64 is ~130 MB, transient
 _PAINT_BUDGET = 8_000_000
+# how many interior points of coarse blocks it fills at once: 32-bit
+# coordinates and float64 values, at most ~160 MB transient with the mask
+# and the kept copies
+_FILL_BUDGET = 4_000_000
 
 
 def _painted_contour(origin, size, step, values, corner, value, label,
-                     background):
+                     background, margin=0, fields=None):
     """The welded field painted onto a regular grid, contoured by flying
     edges.
 
@@ -493,21 +615,29 @@ def _painted_contour(origin, size, step, values, corner, value, label,
     to stay shut. A block holding no value paints its own points as absent
     rather than as background — unpredicted ground is not outside the
     model — and contributes to no corner (`_at_corners`' rule again).
+    `margin` pads the painted box with that many cells of background on
+    every side, so a field carried out to the edge of the blocks still
+    closes before the image ends.
+
+    With `fields`, `values` holds several columns, all averaged onto the
+    corners, and `fields` turns those means into the fields contoured --
+    an array of one column per field, point by point -- painted and
+    contoured together, each slab `1 / n` of the budget.
 
     Returns
     -------
     verts, faces : arrays
         The contoured triangulation, in the lattice's own frame — a
         rotated set turns the vertices afterwards. Empty when the surface
-        misses the value.
+        misses the value. With `fields`, a list of them, one per field.
     """
     origin = _np.asarray(origin, dtype=_np.int64)
     size = _np.asarray(size, dtype=_np.int64)
     values = _np.asarray(values, dtype=float)
     step = _np.broadcast_to(_np.asarray(step, dtype=float), (3,))
 
-    low = origin.min(axis=0)
-    dims = ((origin + size).max(axis=0) - low).astype(_np.int64)
+    low = origin.min(axis=0) - int(margin)
+    dims = ((origin + size).max(axis=0) + int(margin) - low).astype(_np.int64)
     origin = origin - low
     world = _np.asarray(corner, dtype=float) + low * step
     span = dims + 1
@@ -516,22 +646,30 @@ def _painted_contour(origin, size, step, values, corner, value, label,
     # the corner table: every finite block's eight corners as one integer
     # key — z-major, so one slab's point planes are one contiguous key
     # range — averaged with one vote per block
-    corners = (origin[:, None, :]
-               + _gmt.HEX_CORNERS[None, :, :] * size[:, None, :])
-    key = ((corners[..., 2] * span[1] + corners[..., 1]) * span[0]
-           + corners[..., 0])
-    known = _np.isfinite(values)
-    corner_key, inverse = _np.unique(key[known].ravel(), return_inverse=True)
-    corner_value = (_np.bincount(inverse,
-                                 weights=_np.repeat(values[known], 8))
-                    / _np.bincount(inverse))
+    known = _np.isfinite(values) if values.ndim == 1 \
+        else _np.all(_np.isfinite(values), axis=1)
+    corner_key, inverse = _lattice_corners(origin[known], size[known], span)
+    votes = _np.bincount(inverse.ravel())
+    if fields is None:
+        corner_value = (_np.bincount(inverse.ravel(),
+                                     weights=_np.repeat(values[known], 8))
+                        / votes)[:, None]
+    else:
+        corner_value = _np.asarray(fields(_np.stack(
+            [_np.bincount(inverse.ravel(),
+                          weights=_np.repeat(values[known, k], 8)) / votes
+             for k in range(values.shape[1])], axis=1)))
+    del votes
+    n_fields = corner_value.shape[1]
 
     # a finite block bigger than one cell owns points no corner pass will
     # visit; it reads its eight corner means back from the table (its own
     # vote keeps them finite) to spread trilinearly. A one-cell block has
     # no such points and needs no fill at all.
-    big_rows = _np.flatnonzero(known & (size > 1).any(axis=1))
-    eight = corner_value[_np.searchsorted(corner_key, key[big_rows])]
+    big = _np.any(size > 1, axis=1)
+    big_rows = _np.flatnonzero(known & big)
+    eight = corner_value[inverse[big[known]]]
+    del inverse
     row_in_big = _np.full(len(values), -1, dtype=_np.int64)
     row_in_big[big_rows] = _np.arange(len(big_rows))
 
@@ -545,13 +683,18 @@ def _painted_contour(origin, size, step, values, corner, value, label,
                                   return_inverse=True)
     classes = size[fill_rows[first]]
     member = member.ravel()
-    thick = max(1, int(_PAINT_BUDGET // max(1, plane)))
+    thick = max(1, int(_PAINT_BUDGET // max(1, plane * n_fields)))
+    # the fills' coordinates in 32 bits wherever the painted box allows
+    lattice = origin.astype(_np.int32) if int(span.max()) < 2 ** 31 \
+        else origin
 
-    verts, faces, count = [], [], 0
+    verts = [[] for _ in range(n_fields)]
+    faces = [[] for _ in range(n_fields)]
+    count = [0] * n_fields
     for z_start in range(0, int(dims[2]), thick):
         z_stop = min(z_start + thick, int(dims[2]))
-        paint = _np.full((z_stop - z_start + 1, int(span[1]), int(span[0])),
-                         background, dtype=float)
+        paint = _np.full((n_fields, z_stop - z_start + 1, int(span[1]),
+                          int(span[0])), background, dtype=float)
 
         for index, shape in enumerate(classes):
             rows = fill_rows[
@@ -568,17 +711,29 @@ def _painted_contour(origin, size, step, values, corner, value, label,
             mix = _np.prod(_np.where(_gmt.HEX_CORNERS[None, :, :] == 1,
                                      t[:, None, :], 1.0 - t[:, None, :]),
                            axis=2)
-            filled = _np.full((len(rows), len(offsets)), _np.nan)
-            finite = known[rows]
-            if finite.any():
-                filled[finite] = eight[row_in_big[rows[finite]]] @ mix.T
-            points = (origin[rows, None, :]
-                      + offsets[None, :, :]).reshape(-1, 3)
-            filled = filled.ravel()
-            keep = (points[:, 2] >= z_start) & (points[:, 2] <= z_stop)
-            points = points[keep]
-            paint[points[:, 2] - z_start, points[:, 1], points[:, 0]] = \
-                filled[keep]
+            offsets = offsets.astype(lattice.dtype)
+            # a few rows at a time: every point of every block of a size
+            # class at once -- int64 coordinates, their values, the mask
+            # and both kept copies -- was the paint's peak, well over its
+            # corner table (729 points a block for a coarse block eight
+            # cells a side)
+            batch = max(1, _FILL_BUDGET // (len(offsets) * n_fields))
+            for first_row in range(0, len(rows), batch):
+                part = rows[first_row:first_row + batch]
+                filled = _np.full((n_fields, len(part), len(offsets)),
+                                  _np.nan)
+                finite = known[part]
+                if finite.any():
+                    reading = eight[row_in_big[part[finite]]]
+                    for m in range(n_fields):
+                        filled[m, finite] = reading[:, :, m] @ mix.T
+                points = (lattice[part, None, :]
+                          + offsets[None, :, :]).reshape(-1, 3)
+                filled = filled.reshape(n_fields, -1)
+                keep = (points[:, 2] >= z_start) & (points[:, 2] <= z_stop)
+                points = points[keep]
+                paint[:, points[:, 2] - z_start, points[:, 1],
+                      points[:, 0]] = filled[:, keep]
 
         # the corner means last, over whatever the fills wrote: every
         # point that is any block's corner reads the welded value
@@ -586,8 +741,8 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         hi = _np.searchsorted(corner_key, (z_stop + 1) * plane)
         keys = corner_key[lo:hi]
         rest = keys % plane
-        paint[keys // plane - z_start, rest // span[0], rest % span[0]] = \
-            corner_value[lo:hi]
+        paint[:, keys // plane - z_start, rest // span[0],
+              rest % span[0]] = corner_value[lo:hi].T
 
         # The image lives in the lattice's own units, and the world enters
         # only after the contour, in float64: every VTK image contour
@@ -602,30 +757,32 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         # is a sliver the degenerate-face drop already owns. The welded
         # mesh never had the problem because an unstructured contour
         # inherits its input's float64.
-        image = _pv.ImageData(
-            dimensions=(int(span[0]), int(span[1]),
-                        z_stop - z_start + 1),
-            spacing=(1.0, 1.0, 1.0),
-            origin=(0.0, 0.0, float(z_start)))
-        image.point_data[label] = paint.ravel()
-        edges = _vtk.vtkFlyingEdges3D()
-        edges.SetInputData(image)
-        edges.SetValue(0, value)
-        edges.ComputeNormalsOff()
-        edges.ComputeGradientsOff()
-        edges.ComputeScalarsOff()
-        edges.Update()
-        piece = _pv.wrap(edges.GetOutput())
-        if piece.n_cells:
-            piece = piece.triangulate()
-            verts.append(world
-                         + _np.asarray(piece.points, dtype=float) * step)
-            faces.append(piece.faces.reshape(-1, 4)[:, 1:] + count)
-            count += len(verts[-1])
+        for m in range(n_fields):
+            image = _pv.ImageData(
+                dimensions=(int(span[0]), int(span[1]),
+                            z_stop - z_start + 1),
+                spacing=(1.0, 1.0, 1.0),
+                origin=(0.0, 0.0, float(z_start)))
+            image.point_data[label] = paint[m].ravel()
+            edges = _vtk.vtkFlyingEdges3D()
+            edges.SetInputData(image)
+            edges.SetValue(0, value)
+            edges.ComputeNormalsOff()
+            edges.ComputeGradientsOff()
+            edges.ComputeScalarsOff()
+            edges.Update()
+            piece = _pv.wrap(edges.GetOutput())
+            if piece.n_cells:
+                piece = piece.triangulate()
+                verts[m].append(
+                    world + _np.asarray(piece.points, dtype=float) * step)
+                faces[m].append(piece.faces.reshape(-1, 4)[:, 1:] + count[m])
+                count[m] += len(verts[m][-1])
 
-    if not verts:
-        return _np.zeros([0, 3]), _np.zeros([0, 3], dtype=int)
-    return _np.concatenate(verts), _np.concatenate(faces)
+    found = [(_np.concatenate(verts[m]), _np.concatenate(faces[m]))
+             if verts[m] else (_np.zeros([0, 3]), _np.zeros([0, 3], dtype=int))
+             for m in range(n_fields)]
+    return found[0] if fields is None else found
 
 
 def _contour_column(blocks, path) -> "tuple[VariablePath, _Attribute]":
@@ -671,6 +828,140 @@ def _contour_column(blocks, path) -> "tuple[VariablePath, _Attribute]":
                 % (str(path), ", ".join(str(name) for name in parts)))
         raise ValueError("%r holds no prediction to contour" % str(path))
     return path / "prediction", column
+
+
+def _add_rows(target, at, values):
+    """`target[at] += values`, rows bound for the same place summed first."""
+    order = _np.argsort(at, kind="stable")
+    at = at[order]
+    starts = _np.flatnonzero(_np.r_[True, at[1:] != at[:-1]])
+    target[at[starts]] += _np.add.reduceat(values[order], starts, axis=0)
+
+
+class _Grouping:
+    """The blocks of a set gathered into the blocks of its coarsest level.
+
+    `cell` names the coarse block each block falls in and `volume` how many
+    base cells it holds, so its share of that block (`weight`) is a ratio of
+    integers. A coarse block that is one of the set's blocks whole is `whole`
+    and keeps it exactly -- `source` says which. The rest are gathered from
+    their parts, and what that means for a column is the column's to say
+    (`_Variable._coarsen_into`); these are the operations it says it with.
+    A value missing in any part is missing in the whole, which is what keeps
+    a partial answer from passing for one.
+    """
+
+    def __init__(self, cell, volume, cell_volume, n_cells):
+        self.cell = cell
+        self.volume = volume
+        self.weight = volume / float(cell_volume)
+        self.n_cells = n_cells
+        self._alone = volume == cell_volume
+        self.source = _np.full(n_cells, -1, dtype=_np.int64)
+        self.source[cell[self._alone]] = _np.flatnonzero(self._alone)
+        self.whole = self.source >= 0
+
+    def mean(self, values, valid=None):
+        """The volume-weighted mean of a column over each coarse block.
+
+        `valid` marks the parts holding a value, for a column that cannot
+        say so itself; a block kept whole is taken as it stands.
+        """
+        values = _np.asarray(values, dtype=float)
+        if valid is not None:
+            values = _np.where(valid | self._alone, values, _np.nan)
+        return _np.bincount(self.cell, weights=self.weight * values,
+                            minlength=self.n_cells)
+
+    def kept(self, values, missing):
+        """A column where a coarse block is one block whole, `missing`
+        where it is gathered from parts."""
+        values = _np.asarray(values)
+        out = _np.full(self.n_cells, missing, dtype=values.dtype)
+        out[self.whole] = values[self.source[self.whole]]
+        return out
+
+    def realizations(self, store, target, valid=None, shift=None):
+        """Each realization's volume-weighted mean, written into `target`.
+
+        Realization `i` of a coarse block is the mean of realization `i` of
+        its parts: pairing them any other way would invent a correlation the
+        model never produced. The source is read a band of rows at a time
+        and gathered into as many coarse blocks as a working array of the
+        store's spill size holds, so neither store is held whole; more coarse
+        blocks than that cost another pass over the source each.
+
+        With `shift` -- one number per coarse block, near its mean -- the
+        same pass returns how far the parts sit from their block, the
+        variance between them averaged over the realizations. The moments
+        are taken about the shift so that their difference keeps its digits,
+        and a block kept whole comes out at exactly zero.
+        """
+        n_sim = int(store.shape[1])
+        # the sum, and with a shift the two moments about it
+        moments = 1 if shift is None else 3
+        rows = max(1, _storage.DEFAULT_THRESHOLD
+                   // (8 * moments * max(n_sim, 1)))
+        keep = None if valid is None else valid | self._alone
+        spread = None if shift is None else _np.full(self.n_cells, _np.nan)
+        bands = store.row_bands()
+        for lo in range(0, self.n_cells, rows):
+            hi = min(lo + rows, self.n_cells)
+            sums = _np.zeros((moments, hi - lo, n_sim))
+            for band in bands:
+                cell = self.cell[band]
+                inside = (cell >= lo) & (cell < hi)
+                if not _np.any(inside):
+                    continue
+                values = _np.asarray(store[band], dtype=float)[inside]
+                if keep is not None:
+                    values[~keep[band][inside]] = _np.nan
+                weight = self.weight[band][inside][:, None]
+                at = cell[inside] - lo
+                _add_rows(sums[0], at, weight * values)
+                if shift is not None:
+                    offset = values - shift[cell[inside]][:, None]
+                    _add_rows(sums[1], at, weight * offset)
+                    _add_rows(sums[2], at, weight * offset * offset)
+            target[lo:hi, :] = sums[0]
+            if spread is not None:
+                spread[lo:hi] = _np.mean(
+                    _np.maximum(sums[2] - sums[1] * sums[1], 0.0), axis=1)
+        return spread
+
+    def gathered(self, column):
+        """A metadata column over the coarse blocks, gathered as `aggregate`
+        gathers one but weighed by volume: a coded column keeps the label
+        holding most of the block, none on a tie; a boolean one holds where
+        it held throughout; a number averages."""
+        values = column.values.to_numpy()
+        if column.labels is not None:
+            return self._dominant(values)
+        if values.dtype == bool:
+            out = self.kept(values, False)
+            broken = _np.bincount(self.cell, weights=(~values).astype(float),
+                                  minlength=self.n_cells) > 0
+            out[~self.whole] = ~broken[~self.whole]
+            return out
+        return self.mean(values)
+
+    def _dominant(self, codes):
+        """The code holding most of each gathered block's volume, counted in
+        base cells so that a tie is exact; missing codes do not vote."""
+        out = self.kept(codes, -1)
+        voting = ~self.whole[self.cell] & (codes >= 0)
+        if not _np.any(voting):
+            return out
+        votes = _pd.DataFrame({"cell": self.cell[voting],
+                               "code": codes[voting],
+                               "volume": self.volume[voting]})
+        votes = votes.groupby(["cell", "code"])["volume"].sum().reset_index()
+        most = votes.groupby("cell")["volume"].transform("max")
+        winners = votes[votes["volume"] == most].groupby("cell")["code"].agg(
+            ["first", "size"])
+        settled = winners[winners["size"] == 1]
+        out[settled.index.to_numpy()] = settled["first"].to_numpy()
+        return out
 
 
 class BlockSet3D(PointData):
@@ -820,6 +1111,21 @@ class BlockSet3D(PointData):
         ratio = _np.array(self.discretization, dtype=_np.int64)
         return self._coarse_size[None, :] \
             // ratio[None, :] ** self._level[:, None]
+
+    def _ancestor(self, level):
+        """Each block's ancestor at `level`, as one integer per block.
+
+        The flat lattice index of the ancestor's lower corner, which names it
+        among the blocks of that level. A block at `level` is its own
+        ancestor, and one coarser than `level` has none there and reads -1.
+        """
+        ratio = _np.array(self.discretization, dtype=_np.int64)
+        size = self._coarse_size // ratio ** int(level)
+        corner = (self._origin // size[None, :]) * size[None, :]
+        shape = self.lattice_shape
+        key = (corner[:, 0] * shape[1] + corner[:, 1]) * shape[2] \
+            + corner[:, 2]
+        return _np.where(self._level >= int(level), key, -1)
 
     @property
     def block_size(self):
@@ -1075,6 +1381,82 @@ class BlockSet3D(PointData):
                 fresh.labels = column.labels
                 new.metadata[name] = fresh
         return new
+
+    def as_blocks3d(self) -> "Blocks3D | RotatedBlocks3D":
+        """This model at its coarsest level, as a regular block model.
+
+        One block per coarsest-level block, in `Blocks3D`'s own order and
+        with this model's discretization, so a block that was never split is
+        the same block on the same support and keeps every column exactly.
+        Where the model was refined, each coarse block is gathered from the
+        blocks inside it, weighted by volume:
+
+        - a column that is a mean over a block's sub-blocks -- `prediction`,
+          the latent moments, `noise_variance`, the shares below each
+          cut-off, a category's probability and entropy -- takes the mean of
+          its parts', which is that same mean over the whole block;
+        - every realization is averaged index by index, the parts'
+          realization `i` making the block's realization `i`;
+        - what is read off the realizations is read again: the quantiles,
+          the probabilities, the `dispersion` -- the parts' mean dispersion
+          plus the spread between them -- and the predicted category, the
+          winner of the averaged probabilities;
+        - anything else is missing, none of it following from the parts:
+          `divided`, the measurements, a binary variable's entropy.
+
+        A coarse block with any part that holds nothing -- a block `where=`
+        kept from being predicted, say -- holds nothing either, so a partial
+        answer never passes for a whole one. Metadata is gathered as
+        `aggregate` gathers it, by volume: a number averages, a coded column
+        keeps the label holding most of the block (none on a tie), and a
+        boolean one holds where it held throughout.
+
+        Returns
+        -------
+        Blocks3D or RotatedBlocks3D
+            A `RotatedBlocks3D` for a `RotatedBlockSet3D`, with the same
+            angles and turning about the same point.
+
+        See Also
+        --------
+        group : the coarsening that leaves a parent missing instead, since
+            the change of support is otherwise the model's to re-predict.
+
+        Notes
+        -----
+        A derived variable is averaged like any other, which suits a
+        quantity that adds up over a volume. One that does not needs `derive`
+        again on the result, where its function sees the coarse blocks.
+        """
+        coarse = self._coarse_size
+        n = self.lattice_shape // coarse
+        index = self._origin // coarse[None, :]
+        # the regular model counts its blocks x fastest (`Grid3D._generate`)
+        cell = index[:, 0] + n[0] * (index[:, 1] + n[1] * index[:, 2])
+        grouping = _Grouping(cell, _np.prod(self._size, axis=1),
+                             int(_np.prod(coarse)), int(_np.prod(n)))
+
+        blocks = self._coarsest(n, coarse * self.base_step)
+        for name, variable in self.variables.items():
+            fresh = variable.__class__.from_variable(blocks, variable)
+            variable._copy_attrs_into(fresh)
+            variable._coarsen_into(fresh, grouping)
+            blocks.variables[name] = fresh
+        for name, column in self.metadata.items():
+            values = grouping.gathered(column)
+            fresh = _Attribute(blocks, values, dtype=values.dtype)
+            fresh.labels = column.labels
+            blocks.metadata[name] = fresh
+        return blocks
+
+    def _coarsest(self, n, step) -> "Blocks3D | RotatedBlocks3D":
+        """The empty regular model `as_blocks3d` fills: `n` blocks of `step`
+        over this model's box."""
+        return Blocks3D(start=self.box_corner + step / 2, n=n, step=step,
+                        # added to the grid's arguments by `_blockdata`
+                        discretization=list(  # type: ignore[call-arg]
+                            self.discretization),
+                        labels=list(self.coordinate_labels))
 
     # ------------------------------------------------------------------ #
     # geoh5 interchange
@@ -1676,12 +2058,25 @@ class BlockSet3D(PointData):
     def _shared_corners(origin, size, shape):
         """Each block's eight corners, as indices into the distinct lattice
         points -- the welding of `_hex_mesh`, done in integers."""
-        corners = (origin[:, None, :]
-                   + _gmt.HEX_CORNERS[None, :, :] * size[:, None, :])
-        span = shape + 1
-        key = ((corners[..., 0] * span[1] + corners[..., 1]) * span[2]
-               + corners[..., 2])
-        return _np.unique(key.ravel(), return_inverse=True)[1].reshape(-1, 8)
+        return _lattice_corners(origin, size, _np.asarray(shape) + 1)[1]
+
+    def _base_corners(self, unit):
+        """`_shared_corners` of the model's own blocks on a lattice `unit`
+        times finer, kept. It depends on the lattice alone, and every contour
+        starts from it: a mesh set's at every cut-off and realization, whose
+        forked workers read the parent's copy. The lattice is set when a set
+        is made and never changed in place -- `split` and `group` make new
+        sets -- so the arrays it was read from say whether it still holds."""
+        unit = _np.asarray(unit, dtype=_np.int64)
+        fingerprint = (id(self._origin), id(self._level),
+                       tuple(int(u) for u in unit))
+        cached = getattr(self, "_corner_cache", None)
+        if cached is None or cached[0] != fingerprint:
+            cached = (fingerprint, self._shared_corners(
+                self._origin * unit, self._size * unit,
+                self.lattice_shape * unit))
+            self._corner_cache = cached
+        return cached[1]
 
     @staticmethod
     def _at_corners(corners, values):
@@ -1690,6 +2085,11 @@ class BlockSet3D(PointData):
         where the surface runs. A block holding no value contributes nothing,
         rather than carrying its absence into every corner it touches.
         """
+        return BlockSet3D._corner_means(corners, values)[corners]
+
+    @staticmethod
+    def _corner_means(corners, values):
+        """`_at_corners` once per corner point rather than per block."""
         known = _np.isfinite(values)
         length = int(corners.max()) + 1
         # bincount rather than `np.add.at`: the same sums, several times
@@ -1698,12 +2098,11 @@ class BlockSet3D(PointData):
                              weights=_np.repeat(values[known], 8),
                              minlength=length)
         count = _np.bincount(corners[known].ravel(), minlength=length)
-        mean = _np.divide(total, count, out=_np.full(length, _np.nan),
+        return _np.divide(total, count, out=_np.full(length, _np.nan),
                           where=count > 0)
-        return mean[corners]
 
     def _cut_to_contour(self, values, value, margin=1, supersample=1,
-                        cap=None):
+                        fields=None):
         """The blocks a surface runs through, cut small -- in the mesh handed
         to VTK, not in the model.
 
@@ -1731,6 +2130,11 @@ class BlockSet3D(PointData):
         correction averages to zero over the children, so a block's estimate
         is exactly the mean of the children standing in for it.
 
+        With `fields`, `values` holds several columns, each cut the same
+        way, and the surfaces are those of the fields `fields` reads off the
+        columns' corner means (see `_contour_fields`); a block is cut where
+        any of them runs through it.
+
         Returns
         -------
         origin, size, step, values
@@ -1751,24 +2155,26 @@ class BlockSet3D(PointData):
         shape = self.lattice_shape * unit
 
         values = _np.asarray(values, dtype=float)
+        columns = values.shape[1] if values.ndim == 2 else 1
         cut = False
 
-        for _ in range(self.max_levels + int(supersample)):
-            corners = self._shared_corners(origin, size, shape)
-            at_corner = self._at_corners(corners, values)
-            # a corner with no value must not decide anything either way
-            low = _np.where(_np.isnan(at_corner), _np.inf, at_corner).min(1)
-            high = _np.where(_np.isnan(at_corner), -_np.inf, at_corner).max(1)
-            marked = (low < value) & (high > value)
-            if cap is not None:
-                # a closing cap runs through the boundary cells the kept
-                # region touches, and it tears between mismatched sizes like
-                # any other piece of the surface -- so those cells are cut
-                # with the rest (the cap side: +1 keeps above, -1 below)
-                at_face = _np.any(
-                    (origin == 0) | (origin + size == shape), axis=1)
-                kept = values > value if cap > 0 else values < value
-                marked |= at_face & kept
+        for level in range(self.max_levels + int(supersample)):
+            corners = self._base_corners(unit) if level == 0 \
+                else self._shared_corners(origin, size, shape)
+            means = _np.stack(
+                [self._corner_means(corners, values) if values.ndim == 1
+                 else self._corner_means(corners, values[:, k])
+                 for k in range(columns)], axis=1)
+            decided = means if fields is None else _np.asarray(fields(means))
+            marked = _np.zeros(len(origin), dtype=bool)
+            for field in decided.T:
+                at_corner = field[corners]
+                # a corner with no value must not decide anything either
+                # way -- `fmin` and `fmax` pass over a NaN, and an all-NaN
+                # row compares false, without an n x 8 copy each
+                marked |= (_np.fmin.reduce(at_corner, axis=1) < value) \
+                    & (_np.fmax.reduce(at_corner, axis=1) > value)
+                del at_corner
             near = _gmt.grow(corners, marked, margin)
             near &= _np.all(size >= ratio, axis=1)
             if not _np.any(near):
@@ -1779,17 +2185,27 @@ class BlockSet3D(PointData):
             children = (origin[near][:, None, :]
                         + offset[None, :, :] * child_size[:, None, :]
                         ).reshape(-1, 3)
-            shaped = at_corner[near] @ weights.T
-            shaped += (values[near] - at_corner[near].mean(axis=1))[:, None]
-            # a block beside one that was never predicted has no shape to read
-            # off its corners, so it hands its own value down unchanged
-            shaped = _np.where(_np.isfinite(shaped), shaped,
-                               values[near][:, None])
+            shaped = []
+            for k in range(columns):
+                column = values[near] if values.ndim == 1 else values[near, k]
+                at_corner = means[:, k][corners[near]]
+                parts = at_corner @ weights.T
+                parts += (column - at_corner.mean(axis=1))[:, None]
+                # a block beside one that was never predicted has no shape
+                # to read off its corners, so it hands its own value down
+                # unchanged
+                shaped.append(_np.where(_np.isfinite(parts), parts,
+                                        column[:, None]).ravel())
+            # this level's table goes before the next one is built, rather
+            # than the two of them standing side by side at the peak
+            del corners, means, decided, marked, at_corner, parts
 
             origin = _np.concatenate([origin[~near], children])
             size = _np.concatenate(
                 [size[~near], _np.repeat(child_size, len(offset), axis=0)])
-            values = _np.concatenate([values[~near], shaped.ravel()])
+            values = _np.concatenate(
+                [values[~near], shaped[0] if values.ndim == 1
+                 else _np.stack(shaped, axis=1)])
 
         if not cut:
             return None, None, None, None
@@ -1862,9 +2278,9 @@ class BlockSet3D(PointData):
             in the side -- `"above"` (or `True`) keeps the region where the
             values exceed `value`, a grade shell, and `"below"` the region
             under it, as on a grid. Done with a shell of ghost cells
-            mirroring the boundary blocks, each its partner's own size, so
-            the closing cap cannot tear whatever the refinement did to the
-            boundary.
+            carrying the boundary blocks' values on past the box, each its
+            partner's own size, and the box then cutting the body off, so
+            its faces, edges and corners on the box are the box's own.
 
         Returns
         -------
@@ -1879,39 +2295,57 @@ class BlockSet3D(PointData):
         path, column = _contour_column(self, path)
         if not column._has_content():
             raise ValueError("nothing under %r to contour" % str(path))
-        label = str(path)
-
-        value = float(value)
         values = _np.asarray(column.values, dtype=float).ravel()
-        span = (float(_np.nanmin(values)), float(_np.nanmax(values)))
-        cap = None
-        if close:
-            # `_closing_value` is asked only which side is kept, and raises
-            # on anything that is not a side; what the ghosts hold comes
-            # from the blocks they mirror, in `_ghost_values`
-            cap = 1 if _closing_value(close, values) < value else -1
+        surface = self._contour_values(values, value, str(path),
+                                       supersample=supersample, close=close)
+        if surface is None:
+            raise ValueError(
+                "no surface at %g; %r runs from %g to %g"
+                % (float(value), str(path), float(_np.nanmin(values)),
+                   float(_np.nanmax(values))))
+        if simplify is not None:
+            surface = surface.simplify(simplify)
+        surface.provenance = {
+            "source": str(path), "value": float(value),
+            "close": None if not close
+            else ("above" if close is True else str(close)),
+            "supersample": int(supersample),
+            "simplify": None if simplify is None else float(simplify)}
+        return surface
 
+    def _contour_values(self, values, value, label, supersample=0,
+                        close=False, fallback=True):
+        """`get_contour` on an array of block values rather than a column.
+
+        What a mesh set contours every realization through, the column
+        already read. None where the field never reaches `value`: an empty
+        answer is a fact about a realization rather than an error, and the
+        caller decides which it is. `fallback=False` hands back a painted
+        surface that is no body as it is, rather than contouring the welded
+        mesh again: a mesh set moves the level instead, which the fallback
+        never beat, and on a big model the welded mesh is the costliest
+        thing a contour can do (14 million cells, 17 GB and two minutes an
+        attempt, measured on the Tom v6 model).
+        """
+        value = float(value)
         origin, size, step, cell_values = self._cut_to_contour(
-            values, value, supersample=supersample, cap=cap)
+            values, value, supersample=supersample)
         if origin is None:
             origin, size = self._origin, self._size
             step, cell_values = self.base_step, values
+        cell_values = _np.asarray(cell_values)
 
-        if cap is not None:
-            # the box measured in whichever lattice the mesh is drawn on
-            shape = _np.asarray(self.lattice_shape) * _np.round(
-                _np.asarray(self.base_step) / _np.asarray(step)
-            ).astype(int)
-            ghost_origin, ghost_size, ghost_parent = _ghost_shell(
-                origin, size, shape)
-            cell_values = _np.asarray(cell_values)
-            origin = _np.concatenate(
-                [_np.asarray(origin), _np.asarray(ghost_origin)])
-            size = _np.concatenate(
-                [_np.asarray(size), _np.asarray(ghost_size)])
-            cell_values = _np.concatenate(
-                [cell_values,
-                 _ghost_values(cell_values[ghost_parent], value, cap > 0)])
+        mirrored = None
+        if close:
+            # `_closing_value` raises on anything that is not a side, and
+            # says which one is kept
+            background = _closing_value(close, values)
+            keep_above = background < value
+            origin, size, cell_values, inside = self._with_ghosts(
+                origin, size, step, cell_values)
+            mirrored = cell_values[inside:].copy()
+        else:
+            background = _np.nan
 
         # One field, one route: the painted grid carries the welded mesh's
         # own point field -- cell-equal corner means, trilinear interiors
@@ -1923,32 +2357,49 @@ class BlockSet3D(PointData):
         # arbiter regardless: a closed-but-inconsistent Mesh3D is never
         # what a level set means, and sends the result back through the
         # welded mesh, which remains the last word on what the field says.
-        background = _closing_value(close, values) if close else _np.nan
         verts, faces = _painted_contour(origin, size, step, cell_values,
                                         self.box_corner, value, label,
-                                        background)
+                                        background,
+                                        margin=1 if close else 0)
+        if close and len(faces):
+            # The ghosts carry the field on past the box as it stands at
+            # the box -- each a copy of the block it mirrors -- so the
+            # surface crosses the box's faces rather than lying in them,
+            # and closes a cell past the ghosts, against the padding. The
+            # box then cuts it, exactly, faces, edges and corners alike.
+            # The cap used to be painted onto the faces instead, by ghosts
+            # holding each block's reflection about the level: every face
+            # point of a kept block then sat exactly at the level, which
+            # rounded the box's edges by half a boundary block (5% of an
+            # 80 m box three slabs fill) and folded the cap flat onto
+            # itself wherever the kept ground thinned against it. That
+            # remains the way a body Manifold refuses is closed.
+            clipped = _clip_to_box(verts, faces, *self._lattice_box())
+            if clipped is not None:
+                verts, faces = clipped
+            else:
+                cell_values[inside:] = _ghost_values(mirrored, value,
+                                                     keep_above)
+                verts, faces = _painted_contour(origin, size, step,
+                                                cell_values,
+                                                self.box_corner, value,
+                                                label, background)
+                mirrored = None
         if len(faces) == 0:
-            raise ValueError(
-                "no surface at %g; %r runs from %g to %g"
-                % (value, label, span[0], span[1]))
-        # the lattice frame is where the contour is exact; a rotated
-        # set turns the finished vertices, as its `_hex_mesh` does
-        verts = self._to_world(verts)
-        verts, faces = _gmt.drop_degenerate_faces(verts, faces)
-        surface = mesh3d(verts, faces,
-                         _gmt.vertex_normals(verts, faces))
-        if type(surface) is Mesh3D and surface.n_data > 0:
-            surface = None
-
-        if surface is None:
+            return None
+        surface = self._surface_of(verts, faces)
+        if type(surface) is Mesh3D and surface.n_data > 0 and fallback:
+            if mirrored is not None:
+                # the welded mesh has no padding to close against, so its
+                # ghosts put the cap on the faces the old way
+                cell_values[inside:] = _ghost_values(mirrored, value,
+                                                     keep_above)
             mesh = self._hex_mesh(origin, size, step)
             mesh.cell_data[label] = cell_values
             welded = mesh.cell_data_to_point_data().contour(
                 [value], scalars=label)
             if welded.n_cells == 0:
-                raise ValueError(
-                    "no surface at %g; %r runs from %g to %g"
-                    % (value, label, span[0], span[1]))
+                return None
             welded = welded.triangulate()
             verts = _np.asarray(welded.points, dtype=float)
             faces = _np.asarray(welded.faces).reshape(-1, 4)[:, 1:]
@@ -1957,9 +2408,104 @@ class BlockSet3D(PointData):
             verts, faces = _gmt.drop_degenerate_faces(verts, faces)
             surface = mesh3d(verts, faces,
                              _gmt.vertex_normals(verts, faces))
+        return surface
 
-        if simplify is not None:
-            surface = surface.simplify(simplify)
+    def _contour_fields(self, values, fields, value, label, supersample=0):
+        """Several bodies from one cut and one paint: where each of the
+        fields `fields` reads off the columns of `values` exceeds `value`,
+        closed against the box.
+
+        What a mesh set contours a categorical realization through, each
+        category's field its draw against the best of its rivals'. Read off
+        the draws' corner means, two categories meeting along a contact
+        take their surfaces through the same points, since there the one's
+        field is the other's negated. Each category contoured on a field
+        taken block by block, the best rival picked inside every block
+        before the corners average, drew each contact twice, and a
+        realization's rock bodies overlapped and left gaps.
+
+        `fields` takes an array of one column per column of `values` and
+        returns one per field, row by row, and must never read below the
+        lowest it reads off a block, as a mean of the columns against the
+        most of the means cannot. Returns one entry per field, as
+        `_contour_values(..., close="above", fallback=False)` returns it:
+        None where the field misses the level. A field whose surface
+        Manifold will not take is contoured on its own instead, from the
+        field `fields` reads off each block.
+        """
+        value = float(value)
+        values = _np.asarray(values, dtype=float)
+        blockwise = _np.asarray(fields(values))
+        origin, size, step, cell_values = self._cut_to_contour(
+            values, value, supersample=supersample, fields=fields)
+        if origin is None:
+            origin, size = self._origin, self._size
+            step, cell_values = self.base_step, values
+        origin, size, cell_values, _ = self._with_ghosts(
+            origin, size, step, cell_values)
+        painted = _painted_contour(origin, size, step, cell_values,
+                                   self.box_corner, value, label,
+                                   _closing_value("above", blockwise),
+                                   margin=1, fields=fields)
+        found = []
+        for m, (verts, faces) in enumerate(painted):
+            if len(faces):
+                clipped = _clip_to_box(verts, faces, *self._lattice_box())
+                if clipped is None:
+                    found.append(self._contour_values(
+                        blockwise[:, m], value, label,
+                        supersample=supersample, close=True,
+                        fallback=False))
+                    continue
+                verts, faces = clipped
+            found.append(self._surface_of(verts, faces) if len(faces)
+                         else None)
+        return found
+
+    def _with_ghosts(self, origin, size, step, cell_values):
+        """The blocks and the shell of ghosts mirroring them, each ghost
+        holding a copy of its partner's value, and where the ghosts start."""
+        # the box measured in whichever lattice the mesh is drawn on
+        shape = _np.asarray(self.lattice_shape) * _np.round(
+            _np.asarray(self.base_step) / _np.asarray(step)).astype(int)
+        ghost_origin, ghost_size, ghost_parent = _ghost_shell(
+            origin, size, shape)
+        cell_values = _np.asarray(cell_values)
+        return (_np.concatenate([_np.asarray(origin),
+                                 _np.asarray(ghost_origin)]),
+                _np.concatenate([_np.asarray(size), _np.asarray(ghost_size)]),
+                _np.concatenate([cell_values, cell_values[ghost_parent]]),
+                len(origin))
+
+    def _lattice_box(self):
+        """The model's box in the lattice frame, lowest corner and highest."""
+        low = _np.asarray(self.box_corner, dtype=float)
+        return low, low + _np.asarray(self.lattice_shape) * _np.asarray(
+            self.base_step, dtype=float)
+
+    def _surface_of(self, verts, faces):
+        """A painted contour as the mesh its geometry calls for."""
+        # the lattice frame is where the contour is exact; a rotated
+        # set turns the finished vertices, as its `_hex_mesh` does
+        verts = self._to_world(verts)
+        verts, faces = _gmt.drop_degenerate_faces(verts, faces)
+        surface = mesh3d(verts, faces,
+                         _gmt.vertex_normals(verts, faces))
+        if type(surface) is Mesh3D and surface.n_data > 0:
+            # Where the kept ground thins to a layer against the box, the
+            # body can touch itself along an edge -- the layer's underside
+            # meeting a cap painted onto the faces, or two pieces of the
+            # cut meeting on a face -- which comes out as one edge four
+            # triangles share, and no winding repair settles that. Split,
+            # the two touch rather than share it -- the copies moved apart
+            # as the booleans move theirs.
+            split, parted = _gmt.split_touching_edges(verts, faces)
+            if split is not verts:
+                split = _separated(split, parted)
+                touching = mesh3d(split, parted,
+                                  _gmt.vertex_normals(split, parted))
+                if type(touching) is not Mesh3D:
+                    surface = touching
         return surface
 
 
@@ -2032,6 +2578,17 @@ class RotatedBlockSet3D(BlockSet3D):
         mesh = super()._hex_mesh(origin, size, step)
         mesh.points = self._to_world(_np.asarray(mesh.points, dtype=float))
         return mesh
+
+    def _coarsest(self, n, step):
+        # the same angles about the same point, so every block that was never
+        # split lands where it was
+        return RotatedBlocks3D(start=self._pivot, n=n, step=step,
+                               azimuth=self.azimuth, dip=self.dip,
+                               rake=self.rake,
+                               # added to the grid's arguments by `_blockdata`
+                               discretization=list(  # type: ignore[call-arg]
+                                   self.discretization),
+                               labels=list(self.coordinate_labels))
 
     @classmethod
     def from_data(cls, data, step, margin=0.1, decimals=0,

@@ -4,8 +4,9 @@ The classic 2D benchmark, end to end: look at the data, build and train a
 model, validate it where it never looked, calibrate what the validation
 finds, and map the result. Everything here was introduced in Parts I and
 II, and this chapter is the sequence, with the reasoning said at each
-step. Walker Lake's `V` is a positive, strongly skewed variable on 470
-irregularly sampled locations, with a 78 000-node prediction grid: small
+step. Walker Lake's `V` is a non-negative variable with a long, thin right
+tail, on 470 irregularly sampled locations, with a 78 000-node prediction
+grid: small
 enough to run in minutes, awkward enough to be honest.
 
 ## 15.1 Look first
@@ -34,8 +35,10 @@ explore.scene(clip=[0, 0.99]).savefig("figures/15-samples.png", dpi=150,
 
 ![The samples](figures/15-samples.png)
 
-Two decisions fall straight out of looking. The long right tail wants a
-positivity warping with a trainable spline behind it (chapter 4), and the
+Two decisions fall straight out of looking. The long right tail and the
+pile of zeros want a power link that keeps the grade from going negative
+and trains its exponent
+(chapter 4), and the
 banded, uneven sampling means a random validation split would lie
 (chapter 13).
 
@@ -58,10 +61,8 @@ gp = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Scale(1),
-    geoml.warping.Softplus(1),
-    geoml.warping.ZScore(1),
-    geoml.warping.Spline(1, knots_per_arm=4))
+    geoml.warping.BoxCox(1),
+    geoml.warping.ZScore(1))
 
 model = geoml.models.VGPNetwork(
     walker, "V",

@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -175,10 +175,11 @@ class Selection(object):
         return var
 
     @staticmethod
-    def _check_kind(kind):
-        if kind not in ("scatter", "hist2d"):
+    def _check_kind(kind, kinds=("scatter", "hist2d")):
+        if kind not in kinds:
             raise ValueError(
-                "kind must be 'scatter' or 'hist2d'; got %r" % kind)
+                "kind must be %s; got %r"
+                % (" or ".join(repr(k) for k in kinds), kind))
 
     @staticmethod
     def _is_categorical(var):

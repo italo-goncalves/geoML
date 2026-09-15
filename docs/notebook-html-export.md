@@ -13,7 +13,12 @@ captures a dead placeholder. This is what makes the export look impossible.
 The `'html'` backend is the one built for this: it serializes each scene's
 geometry into a self-contained vtk.js viewer *inside the cell output*, so
 the scene needs no kernel ever again. Available in pyvista ≥ 0.44
-(verified here on 0.47.3).
+(verified here on 0.47.3, and on 0.49.0 with trame-pyvista 0.1.7).
+**Since pyvista 0.49 the interactive backends are a separate package**:
+`pip install trame-pyvista`, or `pyvista[jupyter]`, whose extra now
+includes it. Without it `set_jupyter_backend('html')` raises an
+`ImportError`, and a notebook that sets no backend falls back to static
+images with a warning.
 
 ## Recipe
 

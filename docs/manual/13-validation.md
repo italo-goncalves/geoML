@@ -41,10 +41,8 @@ gp = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Scale(1),
-    geoml.warping.Softplus(1),
-    geoml.warping.ZScore(1),
-    geoml.warping.Spline(1, knots_per_arm=4))
+    geoml.warping.BoxCox(1),
+    geoml.warping.ZScore(1))
 
 model = geoml.models.VGPNetwork(
     walker, "V",
@@ -132,6 +130,20 @@ hyperparameters and warping were fitted on all the data, is the same one
 kriging makes when it keeps the variogram. The measurements are in
 `docs/cross-validation.md`, and `refit="all"` trades the other way when
 you want it.
+
+Freezing parameters does not make an iteration cheaper: a fold refit still
+costs the whole reduced data set per step, whatever is on the tape. So a
+model too large to train full-batch is too large to cross-validate that
+way, and `method="svi"` refits each fold in minibatches instead, of the
+size the model's own options already carry. The passes are counted by
+`epochs` rather than `iterations`, because an epoch is one visit to the
+data and therefore many gradient steps — the same distinction as
+`train_full` against `train_svi` in chapter 11.
+
+```
+oof, scores = geoml.models.cross_validate(
+    model, method="svi", epochs=30, n_sim=20)
+```
 
 The score table reads like a drill campaign report, with one row per
 variable component and fold, plus a pooled `"all"` row.
@@ -385,7 +397,8 @@ Three limits, stated rather than discovered.
   than the interval.
 
 > **In the code.** `PointData.spatial_k_fold` builds the folds,
-> `models.cross_validate` drives the loop and returns the out-of-fold
+> `models.cross_validate(..., refit=, method=, iterations=, epochs=)`
+> drives the loop and returns the out-of-fold
 > container and the score table, and `models.conformalize` reads the PIT
 > metadata. The scores live in `geoml.metrics` and are also reported by
 > every continuous variable's `compute_metrics()`. Design record with the

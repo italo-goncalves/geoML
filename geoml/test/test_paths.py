@@ -217,11 +217,12 @@ def test_simulations_are_a_leaf_of_their_own_shape():
 # --------------------------------------------------------------------------- #
 def test_a_node_reports_the_facts_a_rebuild_has_to_carry():
     point = _points()
-    point.variables["au"].set_cutoffs([1.0, 2.0])
+    point.variables["au"].set_cutoffs([1.0, 2.0]).set_unit("g/t")
 
-    assert point.variables["au"].node_attrs() == {"cutoffs": [1.0, 2.0]}
+    assert point.variables["au"].node_attrs() == \
+        {"cutoffs": [1.0, 2.0], "unit": "g/t"}
     assert point.variables["assay"].components["a"].node_attrs() == \
-        {"cutoffs": None}
+        {"cutoffs": None, "unit": None}
 
 
 @pytest.mark.parametrize("variable", ["au", "vec", "assay"])

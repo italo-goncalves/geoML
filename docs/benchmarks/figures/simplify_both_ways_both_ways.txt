@@ -1,0 +1,14 @@
+label both_ways, geoML from /mnt/c/Users/Ítalo/OneDrive/Python/Pacotes/geoML-claude
+
+BIF: 324970 triangles, volume 817318; its quadric pre-pass to 276746 triangles comes back NotClosedError
+  budget  triangles     time kind          volume     out    back whole?
+  0.5         14996     2.7s Solid3D       816336   0.463   0.436 
+  1           13580     3.7s Solid3D       816012   0.507   0.534 
+  2           12522     3.8s Solid3D       815698   0.598   0.587 
+
+Hematite: 620126 triangles, volume 2.46402e+06; its quadric pre-pass to 575819 triangles comes back NotClosedError
+  budget  triangles     time kind          volume     out    back whole?
+  0.5         38856     7.2s Solid3D  2.46385e+06   0.492   0.468 
+  1           30806     6.9s Solid3D  2.46393e+06   0.574   0.604 
+  2           28162     7.0s Solid3D  2.46393e+06   0.645   0.670 
+done

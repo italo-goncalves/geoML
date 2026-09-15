@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -308,11 +308,20 @@ class _GriddedData(_PointBased):
         for size, axis in zip(self._sizes, self._axes):
             cols.append(axis[remaining % size])
             remaining = remaining // size
-        rows = _np.stack(cols, axis=-1)
-        if self._transform is not None:
-            origin, matrix = self._transform
-            rows = _np.matmul(rows - origin, matrix) + origin
-        return rows
+        return self._to_world(_np.stack(cols, axis=-1))
+
+    def _to_world(self, rows):
+        """Rows counted in the grid's own frame, where they are placed.
+
+        The identity unless the grid is turned (`transform`); the block
+        classes send their sub-blocks and box corners through it too, so
+        a turned model has one map out of its frame rather than one per
+        use.
+        """
+        if self._transform is None:
+            return rows
+        origin, matrix = self._transform
+        return _np.matmul(rows - origin, matrix) + origin
 
     def _resolve_rows(self, key):
         if isinstance(key, slice):
@@ -883,17 +892,20 @@ class RotatedGrid3D(Grid3D):
             each one is a full-length array in the exported object), `True` for
             all of them, an `int` for the first n, or a sequence of indices.
         """
-        pv_grid = super().as_pyvista(simulations=simulations, include=include)
+        return self._turned(
+            super().as_pyvista(simulations=simulations, include=include))
 
-        mat = _gmt.rotation_matrix(self.azimuth, self.dip, self.rake)
+    def _turned(self, mesh):
+        """A pyvista object built in the grid's own frame, turned into place
+        about the origin, as the coordinates are."""
         transf = _np.eye(4)
-        transf[:3, :3] = mat.T
+        transf[:3, :3] = self.rotation_matrix().T
 
-        pv_grid = pv_grid.translate(- self.origin)
-        pv_grid = pv_grid.transform(transf)
-        pv_grid = pv_grid.translate(self.origin)
-
-        return pv_grid
+        mesh = mesh.translate(- self.origin)
+        # pyvista 0.49 refuses a transform that does not say whether it is in
+        # place; not, so the object built above is left as it was
+        mesh = mesh.transform(transf, inplace=False)
+        return mesh.translate(self.origin)
 
     @classmethod
     def from_bounding_box(cls, box, step: "float | _types.ArrayLike",

@@ -1,0 +1,19 @@
+label blas1_wide, geoML from /mnt/c/Users/Ítalo/OneDrive/Python/Pacotes/geoML-claude, BLAS threads in the workers: 1
+908237 blocks, 32 CPUs, FeO_total at [0.6, 0.7, 0.8, 0.85], realizations 0-23
+the prediction's shells alone: 35 s
+
+== 8 workers: 288 s past the prediction, 12.0 s a realization
+  reading the realizations 0.9 s; the pool 286 s, of it the parent writing 12.7 s
+  a task in its worker: 92.7 s (84.3-101.9), 92.8 s of CPU, 1.00 cores, up to 32 threads, 114 MB sent back
+  its stages, mean s: against 9.7, classify 4.9, clip 19.7, cut 26.3, measure 1.3, paint 24.2
+
+== 12 workers: 258 s past the prediction, 10.8 s a realization
+  reading the realizations 0.8 s; the pool 258 s, of it the parent writing 15.0 s
+  a task in its worker: 124.6 s (113.8-141.6), 124.8 s of CPU, 1.00 cores, up to 32 threads, 114 MB sent back
+  its stages, mean s: against 11.5, classify 6.0, clip 25.5, cut 36.7, measure 1.5, paint 33.7
+
+== 24 workers: 269 s past the prediction, 11.2 s a realization
+  reading the realizations 0.8 s; the pool 268 s, of it the parent writing 15.0 s
+  a task in its worker: 256.1 s (240.9-266.0), 256.0 s of CPU, 1.00 cores, up to 32 threads, 114 MB sent back
+  its stages, mean s: against 15.9, classify 10.4, clip 48.6, cut 83.9, measure 2.4, paint 73.2
+done

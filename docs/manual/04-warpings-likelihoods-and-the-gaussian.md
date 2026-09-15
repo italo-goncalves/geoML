@@ -27,8 +27,18 @@ Warpings chain, and the chain is read data-side first:
   well-behaved numbers instead of on assay units.
 - `ZScore` centres and scales. `ZScore(size, robust=True)` initializes on
   winsorized data, so that one gross outlier cannot set the scale.
-- `Spline` is a monotone spline for asymmetry the fixed links do not
-  catch, and it is the trainable heart of most chains.
+- `BoxCox` and `YeoJohnson` are power links with a trainable exponent,
+  the logarithm at one end and the identity at the other: Box-Cox for a
+  positive grade, whose inverse returns zero for whatever lies past its
+  floor and so can never go negative, Yeo-Johnson for a column that
+  crosses zero. `Arcsinh` is the zero-tolerant logarithm, and
+  `SinhArcsinh` sets skewness and tail weight on a standardized column.
+  All four start where the data are most Gaussian and train from there.
+- `Spline` is a monotone spline for whatever asymmetry a parametric link
+  leaves. It was the trainable heart of every chain in earlier releases; the
+  links were measured to replace it on Walker Lake and Jura alike, with
+  exact inverses and tamer tails, so it is now the optional refinement
+  behind one.
 - `PCA`, `RobustPCA` and `Rotation` are the multivariate links, which
   decorrelate the columns so the latent fields can be modelled
   independently.
@@ -38,18 +48,20 @@ A chain that returns only positive values is the everyday case, and it is
 worth spelling out once:
 
 ```
-data  ->  Scale  ->  Softplus  ->  ZScore  ->  Spline  ->  latent field
+data  ->  BoxCox  ->  ZScore  ->  latent field
 ```
 
-Read backwards, the field passes through the spline, is un-standardized,
-goes through a softplus (which cannot be negative), and is scaled back to
-assay units by a positive factor. No realization can come back negative,
-which is exactly the defect chapter 2 left open. Chapters 11 and 15 use
-this chain as their default.
+Read backwards, the field is un-standardized and goes through the
+inverse power, which returns a zero grade for anything the latent field
+puts below its floor and cannot be negative anywhere. No realization can
+come back negative, which is exactly the defect chapter 2 left open, and
+the exponent that decides how hard the tail is pulled in is trained with
+the model rather than chosen. Chapters 11 and 15 use this chain as their
+default.
 
 One distinction the package tracks carefully: a warping is
 **elementwise** if each output component depends on its own input alone
-(`Softplus`, `Spline`), and *mixing* if not (`PCA`, `Rotation`,
+(`Softplus`, `BoxCox`, `Spline`), and *mixing* if not (`PCA`, `Rotation`,
 `CenteredLogRatio`). The flag decides how the noise integrals below are
 computed, a cheap per-component quadrature for elementwise chains and a
 genuinely multivariate rule for mixing ones. Every warping's declaration
@@ -127,11 +139,11 @@ import numpy as np
 geoml.set_seed(1234)
 walker, walker_grid = geoml.datasets.walker()
 
-# positivity first, then centring, then a trainable spline for the skew
+# a power link for positivity and skew at once, its exponent trained;
+# then centring
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Softplus(1),
-    geoml.warping.ZScore(1),
-    geoml.warping.Spline(1, knots_per_arm=4))
+    geoml.warping.BoxCox(1),
+    geoml.warping.ZScore(1))
 
 experts = geoml.data.inducing.grid_experts(walker_grid, 10.0, block=8)
 

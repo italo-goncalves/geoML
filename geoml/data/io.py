@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -61,7 +61,8 @@ def _write_container(group, container):
             "step": [float(s) for s in _np.atleast_1d(container.step_size)],
             "labels": [str(lb) for lb in container.coordinate_labels],
         }
-        if isinstance(container, (Blocks1D, Blocks2D, Blocks3D)):
+        if isinstance(container, (Blocks1D, Blocks2D, Blocks3D,
+                                  RotatedBlocks3D)):
             meta["discretization"] = [int(d) for d in container.discretization]
         if isinstance(container, RotatedGrid3D):
             meta["azimuth"] = float(container.azimuth)
@@ -124,7 +125,10 @@ def _write_container(group, container):
         write("_normals", container.normals)
         # the class is recorded rather than inferred on the way back: a mesh
         # that closes could be rebuilt as either a Mesh3D or a Solid3D
-        return {"class": type(container).__name__}
+        meta: dict = {"class": type(container).__name__}
+        if getattr(container, "provenance", None):
+            meta["provenance"] = dict(container.provenance)
+        return meta
     raise NotImplementedError(
         f"to_zarr does not yet support container type "
         f"'{type(container).__name__}'")
@@ -215,12 +219,15 @@ def _rebuild_container(meta, group):
     meshes = {"Mesh3D": Mesh3D, "Surface3D": Surface3D, "Solid3D": Solid3D,
               "DTM3D": DTM3D}
     if cls_name in meshes:
-        return meshes[cls_name](read("_coordinates"), read("_triangles"),
+        mesh = meshes[cls_name](read("_coordinates"), read("_triangles"),
                                 read("_normals"))
+        mesh.provenance = dict(meta.get("provenance", {}))
+        return mesh
 
     classes = {"Grid1D": Grid1D, "Grid2D": Grid2D, "Grid3D": Grid3D,
                "GridND": GridND, "Blocks1D": Blocks1D, "Blocks2D": Blocks2D,
-               "Blocks3D": Blocks3D, "RotatedGrid3D": RotatedGrid3D}
+               "Blocks3D": Blocks3D, "RotatedGrid3D": RotatedGrid3D,
+               "RotatedBlocks3D": RotatedBlocks3D}
     if cls_name not in classes:
         raise NotImplementedError(
             f"open does not support container type '{cls_name}'")
@@ -232,7 +239,7 @@ def _rebuild_container(meta, group):
     kwargs = {"start": start, "n": n, "step": step, "labels": meta["labels"]}
     if "discretization" in meta:
         kwargs["discretization"] = meta["discretization"]
-    if cls_name == "RotatedGrid3D":
+    if cls_name in ("RotatedGrid3D", "RotatedBlocks3D"):
         kwargs.update(azimuth=meta["azimuth"], dip=meta["dip"], rake=meta["rake"])
     return classes[cls_name](**kwargs)
 

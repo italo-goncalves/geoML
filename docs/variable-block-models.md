@@ -227,6 +227,36 @@ maintain by construction.
 Storage is `origin` (3 x int32) plus `level` (uint8) = 13 bytes a block; size
 is derived from the level.
 
+### 4.5 Back to a regular grid, averaged
+
+`group` leaves a parent missing (§12, step 7): coarsening is a change of
+support, and inside the model a parent is re-predicted. Handing the model
+to software that reads only a regular grid is the one place the change of
+support is wanted instead, so `BlockSet3D.as_blocks3d()` (0.6.10, decided
+2026-09-11) gathers every block into its coarsest-level block and averages.
+Each column says how it gathers:
+
+| column | a gathered block takes |
+|---|---|
+| a mean over the sub-blocks: `prediction`, the latent moments, `noise_variance`, `proportions`; a category's `probability`, indicator moments and `entropy` | the volume-weighted mean of its parts' -- the same mean over the whole block, exactly |
+| the realizations | the volume-weighted mean, index by index (§4.2) |
+| quantiles, probabilities | read again off the averaged realizations |
+| `dispersion` | the parts' mean dispersion plus the spread between them, realization by realization: the variance of a mixture |
+| the predicted category | the winner of the averaged probabilities, as `update` names it |
+| `divided`, measurements, a binary variable's entropy | missing: none of them follows from the parts |
+
+A block never split keeps every column bit for bit. A block with any part
+that holds nothing holds nothing, which is §4.2's mass conservation again:
+averaging over the parts that are there would weigh the answer wrong. A
+category's probability reads 0 where nothing was predicted, so for the
+categorical kinds the label marks which parts were.
+
+The rules live on the variable classes (`_BLOCK_MEANS`,
+`_BLOCK_MEAN_FAMILIES`, `_coarsen_into`), so a column added later is
+missing on a gathered block until someone declares that it averages --
+incomplete rather than wrong. A rotated set comes back a `RotatedBlocks3D`
+with its angles and its pivot.
+
 ---
 
 ## 5. Contouring: solved, but not for free

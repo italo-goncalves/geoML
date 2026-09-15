@@ -57,9 +57,8 @@ geoml.set_seed(1234)
 walker, walker_grid = geoml.datasets.walker()
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Softplus(1),
-    geoml.warping.ZScore(1),
-    geoml.warping.Spline(1, knots_per_arm=4))
+    geoml.warping.BoxCox(1),
+    geoml.warping.ZScore(1))
 
 experts = geoml.data.inducing.grid_experts(walker_grid, 10.0, block=8)
 

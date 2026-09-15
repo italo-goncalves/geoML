@@ -337,7 +337,7 @@ class _Likelihood(_gpr.Parametric):
                 _tf.fill([_SOBOL_NODES],
                          _tf.constant(1 / _SOBOL_NODES, _tf.float64)))
 
-    def _measurement_nodes(self, n_nodes):
+    def _measurement_nodes(self, n_nodes, shift=None):
         """Nodes that *represent* the noise instead of integrating against it.
 
         A different job from `_noise_nodes`, and so a different rule. Gauss-
@@ -348,14 +348,44 @@ class _Likelihood(_gpr.Parametric):
         pooled and read as a sample -- quantiles and all -- with no weights
         anywhere. In more than one dimension the equal-share set is a
         scrambled Sobol sequence, which is equal-weight by construction.
+
+        `shift`, uniforms in [0, 1) of shape `(n, size, n_sim)`, moves the
+        whole set by a random rotation modulo one, a different one for each
+        location, component and realization (a Cranley-Patterson rotation).
+        The rotated lattice still has exactly one point per stratum and
+        each point is marginally uniform, so every finite moment of the
+        pooled sample is unbiased (up to the mass clipped beyond 1e-6 of
+        either tail), the tails are reached with their probability, and two
+        locations never share a noise value. On the Sobol path the rotated
+        set is equal-weight and unbiased too, but no longer one point per
+        stratum -- a rotation does not preserve a net. Without a shift the
+        strata's midpoints come back, one fixed set for every location: a
+        picture that carries less than the variance -- 0.96 of a Gaussian's
+        at 32 nodes, 0.89 of a Laplace's, 0.87 of a Student's t at five
+        degrees, in warped space -- and that put the same noise value on
+        every location of a column, which is why the model's doors always
+        pass a shift. The result is `(n_nodes, size)` without a shift and
+        `(n_nodes, n, size, n_sim)` with one.
         """
         if self.warping.elementwise:
             u = (_np.arange(n_nodes) + 0.5) / n_nodes
-            return _tf.constant(_np.tile(u[:, None], [1, self.size]),
-                                _tf.float64)
-
-        points = _rnd.sobol_engine(self.size, _SOBOL_SEED).random(n_nodes)
-        return _tf.constant(_np.clip(points, 1e-6, 1 - 1e-6), _tf.float64)
+            base = _np.tile(u[:, None], [1, self.size])
+        else:
+            base = _rnd.sobol_engine(self.size, _SOBOL_SEED).random(n_nodes)
+        base = _tf.constant(base, _tf.float64)
+        if shift is None:
+            return _tf.clip_by_value(base, 1e-6, 1 - 1e-6)
+        shift = _tf.convert_to_tensor(shift, _tf.float64)
+        if len(shift.shape) != 3 or shift.shape[1] != self.size:
+            # a narrower middle axis would broadcast one rotation over
+            # every component, quietly reinstating the shared noise value
+            raise ValueError(
+                "shift must be (n, size, n_sim) with size %d, got %s"
+                % (self.size, tuple(shift.shape)))
+        u = _tf.math.floormod(base[:, None, :, None] + shift[None], 1.0)
+        # a quantile at exactly zero or one is infinite; the mass beyond
+        # 1e-6 of either tail is not worth an infinity
+        return _tf.clip_by_value(u, 1e-6, 1 - 1e-6)
 
     def _noise_values(self):
         """The noise nodes with the quantile applied.
@@ -377,13 +407,18 @@ class _Likelihood(_gpr.Parametric):
         dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
         return dist.quantile(u[:, :, None]), weights, weights
 
-    def _measurement_values(self, n_nodes):
-        """Equal-share noise values standing for a fresh measurement."""
-        u = self._measurement_nodes(n_nodes)
+    def _measurement_values(self, n_nodes, shift=None):
+        """Equal-share noise values standing for a fresh measurement:
+        `(n_nodes, size, 1)` without a shift, `(n_nodes, n, size, n_sim)`
+        with one, either broadcasting against the latent draws."""
+        u = self._measurement_nodes(n_nodes, shift)
+        if shift is None:
+            u = u[:, :, None]
         dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
-        return dist.quantile(u[:, :, None])
+        return dist.quantile(u)
 
-    def measurement_samples(self, sims, n_nodes=_MEASUREMENT_NODES):
+    def measurement_samples(self, sims, n_nodes=_MEASUREMENT_NODES,
+                            shift=None):
         """What a *measurement* at each location would read.
 
         A prediction reports the ground, the noise having been integrated out,
@@ -395,15 +430,24 @@ class _Likelihood(_gpr.Parametric):
         an accuracy plot, a cross-validation -- and it is meant for the few
         thousand locations that carry measurements, never for a block model.
 
+        `shift` -- uniforms of shape `(n, size, n_sim)`, one per location,
+        component and realization -- rotates the noise nodes so that the
+        sample is unbiased in every moment and independent between
+        locations; see `_measurement_nodes`. The model's doors draw it from
+        the model's seed. Without it every location in a column carries the
+        same noise value: fine for reading one location, wrong for anything
+        read across several -- a variogram, a regional mean.
+
         Returns
         -------
         (rows, variables, n_sim * n_nodes)
         """
         self.warping.refresh()
-        noise = self._measurement_values(n_nodes)
+        noise = self._measurement_values(n_nodes, shift)
 
         return _tf.concat(
-            [self._back_transform(sims + noise[i][None])
+            [self._back_transform(
+                sims + (noise[i] if shift is not None else noise[i][None]))
              for i in range(n_nodes)], axis=2)
 
     def _back_transform(self, sims):
@@ -1117,16 +1161,24 @@ class Mixture(_ContinuousLikelihood):
                              for k in range(len(distributions))], axis=0)
         return eps, value, spread
 
-    def _measurement_values(self, n_nodes):
+    def _measurement_values(self, n_nodes, shift=None):
         """Equal-share nodes of the full mixture, contamination included.
 
         A fresh measurement can be a bad one, so what a sample would read is
         described by everything. The mixture quantile has no closed form;
         sixty bisections of the closed-form CDF settle it to working
-        precision, once per trace.
+        precision. With a shift the bisection runs over the whole
+        `(n_nodes, n, size, n_sim)` set of a batch rather than over
+        `n_nodes` values, so it costs what the batch is: measured 2.6 s
+        against 1.7 for a 20 000-row batch at the defaults on the GPU, and
+        18 s against 0.1 on the CPU.
         """
-        u = self._measurement_nodes(n_nodes)[:, :, None]
+        u = self._measurement_nodes(n_nodes, shift)
+        if shift is None:
+            u = u[:, :, None]
         w = self.parameters["weights"].get_value()
+        # one weight per component, broadcast over whatever `u` is shaped
+        w = _tf.reshape(w, [-1] + [1] * len(u.shape))
         distributions = self._component_distributions()
 
         quantiles = _tf.stack([d.quantile(u) for d in distributions], axis=0)
@@ -1135,7 +1187,7 @@ class Mixture(_ContinuousLikelihood):
 
         def mixture_cdf(x):
             parts = _tf.stack([d.cdf(x) for d in distributions], axis=0)
-            return _tf.reduce_sum(parts * w[:, None, None, None], axis=0)
+            return _tf.reduce_sum(parts * w, axis=0)
 
         for _ in range(60):
             mid = 0.5 * (lo + hi)

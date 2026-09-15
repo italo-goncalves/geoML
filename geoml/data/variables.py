@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -41,8 +41,83 @@ from geoml.data.base import (
 # inside the class is not read as that alias.
 _Attr = _Attribute
 
+# What to divide a column by to turn its unit into a fraction of the whole.
+# Lives here rather than in `drillhole`, where it started, because a
+# composition's parts carry their unit as a fact of the variable and the
+# drillhole is only one of the doors data comes in by; `drillhole` re-exports
+# it, so `geoml.data.drillhole.UNITS` still resolves.
+UNITS = {"fraction": 1.0, "ratio": 1.0, "1": 1.0,
+         "%": 100.0, "pct": 100.0, "percent": 100.0, "wt%": 100.0,
+         "ppm": 1e6, "g/t": 1e6, "mg/kg": 1e6,
+         "ppb": 1e9, "ug/kg": 1e9, "mg/t": 1e9}
+
+
+def _divisor(unit):
+    """What to divide a column by to turn its unit into a fraction.
+
+    A number is taken as the divisor itself; a string is looked up in
+    `UNITS`. `None` means undeclared, which is a fraction: that is what
+    makes an undeclared composition behave exactly as it did before units
+    existed.
+    """
+    if unit is None:
+        return 1.0
+    if isinstance(unit, (int, float)) and not isinstance(unit, bool):
+        if unit <= 0:
+            raise ValueError(f"a unit divisor must be positive, got {unit}")
+        return float(unit)
+
+    key = str(unit).strip().lower()
+    if key not in UNITS:
+        raise ValueError(
+            f"unknown unit {unit!r}; expected one of {sorted(UNITS)}, or a "
+            f"number to divide the column by")
+    return UNITS[key]
+
+
+def _units_per_label(units, labels):
+    """`{label: unit}` from a mapping, a sequence, or nothing.
+
+    A variable's parts are named, so a mapping is the spelling that cannot
+    be got wrong; a sequence is accepted in the labels' own order, and a
+    label the mapping does not name is undeclared rather than an error --
+    a composition's `rest` is exactly that case.
+    """
+    if units is None:
+        return {label: None for label in labels}
+    if isinstance(units, dict):
+        unknown = [key for key in units if key not in labels]
+        if unknown:
+            raise ValueError(
+                "units given for %s, which %s not among the labels %s"
+                % (", ".join(repr(u) for u in unknown),
+                   "is" if len(unknown) == 1 else "are",
+                   ", ".join(repr(str(lb)) for lb in labels)))
+        return {label: units.get(label) for label in labels}
+    units = list(units)
+    if len(units) != len(labels):
+        raise ValueError(
+            "%d unit(s) given for %d label(s); pass a mapping from label to "
+            "unit where only some are declared"
+            % (len(units), len(labels)))
+    return dict(zip(labels, units))
+
+
 def _store_bytes(store):
     return int(_np.prod(store.shape)) * _np.dtype(store.dtype).itemsize
+
+
+def _missing_value(attribute):
+    """What an empty row of `attribute` holds: the missing code of a coded
+    column, False in a flag, the empty string in text, NaN in a number."""
+    kind = _np.dtype(attribute.values.dtype).kind
+    if attribute.labels is not None or kind in "iu":
+        return -1
+    if kind == "b":
+        return False
+    if kind == "O":
+        return ""
+    return _np.nan
 
 
 def _refuse_past_threshold(nbytes, name):
@@ -254,6 +329,64 @@ class _Variable(_TreeNode):
         for name, component in (getattr(self, "components", None) or {}).items():
             component._carry_into(new.components[name], keep)
 
+    # The columns that are a mean over a block's sub-blocks, and the families
+    # of them: a coarser block's is then the volume-weighted mean of its
+    # parts', exactly. What `_coarsen_into` averages; a column left out of
+    # these is left missing wherever a block is gathered, never wrong.
+    _BLOCK_MEANS: "tuple[str, ...]" = ()
+    _BLOCK_MEAN_FAMILIES: "tuple[str, ...]" = ()
+
+    def _coarsen_into(self, new, grouping, valid=None):
+        """Fill an already-built variable on coarser blocks from this one.
+
+        `grouping` (built by `BlockSet3D.as_blocks3d`) says which coarse
+        block each of this variable's blocks falls in and what share of it
+        each holds. A coarse block that is one of them whole keeps every
+        column as it stands. One gathered from parts takes the
+        volume-weighted mean of the columns `_BLOCK_MEANS` and
+        `_BLOCK_MEAN_FAMILIES` declare, and of every realization index by
+        index; it leaves everything else missing, and a subclass recomputes
+        what those averages settle. `valid` marks the parts that were
+        predicted, for a kind whose columns cannot say so themselves.
+
+        Apart from `as_blocks3d` for the same reason `_carry_into` is apart
+        from `carry_to`: a variable holding components fills the ones its
+        own `from_variable` just built.
+        """
+        for role in self._ZARR_ATTRS:
+            old = getattr(self, role, None)
+            if old is None or getattr(new, role, None) is None:
+                continue
+            if role in self._BLOCK_MEANS:
+                values = grouping.mean(old.values.to_numpy(), valid)
+            else:
+                values = grouping.kept(old.values.to_numpy(),
+                                       _missing_value(old))
+            fresh = self._Attribute(new.coordinates, values,
+                                    dtype=values.dtype)
+            fresh.labels = None if old.labels is None else list(old.labels)
+            setattr(new, role, fresh)
+
+        self._coarsen_realizations(new, grouping, valid)
+
+        for family in self._DICT_FAMILIES:
+            target = getattr(new, family)
+            for key, old in (getattr(self, family, None) or {}).items():
+                if family in self._BLOCK_MEAN_FAMILIES:
+                    values = grouping.mean(old.values.to_numpy(), valid)
+                else:
+                    values = grouping.kept(old.values.to_numpy(), _np.nan)
+                target[key] = self._Attribute(new.coordinates, values)
+
+        for name, component in (getattr(self, "components", None) or {}).items():
+            component._coarsen_into(new.components[name], grouping, valid)
+
+    def _coarsen_realizations(self, new, grouping, valid):
+        """The realizations on the coarser blocks, averaged index by index."""
+        if self._ZARR_HAS_SIMS and self.simulations is not None:
+            new.allocate_simulations(self.simulations.shape[1])
+            grouping.realizations(self.simulations, new._sim_store(), valid)
+
     def _subset_into(self, new, item):
         """Fill a copy with the `item` rows of this node, column by column.
 
@@ -324,6 +457,18 @@ class _Variable(_TreeNode):
                 "variable %r has no simulations; call "
                 "`allocate_simulations` first" % str(self.name))
         return self.simulations
+
+    def from_model_units(self, values):
+        """Values as the model produced them, in this variable's own units.
+
+        The identity for everything the model reads directly -- a variable's
+        unit is a label there, and the numbers never left the units they
+        arrived in. A composition overrides it: its parts reach the model as
+        fractions of the whole, so what comes back has to be put into the
+        unit each part was assayed in. `values` carries the component axis
+        second, as everything the model hands back does.
+        """
+        return values
 
     def get_measurements(self):
         raise NotImplementedError
@@ -562,13 +707,26 @@ class ContinuousVariable(_Variable):
         Under a `Mixture` likelihood, how likely each measurement is to have
         come from each of its noise components, indexed by the component's
         position. Empty otherwise; written by `set_responsibilities`.
+    unit : str, float or None
+        What the values are measured in -- `"%"`, `"ppm"`, `"g/t"`, or a
+        number. On a variable a model reads directly this is a **label**:
+        the values go to the likelihood as they stand, and the unit travels
+        so that a figure can say what an axis is in and an export can record
+        it. On a part of a `CompositionalVariable` it is also the divisor
+        that turns the value into a fraction of the whole, since parts in
+        different units cannot be added up. `None` is undeclared.
     """
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
                    "prediction", "dispersion", "noise_variance")
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
                       "responsibilities")
-    _NODE_ATTRS = ("cutoffs",)
+    _NODE_ATTRS = ("cutoffs", "unit")
+    # `dispersion` and the quantile families are read again off the
+    # realizations instead (`_coarsen_realizations`, `_coarsen_into`)
+    _BLOCK_MEANS = ("latent_mean", "latent_variance", "prediction",
+                    "noise_variance")
+    _BLOCK_MEAN_FAMILIES = ("proportions",)
 
     measurements: _Attribute
     latent_mean: _Attribute
@@ -578,19 +736,27 @@ class ContinuousVariable(_Variable):
     noise_variance: _Attribute
     simulations: _storage.ArrayStore | None
     cutoffs: list[float] | None
+    unit: "str | float | None"
     quantiles: dict[float, _Attribute]
     probabilities: dict[float, _Attribute]
     proportions: dict[float, _Attribute]
     divided: dict[float, _Attribute]
     responsibilities: dict[int, _Attribute]
 
-    def __init__(self, name, coordinates, measurements=None):
+    def __init__(self, name, coordinates, measurements=None, unit=None):
         super().__init__(name, coordinates)
 
         if measurements is None:
             self.measurements = self._Attribute(coordinates)
         else:
             self.measurements = self._Attribute(coordinates, measurements)
+
+        # What the values are measured in. A fact of the variable, so it
+        # rides `tree()`, Zarr and every rebuild off `_NODE_ATTRS` rather
+        # than being carried by hand in each of them.
+        self.unit = None
+        if unit is not None:
+            self.set_unit(unit)
 
         self.latent_mean = self._Attribute(coordinates)
         self.latent_variance = self._Attribute(coordinates)
@@ -634,6 +800,23 @@ class ContinuousVariable(_Variable):
         # likelihood; empty under every other one. See `set_responsibilities`.
         self.responsibilities = _col.OrderedDict()
 
+    def set_unit(self, unit: "_types.Unit | None") -> "ContinuousVariable":
+        """What the values are measured in.
+
+        A label here: the values reach the likelihood as they stand, and the
+        unit travels with the variable so that a figure can say what an axis
+        is in and an export can record it. Anything is accepted, `UNITS`
+        holding only the ones that can also be *divided* by -- which is what
+        a part of a composition needs, and what `_Component.set_unit`
+        insists on.
+        """
+        self.unit = unit
+        return self
+
+    def divisor(self) -> float:
+        """What to divide this variable's values by to make them fractions."""
+        return _divisor(self.unit)
+
     def set_cutoffs(self, cutoffs: _types.Cutoffs) -> "ContinuousVariable":
         """The grades this variable is judged against.
 
@@ -647,7 +830,18 @@ class ContinuousVariable(_Variable):
         return self
 
     def prediction_input(self):
-        return {} if self.cutoffs is None else {"cutoffs": self.cutoffs}
+        return {} if self.cutoffs is None \
+            else {"cutoffs": self._model_cutoffs()}
+
+    def _model_cutoffs(self):
+        """The cut-offs as the model reads them.
+
+        The same numbers here -- a variable a model reads directly is in
+        whatever units it was measured in, and its unit is a label. A part
+        of a composition overrides this: its cut-off is declared in its own
+        unit and the model works in fractions.
+        """
+        return list(self.cutoffs or [])
 
     def get_measurements(self):
         values = self.measurements.values.copy()[:, None]
@@ -792,6 +986,41 @@ class ContinuousVariable(_Variable):
             (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
             owner=self.coordinates)
 
+    def _coarsen_realizations(self, new, grouping, valid):
+        # The spread between the parts comes out of the same pass as their
+        # mean: a block's dispersion is its parts' mean dispersion plus how
+        # far they sit from one another, realization by realization -- the
+        # variance of a mixture, and the "larger by exactly what the grouping
+        # absorbed" of `group`. About the block's prediction, which the
+        # scalar columns have already averaged.
+        if self.simulations is None:
+            return
+        new.allocate_simulations(self.simulations.shape[1])
+        centre = new.prediction.values.to_numpy()
+        between = grouping.realizations(
+            self.simulations, new._sim_store(), valid,
+            shift=_np.where(_np.isfinite(centre), centre, 0.0))
+        within = grouping.mean(self.dispersion.values.to_numpy(), valid)
+        new.dispersion = self._Attribute(new.coordinates, within + between)
+
+    def _coarsen_into(self, new, grouping, valid=None):
+        super()._coarsen_into(new, grouping, valid)
+        if self.simulations is None:
+            return
+        # read again off the averaged realizations, at the same keys; a block
+        # kept whole keeps its own, which the same reading would reproduce
+        for family, reset in (("quantiles", new.reset_quantiles),
+                              ("probabilities", new.reset_probabilities)):
+            old = getattr(self, family)
+            if not old:
+                continue
+            reset(list(old))
+            fresh = getattr(new, family)
+            for key in fresh:
+                kept = grouping.kept(old[key].values.to_numpy(), _np.nan)
+                fresh[key] = self._Attribute(new.coordinates, _np.where(
+                    grouping.whole, kept, fresh[key].values.to_numpy()))
+
     def compute_metrics(self, alpha=0.05):
         """
         Scores this variable's prediction against its own measurements.
@@ -906,8 +1135,8 @@ class DerivedVariable(ContinuousVariable):
     """
     _NODE_ATTRS = ContinuousVariable._NODE_ATTRS + ("parents",)
 
-    def __init__(self, name, coordinates, parents=None):
-        super().__init__(name, coordinates)
+    def __init__(self, name, coordinates, parents=None, unit=None):
+        super().__init__(name, coordinates, unit=unit)
         self.parents = list(parents) if parents is not None else None
 
     def _from(self):
@@ -937,9 +1166,11 @@ class VectorVariable(_Variable):
     # the mixture is over the row, so the responsibilities belong to the
     # variable rather than to its components -- one answer per location
     _DICT_FAMILIES = ("responsibilities",)
+    _BLOCK_MEANS = ("uncertainty",)
     _LABEL_KIND = "components"
 
-    def __init__(self, name, coordinates, labels, measurements=None):
+    def __init__(self, name, coordinates, labels, measurements=None,
+                 units=None):
         super().__init__(name, coordinates)
 
         if measurements is not None \
@@ -948,6 +1179,7 @@ class VectorVariable(_Variable):
 
         self.labels = labels
         self._length = len(labels)
+        units = _units_per_label(units, labels)
 
         self.components = {}
         for i, label in enumerate(labels):
@@ -955,6 +1187,7 @@ class VectorVariable(_Variable):
                 label,
                 coordinates,
                 measurements[:, i] if measurements is not None else None,
+                unit=units[label],
             )
 
         self.uncertainty = self._Attribute(coordinates)
@@ -983,7 +1216,7 @@ class VectorVariable(_Variable):
         fewer than the widest is padded with infinity, which nothing is ever
         above, so its spare columns come back empty and `update` drops them.
         """
-        declared = [self.components[label].cutoffs or [] for label in
+        declared = [self.components[label]._model_cutoffs() for label in
                     self.labels]
         widest = max(len(row) for row in declared) if declared else 0
         if widest == 0:
@@ -1014,16 +1247,17 @@ class VectorVariable(_Variable):
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
-                        *args, **kwargs):
+                        units=None, *args, **kwargs):
         new_var = cls(
             name,
             coordinates,
             labels=columns,
             measurements=df.loc[:, columns].values,
+            units=units,
         )
         return new_var
 
-    def update(self, idx, **kwargs):
+    def update(self, idx, elementwise=False, **kwargs):
         prediction = _tf.unstack(kwargs["average_sim"], axis=1)
         simulations = _tf.unstack(kwargs["simulations"], axis=1)
         # each component is dispersed inside a block, and measured, on its own
@@ -1035,12 +1269,24 @@ class VectorVariable(_Variable):
             key: (_tf.unstack(kwargs[key], axis=1)
                   if key in kwargs.keys() else blank)
             for key in ("proportions", "divided")}
+        # The latent field's columns are the components' own only under an
+        # elementwise warping, which is what the model says with
+        # `elementwise`; a rotation or a projection leaves no column that
+        # is any one component's, and then the components' latent moments
+        # stay empty rather than carry a mixture under one label.
+        moments = {
+            key: (_tf.unstack(kwargs[key], axis=1)
+                  if elementwise and key in kwargs.keys() else blank)
+            for key in ("mean", "variance")}
 
         for i, (lb, p, s, d, nv) in enumerate(zip(self.labels, prediction,
                                                   simulations, dispersion,
                                                   noise)):
             values = {"average_sim": p, "simulations": s, "dispersion": d,
                       "noise_variance": nv}
+            for key, unstacked in moments.items():
+                if unstacked[i] is not None:
+                    values[key] = unstacked[i]
             for key, unstacked in shares.items():
                 column = unstacked[i]
                 if column is not None:
@@ -1078,21 +1324,59 @@ class _Component(ContinuousVariable):
     latent_mean: "_Attr | None"
     latent_variance: "_Attr | None"
 
-    def __init__(self, name, coordinates, measurements=None):
-        super().__init__(name, coordinates, measurements)
+    def __init__(self, name, coordinates, measurements=None, unit=None):
+        super().__init__(name, coordinates, measurements, unit=unit)
         self.latent_mean = None
         self.latent_variance = None
 
+    def set_unit(self, unit):
+        """The part's unit, which here is also a divisor.
+
+        Parts in different units cannot be added up, so a composition's
+        unit has to be one the package can convert: a name from `UNITS` or
+        a number. Checked when it is declared rather than at the door,
+        where the message would arrive a training run late.
+        """
+        _divisor(unit)
+        self.unit = unit
+        return self
+
+    def _model_cutoffs(self):
+        # declared in the part's own unit; the model works in fractions
+        divisor = self.divisor()
+        return [c / divisor for c in (self.cutoffs or [])]
+
     def update(self, idx, **kwargs):
-        self.prediction.values[idx] = kwargs["prediction"].numpy()
-        self._sim_store()[idx, :] = kwargs["simulations"].numpy()
+        # The model speaks in fractions of the whole -- it has to, since
+        # the parts are added up -- and this part is stored, reported and
+        # contoured in the unit it was assayed in. So the crossing happens
+        # here, once, and everything downstream of it (quantiles, cut-off
+        # shares, grade-tonnage, the plots) is already in the right unit
+        # without knowing that units exist. A variance carries the square.
+        scale = self.divisor()
+
+        self.prediction.values[idx] = kwargs["prediction"].numpy() * scale
+        self._sim_store()[idx, :] = kwargs["simulations"].numpy() * scale
 
         if "dispersion" in kwargs.keys():
-            self.dispersion.values[idx] = kwargs["dispersion"].numpy()
+            self.dispersion.values[idx] = \
+                kwargs["dispersion"].numpy() * scale ** 2
 
         if "noise_variance" in kwargs.keys():
             self.noise_variance.values[idx] = \
-                kwargs["noise_variance"].numpy()
+                kwargs["noise_variance"].numpy() * scale ** 2
+
+        for key, target in (("proportions", self.proportions),
+                            ("divided", self.divided)):
+            # a share is a share whatever the unit; the cut-offs they are
+            # indexed by are this part's own, as declared
+            if key not in kwargs.keys():
+                continue
+            values = kwargs[key].numpy()
+            for i, cutoff in enumerate(self.cutoffs or []):
+                if cutoff not in target:
+                    target[cutoff] = self._Attribute(self.coordinates)
+                target[cutoff].values[idx] = values[:, i]
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -1104,20 +1388,53 @@ class _Component(ContinuousVariable):
 
 
 class CompositionalVariable(VectorVariable):
-    def __init__(self, name, coordinates, labels, measurements=None):
-        super().__init__(name, coordinates, labels, measurements)
+    """A composition, each part in its own unit.
+
+    The parts are stored, reported and simulated in the units they were
+    measured in -- percent, ppm, g/t -- and turned into fractions of the
+    whole only where the model reads them, since parts in different units
+    cannot be added up. `add_compositional_variable` is the door that
+    prepares them; the two crossings are `get_measurements` here and
+    `_Component.update` on the way back.
+    """
+
+    def __init__(self, name, coordinates, labels, measurements=None,
+                 units=None):
+        super().__init__(name, coordinates, labels, measurements, units)
+        units = _units_per_label(units, labels)
         for i, label in enumerate(labels):
             self.components[label] = _Component(
                 label,
                 coordinates,
-                measurements[:, i] if measurements is not None else None)
+                measurements[:, i] if measurements is not None else None,
+                unit=units[label])
+
+    def divisors(self):
+        """What each part is divided by to become a fraction, in order."""
+        return _np.array([self.components[label].divisor()
+                          for label in self.labels], dtype=float)
+
+    def from_model_units(self, values):
+        """Model-space values (fractions) in the parts' own units.
+
+        `values` has the component axis second, as everything the model
+        hands back does.
+        """
+        scale = self.divisors()
+        values = _np.asarray(values, dtype=float)
+        shape = [1] * values.ndim
+        shape[1] = scale.size
+        return values * scale.reshape(shape)
 
     def get_measurements(self):
         # not allowing partial missing data
         out = [self.components[label].measurements.values.to_numpy()
                for label in self.labels]
 
-        out = _np.stack(out, axis=1)
+        # each part divided by its own unit, so that they can be added up:
+        # 1 % and 10 000 ppm are the same fraction, and only in fractions
+        # does a row sum to one
+        out = _np.stack(out, axis=1) / self.divisors()[None, :]
         total = _np.sum(out, axis=1, keepdims=True)
         total = _np.where(_np.abs(total - 1) < 1e-10, 1.0, _np.nan)
         out = out * total
@@ -1143,12 +1460,13 @@ class CompositionalVariable(VectorVariable):
 
     @classmethod
     def from_data_frame(cls, name, coordinates, df, columns=None,
-                        *args, **kwargs):
+                        units=None, *args, **kwargs):
         new_var = cls(
             name,
             coordinates,
             labels=columns,
-            measurements=df.loc[:, columns].values)
+            measurements=df.loc[:, columns].values,
+            units=units)
         return new_var
 
     def update(self, idx, **kwargs):
@@ -1157,16 +1475,29 @@ class CompositionalVariable(VectorVariable):
         # a part varies inside a block, and is assayed, on its own account
         dispersion = _tf.unstack(kwargs["dispersion"], axis=1)
         noise = _tf.unstack(kwargs["noise_variance"], axis=1)
+        blank = [None] * len(self.labels)
+        shares = {
+            key: (_tf.unstack(kwargs[key], axis=1)
+                  if key in kwargs.keys() else blank)
+            for key in ("proportions", "divided")}
 
-        for lb, p, s, d, nv in zip(
+        for i, (lb, p, s, d, nv) in enumerate(zip(
                 self.labels,
-                prediction, simulations, dispersion, noise):
-            self.components[lb].update(idx, **{
+                prediction, simulations, dispersion, noise)):
+            values = {
                 "prediction": p,
                 "simulations": s,
                 "dispersion": d,
                 "noise_variance": nv
-            })
+            }
+            for key, unstacked in shares.items():
+                column = unstacked[i]
+                if column is not None:
+                    # padded out to the widest part, as `prediction_input`
+                    # built it; this one takes the cut-offs it declared
+                    declared = len(self.components[lb].cutoffs or [])
+                    values[key] = column[:, :declared]
+            self.components[lb].update(idx, **values)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 
@@ -1176,8 +1507,12 @@ class CompositionalVariable(VectorVariable):
         metrics.columns = self.labels
 
         comp_true, has_value = self.get_measurements()
+        # `get_measurements` closes the parts into fractions, and the
+        # Aitchison distance is not invariant to scaling one part alone, so
+        # the predictions are put on the same footing before comparing
         comp_pred = _np.stack([self.components[c].prediction.values.to_numpy()
                                for c in self.labels], axis=1)
+        comp_pred = comp_pred / self.divisors()[None, :]
         comp_true = comp_true[has_value[:, 0] == 1]
         comp_pred = comp_pred[has_value[:, 0] == 1]
         ad = _gmlmetrics.aitchison_distance(comp_true, comp_pred)
@@ -1200,6 +1535,9 @@ class _Category(_Variable):
                    "indicator_variance", "indicator_predicted")
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("proportions", "divided")
+    _BLOCK_MEANS = ("probability", "indicator_mean", "indicator_variance",
+                    "indicator_predicted")
+    _BLOCK_MEAN_FAMILIES = ("proportions",)
 
     def __init__(self, name, coordinates, indicator):
         super().__init__(name, coordinates)
@@ -1260,6 +1598,9 @@ class RockTypeVariable(_Variable):
 
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
                    "measurements_a", "measurements_b", "boundary")
+    # taken per sub-block and then averaged (`_resolve`); `predicted` is read
+    # again off the averaged probabilities (`_coarsen_into`)
+    _BLOCK_MEANS = ("entropy", "uncertainty")
     _LABEL_KIND = "categories"
 
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
@@ -1432,18 +1773,112 @@ class RockTypeVariable(_Variable):
                 values["divided"] = cut
             self.components[lb].update(idx, **values)
 
+    def _coarsen_into(self, new, grouping, valid=None):
+        # A category's probability reads 0 where nothing was predicted, not
+        # missing, so the parts that were are told apart by their label
+        predicted = self.predicted.values.to_numpy() >= 0
+        valid = predicted if valid is None else valid & predicted
+        super()._coarsen_into(new, grouping, valid)
+
+        # the winner of the averaged probabilities, as `update` names it
+        probability = _np.stack(
+            [new.components[label].probability.values.to_numpy()
+             for label in self.labels], axis=1)
+        gathered = ~grouping.whole & _np.all(_np.isfinite(probability),
+                                             axis=1)
+        codes = new.predicted.values.to_numpy().copy()
+        codes[gathered] = _np.argmax(probability[gathered], axis=1)
+        new.predicted.values[:] = codes
+
     def training_input(self, idx=None):
         if idx is None:
             idx = _np.arange(self.coordinates.n_data)
         return {"is_boundary": _tf.constant(
             self.boundary.values.to_numpy()[idx, None], _tf.bool)}
 
-    def compute_metrics(self, **kwargs):
+    def compute_metrics(self, decluster: bool = False) -> "_pd.DataFrame":
+        """
+        Scores this variable's prediction against its own measurements.
+
+        Every score is of one category against the rest, so the table has
+        a column per category. The locations scored are the ones the
+        confusion matrix counts: measured, predicted, and off the contacts,
+        where a location holds two measurements and no one truth.
+
+        - Balanced accuracy, Jaccard, Matthews, Cohen's kappa, precision,
+          recall and F1 score read the predicted category. Recall is the
+          share of the locations measured as the category that the model
+          calls it; precision is the share of the locations the model
+          calls it that were measured as it.
+        - Quantity and allocation disagreement split the category's errors
+          into the part a wrong proportion explains and the part a wrong
+          place explains (Pontius and Millones, 2011). Summed over the
+          categories and halved, they add up to one minus the accuracy.
+        - The Brier score and the log score read the predicted
+          probability, as a forecast of whether a location is the
+          category. Both are proper: neither hedging nor overconfidence
+          improves them. Lower is better.
+
+        Parameters
+        ----------
+        decluster
+            Weight each location by the container's `"declustering"`
+            metadata column, which the container's `decluster` method
+            writes, so that densely drilled ground does not dominate.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per score, one column per category.
+
+        Raises
+        ------
+        ValueError
+            If no location holds both a measurement and a prediction, or if
+            `decluster` is asked for and the container keeps no weights.
+
+        Notes
+        -----
+        A score with no value is NaN: the precision of a category the model
+        never calls, the recall of one never measured. At the locations a
+        model was trained on, every score flatters it; the out-of-fold
+        container :func:`geoml.models.cross_validate` fills is the honest
+        input.
+
+        References
+        ----------
+        Brier, G. W. (1950). Verification of forecasts expressed in terms of
+        probability. *Monthly Weather Review*, 78(1), 1-3.
+
+        Cohen, J. (1960). A coefficient of agreement for nominal scales.
+        *Educational and Psychological Measurement*, 20(1), 37-46.
+
+        Pontius, R. G., & Millones, M. (2011). Death to Kappa: birth of
+        quantity disagreement and allocation disagreement for accuracy
+        assessment. *International Journal of Remote Sensing*, 32(15),
+        4407-4429.
+        """
         y_pred = self.predicted.to_numpy()
         y_true_a = self.measurements_a.to_numpy()
         y_true_b = self.measurements_b.to_numpy()
 
-        valid = y_true_a == y_true_b
+        # the missing code decodes to the empty string on both sides
+        valid = (y_true_a == y_true_b) & (y_true_a != "") & (y_pred != "")
+        if not valid.any():
+            raise ValueError(
+                "no location holds both a measured category and a "
+                "prediction of %r; predict on the data first" % self.name)
+
+        weights = None
+        if decluster:
+            column = self.coordinates.metadata.get("declustering")
+            if column is None:
+                raise ValueError(
+                    "the container keeps no 'declustering' column to weight "
+                    "the locations by; run its decluster() method first")
+            weights = _np.asarray(column.values, dtype=float)[valid]
+        share = _np.ones(valid.sum()) if weights is None else weights
+        share = share / share.sum()
 
         y_pred = y_pred[valid]
         y_true = y_true_a[valid]
@@ -1452,10 +1887,44 @@ class RockTypeVariable(_Variable):
         for lab in self.labels:
             yp = _np.where(y_pred == lab, 1, 0)
             yt = _np.where(y_true == lab, 1, 0)
+            claim = self.components[lab].probability.values.to_numpy()[valid]
+
+            # the category's hits and its two errors, as shares of the
+            # locations: called it where another was measured (commission),
+            # measured as it where another was called (omission)
+            hits = share @ (yt * yp)
+            commission = share @ (yp * (1 - yt))
+            omission = share @ (yt * (1 - yp))
+            with _np.errstate(invalid="ignore", divide="ignore"):
+                # 0/0 where there is nothing to score: the precision of a
+                # category never called, the recall of one never measured,
+                # the kappa of one neither
+                precision = hits / (hits + commission)
+                recall = hits / (hits + omission)
+                f1 = 2 * hits / (2 * hits + commission + omission)
+                kappa = _skmetrics.cohen_kappa_score(
+                    yt, yp, labels=[0, 1], sample_weight=weights)
+            # a claim of exactly zero for the category measured would score
+            # infinity; clipped at machine precision, as scikit-learn clips
+            eps = _np.finfo(float).eps
+            clipped = _np.clip(claim, eps, 1 - eps)
+
             d = {
-                'Balanced accuracy': _skmetrics.balanced_accuracy_score(yt, yp),
-                'Jaccard': _skmetrics.jaccard_score(yt, yp),
-                'Matthews': _skmetrics.matthews_corrcoef(yt, yp),
+                'Balanced accuracy': _skmetrics.balanced_accuracy_score(
+                    yt, yp, sample_weight=weights),
+                'Jaccard': _skmetrics.jaccard_score(
+                    yt, yp, sample_weight=weights),
+                'Matthews': _skmetrics.matthews_corrcoef(
+                    yt, yp, sample_weight=weights),
+                "Cohen's kappa": kappa,
+                'Precision': precision,
+                'Recall': recall,
+                'F1 score': f1,
+                'Quantity disagreement': abs(commission - omission),
+                'Allocation disagreement': 2 * min(commission, omission),
+                'Brier score': share @ (claim - yt) ** 2,
+                'Log score': -share @ (yt * _np.log(clipped)
+                                       + (1 - yt) * _np.log1p(-clipped)),
             }
             series.append(_pd.Series(d, name=lab))
 
@@ -1583,6 +2052,10 @@ class BinaryVariable(_Variable):
     _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
                    "probability", "entropy", "uncertainty",
                    "latent_mean", "latent_variance")
+    # `entropy` and `uncertainty` are functions of the block's own
+    # probability, not means over it, and stay out; `predicted` is read
+    # again off the averaged probability (`_coarsen_into`)
+    _BLOCK_MEANS = ("probability", "latent_mean", "latent_variance")
     _LABEL_KIND = "categories"
     _ZARR_HAS_SIMS = True
 
@@ -1680,6 +2153,20 @@ class BinaryVariable(_Variable):
         self.probability.values[idx] = prob
 
         self._sim_store()[idx, :] = sims
+
+    def _coarsen_into(self, new, grouping, valid=None):
+        # the probability reads 0 where nothing was predicted, not missing,
+        # so the parts that were are told apart by their label
+        predicted = self.predicted.values.to_numpy() >= 0
+        valid = predicted if valid is None else valid & predicted
+        super()._coarsen_into(new, grouping, valid)
+
+        # the positive class at one half or more, as `update` has it
+        probability = new.probability.values.to_numpy()
+        gathered = ~grouping.whole & _np.isfinite(probability)
+        codes = new.predicted.values.to_numpy().copy()
+        codes[gathered] = _np.where(probability[gathered] < 0.5, 1, 0)
+        new.predicted.values[:] = codes
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(

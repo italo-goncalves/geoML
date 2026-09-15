@@ -1,0 +1,20 @@
+block 4: 9 experts of 36 points; trained 500 it in 74 s
+weights: max-weight quantiles 10/50/90%: [0.458 0.649 0.877]; share of points with max > 0.9: 0.07; mean 1-sum(w^2): 0.468; experts reaching a point (w > 0.01), mean: 4.05
+literal reset of expert 1 with delta=1: its weight on its home points mean 0.192 (trained 0.566); rmse there 576.323 vs masked removal 604.974
+literal reset of expert 1 with delta=100: its weight on its home points mean 0.004 (trained 0.566); rmse there 604.529 vs masked removal 604.974
+
+arm               rmse   time s
+in-sample       181.92         
+leo-mix         301.49        2
+leo-sq          382.50         
+leo-home        441.67         
+refit-home      348.24      144
+knndm           221.77       75
+truth           170.69         
+
+by top weight: bin, n, rmse leo-home, rmse refit-home, rmse in-sample
+[0.00, 0.50)   89    423.10    284.12    180.65
+[0.50, 0.70)  191    477.98    352.15    195.53
+[0.70, 0.90)  155    430.84    375.79    176.06
+[0.90, 0.99)   35    309.11    348.01    124.49
+done

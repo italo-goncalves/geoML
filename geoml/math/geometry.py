@@ -331,6 +331,145 @@ def drop_degenerate_faces(points, triangles, precision=6):
     return points, triangles[rows[keep]]
 
 
+def split_touching_edges(points, triangles, precision=6):
+    """
+    Splits every edge where two pieces of a surface touch.
+
+    A surface touching itself along a line -- a level set meeting its own
+    closing cap edge-on, two bodies meeting along an edge -- comes out
+    welded as an edge four triangles share. It is neither closed nor
+    consistently wound in any reading, and no repair of the winding
+    settles it. Around such an edge the four triangles alternate in the
+    direction they walk it and bound two wedges of inside between two of
+    outside; each triangle is paired with its neighbour across an inside
+    wedge, and each vertex of the edge gets a copy for every piece that
+    meets there, so the pieces touch rather than share.
+
+    Parameters
+    ----------
+    points : array
+        An (n, 3) array of vertex coordinates.
+    triangles : array
+        An (m, 3) array of vertex indices, consistently wound where the
+        pieces are.
+    precision : int
+        Decimal places the coordinates are welded to, as in `weld`.
+
+    Returns
+    -------
+    points, triangles : arrays
+        The very arrays given where no edge is shared by more than two
+        triangles. Otherwise the welded vertices, a copy appended for each
+        extra piece meeting at a vertex, and the triangles indexing them.
+        A copy sits exactly on its original; moving the pieces apart is
+        the caller's business.
+
+    Notes
+    -----
+    An edge shared by some other number of triangles, or by four that do
+    not alternate, is left as it is.
+    """
+    triangles = _np.asarray(triangles)
+    welded_points, welded = weld(points, triangles, precision)
+    welded = _np.array(welded)
+    n_triangles = len(welded)
+    edges = _np.concatenate([welded[:, [0, 1]], welded[:, [1, 2]],
+                             welded[:, [2, 0]]])
+    low = _np.minimum(edges[:, 0], edges[:, 1]).astype(_np.int64)
+    high = _np.maximum(edges[:, 0], edges[:, 1]).astype(_np.int64)
+    keys, which, counts = _np.unique(low * len(welded_points) + high,
+                                     return_inverse=True, return_counts=True)
+    which = which.ravel()
+    if not _np.any(counts > 2):
+        return points, triangles
+    # the rows of every edge, grouped: row r is edge r // m of triangle r % m
+    order = _np.argsort(which, kind="stable")
+    starts = _np.concatenate([[0], _np.cumsum(counts)])
+
+    def sharing(edge):
+        rows = order[starts[edge]:starts[edge + 1]]
+        return rows % n_triangles, rows
+
+    # each split edge's two pairs of triangles, the pieces it separates
+    paired = {}
+    for edge in _np.flatnonzero(counts == 4):
+        faces, rows = sharing(edge)
+        u, v = int(low[rows[0]]), int(high[rows[0]])
+        walks = _np.where(edges[rows, 0] == u, 1, -1)
+        opposite = welded[faces].sum(axis=1) - u - v
+        axis = welded_points[v] - welded_points[u]
+        axis = axis / _np.linalg.norm(axis)
+        radial = welded_points[opposite] - welded_points[u]
+        radial = radial - _np.outer(radial @ axis, axis)
+        if not _np.all(_np.linalg.norm(radial, axis=1) > 0):
+            # a face lying along the edge's own line has no side to be on
+            continue
+        first = radial[0] / _np.linalg.norm(radial[0])
+        angle = _np.arctan2(radial @ _np.cross(axis, first), radial @ first)
+        around = _np.argsort(angle)
+        if _np.any(walks[around] == _np.roll(walks[around], -1)):
+            continue
+        # a face walking u to v faces the way the angle grows, so what it
+        # bounds lies behind it: the wedge from a face walking v to u
+        # round to one walking u to v is inside
+        wedges = [(faces[around[i]], faces[around[(i + 1) % 4]])
+                  for i in range(4)
+                  if walks[around[i]] < 0 < walks[around[(i + 1) % 4]]]
+        if len(wedges) == 2:
+            paired[int(edge)] = wedges
+
+    if not paired:
+        return points, triangles
+    ends = _np.unique(_np.concatenate(
+        [[low[sharing(edge)[1][0]], high[sharing(edge)[1][0]]]
+         for edge in paired]))
+    # every vertex's pieces worked out on the triangles as welded, and only
+    # then given their copies: renumbering as it went would leave the next
+    # vertex looking up edges the table never held
+    moves = []
+    for vertex in ends:
+        fan = _np.flatnonzero(_np.any(welded == vertex, axis=1))
+        parent = {int(face): int(face) for face in fan}
+
+        def root(face):
+            while parent[face] != face:
+                parent[face] = parent[parent[face]]
+                face = parent[face]
+            return face
+
+        # the triangles of the fan joined through the edges they share at
+        # this vertex: all of them on an ordinary edge, only a pair's on a
+        # split one
+        for face in fan:
+            for other in welded[face]:
+                if other == vertex:
+                    continue
+                a, b = sorted((int(vertex), int(other)))
+                edge = int(_np.searchsorted(
+                    keys, a * len(welded_points) + b))
+                groups = paired[edge] if edge in paired \
+                    else [sharing(edge)[0]]
+                for group in groups:
+                    members = [int(member) for member in group]
+                    if int(face) in members:
+                        for member in members:
+                            parent[root(member)] = root(int(face))
+        pieces = {}
+        for face in fan:
+            pieces.setdefault(root(int(face)), []).append(int(face))
+        moves.extend((int(vertex), faces)
+                     for faces in list(pieces.values())[1:])
+    if not moves:
+        return points, triangles
+    copies = []
+    for vertex, faces in moves:
+        copy = len(welded_points) + len(copies)
+        copies.append(welded_points[vertex])
+        for face in faces:
+            welded[face][welded[face] == vertex] = copy
+    return _np.concatenate([welded_points, _np.array(copies)]), welded
+
+
 def _counts_of(n_points, triangles, directed):
     """How often each edge of a *welded* triangulation appears."""
     edges = _np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]],
@@ -541,12 +680,14 @@ def signed_volume(points, triangles):
     """
     The volume a closed surface encloses, negative if it is wound inwards.
 
-    Each triangle forms a tetrahedron with the origin, whose signed volume is
-    a sixth of the determinant of its corners; over a closed surface those
-    add up to what it encloses, wherever the origin happens to be. The sign
-    is the useful part: it says which way the triangles face taken together,
-    which is what an inside/outside test must know and cannot learn from any
-    one of them.
+    Each triangle forms a tetrahedron with a fixed point, whose signed volume
+    is a sixth of the determinant of its corners; over a closed surface those
+    add up to what it encloses, wherever the point happens to be. The point
+    is the vertices' own centre rather than the origin, whose tetrahedra at
+    mine-grid coordinates are vast and cancel one another down to the
+    answer within rounding. The sign is the useful part: it says which way
+    the triangles face taken together, which is what an inside/outside test
+    must know and cannot learn from any one of them.
 
     Parameters
     ----------
@@ -561,7 +702,12 @@ def signed_volume(points, triangles):
         Positive where the triangles face outwards, negative where they face
         in. Meaningless for a surface that is not closed.
     """
-    corners = _np.asarray(points, dtype=float)[_np.asarray(triangles)]
+    points = _np.asarray(points, dtype=float)
+    if len(points) > 0:
+        # about the origin, a millimetre film read 23% wrong at a northing
+        # of 7,000 km
+        points = points - points.mean(axis=0)
+    corners = points[_np.asarray(triangles)]
     return float(_np.sum(_np.einsum(
         "ij,ij->i", corners[:, 0],
         _np.cross(corners[:, 1], corners[:, 2]))) / 6.0)

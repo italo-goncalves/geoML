@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -31,6 +31,7 @@ import pyvista as _pv
 import vtk as _vtk
 import ezdxf as _ezdxf
 from ezdxf.render import MeshVertexMerger as _MeshVertexMerger
+import manifold3d as _manifold
 
 import geoml._types as _types
 import geoml.math.geometry as _gmt
@@ -170,10 +171,18 @@ class Mesh3D(_PointBased):
     consistent : bool
         Whether the triangles agree about which way is out. A closed mesh
         that is not consistent bounds nothing that can be tested.
+    provenance : dict
+        What the mesh was made from, where whatever made it says so: a
+        contour records the column, the level, the side it closes on and
+        its budgets, and a `MeshSet` adds its limits and the realization.
+        Empty otherwise. It travels with `to_zarr` and `to_geoh5`.
     """
+
+    provenance: dict
 
     def __init__(self, points, triangles, normals):
         super().__init__()
+        self.provenance = {}
 
         if points.shape[1] != 3:
             raise ValueError("points must be an array with 3 columns")
@@ -334,9 +343,11 @@ class Mesh3D(_PointBased):
         ----------
         max_error : float
             The largest distance the simplified surface may sit from the
-            original, in the mesh's own units. Enforced by measurement: the
-            simplified faces are probed against the original surface, and
-            the decimation tightened until the promise holds.
+            original, in the mesh's own units, either way. Enforced by
+            measurement: the simplified faces are probed against the
+            original surface and the original's vertices against the
+            simplified one, and the decimation tightened until the promise
+            holds.
 
         Returns
         -------
@@ -359,14 +370,20 @@ class Mesh3D(_PointBased):
         # workers and locators built once -- the measurements are half of
         # a real simplify (4.9 of 10.0 s on a 522k-triangle shell), and
         # VTK holds the GIL through them, so the pool is what threads can
-        # not do (see `_signed_distance`); a mesh too small to repay the
+        # not do (see `_DistanceQueries`); a mesh too small to repay the
         # spin-up measures serially on the one kept locator
+        # the vertices a triangle uses: a mesh can carry a few that none
+        # does, which lie off the surface and would measure the mesh
+        # against itself as off (35 on an Assen shell an older geoML made,
+        # up to 0.72 away)
+        points = _np.asarray(original.points, dtype=float)[_np.unique(
+            original.faces.reshape(-1, 4)[:, 1:])]
         with _DistanceQueries(
                 original,
                 parallel=4 * original.n_cells >= _PARALLEL_QUERIES
         ) as measure:
 
-            def deviation_of(mesh):
+            def deviation_of(mesh, limit):
                 # probed on the simplified faces -- centroids and edge
                 # midpoints; the surviving vertices lie on the original by
                 # construction and would measure nothing
@@ -377,31 +394,25 @@ class Mesh3D(_PointBased):
                     (pts[tri[:, 0]] + pts[tri[:, 1]]) / 2,
                     (pts[tri[:, 1]] + pts[tri[:, 2]]) / 2,
                     (pts[tri[:, 2]] + pts[tri[:, 0]]) / 2])
-                return float(_np.abs(measure.query(probes)).max())
+                out = float(_np.abs(measure.query(probes)).max())
+                if out > limit:
+                    return out
+                # and the original's vertices against the simplified
+                # surface: a fold the cut took away sits off every new face
+                # however close those faces sit to the original
+                with _DistanceQueries(
+                        mesh, parallel=4 * mesh.n_cells >= _PARALLEL_QUERIES
+                ) as back:
+                    return max(out, float(_np.abs(back.query(points)).max()))
 
-            # A large mesh takes a fast quadric pre-pass first, so the
-            # error-bounded decimator works a fraction of the triangles: on
-            # an 835k-triangle shell this is most of a 4x speedup. The
-            # pre-pass is verified against the original like everything
-            # else, and given half the budget; where it overspends, the
-            # mesh is taken as it came.
-            working = original
-            n_triangles = original.n_cells
-            if n_triangles > 100_000:
-                rough = original.decimate(1.0 - 50_000.0 / n_triangles,
-                                          volume_preservation=True)
-                rough = rough.clean().triangulate()
-                if deviation_of(rough) <= 0.5 * max_error:
-                    working = rough
-
-            def cut_at(bound):
+            def cut_at(start, bound):
                 # vtkDecimatePro is the one decimator that takes an error
                 # bound, as a fraction of the bounding-box diagonal;
                 # preserving topology is what keeps a closed body closed,
                 # and the error accumulates against its input rather than
                 # being re-granted per collapse
                 decimate = _vtk.vtkDecimatePro()
-                decimate.SetInputData(working)
+                decimate.SetInputData(start)
                 decimate.SetTargetReduction(1.0)
                 decimate.SetMaximumError(bound / diagonal)
                 decimate.AccumulateErrorOn()
@@ -410,44 +421,65 @@ class Mesh3D(_PointBased):
                 decimate.Update()
                 return _pv.wrap(decimate.GetOutput()).clean().triangulate()
 
-            # the decimator's own error metric runs loose at tight budgets
-            # (measured 7x over at 0.02 of a unit step on a contoured
-            # shell), so the true deviation -- always against the original,
-            # whatever the pre-pass did -- is measured and the internal
-            # bound tightened until the promise holds
-            bound = max_error
-            for _ in range(4):
-                mesh = cut_at(bound)
-                deviation = deviation_of(mesh)
-                if deviation <= max_error:
-                    break
-                bound *= 0.5 * max_error / deviation
-
-            # Decimation can also break the kind's own promise -- collapse
-            # a thin feature into a membrane the rebuild cannot always
-            # repair -- and that is no reason to raise out of a workflow,
-            # because unlike the other rebuilds this one holds a remedy:
-            # cutting less. A gentler cut avoids the collapse, its error
-            # only shrinks, and the original mesh is within any budget at
-            # all -- so the budget is spent more timidly until the kind
-            # survives, and not at all as the last resort, said out loud
-            # rather than silently.
-            for _ in range(3):
+            def rebuilt(mesh):
                 try:
                     return _rebuilt_as(type(self), mesh)
                 except (NotClosedError, InconsistentMeshError,
                         NotSingleValuedError):
+                    return None
+
+            # A large mesh takes a fast quadric pre-pass first, so the
+            # error-bounded decimator works a fraction of the triangles: on
+            # an 835k-triangle shell this is most of a 4x speedup. The
+            # pre-pass is verified like everything else and given half the
+            # budget, and it must still be the kind the mesh is: every cut
+            # after it starts from it, so a body it broke stayed broken
+            # however gently it was cut -- the Assen shells came back whole
+            # at 2 m, where 0.5 m took them down 16 and 22 times.
+            starts = [original]
+            n_triangles = original.n_cells
+            if n_triangles > 100_000:
+                rough = original.decimate(1.0 - 50_000.0 / n_triangles,
+                                          volume_preservation=True)
+                rough = rough.clean().triangulate()
+                if deviation_of(rough, 0.5 * max_error) <= 0.5 * max_error \
+                        and rebuilt(rough) is not None:
+                    starts.insert(0, rough)
+
+            # The decimator's own error metric runs loose at tight budgets
+            # (measured 7x over at 0.02 of a unit step on a contoured
+            # shell), so the true deviation -- always against the original,
+            # whatever the pre-pass did -- is measured and the internal
+            # bound tightened until the promise holds. Decimation can also
+            # break the kind's own promise -- collapse a thin feature into a
+            # membrane the rebuild cannot always repair -- and that is no
+            # reason to raise out of a workflow, because unlike the other
+            # rebuilds this one holds a remedy: cutting less. A gentler cut
+            # avoids the collapse, and the original mesh is within any
+            # budget at all -- so the budget is spent more timidly until the
+            # kind survives, from the original where the pre-pass will not
+            # do, and not at all as the last resort, said out loud rather
+            # than silently.
+            for start in starts:
+                bound = max_error
+                for _ in range(4):
+                    for _ in range(4):
+                        mesh = cut_at(start, bound)
+                        deviation = deviation_of(mesh, max_error)
+                        if deviation <= max_error:
+                            break
+                        bound *= 0.5 * max_error / deviation
+                    else:
+                        break
+                    kept = rebuilt(mesh)
+                    if kept is not None:
+                        return kept
                     bound *= 0.25
-                    mesh = cut_at(bound)
-            try:
-                return _rebuilt_as(type(self), mesh)
-            except (NotClosedError, InconsistentMeshError,
-                    NotSingleValuedError):
-                _warnings.warn(
-                    "decimation broke this mesh's own shape however gently "
-                    "it was applied, so the mesh is returned as it came, "
-                    "with all its %d triangles" % len(self.triangles))
-                return self
+            _warnings.warn(
+                "no cut within the budget kept this mesh's own shape, however "
+                "gently it was applied, so the mesh is returned as it came, "
+                "with all its %d triangles" % len(self.triangles))
+            return self
 
     def smooth(self, iterations=20, pass_band=0.1):
         """
@@ -944,125 +976,45 @@ class Solid3D(Mesh3D):
         return self._resolved(other, operation)
 
     def _resolved(self, other, operation):
-        """Which case this is, and the answer for it.
+        """The boolean of two bodies, worked out exactly by Manifold.
 
-        Two bodies either cross or they do not, and the vertices say which:
-        a surface crossing another has vertices on both sides of it. Where
-        they do not cross -- apart, or one inside the other -- the answer is
-        one of the two bodies, or both, or nothing, and is exact. Where they
-        do, `_implicit_combine` works it out on a grid.
+        manifold3d answers every case -- apart, nested, crossing -- on the
+        triangles themselves, and its answer is always a closed,
+        consistently wound body. The bodies go in welded, in double
+        precision and in the pair's local frame: Manifold's tolerance grows
+        with the size of the coordinates, and at mine-grid coordinates it
+        would blur exactly the thin films adjacent domains meet along.
+        Bodies whose boxes are apart need no engine at all, which spares a
+        domains workflow the conversion on every exclusive pair.
 
-        **VTK's exact boolean is not consulted at all**, and that is a
-        deliberate retreat from what 0.6.1 shipped. The filter does answer
-        exactly on simple analytic meshes, but on the contour-derived bodies
-        this package exists to produce it **segfaults**, taking the session
-        with it -- measured on shells of 836 to 3128 triangles, at the
-        origin and at mine-grid coordinates, and on the same shells cleaned,
-        de-slivered and decimated. A crash cannot be caught, so the
-        error-and-empty-output fallback the old code wrapped it in never
-        got a turn; the meshes most likely to need the fallback were the
-        ones that never reached it. What is given up is exactness on the
-        cases VTK could do (a box against a box), which now answer to the
-        implicit engine's grid step like everything else, and say so.
+        The two engines before this one are why it is checked the way it
+        is. VTK's exact filter segfaulted on contour-derived shells, and a
+        crash cannot be caught. The signed-distance grid that replaced it
+        was robust but exact only to its step, and the films between
+        adjacent rock domains are thinner than any affordable step: on the
+        Assen shells its intersections read up to 5231 times the exact
+        volume. Manifold answered all fifteen of those pairs exactly and
+        nine times faster, and takes the contour-derived block shells that
+        crashed VTK in-process.
         """
-        here, there = _empty_solid(), _empty_solid()
-        if self.n_data > 0:
-            here = self
-        if other.n_data > 0:
-            there = other
+        if self.n_data == 0 or other.n_data == 0:
+            if operation == "union":
+                return other if self.n_data == 0 else self
+            if operation == "intersection" or self.n_data == 0:
+                return _empty_solid()
+            return self
+        if not self.bounding_box.overlaps_with(other.bounding_box):
+            # nothing crosses and nothing is inside anything
+            if operation == "union":
+                return _joined([self, other])
+            return _empty_solid() if operation == "intersection" else self
 
-        mine_inside = theirs_inside = False
-        if (here.n_data > 0 and there.n_data > 0
-                and here.bounding_box.overlaps_with(there.bounding_box)):
-            # boxes apart need none of this: nothing crosses, nothing is
-            # inside anything, and a domains workflow is full of exactly
-            # such pairs -- mutually exclusive rock shells
-            shift = _local_frame(here, there)
-            here_poly = here._polydata().translate(-shift)
-            there_poly = there._polydata().translate(-shift)
-            here_points = _np.asarray(here.coordinates) - shift
-            there_points = _np.asarray(there.coordinates) - shift
-
-            # Crossing is the common case and rarely needs every vertex to
-            # prove: a couple of thousand from either body usually land on
-            # both sides already. The full queries below are only paid when
-            # the probes come back one-sided, which is also the only time
-            # their answer is needed in full -- "all inside" is a claim
-            # about every vertex. Measured on 55k-vertex shells: 0.79 s of
-            # crossing test becomes ~0.05 s wherever the bodies do cross.
-            for probe_points, probe_body in ((here_points, there_poly),
-                                             (there_points, here_poly)):
-                sample = probe_points[
-                    ::max(1, len(probe_points) // 2048)]
-                seen = _gmt.inside_solid(probe_body, sample)
-                if seen.any() and not seen.all():
-                    return _implicit_combine(here, there, operation)
-
-            # One full scan usually settles it: two closed surfaces that
-            # cross put vertices of *each* on both sides of the other, so
-            # the smaller vertex set decides crossing for both, and
-            # disjoint bodies with overlapping boxes -- interleaved rock
-            # lobes -- pay one scan instead of two. The second scan is
-            # owed in two cases only: the second body could still lie
-            # wholly inside the first (its bounding box says so for free),
-            # or the first came back wholly inside -- nesting is exactly
-            # where a vertex the probes and the first scan never see could
-            # hide a crossing, and it is rare enough to afford the check
-            # the old code always paid.
-            flipped = len(there_points) < len(here_points)
-            if flipped:
-                first = _gmt.inside_solid(here_poly, there_points)
-            else:
-                first = _gmt.inside_solid(there_poly, here_points)
-            if first.any() and not first.all():
-                return _implicit_combine(here, there, operation)
-            first_inside = bool(first.all())
-
-            second_inside = False
-            inner, outer = ((here, there) if flipped else (there, here))
-            enclosable = bool(
-                _np.all(_np.ravel(inner.bounding_box.min)
-                        >= _np.ravel(outer.bounding_box.min))
-                and _np.all(_np.ravel(inner.bounding_box.max)
-                            <= _np.ravel(outer.bounding_box.max)))
-            if first_inside or enclosable:
-                if flipped:
-                    second = _gmt.inside_solid(there_poly, here_points)
-                else:
-                    second = _gmt.inside_solid(here_poly, there_points)
-                if second.any() and not second.all():
-                    return _implicit_combine(here, there, operation)
-                second_inside = bool(second.all())
-
-            if flipped:
-                mine_inside, theirs_inside = second_inside, first_inside
-            else:
-                mine_inside, theirs_inside = first_inside, second_inside
-
-        if operation == "union":
-            if mine_inside:
-                return there
-            if theirs_inside or there.n_data == 0:
-                return here
-            if here.n_data == 0:
-                return there
-            return _joined([here, there])
-
-        if operation == "intersection":
-            if mine_inside:
-                return here
-            if theirs_inside:
-                return there
-            return _empty_solid()
-
-        if mine_inside:
-            return _empty_solid()
-        if theirs_inside:
-            # a body with a cavity: the inner surface turned inwards, so the
-            # volumes subtract and a location in the hollow reads as outside
-            return _joined([here, there], reverse=[False, True])
-        return here
-
+        shift = _local_frame(self, other)
+        first, second = _to_manifold(self, shift), _to_manifold(other, shift)
+        answer = {"union": lambda: first + second,
+                  "intersection": lambda: first ^ second,
+                  "difference": lambda: first - second}[operation]()
+        return _from_manifold(answer, shift)
 
     def _cut_by_sheet(self, sheet, operation):
         """This body divided by a sheet, keeping what lies under or over it.
@@ -1130,21 +1082,14 @@ def _rebuilt_as(cls, mesh):
                    _gmt.vertex_normals(points, triangles))
 
 
-# the cell budget of the implicit fallback: the step is chosen so the grid
-# stays near this many cells whatever the bodies span
-_IMPLICIT_CELLS = 2_000_000
-
-# how many fine steps a coarse cell spans in the Lipschitz pre-pass
-_IMPLICIT_COARSE = 4
-
-
 # One distance locator per worker process, built by the pool initializer and
 # read by every chunk that worker answers. Module-level because a pool can
 # only call what it can import.
 _QUERY_STATE = {}
 
 # Below this many points the pool costs more than it saves: forking and
-# feeding ~16 workers is ~0.2 s, and the serial rate is ~25 us a point -- at 20k points the pool already returns twice as fast as the serial call, which is what pools the boolean's coarse passes (~31k points on a 2M-cell grid) and not the small probes.
+# feeding ~16 workers is ~0.2 s, and the serial rate is ~25 us a point, so
+# at 20k points the pool already returns twice as fast as the serial call.
 _PARALLEL_QUERIES = 20_000
 
 
@@ -1164,11 +1109,12 @@ def _distance_chunk(chunk):
 class _DistanceQueries:
     """Signed distances to one surface, over several queries.
 
-    The keep-the-pool sibling of `_signed_distance`, which spins its
-    workers up per call: `simplify` measures its deviations three to six
-    times against the same original, so the fork and the per-worker
-    locator builds are paid once here and every measurement after the
-    first rides them. Probing 260k points against a 522k-triangle shell
+    `simplify` measures its deviations three to six times against the same
+    original, so the fork and the per-worker locator builds are paid once
+    here and every measurement after the first rides them. **Processes,
+    not threads, and it is not a style choice**: VTK holds the GIL through
+    `FunctionValue`, so eight threads measured 1.2x where sixteen forked
+    processes measured 7.9x, bit-identical. Probing 260k points against a 522k-triangle shell
     measured 1.6 s a call serial; the pool answers the lot of a
     `simplify` in about that. Serial wherever a pool cannot or should not
     come up -- `parallel=False`, no `fork`, one CPU, or the fork failing
@@ -1186,9 +1132,13 @@ class _DistanceQueries:
             return
         try:
             with _warnings.catch_warnings():
-                # the same suppression as `_signed_distance`, for the
-                # same measured reason: the workers touch VTK and numpy
-                # alone, never TF, never the GPU
+                # Python 3.12 warns that forking a multi-threaded process
+                # can deadlock, and TensorFlow's thread pools are always up
+                # by the time a mesh is simplified. The workers touch VTK
+                # and numpy alone -- never the GPU, never TF -- and the
+                # combination was measured stable and bit-identical with
+                # CUDA live in the parent; spawned workers would import the
+                # package, TensorFlow and all, per pool
                 _warnings.filterwarnings(
                     "ignore", message=".*fork\\(\\)",
                     category=DeprecationWarning)
@@ -1223,224 +1173,136 @@ class _DistanceQueries:
         return _np.asarray(_pv.convert_array(out), dtype=float)
 
 
-def _signed_distance(body, points):
-    """Each point's signed distance to the body, negative inside.
-
-    **The sign is the pseudonormal's, imperfect and measured to be the
-    best available.** On a real 2.5M-triangle ore envelope carrying
-    degenerate faces, `vtkImplicitPolyDataDistance` signed a small cone of
-    points forty metres outside the body as -43 — and replacing its sign
-    with `vtkSelectEnclosedPoints`' ray casting was built, measured and
-    reverted, because a ray through a degenerate patch corrupts the
-    crossing parity of **every point along its shadow**: the same 58
-    probes stayed wrong and whole columns of good ones flipped, speckling
-    the fields and quintupling the output. A pseudonormal error is local
-    to the defect; a parity error is a column. What actually contains the
-    damage is the region clamp in `_implicit_combine`, which no sign
-    error can cross.
-
-    A large query is spread over forked worker processes, each holding its
-    own locator; the answers are the same filter either way, and were
-    measured bit-identical. **Processes, not threads, and it is not a
-    style choice**: VTK holds the GIL through `FunctionValue`, so eight
-    threads measured 1.2x where sixteen forked processes measured 7.9x.
-    Everything else takes the serial path: small queries, where the pool
-    costs more than it saves, platforms without `fork` (Windows outside
-    WSL — a spawned worker would re-import the package, TensorFlow and
-    all), and any pool that fails to come up.
-    """
-    points = _np.ascontiguousarray(points)
-    if (len(points) >= _PARALLEL_QUERIES
-            and "fork" in _mp.get_all_start_methods()):
-        workers = max(1, min(16, _os.cpu_count() or 1))
-        if workers > 1:
-            polydata = body._polydata()
-            try:
-                with _warnings.catch_warnings():
-                    # Python 3.12 warns that forking a multi-threaded
-                    # process can deadlock, and TensorFlow's thread pools
-                    # are always up by the time a mesh is cut. The workers
-                    # here touch VTK and numpy alone -- never the GPU,
-                    # never TF -- and the combination was measured stable
-                    # and bit-identical with CUDA live in the parent.
-                    # Suppressed rather than designed around because every
-                    # alternative loses: threads sit behind VTK's GIL hold,
-                    # and spawn or forkserver workers would import the
-                    # package, TensorFlow and all, per pool.
-                    _warnings.filterwarnings(
-                        "ignore", message=".*fork\\(\\)",
-                        category=DeprecationWarning)
-                    with _mp.get_context("fork").Pool(
-                            workers, initializer=_distance_worker,
-                            initargs=(
-                                _np.asarray(polydata.points, dtype=float),
-                                _np.asarray(polydata.faces))) as pool:
-                        return _np.concatenate(pool.map(
-                            _distance_chunk,
-                            _np.array_split(points, 2 * workers)))
-            except OSError:
-                # no processes to be had; the serial path always is
-                pass
-    cloud = _pv.PolyData(points)
-    return _np.asarray(cloud.compute_implicit_distance(
-        body._polydata())["implicit_distance"], dtype=float)
-
-
-def _banded_distance(body, points, shape, low, step, relevant):
-    """The signed field, exact wherever `relevant` allows a zero crossing.
-
-    A distance field is 1-Lipschitz, so a coarse sample bounds every fine
-    value near it: where the nearest coarse value stands further from zero
-    than the anchor distance plus a cell's diagonal, the fine sign is
-    settled without a query. The exact queries collapse to a band around
-    the body's surface -- measured at 29% of the lattice on a contoured
-    shell, for 12x the speed at zero error, since inside the band the
-    values are the same queries they always were. `relevant` narrows the
-    band further to where the *combined* field can cross at all, which is
-    what spares a vast terrain's field being resolved far from a small
-    body.
-    """
-    k = _IMPLICIT_COARSE
-    axes = [low[i] + k * step * _np.arange(shape[i] // k + 2)
-            for i in range(3)]
-    gz, gy, gx = _np.meshgrid(axes[2], axes[1], axes[0], indexing="ij")
-    coarse = _signed_distance(body, _np.column_stack(
-        [gx.ravel(), gy.ravel(), gz.ravel()]))
-
-    index = [_np.clip(_np.round((points[:, i] - low[i]) / (k * step))
-                      .astype(int), 0, len(axes[i]) - 1) for i in range(3)]
-    field = coarse.reshape(len(axes[2]), len(axes[1]), len(axes[0]))[
-        index[2], index[1], index[0]]
-
-    reach = _implicit_reach(step)
-    band = (_np.abs(field) <= reach) & relevant
-    if band.any():
-        field = field.copy()
-        field[band] = _signed_distance(body, points[band])
-    return field
-
-
-def _implicit_reach(step):
-    """How far from zero an anchored coarse value may sit and still leave a
-    fine crossing possible: the anchor offset plus two cell diagonals."""
-    return (_IMPLICIT_COARSE / 2.0 + 2.0) * _np.sqrt(3.0) * step
-
-
-def _implicit_combine(here, there, operation):
-    """The boolean as signed fields on a grid, contoured back to a body.
-
-    The engine of last resort, for the meshes VTK's exact filter fails on
-    (measured on contour-derived shells: whole patches dropped or
-    fabricated, unrepairable after the fact). Each body becomes its signed
-    distance sampled on a grid over the region the answer can occupy;
-    `max` of the fields is the intersection, `min` the union, `max(a, -b)`
-    the difference; the zero surface of the combined field is the answer.
-    There is no seam geometry to walk, which is what makes it robust, and
-    the price is honest: the surface is exact to the grid's step rather
-    than to the inputs' triangles.
-
-    The fields are evaluated in a band (see `_banded_distance`), and each
-    body's band is masked by the other's coarse field, so that neither is
-    resolved where the other has already decided the outcome -- a small
-    shell against a whole topography queries the topography around the
-    shell alone.
-    """
-    # imported late: the grids subclass the containers meshes sit beside
-    from geoml.data import Grid3D
-
-    a_low, a_high = (_np.ravel(here.bounding_box.min),
-                     _np.ravel(here.bounding_box.max))
-    b_low, b_high = (_np.ravel(there.bounding_box.min),
-                     _np.ravel(there.bounding_box.max))
-    if operation == "intersection":
-        low, high = _np.maximum(a_low, b_low), _np.minimum(a_high, b_high)
-        if _np.any(high <= low):
-            return _empty_solid()
-    elif operation == "union":
-        low, high = _np.minimum(a_low, b_low), _np.maximum(a_high, b_high)
-    else:
-        low, high = a_low, a_high
-
-    span = high - low
-    step = float((span.prod() / _IMPLICIT_CELLS) ** (1.0 / 3.0))
-    _warnings.warn(
-        "the %s of these meshes crosses, so it is worked out on an implicit "
-        "grid and is exact to its step of %.3g" % (operation, step))
-
-    # the region the answer can occupy, kept before the margin is added:
-    # the combined field is clamped against this box below
-    region_low, region_high = low.copy(), high.copy()
-
-    # two cells of margin, so the zero surface closes inside the grid
-    low = low - 2 * step
-    n = _np.ceil((span + 4 * step) / step).astype(int) + 1
-    grid = Grid3D(start=low, n=n, step=[step, step, step])
-    points = _np.asarray(grid.coordinates, dtype=float)
-
-    # each body is only exact where the other leaves the outcome open; the
-    # first pass has no other field to ask, so it answers everywhere
-    reach = _implicit_reach(step)
-    everywhere = _np.ones(len(points), dtype=bool)
-    field_a = _banded_distance(here, points, n, low, step, everywhere)
-    if operation == "intersection":
-        field_b = _banded_distance(there, points, n, low, step,
-                                   field_a <= reach)
-        field = _np.maximum(field_a, field_b)
-    elif operation == "union":
-        field_b = _banded_distance(there, points, n, low, step,
-                                   field_a >= -reach)
-        field = _np.minimum(field_a, field_b)
-    else:
-        field_b = _banded_distance(there, points, n, low, step,
-                                   field_a <= reach)
-        field = _np.maximum(field_a, -field_b)
-
-    # The answer cannot exist outside the region box, so the box's own
-    # signed distance caps the field. This is what seals the surface at
-    # the region boundary *whatever the locators do inside*: their sign is
-    # a pseudonormal's and was measured wrong forty metres outside a real
-    # ore envelope, which carried the zero surface out through the grid
-    # and handed back an open sheet for the intersection of two closed
-    # bodies. The cap stands 1.5 cells out -- far enough that a body's own
-    # wall on the region boundary and the cap fall in different cells
-    # (half a step apart they pinch, marching cubes having one crossing
-    # per edge to give), near enough that the two-cell grid margin still
-    # holds a node beyond the cap for its surface to close through.
-    gap = _np.maximum((region_low - 1.5 * step) - points,
-                      points - (region_high + 1.5 * step))
-    clamp = (_np.linalg.norm(_np.maximum(gap, 0.0), axis=1)
-             + _np.minimum(gap.max(axis=1), 0.0))
-    field = _np.maximum(field, clamp)
-
-    grid.add_continuous_variable("distance", field)
-    if _np.all(field > 0):
-        return _empty_solid()
-    # the variable was just added as a continuous one, which is what carries
-    # the `measurements` this contours
-    distance = grid.variables["distance"]
-    assert isinstance(distance, ContinuousVariable)
-    body = distance.measurements.get_contour(0.0)
-    if not isinstance(body, Solid3D):
-        # Marching cubes pinches wherever two zero surfaces run closer
-        # than a cell, and real bodies invite that: their flat walls sit
-        # on the region boundary the cap runs along. The residue is
-        # pinholes -- measured 6 open edges of 350k triangles on a real
-        # pair -- and a pinhole is honestly repairable at the engine's own
-        # resolution, which is what the step is.
-        healed = body.heal(hole_size=2 * step)
-        if isinstance(healed, Solid3D):
-            return healed
-    return body
-
-
 def _local_frame(mine, theirs):
-    """The corner both meshes are translated by before VTK sees them.
+    """The corner both meshes are translated by before VTK or Manifold sees
+    them.
 
     Rounded so the shift itself costs no precision on the way back.
     """
     corner = _np.minimum(_np.ravel(mine.bounding_box.min),
                          _np.ravel(theirs.bounding_box.min))
     return _np.round(corner)
+
+
+def _to_manifold(solid, shift):
+    """A body as Manifold takes it: welded, moved by `shift`, in double
+    precision.
+
+    A body Manifold will not take is refused out loud. Its failures come
+    back as an empty answer carrying a status, and an empty answer reads
+    exactly like two bodies that never meet -- the trap VTK's filter set.
+    """
+    points, triangles = _gmt.weld(
+        _np.asarray(solid.coordinates, dtype=float) - shift, solid.triangles)
+    body = _manifold.Manifold(_manifold.Mesh64(
+        vert_properties=_np.ascontiguousarray(points),
+        tri_verts=_np.ascontiguousarray(triangles, dtype=_np.uint64)))
+    if body.status() != _manifold.Error.NoError:
+        raise InconsistentMeshError(
+            "Manifold cannot take this body (%s), though it closes and its "
+            "triangles agree which way is out" % body.status().name)
+    return body
+
+
+def _from_manifold(body, shift):
+    """Manifold's answer back as a mesh, moved back by `shift`."""
+    if body.status() != _manifold.Error.NoError:
+        raise InconsistentMeshError(
+            "Manifold could not work this boolean out (%s)"
+            % body.status().name)
+    if body.is_empty():
+        return _empty_solid()
+    mesh = body.to_mesh64()
+    points = _np.asarray(mesh.vert_properties, dtype=float)[:, :3]
+    triangles = _np.asarray(mesh.tri_verts, dtype=_np.int64).reshape(-1, 3)
+    answer = mesh3d(points + shift, triangles,
+                    _gmt.vertex_normals(points, triangles))
+    if type(answer) is not Mesh3D:
+        return answer
+    moved = _separated(points, triangles)
+    if moved is points:
+        return answer
+    return mesh3d(moved + shift, triangles,
+                  _gmt.vertex_normals(moved, triangles))
+
+
+# How far apart the two copies of a vertex Manifold keeps twice are moved,
+# each into its own side, in coordinate units: past the six decimals every
+# welding here rounds to, and far below anything a model resolves.
+_TOUCH_SEPARATION = 1e-5
+
+
+def _separated(points, triangles):
+    """Manifold's vertices, the copies of any it keeps twice moved apart.
+
+    An answer that touches itself -- a difference whose pieces meet along
+    an edge, two shells closed against the same face of a model and
+    subtracted -- is a closed, consistent manifold in Manifold's own
+    numbering, the touch held as separate vertices at one position. geoML
+    measures closedness and winding by position, welding coincident
+    vertices first, and welded the touch is an edge four triangles share:
+    a body read as a `Mesh3D` with no volume (measured on the Assen FeO_total
+    shells, every band between two cut-offs). Moved a hundred-thousandth
+    of a unit into their own side, along the normal of the triangles each
+    belongs to, the copies stay apart through every welding. Returns
+    `points` itself where nothing is kept twice.
+    """
+    rounded = _np.round(points, 6)
+    _, inverse, counts = _np.unique(rounded, axis=0, return_inverse=True,
+                                    return_counts=True)
+    twice = counts[_np.ravel(inverse)] > 1
+    if not twice.any():
+        return points
+    moved = _np.array(points, dtype=float)
+    moved[twice] -= _TOUCH_SEPARATION * _gmt.vertex_normals(
+        points, triangles)[twice]
+    return moved
+
+
+def _clip_to_box(points, triangles, low, high):
+    """A closed triangulation cut to the box from `low` to `high` by
+    Manifold, so the box's faces, edges and corners come out exact.
+
+    Built for a contour closed against a block model: the field is carried
+    past the model's box by mirrored ghosts and closed well outside it, and
+    this cut is where the cap comes from. Returns the arrays of what lies
+    inside the box, or None where Manifold will not take the triangulation
+    as a body even with its touching edges split.
+    """
+    shift = _np.round(_np.asarray(low, dtype=float))
+    points, triangles = _gmt.drop_degenerate_faces(
+        _np.asarray(points, dtype=float) - shift, triangles)
+    points, triangles = _gmt.weld(points, triangles)
+    # a contour faces up its field's gradient, so a region kept below the
+    # level comes wound inside out, which Manifold would take as said
+    if _gmt.signed_volume(points, triangles) < 0:
+        triangles = triangles[:, ::-1]
+
+    def body_of(vertices, faces):
+        body = _manifold.Manifold(_manifold.Mesh64(
+            vert_properties=_np.ascontiguousarray(vertices),
+            tri_verts=_np.ascontiguousarray(faces, dtype=_np.uint64)))
+        return body if body.status() == _manifold.Error.NoError else None
+
+    body = body_of(points, triangles)
+    if body is None:
+        split, parted = _gmt.split_touching_edges(points, triangles)
+        if split is points:
+            return None
+        body = body_of(_separated(split, parted), parted)
+        if body is None:
+            return None
+    extent = _np.asarray(high, dtype=float) - _np.asarray(low, dtype=float)
+    box = _manifold.Manifold.cube(extent).translate(
+        _np.asarray(low, dtype=float) - shift)
+    answer = body ^ box
+    if answer.status() != _manifold.Error.NoError:
+        return None
+    if answer.is_empty():
+        return _np.zeros((0, 3)), _np.zeros((0, 3), dtype=_np.int64)
+    mesh = answer.to_mesh64()
+    return (_np.asarray(mesh.vert_properties, dtype=float)[:, :3] + shift,
+            _np.asarray(mesh.tri_verts, dtype=_np.int64).reshape(-1, 3))
 
 
 def _reaches_across(sheet, box):

@@ -64,7 +64,7 @@ explore = geoml.plots.Explorer(jura_validation, continuous="Elements",
 figure = explore.accuracy()
 figure.savefig("figures/14-accuracy.png", dpi=150, bbox_inches="tight")
 
-figure = explore.prediction_scatter()
+figure = explore.prediction_scatter(trim=[0, 0.95])
 figure.savefig("figures/14-scatter.png", dpi=150, bbox_inches="tight")
 ```
 
@@ -76,6 +76,13 @@ The accuracy plot is the geostatistician's calibration check, and chapter
 13 computes its number as `goodness`. The scatter is the figure everyone
 asks for first and over-reads: its spread mixes model error with assay
 noise, which is exactly why the accuracy plot sits beside it.
+
+`trim=[0, 0.95]` ends each panel's window at the 95th percentile, so the
+few high assays beyond it no longer set the limits and press the rest of
+the cloud into a corner. Each panel counts what it left out, four or five
+of the hundred here. They are the high grades, where a smoothing estimator
+falls furthest below the truth, so the scatter without `trim` is still the
+one that shows that bias.
 
 ## 14.2 The dashboard
 

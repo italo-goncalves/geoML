@@ -48,7 +48,7 @@ k-means pre-clustering is the only draw). Coordinates only — the common case;
 a feature-space variant would be a different distance matrix into the same
 builder.
 
-## The driver: `models.cross_validate(model, folds, refit, iterations)`
+## The driver: `models.cross_validate(model, folds, refit, method)`
 
 The VGP has no closed-form LOO (Rasmussen & Williams §5.4.2 is for the
 closed-form GP), and retraining from scratch per fold is what the driver
@@ -75,6 +75,59 @@ The conceded leakage, stated in the docstring: hyperparameters and warping
 saw all the data — the same concession kriging makes when it keeps the
 variogram. `refit="all"` trades the other way (warm-start everything, freeze
 nothing new). Leave-one-hole-out is `folds` pointed at a hole-id column.
+
+**The refit can be minibatched.** `method="svi"` sends each fold to
+`train_svi` instead of `train_full`, in batches of
+`options.training_batch_size` — which the fold copy already carries, the
+options riding in the saved model, so nothing new is passed in. It matters
+because freezing parameters does not make an iteration cheaper: a full-batch
+refit costs the whole reduced data set per step whatever is on the tape, so
+a model too large to train full-batch is too large to cross-validate that
+way. The passes are counted by a **separate** argument, `epochs`, because an
+epoch is one visit to the data in batches and therefore many gradient steps:
+a number that suits `iterations` is wrong for `epochs`, and one argument
+serving both would silently be read the wrong way. Two things follow the
+choice. `options.training_tolerance`, if set, judges once an epoch on the
+mean bound over its batches rather than once an iteration, so a short refit
+may never give it enough to fire and the cap does the stopping. And
+`train_svi` does not index the variables' `training_input` per batch (a
+commented-out attempt sits beside it), which costs nothing while the only
+payload is `RockTypeVariable`'s `is_boundary` — accepted by both categorical
+likelihoods and read by neither — and would need fixing first the day a
+censoring mask or a per-datum support rides that channel.
+
+**The scoring is what costs memory, not the refit.** Each fold is scored
+through `predict_measurements`, which returns its whole answer as one array
+per variable — `n_sim * n_nodes * 8` bytes a row for each column, 5 KB a row
+at the defaults, and **twice that at the peak**: a 92 MB answer was measured
+to cost 182 MB resident, the concatenate holding the parts and the assembled
+whole at once. Nothing checked that until 2026-09-04, when a
+notebook running a cross-validation had its kernel killed by the Linux OOM
+killer: 63 GB resident against WSL's 62 GB, host RAM, the GPU never
+involved. That call now refuses past `models.MEASUREMENT_LIMIT` (2 GB)
+before doing any work.
+
+**So the driver stopped materializing them.** Every statistic taken of these
+samples reduces the sample axis one row at a time — `coverage` builds a
+central interval per location and counts the fraction inside, CRPS is per
+row, so are the point errors and the PIT — so nothing needs two rows'
+samples at once. `VGPNetwork.measurement_batches` yields `(rows, samples)`
+per batch and the fold loop folds each batch into **sufficient statistics**:
+counts and sums, never a mean of means, since batches differ in size and a
+short one must not weigh like a long one. Those are the same statistics the
+pooled row already used, so one accumulator now serves both, a fold read in
+batches and a pooling read fold by fold being the same arithmetic. Measured
+on 18 800 rows whose samples come to 92 MB: **+75 MB peak materialized
+against +0 MB streamed**, the same rmse to six decimals, slightly faster.
+The two tests that make it safe are the equivalence ones — the batches
+concatenate to exactly what the whole call returns, and the scores agree to
+1e-12 whether a fold arrives in one piece or in eighty.
+
+One trap that test found: two consecutive `cross_validate` runs are not
+comparable at all unless the seed is reset between them, because
+`_fresh_variational_state` draws `alpha_white_` from the package RNG, so the
+second run's fold models start somewhere else. Nothing to do with batching —
+but it is what a naive equivalence test measures first.
 
 ### E1 — the measurement that settled the refit question
 
@@ -113,6 +166,109 @@ Three findings:
    re-initializes instead — fresh init is structurally ignorant, and the
    question dissolves.
 
+### E2 — the leaf-only refit, measured (2026-09-09)
+
+The author's proposal: the interior encodes the spatial pattern and the
+conditioning to data happens at the leaves, so re-initialize and refit only
+the terminal GP nodes (`refit="leaves"`, `_terminal_gp_nodes`: from each leaf
+down through operation nodes to the first GP) and keep the interior as all
+the data taught it. Measured on chapter 16's Jura tree — a two-column
+displacement GP walked, the rock GP on the walked coordinates, the metals as
+their own GP plus a `Linear` trend read from the rock GP; the interior is the
+displacement field — five spatial folds (`spatial_k_fold` against the
+held-out set), 60 inducing points, three seeds, the same inducing set in
+every arm (`docs/benchmarks/leaf_refit.py`). Scores are pooled out-of-fold
+over the seven metals, rmse and CRPS over each metal's sd averaged, plus the
+rock's balanced accuracy from the OOF container. Times are from seed 0's
+solo run only; the other runs shared the GPU five ways.
+
+| arm | seeds | rmse/sd | crps/sd | goodness | rock accuracy | seed-0 time |
+|---|---|---|---|---|---|---|
+| in-sample-300 | 1 | 0.699 | 0.371 | 0.890 | 0.971 | — |
+| fresh-all-50 | 3 | 0.927 | 0.496 | 0.911 | 0.815 | 41 s |
+| fresh-leaves-50 | 3 | 0.856 | 0.452 | 0.930 | 0.919 | 31 s |
+| fresh-all-200 | 3 | 0.921 | 0.493 | 0.930 | 0.803 | 84 s |
+| fresh-leaves-200 | 3 | 0.798 | 0.420 | 0.929 | 0.909 | 57 s |
+| warm-200 | 3 | 0.918 | 0.487 | 0.903 | 0.864 | 107 s |
+| scratch-400 | 3 | 0.991 | 0.535 | 0.898 | 0.825 | 212 s |
+| scratch-300 | 3 | 0.970 | 0.520 | 0.923 | 0.825 | — |
+| scratch-600 | 3 | 1.026 | 0.559 | 0.856 | 0.828 | — |
+| scratch-leaves-200 | 3 | 1.001 | 0.543 | 0.868 | 0.827 | — |
+
+Two protocols. **Reuse** is the driver's: one model trained 300 iterations
+on all the rows, then `refit="variational"` (fresh-all), `refit="leaves"`
+(fresh-leaves), `refit="all"` (warm, E1's leak reference) and a fresh model
+per fold trained 400 iterations (scratch, the gold). **Honest** builds a
+fresh model per fold and applies the *same* leaf-only refit to it — an
+interior that never saw the held-out rows — after 600 iterations
+(scratch-leaves), with the fold model also scored at 300 and 600.
+
+1. **From the all-data interior the leaf-only refit scores 20% past the
+   gold** (rmse/sd 0.80 against scratch's 0.99) and past the warm start
+   (0.92), which E1 had already called residual memory; fresh-all sits at
+   0.92. The rock's out-of-fold accuracy under it is 0.91, against 0.83 for
+   scratch and 0.97 in-sample: the held-out rows are being predicted about
+   as well as the training rows.
+2. **From a fold-trained interior the same refit scores like scratch**
+   (1.00 against 0.97 at 300 and 1.03 at 600 iterations; rock 0.83). The
+   protocol is not better; the interior was remembering.
+3. So the interior *is* conditioned on the data, and with far more capacity
+   than a variogram: the displacement field bends space so the contacts
+   the held-out holes logged become sharp, and a rock GP re-initialized on
+   the training rows alone finds them there. Freezing that field keeps
+   its memory intact, which is why the leak is *larger* than the warm
+   start's — warm training lets the field drift toward the reduced data's
+   optimum.
+4. A side reading: the fresh fold models score worse at 600 iterations than
+   at 300 (1.03 against 0.97) while their bound keeps rising, the mild
+   overfitting past the data count already on record.
+
+`refit="leaves"` stays in the driver the way `refit="all"` does — as a
+diagnostic of how much the interior remembers, documented as such — and is
+not for scoring. The closed-form leave-out of a terminal leaf given the
+interior (candidate (c) of the cheaper-cross-validation item) inherits the
+same verdict, being this refit taken to zero iterations.
+
+### The fold model is one model (2026-09-08)
+
+The driver used to rebuild a fold model from the file for every fold. On
+the Tom v6 model (20k rows, 2000 inducing points in ten experts, a
+`GPWalk`) a five-fold SVI run took the WSL kernel down in its fifth fold,
+on a machine WSL sees 62 GB of. Measured on a 5000-row copy of that model
+(`/c/Users/Public/cv_leak.py` and the probes beside it):
+
+| what | growth |
+|---|---|
+| per fold, `jit_predict=True` (the notebook's setting) | +2.8 GB |
+| per fold, `jit_predict=False` | +2.6 GB |
+| after the run, `gc.collect()` | 0 returned |
+| a model built, trained one epoch and dropped, CPU or GPU | +1.4-1.5 GB retained |
+| a second `train_svi` call on the same model | +200 MB retained |
+| a model built, *predicted* and dropped | 0 retained |
+
+The retention is TensorFlow's, and it is the training step's: a traced
+function that takes gradients through a nested traced call leaves its
+concrete functions, their forward/backward rewrites and the optimizer's
+`tf.cond` branch graphs alive in reference cycles the garbage collector
+cannot break (a plain TensorFlow reproduction, no geoML, leaks the same
+way: 244 graphs and 750 MB a model). Dismantling those graphs by hand,
+emptying the eager context's function library, clearing its kernel cache
+and trimming the heap together halve the growth and cap none of it -- 0.6
+GB a model stays in the C++ runtime, in the glibc heap, and no public
+knob reaches it. So the fix is not to build a model per fold. One fold
+model is rebuilt from the file around the first fold's rows; every later
+fold swaps its rows in (`_set_data`: the container, the stacked
+measurements and their mask, and the count the minibatch bound scales by,
+which became a `tf.Variable` so the trace reads the new value), restores
+the file's parameters (`update_parameters` from a snapshot taken at the
+load) and zeroes the optimizer's moment estimates and step count in place
+(`_reset_optimizer`, so the traced step that captured the optimizer stays
+valid). `_training_step` is cached on the model and rebuilt only when the
+variables or the optimizer object change, with `reduce_retracing` so
+differing row counts share one relaxed trace. The same five-fold run:
+3.2 GB in total where it was 13.4, and 121 s where it was 463, the
+rebuild, the retrace and the XLA compile of prediction paid once.
+
 ## The variogram: `prepare.variogram`, drawn by both backends
 
 The experimental semivariogram of the measurements, with one thin curve per
@@ -133,6 +289,157 @@ constant to add and the alternative is a draw, which would put a seed inside
 a metric. It is therefore an estimate that never reaches zero, to be read as
 a ranking between models on the same data; the figure is what to reach for
 when the size of the disagreement matters.
+
+### The noise lift is exact, measured (2026-09-09)
+
+The question: the fan is the stored realizations of the *ground* (each one
+`E[g(z + eps) | z]`, the noise integrated out through `integrated_backward`)
+raised by the pair-averaged `(v_i + v_j) / 2` from the `noise_variance`
+column; no noise draw enters. Is that lift enough to put the fan on the
+measurements' footing, or does a nonlinear warping leave something out?
+Measured on Walker (Gaussian likelihood, `ZScore -> Spline`, 100 inducing
+points) and on Jura's seven metals (`MultivariateGaussian` and the author's
+`EpsilonInsensitive`, both under `ZScore -> Spline`, 60 inducing points),
+300 iterations, 64 realizations at the data locations, fifteen declustered
+lags; every curve on the same pairs and weights (the copies' data curves
+asserted equal to 1e-12). The reference is an honest Monte Carlo
+measurement fan: noise drawn independently per location, realization and
+column from the fitted likelihood's own quantile in warped space and
+back-transformed. Three measurers, each audited and re-run by a skeptic at
+seed 4321 with other sample sizes (`/c/Users/Public/vario_*.py`,
+`verify_*.py`).
+
+| case | lifted fan / honest measurement fan, per lag | paired z |
+|---|---|---|
+| Walker, Gaussian, ZScore->Spline | 0.993 - 1.002 (re-run 0.9985 - 1.0022) | within 1.33 (re-run 0.57) |
+| Jura Zn, MultivariateGaussian | 0.997 - 1.006; all seven metals 0.993 - 1.007 | within 2.0 |
+| Jura Zn, EpsilonInsensitive | 0.973 - 1.017; all metals 0.95 - 1.03 | within 1.7 |
+
+So the lift is exactly what independent measurement noise adds, at every
+lag, whatever the warping's bend, as the algebra says: a measurement is the
+ground value plus a zero-mean error independent between locations, the
+cross term averages away, and the pair's excess is half the two variances.
+The 8-node Gauss-Hermite second moment the lift reads agrees with a
+200-node reference to 0.1-0.3% in the declustered mean. The correction is
+not the reason a fan and a data curve disagree.
+
+**Nor is the conditioning.** In-sample the realizations are conditioned on
+the very measurements whose errors the lift adds back, so a double count
+was the next suspect. The same fans on `cross_validate`'s out-of-fold
+container (`/c/Users/Public/vario_oof.py`; the data curve is the same, only
+the realizations change) barely move:
+
+| lifted fan / data curve, short / mid / long lags | in-sample | out-of-fold |
+|---|---|---|
+| Walker V | 1.26 / 1.30 / 1.28 | 1.28 / 1.33 / 1.30 |
+| Jura Zn | 0.86 / 0.97 / 1.17 | 0.90 / 1.07 / 1.24 |
+| Jura Pb | 0.49 / 0.69 / 0.72 | 0.51 / 0.71 / 0.73 |
+| Jura Cd | 1.03 / 1.12 / 1.27 | 1.05 / 1.17 / 1.30 |
+
+What the gap measures is the model's own total variance. On Walker the
+fitted noise is 0.88 of the declustered sill and the ground's long-lag
+variance another 0.48, so the model scatters a fresh measurement 1.36
+times what the data do, in-sample and out-of-fold alike; Jura splits by
+metal, lead at two thirds of the data, chromium and nickel a tenth over,
+cadmium on the mark. That is the figure doing its job — the same
+over- or under-dispersion `spread_check` and the coverage scores read
+marginally — and the honest place to read it stays the out-of-fold
+container.
+
+**Found on the way, about `predict_measurements`, not about the figure.**
+(1) `_measurement_values` returns the noise node as `(n_nodes, size, 1)`,
+so within one column every location carries the *same* noise value in
+warped space: the columns are right marginally (what the accuracy plot,
+the PITs, CRPS and coverage read) and wrong jointly — a variogram of them
+rides the raw ground fan (the shift cancels in every pair), and so would a
+regional sum or mean of measurements. (2) The equal-share midpoint nodes
+carry less than the noise variance: 0.98 of it for a Gaussian at 64 nodes,
+but for `EpsilonInsensitive`'s exponential tails only 35-47% at the
+default 32 nodes on lead, copper and chromium, so those samples' spread
+understates the model's own noise by half or more. Both were cured at
+once the same day by rotating the strata — a uniform per location,
+component and realization from the model's seed, modulo one — which keeps
+every moment unbiased, reaches the tails with their probability, and
+decorrelates the locations: measured after, the samples' warped-space
+variance at 0.985-1.014 of the law's on every metal and on Walker, and a
+variogram of the samples on the lifted fan (Zn 0.97-1.00 by lag, Walker
+0.999-1.001; `/c/Users/Public/meas_gate.py`). Two footnotes: the 35-47%
+is a data-unit ratio against the `noise_variance` column through Jura's
+spline — in warped space the midpoints carry 0.89 of an exponential-tailed
+law's variance and 0.96 of a Gaussian's at 32 nodes; and E1's crps and
+goodness above were produced on the midpoint nodes and would move by a
+few percent at most on a re-run.
+
+### Jura's metals: the likelihood, not the link (2026-09-10)
+
+The figures above showed copper and lead's fans at three times the data
+under the author's epsilon-insensitive likelihood with a `ZScore -> Spline`
+warping. The guide's parametric links were the first recommendation; they
+were measured, and they are not the lever. `docs/benchmarks/jura_noise_footing.py`:
+one `BasicGP` of size 7 on the same 60 k-means inducing points, the same
+seed and the same five spatial folds for every arm, judged on the lifted
+fan against the data curve out of fold (`|log(fan/data)|` averaged over
+lag bands and metals) and on the out-of-fold scores. A first pass at 300
+iterations over nine arms — four links under the epsilon-insensitive
+likelihood, two under the multivariate Gaussian, two under the two-scale
+mixture, a robust ZScore under the epsilon-insensitive — was reviewed by
+three skeptics, who found (a) no arm converged at 300 iterations and the
+Gaussian arms were the furthest from it, (b) a size-7 mixture trains on an
+eight-draw Monte Carlo bound the other arms do not, 57 nats optimistic, and
+loses its edge at 64 draws, and (c) the mechanism claim stronger than
+drafted. The arms that matter were rerun to 1200 iterations:
+
+| arm, 1200 iterations | rmse/sd | crps/sd | goodness | fan/data, mid lags, per metal (Cd Co Cr Cu Ni Pb Zn) |
+|---|---|---|---|---|
+| spline / epsilon-insensitive (the baseline) | 0.939 | 0.484 | 0.864 | 1.40 1.33 2.35 2.18 1.35 2.60 0.92 |
+| spline / multivariate Gaussian | 0.942 | 0.487 | 0.959 | 1.27 0.97 1.30 1.41 1.00 1.20 1.15 |
+| boxcox / multivariate Gaussian | 0.938 | 0.487 | 0.957 | 1.61 0.94 1.24 1.16 0.97 0.73 1.14 |
+| robust spline / mixture, 64 draws | 0.950 | 0.496 | 0.851 | 0.96 0.90 1.01 1.11 0.86 0.90 0.81 |
+
+Seed-to-seed spread on the first pass was 0.001–0.017 on every column, so
+the gaps are real. What the table says:
+
+1. **Under the epsilon-insensitive likelihood no link fixes copper, and
+   trained longer the excess spreads**: at 1200 iterations six of the seven
+   fans sit 1.3–2.6 times the data. The reason is the law's tail, not the
+   fit: `epsilon` trains to zero (a Laplace), the fitted noise width on
+   copper is the same as the Gaussian's in log units (0.457 against
+   0.442), and a Laplace tail pushed back through a log-like link has a
+   second moment with a pole at `2·sigma_log / c_rate = 1` — copper's fit
+   sat at 0.956, where ±5% of `c_rate`, under a nat of bound, moves the
+   data-unit variance between 2.6 and 9.6 times the sill. Under the spline
+   chain the culprit is the steep outer segment on *both* sides (the 0.5%
+   quantile of a copper measurement was −130 ppm). A Gaussian of the same
+   warped variance through the same link gives 0.7–1.6 times the sill.
+   Which metals blow up is predicted by `2·sigma_log/c` alone: lead at
+   0.54 did not under Box-Cox, cadmium at 0.79 did.
+2. **The multivariate Gaussian on the same chain puts every metal within
+   0.97–1.41 of the data** (copper the worst at 1.41), lifts goodness from
+   0.86 to 0.96, and costs nothing in rmse and under 1% in CRPS. On Jura's
+   true held-out set (100 points, both seeds) the picture repeats: the
+   epsilon arm's copper fan 2.4 times the held-out curve against 0.6–0.7
+   for the Gaussian arms, goodness 0.91 against 0.94 for Box-Cox, rmse
+   equal, CRPS within 2%. The bound prefers the epsilon-insensitive by
+   200 nats on the same chain (−5882 against −6085): the Gaussian is chosen
+   *against* the model's own evidence, on out-of-fold calibration, because
+   the excess the bound rewards is tail mass beyond the 99.5% quantile that
+   the in-sample residuals never test.
+3. **The mixture is not recommended.** Its tight fan (mean |log| 0.135)
+   is under-dispersion, not calibration: out of fold it claims 25% less
+   variance than the residuals show, its goodness falls below the
+   baseline's at 64 training draws, and its eight-draw bound is
+   optimistic by 57 nats and seed-sensitive.
+
+**The recommendation for Jura's metals**: keep the chain, change the
+likelihood — `MultivariateGaussian` under `ZScore -> Spline` for the best
+footing, or under `BoxCox -> ZScore` for the best calibration (goodness
+0.957, copper 1.16, cadmium 1.6 over, lead 0.73 under), both trained past
+300 iterations. Two side findings went to the roadmap: the eight-node
+quadrature behind `noise_variance` is ±20% for an exponential-tailed noise
+through a convex link, and a vector variable's components never receive
+their latent moments. Figures:
+`docs/benchmarks/figures/jura_footing_{spline_epsilon,spline_gaussian,boxcox_gaussian,spline-robust_mixture}_it1200_*_oof.png`;
+every arm's numbers in `jura_footing_*.csv` beside them.
 
 ## The calibration: `models.conformalize` / `ConformalCalibration`
 
@@ -172,7 +479,7 @@ they belong:
 
 ## Tests
 
-`geoml/test/test_cross_validation.py` (18): the fold builder (beats random on
+`geoml/test/test_cross_validation.py` (31): the fold builder (beats random on
 W, atoms never split, deterministic, refusals), the driver (every row
 out-of-fold, table pooled, held-out worse than in-sample, original model
 untouched, fresh state ignorant with everything else frozen), and the

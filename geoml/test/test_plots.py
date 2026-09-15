@@ -219,6 +219,78 @@ def test_a_histogram_has_one_panel_per_component(jura):
     assert len(_visible(figure)) == 7
 
 
+def test_every_histogram_panel_is_summed_up(jura):
+    figure = geoml.plots.Explorer(jura, continuous="Elements").histogram()
+    values, measured, _ = prepare.numeric_values(jura.variables["Elements"])
+    for i, panel in enumerate(_visible(figure)):
+        (box,) = panel.texts
+        summary = prepare.summary_statistics(values[measured, i])
+        assert box.get_text() == "\n".join(prepare.statistics_lines(summary))
+
+        # and no bar runs under it
+        corners = box.get_window_extent().get_points()
+        low, high = panel.transData.inverted().transform(corners)[:, 0]
+        bottom = panel.transAxes.inverted().transform(corners)[0, 1]
+        for bar in panel.patches:
+            if bar.get_x() + bar.get_width() > low and bar.get_x() < high:
+                assert bar.get_height() / panel.get_ylim()[1] < bottom
+
+    plain = geoml.plots.Explorer(jura, continuous="Elements").histogram(
+        statistics=False)
+    assert not any(panel.texts for panel in plain.axes)
+
+
+def test_the_summary_statistics_are_the_moments_of_the_values_themselves():
+    from scipy import stats
+    values = np.array([1.0, 2.0, 3.0, 4.0, 10.0, np.nan])
+    finite = values[np.isfinite(values)]
+    summary = prepare.summary_statistics(values)
+
+    assert summary["n"] == 5
+    assert np.isclose(summary["mean"], finite.mean())
+    assert np.isclose(summary["std"], finite.std())
+    assert np.isclose(summary["cv"], finite.std() / finite.mean())
+    # the population form, and the kurtosis in excess of a normal's
+    assert np.isclose(summary["skewness"], stats.skew(finite))
+    assert np.isclose(summary["kurtosis"], stats.kurtosis(finite))
+    assert (summary["min"], summary["median"], summary["max"]) == \
+        (1.0, 3.0, 10.0)
+    assert np.allclose([summary["q1"], summary["q3"]],
+                       np.quantile(finite, [0.25, 0.75]))
+
+
+def test_what_a_column_cannot_say_reads_as_a_dash():
+    constant = prepare.summary_statistics(np.full(4, 2.0))
+    assert np.isnan(constant["skewness"]) and np.isnan(constant["kurtosis"])
+    # a coefficient of variation means nothing about a centred column
+    centred = prepare.summary_statistics(np.array([-1.0, 0.0, 1.0]))
+    assert np.isnan(centred["cv"])
+
+    lines = prepare.statistics_lines(centred)
+    assert len(lines) == 6
+    assert lines[3].split()[:2] == ["CV", "-"]
+    # a ratio that rounds to nothing carries no sign
+    nearly = dict(centred, kurtosis=-0.0004)
+    assert prepare.statistics_lines(nearly)[5].split() == ["kurt", "0.00"]
+    # and the columns line up: every label on the right starts at one place
+    assert len({line.index(label) for line, label in
+                zip(lines, ["min", "Q1", "median", "Q3", "max"])}) == 1
+
+
+def test_the_box_sits_over_the_lower_half_and_the_bars_clear_it():
+    counts, edges = [10, 30, 20, 5, 2, 1], np.arange(7.0)
+    # a long right tail leaves the right half nearly empty, a long left one
+    # the left
+    assert prepare.statistics_side(counts) == "right"
+    assert prepare.statistics_side([1, 2, 5, 20, 30, 10]) == "left"
+    # over the last three bins, the tallest bar overall sets the top ...
+    assert np.isclose(prepare.statistics_top(counts, edges, 3.0, 6.0, 0.4),
+                      31.5)
+    # ... and a box reaching over the peak raises it until the peak clears
+    assert np.isclose(prepare.statistics_top(counts, edges, 1.5, 6.0, 0.4),
+                      1.02 * 30 / 0.6)
+
+
 def test_a_pairs_plot_leaves_out_the_half_that_repeats(jura):
     figure = geoml.plots.Explorer(
         jura, continuous="Elements", categorical="Rock").pairs()
@@ -426,8 +498,9 @@ def test_the_data_goes_through_the_models_own_warping(trained):
     model, point = trained
     warped, measured, labels = prepare.warped_values(model, "v")
 
-    values, _, _ = prepare.numeric_values(point.variables["v"])
-    expected, _ = model.likelihoods[0].warping.forward(values[measured])
+    values, _ = point.variables["v"].get_measurements()
+    expected, _ = model.likelihoods[0].warping.forward(
+        np.asarray(values, dtype=float)[measured])
 
     assert np.allclose(warped, np.asarray(expected))
     # numbered, not named after what was measured: a warping may rotate or
@@ -445,6 +518,44 @@ def test_only_measured_rows_are_warped(trained):
 
     assert len(warped) == int(np.sum(measured))
     assert np.all(np.isfinite(warped))
+
+
+def test_the_warping_is_fed_model_units_not_measured_ones():
+    """A composition's parts reach the model as fractions of the whole,
+    which is what its warping was initialized on. Feeding the figure the
+    stored ppm and percent instead put the log of each part's divisor on
+    every warped column as an offset: a centred log-ratio of scaled parts
+    shifts by exactly that, and a PCA centred on the fractions cannot take
+    it back out. The warped columns are centred, as the model sees them."""
+    geoml.set_seed(7)
+    point, rng = _points(n=30)
+    ag = rng.uniform(10.0, 500.0, 30)          # ppm
+    pb = rng.uniform(0.1, 5.0, 30)             # %
+    point.add_compositional_variable(
+        "assay", ["ag", "pb"], np.stack([ag, pb], axis=1),
+        units={"ag": "ppm", "pb": "%"}, rest=True)
+    warping = geoml.warping.ChainedWarping(
+        geoml.warping.CenteredLogRatio(3), geoml.warping.PCA(3, 2))
+    inducing = geoml.data.Grid2D(start=[0, 0], n=[3, 3], step=[50, 50])
+    network = geoml.latent.BasicGP(
+        geoml.latent.BasicInput(inducing), size=2)
+    model = geoml.models.VGPNetwork(
+        point, "assay", geoml.likelihood.MultivariateGaussian(3, warping),
+        network, options=geoml.models.GPOptions(verbose=False,
+                                                training_samples=4))
+    model.train_full(max_iter=1)
+
+    warped, measured, _ = prepare.warped_values(model, "assay")
+
+    values, _ = point.variables["assay"].get_measurements()
+    expected, _ = warping.forward(np.asarray(values, dtype=float)[measured])
+    assert np.allclose(warped, np.asarray(expected))
+    assert np.abs(warped.mean(axis=0)).max() < 1e-8
+    # and the stored columns would not have been: the offsets are the logs
+    # of the divisors, several units of a whitened component
+    stored, _, _ = prepare.numeric_values(point.variables["assay"])
+    off, _ = warping.forward(stored[measured])
+    assert np.abs(np.asarray(off).mean(axis=0)).max() > 1.0
 
 
 def test_a_likelihood_with_no_warping_has_nothing_to_transform():
@@ -1158,6 +1269,70 @@ def test_only_the_two_kinds_are_accepted(trained):
             kind="hexbin")
 
 
+def test_a_trim_leaves_out_only_what_would_stretch_the_window():
+    """A smoothing model packs its highest predictions well inside the
+    measured range. Trimming each axis by its own quantiles would drop them,
+    and they stretch nothing."""
+    measured = np.append(np.arange(100.0), 1000.0)
+    predicted = 20 + 0.5 * measured
+    predicted[-1] = 30.0            # the far assay, smoothed towards the rest
+
+    kept = prepare.inside_trim(measured, predicted, [0, 0.99])
+
+    assert not kept[-1]
+    assert kept[:-1].all()          # the highest prediction among them
+
+
+def test_without_a_trim_every_location_is_kept():
+    measured = np.append(np.arange(100.0), 1000.0)
+    assert prepare.inside_trim(measured, measured, None).all()
+    assert prepare.inside_trim(measured, measured, [0, 1]).all()
+
+
+@pytest.mark.parametrize("bad", [[0.99], [0.9, 0.1], [0, 1.5], [-0.1, 0.9]])
+def test_a_trim_is_two_quantiles_the_lower_first(bad):
+    with pytest.raises(ValueError, match="two quantiles"):
+        prepare.inside_trim(np.arange(10.0), np.arange(10.0), bad)
+
+
+def test_a_trimmed_scatter_says_how_many_it_left_out(trained):
+    _, point = trained
+    true, predicted, labels, _ = prepare.prediction_values(point, "v")
+    column = labels.index("b")
+    kept = prepare.inside_trim(true[:, column], predicted[:, column],
+                               [0, 0.9])
+    assert not kept.all()
+
+    figure = geoml.plots.Explorer(point, continuous="v").prediction_scatter(
+        component="b", trim=[0, 0.9])
+    main, top, right = figure.axes
+
+    assert len(main.collections[0].get_offsets()) == kept.sum()
+    # the margins are of the same points
+    assert sum(bar.get_height() for bar in top.patches) == kept.sum()
+    assert sum(bar.get_width() for bar in right.patches) == kept.sum()
+    assert [text.get_text() for text in main.texts] == [
+        "outliers left out: %d of %d" % ((~kept).sum(), len(kept))]
+
+
+def test_an_untrimmed_scatter_has_nothing_to_say(trained):
+    _, point = trained
+    figure = geoml.plots.Explorer(point, continuous="v").prediction_scatter(
+        component="b")
+    assert not figure.axes[0].texts
+
+
+def test_each_panel_is_trimmed_on_its_own(trained):
+    _, point = trained
+    true, predicted, _, _ = prepare.prediction_values(point, "v")
+    figure = geoml.plots.Explorer(point, continuous="v").prediction_scatter(
+        trim=[0, 0.9])
+
+    for i, panel in enumerate(_visible(figure)):
+        kept = prepare.inside_trim(true[:, i], predicted[:, i], [0, 0.9])
+        assert len(panel.collections[0].get_offsets()) == kept.sum()
+
+
 # --------------------------------------------------------------------------- #
 # grade and tonnage
 # --------------------------------------------------------------------------- #
@@ -1188,7 +1363,7 @@ def test_without_a_density_the_curve_is_in_volume(blocks):
     curves = prepare.grade_tonnage(blocks, "grade", cutoffs=5)
 
     # a two-dimensional grid gives an area, and the axis has to say so
-    assert curves["unit"] == "area"
+    assert curves["extent"] == "area"
     cell = 2.0 * 5.0
     assert np.allclose(curves["tonnage"][0], blocks.n_data * cell)
 
@@ -1198,7 +1373,7 @@ def test_a_density_turns_the_volume_into_a_mass(blocks):
     mass = prepare.grade_tonnage(blocks, "grade", density="fixed_density",
                                  cutoffs=5)
 
-    assert mass["unit"] == "mass"
+    assert mass["extent"] == "mass"
     assert np.allclose(mass["tonnage"], 3.0 * volume["tonnage"])
 
 
@@ -1430,10 +1605,65 @@ def test_the_uncertainty_may_be_an_attribute_of_the_variable(blocks):
     assert curves["kept"] == int(np.sum(variance <= 1.0))
 
 
+def test_a_vector_variable_hands_its_components_their_latent_moments(
+        trained):
+    """Under an elementwise warping latent column i is component i's own,
+    so each component's `latent_mean`/`latent_variance` is filled -- they
+    used to stay NaN, `VectorVariable.update` forwarding everything but
+    those two -- and the parent's `uncertainty` is their mean across the
+    components, which pins the columns to the right components."""
+    model, point = trained
+    grid = geoml.data.Grid2D(start=[0, 0], n=[6, 6], step=[15, 15])
+    model.predict(grid, n_sim=4)
+
+    vector = grid.variables["v"]
+    variances = []
+    for label in vector.labels:
+        component = vector.components[label]
+        mean = component.latent_mean.values.to_numpy()
+        variance = component.latent_variance.values.to_numpy()
+        assert np.all(np.isfinite(mean))
+        assert np.all(variance > 0)
+        variances.append(variance)
+
+    assert np.allclose(np.mean(variances, axis=0),
+                       vector.uncertainty.values.to_numpy())
+
+
+def test_a_mixing_warping_leaves_the_components_latent_moments_empty():
+    """A projection's latent columns are mixtures of the components, so no
+    column is any one of them and the components' latent moments stay
+    NaN rather than carry a mixture under one label."""
+    geoml.set_seed(7)
+    point, rng = _points(n=30)
+    point.add_vector_variable("v", ["a", "b", "c"], rng.normal(size=(30, 3)))
+    warping = geoml.warping.ChainedWarping(
+        geoml.warping.ZScore(3), geoml.warping.PCA(3, 2))
+    inducing = geoml.data.Grid2D(start=[0, 0], n=[4, 4], step=[30, 30])
+    network = geoml.latent.BasicGP(
+        geoml.latent.BasicInput(inducing,
+                                transform=geoml.transform.Isotropic(40)),
+        size=2, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "v", geoml.likelihood.MultivariateGaussian(3, warping),
+        network,
+        options=geoml.models.GPOptions(verbose=False, training_samples=5))
+    model.train_full(max_iter=2)
+    model.predict(point, n_sim=4)
+
+    vector = point.variables["v"]
+    assert np.all(np.isfinite(vector.uncertainty.values.to_numpy()))
+    for label in vector.labels:
+        component = vector.components[label]
+        assert np.all(np.isfinite(component.prediction.values.to_numpy()))
+        assert np.all(np.isnan(component.latent_mean.values.to_numpy()))
+        assert np.all(np.isnan(component.latent_variance.values.to_numpy()))
+
+
 def test_the_uncertainty_may_belong_to_the_variable_that_contains_the_grade(
         trained):
-    """The ordinary case for a vector variable: a component has
-    `latent_variance` set to None and no uncertainty of its own, so the column
+    """A component of a vector variable has no uncertainty of its own, and
+    its `latent_variance` is empty under a mixing warping, so the column
     that exists is the parent's."""
     model, point = trained
     grid = geoml.data.Grid2D(start=[0, 0], n=[8, 8], step=[12, 12])
@@ -1442,10 +1672,11 @@ def test_the_uncertainty_may_belong_to_the_variable_that_contains_the_grade(
     doubt = np.linspace(0.0, 1.0, grid.n_data)
     grid.variables["v"].uncertainty.values[:] = doubt
 
-    # the component carries a latent_variance of its own, but nothing wrote
-    # one, and an empty column must not stop the search short of the parent
+    # the component carries a latent_variance of its own, left empty here as
+    # a mixing warping leaves it, and an empty column must not stop the
+    # search short of the parent
     component = grid.variables["v"].components["a"]
-    assert np.all(np.isnan(component.latent_variance.values.to_numpy()))
+    component.latent_variance.values[:] = np.nan
 
     curves = prepare.grade_tonnage(grid, "a", cutoffs=3,
                                    uncertainty="uncertainty",
@@ -1951,9 +2182,15 @@ def test_the_lift_matches_noise_actually_drawn_per_location(trained):
     variogram of a realization with an independent error added at every
     location. Only the variance of that error enters, never its shape, which
     is why nothing has to be drawn in the figure itself.
+
+    Both sides with fixed weights: the declustering cell is chosen from the
+    values, so weights chosen afresh from each noisy draw depend on the
+    noise, and the expectation of that estimator sits above the lift
+    (measured 5-10% at 2000 draws, seed-independent). The figure itself
+    keeps the cell chosen on the measurements for every curve.
     """
     _, point = trained
-    panel = prepare.variogram(point, "v", n_lags=5)[0]
+    panel = prepare.variogram(point, "v", n_lags=5, decluster=False)[0]
 
     part = point.variables["v"].components["a"]
     variance = part.noise_variance.values.to_numpy().astype(float).ravel()
@@ -1965,7 +2202,8 @@ def test_the_lift_matches_noise_actually_drawn_per_location(trained):
         noisy = column + rng.normal(0.0, np.sqrt(variance))
         check = geoml.data.PointData.from_array(np.asarray(point.coordinates))
         check.add_continuous_variable("r", noisy)
-        drawn.append(prepare.variogram(check, "r", n_lags=5)[0]["data"])
+        drawn.append(prepare.variogram(check, "r", n_lags=5,
+                                       decluster=False)[0]["data"])
 
     assert np.allclose(np.mean(drawn, axis=0), panel["realizations"][3],
                        rtol=0.05)

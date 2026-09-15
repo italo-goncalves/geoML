@@ -1,3 +1,882 @@
+## version 0.6.10
+* **A tree's leaves are the points of contact with the likelihoods.**
+`VGPNetwork` took one node, so a model with two likelihoods had to end in
+a `Concatenate` whose only purpose was to be split apart again -- eight
+`tf.split` sites undoing a join made a moment earlier -- and the diagram
+drew that join as if it were part of the model. `latent_network=` now takes
+a list of leaves, one per likelihood in order, and `variables={"Rock": lik,
+...}` names each likelihood beside its variable with `likelihoods=` left
+out. The single node is still accepted and still split among the
+likelihoods it serves, bit-identically: twelve iterations of the manual's
+Jura two-likelihood model reach the same bound to the last bit before and
+after. A list of leaves on a shared root agrees with the `Concatenate` of
+them to 1e-10 (the arithmetic is ordered differently, so not to the bit);
+a parent two leaves share is priced by the KL, reset by cross-validation
+and refreshed once, the tree being walked as the identity-deduplicated
+union of the leaves' ancestors; persistence keeps it shared, as it already
+kept any shared node. `latent_network` became a property -- the leaf when
+there is one, an error naming `leaves` when there are several -- and the
+diagram draws each likelihood off its own leaf, so chapter 16's
+`Concatenate_1` box is gone from its own figure. **Independent trees
+work**: leaves on roots of their own, no join at all, which is the use this
+was for -- one tree with inducing points near the drillholes, another
+gridded for geophysics. Measured on Jura over three seeds against the same
+two leaves on one shared root of 120 points: the metals identical
+(0.949/0.477 against 0.950/0.478 rmse/crps over sd), the rock five points
+of accuracy worse on its own coarser tree of 40, the two-tree model a third
+faster to train. Found on the way: a terminal `Stack` already joined two
+trees -- it propagates no inducing points, so nothing can sit on top of it
+-- while a terminal `Concatenate` over two roots raises, its `root` being
+`None`; that is the difference between the two, and `Concatenate` stays for
+chapter 5's deep input and for saved models. Chapter 16 uses the list form;
+`test_leaves.py` pins the spellings, the refusals, the equivalence, the
+diagram, persistence, cross-validation and the two-tree gate.
+**Fixed before release (2026-09-08)**: the refactor registered the
+likelihoods before the leaves, and a save file stores the parameters by
+position in `all_parameters` -- registration order -- so every model saved
+by 0.6.9 refused to open with a shape mismatch at the first slot. The tree
+is registered first again, as it always was; a model saved by the 0.6.9
+extract opens and predicts identically, and `test_model_persistence.py`
+pins the order. A model saved by the working tree between 2026-09-05 and
+this fix carries the flipped order and will not open; retrain it.
+* **Cross-validation reuses one fold model, and a model's training step is
+traced once.** A five-fold run on the Tom v6 model (20k rows, 2000
+inducing points in ten experts) took the WSL kernel down in its fifth
+fold. Measured on a 5000-row copy: the process grew 2.6-2.8 GB *per
+fold*, with or without XLA, and none of it came back when the fold models
+died -- TensorFlow keeps the graph machinery of a differentiated function
+resident after the function is gone (its concrete functions, their
+gradient rewrites and the optimizer's branch graphs hold each other in
+reference cycles the garbage collector cannot break, and the C++ side
+behind them stays even when those are dismantled by hand: the eager
+context's function library emptied, its kernel cache cleared and the heap
+trimmed, a model still left 0.6 GB behind). Prediction's graphs are
+freed; a step with gradients is not. So the driver no longer rebuilds a
+model per fold: one fold model is rebuilt from the file around the first
+fold's rows, and every later fold swaps its rows in (`_set_data`, which
+replaces exactly what the constructor derived from the data), restores
+the file's parameters and zeroes the optimizer's memory in place, so it
+starts where a reloaded model would while the first fold's traces serve
+it. The count the minibatch bound scales by became a variable the trace
+reads, and `_training_step` is cached on the model -- rebuilt only when
+the variables or the optimizer change (`set_learning_rate` replaces the
+optimizer) or a variable hands the bound a payload -- with
+`reduce_retracing` so the folds' differing row counts and an epoch's last
+short batch share one relaxed trace. The same run: 3.2 GB in total where
+it was 13.4, 121 s where it was 463. Repeated `train_full`/`train_svi`
+calls on one model, which traced a new step each time (200 MB a call,
+never returned), share the one trace now. Pinned by
+`test_the_training_step_is_traced_once_per_model` (`test_vgp.py`) and
+`test_one_fold_model_serves_every_fold` (one load, each fold on its own
+rows, the file's parameters and a zeroed optimizer at every fold start,
+at most three traces over four folds).
+* **`cross_validate(refit="leaves")`, and what it measured.** Re-initializes
+and refits the variational state of the *terminal GP nodes* only — from
+each leaf down through operation nodes to the first GP
+(`_terminal_gp_nodes`), so `Linear(cat, size=2)`'s state is `cat`'s —
+keeping the interior (a `GPWalk`'s field, a shared parent) as all the data
+taught it. Proposed as the honest refit, on the reasoning that the interior
+encodes the spatial pattern and the conditioning to data happens at the
+leaves; measured on chapter 16's Jura tree over three seeds to score
+20% *past* the scratch gold (rmse/sd 0.80 against 0.99) and past the warm
+start (0.92), the rock's out-of-fold accuracy at 0.91 against 0.83, while
+the same refit from an interior trained on the fold's rows alone scores
+1.00 — the gold. The displacement field remembers where the held-out holes
+put the contacts. Kept as a diagnostic of that memory, like `refit="all"`,
+and not for scoring; E2 in `docs/cross-validation.md`,
+`docs/benchmarks/leaf_refit.py`.
+* **A vector variable's components receive their latent moments.**
+`VectorVariable.update` forwarded everything but `mean` and `variance`, so
+every component carried a `latent_mean` and a `latent_variance` -- declared,
+exported, listed -- that stayed NaN after a prediction. They are filled now
+when latent column i is component i's own, which an elementwise warping
+guarantees (the default `ZScore`, and the recommended `ZScore -> Spline`
+chain); `predict` says so at the door with `elementwise=`, read from the
+likelihood's warping. Under a rotation or a projection no latent column
+belongs to any one component, so the columns stay empty rather than carry
+a mixture under a component's label -- the same rule the transformed-pairs
+figure numbers its columns by. A composition's parts keep no latent
+moments, as before: its warping mixes by construction. One consequence:
+`uncertainty="latent_variance"` when grading a component now finds that
+component's own, where it used to fall through to the parent's
+`uncertainty`.
+* **A GP node's draw is keyed by its name.** Every draw in a sweep is
+handed the model's seed, and the draw is stateless in shape and seed, so
+two GP nodes of one size on one root -- `Stack`, `Concatenate` and the
+per-leaf loops hand every node the same seed -- drew the same whitened
+normals: the latent realizations of Jura's rock and metal leaves
+correlated at 0.995 component for component, a coupling nobody modelled
+that any joint read across variables saw (measured 2026-09-08). The node's
+name, numbered within its tree and replayed by a save, is folded into the
+seed's second entry at the one draw function (`_node_seed`, a CRC rather
+than Python's per-process `hash`). Under the Sobol rule a different
+scramble was not enough -- SciPy's is a linear matrix scramble, whose
+leading bit stays a linear function of the base digits, so two scrambles
+of one sequence kept their points paired and the leaves still correlated
+at 0.37 -- so the realizations are also put in an order of the node's own,
+drawn from the same seed: each node keeps its evenly spread set, and
+realization k of one node no longer sits beside realization k of another.
+The correlation reads under 0.2 both ways now, a saved model still replays
+its simulations, and a node drawn outside a model keeps the bare seed. The numbers every model draws change -- the
+distribution does not. The experts of one node still share their normals
+across the overlap, as before.
+* **Jura's metals: the likelihood, not the link** (`docs/benchmarks/jura_noise_footing.py`).
+The variogram figure put copper and lead's fans at three times the data
+under the epsilon-insensitive likelihood; the parametric links were tried
+first and none fixes it — a Laplace tail (`epsilon` trains to zero) pushed
+back through a log-like link has a second moment with a pole at
+`2·sigma_log/c_rate = 1`, and copper sat at 0.956. The multivariate
+Gaussian on the same chain puts every metal within 0.97–1.41 of the data,
+goodness 0.86 → 0.96, at the same rmse and within 1% on CRPS, on the folds
+and on the true held-out set; the two-scale mixture's tighter fan is
+under-dispersion and is not recommended. Three skeptics reviewed the
+comparison; the arms that matter were rerun to 1200 iterations. Record in
+`docs/cross-validation.md`.
+* **Measurement samples on rotated equal-share nodes.** `predict_measurements`
+and `measurement_batches` built a fresh measurement on the strata's
+midpoints, one fixed set of noise values for every location. Found while
+verifying the variogram figure's noise lift (which is exact; see the record):
+the midpoints carry less than the noise variance -- in warped space 0.96
+of a Gaussian's at 32 nodes, 0.89 of a Laplace's, 0.87 of a Student's t
+at five degrees; through Jura's spline warping, in data units against the
+`noise_variance` column, 35-47% on lead, copper and chromium -- so a
+heavy-tailed likelihood's accuracy plot, CRPS and coverage read narrower
+than the model; and every location in a column carried the *same* noise value in
+warped space, right per location and wrong across them (a variogram of
+the samples rode the raw ground fan, the common shift cancelling in every
+pair). The nodes are now rotated modulo one by a uniform per location,
+component and realization (`_measurement_nodes(n_nodes, shift)`, a
+Cranley-Patterson rotation, the Sobol set for a mixing warping likewise),
+drawn once per call for the whole container from the model's seed and
+drawn a batch at a time by advancing the stream to the batch's rows, so
+a location's sample is the same whatever batch computed it and the
+streaming door still holds no more than a batch. The rotated lattice
+keeps one point per stratum, each marginally uniform (the Sobol set of a
+mixing warping stays unbiased but is no longer a net): every finite
+moment of the pooled sample is unbiased, the tails appear with their
+probability, and locations decorrelate. Measured after: the samples'
+variance in warped space at 0.985-1.014 of the law's on every Jura metal
+and on Walker, and a variogram of the samples on the lifted ground fan
+(Zn 0.97-1.00 by lag, Walker 0.999-1.001) where it sat 1.3-2.8x below.
+The mean of a location's samples now returns the prediction to Monte
+Carlo precision rather than exactly, which one test states. One cost: a
+`Mixture`'s samples bisect its quantile over the whole rotated set of a
+batch, 18 s against 0.1 for a 20 000-row batch on the CPU (2.6 against
+1.7 on the GPU); on the roadmap if it ever matters.
+`test_measurement_samples.py` pins the rest: the variance for Gaussian,
+Laplace and epsilon-insensitive noise, one node per stratum, locations
+that never share a value, the mixture quantile under rotation, and the
+door seeded, batch-invariant and independent between locations.
+* **The transformed-pairs figure feeds the warping what the model fed it.**
+`prepare.warped_values` sent the stored columns -- a composition's parts in
+the ppm and percent they were assayed in -- through a warping the model had
+initialized on `get_measurements`, the parts as fractions of the whole. A
+centred log-ratio of scaled parts shifts every column by the log of its
+divisor, and a PCA centred on the fractions cannot take that out, so on
+the Tom v6 assays "as the model sees it" showed components centred at 6
+and -5 where the EDA's PCA of the same data was centred at zero. It reads
+`get_measurements` now, so the figure is centred as the model is; the
+scale still differs from the EDA's PCA, whose scores keep their
+eigenvalues where the warping's are whitened.
+* **Mesh sets: every contour of a column, the realizations' too, as one
+set.** `geoml.data.MeshSet(blocks, "Comp/Fe", limits={"topography":
+topo})` contours a block model or a grid at every cut-off the variable
+declares -- or once per category, keyed by name -- and holds the bodies as
+a read-only mapping, `shells[0.5]`; every realization is contoured as well,
+in forked workers, each realization a set of its own read on access from a
+Zarr store, `shells.simulations[4][0.5]`. Limits keep a sheet's underneath
+or a body's inside, exclusions take theirs away, and every boolean runs in
+one Manifold frame. `check()` measures exactly how far the shells fail to
+nest or the categories overlap, and the gap they leave; `repair()` enforces
+it. `table(density=, grade=)` gives each cut-off's volume, band, what each
+limit took, pieces, crossing and the blocks' own volume, and with a grade
+each band's tonnage, mean, metal and the realizations' P10-P90 of metal in
+the prediction's bands; `realization_table` the same in each realization's
+own bands; `volume_dispersion()` the realizations' volumes against the
+prediction's, measured as each was made. Also `probability` (the bodies
+where a cut-off is cleared with given probability), `connectivity`,
+`spacing`, `compare`, `section`, `simplify` (nested again after),
+`drop_pieces`, `clip`/`exclude`, `assign`, `crossed_by`, `to_zarr`/`open`,
+`to_geoh5`, `export_dxf` (a layer per mesh), `as_pyvista` and `plot`; three
+figures in both backends, `volume_dispersion`, `connectivity` and
+`section`. A categorical realization picks its category by `rule=`,
+`"largest"` for `CategoricalGaussianIndicator` and `"priority"` for the
+hierarchical likelihood, the container not recording which drew it.
+Measured on the Assen block model (908 237 blocks, 25 realizations,
+eight workers): FeO_total at four cut-offs in 800 s and the six rocks in
+1024 s; the shells nest as contoured, to 1e-14 m3, so `repair` stays
+off; at 0.85 the prediction's shell holds 1.42 Mm3 against the
+realizations' 1.65 / 2.18 / 3.00 (P10/P50/P90); and a realization's six
+rock bodies overlap by about 1.1% of the model where the prediction's
+overlap by 0.008%, which an entry below settles. A contour that will not
+close is retried a hair off its level, recorded as `nudge`: `get_contour`
+can meet its own closing cap edge-on (7 of 104 Fe meshes, 8 of 156
+rock bodies). Design record `docs/mesh-sets.md`; `test_meshsets.py`
+(51 tests).
+* **A boolean whose answer touches itself comes back a body.** Two
+bodies whose difference leaves pieces meeting along an edge -- every band
+between two grade shells closed against the same face of a block model,
+on the Assen shells -- are a closed, consistent manifold in Manifold's own
+numbering, the touch kept as coincident vertices. geoML measures winding
+by position, welding first, and the weld turned the touch into an edge
+four triangles share: the answer came back a `Mesh3D` with no volume.
+Each copy of such a vertex now moves a hundred-thousandth of a unit into
+its own side, only where the first reading fails, and the answer is a
+`Solid3D` that goes back into Manifold as one. Two tests, at the origin and
+at mine coordinates.
+* **A contour says what it was made from.** `get_contour` on a block model
+records the column, the level, the side it closes on and its budgets in
+the mesh's new `provenance`, which `to_zarr` keeps and `to_geoh5` writes
+into the object's metadata; a mesh set adds its limits, the realization
+and any nudge. `BlockSet3D.get_contour` became a wrapper over
+`_contour_values`, which contours an array and answers None where the field
+misses the level.
+* **`BlockSet3D.as_blocks3d()`: a refined model at its coarsest level, as a
+regular one.** One block per coarsest-level block, in `Blocks3D`'s order
+and with the set's discretization, for software that reads a regular grid.
+A block never split is the same block on the same support and keeps every
+column bit for bit. A block gathered from finer ones takes the
+volume-weighted mean of the columns that are means over a block's
+sub-blocks -- the prediction, the latent moments, `noise_variance`, the
+shares below a cut-off, a category's probability and entropy, declared per
+class in `_BLOCK_MEANS` and `_BLOCK_MEAN_FAMILIES` so a new column is
+missing until someone says it averages -- and of every realization index
+by index, streamed in bands so neither store is held whole. What is read
+off the realizations is read again: the quantiles and probabilities, the
+dispersion (the parts' mean dispersion plus the spread between them, the
+variance of a mixture, taken in the same pass) and the predicted category,
+the winner of the averaged probabilities. The rest -- `divided`, the
+measurements, a binary variable's entropy -- is missing, none of it
+following from the parts, and a block with any part that holds nothing
+holds nothing (a category's probability reads 0 where nothing was
+predicted, so its label is what marks the parts). Metadata is gathered as
+`aggregate` gathers it, by volume: numbers average, a coded column keeps
+the label holding most of the block, a tie counted exactly in base cells
+and left empty, and a flag holds where it held throughout -- a boolean
+stays a boolean, since a share would read `True` in every `where=`. This
+averages where `group` still leaves a parent missing: a conversion to a
+regular grid is where the change of support is wanted (decided
+2026-09-11). Mass is conserved to rounding, the prediction and every
+realization (3e-16 relative on a three-level set). `test_as_blocks3d.py`
+(15 tests).
+* **`RotatedBlocks3D`: the regular block model, turned.** `_blockdata`
+applied to `RotatedGrid3D` as it is to `Grid3D`: the decorator now passes
+the grid's own keywords through (the angles) and sends the block box and
+the sub-block offsets through the grid's `_to_world`, new on
+`_GriddedData` and what `_generate` turns rows with too. It predicts at
+block support, aggregates through its rotation, exports its cells turned
+into place, round-trips through Zarr and is fitted by `from_data` as the
+grid is; `as_blocks3d` returns one for a `RotatedBlockSet3D`, with the same
+angles about the same pivot, and it predicts what the equivalent
+`RotatedBlockSet3D(max_levels=0)` does. The class the data page once
+documented without its existing is real now. Not yet: a geoh5 BlockModel
+from it, and `Blocks3D.from_geoh5` still returns a rotated model as a
+`RotatedBlockSet3D(max_levels=0)` (roadmap).
+* **Fixed: `RotatedGrid3D.as_pyvista` failed on pyvista 0.49**, which
+refuses an `ImageData.transform` that does not say whether it is in place.
+The turn is now `_turned`, shared with `RotatedBlocks3D`, and a test pins
+the exported nodes where the grid's coordinates are.
+* **Fixed: a mesh set's default workers could take the machine's memory
+down.** On the Tom v6 block model (6.8 million blocks, 25 realizations)
+`MeshSet(bm, "assay/Zn", limits=...)` hung WSL. The default was eight
+workers whatever the model, and a worker costs what one contour does: 4
+to 8 GB here, most of it `_cut_to_contour`'s corner tables over the cut
+mesh (7 to 12 million cells), not the painted slabs the old estimate had
+in mind. Eight of them and the notebook passed WSL's 62 GB, and the
+global OOM killer took WSL's own processes with them. The default is now
+as many workers as memory holds: the parent's high-water growth over the
+prediction's contours is the cost -- Linux resets the mark through
+`clear_refs`, so a kernel's earlier work does not count -- the available
+memory is read from `/proc/meminfo` and any cgroup limit, and the pool
+takes as many as fit 80% of it at 1.25 times the cost, saying so when
+that is fewer than the CPUs. Measured under a 40 GB cap: eight workers
+were killed at the cap, while the default chose four and peaked at 23.8
+GB. A worker killed anyway is now a `RuntimeError` that names the cure:
+the pool is a `ProcessPoolExecutor`, where `multiprocessing.Pool` replaced
+the dead worker and waited for its task forever. And a set no longer sends
+a contour that is no body through the welded mesh (`_contour_values(...,
+fallback=False)`; `get_contour` keeps it): on the same model an Ag
+realization at 10 ppm fell back at every nudge, over 14 million cells at
+17 GB and two minutes an attempt -- twice what a worker is sized for --
+and came back open every time, as the one Assen shell the fallback was
+tried on had. Without it an attempt costs the painted contour's 12 GB and
+95 s, and a shell that will not close is recorded as a failure after its
+last nudge. Measured on Ag with the limits and 3 workers the default
+chose: 25.5 GB at the peak under a 50 GB cap. Ten tests in
+`test_meshsets.py`.
+* **A mesh set says when its limits leave nothing of a shell.** The Tom v6
+Zn, Pb and Ag sets were built with an uncertainty limit made by
+`get_contour('Rock/uncertainty', 1e-4)`: a body around the few pockets
+where the rock was that certain, 0.02% of the model. A limit keeps its
+inside, so it took every shell -- 10.2 million m3 of Zn at 5%, 1.7 million of
+Pb, 290 million of Ag at 10 ppm, nothing left of any -- and the sets were
+built, stored and reopened empty, the summary reading "volume 0" with no
+word of why. Nothing in the saving or the loading was wrong: the store held
+exactly the empty meshes the set had made. A shell that had ground and has
+none left after the limits and exclusions now raises a `UserWarning` naming
+its cut-offs, the volume they held, and the share each limit took -- on that
+model, `'uncertainty' took 98% of it and 'topography' 2%` -- raised by the
+prediction's cut, before any realization is contoured, and by
+`limit`/`exclude` on a set already made. A shell empty before any cut, its
+level never reached, is not reported. Three tests in `test_meshsets.py`.
+And printed, a set with limits shows what each shell held before them
+beside what is left -- `5.0  volume 0 of 1.02e+07 before the limits, 0
+pieces` -- so a set reopened from its store, which warns of nothing, still
+tells a shell a limit took from a level the field never reached. One test.
+* **A contour meeting its closing cap edge-on is split, not retried.**
+Where the kept ground thins to a layer against the model's box, its
+underside can meet the cap along a lattice edge: four triangles share the
+edge, which no winding repair settles, so the shell came back a `Mesh3D`
+and a mesh set contoured it again a hair either side of its level, up to
+thirteen times -- twenty minutes a shell on the Tom v6 model, and a failure
+where none closed. `math.geometry.split_touching_edges` splits such an edge
+instead: the four triangles alternate in the direction they walk it, each is
+paired with its neighbour across a wedge of inside, and the vertices get a
+copy for every piece meeting there, moved apart as the booleans move
+theirs, so the layer and the cap touch rather than share. It runs only where
+a contour has already come back a plain `Mesh3D`, so no other contour
+changes. A census of the Assen model contouring every realization at its own
+level only (`docs/benchmarks/contour_stages.py`): the shells that would have
+been retried fell from 16 to 8 -- the FeO_total prediction's at 0.7, five of
+six among its realizations, and two of nine rock bodies closing at their own
+level. Each of the eight sits between the bodies a ten-thousandth of the
+span either side, and agrees with what the retry returned to within four
+parts in a million wherever the retry moved a billionth or a
+hundred-millionth of the span; twice it had to move a ten-thousandth and
+returned that neighbour's body, 0.07-0.08% larger
+(`contour_split_neighbours.py`). The retry could also land on the wrong
+body: on a small model a random
+search turned up, it took the level a billionth of the span higher and
+returned a body 1.1% smaller than those a millionth either side, where the
+split body sits between them. What the split cannot mend is the cap folding
+flat onto itself -- two of the four triangles lying in the box face on one
+side of the edge, walking it both ways, as Limestone's realization 17 shows
+-- because the cap was drawn through lattice points valued exactly at the
+level; those shells were retried until the box began cutting the cap
+(below), after which none is. Three tests in `test_mesh3d.py` and
+`test_blockset.py`.
+* **A contour of a block model takes less than half the memory, in the
+same time.** Measured stage by stage on the Assen model (908 237 blocks,
+`docs/benchmarks/contour_stages.py`, results under `figures/`): the corner
+tables were most of a contour's memory -- every block's corners as an
+`n x 8 x 3` int64 array, their keys, and `np.unique`'s sorted copy, argsort
+and int64 inverse, built at every level of the cut and again by the paint --
+and the paint's fills of coarse blocks, every interior point of a size
+class at once, were most of the rest. `_lattice_corners` now builds the keys
+a corner at a time, sorts them once and scatters each key's rank back into
+32-bit indices; the first level of the cut, which depends on the lattice
+alone, is kept on the set (`_base_corners`), so a mesh set's contours after
+the first skip it and its forked workers read the parent's copy; each
+level's table is freed before the next is built; and the fills go a few
+thousand points at a time in 32-bit coordinates. Every mesh comes out
+identical to the bit -- 343 contours of balls meeting a face, an edge and a
+corner, closed both ways at three supersamplings, blocks without values, a
+rotated set and 300 random models, the fills also forced into chunks of 300
+points. Peak growth over what the process held, FeO_total's prediction:
+
+| Contour | Cut, before -> after | Paint, before -> after | Time, before -> after |
+|---|---|---|---|
+| 0.6, supersample 0 | 1.62 -> 0.73 GB | 2.33 -> 1.00 GB | 14.2 -> 13.3 s |
+| 0.8, supersample 0 | 1.47 -> 0.49 GB | 1.65 -> 0.71 GB | 10.3 -> 9.6 s |
+| 0.6, supersample 1 | 5.11 -> 2.03 GB | 8.26 -> 3.49 GB | 61.9 -> 62.4 s |
+| 0.85, supersample 1 | 2.66 -> 1.04 GB | 3.56 -> 1.52 GB | 32.5 -> 28.3 s |
+
+Supersample 1 cuts a lattice of 7.4 million cells, the size a Tom v6
+contour reaches. Finding the ranks by `searchsorted` into the distinct points
+was tried first and is leaner still, but measured 40-80% slower on Assen and
+17 times slower than `np.unique` on a table of 16 million keys, where the
+argsort was 1.4 times faster (`figures/contour_stages_searchsorted.txt`).
+* **A body closed against a block model's box meets it in the box's own
+faces.** `close=` used to paint the cap onto the box: each ghost cell past
+the boundary held its block's reflection about the level, which put every
+face point of a kept block exactly at the level. The body rounded off where
+it left the box, by about half a boundary block -- three slabs filling an
+80 m box of 10 m blocks left 5.1% of it uncovered along the edges -- pulled
+a thin layer's rim back off the face, and folded the cap flat onto itself
+where the kept ground thinned against it, which is what a mesh set still
+had to retry. The ghosts now hold copies of their blocks, so the field runs
+on past the box as it stands at the box and closes a cell beyond the
+ghosts, and Manifold cuts the body at the box (`meshes._clip_to_box`),
+exactly. The three slabs now tile the box, gap 0. Against Monte Carlo, a
+ball meeting the box at a face, an edge, a corner and half outside it,
+closed either way at supersample 0 and 1, the worst of the 16 volumes went
+from 2.61% to 1.40% off and the mean from 0.65% to 0.40%, though the ball
+at a corner, closed above, now reads high, +1.13% where it read -0.12%: a
+copy carries the field on flat, so across the half block by the face it
+turns half as fast as inside. On 1 000 random thin layers against the top
+face, the contours read a median 1.00 of the kept blocks' volume where they
+read 0.82 (quartiles 0.72 to 1.05, against 0.29 to 0.89), 990 closed where
+964 did, and none came back a `Mesh3D` where 2 did
+(`docs/benchmarks/closed_contours.py`). The cap also stopped cutting every
+kept block on the face to the finest size, a cut no block inside the model
+gets, so an isolated kept block on the face now makes no body of its own,
+as one inside never did: 9 of the 1 000 lost a small body that way, and 33
+gained one where the old cap had left none. On Assen, FeO_total's prediction at 0.6 takes 9.6 s
+instead of 13.3 and at supersample 1 40.6 s instead of 62.4, with the
+paint's peak at 1.64 GB instead of 3.49 and a third of the triangles, the
+box's faces being a few large triangles now; every contour the benchmark
+takes is a body, where FeO_total at 0.7 at supersample 1 and Limestone's
+realization 17 were not. And contouring every Assen realization at its own
+level only, none of the 100 FeO_total shells or the 150 rock bodies needs
+a mesh set's retry any more, where 8 did after the split above and 16
+before it; the 25 FeO_total realizations took 1198 s in one process
+instead of 1395. Where Manifold will not take the carried surface, the
+reflected cap is still how it closes, and the welded fallback keeps it. `test_blockset.py`: a field rising with height, cut between two
+layers of blocks, is the upper part of the box to 1e-6, both sides.
+* **A categorical realization's bodies tile the model.** Each category of
+a realization was contoured on its own field, its draw against the best of
+the others' taken block by block, so the best rival was picked inside every
+block before the corners averaged, and two categories meeting along a
+contact drew it twice, apart: on Assen a realization's six rock bodies
+overlapped by 1.07 to 1.21% of the model and left 0.73 to 0.77% of it
+uncovered. A realization's categories now come from one cut and one paint
+of all its draws (`BlockSet3D._contour_fields`): the draws are averaged
+onto the corners and each category's field is read off those means, so
+along a contact one field is the other negated and both surfaces pass
+through the same points. On Assen's realizations 0, 12 and 24
+(`docs/benchmarks/category_partition.py`): overlap 0.0000% of the model,
+gap 0.089 to 0.095%, 54 s a realization instead of 72. The gap left is
+where three categories meet inside one cell, each field's piece cutting
+off its own corners and none claiming the middle, which only a
+multi-material contour would close (roadmap). A category that does not
+come out a body is contoured on its own as before, nudges and all, and the
+prediction's bodies, contoured on the likelihood's own fields, are
+unchanged (overlap 0.008%, gap 0.053%, the box's rounded edges gone from
+the 0.098% it was). Six fields at once peak higher than one: 2.06 GB on
+Assen against the prediction's worst single contour at 0.92. So a set with
+no `workers=` now contours the first realization in the parent, measures
+it, keeps it, and sizes the pool to it. Two tests in `test_meshsets.py`.
+* **Why a mesh set's workers stop scaling, measured**
+(`docs/benchmarks/mesh_set_workers.py`, eight FeO_total realizations of
+the Assen model at four cut-offs). One process makes a realization in
+45.8 s, and 2, 4 and 8 workers in 30.4, 18.0 and 12.8 s -- 3.6 times at
+eight, where it was 2.2 before the leaner contours above. The parent's
+reads and writes take a few seconds of the pool, and what comes back from
+a worker, 114 MB a realization, costs nothing measurable. Two things do: a
+forked worker runs Manifold on one thread, the parent having started its
+thread pool before the fork (a boolean 3.8 s on one thread, 1.1 s on
+eighteen in the parent, which burned five times the CPU), so a task is one
+core's work; and more workers than eight buy almost nothing, 12 and 24
+giving 10.8 and 11.2 s a realization with every stage slowing in step --
+the machine, a 16-core two-channel Ryzen 9 7950X, out of memory bandwidth
+and then cores. Also found: OpenBLAS keeps a thread per CPU in every
+process and they spin, 80 s of a realization's 173 s of CPU; the workers
+now hold it to one thread, which saves 38% of each task's CPU and 5% of
+the time. The default pool stays at eight.
+* **`simplify` holds its budget both ways, and no longer hands a large
+shell back whole.** The budget is measured both ways now: the simplified
+faces against the original, as before, and the original's vertices -- the
+ones a triangle uses -- against the simplified surface, which a cut can
+leave behind while every new face sits close to the original; and a cut
+still over budget after four tightenings is never returned. The quick
+quadric pre-pass a mesh over 100 000 triangles takes must also be the kind
+the mesh is: on the Assen BIF and Hematite shells it came back open, was
+taken anyway at 1 and 2 m for being within half the budget, and every cut
+after it started from it, so both shells came back whole with a warning,
+after 4 to 12 s. Such a pre-pass is now dropped and the cuts start from the
+original (`docs/benchmarks/simplify_both_ways.py`): BIF (324 970
+triangles) at 1 and 2 m to 13 580 and 12 522 triangles in under 4 s,
+Hematite (620 126) to 30 806 and 28 162 in 7 s, and every answer within
+its budget both ways. The 0.72 m the roadmap had recorded between BIF's
+vertices and its simplified shell at 0.5 m was 35 vertices no triangle
+uses, carried by a store an older geoML wrote; the used ones sit within
+0.44 m. One assertion in `test_mesh_operations.py`.
+* **A categorical variable's scores: kappa, the two errors apart, the two
+kinds of disagreement, and the probabilities.** `compute_metrics` on a
+categorical or rock type variable read the predicted label alone, three
+statistics per category. It now reports eleven, still one column per
+category and each category against the rest: Cohen's kappa; precision,
+recall and F1 score, which keep apart the two errors the others mix -- for
+an ore domain, the ore the model misses and the dilution it calls ore;
+quantity and allocation disagreement (Pontius and Millones, 2011), the
+category's errors split into the part a wrong proportion explains and the
+part a wrong place does, which summed over the categories and halved add
+up to one minus the accuracy; and the Brier and log scores of the
+predicted probability, proper scores that tell an honest claim from the
+same calls hedged or overconfident, where every label score reads the
+same. `decluster=True` weights each location by the container's
+`"declustering"` column; off by default. A score with no value reads NaN
+rather than a zero that looks like one: the precision of a category never
+called, the recall of one never measured. On a Jura rock model trained for
+300 iterations and scored on the 100 validation samples, kappa ran from 0
+(Portlandian, never called) to 0.75 (Argovian), in no column above
+Matthews, as it cannot be in a two-way table; Portlandian's error was
+all quantity, and the two parts added to 0.29, one minus the 0.71
+accuracy. **Fixed on the way**: locations with no measurement or no
+prediction were scored -- a missing measurement as a wrong call of the
+category predicted there, a missing prediction as a miss of the one
+measured -- where the confusion matrix and the reliability figure leave
+them out. Five locations with one of each, every other call right, read a
+balanced accuracy of 0.83 and 0.75 where it is 1. A variable predicted
+nowhere is now refused. Twelve tests in `test_metrics.py`.
+* **The booleans are exact: Manifold replaces the signed-distance
+grid.** `Solid3D.union`/`intersection`/`difference`, and every cut that
+ends in one (`clip_meshes`, a body divided by a sheet), now go to
+manifold3d, a new hard dependency (`manifold3d>=3.5`): the bodies welded,
+moved to the pair's rounded corner and handed over in double precision,
+the answer always a consistent body, a refusal raised rather than
+returned empty. The grid was exact only to its step, and the films
+between adjacent rock domains are thinner than any step it could afford:
+on the six Assen shells (325k-681k triangles at mine coordinates) its 14
+non-empty pair intersections read 5 to 5231 times the exact volume, and
+one film 0.0002 m3 against 1.70. Manifold answered the 15 pairs, a union
+and two differences exactly in 15 s against 141 s, with no crash in 54
+isolated calls, and the contour-derived block shells that crashed VTK's
+filter pass in-process. The pyvista-manifold accessor was measured and not
+used: it casts to float32, and returned inconsistent meshes in 4 of 18
+jobs in the local frame and 15 of 18 at mine coordinates. `meshes.py`
+loses the grid -- `_implicit_combine`, the banded fields, the per-call
+signed-distance pool, `_resolved`'s crossing probes -- 256 lines net, and
+the UserWarning naming the step goes with it. An exact answer keeps both
+inputs' triangles, so a union comes back larger (1.26M triangles against
+the grid's 242k). Manifold's `simplify`, `decompose` and `level_set` were
+measured against geoML's own and not adopted: `simplify` is 20-60 times
+faster but strayed past its tolerance on the real shells (at 0.5 m,
+0.9-1.0 m out and up to 2.7 m back; at 2 m, 14.6 m back on BIF and an
+inconsistent mesh on Hematite); `decompose` finds `split`'s pieces but
+costs as much once they are handed back, and takes solids only;
+`level_set` wants a function rather than samples and ran 5-8 times slower
+than flying edges. `docs/benchmarks/manifold_booleans.py`,
+`manifold_features.py`.
+* **A body's volume no longer depends on where it sits.**
+`math.geometry.signed_volume` summed tetrahedra against the world origin,
+and at mine-grid coordinates those cancel down to a small body's volume
+within rounding: a millimetre film read 23% wrong at a northing of 7,000
+km, and the Assen film volumes moved by up to 8% once corrected. It sums
+about the vertices' centre now, which is the same answer for any closed
+surface.
+* **Histograms carry their summary statistics.** Every panel of
+`histogram` sums its values up in a box, on both backends: the count, the
+mean, the standard deviation, the coefficient of variation, the skewness
+and the kurtosis beside the minimum, the quartiles, the median and the
+maximum; `statistics=False` leaves it out. The moments are the values' own,
+in population form, and the kurtosis is the excess over a normal's; with
+categories drawn, the statistics are of every measured value, the
+categories pooled. The box takes the upper corner over the half of the
+bins with the lower bars -- the right, for the long tail of an assay -- and
+the axis rises until no bar runs under it: measured exactly once the layout
+is settled in matplotlib, estimated from the font and the panel's size in
+plotly, which lays its text out in the page. `prepare.summary_statistics`,
+`statistics_lines`, `statistics_side` and `statistics_top` hold the
+arithmetic.
+* **`dispersion_by_support`: how much the ground varies inside a block,
+against the block's size.** A `BlockSet3D` holds blocks of several sizes,
+and a block's `dispersion` is the spread of its sub-blocks on its own
+support. The new figure merges every block into its parent, level by level
+up to the coarsest, and draws the within-block standard deviation of every
+block of each size as a box, a violin or a jittered strip, the strip
+coloured by how many times the refinement split inside each block, with a
+line through each size's root mean square, on an axis from zero so the
+change with size reads at its scale; the strip's points are faint by
+default (`alpha=0.2`) and its key is not. A parent is never predicted:
+its dispersion is its blocks', volume-weighted, plus how much their values
+differ among themselves, taken realization by realization from the stored
+simulations. That is the law of total variance, exact against a brute-force
+spread of planted values, and it is the reading `group`'s docstring already
+allows, a realization being what comes across a regrouping exactly. Every
+stored realization is used, read a band of blocks at a time, and a parent
+missing some of its ground is left out at its size and every size above.
+Two things to read it with. The fine sizes exist only where the refinement
+went, so each size is different ground; its label gives the count and the
+share of the volume. And a block left whole reads its dispersion off its 8
+sub-blocks where a split one reads off 64 positions or more, so over the
+same ground it reads lower: a linear trend loses a quarter of its variance
+at two positions a side against six percent at four, an uncorrelated field
+an eighth against under two percent. On a refined synthetic model the root
+mean square doubles per level (0.038, 0.081, 0.164) and the blocks left
+whole sit at the bottom of each size's spread. Both backends;
+`prepare.dispersion_by_support` and `BlockSet3D._ancestor` underneath.
+* **A composition says how many zeros it replaced.**
+`add_compositional_variable`, and every drillhole conversion through it,
+replaces a zero or negative part with half the smallest positive value of
+its own column, and did so without a word. A warning now counts the
+replacements part by part, with the number of samples they are out of, so
+a part that sits mostly below detection is seen before it is modelled.
+* **`prediction_scatter(trim=...)` leaves the outliers out.** A few assays
+far from the rest set the limits of the scatter and squeezed everything
+else into a corner, most of the panel left blank. `trim` names a pair of
+quantiles, as `scene`'s `clip` does -- `[0, 0.99]` for a long right tail
+-- and the window runs from the lower quantile of the measured or the
+predicted values, whichever is lower, to the upper quantile of whichever
+is higher. A location outside it on either axis leaves the cloud and both
+margins, and the panel counts how many did in its lower-right corner, the
+one a smoothing model leaves empty: it never gives the highest
+measurements the lowest predictions, where the upper left holds the low
+assays it pulled up (the note first sat there and hid two of chapter 14's
+Cd points). Each end comes from whichever side reaches further so that
+only what would stretch the window goes: trimming each axis by its own
+quantiles would also drop the highest predictions, which a smoothing model
+packs well inside the measured range. Named `trim` rather than `clip`
+because it drops points, where `clip` drops nothing. Both backends;
+`prepare.inside_trim` holds the arithmetic. Chapter 14's scatter uses
+`[0, 0.95]`, four or five of each panel's hundred held-out samples left
+out; rerunning the chapter also refreshed its accuracy figure, which
+predated this release's changes to the measurement samples (goodness
+moved by 0.02 at most).
+* **A glossary and a roadmap, at last in the repository.** `CONTEXT.md` is
+the project's ubiquitous language: the ground against a measurement, the
+three variances, support, expert, realization, warping against transform --
+what each word means here and which near-synonyms to avoid. The language was
+real and precise already but spread across a very long instruction file,
+docstrings and the manual, with no page organized by *concept*.
+`docs/roadmap.md` is the other half: the open work with sizes, the ideas
+tried and dropped with the numbers that killed them, and the tools refused
+on a structural mismatch. The rejections are the valuable part -- they exist
+so an idea is not re-proposed -- and until now they lived outside the
+repository, invisible to anyone but the assistant that recorded them. Both
+are linked from the top of `CLAUDE.md`; the roadmap is published under the
+documentation site's internals.
+* **`grade_tonnage` stopped calling two different things `unit`.** Its
+returned dict used `unit` for what the tonnage accumulates -- `"area"`,
+`"volume"`, `"mass"` -- which collided with the physical units added to
+variables earlier in this release, and the first fix simply added
+`grade_unit` beside it. The key is now `extent` for what is accumulated and
+`unit` for what the grade is measured in, which is what both words mean
+everywhere else in the package.
+* **The measurement samples can be consumed a batch at a time, and
+cross-validation now does.** `VGPNetwork.measurement_batches` yields
+`(rows, samples)` per batch -- the same values `predict_measurements`
+assembles, in the pieces it assembles them from, already in the variable's
+own units so a streaming caller can compare them against assays without
+waiting for an assembly that never happens. Every statistic taken of these
+samples reduces the sample axis one row at a time (coverage builds a
+central interval per location, CRPS is per row, so are the point errors and
+the PIT), so a caller that accumulates as it goes never holds more than a
+batch. `cross_validate` was rewritten that way: sufficient statistics --
+counts and sums, never a mean of means, since batches differ in size --
+folded per batch, then per fold into the pooled row, which is the same
+arithmetic the pooled row already used. Measured on 18 800 rows whose
+samples come to 92 MB: **+75 MB peak materialized against +0 MB streamed**,
+the same rmse to six decimals, and slightly faster. Two tests pin it: the
+batches concatenate to exactly what the whole call returns, and the scores
+are identical to 1e-12 whether a fold arrives in one piece or in eighty.
+The plotting figures were left on the materializing door on purpose -- they
+cache the samples on the `Selection` to reuse across figures, and they draw
+validation sets small enough that the guard is the right protection.
+* **`predict_measurements` refuses a request it cannot hold.** It returns
+the whole answer as one array per variable -- every batch kept in a list and
+concatenated at the end -- costing `n_sim * n_nodes * 8` bytes a row for
+each column, which is 5 KB a row at the defaults (measured, exactly the
+shape arithmetic, and twice that at the peak while the batches and the assembled whole are both live -- a 92 MB answer measured 182 MB resident). Nothing checked that, so a cross-validation over a few
+million rows asked for tens of gigabytes and the Linux OOM killer ended the
+session rather than raising: a notebook lost its kernel this way on
+2026-09-04, 63 GB resident against WSL's 62 GB, with the GPU never
+involved. `get_simulations` was given exactly this guard in 0.6.9 and this
+path was missed. It now computes the size from the shapes before any work
+and raises a `MemoryError` past `models.MEASUREMENT_LIMIT` (2 GB, about
+400 000 rows of a scalar variable at the defaults), naming the three ways
+under it -- fewer locations, more folds, or lower node counts. A fixed
+ceiling rather than a share of free memory, so the same script does not
+pass on one machine and fail on another.
+* **`cross_validate(method="svi")` refits each fold in minibatches.** The
+driver hard-coded `train_full`, so a fold refit was always full-batch even
+where the model itself had been trained by SVI -- and freezing parameters
+does not make an iteration cheaper, since the cost is the whole reduced
+data set per step whatever is on the tape. A model too large to train
+full-batch was therefore too large to cross-validate. The batch size needs
+no new argument: it is `options.training_batch_size`, riding in the saved
+model, so the fold copy already carries it. The passes are counted by a
+separate `epochs`, not by `iterations`, because an epoch is one visit to
+the data in batches and therefore many gradient steps, and a number that
+suits one is wrong for the other. Two things follow the choice, both in
+the docstring: `options.training_tolerance` then judges once an epoch on
+the mean bound over its batches, so a short refit may never give it enough
+to fire; and `train_svi` does not index the variables' `training_input`
+per batch, which costs nothing while the only payload is
+`RockTypeVariable`'s `is_boundary` -- accepted by both categorical
+likelihoods and read by neither -- and would need fixing first the day a
+censoring mask or a per-datum support rides that channel.
+* **Variables carry a unit, and a composition's parts keep theirs.** A
+grade reported in percent was stored as a fraction and came back as one:
+the divisor lived in the drillhole conversion, was applied on the way in
+and forgotten, so every prediction, realization, quantile and variance of
+a composition spoke in fractions of the whole whatever the assay said.
+`unit=` is now a fact of the variable — declared on
+`add_continuous_variable`, `add_vector_variable`,
+`add_compositional_variable` and `derive`, or on an interval table's
+column (`units=` at construction; afterwards
+`IntervalTable.set_unit(column, unit)` for one, or the database-level
+`DrillholeData.set_unit(table, {column: unit})` for a whole table, which
+is how an assay certificate reads — all three change the table the
+database holds, in place, so declare them before compositing, whose
+copies carry the units but no longer share them), where it travels
+through renaming and compositing onto the variable the conversion builds.
+Being a `_NODE_ATTRS` fact it rides `tree()`, the Zarr store, `copy_to`,
+`carry_to` and subsetting off the one declaration; a store written before
+this loads with none. On a variable a model reads directly it is a
+**label**: it names an axis (`prepare.axis_label`, both backends), rides
+the pyvista and geoh5 exports as `field_data["geoml_units"]`, is listed by
+`container.units()`, and changes no number. On a part of a
+`CompositionalVariable` it is also the **divisor**, and the parts are
+stored, predicted, simulated and reported in the units they were assayed
+in — the crossing to fractions of the whole happens at the two model doors
+(`get_measurements` divides, `_Component.update` multiplies, a variance by
+the square) and at the two side doors (`prediction_input` puts a cut-off
+declared in the part's own unit into fractions, `predict_measurements`
+brings the samples back). The gate, `test_units.py`: the same composition
+told it is in percent and told nothing trains to a **bit-identical** bound
+and reports every column a factor of a hundred apart, ten thousand for a
+variance, with 30 % and 0.30 naming one cut-off and the same shares above
+it. Units for a composition come as a mapping or as one per label, and with
+`rest=True` a sequence naming the parts the caller actually has is
+complete: the generated rest goes undeclared, holding a fraction, unless
+a longer sequence or a `"rest"` key gives it a unit of its own. The
+composition machinery moved with the unit table from
+`drillhole.py` to the containers, so a data-frame user gets what a
+drillhole user got — missing rows, the zero substitution, the rest part,
+the closure — and a row nothing touches keeps its numbers to the last bit.
+A drillhole composition group may now name its columns as a list and take
+their units from the table; `validate` reports a value above the whole its
+unit measures, which is the shape a mislabelled unit takes. Two things
+fixed in passing: `CompositionalVariable.update` dropped `proportions` and
+`divided`, so a cut-off declared on a part was never filled, and the
+Aitchison distance in its metrics compared closed measurements against
+unclosed predictions. `datasets.arctic_lake()` declares its percentages
+instead of dividing them away.
+* **The manual's CI job runs one chapter per process.** The v0.6.9
+tag was the first release since v0.6.5 whose full-suite job
+survived the runner, and the job holding the manual alone was
+still killed — exit 143 at 22 minutes of a 90-minute budget, no
+test failing, the same memory signature the split was built
+against. `test_manual.py` now launches `run_blocks.py` once per
+chapter, so each chapter's TensorFlow, matplotlib and pyvista
+footprint is released before the next begins; the chapters were
+independent namespaces already, and a failure now names its
+chapter.
+* **Chapter 16 seeds its expert partition.** Its figures were the only
+ones in the manual that changed from one run to the next: every
+other chapter reproduced its output byte for byte at the 0.6.9
+release, and chapter 16 did not, because `inducing.experts` draws
+its k-means start from its own `seed` (documented as separate from
+`set_seed`) and the chapter passed none. It passes `seed=1234` now;
+the figures are regenerated by `test_manual` at the next full-suite
+run and committed then, so the chapter's pictures are those of one
+reproducible model rather than of whichever partition ran last.
+* **`latent.GaussianInput`: an input variance that reaches the network.**
+A `GaussianData` container's per-coordinate variance travelled all the way
+to the root and was zeroed there, `BasicInput` being deterministic by
+design. The new root has `BasicInput`'s signature and maps the variance
+through the transform as the diagonal of `J diag(var) Jᵀ` — exactly for an
+affine transform (the ellipsoids, projections, ARD, selections, now
+declared `linear` per class and checked against a numerical Jacobian; the
+Jacobian read off one probe point and applied as one matrix product,
+which is the fast path for the high-dimensional inputs with missing
+entries the node is built for) and to first order through a nonlinear one
+(`Periodic`, the faults: one forward-mode pass per input coordinate,
+verified through `FaultDisplacement`'s Newton steps). The consumer was
+already there: `BasicGP.covariance_matrix`'s expected kernel, the one the
+deep propagation uses between nodes. With no variance the node is
+`BasicInput` bit for bit. **The gate (`docs/benchmarks/gaussian_input.py`,
+three seeds) found no measurable gain on either synthetic case**: eight
+correlated inputs with 30% of entries missing scored rmse 1.63 / coverage
+0.87 / crps 0.85 with column-mean imputation and 1.63 / 0.87 / 0.85 with
+the missing entry's marginal variance declared (1.59 / 0.88 / 0.82 with
+its conditional variance, ahead on two seeds of three), differences
+inside the seed spread; Walker Lake sampled at locations reported with a
+Gaussian error of 5 or 15 units scored the same to three figures whether
+the error was declared or not. The likely reason is measured alongside:
+the expected-kernel moment path **narrows** the prediction up to input
+variances of the range's own order (mean latent variance 0.515 → 0.468 at
+`var = range²` on the test fixture) and only returns to the prior in the
+wide limit, because it smooths the cross-covariance faster than its
+normalization shrinks it and carries no term for the variance of the mean
+over the input — Girard's second-moment correction, on the board. The
+node ships because it is the only way a declared variance takes effect at
+all, is small, and is exact where the transform is affine; it does not
+yet buy calibration.
+* **`latent.UncertainInputGP`: the GP node that integrates over its input's
+uncertainty, and the measurement that made it.** `BasicGP` reads an
+uncertain input through Paciorek's inflated covariance and takes its
+moments at one point under it. Against the exact mixture over the input's
+Gaussian (`docs/benchmarks/uncertain_input_moments.py`, Walker Lake, four
+kernels, 3000 draws per point) that path understates the predictive
+variance 4–10× and misplaces the mean by 10–70% of its magnitude from a
+tenth of the squared range upward. Girard's closed form is exact for the
+Gaussian kernel (within 1.3%) and its inflated-variance transfer to other
+kernels fails outright at small variances (the factorization of the
+product kernel is Gaussian-specific, so Paciorek's argument does not carry
+to the second moment); the first-order slope term is usable only below a
+hundredth of the squared range; a scrambled-Sobol quadrature over the
+input is within 4% of the exact moments for every kernel at 32 nodes, from
+two to eight dimensions. The node does that: the input's nodes stacked
+along the batch axis, `BasicGP`'s deterministic moments at all of them,
+the mixture's moments out, and each realization drawn at a node of its own
+— which is what lets the correction reach the ensemble, since the stored
+simulations are `cov_cross · chol_r · normals + mu` and never read the
+moment variance. Given no variance it is `BasicGP` to 1e-10; the nodes are
+a fixed parameter so a save replays them; the cost is `n_nodes` cross-
+covariances where `BasicGP` pays one. **Gate, three seeds.** On eight
+correlated inputs with 30% of entries missing — the case the pair is built
+for — the node improves its `BasicGP` counterpart on every score: marginal
+variance 1.63 / 0.87 / 0.85 → 1.56 / 0.93 / 0.82 (rmse / cover90 / crps),
+conditional 1.59 / 0.88 / 0.82 → 1.54 / 0.91 / 0.79, the 90% band covering
+90% for the first time. On Walker Lake sampled at locations reported with
+a Gaussian error, whose training noise term already absorbs that error,
+integrating over the location costs accuracy — rmse 176 → 180 at an error
+of 5 units and 205 → 221 at 15, coverage unchanged at 0.91–0.92 — so for
+that case `BasicGP` stays the recommendation. `UncertainInputGP` is for
+inputs with missing entries; uncertain coordinates remain the rare special
+case, and there the noise term does the job.
+* **Four parametric marginal warpings, measured as replacements for
+`Spline`.** `BoxCox` (Box & Cox 1964), `YeoJohnson` (Yeo & Johnson 2000),
+`Arcsinh` (Johnson 1949; Burbidge, Magee & Robb 1988) and `SinhArcsinh`
+(Jones & Pewsey 2009): elementwise, closed form both ways, one to two
+trainable parameters per component started at the values that make the
+column most Gaussian (Box and Cox's profile likelihood, on declustering
+weights where given) and refined by training. The power links keep their
+exponent in `[0, 2]`: a negative exponent bounds the transformed values
+above and the inverse blows up toward the bound — measured on Jura at 826
+times the data's maximum on tail draws, with the mean prediction destroyed
+in one arm — so it is not offered, and a Box-Cox draw below its floor
+comes back as a zero grade instead. **The measurement**
+(`docs/benchmarks/parametric_warpings.py`; Walker Lake, chapter 15's
+model scored on 2000 points of the exhaustive truth, three seeds; Jura,
+the flow gate's model on the held-out 100 sites, two seeds; rmse/sd,
+crps/sd, 90% coverage of a measurement): on Walker the chapter's chain
+`Scale → Softplus → ZScore → Spline(4)` scores 0.666 / 0.358 / 0.888 and
+the same chain without the spline scores the same, so the spline was
+buying nothing there; `YeoJohnson → ZScore` scores 0.650 / 0.347 / 0.903,
+`SinhArcsinh` between two `ZScore`s 0.653 / 0.357 / 0.928, `BoxCox →
+ZScore` 0.656 / 0.353 / 0.893. On Jura the chapter's `Log → RobustPCA →
+Spline(5) → ZScore` scores 0.977 / 0.495 / 0.796 with tail draws reaching
+**20 times** the data's maximum; `BoxCox → RobustPCA → ZScore →
+SinhArcsinh → ZScore` scores 0.943 / 0.476 / 0.801 with tails at 4.8
+times, `Log → RobustPCA → ZScore → SinhArcsinh → ZScore` 0.957 / 0.487 /
+0.831 at 3.9 times, and a two-knot spline behind the latter 0.955 /
+0.485 / 0.837. Every link's round trip sits at 1e-12 where the spline
+chains sit at 1e-5 to 1e-6, and the links train 20–40% faster. `Arcsinh`
+alone over-covers (0.936 on Walker) and is the zero-tolerant logarithm
+rather than a normalizer. **The standing recommendation moves**: for a
+single positive grade `BoxCox → ZScore` (Yeo-Johnson scored a hair
+better on Walker but maps the whole line to itself, so a latent draw
+below zero comes back a negative grade; Box-Cox's floor keeps the
+chain's promise), for a centred column `YeoJohnson → ZScore`, for a
+vector of grades
+`BoxCox → RobustPCA → ZScore → SinhArcsinh → ZScore`; `Spline` stays for
+saved models and as an optional two-knot refinement behind a link. The
+manual's seven spline chains were switched the same day: `BoxCox →
+ZScore` on Walker Lake (chapters 4, 5, 7, 11, 13, 15) and the vector
+chain on Jura (chapter 16), figures and quoted numbers re-earned.
+* **The release run.** The full suite, 1625 tests, green once one test
+was brought back to what it meant: `test_no_variance_is_basic_gp`
+compared a `BasicGP` and an `UncertainInputGP` draw for draw, and since
+each node's draws are keyed by its name the two were different streams
+by construction, failing since that change; both nodes are now named
+alike and agree to 1e-10. The manual's run regenerated seventeen figures,
+the realizations drawing new numbers now that each node keys its own and
+the measurement samples sitting on rotated nodes, and every claim the
+prose makes of them was checked against the fresh ones. None was
+contradicted by what moved. The histograms' new statistics contradict one:
+Walker Lake's `V` is not "positive, strongly skewed" but non-negative, an
+eighth of it in the lowest bin, skew 0.46 under a long thin tail, and
+chapter 15 now says so. Three were wrong before the figures moved, and are
+corrected in chapter 16: its transformed pairs carry a normal fitted to each
+column, not the standard normal the prose and `transformed_pairs`'
+docstring named; its accuracy figure scores measurements, where the
+table's goodness reads the simulations; and three of its seven metals are
+not skewed. Chapter 13's variogram verdict is left for a measured look
+(roadmap).
+
 ## version 0.6.9
 * **The latent-node protocol is two primitives and one composer.** Every
 node used to implement `predict` twice over — a five-tuple with

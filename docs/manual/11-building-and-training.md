@@ -44,10 +44,8 @@ gp = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.Scale(1),
-    geoml.warping.Softplus(1),
-    geoml.warping.ZScore(1),
-    geoml.warping.Spline(1, knots_per_arm=4))
+    geoml.warping.BoxCox(1),
+    geoml.warping.ZScore(1))
 
 likelihood = geoml.likelihood.Gaussian(warping)
 
@@ -131,8 +129,9 @@ print("lowest value:",
       round(float(np.min(fresh_grid.values("V/prediction"))), 1))
 ```
 
-The value is positive, as the `Scale → Softplus → ZScore → Spline` chain
-guarantees, and it is the same number the original model would have given.
+The value is positive, as the `BoxCox → ZScore` chain guarantees --
+the inverse power returns zero for anything past its floor -- and it is
+the same number the original model would have given.
 
 The mechanism is worth understanding, because two workflows ride on it.
 Saving records the *constructor calls* that built every object, plus the

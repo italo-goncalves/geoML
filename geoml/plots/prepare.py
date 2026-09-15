@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,6 +26,7 @@ instead of against pictures.
 from collections.abc import Sequence
 
 import numpy as _np
+import scipy.sparse as _sparse
 import scipy.spatial as _spatial
 import scipy.stats as _stats
 
@@ -77,10 +78,26 @@ def numeric_values(var):
     labels : list
         A name per column.
     """
-    values, has_value = var.get_measurements()
+    _, has_value = var.get_measurements()
     measured = _np.all(has_value == 1.0, axis=1)
-    labels = [str(label) for label in getattr(var, "labels", [var.name])]
+
+    # the stored columns rather than what `get_measurements` hands the
+    # model: a composition's parts reach it as fractions of the whole, and
+    # a figure shows the units they were measured in -- the same units every
+    # other figure reads `prediction` and `noise_variance` in
+    components = getattr(var, "components", None)
+    parts = [var] if components is None \
+        else [components[label] for label in var.labels]
+    values = _np.stack([part.measurements.values.to_numpy() for part in parts],
+                       axis=1)
+    labels = [axis_label(part) for part in parts]
     return _np.asarray(values, dtype=float), measured, labels
+
+
+def axis_label(part):
+    """A continuous variable's name, with its unit where it declares one."""
+    unit = getattr(part, "unit", None)
+    return str(part.name) if unit is None else "%s (%s)" % (part.name, unit)
 
 
 def category_values(var):
@@ -271,7 +288,15 @@ def warped_values(model, name: str):
             "%s carries no warping, so there is nothing to transform"
             % type(likelihood).__name__)
 
-    values, measured, _ = numeric_values(variable(model.data, name))
+    # What the model fed the warping -- `get_measurements`, a composition's
+    # parts as fractions of the whole, the rows closed -- rather than the
+    # stored columns `numeric_values` shows in their measured units. The
+    # warping was initialized on the former; sending ppm and percent
+    # through it put the log of each part's divisor on every warped column
+    # as an offset, and the figure showed components centred at 6 and -5.
+    values, has_value = variable(model.data, name).get_measurements()
+    values = _np.asarray(values, dtype=float)
+    measured = _np.all(_np.asarray(has_value) == 1.0, axis=1)
     warped, _ = warping.forward(values[measured])
     warped = _np.asarray(warped, dtype=float)
 
@@ -568,6 +593,144 @@ def normal_curve(values: _types.ArrayLike, low: float, high: float,
     return x, density
 
 
+def summary_statistics(values: _types.ArrayLike) -> "dict[str, float]":
+    """
+    The numbers a distribution is summed up by.
+
+    The moments are those of the values themselves, in their population
+    form, and the kurtosis is the excess over a normal's, so a normal reads
+    0 on the skewness and the kurtosis alike. The coefficient of variation
+    is the standard deviation over the mean, and missing where the mean is
+    not positive, which leaves it meaning nothing. Values that are not
+    finite are left out.
+
+    Returns
+    -------
+    dict
+        `n`, `mean`, `std`, `cv`, `skewness`, `kurtosis`, `min`, `q1`,
+        `median`, `q3` and `max`.
+    """
+    values = _np.asarray(values, dtype=float).ravel()
+    values = values[_np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("there are no finite values to sum up")
+
+    mean = float(values.mean())
+    deviation = float(values.std())
+    centred = values - mean
+    if deviation > 0:
+        skewness = float(_np.mean(centred ** 3)) / deviation ** 3
+        kurtosis = float(_np.mean(centred ** 4)) / deviation ** 4 - 3.0
+    else:
+        skewness = kurtosis = _np.nan
+    q1, median, q3 = (float(q) for q in _np.quantile(values,
+                                                     [0.25, 0.5, 0.75]))
+    return {"n": int(values.size), "mean": mean, "std": deviation,
+            "cv": deviation / mean if mean > 0 else _np.nan,
+            "skewness": skewness, "kurtosis": kurtosis,
+            "min": float(values.min()), "q1": q1, "median": median,
+            "q3": q3, "max": float(values.max())}
+
+
+def statistics_lines(statistics: "dict[str, float]") -> "list[str]":
+    """
+    Summary statistics as lines of text for a box in a monospace font.
+
+    Two columns, aligned: the count and the moments on the left, the order
+    statistics on the right. A value in the variable's units keeps four
+    significant figures and a ratio -- the coefficient of variation, the
+    skewness, the kurtosis -- two decimals. A number that is missing reads
+    as a dash.
+    """
+    def number(value, pattern="%.4g"):
+        if not _np.isfinite(value):
+            return "-"
+        text = pattern % value
+        # a value that rounds to nothing carries no sign
+        return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+    left = [("n", "%d" % statistics["n"]),
+            ("mean", number(statistics["mean"])),
+            ("sd", number(statistics["std"])),
+            ("CV", number(statistics["cv"], "%.2f")),
+            ("skew", number(statistics["skewness"], "%.2f")),
+            ("kurt", number(statistics["kurtosis"], "%.2f"))]
+    right = [("min", number(statistics["min"])),
+             ("Q1", number(statistics["q1"])),
+             ("median", number(statistics["median"])),
+             ("Q3", number(statistics["q3"])),
+             ("max", number(statistics["max"])),
+             ("", "")]
+
+    def width(pairs, item):
+        return max(len(pair[item]) for pair in pairs)
+
+    lines = []
+    for (name, value), (other, figure) in zip(left, right):
+        line = "%-*s %*s" % (width(left, 0), name, width(left, 1), value)
+        if other:
+            line += "   %-*s %*s" % (width(right, 0), other,
+                                     width(right, 1), figure)
+        lines.append(line)
+    return lines
+
+
+def statistics_side(counts: _types.ArrayLike) -> str:
+    """
+    The upper corner a box of statistics takes over a histogram.
+
+    The one over whichever half of the bins has the lower bars: the right,
+    for the long tail of an assay.
+
+    Parameters
+    ----------
+    counts
+        The height of the tallest bar in each bin, left to right.
+
+    Returns
+    -------
+    str
+        `"left"` or `"right"`.
+    """
+    counts = _np.asarray(counts, dtype=float)
+    half = len(counts) // 2
+    left = float(counts[:half].max()) if half else 0.0
+    right = float(counts[half:].max()) if len(counts) > half else 0.0
+    return "right" if right <= left else "left"
+
+
+def statistics_top(counts: _types.ArrayLike, edges: _types.ArrayLike,
+                   low: float, high: float, height: float) -> float:
+    """
+    How tall a histogram's axis has to be for its bars to clear a box.
+
+    Every bar whose bin reaches under the box has to end below it, with a
+    little room to spare; the bars beside it may run as high as they like.
+
+    Parameters
+    ----------
+    counts
+        The height of the tallest bar in each bin, left to right.
+    edges
+        The bins' edges.
+    low, high
+        Where the box starts and ends along the axis, in the axis's units.
+    height
+        How much of the axis's height the box covers, from the top.
+
+    Returns
+    -------
+    float
+        The top the axis needs.
+    """
+    counts = _np.asarray(counts, dtype=float)
+    edges = _np.asarray(edges, dtype=float)
+    under = (edges[1:] > low) & (edges[:-1] < high)
+    tallest = float(counts[under].max()) if _np.any(under) else 0.0
+    return max(1.05 * float(counts.max()),
+               1.02 * tallest / max(1.0 - height, 0.1))
+
+
 def continuous_parts(var) -> "list[_data.ContinuousVariable]":
     """The continuous columns a figure draws, one per component.
 
@@ -644,7 +807,7 @@ def prediction_values(container: "_data._SpatialData", name: str):
                 % name)
         measured_values.append(part.measurements.values.to_numpy())
         predicted_values.append(part.prediction.values.to_numpy())
-        labels.append(str(part.name))
+        labels.append(axis_label(part))
 
     measured_values = _np.stack(measured_values, axis=1).astype(float)
     predicted_values = _np.stack(predicted_values, axis=1).astype(float)
@@ -661,6 +824,48 @@ def prediction_values(container: "_data._SpatialData", name: str):
 
     return (measured_values[both], predicted_values[both], labels,
             _np.where(both)[0])
+
+
+def inside_trim(measured: _types.ArrayLike, predicted: _types.ArrayLike,
+                trim: "_types.ArrayLike | None" = None):
+    """
+    Which locations a predicted-against-measured panel keeps under a trim.
+
+    A few values far from the rest set the limits of such a panel and
+    squeeze everything else into a corner of it. Naming a pair of quantiles
+    sets a window instead, running from the lower quantile of the measured
+    or the predicted values, whichever is lower, to the upper quantile of
+    whichever is higher; a location outside it on either axis is left out.
+    `[0, 0.99]` takes off the long right tail of an assay, `[0.01, 0.99]`
+    both ends.
+
+    Returns a boolean mask over the locations, every one kept when `trim`
+    is None.
+    """
+    measured = _np.asarray(measured, dtype=float)
+    predicted = _np.asarray(predicted, dtype=float)
+    if trim is None:
+        return _np.ones(len(measured), dtype=bool)
+
+    levels = _np.asarray(trim, dtype=float).ravel()
+    if len(levels) != 2 or not _np.all((levels >= 0) & (levels <= 1)) \
+            or levels[0] >= levels[1]:
+        raise ValueError(
+            "trim takes two quantiles between 0 and 1, the lower first: "
+            "[0, 0.99] leaves out the long right tail, [0.01, 0.99] both "
+            "ends. Got %r" % (levels.tolist(),))
+
+    # each end from whichever side reaches further, so that only what would
+    # stretch the window is left out: trimming each axis by its own
+    # quantiles would also drop the highest predictions, which a smoothing
+    # model packs well inside the measured range -- points that stretch
+    # nothing, and the very ones that show the smoothing
+    low = min(_np.quantile(measured, levels[0]),
+              _np.quantile(predicted, levels[0]))
+    high = max(_np.quantile(measured, levels[1]),
+               _np.quantile(predicted, levels[1]))
+    return ((measured >= low) & (measured <= high)
+            & (predicted >= low) & (predicted <= high))
 
 
 def _bin_edges(values, bins):
@@ -2176,10 +2381,11 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
     -------
     dict
         `cutoff` `(n_cutoffs,)`; `tonnage`, `grade` and `metal`
-        `(n_cutoffs, n_realizations)`; `unit`, which is the extent of a block
-        or `"mass"` depending on whether a density was given; and `kept` and
-        `total`, the blocks that survived the uncertainty filter and the
-        blocks there were.
+        `(n_cutoffs, n_realizations)`; `extent`, what is accumulated above
+        the cut-off -- a block's own extent, or `"mass"` where a density
+        was given; `unit`, what the grade is measured in where it says so;
+        and `kept` and `total`, the blocks that survived the uncertainty
+        filter and the blocks there were.
     """
     volume = block_volume(container)
     # a block of a two-dimensional grid has an area, not a volume, and saying
@@ -2260,8 +2466,250 @@ def grade_tonnage(container, name, density=None, cutoffs=30,
         mean_grade = _np.where(tonnage > 0, metal / tonnage, _np.nan)
 
     return {"cutoff": cutoffs, "tonnage": tonnage, "grade": mean_grade,
-            "metal": metal, "unit": extent if density is None else "mass",
+            "metal": metal,
+            # what is being accumulated above the cut-off -- a length, an
+            # area, a volume, or a mass where a density was given
+            "extent": extent if density is None else "mass",
+            # and what the grade itself is measured in, where it says so
+            "unit": getattr(var, "unit", None),
             "kept": kept, "total": total}
+
+
+def dispersion_by_support(container: "_data.BlockSet3D", name: str,
+                          component: "str | None" = None) -> "list[dict]":
+    """
+    The within-block standard deviation at every block size a block set has.
+
+    Each block's `dispersion` says how much the ground varies inside it, on
+    the block's own support. Merging the blocks into their parents, level by
+    level up to the coarsest, gives the same number at every size the
+    lattice has, so it can be read against the block size.
+
+    A parent is never predicted; it is put together from the blocks inside
+    it. Its dispersion is theirs, volume-weighted, plus how much their block
+    values differ among themselves -- taken realization by realization, a
+    realization being the one thing that comes across a regrouping exactly,
+    and averaged over the realizations as a block's own dispersion is. Every
+    realization the variable holds is used, read a band of blocks at a time.
+
+    A parent missing any of its ground -- a block never predicted, such as
+    one a `where=` filter left out -- is left out at that size and at every
+    size above it, as `BlockSet3D.group` refuses a partial family.
+
+    Parameters
+    ----------
+    container
+        The block set.
+    name
+        The continuous variable.
+    component
+        One component of a vector or compositional variable; every one by
+        default.
+
+    Returns
+    -------
+    list of dict
+        One per component, in label order, with `name`, `label` and `sizes`:
+        one dict per level, the finest first, holding `level`, `size` (the
+        block size along each axis), `deviation` (the within-block standard
+        deviation of every block of that size), `depth` (how many times the
+        refinement split inside each: 0 for a block it left whole), `rms`
+        (the root mean square of `deviation`, the dispersion of the ground
+        within blocks of that size), `count`, `share` (of the set's volume
+        the blocks cover) and `left_out` (blocks of that size missing some
+        of their ground).
+
+    Raises
+    ------
+    ValueError
+        If the container is not a `BlockSet3D`, or the variable carries no
+        dispersion or no simulations.
+    KeyError
+        If `component` names no component of the variable.
+    """
+    if not isinstance(container, _data.BlockSet3D):
+        raise ValueError(
+            "the dispersion by block size merges blocks into their parents, "
+            "which needs a BlockSet3D; got a %s" % type(container).__name__)
+
+    var = variable(container, name)
+    parts = continuous_parts(var)
+    if component is not None:
+        parts = [part for part in parts if str(part.name) == str(component)]
+        if not parts:
+            raise KeyError("no component %r in %r; found %s"
+                           % (component, name, component_names(var)))
+
+    return [{"name": str(part.name), "label": axis_label(part),
+             "sizes": _dispersion_sizes(container, part)} for part in parts]
+
+
+def _dispersion_sizes(blocks, part):
+    """`dispersion_by_support` for one column."""
+    dispersion = _np.asarray(part.dispersion.values.to_numpy(), dtype=float)
+    leaf = _np.isfinite(dispersion)
+    if not _np.any(leaf):
+        raise ValueError(
+            "%r carries no dispersion; a model writes one when it predicts "
+            "onto blocks, and a derived variable has none" % str(part.name))
+    store = getattr(part, "simulations", None)
+    if store is None or len(getattr(store, "shape", ())) != 2:
+        raise ValueError(
+            "%r carries no simulations, which a parent's dispersion is put "
+            "together from" % str(part.name))
+
+    level = _np.asarray(blocks.level)
+    ratio = _np.array(blocks.discretization, dtype=_np.int64)
+    volume = _np.prod(blocks._size, axis=1)         # in base cells
+    finest = int(level[leaf].max())
+    n_sim = int(store.shape[1])
+
+    def cells(coarse):
+        """A block's volume at level `coarse`, in base cells."""
+        return int(_np.prod(blocks._coarse_size // ratio ** coarse))
+
+    # every block finer than a level, numbered by its ancestor there
+    parents = {}
+    for coarse in range(finest):
+        inside = leaf & (level > coarse)
+        _, inverse = _np.unique(blocks._ancestor(coarse)[inside],
+                                return_inverse=True)
+        index = _np.full(blocks.n_data, -1, dtype=_np.int64)
+        index[inside] = inverse.ravel()
+        parents[coarse] = (index, int(index.max()) + 1)
+
+    # The realizations enter shifted by their mean: the spread between
+    # blocks is a difference of two sums of squares, and a grade far from
+    # zero would otherwise leave it at the mercy of rounding.
+    prediction = _np.asarray(part.prediction.values.to_numpy(), dtype=float)
+    finite = _np.isfinite(prediction) & leaf
+    shift = float(prediction[finite].mean()) if _np.any(finite) else 0.0
+
+    # A parent's realizations are sums over blocks that sit anywhere in the
+    # store -- a split appends its children at the end -- so they are
+    # gathered band by band into one row per parent and realization. Where
+    # that many rows would not fit, the realizations are taken a slice at a
+    # time, each slice another pass over the store.
+    rows = sum(n for _, n in parents.values())
+    per_pass = max(1, int(_storage.DEFAULT_THRESHOLD // (8 * max(rows, 1))))
+    square = _np.zeros(blocks.n_data)
+    between = {coarse: _np.zeros(n) for coarse, (_, n) in parents.items()}
+    for first in range(0, n_sim, per_pass):
+        columns = slice(first, min(first + per_pass, n_sim))
+        sums = {coarse: _np.zeros((n, columns.stop - columns.start))
+                for coarse, (_, n) in parents.items()}
+        for band in store.row_bands():
+            keep = _np.flatnonzero(leaf[band])
+            if keep.size == 0:
+                continue
+            values = _np.asarray(store[band, columns], dtype=float)
+            values = values[keep] - shift
+            keep = keep + band.start
+            square[keep] += _np.sum(values ** 2, axis=1)
+            for coarse, (index, n) in parents.items():
+                parent = index[keep]
+                used = parent >= 0
+                if not _np.any(used):
+                    continue
+                count = int(_np.count_nonzero(used))
+                gather = _sparse.csr_matrix(
+                    (volume[keep[used]] / cells(coarse),
+                     (parent[used], _np.arange(count))), shape=(n, count))
+                sums[coarse] += gather @ values[used]
+        for coarse in parents:
+            between[coarse] += _np.sum(sums[coarse] ** 2, axis=1)
+
+    total = float(volume.sum())
+    sizes = []
+    for coarse in range(finest, -1, -1):
+        whole = leaf & (level == coarse)
+        variance = [dispersion[whole]]
+        depth = [_np.zeros(int(_np.count_nonzero(whole)), dtype=_np.int64)]
+        left_out = int(_np.count_nonzero(~leaf & (level == coarse)))
+        if coarse in parents:
+            index, n = parents[coarse]
+            inside = index >= 0
+            weight = volume[inside] / cells(coarse)
+            # the law of total variance, realization by realization: what
+            # varies inside the blocks, plus how their values differ
+            within = _np.bincount(index[inside], minlength=n,
+                                  weights=weight * dispersion[inside])
+            spread = _np.bincount(index[inside], minlength=n,
+                                  weights=weight * square[inside] / n_sim) \
+                - between[coarse] / n_sim
+            covered = _np.bincount(index[inside], minlength=n,
+                                   weights=volume[inside])
+            complete = covered == cells(coarse)
+            deepest = _np.zeros(n, dtype=_np.int64)
+            _np.maximum.at(deepest, index[inside], level[inside] - coarse)
+            variance.append((within + spread)[complete])
+            depth.append(deepest[complete])
+            left_out += int(_np.count_nonzero(~complete))
+
+        variance = _np.maximum(_np.concatenate(variance), 0.0)
+        count = len(variance)
+        sizes.append({
+            "level": coarse,
+            "size": blocks.base_step * (blocks._coarse_size
+                                        // ratio ** coarse),
+            "deviation": _np.sqrt(variance),
+            "depth": _np.concatenate(depth),
+            "rms": float(_np.sqrt(variance.mean())) if count else _np.nan,
+            "count": count,
+            "share": count * cells(coarse) / total,
+            "left_out": left_out})
+    return sizes
+
+
+def split_label(depth: int) -> str:
+    """How many times the refinement split inside a block, in words."""
+    names = {0: "left whole", 1: "split once", 2: "split twice"}
+    return names.get(int(depth), "split %d times" % int(depth))
+
+
+def support_tick(entry: dict) -> "list[str]":
+    """The lines naming one block size on the axis of
+    `dispersion_by_support`: the size, then how much of the set it is."""
+    lines = [" × ".join("%g" % side for side in entry["size"]),
+             "%d block%s, %.0f%%" % (entry["count"],
+                                     "" if entry["count"] == 1 else "s",
+                                     100 * entry["share"])]
+    if entry["left_out"]:
+        lines.append("%d left out" % entry["left_out"])
+    return lines
+
+
+def jitter(n: int, width: float = 0.5) -> _types.FloatArray:
+    """Offsets spreading `n` points across a strip `width` wide.
+
+    Taken from the golden-ratio sequence rather than at random, so a figure
+    comes out the same every time and the points spread evenly whatever
+    their number.
+    """
+    return ((_np.arange(n) * 0.6180339887498949 % 1.0 - 0.5)
+            * width).astype(_np.float64)
+
+
+def support_strip(sizes: "list[dict]", most: int = 5000) -> "list[tuple]":
+    """The points of `dispersion_by_support` drawn as a strip.
+
+    One `(depth, x, y)` per depth of splitting, `x` being the position of
+    the block's size plus a spread across the strip. At most about `most`
+    blocks of each size are kept, taken by striding through them.
+    """
+    x, y, depth = [], [], []
+    for position, entry in enumerate(sizes):
+        if entry["count"] == 0:
+            continue
+        pick = _np.arange(0, entry["count"],
+                          max(1, int(_np.ceil(entry["count"] / most))))
+        x.append(position + jitter(len(pick)))
+        y.append(entry["deviation"][pick])
+        depth.append(entry["depth"][pick])
+    if not x:
+        return []
+    x, y, depth = (_np.concatenate(a) for a in (x, y, depth))
+    return [(int(d), x[depth == d], y[depth == d]) for d in _np.unique(depth)]
 
 
 def grid_shape(n_panels):
@@ -2269,3 +2717,209 @@ def grid_shape(n_panels):
     columns = int(_np.ceil(_np.sqrt(n_panels)))
     rows = int(_np.ceil(n_panels / columns))
     return rows, columns
+
+
+# --------------------------------------------------------------------------- #
+# mesh sets
+# --------------------------------------------------------------------------- #
+def key_label(shells: "_data.MeshSet", key) -> str:
+    """A mesh set's key as a figure writes it: a category's name, or the
+    cut-off as a number."""
+    return str(key) if shells.kind == "category" else "%g" % key
+
+
+def key_axis(shells: "_data.MeshSet") -> str:
+    """What the keys of a mesh set are, for the axis they run along."""
+    if shells.kind == "category":
+        return "category"
+    if "probability_of" in shells.provenance:
+        return "probability"
+    return "cut-off" if shells.unit is None else "cut-off (%s)" % shells.unit
+
+
+def volume_dispersion(shells: "_data.MeshSet",
+                      relative: bool = False) -> dict:
+    """
+    What `volume_dispersion` draws: every realization's mesh volume at each
+    cut-off or category, beside the prediction's.
+
+    Read off what the set measured as each realization was made, so no mesh
+    is loaded.
+
+    Parameters
+    ----------
+    shells
+        A set built with its realizations.
+    relative
+        Whether to divide every volume by the prediction's, so that the
+        prediction reads one.
+
+    Returns
+    -------
+    dict
+        `labels`, one per key; `values`, the realizations' volumes at each
+        key; `prediction`, the prediction's; `title`; `axis`, what the
+        volumes are; `keys`, what the keys are.
+    """
+    table = shells.realization_volumes()
+    summary = shells.volume_dispersion()
+    values, prediction = [], []
+    for key in shells:
+        held = table[key].to_numpy(dtype=float)
+        held = held[_np.isfinite(held)]
+        own = float(summary.loc[key, "prediction"])
+        if relative:
+            held = held / own if own > 0 else _np.full(held.shape, _np.nan)
+            own = 1.0 if own > 0 else _np.nan
+        values.append(held)
+        prediction.append(own)
+    return {"labels": [key_label(shells, key) for key in shells],
+            "values": values, "prediction": _np.asarray(prediction),
+            "relative": relative,
+            "title": "%s: volume by realization" % shells.path,
+            "axis": "volume over the prediction's" if relative
+            else "volume",
+            "keys": key_axis(shells)}
+
+
+def connectivity(shells: "_data.MeshSet") -> dict:
+    """
+    What `connectivity` draws: how many pieces each mesh is in, and the
+    largest one's share of its volume.
+
+    Returns
+    -------
+    dict
+        `labels`; `x`, the cut-offs or the categories' positions;
+        `numeric`, whether `x` is a scale; `largest` and `pieces`, the
+        prediction's; `band`, the realizations' P10 and P90 of the largest
+        share, `median` their P50 and `pieces_median` the pieces' P50 --
+        None without realizations; `title`; `keys`.
+    """
+    frame = shells.connectivity()
+    numeric = shells.kind != "category"
+    if numeric:
+        x = _np.asarray(list(shells), dtype=float)
+    else:
+        x = _np.arange(len(shells), dtype=float)
+    held = "largest_p10" in frame
+    band = None
+    if held:
+        band = (frame["largest_p10"].to_numpy(dtype=float),
+                frame["largest_p90"].to_numpy(dtype=float))
+    return {"labels": [key_label(shells, key) for key in shells],
+            "x": x, "numeric": numeric,
+            "largest": frame["largest"].to_numpy(dtype=float),
+            "pieces": frame["pieces"].to_numpy(dtype=float),
+            "band": band,
+            "median": frame["largest_p50"].to_numpy(dtype=float)
+            if held else None,
+            "pieces_median": frame["pieces_p50"].to_numpy(dtype=float)
+            if held else None,
+            "title": "%s: connectivity" % shells.path,
+            "keys": key_axis(shells)}
+
+
+def mesh_section(shells: "_data.MeshSet", axis, value: float,
+                 variable=None, resolution: "float | None" = None) -> dict:
+    """
+    What `section` draws: where each mesh of a set crosses a plane, and
+    what the model holds on it.
+
+    Parameters
+    ----------
+    shells
+        The set.
+    axis
+        The coordinate held fixed, by index or by label.
+    value
+        Where along it the plane sits.
+    variable
+        A continuous variable or component of the set's container, drawn
+        beneath the lines; nothing is drawn beneath without one.
+    resolution
+        The spacing to sample the variable at on the plane. The finest
+        block by default, or a grid's own spacing.
+
+    Returns
+    -------
+    dict
+        `lines`, for every key's label a list of `(n, 2)` polylines in the
+        plane; `axes`, the labels of the two in-plane coordinates; `image`,
+        the sampled variable or None; `title`; `keys`.
+    """
+    data = shells.data
+    labels = [str(label) for label in
+              (getattr(data, "coordinate_labels", None) or ("X", "Y", "Z"))]
+    if isinstance(axis, (int, _np.integer)):
+        index = int(axis)
+    else:
+        lowered = [label.lower() for label in labels]
+        wanted = str(axis).lower()
+        index = lowered.index(wanted) if wanted in lowered \
+            else "xyz".index(wanted)
+    plane = [i for i in range(3) if i != index]
+    cut = shells.section(index, value)
+    lines = {key_label(shells, key): [line[:, plane] for line in cut[key]]
+             for key in shells}
+    image = None
+    if variable is not None and data is not None:
+        image = section_image(data, variable, index, value, resolution)
+    return {"lines": lines, "axes": (labels[plane[0]], labels[plane[1]]),
+            "image": image, "keys": key_axis(shells),
+            "title": "%s: section at %s = %g" % (shells.path, labels[index],
+                                                 value)}
+
+
+def section_image(container, var, index: int, value: float,
+                  resolution: "float | None" = None) -> "dict | None":
+    """
+    A variable's prediction sampled on a plane across one axis.
+
+    A block model answers exactly which block holds each sample; any other
+    container its nearest location, left empty past half a cell's diagonal.
+    At most 600 samples a side.
+
+    Returns
+    -------
+    dict or None
+        `values` `(n_v, n_u)`, `extent` `(u_min, u_max, v_min, v_max)` and
+        `label`; None when the variable holds no prediction.
+    """
+    column = getattr(var, "prediction", None)
+    if column is None or not column._has_content():
+        return None
+    values = _np.asarray(column.values, dtype=float).ravel()
+    low = _np.ravel(container.bounding_box.min)
+    high = _np.ravel(container.bounding_box.max)
+    plane = [i for i in range(3) if i != index]
+    if resolution is None:
+        step = getattr(container, "base_step", None)
+        if step is None:
+            step = getattr(container, "step_size", None)
+        if step is not None:
+            resolution = float(_np.min(_np.asarray(step, dtype=float)[plane]))
+        else:
+            resolution = float(_np.max(high - low)) / 200.0
+    counts = [int(min(600, max(2, _np.ceil((high[i] - low[i]) / resolution))))
+              for i in plane]
+    u = _np.linspace(low[plane[0]], high[plane[0]], counts[0] + 1)
+    v = _np.linspace(low[plane[1]], high[plane[1]], counts[1] + 1)
+    grid_u, grid_v = _np.meshgrid((u[:-1] + u[1:]) / 2, (v[:-1] + v[1:]) / 2)
+    points = _np.zeros((grid_u.size, 3))
+    points[:, plane[0]] = grid_u.ravel()
+    points[:, plane[1]] = grid_v.ravel()
+    points[:, index] = float(value)
+    if isinstance(container, _data.BlockSet3D):
+        found = container.index_data(_data.PointData.from_array(points))
+        sampled = _np.where(found >= 0, values[_np.maximum(found, 0)],
+                            _np.nan)
+    else:
+        coordinates = _np.asarray(container.coordinates, dtype=float)
+        step = _np.asarray(getattr(container, "step_size", resolution),
+                           dtype=float) * _np.ones(3)
+        distance, nearest = _spatial.KDTree(coordinates).query(points)
+        sampled = _np.where(distance <= 0.5 * float(_np.linalg.norm(step)),
+                            values[nearest], _np.nan)
+    return {"values": sampled.reshape(grid_u.shape),
+            "extent": (u[0], u[-1], v[0], v[-1]), "label": var.name}

@@ -150,6 +150,26 @@ def test_the_column_names_map_back_to_paths(tmp_path):
     assert table["grade - measurements"] == "grade/measurements"
 
 
+def test_the_file_records_what_the_columns_are_measured_in(tmp_path):
+    """A grade read out of a geoh5 file is a number with no scale attached
+    unless the file says otherwise."""
+    point, rng = _point_data()
+    point.add_continuous_variable("grade", rng.uniform(0, 5, 12), unit="g/t")
+    point.add_continuous_variable("plain", rng.uniform(0, 5, 12))
+
+    file = str(tmp_path / "model.geoh5")
+    point.to_geoh5(file, name="samples")
+
+    import json
+    workspace = geoh5py.workspace.Workspace(file)
+    try:
+        samples = workspace.get_entity("samples")[0]
+        units = json.loads(samples.metadata["geoml_units"])
+    finally:
+        workspace.close()
+    assert units == {"grade": "g/t"}
+
+
 def test_a_flat_container_says_it_cannot_go(tmp_path):
     frame = pd.DataFrame(np.zeros((5, 2)), columns=["X", "Y"])
     flat = geoml.data.PointData(frame, ["X", "Y"])

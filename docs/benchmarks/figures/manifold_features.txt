@@ -1,0 +1,30 @@
+
+simplify, contoured ball: 5372 triangles, volume 901.046
+  engine    budget  triangles     time kind          volume       out      back
+  geoML     0.05         1810     0.4s Solid3D      896.382    0.0438    0.0504
+  Manifold  0.05         2084     0.0s Solid3D      895.514    0.0485    0.0487
+  geoML     0.2           574     0.3s Solid3D       879.31     0.147     0.143
+  Manifold  0.2           594     0.0s Solid3D      873.934     0.193      0.19
+  geoML     0.5           462     0.3s Solid3D      871.893     0.229     0.251
+  Manifold  0.5           276     0.0s Solid3D      825.785     0.445     0.464
+
+simplify, Assen BIF: 324970 triangles, volume 817318
+  engine    budget  triangles     time kind          volume       out      back
+  geoML     0.5         14996     2.3s Solid3D       816336     0.459     0.722
+  Manifold  0.5          5762     0.1s Solid3D       815328     0.877       1.1
+  geoML     2          324970     4.4s Solid3D       817318  1.55e-10     0.722
+  Manifold  2           16342     0.1s Solid3D       792563      5.36      14.6
+
+simplify, Assen Hematite: 620126 triangles, volume 2.46402e+06
+  engine    budget  triangles     time kind          volume       out      back
+  geoML     0.5         38856     7.0s Solid3D  2.46385e+06     0.492     0.468
+  Manifold  0.5         13592     0.2s Solid3D  2.46254e+06     0.966      2.73
+  geoML     2          620126     8.4s Solid3D  2.46402e+06  1.55e-10         0
+  Manifold  2           33176     0.2s Mesh3D   2.44669e+06      3.96      6.44
+
+split, Assen Diabase: geoML 3 pieces in 1.2 s, Manifold 3 in 0.1 s; largest volumes [1.3925747e+06 6.1640550e+05 2.8990000e+02] against [1.3925747e+06 6.1640550e+05 2.8990000e+02]
+  and handing Manifold's pieces back as meshes: 1.0 s more
+
+level_set, a ball on 40^3: geoML Solid3D 5372 tris in 0.01 s, volume -0.41% off; Manifold 10104 tris in 0.05 s, volume -0.19% off
+level_set, a ball on 80^3: geoML Solid3D 21368 tris in 0.05 s, volume -0.10% off; Manifold 38400 tris in 0.39 s, volume -0.05% off
+done

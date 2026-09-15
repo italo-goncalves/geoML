@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2025  Ítalo Gomes Gonçalves
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,14 +26,14 @@ which keeps this module free of the circular imports a central registry of
 container and likelihood types would need.
 """
 import os as _os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Union
 
 import numpy as _np
 import numpy.typing as _npt
 
 __all__ = ["ArrayLike", "FloatArray", "IndexArray", "PathLike", "Where",
-           "Cutoffs", "Bins", "Labels"]
+           "Cutoffs", "Bins", "Labels", "Unit", "Units"]
 
 #: Anything NumPy can turn into an array: a list, a tuple, a Series, an array.
 ArrayLike = _npt.ArrayLike
@@ -62,3 +62,14 @@ Bins = Union[int, Sequence[float]]
 
 #: The names of a variable's components or categories, in order.
 Labels = Sequence[str]
+
+# What a column is measured in: a name from `data.variables.UNITS`, or the
+# number to divide by.
+Unit = Union[str, float]
+
+# Units for a variable's several components: one per label, or a mapping
+# from label to unit. `None` in place of the whole leaves them all
+# undeclared, and `None` in place of one leaves that one undeclared -- a
+# mapping does it by leaving the label out, a sequence by naming it.
+Units = Union[Mapping[str, Union[Unit, None]], Sequence[Union[Unit, None]],
+              None]

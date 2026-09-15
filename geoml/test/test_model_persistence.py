@@ -377,3 +377,29 @@ def test_new_data_must_have_the_variables(tmp_path):
 
     with pytest.raises(KeyError):
         geoml.models.VGPNetwork.open(path, data=empty)
+
+
+def test_the_tree_is_registered_before_the_likelihoods():
+    """The file stores parameters by position in `all_parameters`, which
+    is registration order, so the order is part of the save format: the
+    tree's parameters first, then each likelihood's, as every model saved
+    since the first release. The leaves refactor briefly registered the
+    likelihoods first, and every older save refused to open with a shape
+    mismatch at the first slot."""
+    geoml.set_seed(1)
+    point, coords = _points()
+    point.add_continuous_variable("w", np.cos(coords[:, 1] / 25.0))
+    root = geoml.latent.BasicInput(
+        _inducing(), transform=geoml.transform.Isotropic(40))
+    leaves = [geoml.latent.BasicGP(root, size=1),
+              geoml.latent.BasicGP(root, size=1)]
+    likelihoods = [geoml.likelihood.Gaussian(), geoml.likelihood.Gaussian()]
+    model = geoml.models.VGPNetwork(point, ["v", "w"], likelihoods, leaves)
+
+    expected = []
+    for parametric in leaves + likelihoods:
+        for parameter in parametric.all_parameters:
+            if not any(parameter is seen for seen in expected):
+                expected.append(parameter)
+    assert len(model.all_parameters) == len(expected)
+    assert all(a is b for a, b in zip(model.all_parameters, expected))

@@ -1,5 +1,5 @@
 # geoML - machine learning models for geospatial data
-# Copyright (C) 2021  Ítalo Gomes Gonçalves
+# Copyright (C) 2019  Ítalo Gomes Gonçalves
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -48,6 +48,23 @@ import warnings
 
 import tensorflow_probability as _tfp
 _tfd = _tfp.distributions
+
+# How much `predict_measurements` will hold in RAM before it refuses. It
+# returns the whole answer as one array per variable -- every batch kept in
+# a list and concatenated at the end, so the chunks and the result are both
+# live for that moment -- and the answer is `n_sim * n_nodes` values a row
+# for each column: 5 KB a row at the defaults, measured. **The peak is twice
+# that**: a 92 MB answer was measured to cost 182 MB of resident memory, the
+# concatenate holding the parts and the whole at once. Ungoverned, a
+# cross-validation fold over a few million rows asks for tens of gigabytes
+# and the Linux OOM killer ends the session, which is what happened on
+# 2026-09-04 (63 GB resident, the notebook's kernel killed outright).
+# A fixed ceiling rather than a share of free memory: a limit that moves
+# with the machine makes the same script fail in one place and not another,
+# and there is no portable way to ask. Generous on purpose -- 400 000 rows
+# of a scalar variable at the defaults -- since the point is to stop the
+# catastrophe, not to police ordinary use.
+MEASUREMENT_LIMIT = 2 * 1024 ** 3
 
 
 class _ModelOptions:
@@ -740,13 +757,18 @@ class VGPNetwork(_GPModel):
     data
         The training data, a container from the :mod:`geoml.data` module.
     variables
-        The name of a variable in `data` to model, or a list of names.
+        The name of a variable in `data` to model, a list of names, or a
+        mapping from each name to its likelihood -- in which case
+        `likelihoods` is left out.
     likelihoods
         A likelihood from :mod:`geoml.likelihood`, or a list of one per
         variable, in the same order as `variables`.
     latent_network
-        The network's terminal node, from :mod:`geoml.latent`. Its size must
-        match the likelihoods' sizes summed.
+        The tree's leaves, from :mod:`geoml.latent`: a list of nodes, one
+        per likelihood and in the same order, each sized as its likelihood;
+        or a single node serving every likelihood, sized as their sizes
+        summed and split among them in order. Several leaves may share
+        parents, or sit on separate trees with roots of their own.
     directional_data
         Structural measurements, whose variable is taken as the gradient of
         the modelled field.
@@ -755,6 +777,11 @@ class VGPNetwork(_GPModel):
 
     Attributes
     ----------
+    leaves : list
+        The tree's output nodes, one per likelihood or one for all.
+    latent_network
+        The single leaf, where there is one. A model with several leaves
+        raises here and points at `leaves`.
     training_log : list of float
         The evidence lower bound at each iteration of the last training run.
 
@@ -773,36 +800,94 @@ class VGPNetwork(_GPModel):
     """
 
     def __init__(self, data: "_data.PointData",
-                 variables: "str | Sequence[str]",
-                 likelihoods: "_lk._Likelihood | Sequence[_lk._Likelihood]",
-                 latent_network: "_latent.network._LatentVariable",
+                 variables: "str | Sequence[str] | dict",
+                 likelihoods: "_lk._Likelihood | Sequence[_lk._Likelihood] | None" = None,
+                 latent_network: "_latent.network._LatentVariable | Sequence[_latent.network._LatentVariable] | None" = None,
                  directional_data: "_data.DirectionalData | None" = None,
                  options: "GPOptions | None" = None):
         super().__init__(options=options)
 
         self.data = data
-        self.latent_network = self._register(latent_network)
 
-        if isinstance(likelihoods, _lk._Likelihood):
-            likelihoods = [likelihoods]
-        self.likelihoods: "list[_lk._Likelihood]" = list(likelihoods)
+        # `variables={"Rock": lik, ...}` names each likelihood beside its
+        # variable, which is the spelling that cannot get the order wrong
+        if isinstance(variables, dict):
+            if likelihoods is not None:
+                raise ValueError(
+                    "the likelihoods were given twice: once beside each "
+                    "variable and once as `likelihoods`; give one or the "
+                    "other")
+            names, likelihoods = list(variables.keys()), list(variables.values())
+        else:
+            names = [variables] if isinstance(variables, str) \
+                else list(variables)
+            if likelihoods is None:
+                raise ValueError(
+                    "no likelihoods: pass one per variable, or name each "
+                    "beside its variable as `variables={name: likelihood}`")
+            if isinstance(likelihoods, _lk._Likelihood):
+                likelihoods = [likelihoods]
+            likelihoods = list(likelihoods)
+        self.variables: list[str] = names
+        self.likelihoods: "list[_lk._Likelihood]" = likelihoods
+        if len(self.likelihoods) != len(self.variables):
+            raise ValueError(
+                "%d variable(s) but %d likelihood(s); each variable takes "
+                "exactly one" % (len(self.variables), len(self.likelihoods)))
         self.lik_sizes = [lik.size for lik in self.likelihoods]
+
+        # The tree's leaves, and which likelihoods each one serves. A list
+        # is one leaf per likelihood; a single node serves them all and is
+        # split among them by size, which is the shape every model had before
+        # a list was accepted. Nothing in between: a leaf serving some of
+        # the likelihoods but not others would need the join this replaces.
+        if latent_network is None:
+            raise ValueError("no latent network: pass the tree's leaves")
+        self.leaves: "list[_latent.network._LatentVariable]"
+        if isinstance(latent_network, (list, tuple)):
+            self.leaves = list(latent_network)
+            if len(self.leaves) != len(self.likelihoods):
+                raise ValueError(
+                    "%d leaves for %d likelihood(s); a list of leaves takes "
+                    "one per likelihood, in the same order, or pass a single "
+                    "node to serve them all"
+                    % (len(self.leaves), len(self.likelihoods)))
+            self._leaf_groups = [[i] for i in range(len(self.likelihoods))]
+        else:
+            self.leaves = [_cast(_latent.network._LatentVariable,
+                                 latent_network)]
+            self._leaf_groups = [list(range(len(self.likelihoods)))]
+        for leaf, group in zip(self.leaves, self._leaf_groups):
+            self._register(leaf)
+            wanted = sum(self.lik_sizes[i] for i in group)
+            if leaf.size != wanted:
+                raise ValueError(
+                    "leaf %s has size %d where its likelihood%s need%s %d"
+                    % (leaf.name, leaf.size,
+                       "s" if len(group) > 1 else "",
+                       "" if len(group) > 1 else "s", wanted))
+        # The likelihoods are registered AFTER the tree. A save file stores
+        # the parameters by position in `all_parameters`, which is
+        # registration order, so this order is part of the format: every
+        # model saved since the first release put the tree's parameters
+        # first, and registering the likelihoods before the leaves (as the
+        # leaves refactor briefly did) made every older save refuse to open.
         for likelihood in self.likelihoods:
             self._register(likelihood)
+        # the cached refresh trace lives on the model, there being no single
+        # node to hang it on once there are several leaves
+        self._refresh_graph = None
 
-        if isinstance(variables, str):
-            variables = [variables]
-        self.variables: list[str] = list(variables)
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
-        y, has_value = [], []
-        for v in self.variables:
-            y_v, h_v = data.variables[v].get_measurements()
-            y.append(y_v)
-            has_value.append(h_v)
-        self.y = _np.concatenate(y, axis=1)
-        self.has_value = _np.concatenate(has_value, axis=1)
-        self.total_data = _np.sum(self.has_value)
+        self.y, self.has_value = self._stacked_measurements(data)
+        # a variable rather than a number: the traced bound scales a batch
+        # by it, and `_set_data` changes it in place so the trace stays valid
+        self.total_data = _tf.Variable(
+            float(_np.sum(self.has_value)), dtype=_tf.float64, trainable=False)
+        # the one traced training step this model reuses -- see
+        # `_training_step`
+        self._step = None
 
         # initializing likelihoods -- declustered where the data carries
         # the column `container.decluster()` keeps, so the warpings start
@@ -868,7 +953,14 @@ class VGPNetwork(_GPModel):
         for v, lik in zip(self.variables, self.likelihoods):
             s += "\t" + v + " (" + lik.__class__.__name__ + ")\n"
         s += "\nLatent layer:\n"
-        s += str(self.latent_network)
+        if len(self.leaves) == 1:
+            s += str(self.leaves[0])
+        else:
+            # one leaf per likelihood, each written under the variable it
+            # serves; a parent two leaves share appears under both, which is
+            # what the tree looks like from either leaf
+            for v, leaf in zip(self.variables, self.leaves):
+                s += "[%s]\n%s\n" % (v, str(leaf))
         return s
 
     def to_dot(self, legend=True, rankdir="BT"):
@@ -888,12 +980,65 @@ class VGPNetwork(_GPModel):
             amsgrad=True
         )
 
+    @property
+    def latent_network(self):
+        """The tree's single leaf, where there is one.
+
+        Every model built before a list of leaves was accepted has exactly
+        one, and everything that read it keeps working. A model with several
+        leaves has no single output node to hand back, and says so rather
+        than returning sometimes a node and sometimes a list.
+        """
+        if len(self.leaves) == 1:
+            return self.leaves[0]
+        raise AttributeError(
+            "this model has %d leaves, one per likelihood; read `leaves`"
+            % len(self.leaves))
+
+    def _nodes(self):
+        """Every node of the tree, each once, leaves included.
+
+        The union over the leaves' ancestors: a parent shared by two leaves
+        is one node, and must be refreshed, priced in the KL and reset by
+        cross-validation exactly once. Order is fixed by first sighting so
+        that anything zipped against it lines up from one call to the next.
+        """
+        seen, nodes = set(), []
+        for leaf in self.leaves:
+            for node in [leaf] + leaf.get_unique_parents():
+                if id(node) not in seen:
+                    seen.add(id(node))
+                    nodes.append(node)
+        return nodes
+
+    def _refresh(self, jitter):
+        for leaf in self.leaves:
+            leaf.refresh(jitter)
+
+    def _by_likelihood(self, per_leaf, axis=1):
+        """Per-likelihood tensors from per-leaf ones, in likelihood order.
+
+        A leaf serving one likelihood hands its tensor straight over; one
+        serving several is split among them by size along `axis` -- the
+        split every model used to make of its single node, now made only
+        where a leaf actually serves more than one.
+        """
+        out: "list[_Any]" = [None] * len(self.likelihoods)
+        for tensor, group in zip(per_leaf, self._leaf_groups):
+            if len(group) == 1:
+                out[group[0]] = tensor
+                continue
+            sizes = [self.lik_sizes[i] for i in group]
+            for i, piece in zip(group, _tf.split(tensor, sizes, axis=axis)):
+                out[i] = piece
+        return out
+
     @_tf.function
     def _training_elbo(self, x, y, has_value, training_inputs,
                        x_dir=None, directions=None, y_dir=None,
                        has_value_directions=None, x_var=None,
                        samples=20, seed=0, jitter=1e-6):
-        self.latent_network.refresh(jitter)
+        self._refresh(jitter)
 
         # ELBO
         elbo = self._log_lik(x, y, has_value, training_inputs,
@@ -904,10 +1049,9 @@ class VGPNetwork(_GPModel):
             elbo = elbo + self._log_lik_directions(
                 x_dir, directions, y_dir, has_value_directions)
 
-        # KL-divergence
-        unique_nodes = self.latent_network.get_unique_parents()
-        unique_nodes.append(self.latent_network)
-        kl = _tf.add_n([node.kl_divergence() for node in unique_nodes])
+        # KL-divergence, over every node once: a parent two leaves share
+        # is one distribution and pays one price
+        kl = _tf.add_n([node.kl_divergence() for node in self._nodes()])
 
         # The MAP term: point-estimated parameters that declare a prior pay
         # its log-density here, making the objective a bound on
@@ -923,20 +1067,22 @@ class VGPNetwork(_GPModel):
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
-            # prediction
-            mu, var, sims, _ = self.latent_network.predict(
-                x, x_var=x_var, n_sim=samples, seed=[seed, 0])
-
-            mu = _tf.transpose(mu[:, :, 0])
-            var = _tf.transpose(var)
-            sims = _tf.transpose(sims, [1, 0, 2])
+            # prediction, one leaf at a time, then handed to the likelihoods
+            # each leaf serves
+            mus, vars_, simss = [], [], []
+            for leaf in self.leaves:
+                mu, var, sims, _ = leaf.predict(
+                    x, x_var=x_var, n_sim=samples, seed=[seed, 0])
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+                simss.append(_tf.transpose(sims, [1, 0, 2]))
 
             # likelihood
             y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.lik_sizes, axis=1)
-            var = _tf.split(var, self.lik_sizes, axis=1)
+            mu = self._by_likelihood(mus)
+            var = self._by_likelihood(vars_)
             hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.lik_sizes, axis=1)
+            sims = self._by_likelihood(simss)
 
             elbo = _tf.constant(0.0, _tf.float64)
             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
@@ -954,12 +1100,16 @@ class VGPNetwork(_GPModel):
     @_tf.function
     def _log_lik_directions(self, x_dir, directions, y_dir, has_value):
         with _tf.name_scope("batched_elbo_directions"):
-            # prediction
-            mu, var, _ = self.latent_network.predict_directions(
-                x_dir, directions)
-
-            mu = _tf.transpose(mu[:, :, 0])
-            var = _tf.transpose(var)
+            # prediction, per leaf; the directional likelihood is one column
+            # at a time, so the leaves' columns are joined and split by
+            # column rather than by likelihood
+            mus, vars_ = [], []
+            for leaf in self.leaves:
+                mu, var, _ = leaf.predict_directions(x_dir, directions)
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+            mu = _tf.concat(mus, axis=1) if len(mus) > 1 else mus[0]
+            var = _tf.concat(vars_, axis=1) if len(vars_) > 1 else vars_[0]
 
             # likelihood
             y_s = _tf.split(y_dir, self.var_lengths_dir, axis=1)
@@ -977,6 +1127,50 @@ class VGPNetwork(_GPModel):
 
             return elbo
 
+    def _stacked_measurements(self, data):
+        """The measurements of every modelled variable side by side, and
+        the mask of which cells hold one."""
+        y, has_value = [], []
+        for v in self.variables:
+            y_v, h_v = data.variables[v].get_measurements()
+            y.append(y_v)
+            has_value.append(h_v)
+        return _np.concatenate(y, axis=1), _np.concatenate(has_value, axis=1)
+
+    def _set_data(self, data):
+        """Point the model at another container of the same variables.
+
+        For a workflow that trains one model on several subsets of its data
+        -- cross-validation swaps the training rows in fold by fold --
+        without rebuilding it, so the traced training step, the refresh and
+        the prediction graphs are all reused. Replaces exactly what the
+        constructor derived from the data: the container, the stacked
+        measurements and their mask, and the count the minibatch bound
+        scales by. The likelihoods are not re-initialized: the warpings
+        keep their state, as a reloaded model keeps it.
+        """
+        if data.n_dim != self.data.n_dim:
+            raise ValueError(
+                "the new data has %d dimensions where the model's has %d"
+                % (data.n_dim, self.data.n_dim))
+        lengths = [data.variables[v].length for v in self.variables]
+        if lengths != self.var_lengths:
+            raise ValueError(
+                "the new data's variables have lengths %s where the model's "
+                "have %s" % (lengths, self.var_lengths))
+        self.data = data
+        self.y, self.has_value = self._stacked_measurements(data)
+        self.total_data.assign(float(_np.sum(self.has_value)))
+
+    def _reset_optimizer(self):
+        """Zero the optimizer's memory in place -- its moment estimates and
+        the step count its learning-rate schedule reads -- leaving the
+        optimizer object, and so the traced step that captured it, where
+        they are. `set_learning_rate` replaces the object instead, which a
+        new rate needs and which costs a retrace."""
+        for variable in self.optimizer.variables:
+            variable.assign(_tf.zeros(variable.shape, variable.dtype))
+
     def _training_step(self, variables, training_inputs):
         """
         One traced training step: the ELBO, its gradient and the update.
@@ -989,10 +1183,31 @@ class VGPNetwork(_GPModel):
         more time in the optimizer than in the model itself: 278 ms a step
         against 98 ms traced.
 
-        Built once per call to `train_full`/`train_svi` and reused for every
-        iteration; building it per iteration would retrace each time and cost
-        far more than it saves.
+        Built once per model and kept on it, so `train_full` and `train_svi`
+        calls -- and the folds of a cross-validation, which swap the data in
+        under one model -- share a trace. A trace is never returned to the
+        process: TensorFlow's graph machinery for a step with gradients
+        stays resident after the function dies (its concrete functions,
+        their gradient rewrites and the optimizer's branch graphs hold
+        each other in cycles the garbage collector cannot break), measured
+        at 200 MB a step trace and 1.5-2.6 GB a model on the Tom v6 model,
+        so a new one per call is a leak. The step is rebuilt only when the
+        variables or the optimizer object change (`set_learning_rate`
+        replaces the optimizer, and a new rate is baked into the trace), or
+        when a variable hands the bound a payload -- `RockTypeVariable`'s
+        boundary column rides the trace as a constant, so it cannot serve
+        another data set. `reduce_retracing` lets the last, shorter batch
+        of an epoch and the folds' differing row counts share one relaxed
+        trace instead of a static trace each.
         """
+        payload = any(len(inp) > 0 for inp in training_inputs)
+        if self._step is not None and not payload:
+            cached_variables, optimizer, step = self._step
+            if optimizer is self.optimizer \
+                    and len(cached_variables) == len(variables) \
+                    and all(a is b for a, b in zip(cached_variables, variables)):
+                return step
+
         directions = {}
         if self.directional_data is not None:
             directions = dict(
@@ -1004,7 +1219,7 @@ class VGPNetwork(_GPModel):
                 has_value_directions=_tf.constant(
                     self.has_value_dir, _tf.float64))
 
-        @_tf.function
+        @_tf.function(reduce_retracing=True)
         def step(x, y, has_value, x_var):
             with _tf.GradientTape() as tape:
                 loss = - self._training_elbo(
@@ -1016,6 +1231,8 @@ class VGPNetwork(_GPModel):
             self.optimizer.apply_gradients(
                 zip(tape.gradient(loss, variables), variables))
 
+        if not payload:
+            self._step = (tuple(variables), self.optimizer, step)
         return step
 
     def train_full(self, max_iter: int = 1000) -> None:
@@ -1189,20 +1406,19 @@ class VGPNetwork(_GPModel):
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
         with _tf.name_scope("Prediction"):
-            pred_mu, pred_var, pred_sim, pred_exp_var = \
-                self.latent_network.predict(
-                    x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0]
-                )
+            mus, vars_, sims, exp_vars = [], [], [], []
+            for leaf in self.leaves:
+                mu, var, sim, exp_var = leaf.predict(
+                    x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0])
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+                sims.append(_tf.transpose(sim, [1, 0, 2]))
+                exp_vars.append(_tf.transpose(exp_var))
 
-            pred_mu = _tf.transpose(pred_mu[:, :, 0])
-            pred_var = _tf.transpose(pred_var)
-            pred_sim = _tf.transpose(pred_sim, [1, 0, 2])
-            pred_exp_var = _tf.transpose(pred_exp_var)
-
-            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
-            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
-            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+            pred_mu = self._by_likelihood(mus)
+            pred_var = self._by_likelihood(vars_)
+            pred_sim = self._by_likelihood(sims)
+            pred_exp_var = self._by_likelihood(exp_vars)
 
             output = []
             for mu, var, sim, exp_var, lik, v_inp in zip(
@@ -1282,11 +1498,22 @@ class VGPNetwork(_GPModel):
             )
 
         for batch, output in self._over_batches(newdata, batch_pred, where):
-            for v, upd in zip(self.variables, output):
-                newdata.variables[v].update(batch, **upd)
+            for v, lik, upd in zip(self.variables, self.likelihoods, output):
+                # A vector variable hands the latent moments to its
+                # components only when column i is component i's own, which
+                # an elementwise warping guarantees; under a rotation or a
+                # projection no latent column belongs to any one component,
+                # and storing one under a component's name would be wrong
+                # in a way nobody would catch.
+                elementwise = lik.warped and lik.warping.elementwise
+                newdata.variables[v].update(batch, elementwise=elementwise,
+                                            **upd)
 
-    def _over_batches(self, newdata, call, where=None):
-        """Runs `call(coordinates, variance, n_splits)` over `newdata`.
+    def _over_batches(self, newdata, call, where=None, with_rows=False):
+        """Runs `call(coordinates, variance, n_splits)` over `newdata` --
+        `call(coordinates, variance, n_splits, rows)` under `with_rows`, for
+        a caller that keeps something per location and must hand each
+        batch its own slice.
 
         A discretized block fans out into several rows before it reaches the
         model, so the batch is measured in those rows: otherwise
@@ -1311,11 +1538,12 @@ class VGPNetwork(_GPModel):
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
         with _latent.propagation_rule(self.options.expert_propagation):
-            if hasattr(self.latent_network, "cache_prediction_state"):
-                _latent.refresh_cached(self.latent_network,
-                                       self.options.jitter)
+            if all(hasattr(leaf, "cache_prediction_state")
+                   for leaf in self.leaves):
+                _latent.refresh_cached(self.leaves, self.options.jitter,
+                                       owner=self)
             else:
-                self.latent_network.refresh(self.options.jitter)
+                self._refresh(self.options.jitter)
 
         for i, batch in enumerate(batch_id):
             if self.options.verbose:
@@ -1325,8 +1553,10 @@ class VGPNetwork(_GPModel):
             data_coords, splits = newdata.get_batched_coordinates(batch)
             data_var, _ = newdata.get_batched_variance(batch)
 
-            yield batch, call(_tf.constant(data_coords, _tf.float64),
-                              _tf.constant(data_var, _tf.float64), splits)
+            x = _tf.constant(data_coords, _tf.float64)
+            x_var = _tf.constant(data_var, _tf.float64)
+            yield batch, (call(x, x_var, splits, batch) if with_rows
+                          else call(x, x_var, splits))
 
         if self.options.verbose:
             print("\n")
@@ -1355,7 +1585,10 @@ class VGPNetwork(_GPModel):
             Latent realizations per location.
         n_nodes
             Equal-share noise values per realization, so that the two axes
-            pool into one sample.
+            pool into one sample. The nodes are rotated at random per
+            location and realization from the model's seed, so the sample
+            is unbiased in every moment, reaches the tails, and is
+            independent between locations.
 
         Returns
         -------
@@ -1365,9 +1598,91 @@ class VGPNetwork(_GPModel):
             their noise lives in the probabilities, leaving no value for a
             measurement to scatter around.
 
+        Raises
+        ------
+        MemoryError
+            If the answer would not fit. It is held whole, by design, and
+            costs `n_sim * n_nodes * 8` bytes a row for each column of each
+            variable -- 5 KB a row at the defaults, and twice that at the
+            peak, while the batches and the assembled whole are both live.
+            The ceiling is `models.MEASUREMENT_LIMIT`, and the message names
+            the ways under it.
+
         See Also
         --------
         predict : the ground, with the noise integrated out.
+        """
+        wanted = self._measured_variables()
+
+        # Refused before any work rather than discovered part way through:
+        # this door holds the answer whole, and its size is known from the
+        # shapes alone. Sized in bytes rather than rows because a vector
+        # variable costs a column each and the two node counts multiply.
+        wanted_bytes = sum(newdata.n_data * lik.size * n_sim * n_nodes * 8
+                           for _, lik in wanted)
+        if wanted_bytes > MEASUREMENT_LIMIT:
+            raise MemoryError(
+                "measurement samples for %d location(s) at n_sim=%d and "
+                "n_nodes=%d come to %.1f GB, past the %.1f GB "
+                "`models.MEASUREMENT_LIMIT` holds. Ask about fewer "
+                "locations -- more cross-validation folds make each one "
+                "smaller -- or lower n_sim or n_nodes, which multiply: the "
+                "sample is their product. `measurement_batches` has no "
+                "ceiling: it hands the same samples over a batch at a time"
+                % (newdata.n_data, n_sim, n_nodes,
+                   wanted_bytes / 1024 ** 3,
+                   MEASUREMENT_LIMIT / 1024 ** 3))
+
+        chunks = {v: [] for v, _ in wanted}
+        for _, batch in self.measurement_batches(newdata, n_sim, n_nodes):
+            for v, values in batch.items():
+                chunks[v].append(values)
+        return {v: _np.concatenate(parts, axis=0)
+                for v, parts in chunks.items()}
+
+    def _measured_variables(self):
+        """The variables a measurement can be described for, with their
+        likelihoods. A likelihood with no warping has none -- a categorical
+        one's noise lives in the probabilities -- so it is passed over
+        rather than asked."""
+        return [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
+                if lik.warped]
+
+    def measurement_batches(self, newdata: "_data._SpatialData",
+                            n_sim: int = 20, n_nodes: int = 32):
+        """The measurement samples, a batch of locations at a time.
+
+        What :meth:`predict_measurements` returns whole, yielded in the
+        pieces it assembles it from. The samples are the largest thing this
+        model produces -- `n_sim * n_nodes` values a row for each column,
+        5 KB a row at the defaults -- and every statistic taken of them
+        (coverage, CRPS, the point errors, a PIT) reduces the sample axis
+        one row at a time, so a caller that accumulates as it goes never
+        holds more than a batch. That is what :func:`cross_validate` does,
+        and it is why this door carries no size ceiling where the other one
+        must.
+
+        Parameters
+        ----------
+        newdata
+            Locations to ask about, as for :meth:`predict_measurements`.
+        n_sim
+            Latent realizations per location.
+        n_nodes
+            Equal-share noise values per realization.
+
+        Yields
+        ------
+        rows : ndarray
+            Indices into `newdata` of the locations in this batch.
+        samples : dict of str to ndarray
+            One `(len(rows), size, n_sim * n_nodes)` array per variable
+            whose likelihood carries a warping, in the variable's own
+            units.
+
+        See Also
+        --------
+        predict_measurements : the same samples, assembled and returned.
         """
         if newdata.rows_per_location != 1:
             raise ValueError(
@@ -1378,26 +1693,65 @@ class VGPNetwork(_GPModel):
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
 
-        # a likelihood with no warping has no measurement to describe, so it
-        # is passed over rather than asked
-        wanted = [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
-                  if lik.warped]
+        wanted = self._measured_variables()
 
-        def batch_measure(x, x_var, n_splits):
+        # One uniform per location, component and realization, from a
+        # stream seeded by the model, so a location's sample is the same
+        # whatever batch computed it -- and drawn a batch at a time rather
+        # than held whole, this door having promised never to hold more
+        # than a batch. It rotates the equal-share noise nodes (see
+        # `_Likelihood._measurement_nodes`): without it every location in a
+        # column carried the same noise value, and the strata's midpoints
+        # carried 0.89 of a Laplace's noise variance in warped space, 35-47%
+        # of the `noise_variance` column through Jura's spline in data
+        # units, at the default n_nodes -- measured 2026-09-09,
+        # `docs/cross-validation.md`. The stream restarts from the seed on
+        # every call, so two containers of one size get the same uniforms
+        # row for row: nothing to a per-row score, and a caller reading
+        # samples jointly across calls should know.
+        def rotation(k, size, rows):
+            """The rows' slice of the k-th variable's `(n_data, size,
+            n_sim)` stream, drawn without generating what comes before it:
+            PCG64 spends exactly one 64-bit output per double, so advancing
+            by the rows' offset lands where a whole draw would."""
+            first, last = int(rows[0]), int(rows[-1])
+            # the generator `default_rng` would build, named so that its
+            # `advance` is on the type
+            bits = _np.random.PCG64(
+                _np.random.SeedSequence([self.options.seed, 1, k]))
+            bits.advance(first * size * n_sim)
+            block = _np.random.Generator(bits).random(
+                (last - first + 1, size, n_sim))
+            return block[_np.asarray(rows) - first]
+
+        def batch_measure(x, x_var, n_splits, rows):
+            per_leaf = []
             with _latent.simulation_rule(self.options.qmc_simulations):
-                _, _, sims, _ = self.latent_network.predict(
-                    x, x_var=x_var, n_sim=n_sim, seed=[self.options.seed, 0])
-            sims = _tf.split(_tf.transpose(sims, [1, 0, 2]),
-                             self.lik_sizes, axis=1)
-            return [lik.measurement_samples(sim, n_nodes)
-                    for sim, lik in zip(sims, self.likelihoods) if lik.warped]
+                for leaf in self.leaves:
+                    _, _, sims, _ = leaf.predict(
+                        x, x_var=x_var, n_sim=n_sim,
+                        seed=[self.options.seed, 0])
+                    per_leaf.append(_tf.transpose(sims, [1, 0, 2]))
+            sims = self._by_likelihood(per_leaf)
+            measured = [(sim, lik) for sim, lik in zip(sims, self.likelihoods)
+                        if lik.warped]
+            return [lik.measurement_samples(
+                        sim, n_nodes,
+                        shift=_tf.constant(rotation(k, lik.size, rows),
+                                           _tf.float64))
+                    for k, (sim, lik) in enumerate(measured)]
 
-        chunks = {v: [] for v, _ in wanted}
-        for _, output in self._over_batches(newdata, batch_measure):
-            for (v, _), values in zip(wanted, output):
-                chunks[v].append(_np.asarray(values))
-        return {v: _np.concatenate(parts, axis=0)
-                for v, parts in chunks.items()}
+        for rows, output in self._over_batches(newdata, batch_measure,
+                                               with_rows=True):
+            # in the variable's own units, here rather than at the end: a
+            # composition's parts reach the model as fractions of the whole,
+            # and a streaming caller compares them against assays batch by
+            # batch, so the conversion cannot wait for an assembly that
+            # never happens
+            yield rows, {
+                v: self.data.variables[v].from_model_units(
+                    _np.asarray(values))
+                for (v, _), values in zip(wanted, output)}
 
     def responsibilities(self, newdata: "_data._SpatialData",
                          store: bool = True) -> "dict[str, _np.ndarray]":
@@ -1461,10 +1815,14 @@ class VGPNetwork(_GPModel):
                 % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
 
         def batch_moments(x, x_var, n_splits):
-            mu, var, _, _ = self.latent_network.predict(
-                x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
-            mu = _tf.split(_tf.transpose(mu[:, :, 0]), self.lik_sizes, axis=1)
-            var = _tf.split(_tf.transpose(var), self.lik_sizes, axis=1)
+            mus, vars_ = [], []
+            for leaf in self.leaves:
+                mu, var, _, _ = leaf.predict(
+                    x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
+                mus.append(_tf.transpose(mu[:, :, 0]))
+                vars_.append(_tf.transpose(var))
+            mu = self._by_likelihood(mus)
+            var = self._by_likelihood(vars_)
             return [(m, v) for m, v, lik
                     in zip(mu, var, self.likelihoods)
                     if isinstance(lik, _lk.Mixture)]
@@ -1624,7 +1982,35 @@ _VARIATIONAL_STATE = {
 }
 
 
-def _fresh_variational_state(model):
+def _terminal_gp_nodes(model):
+    """The GP nodes nearest the likelihoods: from each leaf down through
+    operation nodes, stopping at the first GP node.
+
+    A leaf is often an operation node with no variational state of its own
+    -- `Linear(cat, size=2)` over a rock GP, `LinearCombination(trend,
+    metal_gp)` -- so the state that conditions on a likelihood's data is
+    found below it. A node can be terminal for one likelihood and interior
+    for another; it counts once.
+    """
+    found = []
+
+    def visit(node):
+        if isinstance(node, _latent.network._GPNode):
+            if not any(node is seen for seen in found):
+                found.append(node)
+        elif isinstance(node, _latent.network._Operation):
+            for parent in node.parents:
+                visit(parent)
+        elif isinstance(node, _latent.network._FunctionalLatentVariable):
+            visit(node.parent)
+        # a root has no state to free
+
+    for leaf in model.leaves:
+        visit(leaf)
+    return found
+
+
+def _fresh_variational_state(model, nodes=None):
     """Freeze what one fold cannot change; forget what it can.
 
     The variational state -- `alpha_white_*`, `delta_*` and `bias_*` on every
@@ -1636,12 +2022,14 @@ def _fresh_variational_state(model):
     the fitted variogram, made once and said out loud in `cross_validate`'s
     docstring. The fresh values are drawn from the package generator, so
     `geoml.set_seed` makes the whole procedure reproducible.
+
+    `nodes` restricts the forgetting to those nodes (`refit="leaves"` passes
+    the terminal GP nodes); every other node's state is frozen with the rest.
     """
     for parameter in model._all_parameters:
         parameter.fix()
 
-    network = model.latent_network
-    for node in [network] + network.get_unique_parents():
+    for node in model._nodes() if nodes is None else nodes:
         for name, parameter in node.parameters.items():
             for prefix, init in _VARIATIONAL_STATE.items():
                 if name.startswith(prefix):
@@ -1653,19 +2041,26 @@ def _fresh_variational_state(model):
 
 def cross_validate(model: VGPNetwork, folds: str = "fold",
                    refit: str = "variational", iterations: int = 200,
+                   method: str = "full", epochs: int = 50,
                    n_sim: int = 20, n_nodes: int = 32,
                    path: _types.PathLike | None = None
                    ) -> "tuple[_data._SpatialData, _pd.DataFrame]":
     """Score a model on folds it never saw, with one short refit per fold.
 
-    The trained model is saved once. Each fold gets a copy rebuilt around the
-    data with that fold removed; under `refit="variational"` its variational
-    state -- the part of a trained model that encodes the data -- is
-    re-initialized and every other parameter frozen, so the fold model starts
-    ignorant of the held-out rows, and only that state is refitted. The fold
-    model then predicts its held-out rows, and only those, into one shared
-    copy of the training data. Folds partition the data, so every location
-    ends up predicted by a model that never saw it.
+    The trained model is saved once and one fold model is rebuilt from the
+    file, around the data with the first fold removed; every later fold
+    swaps its own training rows into that same model, restores the file's
+    parameters and zeroes the optimizer's memory, all in place, so each
+    fold starts exactly where a reloaded model would while the graphs
+    traced for the first serve them all (a model rebuilt per fold leaves
+    its graph machinery resident for the life of the process -- see
+    Notes). Under `refit="variational"` the variational state -- the part
+    of a trained model that encodes the data -- is re-initialized and every
+    other parameter frozen, so the fold model starts ignorant of the
+    held-out rows, and only that state is refitted. The fold model then
+    predicts its held-out rows, and only those, into one shared copy of
+    the training data. Folds partition the data, so every location ends up
+    predicted by a model that never saw it.
 
     Scores are of *measurements*: the held-out values are samples, so each
     fold model is asked through :meth:`VGPNetwork.predict_measurements`.
@@ -1681,11 +2076,34 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         :meth:`~geoml.data.PointData.spatial_k_fold` writes. Any labelling
         works: a hole-id column gives leave-one-hole-out.
     refit
-        `"variational"` to refit the variational state alone, or `"all"` to
-        warm-start every trainable parameter from its trained value and
-        continue on the reduced data.
+        `"variational"` to refit the variational state alone, re-initialized
+        on every node; `"leaves"` to re-initialize and refit it on the
+        terminal GP nodes only -- the GP nearest each likelihood, found from
+        the leaf down through operation nodes -- keeping the interior (a
+        `GPWalk`'s field, a shared parent) as all the data taught it --
+        measured to score 20% past the honest reference on Jura, the
+        interior remembering the held-out rows, so a diagnostic of that
+        memory rather than a score (E2 in `docs/cross-validation.md`); or
+        `"all"` to warm-start every trainable parameter from its trained
+        value and continue on the reduced data.
     iterations
-        Training iterations per fold.
+        Training iterations per fold, under `method="full"`. Ignored under
+        `method="svi"`, which counts in `epochs`.
+    method
+        `"full"` to refit each fold on all its data at every iteration, or
+        `"svi"` to refit in minibatches of
+        `options.training_batch_size` -- the same choice as
+        :meth:`VGPNetwork.train_full` against
+        :meth:`VGPNetwork.train_svi`, and worth making for the same
+        reason: a fold refit costs the whole reduced data set per
+        iteration whatever is frozen, so a model too large to train
+        full-batch is too large to cross-validate that way.
+    epochs
+        Passes over each fold's data, under `method="svi"`. A separate
+        argument from `iterations` because the two count different things:
+        an epoch is one visit to the data in batches, so it is many
+        gradient steps, and the numbers that make sense for one are wrong
+        for the other.
     n_sim
         Latent realizations, for the out-of-fold predictions and the
         measurement samples alike.
@@ -1718,6 +2136,20 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     including each fold's -- the concession kriging cross-validation also
     makes when it keeps the variogram fixed. Design record and measurements:
     `docs/cross-validation.md`.
+
+    Under `method="svi"` the convergence rule, if `options.training_tolerance`
+    is set, reads one value an epoch -- the mean bound over its batches --
+    rather than one an iteration, so it needs a few epochs before it can
+    fire at all. On a short refit that is worth knowing: too few epochs and
+    the rule never speaks; the cap does the stopping.
+
+    Memory is flat across folds by construction. TensorFlow keeps the graph
+    machinery of a differentiated function resident after the function
+    dies, so a fold model built and dropped per fold cost 2.6 GB a fold on
+    a 5000-row copy of a real model and took a five-fold run on the full
+    data past a 62 GB machine; one model with its rows swapped costs one
+    model, and the same run measured 3.2 GB in total and 3.8x faster, the
+    rebuild, the retrace and any XLA compilation being paid once.
     """
     data = model.data
     labels = _np.asarray(data.get_metadata(folds))
@@ -1730,9 +2162,13 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         raise ValueError(
             "cross-validation needs at least 2 folds; column '%s' holds %d"
             % (folds, fold_names.size))
-    if refit not in ("variational", "all"):
+    if refit not in ("variational", "leaves", "all"):
         raise ValueError(
-            "refit must be 'variational' or 'all', got %r" % (refit,))
+            "refit must be 'variational', 'leaves' or 'all', got %r"
+            % (refit,))
+    if method not in ("full", "svi"):
+        raise ValueError(
+            "method must be 'full' or 'svi', got %r" % (method,))
 
     cleanup = path is None
     if cleanup:
@@ -1750,20 +2186,50 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     pit = {}
     try:
         _persistence.save_model(model, saved)
+        fold_model = None
         for fold in fold_names:
             held = labels == fold
-            fold_model = _cast(VGPNetwork,
-                               _persistence.load_model(saved, data=data[~held]))
+            if fold_model is None:
+                # Rebuilt from the file once, around the first fold's rows.
+                # Every later fold swaps its rows in, restores the file's
+                # parameters and zeroes the optimizer's memory, all in
+                # place, so it starts exactly where a reloaded model would
+                # while the graphs traced for the first fold serve it. A
+                # model rebuilt per fold left 2.6 GB of graph machinery
+                # behind each time (TensorFlow never returns it; see
+                # `_training_step`), which is what took a five-fold run on
+                # the Tom v6 model past the machine's memory.
+                fold_model = _cast(
+                    VGPNetwork,
+                    _persistence.load_model(saved, data=data[~held]))
+                value, shape, position, _, _ = \
+                    fold_model.get_parameter_values(complete=True)
+            else:
+                fold_model._set_data(data[~held])
+                fold_model.update_parameters(value, shape, position)
+                fold_model._reset_optimizer()
             if refit == "variational":
                 _fresh_variational_state(fold_model)
-            fold_model.train_full(max_iter=iterations)
+            elif refit == "leaves":
+                _fresh_variational_state(
+                    fold_model, nodes=_terminal_gp_nodes(fold_model))
+            # the batch size rides in the model's own options, so the fold
+            # copy already has whatever the original was trained with
+            if method == "svi":
+                fold_model.train_svi(epochs=epochs)
+            else:
+                fold_model.train_full(max_iter=iterations)
             fold_model.predict(oof, n_sim=n_sim, include_noise=True,
                                where=held)
 
             held_points = oof[held]
-            samples = fold_model.predict_measurements(
-                held_points, n_sim=n_sim, n_nodes=n_nodes)
-            for v, sample in samples.items():
+            held_rows = _np.flatnonzero(held)
+
+            # the truth is small -- one value a row per column -- so it is
+            # read once for the fold and indexed per batch; only the samples
+            # are large enough to be worth streaming
+            truths = {}
+            for v, _ in fold_model._measured_variables():
                 y_true, has_value = \
                     held_points.variables[v].get_measurements()
                 y_true = _np.asarray(y_true, dtype=float)
@@ -1772,73 +2238,112 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                     y_true = y_true[:, None]
                 if has_value.ndim == 1:
                     has_value = has_value[:, None]
+                # not `labels`: that name holds the fold assignments here,
+                # and shadowing it made every fold after the first read
+                # `held` as a scalar False
+                parts = getattr(held_points.variables[v], "labels", None)
+                truths[v] = (y_true, has_value,
+                             [v] if parts is None else list(parts))
 
-                components = getattr(held_points.variables[v], "labels", None)
-                components = [v] if components is None else list(components)
-                for c, component in enumerate(components):
-                    measured = has_value[:, min(c, has_value.shape[1] - 1)] \
-                        == 1
-                    if not measured.any():
-                        continue
-                    truth = y_true[measured, c]
-                    draw = sample[measured, c, :]
-                    point = draw.mean(axis=1)
-                    nominal, observed = _metrics.coverage(truth, draw)
-                    n = int(measured.sum())
-                    score_crps = _metrics.crps(truth, draw)
+            # One pass over the fold's samples, a batch at a time, folding
+            # each into sufficient statistics -- counts and sums, never
+            # means of means, since batches differ in size. The samples are
+            # the only large thing here and this way none of them outlives
+            # its batch.
+            fold_acc = {}
+            for batch, samples in fold_model.measurement_batches(
+                    held_points, n_sim=n_sim, n_nodes=n_nodes):
+                for v, sample in samples.items():
+                    y_true, has_value, components = truths[v]
+                    for c, component in enumerate(components):
+                        column = has_value[batch, min(
+                            c, has_value.shape[1] - 1)]
+                        measured = column == 1
+                        if not measured.any():
+                            continue
+                        truth = y_true[batch, c][measured]
+                        draw = sample[measured, c, :]
+                        _accumulate(fold_acc.setdefault(
+                            (v, component), _fresh_scores()), truth, draw)
 
-                    # where each assay fell inside its own predictive
-                    # distribution (mid-rank, so ties split evenly) --
-                    # what `conformalize` calibrates on
-                    u = (draw < truth[:, None]).mean(axis=1) \
-                        + 0.5 * (draw == truth[:, None]).mean(axis=1)
-                    column = pit.setdefault(
-                        (v, component),
-                        _np.full(data.n_data, _np.nan))
-                    column[_np.flatnonzero(held)[measured]] = u
-                    rows.append({
-                        "variable": v, "component": component, "fold": fold,
-                        "n": n,
-                        "rmse": _metrics.rmse(truth, point),
-                        "mae": _metrics.mae(truth, point),
-                        "bias": _metrics.bias(truth, point),
-                        "crps": score_crps,
-                        "goodness": _metrics.goodness(nominal, observed),
-                    })
+                        # where each assay fell inside its own predictive
+                        # distribution (mid-rank, so ties split evenly) --
+                        # what `conformalize` calibrates on
+                        u = (draw < truth[:, None]).mean(axis=1) \
+                            + 0.5 * (draw == truth[:, None]).mean(axis=1)
+                        stored = pit.setdefault(
+                            (v, component),
+                            _np.full(data.n_data, _np.nan))
+                        stored[held_rows[batch][measured]] = u
 
-                    # sufficient statistics, so the pooled row needs no
-                    # second pass over the samples
-                    a = acc.setdefault((v, component), {
-                        "n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0,
-                        "crps": 0.0,
-                        "observed": _np.zeros_like(observed),
-                        "nominal": nominal,
-                    })
-                    a["n"] += n
-                    a["sse"] += float(((point - truth) ** 2).sum())
-                    a["sae"] += float(_np.abs(point - truth).sum())
-                    a["se"] += float((point - truth).sum())
-                    a["crps"] += score_crps * n
-                    a["observed"] = a["observed"] + observed * n
+            for key, a in fold_acc.items():
+                v, component = key
+                rows.append(dict(_scores_from(a), variable=v,
+                                 component=component, fold=fold))
+                pooled = acc.setdefault(key, _fresh_scores())
+                _merge(pooled, a)
     finally:
         if cleanup:
             _shutil.rmtree(path, ignore_errors=True)
 
     for (v, component), a in acc.items():
-        n = a["n"]
-        rows.append({
-            "variable": v, "component": component, "fold": "all", "n": n,
-            "rmse": float(_np.sqrt(a["sse"] / n)),
-            "mae": a["sae"] / n,
-            "bias": a["se"] / n,
-            "crps": a["crps"] / n,
-            "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
-        })
+        rows.append(dict(_scores_from(a), variable=v, component=component,
+                         fold="all"))
 
     for (v, component), column in pit.items():
         oof.add_metadata(_pit_column(v, component), column)
 
     return oof, _pd.DataFrame(rows)
+
+
+def _fresh_scores():
+    """An empty accumulator for one component's held-out scores.
+
+    Sufficient statistics rather than the scores themselves, so that a fold
+    read in batches and a pooling read fold by fold are the same arithmetic:
+    sums and a count, never a mean of means, which would weight a short
+    batch like a long one.
+    """
+    return {"n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0, "crps": 0.0,
+            "observed": None, "nominal": None}
+
+
+def _accumulate(a, truth, draw):
+    """Fold one batch of measured rows into an accumulator."""
+    point = draw.mean(axis=1)
+    n = int(truth.size)
+    nominal, observed = _metrics.coverage(truth, draw)
+
+    a["n"] += n
+    a["sse"] += float(((point - truth) ** 2).sum())
+    a["sae"] += float(_np.abs(point - truth).sum())
+    a["se"] += float((point - truth).sum())
+    a["crps"] += float(_metrics.crps(truth, draw)) * n
+    a["nominal"] = nominal
+    a["observed"] = observed * n if a["observed"] is None \
+        else a["observed"] + observed * n
+
+
+def _merge(into, other):
+    """Fold one accumulator into another -- a fold into the pooled row."""
+    for key in ("n", "sse", "sae", "se", "crps"):
+        into[key] += other[key]
+    into["nominal"] = other["nominal"]
+    into["observed"] = other["observed"] if into["observed"] is None \
+        else into["observed"] + other["observed"]
+
+
+def _scores_from(a):
+    """The reported scores of one accumulator."""
+    n = a["n"]
+    return {
+        "n": n,
+        "rmse": float(_np.sqrt(a["sse"] / n)),
+        "mae": a["sae"] / n,
+        "bias": a["se"] / n,
+        "crps": a["crps"] / n,
+        "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
+    }
 
 
 def _pit_column(name, component):
@@ -2636,18 +3141,16 @@ class ProjectedVGP(VGPNetwork):
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
-            # prediction
-            sims = self.latent_network.predict(x, n_sim=samples, seed=[seed, 0])
-
-            mu = sims[:, :, 0]  # dummy
-            var = sims[:, :, 0]**2  # dummy
+            # prediction, per leaf
+            per_leaf = [leaf.predict(x, n_sim=samples, seed=[seed, 0])
+                        for leaf in self.leaves]
+            sims = self._by_likelihood(per_leaf)
+            mu = [s[:, :, 0] for s in sims]          # dummy
+            var = [s[:, :, 0] ** 2 for s in sims]    # dummy
 
             # likelihood
             y_s = _tf.split(y, self.var_lengths, axis=1)
-            mu = _tf.split(mu, self.lik_sizes, axis=1)
-            var = _tf.split(var, self.lik_sizes, axis=1)
             hv = _tf.split(has_value, self.var_lengths, axis=1)
-            sims = _tf.split(sims, self.lik_sizes, axis=1)
 
             elbo = _tf.constant(0.0, _tf.float64)
             for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
@@ -2665,19 +3168,15 @@ class ProjectedVGP(VGPNetwork):
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
                      n_sim=1, seed=0, jitter=1e-6, include_noise=True):
         # `predict_raw` is inherited: it compiles this the way the options ask.
-        self.latent_network.refresh(jitter)
+        self._refresh(jitter)
 
         with _tf.name_scope("Prediction"):
-            pred_sim = self.latent_network.predict(x_new, n_sim=n_sim, seed=[seed, 0])
-
-            pred_mu = pred_sim[:, :, 0]  # dummy
-            pred_var = pred_sim[:, :, 0]**2  # dummy
-            pred_exp_var = pred_var   # dummy
-
-            pred_mu = _tf.split(pred_mu, self.lik_sizes, axis=1)
-            pred_var = _tf.split(pred_var, self.lik_sizes, axis=1)
-            pred_sim = _tf.split(pred_sim, self.lik_sizes, axis=1)
-            pred_exp_var = _tf.split(pred_exp_var, self.lik_sizes, axis=1)
+            per_leaf = [leaf.predict(x_new, n_sim=n_sim, seed=[seed, 0])
+                        for leaf in self.leaves]
+            pred_sim = self._by_likelihood(per_leaf)
+            pred_mu = [s[:, :, 0] for s in pred_sim]         # dummy
+            pred_var = [s[:, :, 0] ** 2 for s in pred_sim]   # dummy
+            pred_exp_var = pred_var                          # dummy
 
             output = []
             for mu, var, sim, exp_var, lik, v_inp in zip(

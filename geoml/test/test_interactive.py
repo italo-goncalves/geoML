@@ -174,6 +174,23 @@ def test_a_histogram_has_a_panel_per_component_and_a_trace_per_category(eda):
     assert figure.layout.title.text == "Elements"
 
 
+def test_every_histogram_panel_is_summed_up(eda, jura):
+    figure = eda.histogram()
+    boxes = [a for a in figure.layout.annotations if "mean" in a.text]
+    assert len(boxes) == 7
+
+    values, measured, _ = prepare.numeric_values(jura.variables["Elements"])
+    lines = prepare.statistics_lines(
+        prepare.summary_statistics(values[measured, 0]))
+    # pooled over the rock types, and lined up with spaces that cannot
+    # break, or plotly would collapse the columns
+    assert boxes[0].text == "<br>".join(line.replace(" ", chr(0xA0))
+                                        for line in lines)
+    assert boxes[0].xref == "x domain"
+    # the subplot titles alone, without it
+    assert len(eda.histogram(statistics=False).layout.annotations) == 7
+
+
 def test_a_category_is_named_in_the_legend_once(eda):
     figure = eda.histogram()
     named = [trace.name for trace in figure.data if trace.showlegend]
@@ -631,6 +648,48 @@ def test_several_components_are_drawn_as_panels(trained):
     # a cloud and a 1:1 line each
     assert len(figure.data) == 6
     assert [a.text for a in figure.layout.annotations] == ["a", "b", "c"]
+
+
+def test_a_trimmed_scatter_leaves_the_outliers_out_of_every_trace(trained):
+    """A dashboard matches a selection on the rows each trace carries, so a
+    location left out of the cloud is left out of the margins too."""
+    model, point = trained
+    true, predicted, labels, rows = prepare.prediction_values(point, "v")
+    column = labels.index("a")
+    kept = prepare.inside_trim(true[:, column], predicted[:, column],
+                               [0, 0.9])
+    assert not kept.all()
+
+    figure = geoml.plots.Interactive(point, continuous="v",
+                                     model=model).prediction_scatter(
+        component="a", trim=[0, 0.9])
+
+    carried = [list(trace.customdata) for trace in figure.data
+               if trace.customdata is not None]
+    assert carried == [list(rows[kept])] * 3    # the cloud and both margins
+    note, = [a for a in figure.layout.annotations
+             if a.text.startswith("outliers")]
+    assert note.text == "outliers left out: %d of %d" % ((~kept).sum(),
+                                                         len(kept))
+    assert (note.xref, note.yref) == ("x3 domain", "y3 domain")
+
+
+def test_each_trimmed_panel_counts_its_own_outliers(trained):
+    model, point = trained
+    true, predicted, _, _ = prepare.prediction_values(point, "v")
+    figure = geoml.plots.Interactive(point, continuous="v",
+                                     model=model).prediction_scatter(
+        trim=[0, 0.9])
+
+    expected = {}
+    for i in range(3):
+        kept = prepare.inside_trim(true[:, i], predicted[:, i], [0, 0.9])
+        if not kept.all():
+            expected["x%s domain" % ("" if i == 0 else i + 1)] = \
+                "outliers left out: %d of %d" % ((~kept).sum(), len(kept))
+    notes = {a.xref: a.text for a in figure.layout.annotations
+             if a.text.startswith("outliers")}
+    assert expected and notes == expected
 
 
 def test_the_reliability_curves_carry_no_rows_to_link_on():

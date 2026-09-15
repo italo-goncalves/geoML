@@ -1,7 +1,9 @@
 # 10. Containers and addressing
 
 Everything a model reads or writes lives in a **container**: `PointData`
-for scattered samples, `Grid1D`/`Grid2D`/`Grid3D` for regular lattices,
+for scattered samples (`GaussianData` when their coordinates carry a
+variance, which chapter 5's `GaussianInput` reads), `Grid1D`/`Grid2D`/
+`Grid3D` for regular lattices,
 `BlockSet3D` for the refinable block model of chapter 8, plus the
 directional and mesh types the later chapters use. They differ in how they
 hold coordinates and agree on everything else, and this chapter is about
@@ -139,6 +141,13 @@ facts of chapter 9, sits under `_metadata/`:
 ```python
 print(sorted(str(path) for path in walker.select("**"))[:6])
 ```
+
+Besides its columns, a variable carries a few **facts** — the cut-offs it
+is judged against, and the unit it is measured in. They are not arrays, and
+`tree()` prints them beside the variable's name; `container.units()` lists
+every declared unit by path. Everything a column holds is in that unit,
+which for a composition's part means the one it was assayed in rather than
+the fraction the model works with (§9.4).
 
 ## 10.3 Getting the numbers out
 
