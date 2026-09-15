@@ -61,6 +61,10 @@ taken it so; chapters 8 and 10 said above. The design record, a comment
 and `CLAUDE.md` called it the recoverable share, which is its complement.
 A category's is the share of the block inside it. The glossary gains the
 term.
+* **The release run**: the full suite, 1653 tests, and every chapter of
+the manual. Every chapter's figures came back as committed but chapter
+17's two, which differ from their committed figures as they did at 0.6.12
+and keep them; chapter 16 reproduced its own this time.
 
 ## version 0.6.12
 * **Fixed: a contour through blocks holding no value got NaN vertices.** A
