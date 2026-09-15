@@ -1796,12 +1796,89 @@ class RockTypeVariable(_Variable):
         return {"is_boundary": _tf.constant(
             self.boundary.values.to_numpy()[idx, None], _tf.bool)}
 
-    def compute_metrics(self, **kwargs):
+    def compute_metrics(self, decluster: bool = False) -> "_pd.DataFrame":
+        """
+        Scores this variable's prediction against its own measurements.
+
+        Every score is of one category against the rest, so the table has
+        a column per category. The locations scored are the ones the
+        confusion matrix counts: measured, predicted, and off the contacts,
+        where a location holds two measurements and no one truth.
+
+        - Balanced accuracy, Jaccard, Matthews, Cohen's kappa, precision,
+          recall and F1 score read the predicted category. Recall is the
+          share of the locations measured as the category that the model
+          calls it; precision is the share of the locations the model
+          calls it that were measured as it.
+        - Quantity and allocation disagreement split the category's errors
+          into the part a wrong proportion explains and the part a wrong
+          place explains (Pontius and Millones, 2011). Summed over the
+          categories and halved, they add up to one minus the accuracy.
+        - The Brier score and the log score read the predicted
+          probability, as a forecast of whether a location is the
+          category. Both are proper: neither hedging nor overconfidence
+          improves them. Lower is better.
+
+        Parameters
+        ----------
+        decluster
+            Weight each location by the container's `"declustering"`
+            metadata column, which the container's `decluster` method
+            writes, so that densely drilled ground does not dominate.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per score, one column per category.
+
+        Raises
+        ------
+        ValueError
+            If no location holds both a measurement and a prediction, or if
+            `decluster` is asked for and the container keeps no weights.
+
+        Notes
+        -----
+        A score with no value is NaN: the precision of a category the model
+        never calls, the recall of one never measured. At the locations a
+        model was trained on, every score flatters it; the out-of-fold
+        container :func:`geoml.models.cross_validate` fills is the honest
+        input.
+
+        References
+        ----------
+        Brier, G. W. (1950). Verification of forecasts expressed in terms of
+        probability. *Monthly Weather Review*, 78(1), 1-3.
+
+        Cohen, J. (1960). A coefficient of agreement for nominal scales.
+        *Educational and Psychological Measurement*, 20(1), 37-46.
+
+        Pontius, R. G., & Millones, M. (2011). Death to Kappa: birth of
+        quantity disagreement and allocation disagreement for accuracy
+        assessment. *International Journal of Remote Sensing*, 32(15),
+        4407-4429.
+        """
         y_pred = self.predicted.to_numpy()
         y_true_a = self.measurements_a.to_numpy()
         y_true_b = self.measurements_b.to_numpy()
 
-        valid = y_true_a == y_true_b
+        # the missing code decodes to the empty string on both sides
+        valid = (y_true_a == y_true_b) & (y_true_a != "") & (y_pred != "")
+        if not valid.any():
+            raise ValueError(
+                "no location holds both a measured category and a "
+                "prediction of %r; predict on the data first" % self.name)
+
+        weights = None
+        if decluster:
+            column = self.coordinates.metadata.get("declustering")
+            if column is None:
+                raise ValueError(
+                    "the container keeps no 'declustering' column to weight "
+                    "the locations by; run its decluster() method first")
+            weights = _np.asarray(column.values, dtype=float)[valid]
+        share = _np.ones(valid.sum()) if weights is None else weights
+        share = share / share.sum()
 
         y_pred = y_pred[valid]
         y_true = y_true_a[valid]
@@ -1810,10 +1887,44 @@ class RockTypeVariable(_Variable):
         for lab in self.labels:
             yp = _np.where(y_pred == lab, 1, 0)
             yt = _np.where(y_true == lab, 1, 0)
+            claim = self.components[lab].probability.values.to_numpy()[valid]
+
+            # the category's hits and its two errors, as shares of the
+            # locations: called it where another was measured (commission),
+            # measured as it where another was called (omission)
+            hits = share @ (yt * yp)
+            commission = share @ (yp * (1 - yt))
+            omission = share @ (yt * (1 - yp))
+            with _np.errstate(invalid="ignore", divide="ignore"):
+                # 0/0 where there is nothing to score: the precision of a
+                # category never called, the recall of one never measured,
+                # the kappa of one neither
+                precision = hits / (hits + commission)
+                recall = hits / (hits + omission)
+                f1 = 2 * hits / (2 * hits + commission + omission)
+                kappa = _skmetrics.cohen_kappa_score(
+                    yt, yp, labels=[0, 1], sample_weight=weights)
+            # a claim of exactly zero for the category measured would score
+            # infinity; clipped at machine precision, as scikit-learn clips
+            eps = _np.finfo(float).eps
+            clipped = _np.clip(claim, eps, 1 - eps)
+
             d = {
-                'Balanced accuracy': _skmetrics.balanced_accuracy_score(yt, yp),
-                'Jaccard': _skmetrics.jaccard_score(yt, yp),
-                'Matthews': _skmetrics.matthews_corrcoef(yt, yp),
+                'Balanced accuracy': _skmetrics.balanced_accuracy_score(
+                    yt, yp, sample_weight=weights),
+                'Jaccard': _skmetrics.jaccard_score(
+                    yt, yp, sample_weight=weights),
+                'Matthews': _skmetrics.matthews_corrcoef(
+                    yt, yp, sample_weight=weights),
+                "Cohen's kappa": kappa,
+                'Precision': precision,
+                'Recall': recall,
+                'F1 score': f1,
+                'Quantity disagreement': abs(commission - omission),
+                'Allocation disagreement': 2 * min(commission, omission),
+                'Brier score': share @ (claim - yt) ** 2,
+                'Log score': -share @ (yt * _np.log(clipped)
+                                       + (1 - yt) * _np.log1p(-clipped)),
             }
             series.append(_pd.Series(d, name=lab))
 

@@ -45,6 +45,18 @@ prediction's shell a realization is compared against -- serves every
 operation after it, and a cut that takes nothing hands the contour back
 untouched rather than re-triangulated.
 
+A cut that takes **everything** is said out loud. A limit keeps its inside,
+so one around the wrong ground empties every shell, and the set used to be
+built, stored and reopened with nothing in it and no word of why: on the
+Tom v6 model, `get_contour('Rock/uncertainty', 1e-4)` gave a body around
+the few pockets where the rock was that certain, 0.02% of the model, and as
+a limit it took all three metals' shells -- the Zn shell at 5% held 10.2
+million m3 before it and nothing after. A shell that had ground and has none
+left after the limits now raises a warning naming the cut-offs and the share
+each limit or exclusion took, from `_build` before any realization is
+contoured and from `limit`/`exclude` on a set already made. A shell empty
+before any cut, the field never reaching its level, is not reported.
+
 ## Realizations
 
 Every realization is contoured at creation (`simulations=True`, or an int
@@ -62,6 +74,21 @@ volume it gains and loses against the prediction's shell -- so
 `volume_dispersion()` and the figure behind it never load a mesh. One
 realization's failure is recorded (`failures`, a warning at the end) rather
 than allowed to throw away a build that can run for an hour.
+
+**How many workers.** As many as the CPUs allow, eight at most, and no
+more than memory holds (2026-09-11). A worker costs what one contour of
+the model does, and that grows with the model: on the Tom v6 model, 6.8
+million blocks, one contour took 4 to 8 GB, most of it `_cut_to_contour`'s
+corner tables over the cut mesh, and the eight workers the default then
+started took the 62 GB of the WSL running them down with them -- the
+global OOM killer takes WSL's own processes, a hang that outlives the job.
+So the set measures the parent's high-water growth over the prediction's
+contours, which a worker's contour costs about as much as (5.2 GB against
+4.75 GB a worker, measured), reads the memory there is, and takes as many
+workers as fit 80% of it at 1.25 times that cost, with a warning when that
+is fewer than the CPUs. A worker killed anyway is a `RuntimeError`: the
+pool is a `ProcessPoolExecutor`, where `multiprocessing.Pool` replaced a
+dead worker and waited for its task forever.
 
 ## Categories
 
@@ -89,12 +116,15 @@ for categories every pair's overlap and the gap left in the model's box;
 ones before it in a priority order, and says what that took. A gap is not
 filled: that would be inventing ground.
 
-**Part of every gap is the model's own edges.** A body closed against the
-box has its caps on the faces but rounds the edges where two faces meet:
-the painted value at an edge corner averages one cell inside with three
-reflected outside, so it falls below the level and the surface cuts the
-corner by about half a boundary block. Three slabs filling an 80 m box of
-10 m blocks leave 5% of it that way.
+**None of the gap is the model's own edges any more** (2026-09-14). A body
+closed against the box used to have its caps painted onto the faces, and
+rounded the edges where two faces meet: the painted value at an edge
+corner averaged one cell inside with three reflected outside, so it fell
+below the level and the surface cut the corner by about half a boundary
+block. Three slabs filling an 80 m box of 10 m blocks left 5% of it that
+way. The ghosts past the box now carry copies of the blocks they mirror,
+the surface closes a cell beyond them, and Manifold cuts the body at the
+box, so the three slabs tile it exactly.
 
 ## A contour that will not close
 
@@ -109,8 +139,49 @@ retries a contour that will not close a hair either side of its level --
 from 1e-9 of the field's span up to 1e-4, lower first -- and records the
 move as `nudge` in the mesh's provenance. One realization's shell (19, at
 0.8) stayed open at 534 edges through every move up to 1e-5 and closed at
-1e-4 lower, a few millimetres of shell. The cap itself is an open item in
-the roadmap.
+1e-4 lower, a few millimetres of shell. The cap itself was the cure, and
+it came on 2026-09-14 (below).
+
+Since 2026-09-11 a set does not route such a surface through the welded
+mesh at all (`_contour_values(..., fallback=False)`); it heals it and moves
+the level. The fallback closed none of the shells it was tried on, and on
+the Tom v6 model, 6.8 million blocks, it was the costliest thing a contour
+did: an Ag realization at 10 ppm fell back at every level tried, 14
+million welded cells at 17 GB and two minutes an attempt, twice what a
+worker is sized for, and came back open each time. Without it an attempt
+costs the painted contour, 12 GB and 95 s there. That realization still
+closes at no level up to 1e-5 either side -- the cap again -- so it will be
+recorded as a failure, after 13 attempts and about twenty minutes.
+
+Since 2026-09-13 the edge is split before the level is moved
+(`math.geometry.split_touching_edges`). Where two pieces touch along it,
+the four triangles alternate in the direction they walk it; each is paired
+with its neighbour across a wedge of inside, and the vertices get a copy for
+every piece meeting there, so the layer and the cap touch rather than share.
+Counted on Assen, every realization contoured at its own level only
+(`docs/benchmarks/contour_stages.py`): 16 shells would have been retried and
+8 still are. Those are the cap folding flat onto itself -- two of the four
+triangles lying in the box face on the same side of the edge, walking it
+both ways -- which is no touch and is left alone; the cure is the cap's,
+drawn as it is through lattice points valued exactly at the level. Each of
+the eight the split closed sits between the bodies a ten-thousandth of the
+span either side, and matches the retried body to four parts in a million
+where the retry moved a billionth or a hundred-millionth; where it had to
+move a ten-thousandth, as for realization 19 at 0.8 and Limestone's 3, it
+returned that neighbour's body, 0.07-0.08% larger
+(`docs/benchmarks/contour_split_neighbours.py`). The split is sometimes the
+better answer as well as the cheaper one: on a small model
+where the retry moved the level a billionth of the span, it returned a body
+1.1% smaller than the bodies a millionth either side, and the split body
+sits between them.
+
+Since 2026-09-14 the cap is not drawn at all: the ghosts carry copies of
+the blocks they mirror, the surface closes a cell past them, and Manifold
+cuts the body at the box. Nothing lies on a box face at the level any
+more, so nothing can fold flat there. The same census: none of the 100
+FeO_total shells or the 150 rock bodies needs a retry, and the 25
+FeO_total realizations took 1198 s in one process instead of 1395. The
+nudges stay, for whatever else will not close.
 
 ## A band that touches itself
 
@@ -176,7 +247,8 @@ other by 1.8e-15 m³ as contoured, and no realization's set by more than
 7e-15 m³; simplified to 1 m and nested again, the nesting took nothing
 back. `repair` stays off by default: on this model it has nothing to do.
 Two of the four shells were returned whole by `simplify`, the weakness the
-roadmap already records at 2 m, now at 1 m.
+roadmap already recorded at 2 m, then at 1 m -- a quadric pre-pass that
+came back open, every cut starting from it, dropped since 2026-09-14.
 
 **The volumes the prediction misreports.** FeO_total's median is 0.73:
 
@@ -196,7 +268,8 @@ five pieces, 63% of it in the largest; a realization's, ten.
 
 **The rocks.** The prediction's bodies overlap by 0 to 217 m³ a pair,
 about 1 100 m³ in all -- 0.008% of the model -- and leave 12 900 m³, 0.1%,
-uncovered, most of it the box's rounded edges. Their volumes against the
+uncovered, most of it the box's rounded edges (0.053% since the box cuts
+the bodies). Their volumes against the
 realizations':
 
 | Rock | Prediction | Realizations, P10 / P50 / P90 | Rank |
@@ -211,16 +284,47 @@ realizations':
 Every realization holds more BIF than the prediction, by a third at the
 median. The prediction's body is where BIF is the most probable rock, and
 a rock that is often likely and seldom the most likely loses ground there
-that its realizations keep. **A realization's bodies do not tile the
-model:** three measured overlap by 141 000 to 162 000 m³, about 1.1% of the
-model, and leave 0.75 to 0.84% uncovered. Each category is contoured on
-its own field -- its draw against the best of the others -- and where the
-draws are rough from block to block, the corner values two neighbours'
-fields paint disagree about where their contact runs. The prediction's
-fields are smooth, and agree to 0.008%. That is an open item in the
-roadmap; until it is settled, a realization's rock volumes carry about a
-percent of double counting, and `repair` with a priority order settles
-the overlaps but not the gaps.
+that its realizations keep. **A realization's bodies did not tile the
+model:** three measured overlapped by 141 000 to 162 000 m³, about 1.1% of
+the model, and left 0.75 to 0.84% uncovered. Each category was contoured on
+its own field -- its draw against the best of the others, taken block by
+block -- and where the draws are rough from block to block, the corner
+values two neighbours' fields paint disagree about where their contact
+runs. The prediction's fields are smooth, and agree to 0.008%.
 
-**Workers scale 2.2 times on eight**: 25 realizations in 672 s past the
-prediction, 27 s each, against 59 s in one process. Not investigated.
+Since 2026-09-14 a realization's categories come from one cut and one
+paint of all its draws (`BlockSet3D._contour_fields`): the draws are
+averaged onto the corners first and each category's field read off those
+means, so along a contact between two categories the one's field is the
+other's negated, and their surfaces pass through the same points. Measured
+on realizations 0, 12 and 24 (`docs/benchmarks/category_partition.py`):
+
+| | Overlap, of the model | Gap | A realization |
+|---|---|---|---|
+| Each category on its own | 1.07-1.21% | 0.73-0.77% | 72 s |
+| All at once | 0.0000% | 0.089-0.095% | 54 s |
+| The prediction's bodies | 0.008% | 0.053% | |
+
+The gap left is where three categories meet inside one cell of the
+painted lattice: each field's marching-cubes piece cuts off the corners it
+wins and none claims the middle. Taking a winner's margin against its
+neighbours' winners rather than its runner-up was tried on a plain
+lattice and closed a tenth of it (15.8% to 14.0% on rough draws), so the
+cause is the cell and not the edge crossings; a multi-material contour,
+each interface drawn once, would close the rest (roadmap). Six fields at
+once peak at 2.06 GB where one peaks at 0.92, so the pool is sized to the
+first realization, made in the parent and kept.
+
+**Workers scaled 2.2 times on eight**: 25 realizations in 672 s past the
+prediction, 27 s each, against 59 s in one process. Measured on
+2026-09-14 (`docs/benchmarks/mesh_set_workers.py`, eight realizations of
+FeO_total, after the leaner contours): 45.8, 30.4, 18.0 and 12.8 s a
+realization on 1, 2, 4 and 8 workers, 3.6 times at eight. The parent's
+reads and writes are a few seconds of it, and VTK runs one thread here. A
+forked worker runs Manifold on one thread, the parent having started its
+thread pool, so a task is one core's work, 93 s against 45 s on two cores
+in one process; and more workers do not help, 12, 24 of them giving 10.8
+and 11.2 s a realization with every stage slower in step, the 16-core,
+two-channel machine out of memory bandwidth and then cores. OpenBLAS keeps
+a spinning thread per CPU in every process, 80 s of a task's 173 s of
+CPU; the workers now hold it to one.

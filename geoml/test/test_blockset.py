@@ -1350,11 +1350,10 @@ def test_a_closed_contour_is_a_body_at_every_resolution(side, supersample):
                                     [-5.0, 75.0, 75.0],    # meets a face
                                     [-5.0, -5.0, -5.0]])   # meets a corner
 def test_a_closed_contour_is_capped_on_the_box_face(centre):
-    """The cap goes where the boundary block's value and its ghost's put
-    it, and the ghost holds the reflection `2 * value - v` so that lands
-    halfway between the two centres -- on the face. One shared constant far
-    past the data put it against the block's own centre instead, half a
-    block short, which cut a grade shell back on the side it was kept and
+    """The cap is the box face: the ghosts carry the field on past the box
+    and the box cuts the body off. One shared constant far past the data
+    once put the cap against the boundary block's own centre instead, half
+    a block short, which cut a grade shell back on the side it was kept and
     let its complement out on the other: measured against Monte Carlo,
     `close="above"` read -6.3% where a ball meets a face and -20.0% at a
     corner. Both sides now agree with the volume to about a percent.
@@ -1386,6 +1385,35 @@ def test_a_closed_contour_is_capped_on_the_box_face(centre):
     assert below.volume == pytest.approx(box - exact, rel=0.03)
 
 
+def test_a_closed_contour_meets_the_box_in_the_box_faces():
+    """Where a closed body meets the box, its faces, edges and corners are
+    the box's own. A field rising with height, cut between two layers of
+    blocks, keeps exactly the part of the box above the level, and the two
+    sides tile the box. The cap painted onto the faces before, by ghosts
+    holding each block's reflection about the level, put every face point
+    of a kept block at the level and rounded the body's edges on the box by
+    about half a boundary block."""
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [6, 5, 4], [10.0] * 3,
+                                   discretization=(2, 2, 2), max_levels=1)
+    _graded(blocks, np.asarray(blocks.coordinates)[:, 2])
+    low = np.ravel(blocks.bounding_box.min)
+    high = np.ravel(blocks.bounding_box.max)
+    area = float(np.prod(high[:2] - low[:2]))
+    # the corners read the height itself from 5 m to 25 m; nearer the top
+    # and bottom faces the ghosts, copies of the blocks, flatten the field
+    level = 13.0
+
+    above = blocks.get_contour("g", level, close="above")
+    below = blocks.get_contour("g", level, close="below")
+
+    assert above.volume == pytest.approx(area * (high[2] - level), rel=1e-6)
+    assert below.volume == pytest.approx(area * (level - low[2]), rel=1e-6)
+    for body, top in ((above, high[2]), (below, level)):
+        assert np.ravel(body.bounding_box.min)[:2] == pytest.approx(low[:2])
+        assert np.ravel(body.bounding_box.max) == pytest.approx(
+            [high[0], high[1], top])
+
+
 def test_a_surface_pinching_at_a_corner_is_still_a_body():
     """Where the level set passes exactly through a cell corner it pinches
     to a point, and VTK writes out the zero-area triangles of that marching
@@ -1400,6 +1428,49 @@ def test_a_surface_pinching_at_a_corner_is_still_a_body():
 
     assert isinstance(closed, geoml.data.Solid3D)
     assert closed.volume > 0
+
+
+def _thin_top_layer():
+    """A field rising to the top, noisy, contoured near its top: a ragged
+    layer against the top face, whose underside meets the closing cap
+    edge-on along a lattice edge. Seed 124 of a search over small random
+    models (2026-09-13), where one trial in fifty came out this way; the
+    Assen block model's FeO_total at 0.7 did the same at scale."""
+    rng = np.random.default_rng(124)
+    n = [int(rng.integers(3, 6)), int(rng.integers(3, 6)),
+         int(rng.integers(2, 4))]
+    blocks = geoml.data.BlockSet3D([0, 0, 0], n, [10.0, 10.0, 10.0],
+                                   discretization=(2, 2, 2), max_levels=1)
+    if rng.random() < 0.7:
+        blocks = blocks.split(np.flatnonzero(rng.random(blocks.n_data) < 0.5))
+    z = np.asarray(blocks.coordinates)[:, 2]
+    values = z / (10.0 * n[2]) + 0.15 * rng.standard_normal(blocks.n_data)
+    rng.random()  # the side the search drew, which came out "above"
+    level = float(np.quantile(values, rng.uniform(0.7, 0.97)))
+    return _graded(blocks, values), values, level
+
+
+def test_a_contour_meeting_its_cap_edge_on_is_still_a_body():
+    """Four triangles shared one edge where the underside of the kept layer
+    met the cap, which no winding repair settles, so a mesh set retried the
+    level a hair either side -- thirteen contours, twenty minutes a shell on
+    the Tom v6 model, and a failure where none closed. The edge is split
+    instead: the layer and the cap touch rather than share it."""
+    blocks, values, level = _thin_top_layer()
+
+    closed = blocks.get_contour("g", level, close="above")
+    assert isinstance(closed, geoml.data.Solid3D)
+
+    import geoml.data.meshsets as msm
+    shell, nudge = msm._shell(blocks, values, level, "above", 0, "g")
+    assert nudge == 0.0
+    # and it is the body its neighbours say it is: between the ones a
+    # ten-thousandth of the span either side. The retry it replaces landed
+    # a billionth higher, on a body 1.1% smaller than both
+    span = float(values.max() - values.min())
+    lower = blocks.get_contour("g", level - 1e-4 * span, close="above")
+    higher = blocks.get_contour("g", level + 1e-4 * span, close="above")
+    assert higher.volume <= shell.volume <= lower.volume
 
 
 def test_close_wants_a_side():

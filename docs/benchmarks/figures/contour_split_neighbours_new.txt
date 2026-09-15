@@ -1,0 +1,9 @@
+# docs/benchmarks/contour_split_neighbours.py, this checkout, 2026-09-13
+('FeO', None, 0.7)           -1e-4: Solid3D 6436172.6 | level: Solid3D 6434139.7 | +1e-4: Solid3D 6432120.1
+('FeO', 2, 0.8)              -1e-4: Solid3D 4207458.7 | level: Solid3D 4204915.3 | +1e-4: Solid3D 4202378.3
+('FeO', 8, 0.7)              -1e-4: Solid3D 7286099.7 | level: Solid3D 7284174.2 | +1e-4: Solid3D 7282246.8
+('FeO', 14, 0.6)             -1e-4: Solid3D 9465125.5 | level: Solid3D 9463394.9 | +1e-4: Solid3D 9461668.0
+('FeO', 19, 0.8)             -1e-4: Solid3D 4005296.9 | level: Solid3D 4002682.7 | +1e-4: Solid3D 4000067.6
+('FeO', 19, 0.85)            -1e-4: Solid3D 2014957.1 | level: Solid3D 2011990.0 | +1e-4: Solid3D 2009008.8
+('rock', 0, 'Calcitic Hematite') -1e-4: Solid3D 3554190.3 | level: Solid3D 3550899.4 | +1e-4: Solid3D 3547628.1
+('rock', 3, 'Limestone')     -1e-4: Solid3D 4169948.7 | level: Solid3D 4166557.1 | +1e-4: Solid3D 4163165.4

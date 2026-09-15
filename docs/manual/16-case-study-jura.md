@@ -268,7 +268,10 @@ wants, and the accuracy figure is its calibration column drawn.
 One column in the rock table is worth reading before it is mistaken for a
 bug. Portlandian comes back with a balanced accuracy of 0.5 and a Jaccard
 of zero, which is what those statistics say about a class the model never
-predicts anywhere. It is the rarest formation in the training set, the
+predicts anywhere. Its precision is empty, there being no call of it to be
+right or wrong, and the disagreement rows say the same in their own terms:
+all of its error is quantity and none of it allocation, a proportion wrong
+rather than a place. It is the rarest formation in the training set, the
 other four outvote it at every location, and no amount of fitting will
 change that without telling the model the class matters more than its
 frequency suggests. A rare domain that matters is a modelling decision, not

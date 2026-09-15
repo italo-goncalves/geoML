@@ -343,9 +343,11 @@ class Mesh3D(_PointBased):
         ----------
         max_error : float
             The largest distance the simplified surface may sit from the
-            original, in the mesh's own units. Enforced by measurement: the
-            simplified faces are probed against the original surface, and
-            the decimation tightened until the promise holds.
+            original, in the mesh's own units, either way. Enforced by
+            measurement: the simplified faces are probed against the
+            original surface and the original's vertices against the
+            simplified one, and the decimation tightened until the promise
+            holds.
 
         Returns
         -------
@@ -370,12 +372,18 @@ class Mesh3D(_PointBased):
         # VTK holds the GIL through them, so the pool is what threads can
         # not do (see `_DistanceQueries`); a mesh too small to repay the
         # spin-up measures serially on the one kept locator
+        # the vertices a triangle uses: a mesh can carry a few that none
+        # does, which lie off the surface and would measure the mesh
+        # against itself as off (35 on an Assen shell an older geoML made,
+        # up to 0.72 away)
+        points = _np.asarray(original.points, dtype=float)[_np.unique(
+            original.faces.reshape(-1, 4)[:, 1:])]
         with _DistanceQueries(
                 original,
                 parallel=4 * original.n_cells >= _PARALLEL_QUERIES
         ) as measure:
 
-            def deviation_of(mesh):
+            def deviation_of(mesh, limit):
                 # probed on the simplified faces -- centroids and edge
                 # midpoints; the surviving vertices lie on the original by
                 # construction and would measure nothing
@@ -386,31 +394,25 @@ class Mesh3D(_PointBased):
                     (pts[tri[:, 0]] + pts[tri[:, 1]]) / 2,
                     (pts[tri[:, 1]] + pts[tri[:, 2]]) / 2,
                     (pts[tri[:, 2]] + pts[tri[:, 0]]) / 2])
-                return float(_np.abs(measure.query(probes)).max())
+                out = float(_np.abs(measure.query(probes)).max())
+                if out > limit:
+                    return out
+                # and the original's vertices against the simplified
+                # surface: a fold the cut took away sits off every new face
+                # however close those faces sit to the original
+                with _DistanceQueries(
+                        mesh, parallel=4 * mesh.n_cells >= _PARALLEL_QUERIES
+                ) as back:
+                    return max(out, float(_np.abs(back.query(points)).max()))
 
-            # A large mesh takes a fast quadric pre-pass first, so the
-            # error-bounded decimator works a fraction of the triangles: on
-            # an 835k-triangle shell this is most of a 4x speedup. The
-            # pre-pass is verified against the original like everything
-            # else, and given half the budget; where it overspends, the
-            # mesh is taken as it came.
-            working = original
-            n_triangles = original.n_cells
-            if n_triangles > 100_000:
-                rough = original.decimate(1.0 - 50_000.0 / n_triangles,
-                                          volume_preservation=True)
-                rough = rough.clean().triangulate()
-                if deviation_of(rough) <= 0.5 * max_error:
-                    working = rough
-
-            def cut_at(bound):
+            def cut_at(start, bound):
                 # vtkDecimatePro is the one decimator that takes an error
                 # bound, as a fraction of the bounding-box diagonal;
                 # preserving topology is what keeps a closed body closed,
                 # and the error accumulates against its input rather than
                 # being re-granted per collapse
                 decimate = _vtk.vtkDecimatePro()
-                decimate.SetInputData(working)
+                decimate.SetInputData(start)
                 decimate.SetTargetReduction(1.0)
                 decimate.SetMaximumError(bound / diagonal)
                 decimate.AccumulateErrorOn()
@@ -419,44 +421,65 @@ class Mesh3D(_PointBased):
                 decimate.Update()
                 return _pv.wrap(decimate.GetOutput()).clean().triangulate()
 
-            # the decimator's own error metric runs loose at tight budgets
-            # (measured 7x over at 0.02 of a unit step on a contoured
-            # shell), so the true deviation -- always against the original,
-            # whatever the pre-pass did -- is measured and the internal
-            # bound tightened until the promise holds
-            bound = max_error
-            for _ in range(4):
-                mesh = cut_at(bound)
-                deviation = deviation_of(mesh)
-                if deviation <= max_error:
-                    break
-                bound *= 0.5 * max_error / deviation
-
-            # Decimation can also break the kind's own promise -- collapse
-            # a thin feature into a membrane the rebuild cannot always
-            # repair -- and that is no reason to raise out of a workflow,
-            # because unlike the other rebuilds this one holds a remedy:
-            # cutting less. A gentler cut avoids the collapse, its error
-            # only shrinks, and the original mesh is within any budget at
-            # all -- so the budget is spent more timidly until the kind
-            # survives, and not at all as the last resort, said out loud
-            # rather than silently.
-            for _ in range(3):
+            def rebuilt(mesh):
                 try:
                     return _rebuilt_as(type(self), mesh)
                 except (NotClosedError, InconsistentMeshError,
                         NotSingleValuedError):
+                    return None
+
+            # A large mesh takes a fast quadric pre-pass first, so the
+            # error-bounded decimator works a fraction of the triangles: on
+            # an 835k-triangle shell this is most of a 4x speedup. The
+            # pre-pass is verified like everything else and given half the
+            # budget, and it must still be the kind the mesh is: every cut
+            # after it starts from it, so a body it broke stayed broken
+            # however gently it was cut -- the Assen shells came back whole
+            # at 2 m, where 0.5 m took them down 16 and 22 times.
+            starts = [original]
+            n_triangles = original.n_cells
+            if n_triangles > 100_000:
+                rough = original.decimate(1.0 - 50_000.0 / n_triangles,
+                                          volume_preservation=True)
+                rough = rough.clean().triangulate()
+                if deviation_of(rough, 0.5 * max_error) <= 0.5 * max_error \
+                        and rebuilt(rough) is not None:
+                    starts.insert(0, rough)
+
+            # The decimator's own error metric runs loose at tight budgets
+            # (measured 7x over at 0.02 of a unit step on a contoured
+            # shell), so the true deviation -- always against the original,
+            # whatever the pre-pass did -- is measured and the internal
+            # bound tightened until the promise holds. Decimation can also
+            # break the kind's own promise -- collapse a thin feature into a
+            # membrane the rebuild cannot always repair -- and that is no
+            # reason to raise out of a workflow, because unlike the other
+            # rebuilds this one holds a remedy: cutting less. A gentler cut
+            # avoids the collapse, and the original mesh is within any
+            # budget at all -- so the budget is spent more timidly until the
+            # kind survives, from the original where the pre-pass will not
+            # do, and not at all as the last resort, said out loud rather
+            # than silently.
+            for start in starts:
+                bound = max_error
+                for _ in range(4):
+                    for _ in range(4):
+                        mesh = cut_at(start, bound)
+                        deviation = deviation_of(mesh, max_error)
+                        if deviation <= max_error:
+                            break
+                        bound *= 0.5 * max_error / deviation
+                    else:
+                        break
+                    kept = rebuilt(mesh)
+                    if kept is not None:
+                        return kept
                     bound *= 0.25
-                    mesh = cut_at(bound)
-            try:
-                return _rebuilt_as(type(self), mesh)
-            except (NotClosedError, InconsistentMeshError,
-                    NotSingleValuedError):
-                _warnings.warn(
-                    "decimation broke this mesh's own shape however gently "
-                    "it was applied, so the mesh is returned as it came, "
-                    "with all its %d triangles" % len(self.triangles))
-                return self
+            _warnings.warn(
+                "no cut within the budget kept this mesh's own shape, however "
+                "gently it was applied, so the mesh is returned as it came, "
+                "with all its %d triangles" % len(self.triangles))
+            return self
 
     def smooth(self, iterations=20, pass_band=0.1):
         """
@@ -1234,6 +1257,52 @@ def _separated(points, triangles):
     moved[twice] -= _TOUCH_SEPARATION * _gmt.vertex_normals(
         points, triangles)[twice]
     return moved
+
+
+def _clip_to_box(points, triangles, low, high):
+    """A closed triangulation cut to the box from `low` to `high` by
+    Manifold, so the box's faces, edges and corners come out exact.
+
+    Built for a contour closed against a block model: the field is carried
+    past the model's box by mirrored ghosts and closed well outside it, and
+    this cut is where the cap comes from. Returns the arrays of what lies
+    inside the box, or None where Manifold will not take the triangulation
+    as a body even with its touching edges split.
+    """
+    shift = _np.round(_np.asarray(low, dtype=float))
+    points, triangles = _gmt.drop_degenerate_faces(
+        _np.asarray(points, dtype=float) - shift, triangles)
+    points, triangles = _gmt.weld(points, triangles)
+    # a contour faces up its field's gradient, so a region kept below the
+    # level comes wound inside out, which Manifold would take as said
+    if _gmt.signed_volume(points, triangles) < 0:
+        triangles = triangles[:, ::-1]
+
+    def body_of(vertices, faces):
+        body = _manifold.Manifold(_manifold.Mesh64(
+            vert_properties=_np.ascontiguousarray(vertices),
+            tri_verts=_np.ascontiguousarray(faces, dtype=_np.uint64)))
+        return body if body.status() == _manifold.Error.NoError else None
+
+    body = body_of(points, triangles)
+    if body is None:
+        split, parted = _gmt.split_touching_edges(points, triangles)
+        if split is points:
+            return None
+        body = body_of(_separated(split, parted), parted)
+        if body is None:
+            return None
+    extent = _np.asarray(high, dtype=float) - _np.asarray(low, dtype=float)
+    box = _manifold.Manifold.cube(extent).translate(
+        _np.asarray(low, dtype=float) - shift)
+    answer = body ^ box
+    if answer.status() != _manifold.Error.NoError:
+        return None
+    if answer.is_empty():
+        return _np.zeros((0, 3)), _np.zeros((0, 3), dtype=_np.int64)
+    mesh = answer.to_mesh64()
+    return (_np.asarray(mesh.vert_properties, dtype=float)[:, :3] + shift,
+            _np.asarray(mesh.tri_verts, dtype=_np.int64).reshape(-1, 3))
 
 
 def _reaches_across(sheet, box):

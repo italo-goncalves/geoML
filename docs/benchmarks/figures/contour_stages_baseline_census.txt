@@ -1,0 +1,24 @@
+label baseline_census, geoML from /mnt/c/Users/Public/geoml_baseline
+908237 blocks, 32 CPUs
+
+== census: realizations contoured at their own level only, 1 workers
+FeO_total: 1601 s, 25 realizations x 4 meshes; the prediction's meshes moved off their level: {0.7: 5.927792138147843e-09}
+  not closed at their own level: 6
+   realization 2, 0.8: InconsistentMeshError: the contour of 'Comp/FeO_total/prediction' at 0.8 does not close in
+   realization 8, 0.7: InconsistentMeshError: the contour of 'Comp/FeO_total/prediction' at 0.7 does not close in
+   realization 14, 0.6: InconsistentMeshError: the contour of 'Comp/FeO_total/prediction' at 0.6 does not close in
+   realization 16, 0.7: InconsistentMeshError: the contour of 'Comp/FeO_total/prediction' at 0.7 does not close in
+   realization 19, 0.8: InconsistentMeshError: the contour of 'Comp/FeO_total/prediction' at 0.8 does not close in
+   realization 19, 0.85: InconsistentMeshError: the contour of 'Comp/FeO_total/prediction' at 0.85 does not close i
+rocks: 2056 s, 25 realizations x 6 meshes; the prediction's meshes moved off their level: {}
+  not closed at their own level: 9
+   realization 0, Calcitic Hematite: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 2, Diabase: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 3, Limestone: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 5, Calcitic Hematite: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 9, Calcitic Hematite: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 15, Hematite: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 17, Limestone: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 18, Limestone: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+   realization 23, Calcitic Hematite: InconsistentMeshError: the contour of 'Simple Rock' at 0 does not close into a body, even 
+done

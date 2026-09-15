@@ -1,0 +1,14 @@
+label one_way, geoML from /mnt/c/Users/Public/geoml_step4
+
+BIF: 324970 triangles, volume 817318; its quadric pre-pass to 276746 triangles comes back NotClosedError
+  budget  triangles     time kind          volume     out    back whole?
+  0.5         14996     2.2s Solid3D       816336   0.463   0.436 
+  1          324970     6.2s Solid3D       817318   0.000   0.000 returned whole
+  2          324970     4.1s Solid3D       817318   0.000   0.000 returned whole
+
+Hematite: 620126 triangles, volume 2.46402e+06; its quadric pre-pass to 575819 triangles comes back NotClosedError
+  budget  triangles     time kind          volume     out    back whole?
+  0.5         38856     6.6s Solid3D  2.46385e+06   0.492   0.468 
+  1          620126    12.5s Solid3D  2.46402e+06   0.000   0.000 returned whole
+  2          620126     8.2s Solid3D  2.46402e+06   0.000   0.000 returned whole
+done

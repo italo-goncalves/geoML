@@ -1,0 +1,9 @@
+# docs/benchmarks/contour_split_neighbours.py, GEOML_ROOT = the code before the split, 2026-09-13
+('FeO', None, 0.7)           old retry: volume 6434143.8 at +1e-08 of the span
+('FeO', 2, 0.8)              old retry: volume 4204911.5 at -1e-09 of the span
+('FeO', 8, 0.7)              old retry: volume 7284173.9 at +1e-09 of the span
+('FeO', 14, 0.6)             old retry: volume 9463393.8 at +1e-09 of the span
+('FeO', 19, 0.8)             old retry: volume 4005296.9 at -1e-04 of the span
+('FeO', 19, 0.85)            old retry: volume 2011986.9 at -1e-09 of the span
+('rock', 0, 'Calcitic Hematite') old retry: volume 3550912.8 at +1e-09 of the span
+('rock', 3, 'Limestone')     old retry: volume 4169948.7 at -1e-04 of the span

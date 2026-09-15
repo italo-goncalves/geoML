@@ -208,7 +208,7 @@ eight workers): FeO_total at four cut-offs in 800 s and the six rocks in
 off; at 0.85 the prediction's shell holds 1.42 Mm3 against the
 realizations' 1.65 / 2.18 / 3.00 (P10/P50/P90); and a realization's six
 rock bodies overlap by about 1.1% of the model where the prediction's
-overlap by 0.008%, which the roadmap keeps open. A contour that will not
+overlap by 0.008%, which an entry below settles. A contour that will not
 close is retried a hair off its level, recorded as `nudge`: `get_contour`
 can meet its own closing cap edge-on (7 of 104 Fe meshes, 8 of 156
 rock bodies). Design record `docs/mesh-sets.md`; `test_meshsets.py`
@@ -276,6 +276,239 @@ from it, and `Blocks3D.from_geoh5` still returns a rotated model as a
 refuses an `ImageData.transform` that does not say whether it is in place.
 The turn is now `_turned`, shared with `RotatedBlocks3D`, and a test pins
 the exported nodes where the grid's coordinates are.
+* **Fixed: a mesh set's default workers could take the machine's memory
+down.** On the Tom v6 block model (6.8 million blocks, 25 realizations)
+`MeshSet(bm, "assay/Zn", limits=...)` hung WSL. The default was eight
+workers whatever the model, and a worker costs what one contour does: 4
+to 8 GB here, most of it `_cut_to_contour`'s corner tables over the cut
+mesh (7 to 12 million cells), not the painted slabs the old estimate had
+in mind. Eight of them and the notebook passed WSL's 62 GB, and the
+global OOM killer took WSL's own processes with them. The default is now
+as many workers as memory holds: the parent's high-water growth over the
+prediction's contours is the cost -- Linux resets the mark through
+`clear_refs`, so a kernel's earlier work does not count -- the available
+memory is read from `/proc/meminfo` and any cgroup limit, and the pool
+takes as many as fit 80% of it at 1.25 times the cost, saying so when
+that is fewer than the CPUs. Measured under a 40 GB cap: eight workers
+were killed at the cap, while the default chose four and peaked at 23.8
+GB. A worker killed anyway is now a `RuntimeError` that names the cure:
+the pool is a `ProcessPoolExecutor`, where `multiprocessing.Pool` replaced
+the dead worker and waited for its task forever. And a set no longer sends
+a contour that is no body through the welded mesh (`_contour_values(...,
+fallback=False)`; `get_contour` keeps it): on the same model an Ag
+realization at 10 ppm fell back at every nudge, over 14 million cells at
+17 GB and two minutes an attempt -- twice what a worker is sized for --
+and came back open every time, as the one Assen shell the fallback was
+tried on had. Without it an attempt costs the painted contour's 12 GB and
+95 s, and a shell that will not close is recorded as a failure after its
+last nudge. Measured on Ag with the limits and 3 workers the default
+chose: 25.5 GB at the peak under a 50 GB cap. Ten tests in
+`test_meshsets.py`.
+* **A mesh set says when its limits leave nothing of a shell.** The Tom v6
+Zn, Pb and Ag sets were built with an uncertainty limit made by
+`get_contour('Rock/uncertainty', 1e-4)`: a body around the few pockets
+where the rock was that certain, 0.02% of the model. A limit keeps its
+inside, so it took every shell -- 10.2 million m3 of Zn at 5%, 1.7 million of
+Pb, 290 million of Ag at 10 ppm, nothing left of any -- and the sets were
+built, stored and reopened empty, the summary reading "volume 0" with no
+word of why. Nothing in the saving or the loading was wrong: the store held
+exactly the empty meshes the set had made. A shell that had ground and has
+none left after the limits and exclusions now raises a `UserWarning` naming
+its cut-offs, the volume they held, and the share each limit took -- on that
+model, `'uncertainty' took 98% of it and 'topography' 2%` -- raised by the
+prediction's cut, before any realization is contoured, and by
+`limit`/`exclude` on a set already made. A shell empty before any cut, its
+level never reached, is not reported. Three tests in `test_meshsets.py`.
+And printed, a set with limits shows what each shell held before them
+beside what is left -- `5.0  volume 0 of 1.02e+07 before the limits, 0
+pieces` -- so a set reopened from its store, which warns of nothing, still
+tells a shell a limit took from a level the field never reached. One test.
+* **A contour meeting its closing cap edge-on is split, not retried.**
+Where the kept ground thins to a layer against the model's box, its
+underside can meet the cap along a lattice edge: four triangles share the
+edge, which no winding repair settles, so the shell came back a `Mesh3D`
+and a mesh set contoured it again a hair either side of its level, up to
+thirteen times -- twenty minutes a shell on the Tom v6 model, and a failure
+where none closed. `math.geometry.split_touching_edges` splits such an edge
+instead: the four triangles alternate in the direction they walk it, each is
+paired with its neighbour across a wedge of inside, and the vertices get a
+copy for every piece meeting there, moved apart as the booleans move
+theirs, so the layer and the cap touch rather than share. It runs only where
+a contour has already come back a plain `Mesh3D`, so no other contour
+changes. A census of the Assen model contouring every realization at its own
+level only (`docs/benchmarks/contour_stages.py`): the shells that would have
+been retried fell from 16 to 8 -- the FeO_total prediction's at 0.7, five of
+six among its realizations, and two of nine rock bodies closing at their own
+level. Each of the eight sits between the bodies a ten-thousandth of the
+span either side, and agrees with what the retry returned to within four
+parts in a million wherever the retry moved a billionth or a
+hundred-millionth of the span; twice it had to move a ten-thousandth and
+returned that neighbour's body, 0.07-0.08% larger
+(`contour_split_neighbours.py`). The retry could also land on the wrong
+body: on a small model a random
+search turned up, it took the level a billionth of the span higher and
+returned a body 1.1% smaller than those a millionth either side, where the
+split body sits between them. What the split cannot mend is the cap folding
+flat onto itself -- two of the four triangles lying in the box face on one
+side of the edge, walking it both ways, as Limestone's realization 17 shows
+-- because the cap was drawn through lattice points valued exactly at the
+level; those shells were retried until the box began cutting the cap
+(below), after which none is. Three tests in `test_mesh3d.py` and
+`test_blockset.py`.
+* **A contour of a block model takes less than half the memory, in the
+same time.** Measured stage by stage on the Assen model (908 237 blocks,
+`docs/benchmarks/contour_stages.py`, results under `figures/`): the corner
+tables were most of a contour's memory -- every block's corners as an
+`n x 8 x 3` int64 array, their keys, and `np.unique`'s sorted copy, argsort
+and int64 inverse, built at every level of the cut and again by the paint --
+and the paint's fills of coarse blocks, every interior point of a size
+class at once, were most of the rest. `_lattice_corners` now builds the keys
+a corner at a time, sorts them once and scatters each key's rank back into
+32-bit indices; the first level of the cut, which depends on the lattice
+alone, is kept on the set (`_base_corners`), so a mesh set's contours after
+the first skip it and its forked workers read the parent's copy; each
+level's table is freed before the next is built; and the fills go a few
+thousand points at a time in 32-bit coordinates. Every mesh comes out
+identical to the bit -- 343 contours of balls meeting a face, an edge and a
+corner, closed both ways at three supersamplings, blocks without values, a
+rotated set and 300 random models, the fills also forced into chunks of 300
+points. Peak growth over what the process held, FeO_total's prediction:
+
+| Contour | Cut, before -> after | Paint, before -> after | Time, before -> after |
+|---|---|---|---|
+| 0.6, supersample 0 | 1.62 -> 0.73 GB | 2.33 -> 1.00 GB | 14.2 -> 13.3 s |
+| 0.8, supersample 0 | 1.47 -> 0.49 GB | 1.65 -> 0.71 GB | 10.3 -> 9.6 s |
+| 0.6, supersample 1 | 5.11 -> 2.03 GB | 8.26 -> 3.49 GB | 61.9 -> 62.4 s |
+| 0.85, supersample 1 | 2.66 -> 1.04 GB | 3.56 -> 1.52 GB | 32.5 -> 28.3 s |
+
+Supersample 1 cuts a lattice of 7.4 million cells, the size a Tom v6
+contour reaches. Finding the ranks by `searchsorted` into the distinct points
+was tried first and is leaner still, but measured 40-80% slower on Assen and
+17 times slower than `np.unique` on a table of 16 million keys, where the
+argsort was 1.4 times faster (`figures/contour_stages_searchsorted.txt`).
+* **A body closed against a block model's box meets it in the box's own
+faces.** `close=` used to paint the cap onto the box: each ghost cell past
+the boundary held its block's reflection about the level, which put every
+face point of a kept block exactly at the level. The body rounded off where
+it left the box, by about half a boundary block -- three slabs filling an
+80 m box of 10 m blocks left 5.1% of it uncovered along the edges -- pulled
+a thin layer's rim back off the face, and folded the cap flat onto itself
+where the kept ground thinned against it, which is what a mesh set still
+had to retry. The ghosts now hold copies of their blocks, so the field runs
+on past the box as it stands at the box and closes a cell beyond the
+ghosts, and Manifold cuts the body at the box (`meshes._clip_to_box`),
+exactly. The three slabs now tile the box, gap 0. Against Monte Carlo, a
+ball meeting the box at a face, an edge, a corner and half outside it,
+closed either way at supersample 0 and 1, the worst of the 16 volumes went
+from 2.61% to 1.40% off and the mean from 0.65% to 0.40%, though the ball
+at a corner, closed above, now reads high, +1.13% where it read -0.12%: a
+copy carries the field on flat, so across the half block by the face it
+turns half as fast as inside. On 1 000 random thin layers against the top
+face, the contours read a median 1.00 of the kept blocks' volume where they
+read 0.82 (quartiles 0.72 to 1.05, against 0.29 to 0.89), 990 closed where
+964 did, and none came back a `Mesh3D` where 2 did
+(`docs/benchmarks/closed_contours.py`). The cap also stopped cutting every
+kept block on the face to the finest size, a cut no block inside the model
+gets, so an isolated kept block on the face now makes no body of its own,
+as one inside never did: 9 of the 1 000 lost a small body that way, and 33
+gained one where the old cap had left none. On Assen, FeO_total's prediction at 0.6 takes 9.6 s
+instead of 13.3 and at supersample 1 40.6 s instead of 62.4, with the
+paint's peak at 1.64 GB instead of 3.49 and a third of the triangles, the
+box's faces being a few large triangles now; every contour the benchmark
+takes is a body, where FeO_total at 0.7 at supersample 1 and Limestone's
+realization 17 were not. And contouring every Assen realization at its own
+level only, none of the 100 FeO_total shells or the 150 rock bodies needs
+a mesh set's retry any more, where 8 did after the split above and 16
+before it; the 25 FeO_total realizations took 1198 s in one process
+instead of 1395. Where Manifold will not take the carried surface, the
+reflected cap is still how it closes, and the welded fallback keeps it. `test_blockset.py`: a field rising with height, cut between two
+layers of blocks, is the upper part of the box to 1e-6, both sides.
+* **A categorical realization's bodies tile the model.** Each category of
+a realization was contoured on its own field, its draw against the best of
+the others' taken block by block, so the best rival was picked inside every
+block before the corners averaged, and two categories meeting along a
+contact drew it twice, apart: on Assen a realization's six rock bodies
+overlapped by 1.07 to 1.21% of the model and left 0.73 to 0.77% of it
+uncovered. A realization's categories now come from one cut and one paint
+of all its draws (`BlockSet3D._contour_fields`): the draws are averaged
+onto the corners and each category's field is read off those means, so
+along a contact one field is the other negated and both surfaces pass
+through the same points. On Assen's realizations 0, 12 and 24
+(`docs/benchmarks/category_partition.py`): overlap 0.0000% of the model,
+gap 0.089 to 0.095%, 54 s a realization instead of 72. The gap left is
+where three categories meet inside one cell, each field's piece cutting
+off its own corners and none claiming the middle, which only a
+multi-material contour would close (roadmap). A category that does not
+come out a body is contoured on its own as before, nudges and all, and the
+prediction's bodies, contoured on the likelihood's own fields, are
+unchanged (overlap 0.008%, gap 0.053%, the box's rounded edges gone from
+the 0.098% it was). Six fields at once peak higher than one: 2.06 GB on
+Assen against the prediction's worst single contour at 0.92. So a set with
+no `workers=` now contours the first realization in the parent, measures
+it, keeps it, and sizes the pool to it. Two tests in `test_meshsets.py`.
+* **Why a mesh set's workers stop scaling, measured**
+(`docs/benchmarks/mesh_set_workers.py`, eight FeO_total realizations of
+the Assen model at four cut-offs). One process makes a realization in
+45.8 s, and 2, 4 and 8 workers in 30.4, 18.0 and 12.8 s -- 3.6 times at
+eight, where it was 2.2 before the leaner contours above. The parent's
+reads and writes take a few seconds of the pool, and what comes back from
+a worker, 114 MB a realization, costs nothing measurable. Two things do: a
+forked worker runs Manifold on one thread, the parent having started its
+thread pool before the fork (a boolean 3.8 s on one thread, 1.1 s on
+eighteen in the parent, which burned five times the CPU), so a task is one
+core's work; and more workers than eight buy almost nothing, 12 and 24
+giving 10.8 and 11.2 s a realization with every stage slowing in step --
+the machine, a 16-core two-channel Ryzen 9 7950X, out of memory bandwidth
+and then cores. Also found: OpenBLAS keeps a thread per CPU in every
+process and they spin, 80 s of a realization's 173 s of CPU; the workers
+now hold it to one thread, which saves 38% of each task's CPU and 5% of
+the time. The default pool stays at eight.
+* **`simplify` holds its budget both ways, and no longer hands a large
+shell back whole.** The budget is measured both ways now: the simplified
+faces against the original, as before, and the original's vertices -- the
+ones a triangle uses -- against the simplified surface, which a cut can
+leave behind while every new face sits close to the original; and a cut
+still over budget after four tightenings is never returned. The quick
+quadric pre-pass a mesh over 100 000 triangles takes must also be the kind
+the mesh is: on the Assen BIF and Hematite shells it came back open, was
+taken anyway at 1 and 2 m for being within half the budget, and every cut
+after it started from it, so both shells came back whole with a warning,
+after 4 to 12 s. Such a pre-pass is now dropped and the cuts start from the
+original (`docs/benchmarks/simplify_both_ways.py`): BIF (324 970
+triangles) at 1 and 2 m to 13 580 and 12 522 triangles in under 4 s,
+Hematite (620 126) to 30 806 and 28 162 in 7 s, and every answer within
+its budget both ways. The 0.72 m the roadmap had recorded between BIF's
+vertices and its simplified shell at 0.5 m was 35 vertices no triangle
+uses, carried by a store an older geoML wrote; the used ones sit within
+0.44 m. One assertion in `test_mesh_operations.py`.
+* **A categorical variable's scores: kappa, the two errors apart, the two
+kinds of disagreement, and the probabilities.** `compute_metrics` on a
+categorical or rock type variable read the predicted label alone, three
+statistics per category. It now reports eleven, still one column per
+category and each category against the rest: Cohen's kappa; precision,
+recall and F1 score, which keep apart the two errors the others mix -- for
+an ore domain, the ore the model misses and the dilution it calls ore;
+quantity and allocation disagreement (Pontius and Millones, 2011), the
+category's errors split into the part a wrong proportion explains and the
+part a wrong place does, which summed over the categories and halved add
+up to one minus the accuracy; and the Brier and log scores of the
+predicted probability, proper scores that tell an honest claim from the
+same calls hedged or overconfident, where every label score reads the
+same. `decluster=True` weights each location by the container's
+`"declustering"` column; off by default. A score with no value reads NaN
+rather than a zero that looks like one: the precision of a category never
+called, the recall of one never measured. On a Jura rock model trained for
+300 iterations and scored on the 100 validation samples, kappa ran from 0
+(Portlandian, never called) to 0.75 (Argovian), in no column above
+Matthews, as it cannot be in a two-way table; Portlandian's error was
+all quantity, and the two parts added to 0.29, one minus the 0.71
+accuracy. **Fixed on the way**: locations with no measurement or no
+prediction were scored -- a missing measurement as a wrong call of the
+category predicted there, a missing prediction as a miss of the one
+measured -- where the confusion matrix and the reliability figure leave
+them out. Five locations with one of each, every other call right, read a
+balanced accuracy of 0.83 and 0.75 where it is 1. A variable predicted
+nowhere is now refused. Twelve tests in `test_metrics.py`.
 * **The booleans are exact: Manifold replaces the signed-distance
 grid.** `Solid3D.union`/`intersection`/`difference`, and every cut that
 ends in one (`clip_meshes`, a body divided by a sheet), now go to

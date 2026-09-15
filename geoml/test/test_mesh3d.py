@@ -158,6 +158,40 @@ def test_faces_that_bound_nothing_are_dropped():
     assert geoml.math.geometry.reversed_edges(kept, clean) == 0
 
 
+def _touching_cubes():
+    """Two unit cubes meeting along one vertical edge, welded there."""
+    a_points, a_triangles = _arrays(pv.Box(bounds=(0, 1, 0, 1, 0, 1)))
+    b_points, b_triangles = _arrays(pv.Box(bounds=(1, 2, 1, 2, 0, 1)))
+    points = np.concatenate([a_points, b_points])
+    triangles = np.concatenate([a_triangles, b_triangles + len(a_points)])
+    return geoml.math.geometry.weld(points, triangles)
+
+
+def test_bodies_touching_along_an_edge_are_split_apart():
+    """Welded, two bodies touching along an edge give it four triangles:
+    neither closed nor wound one way in any reading, and no winding repair
+    settles it. A contour makes exactly this where its surface meets the
+    closing cap edge-on. Split, each body keeps its own copy of the edge."""
+    points, triangles = _touching_cubes()
+    assert type(mesh3d(points, triangles, geoml.math.geometry.vertex_normals(
+        points, triangles))) is Mesh3D
+
+    split, parted = geoml.math.geometry.split_touching_edges(points, triangles)
+    # the two ends of the edge, once each more
+    assert len(split) == len(points) + 2
+    moved = geoml.data.meshes._separated(split, parted)
+    body = mesh3d(moved, parted,
+                  geoml.math.geometry.vertex_normals(moved, parted))
+    assert isinstance(body, Solid3D)
+    assert body.volume == pytest.approx(2.0, rel=1e-4)
+
+
+def test_a_surface_with_no_edge_shared_thrice_is_handed_back_as_it_came():
+    points, triangles = _arrays(pv.Box())
+    split, parted = geoml.math.geometry.split_touching_edges(points, triangles)
+    assert split is points and parted is triangles
+
+
 def test_a_doubled_patch_is_resurrected_from_its_rim_inward():
     """The twin groups couple, which is why the rule is worked out on the
     surface rather than per face: in a doubled patch -- what decimation

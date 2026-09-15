@@ -443,6 +443,12 @@ def test_simplify_honours_its_error_budget():
     distance = pv.PolyData(np.ascontiguousarray(probes)) \
         .compute_implicit_distance(shell._polydata())["implicit_distance"]
     assert np.abs(np.asarray(distance)).max() <= budget * 1.001
+    # and the other way: the original's vertices within the budget of the
+    # simplified surface, which a cut can break while every new face sits
+    # close to the original
+    back = pv.PolyData(np.ascontiguousarray(shell.coordinates)) \
+        .compute_implicit_distance(slim._polydata())["implicit_distance"]
+    assert np.abs(np.asarray(back)).max() <= budget * 1.001
 
 
 def _block_shell(centre, radius=45.0, n=8):

@@ -1,0 +1,14 @@
+label step5, geoML from /mnt/c/Users/Ítalo/OneDrive/Python/Pacotes/geoML-claude
+908237 blocks, realizations [0, 12, 24], one process
+the prediction's bodies: 47 s; overlap 0.0083% of the model, gap 0.0528%
+
+== one at a time: 72 s a realization, 0 failures
+  realization  0: overlap 1.0721%, gap 0.7401%
+  realization 12: overlap 1.1180%, gap 0.7719%
+  realization 24: overlap 1.2141%, gap 0.7291%
+
+== all at once: 54 s a realization, 0 failures
+  realization  0: overlap 0.0000%, gap 0.0890%
+  realization 12: overlap 0.0000%, gap 0.0954%
+  realization 24: overlap 0.0000%, gap 0.0911%
+done

@@ -454,6 +454,32 @@ With them go the older candidates this item carried: importance-sampling
 leave-out on blocks, the EP-style cavity, and the closed-form leaf under a
 frozen interior (E2's verdict stands).
 
+**S–M — Categorical scores in `cross_validate`** (suggested 2026-09-11).
+The driver's score table holds continuous variables only: a categorical
+one is predicted into the out-of-fold container like the rest and then
+given no rows, its docstring telling the reader to subset the container by
+fold and call the variable's own `compute_metrics`. That table reads the
+labels and the probabilities the container already holds -- no measurement
+samples, so none of the streaming the continuous scores need -- and since
+2026-09-11 carries kappa, precision and recall, the quantity and allocation
+split and the Brier and log scores beside balanced accuracy, Jaccard and
+Matthews. Wanted: those rows per fold and pooled, from the driver. To
+settle: the shape, the continuous table being one row per variable,
+component and fold and the categorical one a score by category, and
+whether `decluster=` passes through.
+
+**S — Scores for ordered categories** (suggested 2026-09-11, with the
+categorical scores). Every categorical score is of one category against
+the rest, which suits unordered rocks and is blind to order: for an
+`OrderedRockType`, calling the unit next door and calling one three units
+away cost the same. Two scores see the order: Cohen's weighted kappa
+(Cohen 1968), linear weights giving partial credit for a neighbour, and the
+ranked probability score (Epstein 1969), the proper score over the
+cumulative probabilities, which is to an ordered category what CRPS is to a
+grade. Both read the whole classification at once, and the author chose one
+column per category for the kappa (2026-09-11), so where an overall score
+lives in the table is the open question.
+
 **S–M — Batched prediction from a latent node, into a container**
 (requested 2026-09-05). A node's `predict(x, x_var, n_sim, seed)` returns
 the raw four-tuple — mean, variance, simulations, explained variance — and
@@ -528,57 +554,98 @@ BlockModel as a `RotatedBlocks3D` rather than today's
 `RotatedBlockSet3D(max_levels=0)`; that changes a return type, which is
 why it waits for a user.
 
-**S — `get_contour(close=)` meets its own cap edge-on, and rounds the
-box's edges.** Found building mesh sets on the Assen block model
-(2026-09-11). FeO_total at 0.7 keeps a layer one cell thick against the
-top of the lattice; the painted surface comes back closed but with one edge
-shared by four triangles, at (233, 27..28, 160) in the lattice frame, where
-the surface meets the cap edge-on -- no winding repair settles that -- and
-`_contour_values` sends a `Mesh3D` to the welded-mesh fallback, which came
-back *open*, 44 edges in small loops on the planes where the closing ghosts
-change size: the fallback made it worse. Contoured 1e-9 lower the shell
-closes, and `MeshSet` retries that way (`_NUDGES`, the move recorded as
-`nudge`); `get_contour` itself does not. Separately, a body closed against
-the box rounds the box's edges by about half a boundary block, the painted
-value at an edge corner averaging one cell inside with three reflected
-outside: three slabs filling an 80 m box of 10 m blocks leave 5% of it
-uncovered, which a categorical set's `check()` reads as gap. Wanted: a
-cap whose face and edge corners sit on the level exactly without leaving
-the ghost shell a surface of its own, and a fallback that is not worse
-than what it replaces.
+(`get_contour(close=)` meeting its own cap edge-on and rounding the box's
+edges: **done 2026-09-14, 0.6.10**. Found building mesh sets on Assen
+(2026-09-11): FeO_total at 0.7 kept a layer one cell thick against the top
+of the lattice and met the cap along one edge four triangles shared, the
+welded fallback came back open at 44 edges, and a body closed against the
+box rounded its edges by half a boundary block (5% of a slab-filled 80 m
+box left uncovered); a set retried such shells a hair off their level,
+thirteen attempts and twenty minutes a shell on Tom v6. The split of
+touching edges (2026-09-13) took the retried Assen shells from 16 to 8; the
+rest were the cap folding flat onto itself, drawn as it was through lattice
+points valued exactly at the level. Now the ghosts carry copies of the
+blocks they mirror, the surface closes a cell past them, and Manifold cuts
+the body at the box: the slabs tile their box, a ball against the box
+reads within 1.40% of Monte Carlo at worst where it read 2.61%, and a
+census of every Assen realization at its own level finds none of 250
+shells needing a retry. Not rerun on the Tom v6 model.)
 
-**S — `simplify` keeps half its promise.** Found measuring it against
-Manifold's (2026-09-10, `docs/benchmarks/manifold_features.py`), on the
-Assen shells. The budget is checked one way only, the simplified faces
-against the original: at 0.5 m the simplified BIF shell sat within 0.46 m
-of the original, and the original's vertices up to 0.72 m from it. And at
-2 m both shells come back unchanged after 4–8 s -- the last resort, for a
-mesh every cut breaks -- where 0.5 m took them down 22 and 16 times. A
-likely cause, unverified: at 2 m the quadric pre-pass is accepted, being
-within half the budget, and every gentler cut starts from it, so a body
-the pre-pass broke stays broken however little is cut after. The reverse
-check costs a locator on each candidate, where today's is built once on
-the original.
+(`simplify` keeping half its promise: **done 2026-09-14, 0.6.10**,
+`docs/benchmarks/simplify_both_ways.py`. The cause suspected was the one:
+the quadric pre-pass came back open on both Assen shells, was taken at 1
+and 2 m for being within half the budget, and every cut started from it,
+so both came back whole; a pre-pass that is not the mesh's kind is dropped
+now, and BIF and Hematite simplify at 0.5, 1 and 2 m to 12 522-38 856
+triangles, within budget both ways -- the reverse is measured too -- in 3
+to 7 s. The 0.72 m once read between BIF's vertices and its simplified
+shell was 35 vertices no triangle uses, which its store carried.)
 
-**M — A categorical realization's bodies do not tile the model.** Found
-building mesh sets on the Assen rocks (2026-09-11, `docs/mesh-sets.md`).
-Each category is contoured on its own field -- its draw against the best
-of the others, the rule the likelihood decides by -- and where the draws
-are rough from block to block the corner values two neighbours' fields
-paint disagree about where their contact runs: three realizations' six
-bodies overlap by 141 000 to 162 000 m³, about 1.1% of the model, and leave
-0.75-0.84% uncovered, where the prediction's smooth fields agree to
-0.008%. A realization's rock volumes carry that much double counting;
-`repair` with a priority order settles the overlaps, not the gaps. What
-would settle both is one contour of the partition rather than one per
-category -- a multi-material marching cubes, each interface drawn once
-and handed to both sides.
+**M — A categorical realization's bodies leave a gap where three meet.**
+Found building mesh sets on the Assen rocks (2026-09-11,
+`docs/mesh-sets.md`): each category contoured on its own field, taken block
+by block, three realizations' six bodies overlapped by about 1.1% of the
+model and left 0.75-0.84% uncovered. **The overlap is settled
+(2026-09-14)**: a realization's categories come from one cut and one paint
+of its draws, each field read off the draws' corner means
+(`BlockSet3D._contour_fields`), overlap 0.0000% of the model, 54 s a
+realization instead of 72. **What is left is a gap of 0.09%**, where three
+categories meet inside one cell and each field's marching-cubes piece cuts
+off only the corners it wins; a winner's margin taken against its
+neighbours' winners closed a tenth of it on a plain lattice, so the cure
+is the cell's, not the edge crossings'. What would close it is a
+multi-material contour -- each cell split by the argmax of its corner
+values, each interface drawn once and handed to both sides -- which VTK
+does not offer on scalar fields (its SurfaceNets works on labels, losing
+the sub-cell placement). The prediction's own bodies leave 0.053% and
+overlap by 0.008%, contoured on the likelihood's per-block fields one at a
+time; they would take the same cure.
 
-**S — Mesh set workers scale 2.2 times on eight.** 25 Assen realizations
-took 672 s past the prediction, 27 s each, against 59 s in one process
-(2026-09-11). Not investigated: candidates are the parent writing every
-mesh to the store as the results arrive, the arrays pickled back from the
-workers (about 50 MB a mesh), and VTK's own threads inside each worker.
+(One contour of a big block model costing 4 to 8 GB: **more than halved
+2026-09-13, 0.6.10**, in the same time and with every mesh identical to the
+bit -- see the changelog. The corner tables of the cut and the paint are
+built a corner at a time with 32-bit ranks, the first level of the cut is
+kept on the set, and the paint's fills go in chunks; on Assen the peaks
+fell 55-70% (`docs/benchmarks/contour_stages.py`). A mesh set's pool is
+sized by what its prediction's contours measured, so it now takes more
+workers on its own. Not done, and not needed yet: keeping the table to the
+blocks that can be marked, one ring past any whose corners straddle the
+level, which would leave the first level's the only full one. Measure the
+Tom v6 model before taking it up.)
+
+(Mesh set workers scaling 2.2 times on eight: **explained 2026-09-14**,
+`docs/benchmarks/mesh_set_workers.py`. None of the three candidates: the
+parent's writes took 3-15 s of a 100-290 s pool, the 114 MB a realization
+sends back nothing measurable, and VTK runs one thread here. A forked
+worker runs Manifold on one thread, the parent having started its thread
+pool (a boolean 3.8 s on one thread against 1.1 s on eighteen, which burn
+five times the CPU), so a task is one core's work -- 93 s, where one
+process takes 45 s on two. And the machine saturates: 8, 12 and 24 workers
+give 12.0, 10.8 and 11.2 s a realization, each task's CPU time growing with
+the workers for the same work (93, 125, 256 s), every stage alike -- a
+16-core, two-channel Ryzen 9 7950X out of memory bandwidth, then out of
+cores. Steps 3 and 4's leaner contours took eight workers from 27 s a
+realization to 12.8 s (3.6 times one process); OpenBLAS held to one thread
+a worker saves 38% of each task's CPU, 80 s of 173 having been spinning,
+for 5% of the time. Past that the only lever is less memory traffic a
+contour.)
+
+(A mesh set's summary showing only what the limits left: **done
+2026-09-14, 0.6.10** -- with limits present, printing a set shows each
+shell's volume before them beside what is left, a set reopened from its
+store too, where the Tom v6 sets an uncertainty limit had emptied read
+"volume 0" at every cut-off.)
+
+**S — A contour through blocks without a value gets NaN vertices** (found
+2026-09-13, checking the corner tables bit for bit against the old code,
+which does the same). The paint gives a valueless block's points no value,
+and flying edges places a crossing between a value and none at NaN: with
+every fourth block of a small ball model left unpredicted, 138 of the
+contour's 548 vertices came back NaN, and `mesh3d` still classed it a
+`Solid3D`, with a NaN volume. A contiguous unpredicted region -- the ground
+`where=` excludes -- gave none, which is why no real model has shown it.
+Wanted: no crossing drawn into absent ground, and `mesh3d` refusing NaN
+coordinates rather than classing them.
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a
@@ -629,6 +696,23 @@ file's diagnostics read `inducing_points` as possibly-None, and they cannot
 be fixed by declaring them: `None` is load-bearing in the finished state.
 Declaring `tuple` took 33 diagnostics to 67 and was reverted. Do not repeat
 that attempt.
+
+**S–M — The checked files are not clean in the WSL environment**
+(found 2026-09-11). CLAUDE.md says every file in `[tool.pyright]` checks
+clean, but pyright 1.1.411 in the `geoml` conda env (pandas 2.2.3, numpy
+2.4.6, scikit-learn 1.6.1), run from the repository root, reports 251
+errors: `data/drillhole.py` 107, `data/geoh5.py` 36, `plots/explorer.py`
+25, `data/containers.py` 23, `datasets.py` 11, `data/meshes.py` 10,
+`storage.py` 8, `data/variables.py` 7, `data/grids.py` 5,
+`plots/dashboard.py` 4, `data/blocks.py` 3, two each in
+`data/inducing.py`, `math/geometry.py`, `math/rbf.py` and `warping.py`, and
+one each in `plots/interactive.py`, `stats/random.py`, `transform.py` and
+`viz/plotly.py`; `data/meshsets.py` is clean. The seven in `variables.py`
+are on HEAD's version of the file too, so they predate the work in
+progress -- among them `pd.concat` on a `list[DataFrame | None]` and a
+`pop` handed `int | None`. First find out whether CI's pyright sees them or
+only this environment, and which versions it runs: library drift would
+call for a pin or a note, not code.
 
 ---
 

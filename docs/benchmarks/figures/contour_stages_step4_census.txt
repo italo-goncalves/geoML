@@ -1,0 +1,9 @@
+label step4_census, geoML from /mnt/c/Users/Ítalo/OneDrive/Python/Pacotes/geoML-claude
+908237 blocks, 32 CPUs
+
+== census: realizations contoured at their own level only, 1 workers
+FeO_total: 1198 s, 25 realizations x 4 meshes; the prediction's meshes moved off their level: {}
+  not closed at their own level: 0
+rocks: 1866 s, 25 realizations x 6 meshes; the prediction's meshes moved off their level: {}
+  not closed at their own level: 0
+done

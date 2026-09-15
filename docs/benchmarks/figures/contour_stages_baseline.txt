@@ -1,0 +1,34 @@
+label baseline, geoML from /mnt/c/Users/Public/geoml_baseline
+908237 blocks, 32 CPUs
+
+== stages of one contour, in this process
+{'contour': 'FeO_total', 'level': 0.6, 'supersample': 0, 'total_s': 14.2, 'cut_s': 4.7, 'paint_s': 4.9, 'classify_s': 2.3, 'cut_gb': 1.62, 'paint_gb': 2.33, 'levels': '0.91M/1.47M/2.28M', 'painted_M': 3.66, 'triangles': 1039960, 'shared_edges': 0, 'kind': 'Solid3D', 'healed': None}
+{'contour': 'FeO_total', 'level': 0.7, 'supersample': 0, 'total_s': 12.0, 'cut_s': 4.4, 'paint_s': 4.1, 'classify_s': 1.7, 'cut_gb': 1.51, 'paint_gb': 1.94, 'levels': '0.91M/1.45M/2.14M', 'painted_M': 3.06, 'triangles': 817458, 'shared_edges': 1, 'kind': 'Mesh3D', 'healed': 'Mesh3D'}
+{'contour': 'FeO_total', 'level': 0.8, 'supersample': 0, 'total_s': 10.3, 'cut_s': 4.3, 'paint_s': 3.5, 'classify_s': 1.1, 'cut_gb': 1.47, 'paint_gb': 1.65, 'levels': '0.91M/1.38M/1.98M', 'painted_M': 2.63, 'triangles': 613930, 'shared_edges': 0, 'kind': 'Solid3D', 'healed': None}
+{'contour': 'FeO_total', 'level': 0.85, 'supersample': 0, 'total_s': 7.6, 'cut_s': 3.5, 'paint_s': 2.8, 'classify_s': 0.6, 'cut_gb': 1.1, 'paint_gb': 1.3, 'levels': '0.91M/1.20M/1.57M', 'painted_M': 1.95, 'triangles': 359568, 'shared_edges': 0, 'kind': 'Solid3D', 'healed': None}
+{'contour': 'FeO_total', 'level': 0.6, 'supersample': 1, 'total_s': 61.9, 'cut_s': 16.0, 'paint_s': 23.2, 'classify_s': 11.0, 'cut_gb': 5.11, 'paint_gb': 8.26, 'levels': '0.91M/1.87M/4.03M/7.37M', 'painted_M': 13.02, 'triangles': 4206908, 'shared_edges': 0, 'kind': 'Solid3D', 'healed': None}
+{'contour': 'FeO_total', 'level': 0.7, 'supersample': 1, 'total_s': 53.4, 'cut_s': 15.5, 'paint_s': 20.6, 'classify_s': 8.6, 'cut_gb': 4.6, 'paint_gb': 6.79, 'levels': '0.91M/1.91M/4.02M/6.94M', 'painted_M': 10.69, 'triangles': 3321720, 'shared_edges': 1, 'kind': 'Mesh3D', 'healed': 'Mesh3D'}
+{'contour': 'FeO_total', 'level': 0.8, 'supersample': 1, 'total_s': 44.5, 'cut_s': 13.4, 'paint_s': 18.8, 'classify_s': 5.9, 'cut_gb': 4.06, 'paint_gb': 5.5, 'levels': '0.91M/1.75M/3.66M/6.13M', 'painted_M': 8.76, 'triangles': 2493532, 'shared_edges': 0, 'kind': 'Solid3D', 'healed': None}
+{'contour': 'FeO_total', 'level': 0.85, 'supersample': 1, 'total_s': 32.5, 'cut_s': 9.7, 'paint_s': 16.2, 'classify_s': 3.0, 'cut_gb': 2.66, 'paint_gb': 3.56, 'levels': '0.91M/1.44M/2.65M/4.19M', 'painted_M': 5.67, 'triangles': 1464772, 'shared_edges': 0, 'kind': 'Solid3D', 'healed': None}
+{'contour': 'FeO_total r19', 'level': 0.8, 'supersample': 0, 'total_s': 13.4, 'cut_s': 4.9, 'paint_s': 4.5, 'classify_s': 1.9, 'cut_gb': 1.41, 'paint_gb': 2.0, 'levels': '0.91M/1.52M/2.36M', 'painted_M': 3.36, 'triangles': 890302, 'shared_edges': 2, 'kind': 'Mesh3D', 'healed': 'Mesh3D'}
+{'contour': 'Limestone r17', 'level': 0.0, 'supersample': 0, 'total_s': 12.8, 'cut_s': 4.7, 'paint_s': 4.2, 'classify_s': 1.8, 'cut_gb': 1.39, 'paint_gb': 1.98, 'levels': '0.91M/1.44M/2.17M', 'painted_M': 3.19, 'triangles': 925636, 'shared_edges': 1, 'kind': 'Mesh3D', 'healed': 'Mesh3D'}
+                                 total_s  cut_s  paint_s  classify_s  cut_gb  paint_gb                   levels  painted_M  triangles  shared_edges     kind  healed
+contour       level supersample                                                                                                                                     
+FeO_total     0.60  0               14.2    4.7      4.9         2.3    1.62      2.33        0.91M/1.47M/2.28M       3.66    1039960             0  Solid3D    None
+              0.70  0               12.0    4.4      4.1         1.7    1.51      1.94        0.91M/1.45M/2.14M       3.06     817458             1   Mesh3D  Mesh3D
+              0.80  0               10.3    4.3      3.5         1.1    1.47      1.65        0.91M/1.38M/1.98M       2.63     613930             0  Solid3D    None
+              0.85  0                7.6    3.5      2.8         0.6    1.10      1.30        0.91M/1.20M/1.57M       1.95     359568             0  Solid3D    None
+              0.60  1               61.9   16.0     23.2        11.0    5.11      8.26  0.91M/1.87M/4.03M/7.37M      13.02    4206908             0  Solid3D    None
+              0.70  1               53.4   15.5     20.6         8.6    4.60      6.79  0.91M/1.91M/4.02M/6.94M      10.69    3321720             1   Mesh3D  Mesh3D
+              0.80  1               44.5   13.4     18.8         5.9    4.06      5.50  0.91M/1.75M/3.66M/6.13M       8.76    2493532             0  Solid3D    None
+              0.85  1               32.5    9.7     16.2         3.0    2.66      3.56  0.91M/1.44M/2.65M/4.19M       5.67    1464772             0  Solid3D    None
+FeO_total r19 0.80  0               13.4    4.9      4.5         1.9    1.41      2.00        0.91M/1.52M/2.36M       3.36     890302             2   Mesh3D  Mesh3D
+Limestone r17 0.00  0               12.8    4.7      4.2         1.8    1.39      1.98        0.91M/1.44M/2.17M       3.19     925636             1   Mesh3D  Mesh3D
+
+== three slabs filling an 80 m box of 10 m blocks
+      kind  first second        volume         share
+0  overlap      A      B  0.000000e+00  0.000000e+00
+1  overlap      A      C  0.000000e+00  0.000000e+00
+2  overlap      B      C  3.979039e-13  2.627874e-18
+3      gap  (all)         2.600000e+04  5.078125e-02
+done

@@ -203,6 +203,68 @@ def test_a_mesh_that_is_neither_sheet_nor_body_is_refused(radial):
         MeshSet(radial, "g", limits={"odd": loose}, simulations=False)
 
 
+def _emptied(caught):
+    return [str(w.message) for w in caught if "left nothing" in str(w.message)]
+
+
+def test_limits_that_leave_nothing_of_a_shell_say_so_and_who_took_it(radial):
+    """A limit keeps its inside, so one around the wrong ground empties every
+    shell without a word -- measured on the Tom model, where a body around
+    the few places the rock was certain took all three metals' shells, and
+    the sets were built, stored and reopened empty. The terrain takes the
+    upper half, the corner, which no shell reaches, the rest."""
+    corner = _box([-5.0, -5.0, -5.0], [0.0, 0.0, 0.0])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cut = MeshSet(radial, "g", limits={"topography": _terrain(CENTRE),
+                                           "corner": corner},
+                      simulations=False)
+    assert all(cut[cutoff].n_data == 0 for cutoff in cut)
+    (message,) = _emptied(caught)
+    assert "at 20, 30, 40" in message
+    # half each, so either may be named first
+    assert "'corner'" in message and "'topography'" in message
+    assert message.count(" 50%") == 2
+
+
+def test_a_shell_that_keeps_something_or_had_nothing_says_nothing(radial):
+    blocks = _radial(cutoffs=(30.0, 60.0), offsets=None)
+    half = _box([-10.0, -10.0, -10.0], [CENTRE, 90.0, 90.0])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cut = MeshSet(blocks, "g", limits={"west": half}, simulations=False)
+    # 30 keeps its western half and 60 was empty before any limit
+    assert cut[30.0].n_data > 0 and cut[60.0].n_data == 0
+    assert _emptied(caught) == []
+
+
+def test_a_set_cut_by_limits_prints_what_its_shells_held_before(tmp_path):
+    """Printed, an emptied set read "volume 0" at every cut-off, which says
+    nothing of whether the field never reached them or a limit took them --
+    and a set reopened from its store raises no warning to say which."""
+    blocks = _radial(cutoffs=(30.0, 60.0), offsets=None)
+    half = _box([-10.0, -10.0, -10.0], [CENTRE, 90.0, 90.0])
+    cut = MeshSet(blocks, "g", limits={"west": half}, simulations=False)
+    path = str(tmp_path / "cut.zarr")
+    cut.to_zarr(path)
+    for printed in (repr(cut), repr(MeshSet.open(path))):
+        lines = {line.split()[0]: line for line in printed.splitlines()[1:3]}
+        assert "of %.6g before the limits" % cut.table()["raw_volume"][30.0] \
+            in lines["30.0"]
+        assert "volume 0 of 0 before the limits" in lines["60.0"]
+    # with nothing to cut, there is nothing before to tell of
+    assert "before the limits" not in repr(
+        MeshSet(blocks, "g", simulations=False))
+
+
+def test_an_exclusion_added_later_that_takes_everything_says_so(shells):
+    everything = _box([-10.0, -10.0, -10.0], [90.0, 90.0, 90.0])
+    with pytest.warns(UserWarning, match="left nothing") as caught:
+        emptied = shells.exclude(everything, "everything")
+    assert all(emptied[cutoff].n_data == 0 for cutoff in emptied)
+    assert "'everything' took 100%" in _emptied(caught)[0]
+
+
 # --------------------------------------------------------------------------- #
 # realizations
 # --------------------------------------------------------------------------- #
@@ -238,6 +300,142 @@ def test_workers_and_one_process_make_the_same_set(radial, shells):
                           shells.realization_volumes().to_numpy())
 
 
+GB = 1024 ** 3
+
+
+@pytest.mark.parametrize("cost, available", [
+    (4 * GB, 10 * GB), (5 * GB, 50 * GB), (0.5 * GB, 60 * GB),
+    (8 * GB, 45 * GB), (30 * GB, 20 * GB)])
+def test_the_default_pool_fits_in_the_memory_there_is(cost, available):
+    """Eight workers each contouring a 6.8-million-block model took WSL's
+    62 GB down: a worker costs what one contour does, and the default has
+    to be what the machine can hold, not what it has CPUs for."""
+    reserve = 1 * GB
+    pool = msm._pool_size(cost, reserve, available, cpus=8)
+    room = msm._MEMORY_SHARE * (available - reserve)
+    assert 1 <= pool <= 8
+    # as many as fit, and one more would not -- unless even one does not,
+    # when one is still the answer, contouring in this process's stead
+    assert pool == 1 or pool * msm._MEMORY_MARGIN * cost <= room
+    assert pool == 8 or (pool + 1) * msm._MEMORY_MARGIN * cost > room
+
+
+def test_with_nothing_measured_the_pool_is_the_cpus():
+    assert msm._pool_size(None, 0, 10 * GB, cpus=6) == 6
+    assert msm._pool_size(4 * GB, 0, None, cpus=6) == 6
+
+
+def test_the_pool_is_sized_to_a_realization_where_it_costs_more(
+        radial, shells, monkeypatch):
+    """A categorical realization contours all its categories at once, which
+    measured on Assen 2.3 times the prediction's worst contour of one, so
+    the first realization is made in the parent and measured, and the pool
+    sized to whichever cost more -- that realization kept, not made again."""
+    growths = iter([1 * GB, 3 * GB])  # the prediction's, the first's
+
+    class Meter:
+        def __init__(self):
+            self.grown = next(growths, 0)
+
+        def growth(self):
+            return self.grown
+
+    asked = []
+    monkeypatch.setattr(msm, "_PeakMeter", Meter)
+    monkeypatch.setattr(msm, "_default_workers",
+                        lambda cost, stores, numbers: asked.append(cost) or 2)
+    made = MeshSet(radial, "g")
+    assert asked == [3 * GB]
+    assert np.array_equal(made.realization_volumes().to_numpy(),
+                          shells.realization_volumes().to_numpy())
+
+
+def test_the_parent_measures_its_own_peak():
+    meter = msm._PeakMeter()
+    held = np.ones(64 * 1024 ** 2 // 8)
+    grown = meter.growth()
+    del held
+    if grown is not None:
+        assert grown >= 48 * 1024 ** 2
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="one CPU is one worker")
+def test_a_set_says_when_memory_leaves_it_fewer_workers(radial, monkeypatch,
+                                                         shells):
+    # room for one worker's contour and no second, whatever it cost
+    monkeypatch.setattr(msm, "_pool_size",
+                        lambda cost, reserve, available, cpus: 1)
+    monkeypatch.setattr(msm, "_available_bytes", lambda: 1)
+    with pytest.warns(UserWarning, match="memory"):
+        made = MeshSet(radial, "g")
+    assert np.array_equal(made.realization_volumes().to_numpy(),
+                          shells.realization_volumes().to_numpy())
+
+
+def _killed(position):
+    """A worker the kernel took, as it takes one when memory runs out."""
+    os.kill(os.getpid(), 9)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="workers are forked")
+def test_a_worker_killed_is_an_error_rather_than_a_hang(monkeypatch):
+    """A pool waits forever for the task of a worker that was killed; the
+    set has to say so instead, or a notebook cell never comes back."""
+    import signal
+
+    def hung(signum, frame):
+        raise AssertionError("still waiting for a worker that is gone")
+
+    monkeypatch.setattr(msm, "_realization_task", _killed)
+    previous = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(60)
+    try:
+        with pytest.raises(RuntimeError, match="fewer workers"):
+            list(msm._each_realization(3, 2))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_a_set_moves_the_level_rather_than_weld_the_mesh(monkeypatch):
+    """The welded-mesh fallback closed none of the shells it was tried on,
+    and on a 6.8-million-block model it took 17 GB and two minutes an
+    attempt -- twice what a worker is sized for. A set heals and nudges."""
+    import geoml.data.blocks as blk
+    blocks = _radial(offsets=None)
+    values = np.asarray(blocks.values("g/prediction"))
+    welded = []
+    real_hex = blk.BlockSet3D._hex_mesh
+
+    def counted(self, origin, size, step):
+        welded.append(len(origin))
+        return real_hex(self, origin, size, step)
+
+    monkeypatch.setattr(blk.BlockSet3D, "_hex_mesh", counted)
+    # every painted surface classified as no body, the fallback's trigger
+    monkeypatch.setattr(blk, "mesh3d",
+                        lambda points, triangles, normals:
+                        geoml.data.Mesh3D(points, triangles, normals))
+
+    painted = blocks._contour_values(values, 30.0, "g", close="above",
+                                     fallback=False)
+    assert type(painted) is geoml.data.Mesh3D and painted.n_data > 0
+    assert welded == []
+    blocks._contour_values(values, 30.0, "g", close="above")
+    assert len(welded) == 1         # a plain contour still has the last word
+
+    asked = []
+    real_contour = blk.BlockSet3D._contour_values
+
+    def recorded(self, *args, **kwargs):
+        asked.append(kwargs.get("fallback", True))
+        return real_contour(self, *args, **kwargs)
+
+    monkeypatch.setattr(blk.BlockSet3D, "_contour_values", recorded)
+    msm._contoured(blocks, values, 30.0, "above", 0, "g")
+    assert asked == [False]
+
+
 def test_some_realizations_can_be_asked_for_by_number(radial):
     some = MeshSet(radial, "g", simulations=[1, 3], workers=1)
     assert some.simulations.numbers == [1, 3]
@@ -251,11 +449,11 @@ def test_some_realizations_can_be_asked_for_by_number(radial):
 def test_a_realization_that_fails_is_recorded_not_fatal(radial, monkeypatch):
     original = msm._shell
 
-    def flaky(data, values, level, *args):
+    def flaky(data, values, level, *args, **kwargs):
         # realization 4 is the only one reaching above 47
         if level == 30.0 and np.nanmax(values) > 47.0:
             raise RuntimeError("planted")
-        return original(data, values, level, *args)
+        return original(data, values, level, *args, **kwargs)
 
     monkeypatch.setattr(msm, "_shell", flaky)
     with pytest.warns(UserWarning, match="could not be made"):
@@ -308,9 +506,11 @@ def test_a_categorical_set_is_keyed_by_name():
     checked = bodies.check()
     assert np.allclose(checked[checked["kind"] == "overlap"]["volume"], 0.0,
                        atol=1e-6)
-    # what is left is the model's own edges, rounded by the closing caps
+    # and together they fill the box to its edges: the caps are cut by the
+    # box itself, where they used to round each edge by half a block and
+    # leave 5% of this one uncovered
     gap = checked[checked["kind"] == "gap"]["share"].iloc[0]
-    assert 0.0 < gap < 0.06
+    assert gap == pytest.approx(0.0, abs=1e-9)
     with pytest.raises(TypeError, match="no bands"):
         bodies.bands
 
@@ -326,6 +526,67 @@ def test_a_categorical_realization_moves_its_contacts():
     dispersion = bodies.volume_dispersion()
     assert dispersion.loc["A", "p90"] > dispersion.loc["A", "prediction"] \
         > dispersion.loc["A", "p10"]
+
+
+def _rough(seed=0, n_sim=3):
+    """Three categories around random centres, each realization's draws
+    rough from block to block, so that all three compete at the contacts."""
+    rng = np.random.default_rng(seed)
+    blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [10.0, 10.0, 10.0],
+                                   discretization=(2, 2, 2), max_levels=1)
+    blocks = blocks.split(np.flatnonzero(rng.random(blocks.n_data) < 0.3))
+    xyz = np.asarray(blocks.coordinates)
+    centres = rng.uniform(0.0, 75.0, (3, 3))
+    smooth = -np.linalg.norm(xyz[:, None, :] - centres[None], axis=2) / 10.0
+    draws = smooth[:, :, None] \
+        + 0.3 * rng.standard_normal((len(xyz), 3, n_sim))
+    blocks.add_rock_type_variable("Rock", labels=["A", "B", "C"])
+    rock = blocks.variables["Rock"]
+    skew = msm._category_fields(smooth, "largest")
+    for j, name in enumerate("ABC"):
+        rock.components[name].indicator_predicted.values[:] = skew[:, j]
+        rock.components[name].allocate_simulations(n_sim)
+        rock.components[name].simulations[:, :] = draws[:, j, :]
+    rock.predicted.values[:] = np.argmax(smooth, axis=1)
+    return blocks
+
+
+def test_a_realizations_categories_are_contoured_together(monkeypatch):
+    """A realization's categories come from one contour of its draws, each
+    one's field read off the draws' corner means, so two categories meeting
+    take their contact through the same points. Contoured one at a time on
+    fields taken block by block, where the best rival was picked inside
+    every block before the corners averaged, the bodies here overlapped by
+    0.08 to 0.11% of the model and left 0.8 to 0.9% of it uncovered;
+    together they overlap by a fortieth of that or less and leave a quarter.
+    """
+    blocks = _rough()
+    box = float(np.prod(np.asarray(blocks.lattice_shape)
+                        * np.asarray(blocks.base_step, dtype=float)))
+    together = MeshSet(blocks, "Rock", workers=1)
+
+    def one_at_a_time(*args, **kwargs):
+        raise RuntimeError("each category on its own, as before")
+
+    monkeypatch.setattr(geoml.data.BlockSet3D, "_contour_fields",
+                        one_at_a_time)
+    alone = MeshSet(blocks, "Rock", workers=1)
+
+    def shares(checked):
+        # of the model: `check()` gives an overlap as a share of the
+        # smaller body
+        return (checked[checked["kind"] == "overlap"]["volume"].sum() / box,
+                checked[checked["kind"] == "gap"]["volume"].iloc[0] / box)
+
+    for i in range(len(together.simulations)):
+        overlap, gap = shares(together.simulations[i].check())
+        overlap_alone, gap_alone = shares(alone.simulations[i].check())
+        assert overlap_alone > 5e-4 and gap_alone > 5e-3
+        assert overlap < overlap_alone / 20
+        assert gap < gap_alone / 2
+    # the prediction's bodies come from the likelihood's own fields, and
+    # are contoured one at a time either way
+    assert np.allclose(together.check()["volume"], alone.check()["volume"])
 
 
 def test_the_priority_rule_lets_a_later_category_override():
@@ -386,10 +647,10 @@ def test_categories_overlapping_are_resolved_in_priority_order():
                                    "C": bodies["C"]})
     shared = overlapping.check().set_index(["first", "second"]).loc[
         ("A", "B"), "volume"]
-    # a ten-metre strip of B, less B's own rounded edges along it
+    # a ten-metre strip of B, whole now that B's edges along it are square
     assert shared == pytest.approx(wide.intersection(bodies["B"]).volume,
                                    rel=1e-6)
-    assert 0.9 * 10.0 * 80.0 * 80.0 < shared < 10.0 * 80.0 * 80.0
+    assert shared == pytest.approx(10.0 * 80.0 * 80.0, rel=1e-6)
     kept_b = overlapping.repair(priority=["B", "A", "C"])
     assert kept_b.repairs.loc["A"] == pytest.approx(shared, rel=1e-6)
     assert kept_b.repairs.loc["B"] == 0.0

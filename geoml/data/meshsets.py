@@ -19,6 +19,7 @@ by cut-off -- or by name, for a categorical variable -- the prediction's
 and one set per realization, with the reports only a whole set can make.
 """
 import collections.abc as _abc
+import concurrent.futures as _futures
 import itertools as _iter
 import multiprocessing as _mp
 import os as _os
@@ -64,9 +65,21 @@ _STORE_FORMAT = 1
 # as fit here costs the same pass
 _GROUP_BYTES = 1_000_000_000
 
-# the most processes contouring realizations by default: each holds a
-# painted slab of the field and the meshes it has made, several hundred MB
+# the most processes contouring realizations by default, before memory has
+# its say (`_pool_size`): each costs what one contour of the model does,
+# which is not the few hundred MB a slab of paint suggests -- cutting the
+# surface's blocks down (`_cut_to_contour`) measured 4 to 8 GB a contour
+# on the Tom v6 model, 6.8 million blocks, and eight workers took the 62
+# GB of its WSL down with them
 _WORKERS = 8
+
+# what share of the memory there is the workers may plan to take, and what
+# margin a realization's contour gets over the prediction's worst: measured
+# on that model, one contour of the prediction peaked 5.2 GB over what the
+# process held and each worker 4.75 GB, so the prediction is a fair
+# estimate and the margin is for rougher realizations
+_MEMORY_SHARE = 0.8
+_MEMORY_MARGIN = 1.25
 
 # what is measured on every realization's mesh, one number per key
 _MEASURES = ("volume", "raw", "pieces", "largest", "triangles", "gained",
@@ -197,15 +210,24 @@ def _numbers(simulations, count):
 # such edge, and open at 44 once the fallback had it; contoured 1e-9 lower
 # it closes; realization 19 at 0.8 closed only 1e-4 lower, 534 edges open
 # at every smaller move. The move is recorded as `nudge` in each mesh's
-# provenance; at 1e-4 of the span it is a few millimetres of shell.
+# provenance; at 1e-4 of the span it is a few millimetres of shell. Since
+# the box cuts the cap (2026-09-14) no Assen realization needs one; they
+# stay for whatever else will not close.
 _NUDGES = (0.0, -1e-9, 1e-9, -1e-8, 1e-8, -1e-7, 1e-7, -1e-6, 1e-6, -1e-5,
            1e-5, -1e-4, 1e-4)
 
 
 def _contoured(data, values, level, side, supersample, label):
     if isinstance(data, BlockSet3D):
+        # a surface that is no body is healed and moved a hair (`_shell`),
+        # never sent through the welded mesh: that fallback closed none of
+        # the shells it was tried on (Assen's FeO_total at 0.7 came back open
+        # at 44 edges; a Tom v6 Ag realization at 10 ppm open, five levels
+        # running), and on a big model it costs twice the memory a worker is
+        # sized for -- 17 GB and two minutes an attempt at 14 million cells
         return data._contour_values(values, level, label,
-                                    supersample=supersample, close=side)
+                                    supersample=supersample, close=side,
+                                    fallback=False)
     try:
         return _Attribute(data, _np.asarray(values, dtype=float)) \
             .get_contour(level, close=side)
@@ -215,10 +237,16 @@ def _contoured(data, values, level, side, supersample, label):
         return None
 
 
-def _shell(data, values, level, side, supersample, label):
+# `_shell`'s first contour when the caller has none to hand it
+_UNTRIED = object()
+
+
+def _shell(data, values, level, side, supersample, label, first=_UNTRIED):
     """The body where `values` clear `level` on the side kept -- an empty
     body where they never do -- and how far off `level` it had to be
-    contoured to close."""
+    contoured to close. `first` is the contour at `level` itself where the
+    caller made it already, as a categorical realization makes all its
+    categories' at once."""
     finite = _np.asarray(values, dtype=float)
     finite = finite[_np.isfinite(finite)]
     span = float(finite.max() - finite.min()) if finite.size else 0.0
@@ -227,8 +255,11 @@ def _shell(data, values, level, side, supersample, label):
         nudge = share * span
         if share != 0.0 and nudge == 0.0:
             break
-        mesh = _contoured(data, values, level + nudge, side, supersample,
-                          label)
+        if share == 0.0 and first is not _UNTRIED:
+            mesh = cast("Mesh3D | None", first)
+        else:
+            mesh = _contoured(data, values, level + nudge, side,
+                              supersample, label)
         if mesh is None or mesh.n_data == 0:
             return _empty_solid(), nudge
         if isinstance(mesh, Solid3D):
@@ -240,10 +271,10 @@ def _shell(data, values, level, side, supersample, label):
         else InconsistentMeshError
     raise error(
         "the contour of %r at %g does not close into a body, even healed "
-        "and moved a ten-thousandth of its span either side: where the "
-        "ground kept thins against the model's edge, its surface can meet "
-        "the closing cap edge-on, and a column with missing values leaves "
-        "holes a contour runs into" % (label, level))
+        "and moved a ten-thousandth of its span either side: a column with "
+        "missing values leaves holes a contour runs into, and a surface "
+        "that touches itself where no split settles it stays open"
+        % (label, level))
 
 
 def _category_fields(draws, rule):
@@ -364,6 +395,34 @@ def _limited(mesh, bodies, shift):
         # triangles welded and renumbered
         return mesh, taken
     return _mesh(current, shift), taken
+
+
+def _warn_emptied(label, emptied, before, taken, names):
+    """Says so when the limits and exclusions leave nothing of a shell.
+
+    `emptied` holds the keys of the shells that had ground in them and have
+    none left, `before` their volumes before the cuts, and `taken` what each
+    body in `names` took from them. A limit keeps its inside, so one around
+    the wrong ground empties every shell silently, and the set is built,
+    stored and reopened with nothing in it.
+    """
+    if not emptied:
+        return
+    took = _np.sum([taken[key] for key in emptied], axis=0)
+    share = took / took.sum()
+    order = [j for j in _np.argsort(-share) if took[j] > 0]
+    said = ["%r took %.0f%% of it" % (names[order[0]], 100 * share[order[0]])]
+    said += ["%r %.0f%%" % (names[j], 100 * share[j]) for j in order[1:]]
+    if len(said) > 1:
+        said = [", ".join(said[:-1]) + " and " + said[-1]]
+    _warnings.warn(
+        "the limits and exclusions left nothing of %s at %s, a volume of "
+        "%.4g before them: %s. A limit keeps what lies inside its body or "
+        "under its sheet and an exclusion takes that away, so check that "
+        "each one encloses the ground it names"
+        % (label, ", ".join(("%g" % key) if isinstance(key, float)
+                            else str(key) for key in emptied),
+           sum(before[key] for key in emptied), said[0]))
 
 
 def _nest(meshes, keys, side, shift):
@@ -504,9 +563,24 @@ def _realization_task(position):
     state = _BUILD
     number = int(state["numbers"][position])
     draws = state["values"][:, position, :]
+    together = {}
     if state["kind"] == "category":
         fields = _category_fields(draws, state["rule"])
         columns = {key: fields[:, j] for j, key in enumerate(state["keys"])}
+        if isinstance(state["data"], BlockSet3D):
+            rule = state["rule"]
+            try:
+                together = dict(zip(state["keys"], state["data"]
+                                    ._contour_fields(
+                                        draws,
+                                        lambda means: _category_fields(
+                                            means, rule),
+                                        0.0, state["label"],
+                                        supersample=state["supersample"])))
+            except Exception:
+                # the partition in one contour failing leaves each
+                # category to be contoured on its own, as it was before
+                together = {}
     else:
         columns = {key: draws[:, 0] for key in state["keys"]}
 
@@ -518,7 +592,8 @@ def _realization_task(position):
         try:
             shell, nudges[key] = _shell(
                 state["data"], columns[key], level, state["side"],
-                state["supersample"], state["label"])
+                state["supersample"], state["label"],
+                first=together.get(key, _UNTRIED))
             raw[key] = shell.volume
             shell, taken[key] = _limited(shell, state["bodies"],
                                          state["shift"])
@@ -554,28 +629,153 @@ def _realization_task(position):
     return number, arrays, measures, taken, failed
 
 
-def _each_realization(count, workers):
-    """`_realization_task` over positions `0..count-1`, in forked workers
-    where there are several, in this process otherwise."""
-    if workers > 1 and count > 1 \
+def _one_thread_of_blas():
+    """A worker's start: OpenBLAS held to one thread. Every process keeps a
+    thread per CPU, and they spin between calls: on Assen a realization
+    spent 173 s of CPU in one process where 91 s did the work, in the same
+    45 s. Forked workers run Manifold on one thread too, the parent having
+    started its thread pool, so a worker is one core's work."""
+    try:
+        import threadpoolctl
+    except ImportError:
+        return
+    _WORKER_LIMITS.append(threadpoolctl.threadpool_limits(1, user_api="blas"))
+
+
+# the limits a worker set, kept for the worker's life
+_WORKER_LIMITS = []
+
+
+def _each_realization(count, workers, first=0):
+    """`_realization_task` over positions `first..count-1`, in forked
+    workers where there are several, in this process otherwise.
+
+    A worker that dies -- killed for memory, most often -- is an error.
+    `multiprocessing.Pool` replaced it and waited for its task forever,
+    which in a notebook is a cell that never comes back.
+    """
+    if workers > 1 and count - first > 1 \
             and "fork" in _mp.get_all_start_methods():
-        with _warnings.catch_warnings():
-            # the reasoning of `_DistanceQueries`: TensorFlow's thread
-            # pools are up in the parent, the workers touch VTK, Manifold
-            # and numpy alone, and spawned workers would import the package
-            # once each
-            _warnings.filterwarnings(
-                "ignore", message=".*fork\\(\\)", category=DeprecationWarning)
-            pool = _mp.get_context("fork").Pool(min(workers, count))
+        pool = _futures.ProcessPoolExecutor(
+            min(workers, count - first), mp_context=_mp.get_context("fork"),
+            initializer=_one_thread_of_blas)
         try:
-            yield from pool.imap_unordered(_realization_task, range(count))
-            pool.close()
+            with _warnings.catch_warnings():
+                # the reasoning of `_DistanceQueries`: TensorFlow's thread
+                # pools are up in the parent, the workers touch VTK, Manifold
+                # and numpy alone, and spawned workers would import the
+                # package once each. The workers are forked as the tasks go
+                # in, so that is where the warning is.
+                _warnings.filterwarnings(
+                    "ignore", message=".*fork\\(\\)",
+                    category=DeprecationWarning)
+                futures = [pool.submit(_realization_task, position)
+                           for position in range(first, count)]
+            for future in _futures.as_completed(futures):
+                yield future.result()
+        except _futures.process.BrokenProcessPool as error:
+            raise RuntimeError(
+                "a process contouring the realizations died before it was "
+                "done, most often killed for want of memory; make the set "
+                "with fewer workers") from error
         finally:
-            pool.terminate()
-            pool.join()
+            pool.shutdown(wait=True, cancel_futures=True)
     else:
-        for position in range(count):
+        for position in range(first, count):
             yield _realization_task(position)
+
+
+def _status(field):
+    """A field of this process's `/proc/self/status`, in bytes; None where
+    there is no such file."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith(field + ":"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+class _PeakMeter:
+    """How far this process's resident memory rose while something ran.
+
+    Linux keeps a high-water mark, and writing 5 to `clear_refs` sets it
+    back to what the process holds now, so what the set's own contours cost
+    can be read off it whatever the process did before -- a notebook kernel
+    has usually done plenty. `growth` is None anywhere else.
+    """
+
+    def __init__(self):
+        self._start = None
+        try:
+            with open("/proc/self/clear_refs", "w") as refs:
+                refs.write("5")
+        except OSError:
+            return
+        self._start = _status("VmRSS")
+
+    def growth(self):
+        peak = _status("VmHWM")
+        if self._start is None or peak is None:
+            return None
+        return max(0, peak - self._start)
+
+
+def _available_bytes():
+    """The memory more processes could still take, or None where unknown:
+    what Linux counts as available, narrowed to what the cgroup's limit
+    leaves where one is set."""
+    try:
+        with open("/proc/meminfo") as info:
+            fields = dict(line.split(":", 1) for line in info)
+        available = int(fields["MemAvailable"].split()[0]) * 1024
+    except (OSError, KeyError, ValueError):
+        return None
+    try:
+        with open("/proc/self/cgroup") as cgroup:
+            base = "/sys/fs/cgroup" + cgroup.read().split("::", 1)[1].strip()
+        with open(base + "/memory.max") as limit_file:
+            limit = limit_file.read().strip()
+        if limit != "max":
+            with open(base + "/memory.current") as used:
+                available = min(available, int(limit) - int(used.read()))
+    except (OSError, IndexError, ValueError):
+        pass
+    return available
+
+
+def _pool_size(cost, reserve, available, cpus):
+    """How many workers memory holds: as many of `cpus` as fit in a share of
+    what is `available` once the parent's `reserve` is set aside, each
+    worker costing `cost` and a margin. With either unmeasured, the CPUs
+    decide, as they did before."""
+    if not cost or available is None:
+        return cpus
+    room = _MEMORY_SHARE * (available - reserve)
+    return int(max(1, min(cpus, room // (_MEMORY_MARGIN * cost))))
+
+
+def _default_workers(cost, stores, numbers):
+    """The pool a set makes when not told how big: the CPUs, eight at most,
+    and no more than memory holds at what one realization costs, said out
+    loud when that is fewer."""
+    cpus = max(1, min(_WORKERS, _os.cpu_count() or 1))
+    # the parent holds one group of realizations while the workers run
+    reserve = min(_GROUP_BYTES,
+                  8 * int(stores[0].shape[0]) * len(stores) * len(numbers))
+    available = _available_bytes()
+    pool = _pool_size(cost, reserve, available, cpus)
+    if pool < cpus:
+        measured = "" if not cost or available is None else (
+            ": a realization of this model took %.1f GB, and %.1f GB is "
+            "free" % (cost / 1024 ** 3, available / 1024 ** 3))
+        _warnings.warn(
+            "contouring the realizations in %d worker%s rather than %d, "
+            "which is what memory holds%s; pass `workers=` to choose"
+            % (pool, "" if pool == 1 else "s", cpus, measured))
+    return pool
 
 
 def _read_realizations(stores, numbers):
@@ -851,7 +1051,12 @@ class MeshSet(_abc.Mapping):
         ones before it -- rather than only reporting what `check` finds.
     workers
         How many processes contour the realizations; 1 contours them in
-        this one. Defaults to the number of CPUs, eight at most.
+        this one. Defaults to the number of CPUs, eight at most, and no
+        more than memory holds: each worker costs about what the first
+        realization did, which the set contours in this process and
+        measures before the pool starts, or the prediction's worst contour
+        where that was more, and a warning says when that leaves fewer. A
+        worker that dies before it is done raises a `RuntimeError`.
     store
         The path of a Zarr store to keep the set in, which `MeshSet.open`
         reads back. A temporary store, removed with the set, holds the
@@ -925,14 +1130,16 @@ class MeshSet(_abc.Mapping):
         stores = source["stores"]
         numbers = _numbers(simulations, None if stores is None
                            else int(stores[0].shape[1]))
+        # the prediction's contours are the least a worker's will cost,
+        # measured on this model on this machine as they are made
+        meter = _PeakMeter()
         self._build(data, source, limits, exclude, supersample, simplify,
                     rule, repair)
         if numbers:
             self._contour_realizations(
                 source, numbers, rule, repair,
-                max(1, min(_WORKERS, _os.cpu_count() or 1))
-                if workers is None else max(1, int(workers)),
-                store)
+                None if workers is None else max(1, int(workers)), store,
+                cost=meter.growth())
         elif store is not None:
             self.to_zarr(store)
 
@@ -982,18 +1189,27 @@ class MeshSet(_abc.Mapping):
             self.provenance["rule"] = rule
         self.provenance.update(extra or {})
 
+        bodies = self._bodies()
         converted = [(_manifold(body, self._shift), keep)
-                     for _, body, keep in self._bodies()]
+                     for _, body, keep in bodies]
         meshes, raw, taken, self._nudge = {}, {}, {}, {}
+        emptied = []
         for key, level in zip(self._keys, self._levels):
             shell, self._nudge[key] = _shell(
                 data, source["fields"][key], level, self.close,
                 self.supersample, self.path)
             raw[key] = shell.volume
+            whole = shell.n_data > 0
             shell, taken[key] = _limited(shell, converted, self._shift)
+            if whole and shell.n_data == 0:
+                emptied.append(key)
             if self._simplify is not None:
                 shell = _simplified(shell, self._simplify)
             meshes[key] = shell
+        # said here, before any realization is contoured: they would be cut
+        # the same way, and a set takes hours on a large model
+        _warn_emptied(self.path, emptied, raw, taken,
+                      [name for name, _, _ in bodies])
         if repair:
             meshes, removed = self._consistent(meshes)
             self.repairs = _pd.Series(removed, name="removed").reindex(
@@ -1041,8 +1257,12 @@ class MeshSet(_abc.Mapping):
         return found
 
     def _contour_realizations(self, source, numbers, rule, repair, workers,
-                              store):
-        """Every realization's set, contoured in groups, measured, stored."""
+                              store, cost=None):
+        """Every realization's set, contoured in groups, measured, stored.
+
+        With `workers` None the pool is sized here, to the first
+        realization, contoured in this process and measured, or to `cost`,
+        the prediction's, where that was more."""
         if store is None:
             directory = _tempfile.mkdtemp(prefix="geoml_meshset_")
             store = _os.path.join(directory, "meshes.zarr")
@@ -1080,6 +1300,24 @@ class MeshSet(_abc.Mapping):
         stores = source["stores"]
         per_realization = 8 * int(stores[0].shape[0]) * len(stores)
         size = max(1, int(_GROUP_BYTES // per_realization))
+
+        def record(number, arrays, measures, taken, failed):
+            row = where[number]
+            for j, key in enumerate(self._keys):
+                provenance = self._mesh_provenance(key)
+                provenance["realization"] = number
+                provenance["nudge"] = measures[key]["nudge"]
+                _write_arrays(root, "simulations/%d/%s"
+                              % (number, _path_key(key)),
+                              arrays[key], provenance)
+                for name in _MEASURES:
+                    table[name][row, j] = measures[key][name]
+                if len(bodies):
+                    cuts[:, row, j] = taken[key]
+            for key, message in failed.items():
+                self._failures.append(
+                    {"realization": number, "key": key, "error": message})
+
         for start in range(0, len(numbers), size):
             group = numbers[start:start + size]
             _BUILD.clear()
@@ -1091,25 +1329,23 @@ class MeshSet(_abc.Mapping):
                 bodies=bodies, shift=self._shift, simplify=self._simplify,
                 repair=repair, reference=reference)
             try:
-                for number, arrays, measures, taken, failed in \
-                        _each_realization(len(group), workers):
-                    row = where[number]
-                    for j, key in enumerate(self._keys):
-                        provenance = self._mesh_provenance(key)
-                        provenance["realization"] = number
-                        provenance["nudge"] = measures[key]["nudge"]
-                        _write_arrays(root, "simulations/%d/%s"
-                                      % (number, _path_key(key)),
-                                      arrays[key], provenance)
-                        for name in _MEASURES:
-                            table[name][row, j] = \
-                                measures[key][name]
-                        if len(bodies):
-                            cuts[:, row, j] = taken[key]
-                    for key, message in failed.items():
-                        self._failures.append(
-                            {"realization": number, "key": key,
-                             "error": message})
+                first = 0
+                if workers is None:
+                    # A worker costs what a realization does, which the
+                    # prediction's contours can understate: a categorical
+                    # realization contours all its categories at once,
+                    # measured on Assen at 2.3 times the prediction's worst
+                    # contour of one. So the first is made here, measured,
+                    # and kept, and the pool sized to it.
+                    meter = _PeakMeter()
+                    made = _realization_task(0)
+                    cost = max(cost or 0, meter.growth() or 0) or None
+                    workers = _default_workers(cost, stores, numbers)
+                    record(*made)
+                    first = 1
+                for made in _each_realization(len(group), workers,
+                                              first=first):
+                    record(*made)
             finally:
                 _BUILD.clear()
         root.attrs["geoml_meshset"] = self._attrs()
@@ -1168,10 +1404,17 @@ class MeshSet(_abc.Mapping):
                 self.close, len(self), "" if len(self) == 1 else "s"))
         lines = [head]
         width = max(len(str(k)) for k in self._keys)
-        for key, volume, pieces in zip(self._keys, self._summary["volume"],
-                                       self._summary["pieces"]):
-            lines.append("  %s  volume %.6g, %d piece%s" % (
-                str(key).rjust(width), volume, pieces,
+        # with limits, what a shell held before them beside what is left,
+        # so a shell a limit took whole does not read like a level the
+        # field never reached
+        cut = bool(self.limits or self.excluded)
+        for key, volume, raw, pieces in zip(
+                self._keys, self._summary["volume"], self._summary["raw"],
+                self._summary["pieces"]):
+            before = " of %.6g before the limits" % raw \
+                if cut and _np.isfinite(raw) else ""
+            lines.append("  %s  volume %.6g%s, %d piece%s" % (
+                str(key).rjust(width), volume, before, pieces,
                 "" if pieces == 1 else "s"))
         if self.limits or self.excluded:
             lines.append("  cut to %s" % ", ".join(
@@ -1887,15 +2130,21 @@ class MeshSet(_abc.Mapping):
                                     BoundingBox.from_array(
                                         self._corner_points))
         converted = [(_manifold(body, self._shift), keep)]
-        meshes, taken = {}, {}
+        meshes, taken, cuts, emptied = {}, {}, {}, []
         for key, previous in zip(self._keys, self._summary["taken"]):
             meshes[key], cut = _limited(self._meshes[key], converted,
                                         self._shift)
+            if self._meshes[key].n_data > 0 and meshes[key].n_data == 0:
+                emptied.append(key)
+            cuts[key] = cut
             # the new cut is reported where its kind goes: the limits
             # first, then the exclusions
             before = list(previous)
             before.insert(len(self.limits) if keep else len(before), cut[0])
             taken[key] = before
+        _warn_emptied(self.path, emptied,
+                      dict(zip(self._keys, self._summary["volume"])), cuts,
+                      [name])
         return self._derived(meshes, limits=limits, excluded=excluded,
                              taken=taken)
 
