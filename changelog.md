@@ -1,3 +1,15 @@
+## version 0.6.11
+* **Fixed: meshes could not be stored where VTK is 9.7.** VTK 9.7 hands its
+integer arrays back as C `long long`, which on Linux is 64-bit integers
+under a NumPy dtype class of its own that still prints as int64, and Zarr
+matches int64 by class: "No Zarr data type found that matches dtype
+('int64')". Every mesh a set stored, and every mesh's `to_zarr`, failed --
+what CI's fresh installs had shown since 2026-09-11, 38 tests, while a
+machine on VTK 9.5 never saw it. The stores now hand Zarr a number's
+dtype under its canonical class (`storage._zarr_dtype`), the same bytes.
+One test in `test_storage.py`, which fails on the old code with this
+machine's zarr as well.
+
 ## version 0.6.10
 * **A tree's leaves are the points of contact with the likelihoods.**
 `VGPNetwork` took one node, so a model with two likelihoods had to end in

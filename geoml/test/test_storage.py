@@ -216,6 +216,43 @@ def test_row_cdf_matches_numpy_and_inverts_quantiles(tmp_path):
     assert np.all(cdf_at_q >= p)
 
 
+@pytest.mark.skipif(type(np.dtype(np.longlong)) is type(np.dtype(np.int64)),
+                    reason="a C long long is int64's own dtype class here")
+def test_a_long_long_array_reaches_zarr_as_int64(tmp_path, monkeypatch):
+    """On Linux a C `long long` array is 64-bit integers under another NumPy
+    dtype class, which prints as int64 -- VTK 9.7 hands its integer arrays
+    back that way -- and zarr 3.3 matches int64 by class and refuses it:
+    every mesh set failed to write in CI. The stores hand zarr the canonical
+    dtype, whatever class the values came in."""
+    import zarr
+
+    values = np.arange(12, dtype=np.longlong).reshape(4, 3)
+    asked = []
+    group_create = zarr.Group.create_array
+    module_create = zarr.create_array
+
+    def through_group(self, *args, **kwargs):
+        asked.append(np.dtype(kwargs["dtype"]))
+        return group_create(self, *args, **kwargs)
+
+    def through_module(*args, **kwargs):
+        asked.append(np.dtype(kwargs["dtype"]))
+        return module_create(*args, **kwargs)
+
+    monkeypatch.setattr(zarr.Group, "create_array", through_group)
+    monkeypatch.setattr(zarr, "create_array", through_module)
+    group = zarr.open_group(str(tmp_path / "g.zarr"), mode="w")
+    ArrayStore.from_numpy(values).write_into(group, "triangles")
+    allocated = ArrayStore.allocate((5,), dtype=np.longlong, fill_value=0,
+                                    backend="zarr",
+                                    store=str(tmp_path / "a.zarr"))
+
+    assert len(asked) == 2
+    assert all(type(dtype) is type(np.dtype(np.int64)) for dtype in asked)
+    assert np.array_equal(np.asarray(group["triangles"]), values)
+    assert np.asarray(allocated).dtype == np.int64
+
+
 def test_store_columns_mixed_backends(tmp_path):
     from geoml.storage import store_columns
 
