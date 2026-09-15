@@ -1,3 +1,63 @@
+## version 0.6.12
+* **Fixed: a contour through blocks holding no value got NaN vertices.** A
+valueless block painted its points NaN, and flying edges placed a crossing
+between a value and none at NaN: with every fourth block of a small ball
+model unpredicted, 138 of the contour's 548 vertices, and `mesh3d` still
+classed it a `Solid3D`, of NaN volume. A region left out whole did the same
+wherever the surface reached it. Now a valueless block whose every corner a
+valued block shares is read across from those corners, as the welded mesh
+reads any hexahedron, and is no longer cut to the finest size, which had
+turned its middle into corners no valued block reaches. What is left is
+absent ground, with no level to draw: an open contour stops at it, no
+triangle drawn in a cell with an absent corner, and a closed one closes
+against it, the ground painted a hundred times further past the level than
+any corner reads. The ball with a wall of such blocks through its middle
+comes back a body 3.9% smaller, the corners along the wall reading one
+side of it; meeting a slab left out, it closes 0.027 m past the slab's
+face, on 10 m cells, and holds 1.1% more than the whole ball cut there.
+The welded fallback is built from the valued blocks alone. A model with
+every block predicted contours bit for bit as before, 39 contours
+compared, three fields painted together among them. And `Mesh3D` refuses
+points that are not finite numbers, rather than measuring them into NaN.
+Nine tests in `test_blockset.py` and `test_mesh3d.py`.
+* **The tag's full CI job runs one process per test file.** On the v0.6.10
+and v0.6.11 tags it was cancelled at 93-95% with no test failing, out of
+the 16 GB runner's memory: as one process the suite peaks at 23.1 GB. File
+by file under a 14 GB cap every file passed, the heaviest peaking at 6.1
+GB (`test_uncertain_input_gp.py`) and the next at 2.9 GB.
+* **Chapter 13's variogram verdict was wrong, and so was the model under
+it: Box-Cox's default shift bends on zeros.** The chapter read "the fan
+tracks the data across the whole range" off a figure whose data sat under
+the fan's lowest realization at 10 lags of 12, and chapter 15, the same
+model, read its figure the same way. The fan was right. Walker's 22 zero
+samples, shifted by Box-Cox's default millionth, sit so far down the
+logarithm that they pull the exponent's start from 0.60, where it sits
+with the zeros left out, to 0.375. It trained to 0.42, and a noise
+constant in the warped space came back widest where the grade is high:
+declustered, the noise came to 0.63 of the data's variance and noise and
+ground to 1.19 of it, and the spread check claimed 330 in the top grades
+where the errors had 254. Shifted by one, the order of the smallest
+positive value, the exponent trains to 0.58, exactly Yeo-Johnson's fit,
+the two maps agreeing on non-negative data. Noise and ground come to 0.98,
+the fan holds the data at 8 lags of 12, and over the exhaustive grid it
+follows the true variogram within 7% from the second lag on. Held out,
+rmse went from 213 to 212 and CRPS from 122 to 119, goodness from 0.96 to
+0.93. Denser inducing points, 2000 iterations and an exponential kernel
+were measured beside it and mended none of it
+(`docs/benchmarks/walker_zero_shift.py`). Every chapter that builds
+Walker's V, 4, 5, 7, 11, 13 and 15, now does so with `BoxCox(1,
+shift=1.0)`, chapter 4 saying why the shift wants the smallest grade's
+order and chapter 13 what the figure caught; chapter 16's Jura holds no
+zeros and keeps the default. Chapter 5 described its chain as chapter 4's
+"with a `Scale` in front" and credited "the softplus in the chain" with
+its positivity, and held neither: both corrected. And
+`BoxCox.backward` floors at zero for any shift: a draw under the image of
+zero has its pre-image under zero, down to minus the shift, where a grade
+cannot go, and the docstring's promise of a zero floor held only for the
+default shift, to a millionth. The `shift` docstring now says to set it to
+the order of the smallest positive value where there are zeros. One test
+in `test_parametric_warpings.py`, one assertion there changed.
+
 ## version 0.6.11
 * **Fixed: meshes could not be stored where VTK is 9.7.** VTK 9.7 hands its
 integer arrays back as C `long long`, which on Linux is 64-bit integers

@@ -636,16 +636,16 @@ shell's volume before them beside what is left, a set reopened from its
 store too, where the Tom v6 sets an uncertainty limit had emptied read
 "volume 0" at every cut-off.)
 
-**S — A contour through blocks without a value gets NaN vertices** (found
-2026-09-13, checking the corner tables bit for bit against the old code,
-which does the same). The paint gives a valueless block's points no value,
-and flying edges places a crossing between a value and none at NaN: with
-every fourth block of a small ball model left unpredicted, 138 of the
-contour's 548 vertices came back NaN, and `mesh3d` still classed it a
-`Solid3D`, with a NaN volume. A contiguous unpredicted region -- the ground
-`where=` excludes -- gave none, which is why no real model has shown it.
-Wanted: no crossing drawn into absent ground, and `mesh3d` refusing NaN
-coordinates rather than classing them.
+(A contour through blocks without a value getting NaN vertices: **done
+2026-09-15, 0.6.12**. Every fourth block of a small ball model unpredicted
+put 138 of 548 vertices at NaN in a `Solid3D` of NaN volume, and a region
+left out whole did the same wherever the surface reached it -- the
+contiguous one once reported clean had simply not been reached. A
+valueless block is now read across from its corners where valued blocks
+have them all, and left whole rather than cut; anything else is absent
+ground, where an open contour stops and a closed one closes, within a
+hundredth of a cell. `Mesh3D` refuses a point that is not a finite
+number.)
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a
@@ -670,14 +670,12 @@ refinement and contour-cutting do not.
 
 ## 5. Housekeeping, docs and release
 
-**S — The tag's `full` CI job dies at 93%** (found 2026-09-15). On the
-v0.6.10 and v0.6.11 tags the full suite ran clean to 93-95% and was
-cancelled at 24 minutes, "The operation was canceled" and no test failing,
-the same point both times. It is memory: the suite as one pytest process
-peaks at 23.1 GB here (a capped unit's cgroup peak, both releases), and
-the runner has 16 GB. The manual already runs a subprocess per chapter for
-this reason; the full job wants the same, one process per test file, which
-bounds its peak at the heaviest file's.
+(The tag's `full` CI job dying at 93%: **done 2026-09-15, 0.6.12, not yet
+seen on a tag**. On the v0.6.10 and v0.6.11 tags the suite ran clean to
+93-95% and was cancelled with no test failing; as one pytest process it
+peaks at 23.1 GB, and the runner has 16. The job runs one process per
+test file now: under a 14 GB cap every file passed, the heaviest peaking
+at 6.1 GB.)
 
 (The tag-triggered manual CI job: **verified 2026-09-14**. At v0.6.9 it was
 killed at 22 minutes of a 90-minute budget with no pytest output, the OOM
@@ -686,17 +684,22 @@ pyvista. With `test_manual.py` running one subprocess per chapter, it
 passed on the v0.6.10 tag in 28 minutes. If it ever dies the same way
 again, the next lever is not a longer timeout.)
 
-**S — Chapter 13's variogram verdict, read against its figure** (found
-2026-09-14, checking the release's regenerated figures against the prose).
-The prose says the fan "tracks the data across the whole range" and the
-model passes. The shape does track, but the data's curve sits below the
-fan's lowest realization at 10 of 12 lags: 1 to 7 thousand under at most,
-about 20 thousand at the first. It did the same before the figures were
-redrawn, and chapter 15's variogram, the same figure, is read the same way.
-The fan is exact since 2026-09-09, so the gap is the model's own variance
-at short lags. Measure whether the Walker model fits its noise high, and
-say so in both chapters. The same page's "both curves still sit near twice
-the true value at the shortest lag" draws no true curve to read it off.
+(Chapter 13's variogram verdict, read against its figure: **done
+2026-09-15, 0.6.12**, `docs/benchmarks/walker_zero_shift.py`. The model
+did fit its noise high, and the zeros were why: Box-Cox's default shift of
+a millionth put Walker's 22 zero samples so far down the logarithm that
+they pulled the exponent from 0.58 to 0.42, and the steeper inverse
+widened the noise where the grade is high, noise and ground together 1.19
+of the data's declustered variance. Shifted by one, 0.98, and the fan
+follows the true variogram within 7% from the second lag on; denser
+inducing points, longer training and an exponential kernel mended none of
+it. Every chapter that builds Walker's V shifts it now, 4, 5, 7, 11, 13
+and 15, and 13 and 15 read their figures anew; the shortest lag's
+comparison with the truth is measured now, 26 900 true against 46 600 in
+the declustered data. Chapter 16's Jura holds no zeros, its smallest
+value 0.135, and keeps the default. Chapter 5 described its chain as
+chapter 4's "with a `Scale` in front" and credited "the softplus in the
+chain" with its positivity, neither of which it held; corrected with it.)
 
 (Chapter 16's figures: **verified 2026-09-05** — rerun through the manual's
 own runner after the leaves change, the seeded chapter reproduced every

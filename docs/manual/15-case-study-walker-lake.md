@@ -37,8 +37,8 @@ explore.scene(clip=[0, 0.99]).savefig("figures/15-samples.png", dpi=150,
 
 Two decisions fall straight out of looking. The long right tail and the
 pile of zeros want a power link that keeps the grade from going negative
-and trains its exponent
-(chapter 4), and the
+and trains its exponent (chapter 4), shifted by the order of the smallest
+positive value so that the zeros do not bend it (chapter 13), and the
 banded, uneven sampling means a random validation split would lie
 (chapter 13).
 
@@ -46,7 +46,8 @@ banded, uneven sampling means a random validation split would lie
 
 The model of chapter 11, assembled one named piece at a time: inducing
 points on a 10-unit lattice over the prediction grid, cut into experts; a
-spherical kernel; and the chain that keeps a grade positive.
+spherical kernel; and the chain that keeps a grade positive, shifted by
+one for the zeros.
 
 ```python
 experts = geoml.data.inducing.grid_experts(walker_grid, 10.0, block=8)
@@ -61,7 +62,7 @@ gp = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.BoxCox(1),
+    geoml.warping.BoxCox(1, shift=1.0),
     geoml.warping.ZScore(1))
 
 model = geoml.models.VGPNetwork(
@@ -106,9 +107,10 @@ figure.savefig("figures/15-variogram.png", dpi=150, bbox_inches="tight")
 Three things to sign against. The pooled scores are the map's expected
 error, measured where the model never looked. The calibration verdict says
 how wide a "90%" interval really has to be cut. And the variogram fan is
-the spatial check the other two cannot make: the realizations track the
-data's curve across the range, so the model walks like the ground rather
-than merely landing in the right place on average. That matters to a
+the spatial check the other two cannot make: the realizations follow the
+data's curve across the range and hold it at eight lags of the twelve, so
+the model walks like the ground rather than merely landing in the right
+place on average. That matters to a
 resource estimate, because a field fitted too smooth understates how often
 neighbouring blocks differ.
 

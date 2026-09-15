@@ -44,7 +44,7 @@ gp = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.BoxCox(1),
+    geoml.warping.BoxCox(1, shift=1.0),
     geoml.warping.ZScore(1))
 
 likelihood = geoml.likelihood.Gaussian(warping)
@@ -67,8 +67,10 @@ Multi-variable models pass lists in matching order (`["Elements",
 "Landuse"]` with a likelihood each). Two places are worth a moment's
 thought before training starts: the initial `transform` range, and the
 warping chain. Initialization is not fitting, but a range wrong by an
-order of magnitude starts the climb in a bad valley, and a chain without a
-positivity link will happily predict a negative grade (chapter 4).
+order of magnitude starts the climb in a bad valley, a chain without a
+positivity link will happily predict a negative grade (chapter 4), and a
+Box-Cox shifted by far less than the smallest grade lets the zeros bend
+its exponent before training starts (chapter 13).
 
 ## 11.2 Training, watching, adjusting
 
@@ -130,8 +132,8 @@ print("lowest value:",
 ```
 
 The value is positive, as the `BoxCox → ZScore` chain guarantees --
-the inverse power returns zero for anything past its floor -- and it is
-the same number the original model would have given.
+the inverse power returns zero for anything below where a zero lands --
+and it is the same number the original model would have given.
 
 The mechanism is worth understanding, because two workflows ride on it.
 Saving records the *constructor calls* that built every object, plus the

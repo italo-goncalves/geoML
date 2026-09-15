@@ -173,7 +173,7 @@ def test_a_draw_past_a_bounded_support_comes_back_finite():
         assert np.all(np.isfinite(back))
     # a Box-Cox draw below the bound lands on the floor: a zero grade
     floor = np.asarray(_set(wp.BoxCox(2), exponent=0.5).backward(tf.constant(far)))
-    assert np.allclose(floor[0, 0], -1e-6, atol=1e-9)
+    assert floor[0, 0] == 0.0
     # and an exponent outside [0, 2] is pulled back by the parameter's limits
     exponent = wp.BoxCox(2).parameters["exponent"]
     exponent.set_value(np.full(2, -1.0))
@@ -181,6 +181,22 @@ def test_a_draw_past_a_bounded_support_comes_back_finite():
     assert np.all(np.asarray(exponent.get_value()) >= 0.0)
     # and the exponential comparison: the logarithm's inverse at 50 is 1e21
     assert np.asarray(wp.Log(2).backward(tf.constant(far)))[0, 1] > 1e20
+
+
+def test_a_shifted_box_cox_never_returns_a_negative_value():
+    """Between the floor and the image of zero a draw's pre-image lies below
+    zero, where a grade cannot: with a shift of one it came back anywhere
+    down to -1. It reads as zero whatever the shift, and above the image
+    of zero the inverse is exact as before."""
+    warping = _set(wp.BoxCox(1, shift=1.0), exponent=0.5)
+    zero = float(np.asarray(
+        warping.forward(tf.constant(np.zeros([1, 1])))[0])[0, 0])
+
+    below = np.asarray(warping.backward(tf.constant(
+        np.array([[zero - 0.5], [zero - 1.0], [-2.5], [-50.0]]))))
+
+    assert np.all(below == 0.0)
+    _round_trip(warping, np.array([[0.0], [0.5], [3.0], [40.0]]))
 
 
 @pytest.mark.parametrize("warping,data,name", [

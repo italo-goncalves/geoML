@@ -16,7 +16,8 @@ machinery. A metadata column names the folds, one function drives the
 cross-validation, and the calibration reads what it leaves behind.
 
 The worked example is the Walker Lake model of chapter 11, trained long
-enough to have settled.
+enough to have settled. Its Box-Cox link is shifted by one before the
+power, and §13.3 shows the validation that called for it.
 
 ```python
 import os
@@ -40,8 +41,10 @@ gp = geoml.latent.BasicGP(
     size=1,
     kernel=geoml.kernels.Spherical())
 
+# shifted by one, the order of the smallest grade, so the zeros have a
+# logarithm near the rest of the data rather than far below it
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.BoxCox(1),
+    geoml.warping.BoxCox(1, shift=1.0),
     geoml.warping.ZScore(1))
 
 model = geoml.models.VGPNetwork(
@@ -227,7 +230,8 @@ figure.savefig("figures/13-spread-check.png", dpi=150,
 `spread_check` compares the spread the model claimed against the spread
 the errors actually had, laid out along the predicted value, and the level
 axis says *which* term is at fault. A shortfall that widens with the grade
-points at the noise model, and a flat one at the posterior.
+points at the noise model, and a flat one at the posterior. Here the claim
+and the errors agree in every bin, within the error bars.
 
 ```python
 figure = explore.variogram(n_lags=12)
@@ -266,9 +270,12 @@ the average departure from the true variogram from 56% down to 12%, and the
 sill from 89 700 to 64 400 against a truth of 61 800.
 
 Only now can the two curves be laid against each other, and the answer is
-that this model passes. The fan tracks the data across the whole range,
-rising where it rises and levelling where it levels. The realizations walk
-like the data.
+that this model passes. The fan follows the data's shape across the whole
+range, rising where it rises and levelling where it levels, and holds the
+data inside it at eight lags of the twelve. The data run 2 000 to 4 000
+above it between 40 and 70 units, where their curve overshoots its own
+sill, and below it at the shortest lag, which the caution below is about.
+The realizations walk like the data.
 
 That verdict is worth pausing on, because it is the opposite of what the
 same figure said before the two corrections were applied. Uncorrected, the
@@ -280,14 +287,43 @@ scrupulous about what it puts on each axis will convict an innocent
 model**, and it will do so with an air of authority, because a fan far
 below a curve looks like evidence.
 
+Scrupulous, it convicts a guilty one too, and this model was one until
+its Box-Cox was shifted. With the default shift of a millionth, the same
+figure put the data under the fan's lowest realization at ten lags of the
+twelve: by more than 20 000 at the shortest, and the fan about a sixth
+above the data at long range. The model's variance was too big, and the
+noise was the larger part of it. Declustered, the fitted noise alone came
+to 0.63 of the data's variance, and noise and ground together to 1.19 of
+it. The spread check said the same from its own side, claiming a noise of
+330 in the highest grades where the errors had 254.
+
+The cause was 22 zero samples. A zero shifted by a millionth has a
+logarithm far below the rest of the data, and the zeros alone pulled the
+exponent's starting value from 0.60 to 0.375; training ended at 0.42.
+The inverse bent harder with it, and a noise that is constant in the
+warped space comes back widest where the grade is high, which is where the
+shortest pairs sit. Shifted by one, the order of the smallest positive
+value (2.1), the zeros sit beside the rest of the data and the exponent
+trains to 0.58. The noise falls to 0.48 of the data's variance, noise and
+ground together to 0.98, and the fan comes down onto the data. The
+held-out scores moved with it, rmse from 213 to 212 and CRPS from 122 to
+119. Goodness went the other way, from 0.96 to 0.93: the intervals, a
+little wide before, are now a little narrow, and §13.4 is the patch for
+that. Where the data hold zeros, the shift wants the size of their
+smallest positive value, not the default.
+
 One caution remains, and it is the reason the shortest lag is the least
 trustworthy point here rather than the most damning. Declustering cannot
 fully mend that bin: the closest pairs exist mainly *inside* the clusters,
 so it is built from crowded, high-value ground however the weights are set.
 On this dataset that can be checked, because Walker Lake ships its
-exhaustive field, and the check says both curves still sit near twice the
-true value at the shortest lag. That is a limit of the *data*, shared by
-the model that was fitted to it, and no weighting recovers it.
+exhaustive field. The true variogram reads 26 900 at the shortest lag, and
+the declustered data read 46 600 there, 1.7 times the truth. That is a
+limit of the *data*, and no weighting recovers it. Predicted over the
+exhaustive grid, the model's fan follows the true variogram within 7% from
+the second lag on. At the shortest it sits a third above, because the
+fitted noise alone, 29 300, is more than the true field varies over 8
+units. What the model still gets too high is its nugget, by a little.
 
 ![The residual variogram](figures/13-variogram-residuals.png)
 

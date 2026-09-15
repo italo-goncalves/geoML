@@ -517,6 +517,16 @@ def _ghost_values(parent_values, value, keep_above):
     return _np.where(kept, 2.0 * value - parent_values, parent_values)
 
 
+def _corner_keys(origin, size, span):
+    """Each block's eight corners as integer keys of the lattice points they
+    fall on, z-major, `span` points along each axis."""
+    keys = _np.empty((len(origin), 8), dtype=_np.int64)
+    for j, corner in enumerate(_gmt.HEX_CORNERS):
+        at = origin + corner * size
+        keys[:, j] = (at[:, 2] * span[1] + at[:, 1]) * span[0] + at[:, 0]
+    return keys
+
+
 def _lattice_corners(origin, size, span):
     """The distinct lattice points the blocks' corners fall on, and each
     block's eight corners as indices into them.
@@ -538,10 +548,7 @@ def _lattice_corners(origin, size, span):
     origin = _np.asarray(origin, dtype=_np.int64)
     size = _np.asarray(size, dtype=_np.int64)
     span = _np.asarray(span, dtype=_np.int64)
-    keys = _np.empty((len(origin), 8), dtype=_np.int64)
-    for j, corner in enumerate(_gmt.HEX_CORNERS):
-        at = origin + corner * size
-        keys[:, j] = (at[:, 2] * span[1] + at[:, 1]) * span[0] + at[:, 0]
+    keys = _corner_keys(origin, size, span)
     rank = _np.int32 if keys.size < 2 ** 31 else _np.int64
     if keys.size == 0:
         return _np.zeros(0, dtype=_np.int64), _np.zeros((0, 8), dtype=rank)
@@ -612,9 +619,15 @@ def _painted_contour(origin, size, step, values, corner, value, label,
     ghosts the blocks tile their box exactly and it never shows; with them
     the painted box is the hull of ghosts of different sizes, and the
     hollows beyond the smaller ghosts must read as far outside for the cap
-    to stay shut. A block holding no value paints its own points as absent
-    rather than as background — unpredicted ground is not outside the
-    model — and contributes to no corner (`_at_corners`' rule again).
+    to stay shut. A block holding no value contributes to no corner
+    (`_at_corners`' rule again), and where a valued block has each of its
+    corners it is read across from them, as the welded mesh reads a
+    valueless hexahedron. What else it covers is absent ground, with no
+    level to draw, and flying edges put a crossing between a value and
+    none at NaN. A contour closing against `background` closes against it
+    too, painted far past the level on the same side, within a hundredth
+    of a cell of the last valued corner; an open one draws nothing in a
+    cell any of whose corners is absent, and stops there as at the box.
     `margin` pads the painted box with that many cells of background on
     every side, so a field carried out to the edge of the blocks still
     closes before the image ends.
@@ -665,25 +678,51 @@ def _painted_contour(origin, size, step, values, corner, value, label,
     # a finite block bigger than one cell owns points no corner pass will
     # visit; it reads its eight corner means back from the table (its own
     # vote keeps them finite) to spread trilinearly. A one-cell block has
-    # no such points and needs no fill at all.
+    # no such points and needs no fill at all. A block holding no value
+    # fills the same way where the table has all eight of its corners,
+    # and paints its points absent, before any fill, where it does not.
     big = _np.any(size > 1, axis=1)
     big_rows = _np.flatnonzero(known & big)
     eight = corner_value[inverse[big[known]]]
     del inverse
+    absent_rows = _np.flatnonzero(~known)
+    if len(absent_rows) and len(corner_key):
+        keys = _corner_keys(origin[absent_rows], size[absent_rows], span)
+        at = _np.minimum(_np.searchsorted(corner_key, keys),
+                         len(corner_key) - 1)
+        reached = _np.all(corner_key[at] == keys, axis=1)
+        bridged = reached & big[absent_rows]
+        big_rows = _np.concatenate([big_rows, absent_rows[bridged]])
+        eight = _np.concatenate([eight, corner_value[at[bridged]]])
+        absent_rows = absent_rows[~reached]
+        del keys, at
     row_in_big = _np.full(len(values), -1, dtype=_np.int64)
     row_in_big[big_rows] = _np.arange(len(big_rows))
 
-    # sizes as one integer key: `unique` over an axis sorts rows as void
-    # records, which measured ~1.5 s of this call at 912k blocks where the
-    # keyed form is milliseconds
-    fill_rows = _np.flatnonzero(~known | (size > 1).any(axis=1))
-    size_key = (size[fill_rows, 0] + (size[fill_rows, 1] << 21)
-                + (size[fill_rows, 2] << 42))
-    _, first, member = _np.unique(size_key, return_index=True,
-                                  return_inverse=True)
-    classes = size[fill_rows[first]]
-    member = member.ravel()
+    def size_classes(rows):
+        # sizes as one integer key: `unique` over an axis sorts rows as void
+        # records, which measured ~1.5 s of this call at 912k blocks where
+        # the keyed form is milliseconds
+        size_key = (size[rows, 0] + (size[rows, 1] << 21)
+                    + (size[rows, 2] << 42))
+        _, first, member = _np.unique(size_key, return_index=True,
+                                      return_inverse=True)
+        return rows, size[rows[first]], member.ravel()
+
+    # the absent ground first, so a fill sharing a point with it wins
+    passes = [size_classes(absent_rows) + (False,),
+              size_classes(big_rows) + (True,)]
     thick = max(1, int(_PAINT_BUDGET // max(1, plane * n_fields)))
+    # absent ground reads a hundred times further past the level than any
+    # corner, on the side a closing contour leaves out, which puts the
+    # body's face against it within a hundredth of a cell of the corners
+    closing = bool(_np.isfinite(background))
+    gap = abs(background - value) if closing else 1.0
+    reach = _np.maximum(
+        _np.max(corner_value, axis=0, initial=value) - value,
+        value - _np.min(corner_value, axis=0, initial=value))
+    far = value + (_np.sign(background - value) if closing else -1.0) * (
+        100.0 * reach + gap)
     # the fills' coordinates in 32 bits wherever the painted box allows
     lattice = origin.astype(_np.int32) if int(span.max()) < 2 ** 31 \
         else origin
@@ -696,44 +735,45 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         paint = _np.full((n_fields, z_stop - z_start + 1, int(span[1]),
                           int(span[0])), background, dtype=float)
 
-        for index, shape in enumerate(classes):
-            rows = fill_rows[
-                (member == index)
-                & (origin[fill_rows, 2] <= z_stop)
-                & (origin[fill_rows, 2] + size[fill_rows, 2] >= z_start)]
-            if len(rows) == 0:
-                continue
-            offsets = _np.stack(_np.meshgrid(
-                _np.arange(shape[0] + 1), _np.arange(shape[1] + 1),
-                _np.arange(shape[2] + 1), indexing="ij"),
-                axis=-1).reshape(-1, 3)
-            t = offsets / shape
-            mix = _np.prod(_np.where(_gmt.HEX_CORNERS[None, :, :] == 1,
-                                     t[:, None, :], 1.0 - t[:, None, :]),
-                           axis=2)
-            offsets = offsets.astype(lattice.dtype)
-            # a few rows at a time: every point of every block of a size
-            # class at once -- int64 coordinates, their values, the mask
-            # and both kept copies -- was the paint's peak, well over its
-            # corner table (729 points a block for a coarse block eight
-            # cells a side)
-            batch = max(1, _FILL_BUDGET // (len(offsets) * n_fields))
-            for first_row in range(0, len(rows), batch):
-                part = rows[first_row:first_row + batch]
-                filled = _np.full((n_fields, len(part), len(offsets)),
-                                  _np.nan)
-                finite = known[part]
-                if finite.any():
-                    reading = eight[row_in_big[part[finite]]]
-                    for m in range(n_fields):
-                        filled[m, finite] = reading[:, :, m] @ mix.T
-                points = (lattice[part, None, :]
-                          + offsets[None, :, :]).reshape(-1, 3)
-                filled = filled.reshape(n_fields, -1)
-                keep = (points[:, 2] >= z_start) & (points[:, 2] <= z_stop)
-                points = points[keep]
-                paint[:, points[:, 2] - z_start, points[:, 1],
-                      points[:, 0]] = filled[:, keep]
+        for fill_rows, classes, member, fills in passes:
+            for index, shape in enumerate(classes):
+                rows = fill_rows[
+                    (member == index)
+                    & (origin[fill_rows, 2] <= z_stop)
+                    & (origin[fill_rows, 2] + size[fill_rows, 2] >= z_start)]
+                if len(rows) == 0:
+                    continue
+                offsets = _np.stack(_np.meshgrid(
+                    _np.arange(shape[0] + 1), _np.arange(shape[1] + 1),
+                    _np.arange(shape[2] + 1), indexing="ij"),
+                    axis=-1).reshape(-1, 3)
+                t = offsets / shape
+                mix = _np.prod(_np.where(_gmt.HEX_CORNERS[None, :, :] == 1,
+                                         t[:, None, :], 1.0 - t[:, None, :]),
+                               axis=2)
+                offsets = offsets.astype(lattice.dtype)
+                # a few rows at a time: every point of every block of a
+                # size class at once -- int64 coordinates, their values,
+                # the mask and both kept copies -- was the paint's peak,
+                # well over its corner table (729 points a block for a
+                # coarse block eight cells a side)
+                batch = max(1, _FILL_BUDGET // (len(offsets) * n_fields))
+                for first_row in range(0, len(rows), batch):
+                    part = rows[first_row:first_row + batch]
+                    filled = _np.full((n_fields, len(part), len(offsets)),
+                                      _np.nan)
+                    if fills:
+                        reading = eight[row_in_big[part]]
+                        for m in range(n_fields):
+                            filled[m] = reading[:, :, m] @ mix.T
+                    points = (lattice[part, None, :]
+                              + offsets[None, :, :]).reshape(-1, 3)
+                    filled = filled.reshape(n_fields, -1)
+                    keep = ((points[:, 2] >= z_start)
+                            & (points[:, 2] <= z_stop))
+                    points = points[keep]
+                    paint[:, points[:, 2] - z_start, points[:, 1],
+                          points[:, 0]] = filled[:, keep]
 
         # the corner means last, over whatever the fills wrote: every
         # point that is any block's corner reads the welded value
@@ -758,6 +798,10 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         # mesh never had the problem because an unstructured contour
         # inherits its input's float64.
         for m in range(n_fields):
+            absent = _np.isnan(paint[m])
+            holes = bool(absent.any())
+            if holes:
+                paint[m][absent] = far[m]
             image = _pv.ImageData(
                 dimensions=(int(span[0]), int(span[1]),
                             z_stop - z_start + 1),
@@ -774,15 +818,44 @@ def _painted_contour(origin, size, step, values, corner, value, label,
             piece = _pv.wrap(edges.GetOutput())
             if piece.n_cells:
                 piece = piece.triangulate()
-                verts[m].append(
-                    world + _np.asarray(piece.points, dtype=float) * step)
-                faces[m].append(piece.faces.reshape(-1, 4)[:, 1:] + count[m])
-                count[m] += len(verts[m][-1])
+                points = _np.asarray(piece.points, dtype=float)
+                triangles = piece.faces.reshape(-1, 4)[:, 1:]
+                if holes and not closing:
+                    points, triangles = _clear_of(absent, points, triangles,
+                                                  z_start)
+                if len(triangles):
+                    verts[m].append(world + points * step)
+                    faces[m].append(triangles + count[m])
+                    count[m] += len(points)
 
     found = [(_np.concatenate(verts[m]), _np.concatenate(faces[m]))
              if verts[m] else (_np.zeros([0, 3]), _np.zeros([0, 3], dtype=int))
              for m in range(n_fields)]
     return found[0] if fields is None else found
+
+
+def _clear_of(absent, points, triangles, z_start):
+    """The triangles of a painted slab drawn in cells with no absent corner,
+    and the points they use.
+
+    Flying edges draws each triangle inside one cell, so the cell holding
+    its centroid is the one that drew it, and a cell with an absent corner
+    has no level to draw whatever its other corners read. `absent` marks
+    the slab's points, z first, and `points` are in the image's own frame,
+    whose slab starts at `z_start`.
+    """
+    lost = _np.zeros([n - 1 for n in absent.shape], dtype=bool)
+    for dz, dy, dx in _iter.product((0, 1), repeat=3):
+        lost |= absent[dz:dz + lost.shape[0], dy:dy + lost.shape[1],
+                       dx:dx + lost.shape[2]]
+    cell = _np.floor(points[triangles].mean(axis=1)).astype(_np.int64)
+    cell[:, 2] -= z_start
+    cell = _np.clip(cell, 0, _np.array(lost.shape[::-1]) - 1)
+    triangles = triangles[~lost[cell[:, 2], cell[:, 1], cell[:, 0]]]
+    used = _np.unique(triangles)
+    index = _np.zeros(len(points), dtype=triangles.dtype)
+    index[used] = _np.arange(len(used))
+    return points[used], index[triangles]
 
 
 def _contour_column(blocks, path) -> "tuple[VariablePath, _Attribute]":
@@ -2177,6 +2250,12 @@ class BlockSet3D(PointData):
                 del at_corner
             near = _gmt.grow(corners, marked, margin)
             near &= _np.all(size >= ratio, axis=1)
+            # a block holding no value has nothing to hand down: whole, the
+            # paint reads it across from its corners where valued blocks
+            # have them all, and cut, its middle would be corners no valued
+            # block reaches
+            near &= _np.isfinite(values) if values.ndim == 1 \
+                else _np.all(_np.isfinite(values), axis=1)
             if not _np.any(near):
                 break
 
@@ -2191,11 +2270,7 @@ class BlockSet3D(PointData):
                 at_corner = means[:, k][corners[near]]
                 parts = at_corner @ weights.T
                 parts += (column - at_corner.mean(axis=1))[:, None]
-                # a block beside one that was never predicted has no shape
-                # to read off its corners, so it hands its own value down
-                # unchanged
-                shaped.append(_np.where(_np.isfinite(parts), parts,
-                                        column[:, None]).ravel())
+                shaped.append(parts.ravel())
             # this level's table goes before the next one is built, rather
             # than the two of them standing side by side at the peak
             del corners, means, decided, marked, at_corner, parts
@@ -2239,6 +2314,12 @@ class BlockSet3D(PointData):
         its parent's value and the shape its corners carry -- and the surface
         comes back the one a model carried at the finest size throughout would
         have given. See `_cut_to_contour`.
+
+        Blocks holding no value -- ground a `where=` left out, or a split not
+        yet predicted -- vote at no corner. One whose corners valued blocks
+        all share is read across from them; beyond that the ground has no
+        level to draw, and the surface stops at it, or with `close` closes
+        against it.
 
         Parameters
         ----------
@@ -2394,8 +2475,13 @@ class BlockSet3D(PointData):
                 # ghosts put the cap on the faces the old way
                 cell_values[inside:] = _ghost_values(mirrored, value,
                                                      keep_above)
-            mesh = self._hex_mesh(origin, size, step)
-            mesh.cell_data[label] = cell_values
+            # VTK averages cells onto points with a NaN in the sum, so the
+            # blocks holding no value stay out of the welded mesh, and the
+            # corners read the valued blocks alone, as the paint reads them
+            valued = _np.isfinite(cell_values)
+            mesh = self._hex_mesh(_np.asarray(origin)[valued],
+                                  _np.asarray(size)[valued], step)
+            mesh.cell_data[label] = cell_values[valued]
             welded = mesh.cell_data_to_point_data().contour(
                 [value], scalars=label)
             if welded.n_cells == 0:

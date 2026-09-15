@@ -29,11 +29,16 @@ Warpings chain, and the chain is read data-side first:
   winsorized data, so that one gross outlier cannot set the scale.
 - `BoxCox` and `YeoJohnson` are power links with a trainable exponent,
   the logarithm at one end and the identity at the other: Box-Cox for a
-  positive grade, whose inverse returns zero for whatever lies past its
-  floor and so can never go negative, Yeo-Johnson for a column that
-  crosses zero. `Arcsinh` is the zero-tolerant logarithm, and
+  positive grade, whose inverse returns zero for whatever lies below where
+  a zero lands and so can never go negative, Yeo-Johnson for a column
+  that crosses zero. `Arcsinh` is the zero-tolerant logarithm, and
   `SinhArcsinh` sets skewness and tail weight on a standardized column.
   All four start where the data are most Gaussian and train from there.
+  Box-Cox adds a `shift` before the power so that a zero has a logarithm,
+  and where the data hold zeros it wants the order of their smallest
+  positive value. At the default, a millionth, a zero sits so far down
+  the logarithm that the zeros alone bend the exponent; chapter 13 shows
+  what that did to Walker Lake.
 - `Spline` is a monotone spline for whatever asymmetry a parametric link
   leaves. It was the trainable heart of every chain in earlier releases; the
   links were measured to replace it on Walker Lake and Jura alike, with
@@ -53,11 +58,11 @@ data  ->  BoxCox  ->  ZScore  ->  latent field
 
 Read backwards, the field is un-standardized and goes through the
 inverse power, which returns a zero grade for anything the latent field
-puts below its floor and cannot be negative anywhere. No realization can
-come back negative, which is exactly the defect chapter 2 left open, and
-the exponent that decides how hard the tail is pulled in is trained with
-the model rather than chosen. Chapters 11 and 15 use this chain as their
-default.
+puts below where a zero lands and cannot be negative anywhere. No
+realization can come back negative, which is exactly the defect chapter 2
+left open, and the exponent that decides how hard the tail is pulled in
+is trained with the model rather than chosen. Chapters 11 and 15 use this
+chain as their default.
 
 One distinction the package tracks carefully: a warping is
 **elementwise** if each output component depends on its own input alone
@@ -139,10 +144,11 @@ import numpy as np
 geoml.set_seed(1234)
 walker, walker_grid = geoml.datasets.walker()
 
-# a power link for positivity and skew at once, its exponent trained;
-# then centring
+# a power link for positivity and skew at once, its exponent trained and
+# its shift one, the order of the smallest grade, for the zeros; then
+# centring
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.BoxCox(1),
+    geoml.warping.BoxCox(1, shift=1.0),
     geoml.warping.ZScore(1))
 
 experts = geoml.data.inducing.grid_experts(walker_grid, 10.0, block=8)
