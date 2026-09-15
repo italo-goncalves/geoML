@@ -72,6 +72,17 @@ def _leading_chunk(shape, dtype):
     return (int(rows),) + tuple(int(s) for s in shape[1:])
 
 
+def _zarr_dtype(dtype):
+    """`dtype` under the class NumPy names it by, which is the class Zarr
+    matches. A C `long long` array on Linux is 64-bit integers of another
+    dtype class, printing as int64 -- VTK 9.7 hands its integer arrays back
+    that way -- and Zarr refuses it ("no Zarr data type found that matches
+    dtype('int64')"). Rebuilt from its type string, a number's dtype keeps
+    its bytes and takes the canonical class."""
+    dtype = _np.dtype(dtype)
+    return _np.dtype(dtype.str) if dtype.kind in "biufc" else dtype
+
+
 def _use_zarr(shape, dtype, threshold):
     """Whether an array of this shape/dtype should live on disk."""
     if _np.dtype(dtype) == object:
@@ -242,7 +253,7 @@ class ArrayStore:
         if store is None and owner is not None:
             scratch = _scratch_for(owner)
             array = scratch.create_array(
-                shape, _np.dtype(dtype), fill_value, chunks)
+                shape, _zarr_dtype(dtype), fill_value, chunks)
             return cls(array, backend="zarr", store_path=scratch.path)
 
         tempdir = None
@@ -253,7 +264,7 @@ class ArrayStore:
 
         array = _zarr.create_array(
             store=store, shape=shape, chunks=chunks,
-            dtype=_np.dtype(dtype), fill_value=fill_value)
+            dtype=_zarr_dtype(dtype), fill_value=fill_value)
         return cls(array, backend="zarr", store_path=store_path, _tempdir=tempdir)
 
     @classmethod
@@ -282,7 +293,7 @@ class ArrayStore:
         fill = _np.nan if _np.issubdtype(_np.dtype(self.dtype), _np.floating) else 0
         target = group.create_array(
             name=name, shape=self.shape, chunks=chunks,
-            dtype=_np.dtype(self.dtype), fill_value=fill)
+            dtype=_zarr_dtype(self.dtype), fill_value=fill)
         _da.store(self.as_dask(), target, lock=False)
         return target
 
