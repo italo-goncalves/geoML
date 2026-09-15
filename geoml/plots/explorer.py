@@ -417,8 +417,9 @@ class Explorer(_base.Selection):
 
         Two things worth checking before trusting a fitted model, and both are
         easier to see than to test. Down the diagonal, whether the warping
-        made each variable Gaussian: the standard normal it is aiming at is
-        drawn over each histogram. Off the diagonal, whether what is left is
+        made each variable Gaussian: a normal of the column's own mean and
+        spread is drawn over each histogram, so the shape is judged and not
+        the scale. Off the diagonal, whether what is left is
         independent: a round cloud with a correlation near zero is what the
         model assumes, and a tilted or curved one is structure it will not
         capture.

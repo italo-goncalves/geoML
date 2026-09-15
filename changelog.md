@@ -857,6 +857,25 @@ saved models and as an optional two-knot refinement behind a link. The
 manual's seven spline chains were switched the same day: `BoxCox →
 ZScore` on Walker Lake (chapters 4, 5, 7, 11, 13, 15) and the vector
 chain on Jura (chapter 16), figures and quoted numbers re-earned.
+* **The release run.** The full suite, 1625 tests, green once one test
+was brought back to what it meant: `test_no_variance_is_basic_gp`
+compared a `BasicGP` and an `UncertainInputGP` draw for draw, and since
+each node's draws are keyed by its name the two were different streams
+by construction, failing since that change; both nodes are now named
+alike and agree to 1e-10. The manual's run regenerated seventeen figures,
+the realizations drawing new numbers now that each node keys its own and
+the measurement samples sitting on rotated nodes, and every claim the
+prose makes of them was checked against the fresh ones. None was
+contradicted by what moved. The histograms' new statistics contradict one:
+Walker Lake's `V` is not "positive, strongly skewed" but non-negative, an
+eighth of it in the lowest bin, skew 0.46 under a long thin tail, and
+chapter 15 now says so. Three were wrong before the figures moved, and are
+corrected in chapter 16: its transformed pairs carry a normal fitted to each
+column, not the standard normal the prose and `transformed_pairs`'
+docstring named; its accuracy figure scores measurements, where the
+table's goodness reads the simulations; and three of its seven metals are
+not skewed. Chapter 13's variogram verdict is left for a measured look
+(roadmap).
 
 ## version 0.6.9
 * **The latent-node protocol is two primitives and one composer.** Every

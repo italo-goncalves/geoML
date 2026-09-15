@@ -100,8 +100,10 @@ def test_no_variance_is_basic_gp():
     query = geoml.data.PointData.from_array(_points(20, 2, seed=5), labels)
     results = []
     for node in (geoml.latent.BasicGP, geoml.latent.UncertainInputGP):
+        # one name for both: a node's draws are keyed by its name, and the
+        # two classes' own would be BasicGP_1 and UncertainInputGP_1
         model, _ = _model(point, geoml.latent.GaussianInput(
-            inducing, transform=tr.Isotropic(40.0)), node=node)
+            inducing, transform=tr.Isotropic(40.0)), node=node, name="gp")
         model.predict(query, n_sim=6)
         results.append((
             np.asarray(query.values("v/prediction"), dtype=float),

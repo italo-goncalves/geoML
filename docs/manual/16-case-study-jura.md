@@ -45,8 +45,9 @@ explore.pairs(kind="scatter").savefig("figures/16-pairs.png", dpi=150,
 Two arguments for the joint model, both visible before any modelling. The
 histograms grouped by rock type show several metals shifting distribution
 with the geology, so the rock type is informative about the grades. The
-pair plot shows the metals are strongly correlated with each other and
-skewed, which is what the warping chain below has to deal with.
+pair plot shows the metals are strongly correlated with each other, and
+four of them — cadmium, copper, lead and zinc — skewed, which is what the
+warping chain below has to deal with.
 
 ## 16.2 A non-stationary network, and how one variable reaches another
 
@@ -222,8 +223,10 @@ figure.savefig("figures/16-transformed.png", dpi=150, bbox_inches="tight")
 
 ![The metals as the model sees them](figures/16-transformed.png)
 
-Down the diagonal, each column should sit under the standard normal drawn
-over it. Off the diagonal, the clouds should be round and the correlations
+Down the diagonal, each column should sit under the normal drawn over it,
+one of the column's own mean and spread: the warping's trained scale need
+not be one, the GP's amplitude absorbing it, so it is the shape that is
+read. Off the diagonal, the clouds should be round and the correlations
 near zero. The columns are numbered rather than named, because after a
 rotation a column is a mixture of the measured elements rather than any one
 of them. Leaning clouds here are dependence the model is about to assume
@@ -263,7 +266,9 @@ explore.simulation_pairs().savefig("figures/16-simulation-pairs.png",
 
 `compute_metrics` reports per component: seven columns for the metals, and
 balanced accuracy and friends per rock class. That is the table a report
-wants, and the accuracy figure is its calibration column drawn.
+wants. The accuracy figure is its calibration column done honestly: it
+scores samples of a measurement, where the table's goodness reads the
+stored simulations and so reads low (§16.3).
 
 One column in the rock table is worth reading before it is mistaken for a
 bug. Portlandian comes back with a balanced accuracy of 0.5 and a Jaccard

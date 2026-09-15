@@ -678,6 +678,18 @@ signature of a 16 GB runner accumulating TensorFlow, matplotlib and pyvista.
 read the `manual` job. If it ever dies the same way again, the next lever is
 not a longer timeout.
 
+**S — Chapter 13's variogram verdict, read against its figure** (found
+2026-09-14, checking the release's regenerated figures against the prose).
+The prose says the fan "tracks the data across the whole range" and the
+model passes. The shape does track, but the data's curve sits below the
+fan's lowest realization at 10 of 12 lags: 1 to 7 thousand under at most,
+about 20 thousand at the first. It did the same before the figures were
+redrawn, and chapter 15's variogram, the same figure, is read the same way.
+The fan is exact since 2026-09-09, so the gap is the model's own variance
+at short lags. Measure whether the Walker model fits its noise high, and
+say so in both chapters. The same page's "both curves still sit near twice
+the true value at the shortest lag" draws no true curve to read it off.
+
 (Chapter 16's figures: **verified 2026-09-05** — rerun through the manual's
 own runner after the leaves change, the seeded chapter reproduced every
 committed figure byte for byte, and the §16.5 prose matches what the model
