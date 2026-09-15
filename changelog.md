@@ -9,6 +9,8 @@ machine on VTK 9.5 never saw it. The stores now hand Zarr a number's
 dtype under its canonical class (`storage._zarr_dtype`), the same bytes.
 One test in `test_storage.py`, which fails on the old code with this
 machine's zarr as well.
+* **The release run**: the full suite, 1626 tests, and every chapter of
+the manual, whose figures came back as 0.6.10 left them.
 
 ## version 0.6.10
 * **A tree's leaves are the points of contact with the likelihoods.**
