@@ -107,8 +107,8 @@ kriging with it.
 Two layers on Walker Lake: a two-column inner GP warping space, and a
 one-column outer GP reading the warped coordinates alongside the real
 ones. The inducing points are chapter 3's grid of experts, and the warping
-is the positive chain of chapter 4 with a `Scale` in front, so the
-predictions stay in assay units and cannot come back negative.
+is the positive chain of chapter 4, so the predictions cannot come back
+negative.
 
 ```python
 import geoml
@@ -140,7 +140,7 @@ outer = geoml.latent.BasicGP(
     kernel=geoml.kernels.Spherical())
 
 warping = geoml.warping.ChainedWarping(
-    geoml.warping.BoxCox(1),
+    geoml.warping.BoxCox(1, shift=1.0),
     geoml.warping.ZScore(1))
 
 model = geoml.models.VGPNetwork(
@@ -170,7 +170,8 @@ print("lowest prediction:",
 The value is positive, and it is positive by construction rather than by
 luck. Chapter 2's model could return a negative grade wherever it was
 unsure. This one cannot, at any location and in any realization, because
-the softplus in the chain has no negative branch.
+the chain's inverse power returns a zero grade for anything the latent
+field puts below where a zero lands.
 
 Depth costs iterations. A two-layer model settles more slowly than a flat
 one, and it repays the wait only where the geometry is genuinely curved,

@@ -69,6 +69,19 @@ def test_the_measurements_are_taken_at_construction():
     assert not hasattr(sheet, "volume")     # a sheet encloses nothing
 
 
+def test_a_mesh_refuses_points_that_are_not_numbers():
+    """A NaN vertex passes through every measure without a word: a contour
+    through unpredicted blocks came back a Solid3D of NaN volume."""
+    points, triangles = _arrays(pv.Box())
+    points[3] = np.nan
+    normals = np.zeros_like(points)
+
+    with pytest.raises(ValueError, match="1 of the %d points" % len(points)):
+        mesh3d(points, triangles, normals)
+    with pytest.raises(ValueError, match="not finite"):
+        Mesh3D(points, triangles, normals)
+
+
 def test_a_sphere_measures_up():
     sphere = _build(pv.Sphere(radius=2.0, theta_resolution=60,
                               phi_resolution=60), Solid3D)

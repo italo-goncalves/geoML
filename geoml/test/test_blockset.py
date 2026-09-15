@@ -1473,6 +1473,107 @@ def test_a_contour_meeting_its_cap_edge_on_is_still_a_body():
     assert higher.volume <= shell.volume <= lower.volume
 
 
+def _every_fourth(xyz):
+    """Every fourth row: on this lattice, two walls of blocks one thick."""
+    return np.arange(len(xyz)) % 4 == 0
+
+
+def _above_100(xyz):
+    return xyz[:, 2] > 100.0
+
+
+def _ball_with_holes(centre, unpredicted):
+    """`_ball_blocks` with the blocks `unpredicted` picks holding no value."""
+    blocks = _ball_blocks(centre)
+    values = np.array(blocks.values("g/prediction"), dtype=float)
+    values[unpredicted(np.asarray(blocks.coordinates))] = np.nan
+    blocks.variables["g"].prediction.values[:] = values
+    return blocks
+
+
+@pytest.mark.parametrize("close", [False, "above"])
+@pytest.mark.parametrize("unpredicted", [_every_fourth, _above_100])
+def test_a_contour_puts_no_vertex_where_nothing_was_predicted(unpredicted,
+                                                             close):
+    """Flying edges places a crossing between a value and none at NaN: with
+    every fourth block of this model unpredicted, 138 of the contour's 548
+    vertices were NaN, and it still came back a Solid3D, of NaN volume."""
+    blocks = _ball_with_holes([80.0, 80.0, 80.0], unpredicted)
+
+    surface = blocks.get_contour("g", -50.0, close=close)
+
+    assert np.all(np.isfinite(np.asarray(surface.coordinates)))
+
+
+@pytest.mark.parametrize("close", [False, "above"])
+def test_a_contour_reads_across_a_valueless_block_between_valued_ones(close):
+    """A block holding no value, every corner of which a valued block shares,
+    is read across from those corners, as the welded mesh reads any
+    hexahedron: a wall of such blocks through its middle leaves the ball a
+    body, 3.9% smaller, the corners along the wall reading the blocks on
+    one side of it only."""
+    whole = _ball_blocks([80.0, 80.0, 80.0]).get_contour("g", -50.0)
+
+    holed = _ball_with_holes([80.0, 80.0, 80.0], _every_fourth).get_contour(
+        "g", -50.0, close=close)
+
+    assert isinstance(holed, geoml.data.Solid3D)
+    assert holed.volume == pytest.approx(whole.volume, rel=0.05)
+
+
+def test_a_contour_stops_where_the_prediction_does():
+    """Ground holding no value has no level to draw. An open contour ends
+    at it, as it ends at the box, and a closed one closes against it, within
+    a hundredth of a cell of the last corner a valued block has."""
+    import pyvista as pv
+    centre = [80.0, 80.0, 80.0]
+    blocks = _ball_with_holes(centre, _above_100)
+    xyz = np.asarray(blocks.coordinates)
+    holes = _above_100(xyz)
+    # the box starts half a block below the first centre, so the ground
+    # left out starts at 110, not 100
+    face = float(np.min(xyz[holes, 2]
+                        - 0.5 * np.asarray(blocks.block_size)[holes, 2]))
+
+    open_shell = blocks.get_contour("g", -50.0)
+    closed = blocks.get_contour("g", -50.0, close="above")
+
+    assert not open_shell.closed
+    assert np.max(np.asarray(open_shell.coordinates)[:, 2]) <= face + 1e-6
+    assert isinstance(closed, geoml.data.Solid3D)
+    assert np.max(np.asarray(closed.coordinates)[:, 2]) <= face + 0.1
+    # below that face it is the ball the whole model draws
+    whole = _ball_blocks(centre).get_contour("g", -50.0, close="above")
+    low = np.ravel(blocks.bounding_box.min)
+    high = np.ravel(blocks.bounding_box.max)
+    under = pv.Box(bounds=(low[0], high[0], low[1], high[1], low[2],
+                           face)).triangulate()
+    points = np.asarray(under.points, dtype=float)
+    triangles = under.faces.reshape(-1, 4)[:, 1:]
+    under = geoml.data.mesh3d(
+        points, triangles, geoml.math.geometry.vertex_normals(points,
+                                                              triangles))
+    assert closed.volume == pytest.approx(whole.intersection(under).volume,
+                                          rel=0.02)
+
+
+def test_the_welded_fallback_leaves_unpredicted_ground_out(monkeypatch):
+    """VTK averages cells onto points with a NaN in the sum, so the welded
+    mesh is built from the valued blocks alone, whose corners then read
+    what the painted route reads there."""
+    import geoml.data.blocks as blk
+    blocks = _ball_with_holes([80.0, 80.0, 80.0], _above_100)
+    # every painted surface classified as no body, the fallback's trigger
+    monkeypatch.setattr(blk, "mesh3d",
+                        lambda points, triangles, normals:
+                        geoml.data.Mesh3D(points, triangles, normals))
+
+    surface = blocks.get_contour("g", -50.0)
+
+    assert surface.n_data > 0
+    assert np.all(np.isfinite(np.asarray(surface.coordinates)))
+
+
 def test_close_wants_a_side():
     blocks = _blockset()
     _graded(blocks, np.linspace(0.0, 1.0, blocks.n_data))

@@ -190,6 +190,14 @@ class Mesh3D(_PointBased):
             raise ValueError("triangles must be an array with 3 columns")
         if normals.shape[1] != 3:
             raise ValueError("normals must be an array with 3 columns")
+        finite = _np.all(_np.isfinite(points), axis=1)
+        if not _np.all(finite):
+            # a NaN vertex passes through every measure below without a
+            # word, into an area and a volume of NaN: a contour through
+            # unpredicted blocks was once classed a Solid3D that way
+            raise ValueError(
+                "%d of the %d points have coordinates that are not finite "
+                "numbers" % (int(_np.count_nonzero(~finite)), points.shape[0]))
         if triangles.size > 0:
             reach = (int(_np.min(triangles)), int(_np.max(triangles)))
             if reach[0] < 0 or reach[1] >= points.shape[0]:

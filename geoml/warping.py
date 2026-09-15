@@ -747,17 +747,22 @@ class BoxCox(_Warping):
     size
         Number of components.
     shift
-        A positive value added to the data before the power, for zeros.
+        A positive value added to the data before the power, which gives a
+        zero a logarithm. Where the data hold zeros it wants the order of
+        their smallest positive value: a zero shifted by far less sits so
+        far down the logarithm that the zeros alone pull the exponent
+        toward it, and the inverse steepens with it.
     exponent
         The starting exponent, one value or one per component;
         `initialize` replaces it.
 
     Notes
     -----
-    The exponent is kept in ``[0, 2]``. With ``λ > 0`` the transformed
-    values are bounded below by ``-1/λ``; a latent draw past that bound has
-    no pre-image and `backward` returns the floor, a value of zero, which
-    is finite and harmless. A negative exponent bounds them *above*, and
+    The exponent is kept in ``[0, 2]``. A zero maps to
+    ``(shift**λ - 1) / λ``, and a latent draw below that comes back as
+    zero: its pre-image lies under zero, and past ``-1/λ`` there is none at
+    all, so `backward` never returns a negative value whatever the shift.
+    A negative exponent bounds the transformed values *above*, and
     the inverse then blows up toward that bound -- measured on Jura at 826
     times the data's maximum on tail draws, with the mean prediction
     destroyed in one arm -- so negative exponents are not offered.
@@ -807,7 +812,9 @@ class BoxCox(_Warping):
 
     def backward(self, x):
         lam = self.parameters["exponent"].get_value()[None, :]
-        return _tf.exp(self._root(x, lam)) - self.shift
+        # a draw under zero's own image has its pre-image under zero, down
+        # to minus the shift: a zero grade, as the floor past -1/λ is
+        return _tf.maximum(_tf.exp(self._root(x, lam)) - self.shift, 0.0)
 
     def initialize(self, x, weights=None):
         x = _np.asarray(x, dtype=float)

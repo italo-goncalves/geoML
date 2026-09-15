@@ -16,7 +16,11 @@
 # runs alone in its own process; everything else runs in the other. On
 # the v0.6.9 tag the manual job died the same way on its own (exit 143
 # at 22 minutes of 90), so `test_manual.py` now runs one subprocess per
-# chapter; a longer timeout was never the lever.
+# chapter; a longer timeout was never the lever. On the v0.6.10 and v0.6.11
+# tags the other job went the same way, cancelled at 93-95% with no test
+# failing: as one process the suite peaks at 23.1 GB. It runs one process
+# per test file now, which bounds it at the heaviest file's peak, 6.1 GB
+# (test_uncertain_input_gp.py, measured 2026-09-15).
 
 name: tests
 
@@ -77,11 +81,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
         run: pip install -e .[geoh5] pytest
-      - name: Full suite, the manual aside
-        run: >-
-          python -m pytest -q geoml/test
-          --ignore=geoml/test/test_manual.py
-          --deselect geoml/test/test_real_cases.py::test_sunspot_deep_model
+      - name: Full suite, one process per file, the manual aside
+        run: |
+          failed=()
+          for file in geoml/test/test_*.py; do
+            [ "$file" = geoml/test/test_manual.py ] && continue
+            python -m pytest -q "$file" \
+              --deselect geoml/test/test_real_cases.py::test_sunspot_deep_model \
+              || failed+=("$file")
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            printf 'failed: %s\n' "${failed[@]}"
+            exit 1
+          fi
 
   manual:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'

@@ -1,0 +1,4 @@
+values: 470, zeros 22, smallest positive 2.1, largest 1528.1
+shift 1e-6             starts at 0.375; the zeros sit -2.60 sd from the mean, the next value -2.22
+shift 1                starts at 0.550; the zeros sit -2.05 sd from the mean, the next value -1.98
+shift 1e-6, no zeros   starts at 0.600; the zeros sit nan sd from the mean, the next value -2.19
