@@ -670,10 +670,11 @@ refinement and contour-cutting do not.
 
 ## 5. Housekeeping, docs and release
 
-(The tag's `full` CI job dying at 93%: **done 2026-09-15, 0.6.12, not yet
-seen on a tag**. On the v0.6.10 and v0.6.11 tags the suite ran clean to
-93-95% and was cancelled with no test failing; as one pytest process it
-peaks at 23.1 GB, and the runner has 16. The job runs one process per
+(The tag's `full` CI job dying at 93%: **done 2026-09-15, 0.6.12, and
+passed on the v0.6.12 tag in 37 minutes**, the first full job to pass on
+a tag since v0.6.9's. On the v0.6.10 and v0.6.11 tags the suite ran clean
+to 93-95% and was cancelled with no test failing; as one pytest process
+it peaks at 23.1 GB, and the runner has 16. The job runs one process per
 test file now: under a 14 GB cap every file passed, the heaviest peaking
 at 6.1 GB.)
 
