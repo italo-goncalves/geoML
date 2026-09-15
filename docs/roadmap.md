@@ -670,13 +670,21 @@ refinement and contour-cutting do not.
 
 ## 5. Housekeeping, docs and release
 
-**S — Verify the tag-triggered manual CI job.** The `full` job passed at
-v0.6.9 for the first time since v0.6.5, but `manual` alone was still killed
-at 22 minutes of a 90-minute budget with no pytest output — the OOM
-signature of a 16 GB runner accumulating TensorFlow, matplotlib and pyvista.
-`test_manual.py` now runs one subprocess per chapter. Owed: a dispatch, then
-read the `manual` job. If it ever dies the same way again, the next lever is
-not a longer timeout.
+**S — The tag's `full` CI job dies at 93%** (found 2026-09-15). On the
+v0.6.10 and v0.6.11 tags the full suite ran clean to 93-95% and was
+cancelled at 24 minutes, "The operation was canceled" and no test failing,
+the same point both times. It is memory: the suite as one pytest process
+peaks at 23.1 GB here (a capped unit's cgroup peak, both releases), and
+the runner has 16 GB. The manual already runs a subprocess per chapter for
+this reason; the full job wants the same, one process per test file, which
+bounds its peak at the heaviest file's.
+
+(The tag-triggered manual CI job: **verified 2026-09-14**. At v0.6.9 it was
+killed at 22 minutes of a 90-minute budget with no pytest output, the OOM
+signature of a 16 GB runner accumulating TensorFlow, matplotlib and
+pyvista. With `test_manual.py` running one subprocess per chapter, it
+passed on the v0.6.10 tag in 28 minutes. If it ever dies the same way
+again, the next lever is not a longer timeout.)
 
 **S — Chapter 13's variogram verdict, read against its figure** (found
 2026-09-14, checking the release's regenerated figures against the prose).
