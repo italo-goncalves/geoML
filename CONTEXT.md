@@ -35,6 +35,12 @@ The value a decision turns on — a mining cut-off, a contaminant limit.
 Declared on a variable and carried to whatever is predicted from it.
 _Avoid_: threshold, grade limit
 
+**Proportion**:
+The share of a block, over its sub-blocks and its realizations, **at or
+below** a cut-off; for a category, the share of the block inside it. The
+share above, the part a mine would call ore, is one minus it.
+_Avoid_: recoverable share (that is the complement), tonnage fraction
+
 **Unit**:
 What a variable's values are measured in — percent, ppm, g/t. A label on a
 variable the model reads directly; also the divisor on a part of a

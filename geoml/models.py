@@ -205,9 +205,12 @@ class _Convergence:
     stopping when the first is a small enough fraction of the second.
 
     Two things about that ratio are deliberate. Measuring progress from the
-    **start of this call** keeps the phased pattern working -- a model
-    trained, given a smaller learning rate and trained again plateaus and
-    then improves, and each phase is judged on its own terms. And measuring
+    **start of the phase** -- the calls one optimizer makes on one set of
+    trained parameters, which a model carries from call to call
+    (`VGPNetwork._training_phase`) -- keeps the phased pattern working: a
+    model trained, given a smaller learning rate and trained again plateaus
+    and then improves, and each phase is judged on its own terms, while
+    training split into chunks stops where one call would. And measuring
     the recent gain against the total one rather than against the bound's
     value is the only scale-free choice available: an ELBO's magnitude means
     nothing on its own, since it grows with the number of data points and
@@ -244,11 +247,14 @@ class _Convergence:
             weight = 2.0 / (self.window + 1.0)
             smoothed = weight * value + (1.0 - weight) * self.trail[-1]
         self.trail.append(smoothed)
+        return self.settled()
 
+    def settled(self):
+        """Whether the bounds seen so far say stop, without adding one."""
         # nothing to look back at yet, which is the burn-in: a flat stretch
         # before any real progress has a small numerator and a small
         # denominator, and their ratio is not evidence of anything
-        if len(self.trail) <= self.window:
+        if self.tolerance <= 0.0 or len(self.trail) <= self.window:
             return False
 
         recent = abs(self.trail[-1] - self.trail[-1 - self.window])
@@ -888,6 +894,8 @@ class VGPNetwork(_GPModel):
         # the one traced training step this model reuses -- see
         # `_training_step`
         self._step = None
+        # what the next training call goes on with -- see `_training_phase`
+        self._phase = None
 
         # initializing likelihoods -- declustered where the data carries
         # the column `container.decluster()` keeps, so the warpings start
@@ -1167,9 +1175,56 @@ class VGPNetwork(_GPModel):
         the step count its learning-rate schedule reads -- leaving the
         optimizer object, and so the traced step that captured it, where
         they are. `set_learning_rate` replaces the object instead, which a
-        new rate needs and which costs a retrace."""
+        new rate needs and which costs a retrace. Either way the next
+        training call starts a phase of its own (`_training_phase`)."""
         for variable in self.optimizer.variables:
             variable.assign(_tf.zeros(variable.shape, variable.dtype))
+        self._phase = None
+
+    def _training_phase(self, variables, kind):
+        """The stopping rule and the minibatch order a training call goes on
+        with.
+
+        A phase is the run of `kind` calls ("full" or "svi") one optimizer
+        makes on one set of trained parameters. Training in chunks -- how a
+        caller reports progress or honours a cancel between them -- then
+        takes the steps one call would and stops where it would: the
+        optimizer's state and the seed carry over by themselves, and the
+        rule's trail and the batch order are carried here. A new optimizer
+        (`set_learning_rate`), `_reset_optimizer`, other trained parameters
+        or the other trainer start a new phase, judged from its own start.
+        """
+        if self._phase is not None:
+            cached, optimizer, cached_kind, converged, rng = self._phase
+            if optimizer is self.optimizer and cached_kind == kind \
+                    and len(cached) == len(variables) \
+                    and all(a is b for a, b in zip(cached, variables)):
+                # read afresh, so that a lowered tolerance trains on
+                converged.tolerance = self.options.training_tolerance or 0.0
+                return converged, rng
+
+        converged = _Convergence(self.options.training_tolerance)
+        # a generator of its own, so the batch order is reproducible from
+        # options.seed without reaching any draw made outside training
+        rng = _np.random.default_rng(self.options.seed)
+        self._phase = (tuple(variables), self.optimizer, kind, converged, rng)
+        return converged, rng
+
+    @property
+    def converged(self) -> bool:
+        """Whether the bound has settled in the current phase of training.
+
+        True once `options.training_tolerance` has stopped a call, and until
+        the optimizer is replaced or reset or other parameters are trained.
+        A training call made while it holds returns without a step.
+        """
+        if self._phase is None:
+            return False
+        cached, optimizer, _, converged, _ = self._phase
+        variables = self.get_unfixed_variables()
+        return optimizer is self.optimizer and len(cached) == len(variables) \
+            and all(a is b for a, b in zip(cached, variables)) \
+            and converged.settled()
 
     def _training_step(self, variables, training_inputs):
         """
@@ -1242,12 +1297,18 @@ class VGPNetwork(_GPModel):
         together; past that, use :meth:`train_svi`. The evidence lower bound
         of each iteration is appended to `training_log`.
 
+        Consecutive calls with one optimizer on the same trained parameters
+        continue each other: `train_full(100)` twice takes the steps of
+        `train_full(200)` and stops where it would. `set_learning_rate`
+        starts afresh.
+
         Parameters
         ----------
         max_iter
             Number of iterations, and a cap rather than a count when
             `options.training_tolerance` asks training to stop once the
-            bound settles.
+            bound settles; a call made once it has settled (`converged`)
+            takes none.
 
         See Also
         --------
@@ -1258,14 +1319,17 @@ class VGPNetwork(_GPModel):
 
         model_variables = self.get_unfixed_variables()
         step = self._training_step(model_variables, training_inputs)
+        converged, _ = self._training_phase(model_variables, "full")
+        if converged.settled():
+            if self.options.verbose:
+                print("The bound has settled; nothing to train.")
+            return
 
         # the whole data set every iteration, so it is converted once
         x = _tf.constant(self.data.coordinates, _tf.float64)
         y = _tf.constant(self.y, _tf.float64)
         has_value = _tf.constant(self.has_value, _tf.float64)
         x_var = _tf.constant(self.data.get_batched_variance()[0], _tf.float64)
-
-        converged = _Convergence(self.options.training_tolerance)
 
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
@@ -1297,15 +1361,21 @@ class VGPNetwork(_GPModel):
 
         Each epoch visits the data once, in batches of
         `options.training_batch_size`, drawn in an order reproducible from
-        the model's seed. The mean bound over an epoch's batches is appended
-        to `training_log`.
+        the model's seed. The bound of each batch is appended to
+        `training_log`.
+
+        Consecutive calls with one optimizer on the same trained parameters
+        continue each other, the batch order included: `train_svi(5)` twice
+        takes the steps of `train_svi(10)` and stops where it would.
+        `set_learning_rate` starts afresh.
 
         Parameters
         ----------
         epochs
             Number of passes over the data, and a cap rather than a count
             when `options.training_tolerance` asks training to stop once the
-            bound settles. The criterion reads one value an epoch, the mean
+            bound settles; a call made once it has settled (`converged`)
+            takes none. The criterion reads one value an epoch, the mean
             over its batches.
 
         See Also
@@ -1322,11 +1392,12 @@ class VGPNetwork(_GPModel):
         # judged once an epoch, on the mean over its batches: a single
         # batch's bound is an estimate with noise of its own, and smoothing
         # that would only measure how the batches were drawn
-        converged = _Convergence(self.options.training_tolerance)
+        converged, rng = self._training_phase(model_variables, "svi")
+        if converged.settled():
+            if self.options.verbose:
+                print("The bound has settled; nothing to train.")
+            return
 
-        # a generator of its own, so the batch order is reproducible from
-        # options.seed without reaching any draw made outside training
-        rng = _np.random.default_rng(self.options.seed)
         with _latent.propagation_rule(self.options.expert_propagation):
             for i in range(epochs):
                 current_elbo = []
@@ -1476,6 +1547,17 @@ class VGPNetwork(_GPModel):
             fresh = v not in newdata.variables.keys()
             if fresh:
                 self.data.variables[v].copy_to(newdata)
+            else:
+                # the shares are computed at the training variable's cut-offs
+                # and filed by position under the target's, so a target that
+                # declares others takes the model's first
+                for path, old, new in newdata.variables[v]._adopt_cutoffs(
+                        self.data.variables[v]):
+                    warnings.warn(
+                        "%s declared the cut-offs %s, and the model computes "
+                        "its shares at %s; it declares the model's now, and "
+                        "the shares of the ones it gave up were dropped"
+                        % (path, old, new))
             # Allocate when the variable is new, whether or not only some
             # locations are being visited: what is not visited stays NaN,
             # which is what `unpredicted` reads and what the reporting layer
@@ -2116,14 +2198,21 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     Returns
     -------
     oof : container
-        A copy of the training data carrying out-of-fold predictions and
+        A copy of the training data -- every variable and metadata column,
+        the fold labels included -- carrying out-of-fold predictions and
         simulations, plus one metadata column per scored component
         (`pit_<variable>`, or `pit_<variable>_<component>`) holding where
-        each measurement fell inside its own predictive distribution.
+        each measurement fell inside its own predictive distribution. It
+        saves with `to_zarr` and opens with `open` like any container.
     scores : pandas.DataFrame
-        One row per component and fold, plus a pooled `"all"` row, with
-        `rmse`, `mae`, `bias`, `crps` and `goodness` against the held-out
-        measurements.
+        One row per scored component and fold, in the folds' sorted order,
+        then one per component pooled over every fold, whose `fold` is
+        `"all"`. The columns: `n`, the held-out measurements scored;
+        `rmse`, `mae` and `bias` of the mean of the measurement samples
+        against them, the bias being that mean minus the measurement;
+        `crps`, from the samples; `goodness`, of the samples' interval
+        coverage; `variable`; `component`, the variable's own name for a
+        scalar one; and `fold`, the fold's label.
 
     See Also
     --------

@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 import numpy as np
 import pytest
+import zarr
 
 import geoml
 import geoml.data.meshsets as msm
@@ -872,6 +873,72 @@ def test_a_store_given_at_construction_is_the_set_s_own(radial, tmp_path):
     del made
     gc.collect()
     assert os.path.isdir(path)
+
+
+_DESCRIPTION = sorted([
+    "close", "corners", "excluded", "failures", "format", "groups", "keys",
+    "kind", "levels", "limits", "measures", "name", "nudge", "numbers",
+    "path", "provenance", "realization", "repairs", "rule", "shift",
+    "simplify", "summary", "supersample", "taken", "unit"])
+
+
+def test_the_store_is_laid_out_as_its_reference_page_says(shells, tmp_path):
+    """Other programs read a set's store without geoML, following
+    `docs/source/reference/stores.md`. A change to what is written here
+    changes that page -- and `_STORE_FORMAT`, where a reader of the old
+    layout would misread the new one."""
+    path = str(tmp_path / "shells.zarr")
+    shells.to_zarr(path)
+    root = zarr.open_group(path, mode="r")
+
+    assert list(root.attrs) == ["geoml_meshset"]
+    meta = root.attrs["geoml_meshset"]
+    assert msm._STORE_FORMAT == 1 and meta["format"] == 1
+    assert sorted(meta) == _DESCRIPTION
+    assert meta["groups"] == ["20.0", "30.0", "40.0"]
+    assert sorted(name for name, _ in root.groups()) \
+        == ["prediction", "simulations"]
+    assert sorted(name for name, _ in root["simulations"].groups()) \
+        == sorted(str(n) for n in meta["numbers"])
+
+    meshes = ["prediction/%s" % g for g in meta["groups"]] \
+        + ["simulations/%d/%s" % (n, g)
+           for n in meta["numbers"] for g in meta["groups"]]
+    for name in meshes:
+        mesh = root[name]
+        assert sorted(a for a, _ in mesh.arrays()) \
+            == ["_coordinates", "_normals", "_triangles"]
+        assert mesh["_coordinates"].dtype == np.float64
+        assert mesh["_normals"].shape == mesh["_coordinates"].shape
+        assert np.issubdtype(mesh["_triangles"].dtype, np.integer)
+        container = mesh.attrs["geoml"]
+        assert container["geoml_format"] == 2
+        assert container["container"]["class"] == "Solid3D"
+
+
+def test_a_rewrite_keeps_the_attributes_other_programs_wrote(shells, tmp_path):
+    """A program annotating the store -- a provenance hash, say -- does so on
+    its root; geoML's own description is `geoml_meshset`."""
+    path = str(tmp_path / "shells.zarr")
+    shells.to_zarr(path)
+    zarr.open_group(path, mode="r+").attrs["geoscape/hash"] = "abc123"
+    shells.to_zarr(path)
+
+    assert dict(zarr.open_group(path, mode="r").attrs)["geoscape/hash"] \
+        == "abc123"
+    assert list(MeshSet.open(path)) == list(shells)
+
+
+def test_a_realization_is_never_written_over_the_store_it_reads(radial,
+                                                                tmp_path):
+    """One realization's set reads its meshes from its parent's store, and
+    writing it there would empty the store before reading them."""
+    path = str(tmp_path / "given.zarr")
+    made = MeshSet(radial, "g", workers=1, store=path)
+    with pytest.raises(ValueError, match="reads its arrays"):
+        made.simulations[2].to_zarr(path)
+    assert MeshSet.open(path).realization_volumes().equals(
+        made.realization_volumes())
 
 
 def test_the_temporary_store_goes_with_the_set(radial):

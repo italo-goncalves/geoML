@@ -349,6 +349,35 @@ def test_saving_twice_overwrites(tmp_path):
     assert len(loaded.all_parameters) == len(model.all_parameters)
 
 
+def test_saving_keeps_the_attributes_other_programs_wrote(tmp_path):
+    import zarr
+    model = _model()
+    path = str(tmp_path / "model.zarr")
+    model.save(path)
+    zarr.open_group(path, mode="r+").attrs["geoscape/hash"] = "abc123"
+    model.save(path)
+    assert dict(zarr.open_group(path, mode="r").attrs)["geoscape/hash"] \
+        == "abc123"
+
+
+def test_a_loaded_model_is_never_saved_over_its_own_store(tmp_path):
+    """A loaded model reads its training data from the store it came from,
+    so saving it back there emptied the store before copying that data.
+    Refused, and the store still opens with the data it had."""
+    path = str(tmp_path / "model.zarr")
+    _model().save(path)
+    loaded = geoml.models.VGPNetwork.open(path)
+    measured = np.asarray(loaded.data.variables["v"].measurements.values).copy()
+
+    with pytest.raises(ValueError, match="reads its arrays"):
+        loaded.save(path)
+
+    again = geoml.models.VGPNetwork.open(path)
+    np.testing.assert_array_equal(
+        np.asarray(again.data.variables["v"].measurements.values), measured)
+    loaded.save(str(tmp_path / "elsewhere.zarr"))
+
+
 # --------------------------------------------------------------------------- #
 # failure modes
 # --------------------------------------------------------------------------- #

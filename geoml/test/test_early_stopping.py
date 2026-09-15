@@ -3,8 +3,9 @@
 The rule itself is arithmetic over a sequence, so most of it is tested on
 sequences written by hand -- a curve that flattens, one that keeps climbing,
 one that diverges -- where the right answer is known rather than measured.
-The rest checks that both trainers are actually wired to it, and that the
-option is absent unless asked for.
+The rest checks that both trainers are actually wired to it, that training
+split into chunks stops where one call does, and that the option is absent
+unless asked for.
 """
 import numpy as np
 
@@ -156,6 +157,57 @@ def test_a_second_phase_is_judged_from_its_own_start():
     model.train_full(max_iter=120)
     second = len(model.training_log) - first
     assert second > 20
+
+
+def test_training_in_chunks_stops_where_one_call_does():
+    """A caller that reports progress, or listens for a cancel, trains in
+    chunks. The rule reads across them, so the chunks take exactly the
+    steps of one call and stop at the same iteration."""
+    whole = _model(tolerance=0.05)
+    whole.train_full(max_iter=400)
+    assert whole.converged
+
+    chunked = _model(tolerance=0.05)
+    while not chunked.converged and len(chunked.training_log) < 400:
+        chunked.train_full(max_iter=25)
+
+    np.testing.assert_array_equal(chunked.training_log, whole.training_log)
+
+
+def test_svi_in_chunks_draws_the_batches_one_call_draws():
+    """Every epoch shuffles the data again, and the shuffles go on from
+    one chunk to the next instead of starting over at the seed."""
+    whole = _model(tolerance=0.1, batch_size=100)
+    whole.train_svi(epochs=60)
+    assert whole.converged
+
+    chunked = _model(tolerance=0.1, batch_size=100)
+    per_epoch = len(chunked.options.batch_index(chunked.data.n_data))
+    while not chunked.converged \
+            and len(chunked.training_log) < 60 * per_epoch:
+        chunked.train_svi(epochs=4)
+
+    np.testing.assert_array_equal(chunked.training_log, whole.training_log)
+
+
+def test_a_settled_phase_takes_no_step_until_a_new_one_begins():
+    model = _model(tolerance=0.05)
+    model.train_full(max_iter=400)
+    done = len(model.training_log)
+
+    model.train_full(max_iter=50)
+    assert len(model.training_log) == done
+
+    model.set_learning_rate(2e-3)
+    assert not model.converged
+    model.train_full(max_iter=5)
+    assert len(model.training_log) == done + 5
+
+
+def test_nothing_is_converged_without_a_tolerance():
+    model = _model()
+    model.train_full(max_iter=40)
+    assert not model.converged
 
 
 # --------------------------------------------------------------------------- #

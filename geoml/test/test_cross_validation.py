@@ -543,6 +543,29 @@ def test_cross_validate_leaves_the_pits_behind(walker_cv):
     assert 0 < calibration.nominal(0.9) <= 1.0
 
 
+def test_the_out_of_fold_container_saves_and_opens_whole(walker_cv, tmp_path):
+    """A cross-validation is a result like any other: the container goes to
+    a store and comes back with the predictions, the realizations, the fold
+    labels and the PITs, and `conformalize` reads it as it read the
+    original."""
+    _, _, oof, _ = walker_cv
+    path = str(tmp_path / "oof.zarr")
+    oof.to_zarr(path)
+    back = geoml.data.PointData.open(path)
+
+    for attribute in ("prediction", "noise_variance"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(back.variables["V"], attribute).values),
+            np.asarray(getattr(oof.variables["V"], attribute).values))
+    np.testing.assert_array_equal(np.asarray(back.variables["V"].simulations),
+                                  np.asarray(oof.variables["V"].simulations))
+    for column in ("fold", "pit_V"):
+        np.testing.assert_array_equal(back.get_metadata(column),
+                                      oof.get_metadata(column))
+    assert geoml.models.conformalize(back, "V").nominal(0.9) \
+        == geoml.models.conformalize(oof, "V").nominal(0.9)
+
+
 def test_conformalize_names_the_missing_column(walker_cv):
     _, _, oof, _ = walker_cv
     with pytest.raises(ValueError, match="no metadata column"):

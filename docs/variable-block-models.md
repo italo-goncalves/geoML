@@ -649,7 +649,8 @@ realizations. That is `likelihood._divided`, against
 `likelihood._proportions` which keeps the first reading.
 
 Both are stored, because they answer different questions. `proportions[c]` is
-the recoverable share of the block, and per category for a categorical
+the share of the block at or below `c`, whose complement is the recoverable
+share, and per category for a categorical
 variable it is the partial-block domaining number — worth having whether or
 not anything is ever refined. `divided[c]` is the criterion.
 
@@ -716,8 +717,9 @@ Two additions to `ContinuousVariable`, both fed by `update`:
   dispersion would double the storage this exercise exists to reduce.
 - **`proportions`** — an `OrderedDict` keyed by cut-off, the same shape as the
   existing `probabilities` but at **sub-block** support rather than block
-  support. This is the recoverable share within a block, and it is also
-  exactly the splitting criterion.
+  support. This is the share within a block at or below the cut-off, the
+  complement of the recoverable share, and it is also exactly the
+  splitting criterion.
 
 `cutoffs` becomes a declared property of the variable, set on the raw data and
 carried to the blocks by `copy_to`. `cutoffs = None` means the variable
@@ -1074,8 +1076,9 @@ variable.divided[4.0]            # how often 4% passes through the block
 variable.dispersion              # how much the block varies inside itself
 ```
 
-`proportions` is the recoverable share and is worth having whether or not
-anything is refined; on a categorical variable it is per category, and it is
+`proportions` is the share at or below the cut-off, the complement of the
+recoverable share, and is worth having whether or not anything is refined;
+on a categorical variable it is per category, and it is
 the partial-block domaining number:
 
 ```python

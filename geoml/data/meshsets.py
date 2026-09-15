@@ -52,7 +52,8 @@ from geoml.data.meshes import (Mesh3D, Solid3D, Surface3D, _DistanceQueries,
                                _empty_solid, _from_manifold, _ground_under,
                                _joined, _to_manifold, _within_body)
 from geoml.data.blocks import BlockSet3D, _contour_column, _sub_block_shares
-from geoml.data.io import (_GEOML_ZARR_FORMAT, _rebuild_container,
+from geoml.data.io import (_GEOML_ZARR_FORMAT, _open_for_writing,
+                           _rebuild_container, _refuse_overwriting,
                            _write_container)
 
 __all__ = ["MeshSet"]
@@ -1269,7 +1270,7 @@ class MeshSet(_abc.Mapping):
             self._finalizer = _weakref.finalize(
                 self, _shutil.rmtree, directory, True)
         store = _os.fspath(store)
-        root = _zarr.open_group(store, mode="w")
+        root = _open_for_writing(store)
         self._store = store
         for key in self._keys:
             _write_mesh(root, "prediction/%s" % _path_key(key),
@@ -2532,7 +2533,11 @@ class MeshSet(_abc.Mapping):
             else str(self._unit)
         return _jsonable({
             "format": _STORE_FORMAT, "kind": self.kind, "path": self.path,
-            "keys": self._keys, "levels": self._levels, "close": self.close,
+            "keys": self._keys,
+            # each key's group, so that a reader in another language need
+            # not reproduce Python's spelling of a float
+            "groups": [_path_key(key) for key in self._keys],
+            "levels": self._levels, "close": self.close,
             "supersample": self.supersample, "simplify": self._simplify,
             "rule": self.rule, "limits": list(self.limits),
             "excluded": list(self.excluded), "name": self._name,
@@ -2556,6 +2561,11 @@ class MeshSet(_abc.Mapping):
         `Solid3D.open` also reads on its own, with what the set measured
         beside them. The realizations are copied from the set's store.
 
+        A store already at `path` is replaced, except for the root
+        attributes other programs wrote there: every one whose key does not
+        start with `geoml` is kept. Writing a set to its own store rewrites
+        its description in place.
+
         Parameters
         ----------
         path
@@ -2564,6 +2574,13 @@ class MeshSet(_abc.Mapping):
         Returns
         -------
         The path written.
+
+        Raises
+        ------
+        ValueError
+            If `path` lies inside or around the store this set reads its
+            meshes from, or is that store and this set is one realization
+            of another.
         """
         target = _os.fspath(path)
         if self._store is not None and self.realization is None \
@@ -2572,7 +2589,8 @@ class MeshSet(_abc.Mapping):
             root = _zarr.open_group(target, mode="r+")
             root.attrs["geoml_meshset"] = self._attrs()
             return path
-        root = _zarr.open_group(target, mode="w")
+        _refuse_overwriting(self._store, target, "this mesh set")
+        root = _open_for_writing(target)
         for key in self._keys:
             _write_mesh(root, "prediction/%s" % _path_key(key), self[key])
         for group, meshes in (("limits", self.limits),

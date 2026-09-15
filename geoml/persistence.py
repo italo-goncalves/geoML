@@ -52,6 +52,7 @@ import geoml._types as _types
 import geoml.data as _data
 import geoml.parameter as _gpr
 import geoml.storage as _storage
+from geoml.data.io import _open_for_writing, _refuse_overwriting
 
 if TYPE_CHECKING:
     # only for the annotations: importing the models at run time would close
@@ -179,6 +180,25 @@ def _encode(obj, writer):
     return node
 
 
+def _containers(obj, seen):
+    """Every container among the arguments `obj` was built with, however
+    deep: what `save_model` copies into its store."""
+    if isinstance(obj, _data._SpatialData):
+        yield obj
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            yield from _containers(item, seen)
+    elif isinstance(obj, dict):
+        for item in obj.values():
+            yield from _containers(item, seen)
+    elif isinstance(obj, _gpr.Parametric) and id(obj) not in seen:
+        seen.add(id(obj))
+        for item in obj.__dict__.get("_init_args", ()):
+            yield from _containers(item, seen)
+        for item in obj.__dict__.get("_init_kwargs", {}).values():
+            yield from _containers(item, seen)
+
+
 def _encode_parametric(obj, writer):
     if "_init_args" not in obj.__dict__:
         raise ModelFormatError(
@@ -234,14 +254,26 @@ def save_model(model: "_models._GPModel",
         A model object from the `models` module.
     path : str
         Directory to write to. It is created if necessary and overwritten if it
-        already exists.
+        already exists, except for the root attributes other programs wrote
+        there: every one whose key does not start with ``geoml`` is kept.
 
     Returns
     -------
     path : str
         The path that was written to.
+
+    Raises
+    ------
+    ValueError
+        If a container the model holds was opened from `path`, or from a
+        store inside or around it -- as a model loaded from `path` does: its
+        arrays are still read from there, and would be deleted before they
+        were copied.
     """
-    group = _zarr.open_group(path, mode="w")
+    for container in _containers(model, set()):
+        _refuse_overwriting(container._store_path, path,
+                            "the model's %s" % type(container).__name__)
+    group = _open_for_writing(path)
     writer = _Writer(group, path)
 
     meta = {

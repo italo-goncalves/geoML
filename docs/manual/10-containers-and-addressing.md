@@ -125,7 +125,7 @@ Most of the manual is spent reading these, so here they are in one place.
 | `V/dispersion` | how much the ground varies inside a block |
 | `V/simulations/<i>` | one realization |
 | `V/quantiles/<q>` | a quantile of the realizations |
-| `V/proportions/<c>` | the share above a cut-off, on a block model |
+| `V/proportions/<c>` | the share at or below a cut-off, on a block model |
 | `V/divided/<c>` | how often the realizations disagree about the cut-off |
 
 The last two appear only where a block has an interior for the cut-off to

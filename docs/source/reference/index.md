@@ -27,6 +27,7 @@ data
 inducing
 drillhole
 geoh5
+stores
 ```
 
 ## Figures and export

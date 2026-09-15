@@ -1,3 +1,67 @@
+## version 0.6.13
+* **Fixed: writing an opened container back to its own store destroyed
+it.** `open` leaves the arrays on disk, and `to_zarr` onto the same path
+emptied the store before streaming them back: every measurement and every
+coordinate of a 50-point store came back NaN, and nothing was raised. A
+model loaded from a store and saved over it (`VGPNetwork.open(p)` then
+`save(p)`) did the same to its training data and inducing points, which it
+reads from that store, and so did one realization of a mesh set written
+over its parent's. All three now refuse before anything is deleted, as
+does writing into a store inside the source or around it; anywhere else
+is fine. Tests in `test_persistence.py`, `test_model_persistence.py` and
+`test_meshsets.py`.
+* **A rewrite keeps the root attributes other programs wrote.** Containers,
+mesh sets, a mesh set built into a given store and saved models all opened
+their store with `mode="w"`, which in zarr 3 deletes the directory, and a
+provenance hash another program had written on the root went with it.
+geoML's own root attributes live under keys starting with `geoml`
+(`geoml`, `geoml_meshset`, `geoml_model`); every other one is written back
+once the store is emptied. The arrays and groups are replaced, as before.
+* **A container whose cut-offs differ from the model's takes the model's.**
+A prediction computes its `proportions` and `divided` at the cut-offs of
+the variable the model was trained on, and a container already holding the
+variable filed them by position under its own. Moved to other values at
+the same count, the right numbers landed under the wrong cut-off; a vector
+or compositional part declaring more cut-offs raised an unrelated
+`IndexError`, and one declaring fewer lost the model's columns silently.
+`predict` now makes such a container declare the model's cut-offs first,
+converted to a part's own unit where it differs, and warns with both lists;
+the columns are then bit for bit what a fresh container gets. And
+`set_cutoffs` drops the shares of a cut-off it removes, whose `divided`
+column kept voting on where `refine` splits. Five tests in
+`test_blockset.py` and `test_units.py`.
+* **Training in chunks stops where one call does.** The stopping rule
+measured progress from the start of each call, and `train_svi` shuffled
+from the seed again at every call, so training split into chunks, which is
+how a caller reports progress or listens for a cancel, stopped somewhere
+else, and a chunk that began converged ran to its cap. The rule's trail and
+the shuffling now belong to the *phase*: the calls one optimizer makes, with
+one trainer, on one set of trained parameters. `set_learning_rate`,
+`_reset_optimizer`, which each cross-validation fold calls, other trained
+parameters or the other trainer start a new one, so phased training and
+cross-validation are unchanged. Chunks of 25 iterations reproduce a
+400-iteration call's training log bit for bit, and chunks of epochs do
+the same; `VGPNetwork.converged` says when a phase has settled, and a call
+made then takes no step. `train_svi`'s docstring said the log held one
+value an epoch; it holds each batch's bound. Four tests in
+`test_early_stopping.py`.
+* **The stores are documented as formats.** `docs/source/reference/stores.md`
+describes a mesh set's store, field by field, a mesh inside it and a
+container, for programs that read them without geoML, with the rule for
+when a format number changes. A mesh set's root attribute now also lists
+each key's group name (`groups`), so a reader in another language need not
+reproduce Python's spelling of a float. A test walks a written store
+against the page.
+* **Cross-validation's container saves and opens whole**, predictions,
+realizations, fold labels and PITs, `conformalize` reading it as before;
+tested now, and the docstring lists the score table's columns and what
+each measures.
+* **A proportion is the share at or below a cut-off.** The code has always
+taken it so; chapters 8 and 10 said above. The design record, a comment
+and `CLAUDE.md` called it the recoverable share, which is its complement.
+A category's is the share of the block inside it. The glossary gains the
+term.
+
 ## version 0.6.12
 * **Fixed: a contour through blocks holding no value got NaN vertices.** A
 valueless block painted its points NaN, and flying edges placed a crossing
