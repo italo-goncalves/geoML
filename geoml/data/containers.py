@@ -364,6 +364,58 @@ class _SpatialData(_TreeNode):
         else:
             self.metadata[name] = _Attribute.encoded(self, values, labels)
 
+    def unpredicted(self, variable: "str | None" = None) -> _np.ndarray:
+        """
+        Which locations no prediction has reached.
+
+        What a cancelled or partial `predict` left to do: hand it back as
+        `predict(..., where=...)` and only those locations are visited,
+        which gives what predicting the lot would have given. Reading the
+        missing values rather than remembering a call means the answer
+        stays true however the container was arrived at -- reopened from a
+        store, subsetted, carried into.
+
+        Parameters
+        ----------
+        variable
+            Which variable to read. Without one, a location counts as
+            unpredicted where *any* variable the container holds is missing
+            it, which is what a resumed prediction wants: `predict` fills
+            every variable in one pass, so any hole means the batch never
+            ran.
+
+        Returns
+        -------
+        array
+            One boolean per location.
+
+        Raises
+        ------
+        KeyError
+            If `variable` names nothing the container holds.
+
+        See Also
+        --------
+        geoml.models.VGPNetwork.predict : takes the answer as `where`.
+
+        Examples
+        --------
+        .. code-block:: python
+
+            model.predict(grid, n_sim=50)            # cancelled part way
+            model.predict(grid, n_sim=50,
+                          where=grid.unpredicted())  # finishes the rest
+        """
+        if variable is not None:
+            return self.variables[variable].unpredicted()
+        missing = _np.zeros(self.n_data, dtype=bool)
+        for name in self.variables:
+            # a variable that declares no marker -- nothing a model
+            # predicts into -- says nothing either way
+            if self.variables[name]._PREDICTED_MARKER is not None:
+                missing |= self.variables[name].unpredicted()
+        return missing
+
     def get_metadata(self, name: str) -> _np.ndarray:
         """
         The values of a metadata column, as an array.

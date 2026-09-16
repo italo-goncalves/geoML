@@ -34,6 +34,7 @@ import pandas as _pd
 import pyvista as _pv
 import zarr as _zarr
 
+import geoml._progress as _progress
 import geoml._types as _types
 import geoml.math.geometry as _gmt
 import geoml.storage as _storage
@@ -58,8 +59,14 @@ from geoml.data.io import (_GEOML_ZARR_FORMAT, _open_for_writing,
 
 __all__ = ["MeshSet"]
 
-# the layout of a mesh set's own store, recorded beside it
-_STORE_FORMAT = 1
+# The layout of a mesh set's own store, recorded beside it. Format 2 (0.7.0)
+# added `complete`, which format 1 has no way to say: a build wrote its
+# description once, at the end, so every store that existed was a finished
+# one. Both are read -- a format-1 store is complete by construction -- and
+# the number rises so that an older geoML refuses a store of ours rather
+# than reading a half-built one as whole.
+_STORE_FORMAT = 2
+_READABLE_FORMATS = (1, 2)
 
 # how many bytes of realizations are read at once: the store is chunked by
 # rows, so reading one realization visits every chunk, and reading as many
@@ -1114,6 +1121,11 @@ class MeshSet(_abc.Mapping):
     provenance: dict
     repairs: "_pd.Series | None"
 
+    # A set is complete unless a build is still running or it was
+    # opened from a store whose build did not finish. Every path that
+    # does not build reads the class attribute and is right.
+    complete: bool = True
+
     def __init__(self, data: "BlockSet3D | Grid3D", path: str,
                  cutoffs: "_types.Cutoffs | None" = None,
                  close: "bool | str" = "above",
@@ -1195,7 +1207,10 @@ class MeshSet(_abc.Mapping):
                      for _, body, keep in bodies]
         meshes, raw, taken, self._nudge = {}, {}, {}, {}
         emptied = []
-        for key, level in zip(self._keys, self._levels):
+        for done, (key, level) in enumerate(zip(self._keys, self._levels)):
+            # one body of the prediction, the slowest part of building a
+            # set before the realizations begin
+            _progress.emit("mesh_set", done, len(self._keys), "body")
             shell, self._nudge[key] = _shell(
                 data, source["fields"][key], level, self.close,
                 self.supersample, self.path)
@@ -1216,6 +1231,7 @@ class MeshSet(_abc.Mapping):
             self.repairs = _pd.Series(removed, name="removed").reindex(
                 self._keys)
             self.provenance["repaired"] = True
+        _progress.emit("mesh_set", len(self._keys), len(self._keys), "body")
         self._meshes = {key: _relabelled(mesh, self._mesh_provenance(key))
                         for key, mesh in meshes.items()}
         self._summary = self._summarized(self._meshes, raw, taken)
@@ -1297,6 +1313,23 @@ class MeshSet(_abc.Mapping):
         cuts = _np.full((len(bodies), len(numbers), n_keys), _np.nan)
         self._measures, self._taken = table, cuts
         self._failures = []
+        # The description goes in before the first realization and is
+        # rewritten after each one, so a store read while the build is
+        # still running opens and says what it holds. It used to be
+        # written once at the end, and until then `open` raised a bare
+        # KeyError -- a cancelled or crashed contour left nothing
+        # readable, however many realizations it had finished.
+        self.complete = False
+        done_rows = []
+        root.attrs["geoml_meshset"] = self._attrs(keep=done_rows)
+
+        def report(done):
+            # `emit` rather than `reporting`: nothing inside a realization
+            # reports (the contouring happens in another process), so there
+            # is no task to mark, only a count to send
+            _progress.emit("mesh_set", done, len(numbers), "realization")
+
+        report(0)
         where = {number: i for i, number in enumerate(numbers)}
         stores = source["stores"]
         per_realization = 8 * int(stores[0].shape[0]) * len(stores)
@@ -1318,6 +1351,12 @@ class MeshSet(_abc.Mapping):
             for key, message in failed.items():
                 self._failures.append(
                     {"realization": number, "key": key, "error": message})
+            # the store describes itself again, now holding one more
+            # realization, before the caller is told about it: a callback
+            # that cancels here leaves a store that opens
+            done_rows.append(row)
+            root.attrs["geoml_meshset"] = self._attrs(keep=sorted(done_rows))
+            report(len(done_rows))
 
         for start in range(0, len(numbers), size):
             group = numbers[start:start + size]
@@ -1349,6 +1388,7 @@ class MeshSet(_abc.Mapping):
                     record(*made)
             finally:
                 _BUILD.clear()
+        self.complete = True
         root.attrs["geoml_meshset"] = self._attrs()
         if self._failures:
             _warnings.warn(
@@ -2527,12 +2567,32 @@ class MeshSet(_abc.Mapping):
     # ------------------------------------------------------------------ #
     # persistence
     # ------------------------------------------------------------------ #
-    def _attrs(self):
+    def _attrs(self, complete=None, keep=None):
+        """The set's description, as the store's root attribute.
+
+        `keep` names the rows of `_numbers` a partial store actually
+        holds, for the descriptions written while a build is still
+        running: the measure tables are allocated for every
+        realization up front, and a reader must not be told about rows
+        that are still NaN.
+        """
         unit = self._unit if isinstance(self._unit, (str, int, float,
                                                      type(None))) \
             else str(self._unit)
+        numbers = self._numbers
+        measures, taken = self._measures, self._taken
+        if keep is not None:
+            numbers = [numbers[i] for i in keep]
+            if measures is not None:
+                measures = {name: _np.asarray(values)[keep]
+                            for name, values in measures.items()}
+            if taken is not None:
+                taken = _np.asarray(taken)[:, keep, :]
         return _jsonable({
             "format": _STORE_FORMAT, "kind": self.kind, "path": self.path,
+            # False while a build is still writing realizations, so a
+            # store opened mid-flight says what it is instead of failing
+            "complete": self.complete if complete is None else bool(complete),
             "keys": self._keys,
             # each key's group, so that a reader in another language need
             # not reproduce Python's spelling of a float
@@ -2544,9 +2604,9 @@ class MeshSet(_abc.Mapping):
             "unit": unit, "provenance": self.provenance,
             "realization": self.realization,
             "corners": self._corner_points, "shift": self._shift,
-            "summary": self._summary, "numbers": self._numbers,
+            "summary": self._summary, "numbers": numbers,
             "nudge": [self._nudge.get(key, 0.0) for key in self._keys],
-            "measures": self._measures, "taken": self._taken,
+            "measures": measures, "taken": taken,
             "failures": self._failures,
             "repairs": None if self.repairs is None
             else {"keys": list(self.repairs.index),
@@ -2624,10 +2684,11 @@ class MeshSet(_abc.Mapping):
         path = _os.fspath(path)
         root = _zarr.open_group(path, mode="r")
         meta = dict(cast("dict[str, Any]", root.attrs["geoml_meshset"]))
-        if meta.get("format") != _STORE_FORMAT:
+        if meta.get("format") not in _READABLE_FORMATS:
             raise ValueError(
                 "%r was written at mesh set format %s and this version reads "
-                "%d" % (path, meta.get("format"), _STORE_FORMAT))
+                "%s" % (path, meta.get("format"),
+                        ", ".join(str(v) for v in _READABLE_FORMATS)))
         new = cls.__new__(cls)
         kind = meta["kind"]
         keys = [str(k) for k in meta["keys"]] if kind == "category" \
@@ -2675,6 +2736,8 @@ class MeshSet(_abc.Mapping):
                 len(new.limits) + len(new.excluded), len(new._numbers),
                 len(keys))
         new._failures = list(meta["failures"])
+        # Older stores carry no such key and were all written whole.
+        new.complete = bool(meta.get("complete", True))
         new._store = path
         new._finalizer = None
         new._parent = None
@@ -2685,6 +2748,11 @@ class MeshSet(_abc.Mapping):
             new.repairs = _pd.Series(
                 _floats(meta["repairs"]["values"]),
                 index=meta["repairs"]["keys"], name="removed")
+        if not new.complete:
+            _warnings.warn(
+                "%r was left by a build that did not finish: it holds %d of "
+                "the realizations it was to hold, and everything measured "
+                "over them counts those alone" % (path, len(new._numbers)))
         return new
 
 

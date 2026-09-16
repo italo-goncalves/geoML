@@ -1,3 +1,139 @@
+## version 0.7.0
+* **The catalogue.** `geoml.catalogue` describes every class and function a
+model or a script may use as JSON, for programs that build geoML models
+without reading its code, GeoScape's network editor first: `build()`,
+`dumps()`, and `python -m geoml.catalogue [path]`. Each entry is keyed by
+the dotted path a saved model records. Signatures, defaults, descriptions
+and, where the module has annotations, types come from the code; the rest
+every public class of `latent.network`, `latent.fourier`, `kernels`,
+`transform`, `warping` and `likelihood` declares in a `_catalogue`
+attribute, assigned where its module ends: its category, its parents, how
+its size follows from its arguments, whether inducing points pass through
+it and whether it needs them, how it chains, which variable types a
+likelihood accepts, and whether it is public, experimental or internal. The
+format is GeoScape's `docs/geoml-catalogue.md`, revised with four
+amendments and a `nullable` field. `test_catalogue.py`, 238 tests: a public
+class without its own declaration fails, and every declaration is built
+against its class: each node at two sizes on stand-in parents, inducing
+points passed on or refused, every transform and warping at the widths it
+declares, every declared likelihood pairing trained a step, every class
+that can be offered sent through persistence and back, and the same bytes
+from two processes under different hash seeds. Design record
+`docs/catalogue.md`, reference page `catalogue.md`. Its `workflow` map
+gained a `progress` step and a `resume` entry alongside the two items
+below, so a program reading the catalogue finds those calls rather than
+having to be told about them.
+* **What a long call is doing, and how to stop it.** `geoml.progress(callback)`
+is a context manager: every long call made inside it reports one
+`Progress(task, done, total, unit, bound, within)` per unit finished --
+`train_full` per iteration and `train_svi` per batch with the bound,
+`predict` per batch, `refine` per pass, `cross_validate` per fold, a mesh
+set per prediction body and per realization -- and the callback raising is
+how the caller cancels. It rides a context variable rather than an
+argument, because the calls nest and threading one down `refine` into
+`predict` into the likelihood would put it in a dozen signatures to serve
+one purpose; `within` names the enclosing tasks, so a refinement's
+predictions can be told from a bare one. `done` counts what a cancel would
+leave, never what is being attempted, which is the whole value of the
+number. Logging was rejected for the cancel's sake: `Handler.handleError`
+swallows a handler's exception, so it could never travel back. Until now
+GeoScape parsed the `\r` lines of standard output and trained in chunks to
+stay responsive; printing is unchanged.
+* **A cancelled prediction can be finished, and `unpredicted()` is on every
+container.** A location's values do not depend on what else is in its
+batch, so the batches that landed are exactly as they would have been:
+`predict(where=target.unpredicted())` completes the rest and gives, to the
+last bit, what predicting the lot would have given -- the gate in
+`test_progress.py`. The answer is read off the missing values rather than
+remembered from a call, so it survives a store, a subset, a carry. Each
+variable class declares the column that marks it, since not every kind has
+a `prediction`: a rock type has an `entropy`, a vector variable an
+`uncertainty`, and reading the wrong one would call a predicted location
+unpredicted for ever. A block model's `unpredicted()` now unions the
+blocks its last split made with the ones whose values are missing; the two
+agree right after a split and differ only where a prediction stopped part
+way.
+* **A mesh set opens before its build has finished.** The description went
+into the store once, at the end, so a contour cancelled or killed after
+hours left nothing readable, however many realizations it had made --
+`open` raised a bare `KeyError`. It goes in before the first realization
+now and is rewritten after each one, naming only the rows actually filled,
+and `open` reads a partial store, warns, and reports `complete`. The store
+format is 2; format 1 is still read, having always been a finished set.
+* **Chunks that split the realization axis.** A simulations store was
+chunked by location alone, so a chunk held every realization of a band of
+rows and reading ONE of them read them all: `simulation(i)` on a
+`(5 000 000, 100)` store walked 4 GB to hand back 40 MB. Past 32
+realizations the trailing axis is split too, ten to a chunk. Measured cold
+on a `(2 000 000, 100)` store at 100, 25 and 10 columns a chunk: one
+realization 0.76, 0.13 and 0.06 s -- and the reductions no worse for it, a
+quantile pass 1.34, 1.09 and 1.26 s and a pass in row bands 2.53, 1.19 and
+1.07 s, ten columns a chunk being ten times the rows and so fewer, longer
+reads. A band still holds whole rows; `row_quantiles` and `row_cdf` gather
+the realization axis first, one pass over the same bytes, a block of a
+column-chunked array holding part of a row and a quantile over part of a
+row being no quantile. A store written earlier keeps its chunks.
+`docs/benchmarks/realization_chunks.py`.
+* **Fixed: a model with a `RobustPCA` in its chain started somewhere else in
+every process.** `set_seed` is the one knob, and every data-dependent start
+draws from the package generator -- except FastMCD, behind `RobustPCA`,
+which was left to take its starting subsets from NumPy's global state, where
+no seed reaches. Chapter 16's model began from one of two robust
+covariances, by process: its held-out scores moved in the third decimal and
+its figures by up to a fifth of their pixels, run to run, on one checkout.
+It is seeded from the package generator now, as `Rotation`'s FastICA has
+been since 0.6.8, and four processes build that model to the same bits and
+train it to the same bound. Two orders that changed with the process went
+with it, neither of which had moved a number but both of which could: a
+tree's nodes came back in the order a set of them iterated
+(`_Operation.get_unique_parents`), which is the order `VGPNetwork._nodes`
+sums the KL in, and the trainable variables likewise
+(`get_unfixed_variables`); both keep the order they were built in. And the
+contract is written down at last -- `docs/source/reference/reproducibility.md`
+says what comes back the same, what does not, and what to check when two
+runs of one script disagree. Five tests in `test_seed.py`, the last of them
+training and predicting in another process and comparing every number. The
+chapter itself is the proof: re-run on the fix it reproduces all six of its
+committed figures byte for byte.
+* **Fixed on the way, each a claim the catalogue could not have made
+truthfully.** `Identity()` and `Periodic()` given explicitly could not be
+saved: neither they nor their base define an initializer, so they recorded
+no arguments; `Parametric` now wraps an inherited initializer nothing had
+wrapped. `BasicInput`, `kernels.Covariance` and `kernels.Linear` defaulted
+to one `Identity()` built at import and shared by every instance; they take
+`transform=None` and build their own, and a save that left the argument out
+replays as before. `Concatenate` said it passed inducing points on without
+asking its parents, so a GP on a `Concatenate` of a `Multiply` was built and
+failed at its first refresh; it asks them now, as `Add` does, and the GP is
+refused where it is built. An operation given no parents failed with an
+`IndexError`, `GPWalk` on anything but a GP with an `AttributeError`, and
+`MultiStructureGP` took a single structure; all three refuse with a
+message. `warping.__all__` lacked the four parametric links and
+`kernels.__all__` `Covariance` and `RationalQuadratic`; `GPOptions` has an
+annotated constructor, and `Sum` and `Product` no longer call their
+covariances kernels. Six tests in `test_latent_names.py` and
+`test_model_persistence.py`.
+* **The 0.6.0 shims are gone**, as their warning promised since 0.6.4:
+`geoml.drillhole`, `geometry`, `graphviz`, `inducing`, `interpolation`,
+`plotly`, `probability`, `pyvista`, `random` and `tftools`, with the lazy
+`__getattr__` that resolved them. Import `geoml.data.drillhole`,
+`geoml.math.geometry`, `geoml.viz.graphviz`, `geoml.data.inducing`,
+`geoml.math.interpolate`, `geoml.viz.plotly`, `geoml.stats.probability`,
+`geoml.viz.pyvista`, `geoml.stats.random`, and `geoml.math.tf` or
+`geoml.math.linalg`. No saved model can name one: a store records the path
+of a `Parametric` or options class only, and none of the ten modules ever
+defined one -- every such class lives in `kernels`, `latent.network`,
+`likelihood`, `models`, `transform` or `warping`, which stay where they are.
+`test_removed_paths.py` pins both halves. Three docstrings still pointed at
+an old path, and so did the plugin's implicit-modelling notebook.
+* **The release run**: the full suite, 1923 tests, and every chapter of the
+manual. Every chapter's figures came back as committed but chapter 17's
+two, which differ from their committed figures as at 0.6.12 and 0.6.13;
+three runs of this code agree with each other to the byte, so the
+difference is a number a release moved rather than a nondeterminism, and
+the figures are committed anew. Chapter 16 reproduced its own, as it now
+does in any process.
+
 ## version 0.6.13
 * **Fixed: writing an opened container back to its own store destroyed
 it.** `open` leaves the arrays on disk, and `to_zarr` onto the same path

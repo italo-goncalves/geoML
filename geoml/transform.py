@@ -1372,3 +1372,107 @@ class ImplicitFaultBlocks(_Transform):
                           for a, j, side in self.abutting if a == k]
                 columns.append(fault._coordinate(value, taper, bounds))
             return _tf.concat(columns, axis=1)
+
+
+# --------------------------------------------------------------------------- #
+# the catalogue
+# --------------------------------------------------------------------------- #
+# What `geoml.catalogue` cannot read off a transform: the dimension it takes
+# ("in", null for any) and the one it gives ("out", "same_as_parent" being
+# what it took), how transforms chain, and the types of the arguments not
+# annotated. Every transform can be a link of a chain handed to a `transform`
+# argument (`BasicInput`'s, a covariance's).
+_CHAIN = {"via": "geoml.transform.ChainedTransform",
+          "attaches_to": "transform"}
+_KEEPS = {"in": None, "out": {"rule": "same_as_parent"}}
+_PLANE = {"in": {"rule": "const", "value": 2},
+          "out": {"rule": "const", "value": 2}}
+_SPACE = {"in": {"rule": "const", "value": 3},
+          "out": {"rule": "const", "value": 3}}
+_FLOAT = {"type": "float"}
+_SURFACE = {"points": {"type": "json"}, "normals": {"type": "json"},
+            "basis": {"type": "enum",
+                      "constraints": {"choices": list(_rbf._BASES)}},
+            "reach": {"type": "float", "constraints": {"exclusive_min": 0}},
+            "k": {"type": "int", "constraints": {"min": 1}}}
+
+
+def _declared(sizing, label=None, stability=None, **params):
+    entry = {"category": "transform", "chain": _CHAIN, "size": sizing}
+    if label is not None:
+        entry["label"] = label
+    if stability is not None:
+        entry["stability"] = stability
+    if params:
+        entry["params"] = params
+    return entry
+
+
+Identity._catalogue = _declared(_KEEPS)
+Isotropic._catalogue = _declared(
+    _KEEPS, r={"constraints": {"exclusive_min": 0}})
+Anisotropy2D._catalogue = _declared(_PLANE, label="Anisotropy 2D")
+Anisotropy2DMath._catalogue = _declared(_PLANE, label="Anisotropy 2D (x, y)")
+Anisotropy2DDynamic._catalogue = _declared(
+    _PLANE, label="Dynamic anisotropy 2D")
+Anisotropy3D._catalogue = _declared(
+    _SPACE, label="Anisotropy 3D", maxrange=_FLOAT, midrange_fct=_FLOAT,
+    minrange_fct=_FLOAT, azimuth=_FLOAT, dip=_FLOAT, rake=_FLOAT)
+Anisotropy3DMath._catalogue = _declared(
+    _SPACE, label="Anisotropy 3D (x, y, z)")
+Anisotropy3DDynamic._catalogue = _declared(
+    _SPACE, label="Dynamic anisotropy 3D",
+    n_directions_per_axis={"type": "int", "constraints": {"min": 1}})
+ProjectionTo1D._catalogue = _declared(
+    {"in": {"rule": "param", "param": "n_dim"},
+     "out": {"rule": "const", "value": 1}},
+    label="Projection to 1D", n_dim={"type": "int", "constraints": {"min": 1}})
+AnisotropyARD._catalogue = _declared(
+    {"in": {"rule": "param", "param": "n_dim"},
+     "out": {"rule": "param", "param": "n_dim"}},
+    label="Anisotropy (ARD)",
+    n_dim={"type": "int", "constraints": {"min": 1}})
+ChainedTransform._catalogue = _declared(
+    {"in": None, "out": {"rule": "custom",
+                         "note": "the last link's output"}},
+    label="Chain", transforms={"type": "ref:transform[]"})
+SelectVariables._catalogue = _declared(
+    {"in": None, "out": {"rule": "len", "param": "index"}},
+    label="Select", index={"type": "int[]"})
+NormalizeWithBoundingBox._catalogue = _declared(
+    _KEEPS, stability="internal", box={"type": "json"})
+Periodic._catalogue = _declared(
+    {"in": None, "out": {"rule": "custom", "note": "twice the input's"}})
+Concatenate._catalogue = _declared(
+    {"in": None, "out": {"rule": "sum"}},
+    transforms={"type": "ref:transform[]"})
+RandomProjections._catalogue = _declared(
+    {"in": {"rule": "param", "param": "n_dim"},
+     "out": {"rule": "param", "param": "n_directions"}},
+    label="Random projections",
+    n_dim={"type": "int", "constraints": {"min": 2}},
+    n_directions={"type": "int", "constraints": {"min": 1}},
+    seed={"type": "int"})
+BellFault2D._catalogue = _declared(
+    {"in": {"rule": "const", "value": 2},
+     "out": {"rule": "const", "value": 1}},
+    stability="internal", start={"type": "float[]"}, end={"type": "float[]"})
+ImplicitFault._catalogue = _declared(
+    {"in": None, "out": {"rule": "const", "value": 1}},
+    label="Fault (repulsion)", stability="experimental",
+    mode={"type": "enum", "constraints": {"choices": ["step", "decay"]}},
+    **_SURFACE)
+FaultDisplacement._catalogue = _declared(
+    _KEEPS, label="Fault (displacement)", stability="experimental",
+    throw=_FLOAT, strike_slip=_FLOAT,
+    width={"type": "float", "constraints": {"exclusive_min": 0}},
+    drag={"type": "bool"},
+    profile={"type": "enum", "constraints": {"choices": ["bell"]}},
+    flow_steps={"type": "int", "constraints": {"min": 0}}, **_SURFACE)
+FaultNetwork._catalogue = _declared(
+    _KEEPS, label="Fault network", stability="experimental",
+    faults={"type": "ref:transform[]"}, abutting={"type": "json"})
+ImplicitFaultBlocks._catalogue = _declared(
+    {"in": None, "out": {"rule": "len", "param": "faults"}},
+    label="Fault blocks", stability="experimental",
+    faults={"type": "ref:transform[]"}, abutting={"type": "json"})

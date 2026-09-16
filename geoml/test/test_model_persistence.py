@@ -349,6 +349,39 @@ def test_saving_twice_overwrites(tmp_path):
     assert len(loaded.all_parameters) == len(model.all_parameters)
 
 
+def test_a_transform_without_an_initializer_of_its_own_saves(tmp_path):
+    """`Identity` and `Periodic` declare no `__init__`, nor does their
+    base, so they recorded no arguments, and a model handed one could not
+    be saved."""
+    assert geoml.transform.Identity()._init_args == ()
+    assert geoml.transform.Periodic()._init_args == ()
+
+    point, _ = _points()
+    root = geoml.latent.BasicInput(
+        _inducing(), transform=geoml.transform.ChainedTransform(
+            geoml.transform.Identity(), geoml.transform.Isotropic(40)))
+    model = geoml.models.VGPNetwork(
+        point, "v", geoml.likelihood.Gaussian(),
+        geoml.latent.BasicGP(root, size=1),
+        options=geoml.models.GPOptions(verbose=False, training_samples=8))
+    path = str(tmp_path / "model.zarr")
+    model.save(path)
+
+    before, _ = _predict(model)
+    after, _ = _predict(geoml.models.VGPNetwork.open(path))
+    np.testing.assert_allclose(after, before)
+
+
+def test_an_input_left_without_a_transform_gets_its_own_identity():
+    """One built per input, where one built at import used to serve them
+    all."""
+    first = geoml.latent.BasicInput(_inducing())
+    second = geoml.latent.BasicInput(_inducing())
+    assert isinstance(first.transform, geoml.transform.Identity)
+    assert first.transform is not second.transform
+    assert "transform" not in first._init_kwargs
+
+
 def test_saving_keeps_the_attributes_other_programs_wrote(tmp_path):
     import zarr
     model = _model()

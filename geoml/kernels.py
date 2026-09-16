@@ -25,6 +25,8 @@ __all__ = ["Gaussian",
            "Product",
            "Matern32",
            "Matern52",
+           "RationalQuadratic",
+           "Covariance",
            "Scale"]
 
 import geoml.parameter as _gpr
@@ -386,7 +388,7 @@ class Covariance(_AbstractCovariance):
     """Covariance function."""
 
     def __init__(self, kernel: "_Kernel",
-                 transform: "_gt._Transform" = _gt.Identity()):
+                 transform: "_gt._Transform | None" = None):
         """
         Initializer for Covariance.
 
@@ -395,9 +397,11 @@ class Covariance(_AbstractCovariance):
         kernel
             A kernel object.
         transform
-            An object from the `transform` module.
+            An object from the `transform` module; the identity if left out.
         """
         super().__init__()
+        if transform is None:
+            transform = _gt.Identity()
         self.kernel = self._register(kernel)
         self.transform = self._register(transform)
         self._has_compact_support = self.kernel.has_compact_support
@@ -591,9 +595,17 @@ class _WrapperCovariance(_AbstractCovariance):
         self._has_compact_support = self.base_covariance.has_compact_support
 
 class Linear(_AbstractCovariance):
-    """Linear covariance"""
-    def __init__(self, transform=_gt.Identity()):
+    """The linear covariance, the dot product of transformed coordinates."""
+    def __init__(self, transform: "_gt._Transform | None" = None):
+        """
+        Parameters
+        ----------
+        transform
+            An object from the `transform` module; the identity if left out.
+        """
         super().__init__()
+        if transform is None:
+            transform = _gt.Identity()
         self.transform = self._register(transform)
 
     def covariance_matrix(self, x, y):
@@ -622,15 +634,14 @@ class Linear(_AbstractCovariance):
 
 
 class Sum(_NodeCovariance):
-    """Kernel sum"""
+    """A weighted sum of covariances, the weights trained and summing to
+    one."""
     def __init__(self, *args):
         """
-        Kernel sum.
-
         Parameters
         ----------
         args
-            Kernels to compute the sum.
+            The covariances to add up.
         """
         n_comp = len(args)
         v = _gpr.CompositionalParameter(_tf.ones([n_comp], _tf.float64)/n_comp)
@@ -649,15 +660,13 @@ class Sum(_NodeCovariance):
 
 
 class Product(_NodeCovariance):
-    """Kernel product"""
+    """The product of covariances."""
     def __init__(self, *args):
         """
-        Kernel product.
-
         Parameters
         ----------
         args
-            Kernels to compute the product.
+            The covariances to multiply.
         """
         super().__init__(*args)
         self._has_compact_support = any([kernel.has_compact_support
@@ -743,3 +752,25 @@ class Scale(_WrapperCovariance):
     def point_variance_d2(self, x, dir_x):
         return self.parameters["amplitude"].get_value() \
                * self.base_covariance.point_variance_d2(x, dir_x)
+
+
+# --------------------------------------------------------------------------- #
+# the catalogue
+# --------------------------------------------------------------------------- #
+# What `geoml.catalogue` cannot read off each class. A kernel is a function
+# of distance a GP node takes whole; a covariance, a kernel over transformed
+# coordinates, is what `GradientConstrainedInput` and the legacy models take.
+for _kernel in (Gaussian, Spherical, Exponential, Cubic, Constant, Cosine,
+                Matern32, Matern52):
+    _kernel._catalogue = {"category": "kernel"}
+RationalQuadratic._catalogue = {
+    "category": "kernel", "label": "Rational quadratic",
+    "params": {"scale": {"constraints": {"min": 1e-3, "max": 100}}}}
+Covariance._catalogue = {"category": "covariance"}
+Linear._catalogue = {"category": "covariance"}
+Sum._catalogue = {"category": "covariance",
+                  "params": {"args": {"type": "ref:covariance[]"}}}
+Product._catalogue = {"category": "covariance",
+                      "params": {"args": {"type": "ref:covariance[]"}}}
+Scale._catalogue = {"category": "covariance",
+                    "params": {"base_covariance": {"type": "ref:covariance"}}}

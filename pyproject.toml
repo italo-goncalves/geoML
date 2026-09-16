@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geoml"
-version = "0.6.13"
+version = "0.7.0"
 description = "Machine learning for spatial data"
 authors = [
     {name = "Ítalo Gomes Gonçalves", email = "italogoncalves.igg@gmail.com"},
@@ -82,7 +82,9 @@ Homepage = "http://github.com/italo-goncalves/geoML"
 # and checked by nobody, which is how the three `plots` modules drifted
 # between 0.6.4 and 0.6.5.
 include = [
+    "geoml/_progress.py",
     "geoml/_types.py",
+    "geoml/catalogue.py",
     "geoml/models.py",
     "geoml/metrics.py",
     "geoml/likelihood.py",

@@ -22,8 +22,9 @@ __all__ = ["GP", "GPEnsemble", "Normalizer", "StructuralField", "GPOptions",
 
 import numpy as np
 from collections.abc import Sequence
-from typing import Any as _Any, cast as _cast
+from typing import Any as _Any, Literal as _Literal, cast as _cast
 
+import geoml._progress as _progress
 import geoml._types as _types
 import geoml.data as _data
 import geoml.parameter as _gpr
@@ -102,11 +103,13 @@ class GPOptions(_ModelOptions):
     expert_propagation = "consensus"
     training_tolerance = None
 
-    def __init__(self, verbose=True, prediction_batch_size=20000,
-                 jitter=1e-9,
-                 training_batch_size=2000, training_samples=20,
-                 jit_predict=False, qmc_simulations=False,
-                 expert_propagation="consensus", training_tolerance=None):
+    def __init__(self, verbose: bool = True,
+                 prediction_batch_size: int = 20000, jitter: float = 1e-9,
+                 training_batch_size: int = 2000, training_samples: int = 20,
+                 jit_predict: bool = False, qmc_simulations: bool = False,
+                 expert_propagation: _Literal["consensus", "independent"]
+                 = "consensus",
+                 training_tolerance: float | None = None):
         """
         Configuration of Gaussian process models.
 
@@ -976,7 +979,7 @@ class VGPNetwork(_GPModel):
         Writes the model as a Graphviz diagram: coordinates, latent network,
         warpings and output variables.
 
-        See `geoml.graphviz.to_dot`.
+        See `geoml.viz.graphviz.to_dot`.
         """
         # imported here because that module reads the modules this one needs
         import geoml.viz.graphviz as _gv
@@ -1333,7 +1336,8 @@ class VGPNetwork(_GPModel):
 
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
-        with _latent.propagation_rule(self.options.expert_propagation):
+        with _latent.propagation_rule(self.options.expert_propagation), \
+                _progress.reporting("train", max_iter, "iteration") as report:
             for i in range(max_iter):
                 step(x, y, has_value, x_var)
 
@@ -1346,6 +1350,10 @@ class VGPNetwork(_GPModel):
                 if self.options.verbose:
                     print("\rIteration %s | ELBO: %s" %
                           (str(i+1), str(current_elbo)), end="")
+
+                # after the log and the refresh, so a callback that cancels
+                # leaves the model at a completed iteration
+                report(i + 1, bound=float(current_elbo))
 
                 if converged.stop(current_elbo):
                     if self.options.verbose:
@@ -1398,7 +1406,15 @@ class VGPNetwork(_GPModel):
                 print("The bound has settled; nothing to train.")
             return
 
-        with _latent.propagation_rule(self.options.expert_propagation):
+        # an epoch is many gradient steps, and a caller watching a long run
+        # wants to hear from it oftener than once a pass; the batch count is
+        # the same every epoch, so the total is known before the first
+        n_batches = len(self.options.batch_index(self.data.n_data))
+        done = 0
+
+        with _latent.propagation_rule(self.options.expert_propagation), \
+                _progress.reporting(
+                    "train", epochs * n_batches, "batch") as report:
             for i in range(epochs):
                 current_elbo = []
 
@@ -1422,6 +1438,9 @@ class VGPNetwork(_GPModel):
 
                     current_elbo.append(self.elbo.numpy())
                     self.training_log.append(current_elbo[-1])
+
+                    done += 1
+                    report(done, bound=float(current_elbo[-1]))
 
                 total_elbo = _np.mean(current_elbo)
                 if self.options.verbose:
@@ -1632,6 +1651,12 @@ class VGPNetwork(_GPModel):
                 print("\rProcessing batch %s of %s       "
                       % (str(i + 1), str(len(batch_id))), end="")
 
+            # `i` batches are done, and what `done` counts is what a cancel
+            # here would leave written: the consumer writes each batch back
+            # before asking for the next, so the report for batch `i` is made
+            # once batch `i - 1` has landed in the container.
+            _progress.emit("predict", i, len(batch_id), "batch")
+
             data_coords, splits = newdata.get_batched_coordinates(batch)
             data_var, _ = newdata.get_batched_variance(batch)
 
@@ -1639,6 +1664,8 @@ class VGPNetwork(_GPModel):
             x_var = _tf.constant(data_var, _tf.float64)
             yield batch, (call(x, x_var, splits, batch) if with_rows
                           else call(x, x_var, splits))
+
+        _progress.emit("predict", len(batch_id), len(batch_id), "batch")
 
         if self.options.verbose:
             print("\n")
@@ -2014,7 +2041,22 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: int = 20,
                 "`where` needs one value per block: got %d for %d"
                 % (keep.size, blocks.n_data))
 
+    # No total: the passes are not bounded by `max_levels`, since each one
+    # marks a different set and a block still at level 0 can be marked by
+    # any later pass -- as the field sharpens around its neighbours,
+    # `unbalanced` reaches it. The loop stops when nothing is marked, and
+    # there is no honest count to promise before that.
+    with _progress.reporting("refine", None, "pass") as report:
+        return _refine_passes(model, blocks, n_sim, split_on, tolerance,
+                              include_noise, keep, meshes, verbose, report)
+
+
+def _refine_passes(model, blocks, n_sim, split_on, tolerance, include_noise,
+                   keep, meshes, verbose, report):
+    """The body of :func:`refine`, one pass at a time. Separate only so that
+    the reporting block can wrap a function that returns from its middle."""
     model.predict(blocks, n_sim=n_sim, include_noise=include_noise, where=keep)
+    report(0)
 
     step = 0
     while True:
@@ -2043,6 +2085,7 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: int = 20,
             visit = visit & keep
         model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
                       where=visit)
+        report(step)
         if verbose:
             print("pass %d: cut %d block(s) (%d undecided, %d crossed by a "
                   "mesh, %d to level a jump), %d now"
@@ -2273,107 +2316,111 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     rows = []
     acc = {}
     pit = {}
-    try:
-        _persistence.save_model(model, saved)
-        fold_model = None
-        for fold in fold_names:
-            held = labels == fold
-            if fold_model is None:
-                # Rebuilt from the file once, around the first fold's rows.
-                # Every later fold swaps its rows in, restores the file's
-                # parameters and zeroes the optimizer's memory, all in
-                # place, so it starts exactly where a reloaded model would
-                # while the graphs traced for the first fold serve it. A
-                # model rebuilt per fold left 2.6 GB of graph machinery
-                # behind each time (TensorFlow never returns it; see
-                # `_training_step`), which is what took a five-fold run on
-                # the Tom v6 model past the machine's memory.
-                fold_model = _cast(
-                    VGPNetwork,
-                    _persistence.load_model(saved, data=data[~held]))
-                value, shape, position, _, _ = \
-                    fold_model.get_parameter_values(complete=True)
-            else:
-                fold_model._set_data(data[~held])
-                fold_model.update_parameters(value, shape, position)
-                fold_model._reset_optimizer()
-            if refit == "variational":
-                _fresh_variational_state(fold_model)
-            elif refit == "leaves":
-                _fresh_variational_state(
-                    fold_model, nodes=_terminal_gp_nodes(fold_model))
-            # the batch size rides in the model's own options, so the fold
-            # copy already has whatever the original was trained with
-            if method == "svi":
-                fold_model.train_svi(epochs=epochs)
-            else:
-                fold_model.train_full(max_iter=iterations)
-            fold_model.predict(oof, n_sim=n_sim, include_noise=True,
-                               where=held)
+    with _progress.reporting("cross_validate", len(fold_names),
+                             "fold") as report:
+        try:
+            _persistence.save_model(model, saved)
+            fold_model = None
+            for done, fold in enumerate(fold_names):
+                report(done)
+                held = labels == fold
+                if fold_model is None:
+                    # Rebuilt from the file once, around the first fold's rows.
+                    # Every later fold swaps its rows in, restores the file's
+                    # parameters and zeroes the optimizer's memory, all in
+                    # place, so it starts exactly where a reloaded model would
+                    # while the graphs traced for the first fold serve it. A
+                    # model rebuilt per fold left 2.6 GB of graph machinery
+                    # behind each time (TensorFlow never returns it; see
+                    # `_training_step`), which is what took a five-fold run on
+                    # the Tom v6 model past the machine's memory.
+                    fold_model = _cast(
+                        VGPNetwork,
+                        _persistence.load_model(saved, data=data[~held]))
+                    value, shape, position, _, _ = \
+                        fold_model.get_parameter_values(complete=True)
+                else:
+                    fold_model._set_data(data[~held])
+                    fold_model.update_parameters(value, shape, position)
+                    fold_model._reset_optimizer()
+                if refit == "variational":
+                    _fresh_variational_state(fold_model)
+                elif refit == "leaves":
+                    _fresh_variational_state(
+                        fold_model, nodes=_terminal_gp_nodes(fold_model))
+                # the batch size rides in the model's own options, so the fold
+                # copy already has whatever the original was trained with
+                if method == "svi":
+                    fold_model.train_svi(epochs=epochs)
+                else:
+                    fold_model.train_full(max_iter=iterations)
+                fold_model.predict(oof, n_sim=n_sim, include_noise=True,
+                                   where=held)
 
-            held_points = oof[held]
-            held_rows = _np.flatnonzero(held)
+                held_points = oof[held]
+                held_rows = _np.flatnonzero(held)
 
-            # the truth is small -- one value a row per column -- so it is
-            # read once for the fold and indexed per batch; only the samples
-            # are large enough to be worth streaming
-            truths = {}
-            for v, _ in fold_model._measured_variables():
-                y_true, has_value = \
-                    held_points.variables[v].get_measurements()
-                y_true = _np.asarray(y_true, dtype=float)
-                has_value = _np.asarray(has_value)
-                if y_true.ndim == 1:
-                    y_true = y_true[:, None]
-                if has_value.ndim == 1:
-                    has_value = has_value[:, None]
-                # not `labels`: that name holds the fold assignments here,
-                # and shadowing it made every fold after the first read
-                # `held` as a scalar False
-                parts = getattr(held_points.variables[v], "labels", None)
-                truths[v] = (y_true, has_value,
-                             [v] if parts is None else list(parts))
+                # the truth is small -- one value a row per column -- so
+                # it is read once for the fold and indexed per batch; only
+                # the samples are large enough to be worth streaming
+                truths = {}
+                for v, _ in fold_model._measured_variables():
+                    y_true, has_value = \
+                        held_points.variables[v].get_measurements()
+                    y_true = _np.asarray(y_true, dtype=float)
+                    has_value = _np.asarray(has_value)
+                    if y_true.ndim == 1:
+                        y_true = y_true[:, None]
+                    if has_value.ndim == 1:
+                        has_value = has_value[:, None]
+                    # not `labels`: that name holds the fold assignments here,
+                    # and shadowing it made every fold after the first read
+                    # `held` as a scalar False
+                    parts = getattr(held_points.variables[v], "labels", None)
+                    truths[v] = (y_true, has_value,
+                                 [v] if parts is None else list(parts))
 
-            # One pass over the fold's samples, a batch at a time, folding
-            # each into sufficient statistics -- counts and sums, never
-            # means of means, since batches differ in size. The samples are
-            # the only large thing here and this way none of them outlives
-            # its batch.
-            fold_acc = {}
-            for batch, samples in fold_model.measurement_batches(
-                    held_points, n_sim=n_sim, n_nodes=n_nodes):
-                for v, sample in samples.items():
-                    y_true, has_value, components = truths[v]
-                    for c, component in enumerate(components):
-                        column = has_value[batch, min(
-                            c, has_value.shape[1] - 1)]
-                        measured = column == 1
-                        if not measured.any():
-                            continue
-                        truth = y_true[batch, c][measured]
-                        draw = sample[measured, c, :]
-                        _accumulate(fold_acc.setdefault(
-                            (v, component), _fresh_scores()), truth, draw)
+                # One pass over the fold's samples, a batch at a time, folding
+                # each into sufficient statistics -- counts and sums, never
+                # means of means, since batches differ in size. The samples are
+                # the only large thing here and this way none of them outlives
+                # its batch.
+                fold_acc = {}
+                for batch, samples in fold_model.measurement_batches(
+                        held_points, n_sim=n_sim, n_nodes=n_nodes):
+                    for v, sample in samples.items():
+                        y_true, has_value, components = truths[v]
+                        for c, component in enumerate(components):
+                            column = has_value[batch, min(
+                                c, has_value.shape[1] - 1)]
+                            measured = column == 1
+                            if not measured.any():
+                                continue
+                            truth = y_true[batch, c][measured]
+                            draw = sample[measured, c, :]
+                            _accumulate(fold_acc.setdefault(
+                                (v, component), _fresh_scores()), truth, draw)
 
-                        # where each assay fell inside its own predictive
-                        # distribution (mid-rank, so ties split evenly) --
-                        # what `conformalize` calibrates on
-                        u = (draw < truth[:, None]).mean(axis=1) \
-                            + 0.5 * (draw == truth[:, None]).mean(axis=1)
-                        stored = pit.setdefault(
-                            (v, component),
-                            _np.full(data.n_data, _np.nan))
-                        stored[held_rows[batch][measured]] = u
+                            # where each assay fell inside its own predictive
+                            # distribution (mid-rank, so ties split evenly) --
+                            # what `conformalize` calibrates on
+                            u = (draw < truth[:, None]).mean(axis=1) \
+                                + 0.5 * (draw == truth[:, None]).mean(axis=1)
+                            stored = pit.setdefault(
+                                (v, component),
+                                _np.full(data.n_data, _np.nan))
+                            stored[held_rows[batch][measured]] = u
 
-            for key, a in fold_acc.items():
-                v, component = key
-                rows.append(dict(_scores_from(a), variable=v,
-                                 component=component, fold=fold))
-                pooled = acc.setdefault(key, _fresh_scores())
-                _merge(pooled, a)
-    finally:
-        if cleanup:
-            _shutil.rmtree(path, ignore_errors=True)
+                for key, a in fold_acc.items():
+                    v, component = key
+                    rows.append(dict(_scores_from(a), variable=v,
+                                     component=component, fold=fold))
+                    pooled = acc.setdefault(key, _fresh_scores())
+                    _merge(pooled, a)
+            report(len(fold_names))
+        finally:
+            if cleanup:
+                _shutil.rmtree(path, ignore_errors=True)
 
     for (v, component), a in acc.items():
         rows.append(dict(_scores_from(a), variable=v, component=component,

@@ -99,6 +99,14 @@ depth, its length, a filter naming ground worth predicting. It describes the
 sample or the place, not the quantity being modelled.
 _Avoid_: attribute, auxiliary variable
 
+**Unpredicted**:
+A location no prediction has reached, read off the missing values of the
+column each variable class declares as its marker. Not the same as
+*unmeasured*, which is a location with no assay, nor *missing*, which is
+any hole in any column. `container.unpredicted()` is what a cancelled
+prediction is finished with.
+_Avoid_: unfilled, empty, pending
+
 **Block**:
 One cell of a block model, carrying its own origin and size. Values on it
 are on block support, and a **sub-block** is a position inside it used to
@@ -169,6 +177,23 @@ _Avoid_: warp, mapping
 What connects a latent field to measured values, holding the measurement
 error and the back-transformation. It holds no data of its own.
 _Avoid_: loss, observation model
+
+## Long calls
+
+**Task**:
+What a long call reports itself as -- `train`, `predict`, `refine`,
+`cross_validate`, `mesh_set`. A task's **unit** is what its count is in: an
+iteration, a batch, a pass, a fold, a body, a realization. One call can
+report several tasks, since they nest, and an event's **within** names the
+enclosing ones.
+_Avoid_: job, stage, phase (a *phase* is the training-stopping rule's, see
+`_training_phase`)
+
+**Cancel**:
+A progress callback raising, which stops the call and travels out
+untouched. Never a flag geoML sets or a value it returns: a caller must be
+able to tell a cancelled run from a finished one.
+_Avoid_: abort, interrupt, stop
 
 ## Validation
 

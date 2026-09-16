@@ -8,6 +8,7 @@ and that the batched-write and out-of-core reduction paths behave correctly.
 import numpy as np
 import pytest
 
+import geoml.storage as storage
 from geoml.storage import ArrayStore, DEFAULT_THRESHOLD
 
 
@@ -270,3 +271,65 @@ def test_store_columns_mixed_backends(tmp_path):
     want = np.quantile(reference, [0.25, 0.75], axis=1).T
     assert np.allclose(np.asarray(numpy_target), want[:, 0])
     assert np.allclose(np.asarray(zarr_target), want[:, 1])
+
+
+# --------------------------------------------------------------------------- #
+# chunks that split the realization axis (0.7.0)
+# --------------------------------------------------------------------------- #
+def test_a_wide_store_is_chunked_across_its_realizations():
+    """Chunking the location axis alone put every realization of a band of
+    rows in one chunk, so reading ONE of them read them all: a
+    (5 000 000, 100) store walked 4 GB to hand back 40 MB."""
+    rows, chunk = storage._leading_chunk((5_000_000, 100), float)
+    assert chunk == storage._COLUMNS_PER_CHUNK
+    # a chunk still weighs what it always did, so it holds as many more rows
+    assert rows * chunk * 8 <= storage._TARGET_CHUNK_BYTES
+    assert rows * chunk * 8 > storage._TARGET_CHUNK_BYTES // 2
+
+
+def test_a_narrow_store_keeps_every_column_in_one_chunk():
+    """Below the threshold the pass costs nothing worth a second chunk axis,
+    and the reductions read their blocks whole."""
+    assert storage._leading_chunk((5_000_000, 8), float)[1] == 8
+    assert storage._leading_chunk(
+        (5_000_000, storage._MIN_SPLIT_COLUMNS), float)[1] \
+        == storage._MIN_SPLIT_COLUMNS
+    # and an axis that is not realizations is never split
+    assert storage._leading_chunk((1000,), float) == (1000,)
+    assert storage._leading_chunk((1000, 4, 40), float)[1:] == (4, 40)
+
+
+def test_the_reductions_are_exact_on_a_store_split_both_ways(tmp_path):
+    """A block of a column-chunked dask array holds part of a row, and a
+    quantile over part of a row is not a quantile. The reductions gather
+    the realization axis first, which is one pass over the same bytes."""
+    reference = np.random.random((40, 64))
+    sims = ArrayStore.allocate((40, 64), backend="zarr",
+                               store=str(tmp_path / "split.zarr"),
+                               chunks=(7, 10))
+    sims[:] = reference
+    assert sims.as_dask().chunks[1] != (64,)          # genuinely split
+
+    got = sims.row_quantiles([0.1, 0.5, 0.9]).compute()
+    assert np.allclose(got, np.quantile(reference, [0.1, 0.5, 0.9], axis=1).T)
+
+    cutoffs = [0.25, 0.75]
+    assert np.allclose(
+        sims.row_cdf(cutoffs).compute(),
+        np.stack([np.mean(reference <= c, axis=1) for c in cutoffs], axis=1))
+
+    # a band still holds whole rows: it reads each of its column chunks
+    assert all(sims[band].shape[1] == 64 for band in sims.row_bands())
+    assert np.allclose(np.concatenate([sims[b] for b in sims.row_bands()]),
+                       reference)
+
+
+def test_one_realization_reads_a_share_of_a_split_store(tmp_path):
+    """The point of the split, in the one term that does not depend on the
+    machine: how much of the store a realization's read has to touch."""
+    sims = ArrayStore.allocate((2000, 100), backend="zarr",
+                               store=str(tmp_path / "one.zarr"))
+    rows, columns = sims._array.chunks
+    assert columns == storage._COLUMNS_PER_CHUNK
+    touched = rows * columns * np.ceil(2000 / rows)
+    assert touched <= 0.2 * 2000 * 100

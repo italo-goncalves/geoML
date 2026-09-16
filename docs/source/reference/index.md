@@ -46,8 +46,11 @@ viz
 
 metrics
 storage
+progress
+catalogue
 math
 stats
+reproducibility
 ```
 
 ```{note}

@@ -731,29 +731,62 @@ chapter 4's "with a `Scale` in front" and credited "the softplus in the
 chain" with its positivity, neither of which it held; corrected with it.)
 
 **S — Chapters 16 and 17 no longer reproduce their figures byte for
-byte** (found 2026-09-15, at the 0.6.12 release run). Chapter 16 changes
-from run to run: two runs of one checkout printed rmse 0.765 / 2.645 /
-... / 32.830 and 0.768 / 2.646 / ... / 32.831, its six figures moved by up
-to a fifth of their pixels, invisibly, and one of three runs landed back on
-the committed figures. Chapter 17 comes back the same in three runs, on
-0.6.12's code and on 0.6.11's, but not as committed on 2026-08-19, at
-under 0.6% of its pixels. Both reproduced exactly at the 0.6.11 release
-the day before, so this release's code is not the cause, and RobustPCA's
-MCD start is seeded from the package RNG. The committed figures were kept.
-Find the nondeterminism before a release leans on figure diffs again.
+byte** (found 2026-09-15, at the 0.6.12 release run; **chapter 16 fixed
+2026-09-15, 0.7.0**). Chapter 16 changed from run to run: two runs of one
+checkout printed rmse 0.765 / 2.645 / ... / 32.830 and 0.768 / 2.646 /
+... / 32.831, its six figures moved by up to a fifth of their pixels,
+invisibly, and one of three runs landed back on the committed figures.
+Chapter 17 comes back the same in three runs, on 0.6.12's code and on
+0.6.11's, but not as committed on 2026-08-19, at under 0.6% of its pixels.
+Both reproduced exactly at the 0.6.11 release the day before, so this
+release's code was not the cause.
+
+The cause was **`RobustPCA`, whose FastMCD drew its starting subsets from
+NumPy's global generator** -- which `set_seed` does not reach. The note
+above says it was seeded from the package RNG; that was assumed from
+`Rotation`'s FastICA, which is, and never checked. Chapter 16's chain
+holds a `RobustPCA` and chapter 17's does not, which is exactly the split
+between the chapter that moved every run and the chapter that does not.
+Seeded (`warping.py`, `random_state` from `_rnd.rng()`), four processes
+under different hash seeds build that model to the same bits and three
+train it to the same bound. Two orders that changed with the process went
+with it -- `_Operation.get_unique_parents` iterated a set, which is the
+order `VGPNetwork._nodes` sums the KL in, and `get_unfixed_variables`
+likewise -- neither having moved a number, both able to.
+
+Chapter 16 was re-run on the fix and reproduced all six committed figures
+byte for byte, printing the rmse of the higher of the two runs, 0.768 /
+2.646 / 8.492 / 6.093 / 38.130 / 32.831, and §16.5's prose still holds.
+
+Chapter 17's own 0.6% is **not** this: no `RobustPCA`, no `Rotation`, and
+three runs agreed with each other before the fix. Two more agree after it,
+identically, 0.554% of `17-elbo.png` and 0.119% of `17-vein-surface.png`
+from the committed pair and nothing else touched -- a changed number, not a
+nondeterminism, its committed figures predating 0.6.12 by three weeks. Its
+prose quotes none of the numbers it prints. **Re-commit those two figures
+and the item closes.** Committed with 0.7.0 on 2026-09-16, after a third
+identical run inside the release suite; **closed.**
+
+The contract they broke is written down now:
+`docs/source/reference/reproducibility.md`, pinned by five tests in
+`test_seed.py`, the last of them training and predicting in another
+process.
 
 (Chapter 16's figures: **verified 2026-09-05** — rerun through the manual's
 own runner after the leaves change, the seeded chapter reproduced every
 committed figure byte for byte, and the §16.5 prose matches what the model
 prints: Portlandian at a balanced accuracy of 0.5 and a Jaccard of zero.)
 
-**S — Retire the 0.6.0 deprecation shims in 0.7.0.** Ten one-line modules.
-The check that decides the item has been run: `persistence._resolve` replays
-the dotted path recorded in a save, so any module named by a save must stay
-importable forever — but none of the ten defines a `Parametric` subclass,
-the only kind of thing a model store records, and container stores dispatch
-on bare class names. The warning half is done and tested; what is left is
-only the deletion. Re-run the persistence check before doing it.
+(**S — Retire the 0.6.0 deprecation shims in 0.7.0: done 2026-09-16.**
+The ten one-line modules and the lazy `__getattr__` that resolved them are
+gone. The persistence check was re-run first, and against the code rather
+than a reading of it: a store records the path of a `Parametric` or
+`_ModelOptions` class only, anything else refusing to save, and walking
+every subclass of both finds them in six modules -- `kernels`,
+`latent.network`, `likelihood`, `models`, `transform`, `warping` -- none a
+shim, while the ten shims' targets define none. So no save, old or new, can
+name a removed path. `test_removed_paths.py` pins the removal and, more
+usefully, that every recordable class resolves from the path it records.)
 
 **S — `latent/network.py` stays out of the pyright list.** About 28 of the
 file's diagnostics read `inducing_points` as possibly-None, and they cannot
@@ -761,22 +794,18 @@ be fixed by declaring them: `None` is load-bearing in the finished state.
 Declaring `tuple` took 33 diagnostics to 67 and was reverted. Do not repeat
 that attempt.
 
-**S–M — The checked files are not clean in the WSL environment**
-(found 2026-09-11). CLAUDE.md says every file in `[tool.pyright]` checks
-clean, but pyright 1.1.411 in the `geoml` conda env (pandas 2.2.3, numpy
-2.4.6, scikit-learn 1.6.1), run from the repository root, reports 251
-errors: `data/drillhole.py` 107, `data/geoh5.py` 36, `plots/explorer.py`
-25, `data/containers.py` 23, `datasets.py` 11, `data/meshes.py` 10,
-`storage.py` 8, `data/variables.py` 7, `data/grids.py` 5,
-`plots/dashboard.py` 4, `data/blocks.py` 3, two each in
-`data/inducing.py`, `math/geometry.py`, `math/rbf.py` and `warping.py`, and
-one each in `plots/interactive.py`, `stats/random.py`, `transform.py` and
-`viz/plotly.py`; `data/meshsets.py` is clean. The seven in `variables.py`
-are on HEAD's version of the file too, so they predate the work in
-progress -- among them `pd.concat` on a `list[DataFrame | None]` and a
-`pop` handed `int | None`. First find out whether CI's pyright sees them or
-only this environment, and which versions it runs: library drift would
-call for a pin or a note, not code.
+**S — One checked file is not clean: `warping.py`** (found 2026-09-11,
+re-measured 2026-09-15). The 251 errors this item used to list are gone.
+Pyright 1.1.411 over the `[tool.pyright]` list, run from the repository
+root in the `geoml` conda env, now reports **one**:
+`warping.py:1281` `"NoReturn" is not iterable`, on
+`_ContinuousFlow.initialize`'s `x, _ = self.forward(x)` -- the base class's
+`forward` raises, so the checker reads the call as returning nothing and
+the unpacking as impossible. It is on HEAD's version of the file too, so it
+predates the 0.7.0 work. Whatever moved (a library version, the checker's
+own inference) took `data/drillhole.py`'s 107, `data/geoh5.py`'s 36 and the
+rest with it, which is why the old census is not worth chasing. Declare the
+return on the flow base, or annotate the call; either is minutes.
 
 ---
 
@@ -787,9 +816,14 @@ that build and run them, and reads what they leave behind. Its repository
 (`C:\Repos\geoscape`, same owner) keeps what it needs from geoML in
 `docs/geoml-requirements.md`, revised 2026-09-15 against 0.6.11, and the
 catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
-is that list's numbering, and M3 and M4 its milestones. Three items are
-met already: one leaf per likelihood (item 2) and names replayed by a save
-(item 5), both in 0.6.10, and `geoml.__version__` at run time (item 7).
+is that list's numbering, and M3 and M4 its milestones. **Every item on it
+is met as of 0.7.0**; what is left below is the paperwork outside the code.
+Three were met before the list was worked through -- one leaf per
+likelihood (item 2) and names replayed by a save (item 5), both in 0.6.10,
+and `geoml.__version__` at run time (item 7) -- then seven in 0.6.13, and
+items 1, 3, 8, 13 and 15 in 0.7.0. The done-notes below hold what each cost
+and what it taught; GeoScape's own requirements document has not been
+struck through to match.
 
 What GeoScape builds on, where a change must be flagged to it rather than
 made quietly: dotted class paths importable forever, already policy;
@@ -801,50 +835,20 @@ computed them given the same fit, seed and count
 per-location residual draw would break; and node names seeding the draws,
 GeoScape never renaming a node once created.
 
-**L — The catalogue** (GeoScape's item 1, blocks M4). The network editor
-offers nothing geoML has not declared. `geoml.catalogue.build()` and
-`python -m geoml.catalogue [path]` write JSON with sorted keys,
-byte-identical for one version, keyed by the dotted paths persistence
-resolves (`geoml.latent.network.BasicGP`, not a re-export). Signatures,
-defaults and docstrings come from `inspect`; what introspection cannot
-know -- category, size rule, parents, whether inducing points propagate,
-the variable types a likelihood accepts -- comes from a declaration on each
-class beside its code, and a test fails on any public class in a covered
-module without one. The spec leaves to geoML the size rules of `GPWalk`,
-`Stack`, `ProductOfExperts`, `RadialTrend`, `AdditiveGP` and
-`MultiStructureGP`; whether `GradientConstrainedInput` is an input like the
-others; the variable-type names and properties; the shape of a
-`covariance` entry; and which loader a predict step names, both of which
-exist today: `VGPNetwork.open(path)`, inherited from `_GPModel`, and
-`persistence.load_model`. Read off the code on 2026-09-15: `GPWalk` is its
-parent's size, the parent a GP of the walker's size; `Stack` the sum of
-its parents, `ProductOfExperts` their common size, neither propagating;
-`RadialTrend` its `size`, propagating where its parent does; `AdditiveGP`
-and `MultiStructureGP` their `size`, GP nodes like `BasicGP`;
-`GradientConstrainedInput` an input with a `size` of its own and a
-covariance where `BasicInput` takes a transform; a covariance an ordinary
-class entry (`Covariance(kernel, transform)`, `Sum`, `Product`, `Scale`,
-`Linear`); and the loader `VGPNetwork.open`, public, annotated, the save
-carrying its containers. Nothing checks which variable a likelihood is
-bound to, only the sizes, so `accepts` is a declaration a test verifies.
-The spec needs four amendments: `propagates_inducing` true only when every
-parent propagates and all share one root (`Add`, `LinearCombination`); a
-category a parent must belong to (`GPWalk`'s, a GP); a likelihood's size
-following its warping's; and no object defaults.
-
-Found while planning it, each something the catalogue's own tests would
-catch: `Identity()` and `Periodic()` passed explicitly cannot be saved --
-neither they nor `_Transform` define `__init__`, and `Parametric.__init__`
-is not wrapped, so no arguments are recorded; `BasicInput`,
-`kernels.Covariance` and `kernels.Linear` share one `Identity()` built at
-import; `Concatenate` declares that it propagates without asking its
-parents, so a GP on a `Concatenate` of a `Multiply` is built and fails at
-refresh; an operation given no parents fails with an `IndexError`;
-`GPWalk` does not check that its parent is a GP, nor `MultiStructureGP`
-that it has two structures; `warping.__all__` lacks the four parametric
-links, `kernels.__all__` `Covariance` and `RationalQuadratic`; and
-`NormalizeWithBoundingBox` cannot be saved, a `BoundingBox` not being
-encodable.
+(The catalogue, GeoScape's item 1: **done 2026-09-15, for 0.7.0**,
+`geoml/catalogue.py`, design record `docs/catalogue.md`. 104 classes and
+21 functions -- the last two being `geoml.progress` and `unpredicted`,
+added with items 13 and 15 so that GeoScape can discover the calls it needs
+for them -- every class declaring itself in a block where its module
+ends, and 238 tests building each declaration against its class. GeoScape's
+spec was revised with the answers read off the code, four amendments and a
+`nullable` field. The fixes its tests demanded went with it: `Identity()`
+and `Periodic()` saved at last, the shared `Identity()` defaults replaced by
+`None`, `Concatenate` asking its parents before claiming to pass inducing
+points on, operations refusing no parents, `GPWalk` a non-GP and
+`MultiStructureGP` a single structure, and the `__all__` gaps closed.
+`NormalizeWithBoundingBox` still cannot be saved, a `BoundingBox` not being
+encodable, and is catalogued internal.)
 
 (GeoScape's items 4, 6, 9, 10, 11, 12 and 14: **done 2026-09-15, for
 0.6.13**; the changelog has the detail. A target whose cut-offs differ from
@@ -862,34 +866,66 @@ GeoScape flips grades only. `docs/source/reference/stores.md` documents
 the stores, the mesh set's attribute gaining `groups`, the layout pinned
 by `test_the_store_is_laid_out_as_its_reference_page_says`.)
 
-**S — The reproducibility contract, written down** (GeoScape's item 8).
-GeoScape's lineage promises that a Run replays, and the promise must be the
-engine's. `set_seed` before construction is the one path; what it does not
-cover has to be said -- CPU against GPU, TensorFlow's nondeterministic
-kernels, and chapter 16 differing from run to run on one machine, found at
-the 0.6.12 release (§5), which is why that item comes first.
+(**S — The reproducibility contract, written down** (GeoScape's item 8):
+**done 2026-09-15, 0.7.0.** `docs/source/reference/reproducibility.md` says
+what comes back the same -- the parameters, the log, the predictions, the
+realizations and the measurement samples, in any process; a location's
+realizations whatever the batching; a node's draws, keyed by its name; a
+training split into chunks; a mesh set contoured on workers; the catalogue
+-- and what does not: another machine, another version, a GPU, another
+release. The one knob is `set_seed` before anything is built. Finding out
+which was which is what closed §5's chapter-16 item: `RobustPCA` left
+FastMCD reading NumPy's global generator, and two orders came off a set.
+Five tests in `test_seed.py`, the last training and predicting in a second
+process under a different hash seed and comparing every number as hex.)
 
-**M — A progress hook** (GeoScape's item 13). An optional callback, or a
-`logging` channel, reporting what is done, the total where it is known,
-and the bound: per iteration in `train_full` and `train_svi`, per batch in
-`predict`, per pass in `refine`, per body and realization in a mesh set,
-per fold in `cross_validate`. Today GeoScape parses the `\r` lines of
-standard output and trains in chunks, which leans on the convergence item
-above.
+(**M — A progress hook** (GeoScape's item 13): **done 2026-09-15, 0.7.0.**
+`geoml.progress(callback)`, a context manager, one `Progress(task, done,
+total, unit, bound, within)` per unit *finished* -- `train_full` per
+iteration, `train_svi` per batch, `predict` per batch, `refine` per pass,
+`cross_validate` per fold, a mesh set per prediction body and per
+realization. The user chose the context manager over a per-call argument
+(D4), and cancel is the callback raising. A `ContextVar` rather than an
+argument because the calls nest; `within` names the enclosing tasks, so a
+refinement's predictions are told from a bare one. **Logging was rejected**:
+`Handler.handleError` swallows a handler's exception, so a cancel could not
+travel back. Two things the build taught. A generator must not set a
+`ContextVar` -- its body runs in the caller's context, so the mark leaks at
+every `yield` and outlives an abandoned generator -- which is why
+`_over_batches` reports through `emit` and not `reporting`. And **a
+refinement's passes are not bounded by `max_levels`**: a block still at
+level 0 can be marked by any later pass as `unbalanced` reaches it, so
+`refine` reports no total. A test caught the wrong cap.)
 
-**M — A mesh set openable mid-build, and `unpredicted()` everywhere**
-(GeoScape's item 15). `to_zarr` writes the `geoml_meshset` attribute once;
-written up front and after each realization, a cancelled contour would
-keep what it finished. And only `BlockSet3D` has `unpredicted()`, where
-GeoScape resumes a cancelled prediction on any container. Until then its
-Scripts contour one realization a call.
+(**M — A mesh set openable mid-build, and `unpredicted()` everywhere**
+(GeoScape's item 15): **done 2026-09-15, 0.7.0.** The user chose resume over
+discard (D5). The set's description goes into the store before the first
+realization and is rewritten after each one, `complete: false` and only the
+rows actually filled (`_attrs(keep=)`, the measure tables being allocated
+for every realization up front); `open` reads a partial store, warns, and
+reports `complete`. Store format **2**, format 1 still read since it was
+always a finished set. `unpredicted()` is on `_SpatialData` now, each
+variable class declaring its marker column (`_PREDICTED_MARKER`) because a
+rock type has an `entropy` and a vector variable an `uncertainty` where a
+grade has a `prediction`; without a variable a location counts as
+unpredicted where *any* of them misses it. `BlockSet3D` keeps its override
+and unions the two notions. The gate: predicting what `unpredicted()` names
+after a cancel gives, to the last bit, what predicting the lot gives.)
 
-**M — Chunks that split the realization axis** (GeoScape's item 3, M3,
-performance). `ArrayStore` spills and `to_zarr` chunk the location axis
-only, so a chunk holds whole rows and one realization of a
-`(5 000 000, 100)` run reads every chunk, about 4 GB. A policy splitting
-axis 1 once `n_sim` is large, for both, that keeps the row-wise reductions
-(`row_bands`, the quantiles) to one pass over the store.
+(**M — Chunks that split the realization axis** (GeoScape's item 3, M3,
+performance): **done 2026-09-15, 0.7.0.** Past 32 realizations the trailing
+axis is split too, ten columns a chunk. Measured cold -- page cache dropped
+-- on a `(2 000 000, 100)` float64 store, 1.49 GB, at 100, 25 and 10
+columns a chunk: reading one realization 0.76, 0.13 and 0.06 s, **and the
+reductions no worse for it**, a quantile pass 1.34, 1.09 and 1.26 s and a
+pass in row bands 2.53, 1.19 and 1.07 s, ten columns a chunk being ten
+times the rows and so fewer, longer reads. Ten wins on every measure, so
+there is no trade-off left to tune:
+`docs/benchmarks/realization_chunks.py`. A band still holds whole rows,
+reading each of its column chunks; `row_quantiles`/`row_cdf` gather the
+realization axis first (`_whole_rows`), one pass over the same bytes, since
+a block of a column-chunked dask array holds part of a row. Stores written
+earlier keep their chunks.)
 
 Outside the code, from the same list: a contributor licence agreement
 before the first outside contribution is merged; and title in writing, with
