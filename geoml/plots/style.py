@@ -104,7 +104,7 @@ RC = {
 
 # The same figure, for plotly. A plain dict rather than a `go.layout.Template`,
 # so that reading the package's colours never costs an import of plotly -- the
-# same reason `geoml.plotly` builds dicts and imports nothing. Plotly accepts a
+# same reason `geoml.viz.plotly` builds dicts and imports nothing. Plotly accepts a
 # dict wherever it accepts a template.
 TEMPLATE = {
     "layout": {

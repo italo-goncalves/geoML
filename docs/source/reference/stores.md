@@ -47,7 +47,8 @@ present, records how the mesh was made. In a mesh set it holds:
 
 ## A mesh set
 
-Format 1: `geoml_meshset["format"]`.
+Format 2: `geoml_meshset["format"]`. Format 1, written before geoML 0.7.0,
+is read too and was always a finished set.
 
 ```
 <store>/
@@ -66,7 +67,8 @@ The root attribute `geoml_meshset` holds:
 
 | Field | Meaning |
 |---|---|
-| `format` | The layout's number, 1 |
+| `format` | The layout's number, 2 |
+| `complete` | False while a build is still writing realizations, or where one stopped part way; absent at format 1, which means true |
 | `kind` | `"cutoff"` for grade shells, `"category"` for one body per category |
 | `path` | The contoured column's path in its container |
 | `name`, `unit` | The variable's name, and its unit or null |
@@ -88,6 +90,13 @@ The root attribute `geoml_meshset` holds:
 | `repairs` | `{"keys", "values"}`, the volume `repair` removed per key, or null |
 | `corners`, `shift` | The model's box and the frame the cuts were computed in; a reader needs neither |
 
+The description is written before the first realization and again after
+each one, so a set read while its build is still running -- or after one was
+cancelled or killed -- opens and describes what it holds. `numbers`,
+`measures` and `taken` then cover the realizations actually stored, and
+`complete` is false. Before 0.7.0 the description was written once, at the
+end, and until then there was no `geoml_meshset` attribute to read at all.
+
 Stores written before geoML 0.6.13 lack `groups`. Their group names spell
 each cut-off as Python's `str(float(key))` does, as in `30.0` or `1e-05`,
 and each category by its name, unless the name reads as a number.
@@ -103,3 +112,10 @@ array holding it under `key`, such as `_metadata/HOLEID` or
 `zn/prediction`, and a column of text is stored as integer codes into its
 `labels`. Follow the keys rather than building the paths. Stores at format
 1 are not read.
+
+A variable's realizations are one `(n_locations, n_sim)` array, and since
+0.7.0 a wide one is chunked on both axes: the location axis as always, and
+the realization axis in groups of ten, so that reading one realization
+reads about a tenth of the array rather than all of it. Read the chunk
+shape from the array's own metadata -- a store written earlier keeps the
+chunks it was written with, and a narrow array is still one chunk across.

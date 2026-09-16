@@ -58,7 +58,7 @@ def ararangua():
 
     Returns
     -------
-    ara_dh : geoml.drillhole.DrillholeData
+    ara_dh : geoml.data.drillhole.DrillholeData
         A dataset with 13 drillholes and one lithology table, named "lito".
     """
     path = _os.path.dirname(__file__)
@@ -105,7 +105,7 @@ def macpass(path):
 
     Returns
     -------
-    macpass_dh : geoml.drillhole.DrillholeData
+    macpass_dh : geoml.data.drillhole.DrillholeData
         559 drillholes, with the interval tables "litho" (interpreted rock
         code) and "assay" (Ag, Pb, Zn and bulk density).
     """

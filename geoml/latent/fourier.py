@@ -977,3 +977,14 @@ class VFFMatern2(_VariationalFourierFeatures):
             eye = _tf.eye(self.n_columns, dtype=_tf.float64, batch_shape=[self.n_directions, self.size])
             mat = eye + _tf.matmul(self.mat_b, self.mat_b, True)
             self.chol = _tf.linalg.cholesky(_tf.linalg.solve(mat, eye))  # [n_dim, size, n_col, n_col]
+
+
+# the catalogue lists these as internal: dark on purpose, untested, never
+# offered to anyone building a model (`geoml.catalogue`)
+for _category, _classes in (
+        ("input", (ProjectedInput,)),
+        ("latent", (BasicProjectedGP, VFFMatern0, VFFMatern1, VFFMatern2)),
+        ("function", (SelectInput, Linear, Exponentiation)),
+        ("operation", (Concatenate, Multiply, Add, LinearCombination))):
+    for _class in _classes:
+        _class._catalogue = {"category": _category, "stability": "internal"}

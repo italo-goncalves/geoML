@@ -2023,3 +2023,57 @@ class GradientIndicator(_Likelihood):
                   "simulations": sims[:, 0, :],
                   "weights": weights}
         return output
+
+
+# --------------------------------------------------------------------------- #
+# the catalogue
+# --------------------------------------------------------------------------- #
+# What `geoml.catalogue` cannot read off a likelihood: the variable types it
+# may be bound to -- nothing checks them when a model is built, only the
+# sizes, so `test_catalogue.py` builds each pairing instead -- and how its
+# size follows: from its warping for the continuous ones, whose warping must
+# take the variable's `length`, from the variable's classes for a
+# categorical one.
+_GRADED = ["continuous", "vector", "compositional"]
+_BY_WARPING = {"rule": "warping"}
+_CLASSES = {"size_param": True, "constraints": {"min": 2}}
+
+for _likelihood in (Gaussian, Laplace, Gamma, StudentT, EpsilonInsensitive,
+                    Huber):
+    _likelihood._catalogue = {"category": "likelihood", "size": _BY_WARPING,
+                              "accepts": _GRADED}
+for _likelihood in (MultivariateGaussian, MultivariateLaplace,
+                    MultivariateEpsilonInsensitive, MultivariateHuber):
+    _likelihood._catalogue = {
+        "category": "likelihood", "size": _BY_WARPING,
+        "accepts": ["vector", "compositional"],
+        "params": {"n_components": {"constraints": {"min": 1}}}}
+Mixture._catalogue = {
+    "category": "likelihood", "size": _BY_WARPING, "accepts": _GRADED,
+    "stability": "experimental",
+    "params": {"n_components": {"constraints": {"min": 2}},
+               "family": {"type": "enum", "constraints": {
+                   "choices": sorted(_MIXTURE_FAMILIES)}},
+               "separation": {"constraints": {"exclusive_min": 1}},
+               "weights": {"type": "float[]"},
+               "contamination": {"type": "bool[]"}}}
+for _likelihood in (Bernoulli, BernoulliMaximumMargin):
+    _likelihood._catalogue = {"category": "likelihood",
+                              "size": {"rule": "const", "value": 1},
+                              "accepts": ["binary", "anomaly"]}
+for _likelihood in (CategoricalGaussianIndicator,
+                    HierarchicalGaussianIndicator):
+    _likelihood._catalogue = {
+        "category": "likelihood",
+        "size": {"rule": "from_variable", "property": "n_classes"},
+        "accepts": ["rock_type", "categorical"],
+        "params": {"n_components": _CLASSES}}
+OrderedGaussianIndicator._catalogue = {
+    "category": "likelihood", "size": {"rule": "const", "value": 1},
+    "accepts": ["ordered_rock_type"],
+    "params": {"levels": {"constraints": {"min": 1}}}}
+# built by the model itself for directional data, never by hand
+GradientIndicator._catalogue = {
+    "category": "likelihood", "size": {"rule": "const", "value": 1},
+    "accepts": [], "stability": "internal",
+    "params": {"tol": {"type": "float"}}}

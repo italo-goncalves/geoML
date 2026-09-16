@@ -164,6 +164,39 @@ def test_a_gp_on_a_node_that_cannot_propagate_says_which():
     assert "Multiply_1" in str(error.value)
 
 
+def test_a_gp_on_a_concatenation_of_a_product_is_refused():
+    """`Concatenate` hands on its parents' inducing points, so it has none
+    to give when one of them cannot propagate. It used to say it could, and
+    the GP on top failed at its first refresh instead."""
+    root = _root()
+    product = latent.Multiply(latent.BasicGP(root, size=1),
+                              latent.BasicGP(root, size=1))
+    joined = latent.Concatenate(product, latent.BasicGP(root, size=1))
+    with pytest.raises(latent.BrokenPropagationError):
+        latent.BasicGP(joined, size=1)
+
+
+def test_an_operation_needs_a_parent():
+    with pytest.raises(ValueError, match="at least one parent"):
+        latent.Add()
+
+
+def test_a_walk_needs_a_gp_to_walk_on():
+    """It reads its field by interpolating its parent, which only a GP does:
+    anything else failed later, on an attribute error naming neither."""
+    root = _root()
+    with pytest.raises(latent.NodeIncompatibilityError, match="GP node"):
+        latent.GPWalk(latent.Linear(root, size=2))
+    with pytest.raises(latent.NodeIncompatibilityError, match="GP node"):
+        latent.GPWalk(latent.Add(latent.BasicGP(root, size=2),
+                                 latent.BasicGP(root, size=2)))
+
+
+def test_a_multi_structure_gp_needs_two_structures():
+    with pytest.raises(ValueError, match="at least 2"):
+        latent.MultiStructureGP(_root(), n_structures=1)
+
+
 # --------------------------------------------------------------------------- #
 # persistence
 # --------------------------------------------------------------------------- #

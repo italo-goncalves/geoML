@@ -349,7 +349,7 @@ class _LatentVariable(_gpr.Parametric):
         """
         Writes this node and everything feeding it as a Graphviz diagram.
 
-        See `geoml.graphviz.to_dot`, which draws a whole model when given one.
+        See `geoml.viz.graphviz.to_dot`, which draws a whole model when given one.
         """
         # imported here because that module reads this one
         import geoml.viz.graphviz as _gv
@@ -633,6 +633,9 @@ class _Operation(_LatentVariable):
     """
     def __init__(self, *latent_variables, name=None):
         super().__init__()
+        if len(latent_variables) == 0:
+            raise ValueError("%s needs at least one parent"
+                             % type(self).__name__)
         self.parents = list(latent_variables)
 
         self.same_root = all(node.root is latent_variables[0].root for node in latent_variables)
@@ -649,7 +652,16 @@ class _Operation(_LatentVariable):
         all_parents = self.parents.copy()
         for p in self.parents:
             all_parents.extend(p.get_unique_parents())
-        return list(set(all_parents))
+        # by identity, each kept where it was first met: a set of nodes
+        # iterates by memory address, so the tree came out in a different
+        # order in every process -- and that order is what the KL is summed
+        # in (`VGPNetwork._nodes`)
+        unique, seen = [], set()
+        for node in all_parents:
+            if id(node) not in seen:
+                seen.add(id(node))
+                unique.append(node)
+        return unique
 
     def _common_size(self):
         """The parents' size, which the combining nodes require to be shared."""
@@ -738,7 +750,7 @@ class BasicInput(_RootLatentVariable):
     nodes.
 
     """
-    def __init__(self, inducing_points, transform=_tr.Identity(),
+    def __init__(self, inducing_points, transform=None,
                  fix_transform=False,
                  center=False, name=None):
         """
@@ -749,7 +761,8 @@ class BasicInput(_RootLatentVariable):
         inducing_points
             A `PointData` object, or a list of these objects.
         transform
-            An object from the `transform` module for normalization.
+            An object from the `transform` module for normalization; the
+            identity if left out.
         fix_transform : bool
             Whether to fix the transform parameters to prevent them from changing during training.
         center : bool
@@ -759,6 +772,8 @@ class BasicInput(_RootLatentVariable):
             `get_node`. Numbered automatically if omitted.
         """
         super().__init__(name=name)
+        if transform is None:
+            transform = _tr.Identity()
 
         if not isinstance(inducing_points, (list, tuple)):
             inducing_points = (inducing_points, )
@@ -949,8 +964,10 @@ class Concatenate(Stack):
     """
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
-        if self.same_root:
-            self.propagates_inducing_points = True
+        # the parents' inducing points are concatenated, so each must have
+        # some to give, as `Add` and `LinearCombination` ask
+        self.propagates_inducing_points = self.same_root and all(
+            p.propagates_inducing_points for p in self.parents)
 
     def refresh(self, jitter=1e-6):
         for lat in self.parents:
@@ -2430,6 +2447,12 @@ class GPWalk(_FunctionalLatentVariable):
         """
         super().__init__(parent, name=name)
 
+        # the field is read by interpolating a GP (`_GPNode.interpolate`)
+        if not isinstance(parent, _GPNode):
+            raise NodeIncompatibilityError(
+                "%s: the parent must be a GP node, whose field moves the "
+                "points; found %s, a %s"
+                % (self.name, parent.name, type(parent).__name__))
         if parent.size != parent.parent.size:
             raise SizeIncompatibilityError(
                 f"{self.name}: the parent node must have the same size as its own parent. "
@@ -2662,6 +2685,9 @@ class MultiStructureGP(BasicGP):
         name : str
             A name for this node.
         """
+        if n_structures < 2:
+            raise ValueError("a MultiStructureGP combines at least 2 "
+                             "structures, got %r" % (n_structures,))
         self.n_structures = n_structures
         self.weight_concentration = weight_concentration
         super().__init__(parent, size, kernel, fix_range,
@@ -3094,3 +3120,123 @@ class GradientConstrainedInput(_RootLatentVariable):
             ]
             return _tf.reduce_sum(
                 _tf.stack(sims, axis=0) * weights[:, :, :, None], axis=0)
+
+
+# --------------------------------------------------------------------------- #
+# the catalogue
+# --------------------------------------------------------------------------- #
+# What `geoml.catalogue` cannot read off a node: its category, its parents,
+# how its output size follows from its arguments, and whether inducing points
+# pass through it -- "parents" where they do exactly when every parent passes
+# them on and all share one root. The arguments' types are declared too, the
+# constructors here carrying no annotations. `test_catalogue.py` builds every
+# node against these claims.
+_NAME = {"type": "str"}
+_SIZE = {"type": "int", "size_param": True, "constraints": {"min": 1}}
+_NO_PARENTS = {"param": None, "min": 0, "max": 0}
+_ONE_PARENT = {"param": "parent", "min": 1, "max": 1}
+_PARENTS = {"param": "latent_variables", "min": 1, "max": None}
+
+
+def _declared(category, parents, sizing, propagates, requires=False,
+              label=None, stability=None, **params):
+    entry = {"category": category, "parents": parents, "size": sizing,
+             "propagates_inducing": propagates,
+             "requires_propagation": requires,
+             "params": dict(params, name=_NAME)}
+    if label is not None:
+        entry["label"] = label
+    if stability is not None:
+        entry["stability"] = stability
+    return entry
+
+
+# a prior's strength, None switching the prior off
+_PRIOR = {"type": "float", "nullable": True,
+          "constraints": {"exclusive_min": 0}}
+_GP = dict(parent={"type": "node"}, size=_SIZE, kernel={"type": "ref:kernel"},
+           fix_range={"type": "bool"}, isotropic={"type": "bool"},
+           range_prior=_PRIOR)
+_INPUT = dict(inducing_points={"type": "data:PointData"},
+              transform={"type": "ref:transform"},
+              fix_transform={"type": "bool"}, center={"type": "bool"})
+
+BasicInput._catalogue = _declared(
+    "input", _NO_PARENTS, {"rule": "input_dimension"}, True, label="Input",
+    **_INPUT)
+GaussianInput._catalogue = _declared(
+    "input", _NO_PARENTS, {"rule": "input_dimension"}, True,
+    label="Uncertain input", stability="experimental", **_INPUT)
+GradientConstrainedInput._catalogue = _declared(
+    "input", _NO_PARENTS, {"rule": "param", "param": "size"}, True,
+    label="Gradient-constrained input",
+    inducing_points={"type": "data:PointData"},
+    directional_data={"type": "data:DirectionalData"},
+    covariance={"type": "ref:covariance"}, size=_SIZE,
+    fix_covariance={"type": "bool"})
+
+BasicGP._catalogue = _declared(
+    "latent", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
+    requires=True, label="GP", **_GP)
+AdditiveGP._catalogue = _declared(
+    "latent", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
+    requires=True, label="Additive GP", **_GP)
+UncertainInputGP._catalogue = _declared(
+    "latent", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
+    requires=True, label="Uncertain-input GP", stability="experimental",
+    n_nodes={"type": "int", "constraints": {"min": 1}}, **_GP)
+MultiStructureGP._catalogue = _declared(
+    "latent", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
+    requires=True, label="Multi-structure GP",
+    n_structures={"type": "int", "constraints": {"min": 2}},
+    weight_concentration={"type": "json"},
+    **{k: v for k, v in _GP.items() if k != "isotropic"})
+
+Linear._catalogue = _declared(
+    "function", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
+    parent={"type": "node"}, size=_SIZE, unit_norm={"type": "bool"},
+    weight_prior=_PRIOR)
+SelectInput._catalogue = _declared(
+    "function", _ONE_PARENT, {"rule": "len", "param": "columns"}, "parents",
+    label="Select", parent={"type": "node"}, columns={"type": "int[]"})
+Bias._catalogue = _declared(
+    "function", _ONE_PARENT, {"rule": "same_as_parent"}, "parents",
+    parent={"type": "node"},
+    scale={"type": "float", "constraints": {"exclusive_min": 0}})
+Scale._catalogue = _declared(
+    "function", _ONE_PARENT, {"rule": "same_as_parent"}, "parents",
+    parent={"type": "node"})
+RadialTrend._catalogue = _declared(
+    "function", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
+    label="Radial trend", parent={"type": "node"}, size=_SIZE)
+GPWalk._catalogue = _declared(
+    "function", dict(_ONE_PARENT, category=["latent"]),
+    {"rule": "same_as_parent"}, "parents", label="GP walk",
+    parent={"type": "node"},
+    step={"type": "float", "constraints": {"exclusive_min": 0}},
+    n_steps={"type": "int", "constraints": {"min": 1}})
+Exponentiation._catalogue = _declared(
+    "function", _ONE_PARENT, {"rule": "same_as_parent"}, False,
+    label="Exp", parent={"type": "node"})
+
+Stack._catalogue = _declared(
+    "operation", _PARENTS, {"rule": "sum"}, False,
+    latent_variables={"type": "node[]"})
+Concatenate._catalogue = _declared(
+    "operation", _PARENTS, {"rule": "sum"}, "parents",
+    latent_variables={"type": "node[]"})
+LinearCombination._catalogue = _declared(
+    "operation", _PARENTS, {"rule": "common"}, "parents",
+    label="Linear combination", latent_variables={"type": "node[]"},
+    unit_variance={"type": "bool"}, per_component={"type": "bool"},
+    weight_concentration={"type": "float", "nullable": True,
+                          "constraints": {"exclusive_min": 1}})
+Add._catalogue = _declared(
+    "operation", _PARENTS, {"rule": "common"}, "parents",
+    latent_variables={"type": "node[]"})
+ProductOfExperts._catalogue = _declared(
+    "operation", _PARENTS, {"rule": "common"}, False,
+    label="Product of experts", latent_variables={"type": "node[]"})
+Multiply._catalogue = _declared(
+    "operation", _PARENTS, {"rule": "common"}, False,
+    latent_variables={"type": "node[]"})

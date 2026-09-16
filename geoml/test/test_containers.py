@@ -299,3 +299,64 @@ def test_dropping_what_is_not_there_says_what_is():
     point = _stocked_point()
     with pytest.raises(ValueError, match="no variable named 'ag'.*assay, au"):
         point.drop("ag")
+
+
+# --------------------------------------------------------------------------- #
+# which locations no prediction has reached (0.7.0)
+# --------------------------------------------------------------------------- #
+def _four_kinds(n=6):
+    """One container holding a variable of each kind a model predicts into,
+    so that each class's marker column is exercised at its own door."""
+    coords = np.random.default_rng(0).uniform(0.0, 10.0, (n, 2))
+    point = geoml.data.PointData.from_array(coords)
+    point.add_continuous_variable("grade", np.arange(n, dtype=float))
+    point.add_vector_variable("metals", ["a", "b"],
+                              np.random.default_rng(1).random((n, 2)))
+    point.add_categorical_variable("rock", ["x", "y"], ["x", "y"] * (n // 2))
+    point.add_binary_variable("ore", ["no", "yes"], ["no", "yes"] * (n // 2))
+    return point
+
+
+def test_nothing_is_predicted_before_a_model_has_run():
+    """The marker columns are allocated NaN-filled, so a container that has
+    never been predicted into says so of every location."""
+    point = _four_kinds()
+    assert np.all(point.unpredicted())
+    for name in ("grade", "metals", "rock", "ore"):
+        assert np.all(point.unpredicted(name)), name
+
+
+def test_each_kind_of_variable_declares_the_column_that_marks_it():
+    """Not every kind has a `prediction`: a rock type has an entropy, a
+    vector variable an uncertainty. Reading the wrong column would call a
+    predicted location unpredicted for ever."""
+    point = _four_kinds()
+    markers = {"grade": "prediction", "metals": "uncertainty",
+               "rock": "entropy", "ore": "entropy"}
+    for name, column in markers.items():
+        variable = point.variables[name]
+        assert variable._PREDICTED_MARKER == column, name
+        getattr(variable, column).values[:2] = 0.5
+        assert np.array_equal(point.unpredicted(name),
+                              [False, False, True, True, True, True]), name
+
+
+def test_a_location_any_variable_misses_counts_as_unpredicted():
+    """`predict` fills every variable in one pass, so a hole in any of them
+    means the batch never ran."""
+    point = _four_kinds()
+    point.variables["grade"].prediction.values[:] = 1.0
+    point.variables["metals"].uncertainty.values[:] = 1.0
+    point.variables["rock"].entropy.values[:] = 1.0
+    point.variables["ore"].entropy.values[:] = 1.0
+    assert not point.unpredicted().any()
+
+    point.variables["rock"].entropy.values[3] = np.nan
+    assert np.array_equal(point.unpredicted(),
+                          [False, False, False, True, False, False])
+
+
+def test_unpredicted_names_the_variable_it_cannot_find():
+    point = _four_kinds()
+    with pytest.raises(KeyError):
+        point.unpredicted("nonesuch")

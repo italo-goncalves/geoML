@@ -56,20 +56,64 @@ import xarray as _xr
 # large grids / simulation cubes spill to disk.
 DEFAULT_THRESHOLD = 50 * 1024 ** 2  # 50 MB
 
-# Target uncompressed size of a single Zarr chunk. Chunking is done along the
-# leading (data-location) axis only, so batched writes align to whole chunks.
+# Target uncompressed size of a single Zarr chunk.
 _TARGET_CHUNK_BYTES = 8 * 1024 ** 2  # 8 MB
+
+# Past this many realizations the trailing axis is split as well. Chunking
+# the location axis alone puts every realization of a band of rows in one
+# chunk, which is what the row-wise reductions want -- and it makes reading
+# ONE realization read them all: `simulation(i)` on a (5 000 000, 100) store
+# walked the whole 4 GB to hand back 40 MB. Below the threshold the store is
+# small enough that the pass costs nothing worth a second chunk axis.
+_MIN_SPLIT_COLUMNS = 32
+
+# How many realizations a chunk holds once the axis is split: the share of
+# the store one realization's read must visit is this over the total.
+# Measured cold (page cache dropped) on a (2 000 000, 100) float64 store,
+# 1.49 GB, at 100, 25 and 10 columns a chunk: reading one realization 0.76,
+# 0.13 and 0.06 s, and the reductions no worse for it -- a quantile pass
+# 1.34, 1.09 and 1.26 s, a pass in row bands 2.53, 1.19 and 1.07 s, since
+# ten columns a chunk is ten times the rows and so fewer, longer reads.
+# Ten wins on every measure; `docs/benchmarks/realization_chunks.py`.
+_COLUMNS_PER_CHUNK = 10
 
 
 def _leading_chunk(shape, dtype):
-    """Chunk shape that splits only axis 0, targeting ``_TARGET_CHUNK_BYTES``."""
+    """Chunk shape targeting ``_TARGET_CHUNK_BYTES``.
+
+    Splits the leading (data-location) axis, so batched writes align to whole
+    chunks and a band of rows is complete. A 2-D store holding more than
+    ``_MIN_SPLIT_COLUMNS`` realizations splits the trailing axis as well, so
+    that reading one realization reads a share of the store rather than all
+    of it; the row-wise reductions rechunk a band back to whole rows, which
+    is one pass over the same bytes.
+    """
     itemsize = _np.dtype(dtype).itemsize
     trailing = int(_np.prod(shape[1:])) if len(shape) > 1 else 1
+
+    columns = tuple(int(s) for s in shape[1:])
+    if len(shape) == 2 and shape[1] > _MIN_SPLIT_COLUMNS:
+        columns = (min(int(shape[1]), _COLUMNS_PER_CHUNK),)
+        trailing = columns[0]
+
     row_bytes = max(trailing * itemsize, 1)
     rows = max(1, _TARGET_CHUNK_BYTES // row_bytes)
     if shape[0] > 0:
         rows = min(rows, shape[0])
-    return (int(rows),) + tuple(int(s) for s in shape[1:])
+    return (int(rows),) + columns
+
+
+def _whole_rows(darr):
+    """`darr` with its trailing axis in one chunk, for a row-wise reduction.
+
+    A reduction across realizations must see all of a row's at once, and
+    since 0.7.0 a wide store is chunked on that axis too. Rechunking reads
+    the same bytes in the same pass; it is a no-op on a store that was
+    never split.
+    """
+    if darr.ndim == 2 and len(darr.chunks[1]) > 1:
+        return darr.rechunk({1: -1})
+    return darr
 
 
 def _zarr_dtype(dtype):
@@ -391,10 +435,11 @@ class ArrayStore:
         """Slices covering axis 0, each one holding whole chunks.
 
         Reading a store a band at a time is what keeps a reduction over
-        locations flat in memory. Chunking splits axis 0 only, so a band is a
-        whole number of chunks and every row in it is complete: a reduction
-        across simulations sees all of a location's at once, and nothing has to
-        be stitched back together afterwards.
+        locations flat in memory. A band is a whole number of chunks along
+        axis 0 and every row in it is complete -- reading the band reads
+        each of its column chunks, where the trailing axis is split -- so a
+        reduction across simulations sees all of a location's at once, and
+        nothing has to be stitched back together afterwards.
 
         A NumPy-backed store is already in RAM and comes back as a single band,
         so a caller written this way costs nothing on small data.
@@ -411,10 +456,11 @@ class ArrayStore:
         """Lazy row-wise quantiles of a 2-D store.
 
         Returns an uncomputed dask array of shape ``(n_rows, len(qs))``.
-        Because chunking splits only axis 0, every chunk holds complete rows,
-        so the quantiles are exact and the full store is never materialized.
+        The realization axis is gathered into one chunk first, so every
+        block holds complete rows: the quantiles are exact and the full
+        store is never materialized, at one pass over the same bytes.
         """
-        darr = self.as_dask()
+        darr = _whole_rows(self.as_dask())
         qs = _np.atleast_1d(qs).astype(float)
 
         def block_quantiles(block):
@@ -431,7 +477,7 @@ class ArrayStore:
         — the inverse view of :meth:`row_quantiles`. Returns an uncomputed
         dask array of shape ``(n_rows, len(cutoffs))`` with values in [0, 1].
         """
-        darr = self.as_dask()
+        darr = _whole_rows(self.as_dask())
         cutoffs = _np.atleast_1d(cutoffs).astype(float)
 
         def block_cdf(block):

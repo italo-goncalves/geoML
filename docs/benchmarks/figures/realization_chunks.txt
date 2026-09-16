@@ -1,0 +1,6 @@
+(2000000, 100) float64, 1.49 GB, page cache dropped before each read
+
+width     chunks                one    quant    bands   files
+all       10485 x 100          0.76     1.34     2.53     192
+quarter   41943 x 25           0.13     1.09     1.19     193
+ten       104857 x 10          0.06     1.26     1.07     201

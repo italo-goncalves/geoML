@@ -579,6 +579,33 @@ class _Variable(_TreeNode):
         raise NotImplementedError
 
     # ------------------------------------------------------------------ #
+    # what a prediction leaves behind
+    # ------------------------------------------------------------------ #
+    # The column `predict` always fills, whose missing values name the
+    # locations it never reached. Declared per class because not every kind
+    # of variable has a `prediction`: a rock type has an entropy, a vector
+    # variable an uncertainty, and reading the wrong column would call a
+    # predicted location unpredicted for ever.
+    _PREDICTED_MARKER: "str | None" = None
+
+    def unpredicted(self):
+        """One boolean per location: True where no prediction reached it.
+
+        What a cancelled or partial `predict` left to do. Reading the
+        missing values rather than remembering a call means the answer
+        stays true however the container was arrived at -- reopened from a
+        store, subsetted, or split.
+        """
+        if self._PREDICTED_MARKER is None:
+            raise ValueError(
+                "%s says nothing about where it was predicted; it declares "
+                "no marker column" % type(self).__name__)
+        column = getattr(self, self._PREDICTED_MARKER, None)
+        if column is None:
+            return _np.ones(self.coordinates.n_data, dtype=bool)
+        return _np.isnan(_np.asarray(column.values, dtype=float))
+
+    # ------------------------------------------------------------------ #
     # Zarr persistence (see _SpatialData.to_zarr / _SpatialData.open)
     # ------------------------------------------------------------------ #
     # Scalar ``_Attribute`` roles to persist; overridden per subclass.
@@ -753,6 +780,7 @@ class ContinuousVariable(_Variable):
     """
     _ZARR_ATTRS = ("measurements", "latent_mean", "latent_variance",
                    "prediction", "dispersion", "noise_variance")
+    _PREDICTED_MARKER = "prediction"
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
                       "responsibilities")
@@ -1210,6 +1238,7 @@ class VectorVariable(_Variable):
     responsibilities: "dict[int, _Attribute]"
 
     _ZARR_ATTRS = ("uncertainty",)
+    _PREDICTED_MARKER = "uncertainty"
     # the mixture is over the row, so the responsibilities belong to the
     # variable rather than to its components -- one answer per location
     _DICT_FAMILIES = ("responsibilities",)
@@ -1649,6 +1678,7 @@ class RockTypeVariable(_Variable):
 
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
                    "measurements_a", "measurements_b", "boundary")
+    _PREDICTED_MARKER = "entropy"
     # taken per sub-block and then averaged (`_resolve`); `predicted` is read
     # again off the averaged probabilities (`_coarsen_into`)
     _BLOCK_MEANS = ("entropy", "uncertainty")
@@ -2103,6 +2133,7 @@ class BinaryVariable(_Variable):
     _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
                    "probability", "entropy", "uncertainty",
                    "latent_mean", "latent_variance")
+    _PREDICTED_MARKER = "entropy"
     # `entropy` and `uncertainty` are functions of the block's own
     # probability, not means over it, and stay out; `predicted` is read
     # again off the averaged probability (`_coarsen_into`)

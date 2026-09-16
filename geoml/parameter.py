@@ -125,6 +125,10 @@ def _short_value(parameter):
 class Parametric(object):
     """An abstract class for objects with trainable parameters"""
 
+    # what `geoml.catalogue` says of a class that introspection cannot:
+    # assigned, class by class, where each catalogued module ends
+    _catalogue: dict
+
     def __init_subclass__(cls, **kwargs):
         """Records the arguments each subclass is constructed with.
 
@@ -137,8 +141,14 @@ class Parametric(object):
 
         init = cls.__dict__.get("__init__")
         if init is None:
-            # this class inherits an already wrapped initializer
-            return
+            if hasattr(cls.__init__, "__wrapped__"):
+                # this class inherits an already wrapped initializer
+                return
+            # it inherits `Parametric`'s own, which nothing wraps: without
+            # this, a class declaring no initializer anywhere below this one
+            # (`transform.Identity`) recorded no arguments and could not be
+            # saved
+            init = cls.__init__
 
         @_functools.wraps(init)
         def wrapped_init(self, *args, **kwargs):
@@ -256,8 +266,10 @@ class Parametric(object):
         self.update_parameters(value, shape, position)
 
     def get_unfixed_variables(self):
-        unique_params = list(set(self._all_parameters))
-        model_variables = [pr.variable for pr in unique_params
+        # in registration order, which `_all_parameters` already holds once
+        # each: a set of them iterates by memory address, a different order
+        # in every process
+        model_variables = [pr.variable for pr in self._all_parameters
                            if not pr.fixed]
         return model_variables
 

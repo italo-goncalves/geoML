@@ -876,10 +876,10 @@ def test_a_store_given_at_construction_is_the_set_s_own(radial, tmp_path):
 
 
 _DESCRIPTION = sorted([
-    "close", "corners", "excluded", "failures", "format", "groups", "keys",
-    "kind", "levels", "limits", "measures", "name", "nudge", "numbers",
-    "path", "provenance", "realization", "repairs", "rule", "shift",
-    "simplify", "summary", "supersample", "taken", "unit"])
+    "close", "complete", "corners", "excluded", "failures", "format",
+    "groups", "keys", "kind", "levels", "limits", "measures", "name",
+    "nudge", "numbers", "path", "provenance", "realization", "repairs",
+    "rule", "shift", "simplify", "summary", "supersample", "taken", "unit"])
 
 
 def test_the_store_is_laid_out_as_its_reference_page_says(shells, tmp_path):
@@ -893,7 +893,8 @@ def test_the_store_is_laid_out_as_its_reference_page_says(shells, tmp_path):
 
     assert list(root.attrs) == ["geoml_meshset"]
     meta = root.attrs["geoml_meshset"]
-    assert msm._STORE_FORMAT == 1 and meta["format"] == 1
+    assert msm._STORE_FORMAT == 2 and meta["format"] == 2
+    assert meta["complete"] is True
     assert sorted(meta) == _DESCRIPTION
     assert meta["groups"] == ["20.0", "30.0", "40.0"]
     assert sorted(name for name, _ in root.groups()) \
@@ -1072,3 +1073,83 @@ def test_both_backends_draw_connectivity_and_a_section(shells, radial):
     section = interactive.section(shells, "Z", CENTRE)
     assert [trace.type for trace in section.data] == ["heatmap", "scatter",
                                                       "scatter", "scatter"]
+
+
+# --------------------------------------------------------------------------- #
+# a store that opens before the build has finished (0.7.0)
+# --------------------------------------------------------------------------- #
+class _Stop(Exception):
+    """A cancel raised by a progress callback."""
+
+
+def test_a_finished_build_says_it_is_complete(radial, tmp_path):
+    path = str(tmp_path / "whole.zarr")
+    made = MeshSet(radial, "g", workers=1, store=path)
+    assert made.complete is True
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")      # nothing to warn about
+        assert MeshSet.open(path).complete is True
+
+
+def test_a_cancelled_build_leaves_a_store_that_opens(radial, tmp_path):
+    """`to_zarr` wrote the description once, at the end, so until then
+    `open` raised a bare KeyError: a contour cancelled or killed after
+    hours left nothing readable, however many realizations it had made."""
+    path = str(tmp_path / "partial.zarr")
+
+    def stop_after_two(event):
+        if event.task == "mesh_set" and event.unit == "realization" \
+                and event.done >= 2:
+            raise _Stop()
+
+    with pytest.raises(_Stop):
+        with geoml.progress(stop_after_two):
+            MeshSet(radial, "g", workers=1, store=path)
+
+    with pytest.warns(UserWarning, match="did not finish"):
+        reopened = MeshSet.open(path, data=radial)
+    assert reopened.complete is False
+    # what it holds is what finished, and it is readable
+    assert len(reopened._numbers) == 2
+    assert reopened.realization_volumes().shape[0] == 2
+    for number in reopened._numbers:
+        assert reopened.simulations[number][30.0].volume > 0.0
+
+
+def test_a_partial_store_measures_over_what_it_holds(radial, tmp_path):
+    """The measure tables are allocated for every realization up front, so
+    a description written mid-build must name the rows that are filled --
+    otherwise every report reads NaN for the ones still to come."""
+    path = str(tmp_path / "counted.zarr")
+
+    def stop_after_three(event):
+        if event.task == "mesh_set" and event.unit == "realization" \
+                and event.done >= 3:
+            raise _Stop()
+
+    with pytest.raises(_Stop):
+        with geoml.progress(stop_after_three):
+            MeshSet(radial, "g", workers=1, store=path)
+
+    with pytest.warns(UserWarning):
+        reopened = MeshSet.open(path, data=radial)
+    volumes = reopened.realization_volumes()
+    assert volumes.shape[0] == 3
+    assert np.all(np.isfinite(np.asarray(volumes, dtype=float)))
+
+
+def test_a_store_of_the_older_format_still_opens(radial, tmp_path):
+    """Format 1 had no way to say `complete`: a build wrote its description
+    once, at the end, so every store that existed was a finished one."""
+    path = str(tmp_path / "old.zarr")
+    MeshSet(radial, "g", workers=1).to_zarr(path)
+
+    root = zarr.open_group(path, mode="a")
+    meta = dict(root.attrs["geoml_meshset"])
+    meta["format"] = 1
+    del meta["complete"]
+    root.attrs["geoml_meshset"] = meta
+
+    reopened = MeshSet.open(path)
+    assert reopened.complete is True
+    assert reopened.realization_volumes().shape[0] == len(OFFSETS)

@@ -2028,22 +2028,21 @@ class BlockSet3D(PointData):
     def unpredicted(self, variable: str | None = None) -> _np.ndarray:
         """Which blocks have nothing in them yet.
 
-        What `split` leaves behind: hand it to `predict(..., where=...)` and
-        only the blocks the refinement created are visited. Without a variable
-        it is the blocks the last split made, which is what a container knows
-        without having to be told what was predicted into it; naming one reads
-        its missing values instead, which stays true however the object was
-        arrived at.
+        What `split` leaves behind, and what a cancelled prediction did not
+        reach: hand it to `predict(..., where=...)` and only those blocks
+        are visited. Without a variable it is the blocks the last split
+        made *together with* the ones whose values are missing -- the two
+        agree right after a split, when the children hold nothing, and
+        differ only where a prediction stopped part way or never covered
+        the ground. Naming a variable reads that one's missing values
+        alone.
         """
-        if variable is None:
-            return _np.array(self._fresh, dtype=bool)
-        prediction = getattr(self.variables[variable], "prediction", None)
-        if prediction is None:
-            raise ValueError(
-                "%r has no prediction column to read; name a continuous "
-                "variable, or ask without one for the blocks the last "
-                "split made" % variable)
-        return _np.isnan(_np.asarray(prediction.values))
+        if variable is not None:
+            return self.variables[variable].unpredicted()
+        # `_fresh` alone would call a half-predicted split complete, and
+        # the missing values alone would forget a child nothing has been
+        # asked about yet
+        return _np.array(self._fresh, dtype=bool)             | _SpatialData.unpredicted(self)
 
     # ------------------------------------------------------------------ #
     # what the model asks for

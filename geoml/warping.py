@@ -29,7 +29,11 @@ __all__ = ["Identity",
            "PCA",
            "RobustPCA",
            "Rotation",
-           "ScaledSimplex"
+           "ScaledSimplex",
+           "BoxCox",
+           "YeoJohnson",
+           "Arcsinh",
+           "SinhArcsinh"
            ]
 
 import geoml.math.interpolate as _gint
@@ -1613,7 +1617,13 @@ class RobustPCA(PCA):
                 "ignore",
                 message="The covariance matrix associated to your dataset "
                         "is not full rank")
-            mcd = _MCD(support_fraction=self.support_fraction).fit(x)
+            # seeded from the package RNG, as `Rotation` is: unseeded,
+            # FastMCD draws its starting subsets from numpy's global state,
+            # which `geoml.set_seed` does not reach -- chapter 16's model
+            # started from one of two robust covariances, by process
+            mcd = _MCD(support_fraction=self.support_fraction,
+                       random_state=int(_rnd.rng().integers(2 ** 31))
+                       ).fit(x)
         self.mean = _tf.constant(mcd.location_[None, :], _tf.float64)
         cov = mcd.covariance_
         vals, vecs = _np.linalg.eigh(cov)
@@ -1804,3 +1814,90 @@ class ScaledSimplex(Identity):
         scale = _np.sum(x_new, axis=0, keepdims=True) / _np.sum(complete)
         self.scale = _tf.constant(scale, _tf.float64)
         return x_new / self.scale
+
+
+# --------------------------------------------------------------------------- #
+# the catalogue
+# --------------------------------------------------------------------------- #
+# What `geoml.catalogue` cannot read off a warping: the width it takes and
+# gives ("same_as_parent" being what it took), how warpings chain -- every
+# one can be a link of the chain a likelihood's `warping` receives -- and the
+# types of the arguments, the constructors here carrying no annotations.
+_CHAIN = {"via": "geoml.warping.ChainedWarping", "attaches_to": "warping"}
+_SIZED = {"in": {"rule": "param", "param": "size"},
+          "out": {"rule": "same_as_parent"}}
+_OF_N = {"in": {"rule": "param", "param": "n_dim"},
+         "out": {"rule": "same_as_parent"}}
+_COUNT = {"type": "int", "size_param": True, "constraints": {"min": 1}}
+_POSITIVE = {"type": "float", "constraints": {"exclusive_min": 0}}
+_EXPONENT = {"type": "float", "constraints": {"min": 0, "max": 2}}
+
+
+def _declared(sizing, label=None, stability=None, **params):
+    entry = {"category": "warping", "chain": _CHAIN, "size": sizing}
+    if label is not None:
+        entry["label"] = label
+    if stability is not None:
+        entry["stability"] = stability
+    if params:
+        entry["params"] = params
+    return entry
+
+
+Identity._catalogue = _declared(_SIZED, size=_COUNT)
+Spline._catalogue = _declared(
+    _SIZED, stability="experimental", size=_COUNT,
+    knots_per_arm={"type": "int", "constraints": {"min": 1}},
+    backbone={"type": "enum", "constraints": {"choices": ["cubic", "rq"]}})
+ZScore._catalogue = _declared(
+    _SIZED, label="Z-score", size=_COUNT, mean={"type": "float[]"},
+    std={"type": "float[]"}, robust={"type": "bool"})
+Center._catalogue = _declared(_SIZED, size=_COUNT,
+                              mean={"type": "float[]"})
+Softplus._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
+Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
+Scale._catalogue = _declared(_SIZED, size=_COUNT, scale={"type": "json"})
+BoxCox._catalogue = _declared(
+    _SIZED, label="Box-Cox", size=_COUNT, shift=_POSITIVE,
+    exponent=_EXPONENT)
+YeoJohnson._catalogue = _declared(
+    _SIZED, label="Yeo-Johnson", size=_COUNT, exponent=_EXPONENT)
+Arcsinh._catalogue = _declared(_SIZED, size=_COUNT, scale=_POSITIVE)
+SinhArcsinh._catalogue = _declared(
+    _SIZED, label="Sinh-arcsinh", size=_COUNT, skewness={"type": "float"},
+    tailweight=_POSITIVE)
+ChainedWarping._catalogue = _declared(
+    {"in": {"rule": "custom", "note": "the first link's input"},
+     "out": {"rule": "custom", "note": "the last link's output"}},
+    label="Chain", warpings={"type": "ref:warping[]"})
+Sigmoid._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
+ContinuousNormalizingFlow._catalogue = _declared(
+    _SIZED, label="Normalizing flow", stability="experimental", size=_COUNT,
+    inducing_points={"type": "int", "constraints": {"min": 1}},
+    n_steps={"type": "int", "constraints": {"min": 1}}, step=_POSITIVE,
+    rtol=_POSITIVE)
+TensorProductFlow._catalogue = _declared(
+    _SIZED, label="Tensor-product flow", stability="experimental",
+    size=_COUNT, grid={"type": "int", "constraints": {"min": 2}},
+    rank={"type": "int", "constraints": {"min": 1}},
+    n_steps={"type": "int", "constraints": {"min": 1}}, rtol=_POSITIVE)
+PCA._catalogue = _declared(
+    {"in": {"rule": "param", "param": "n_dim"},
+     "out": {"rule": "custom", "note": "n_components, or n_dim if null"}},
+    n_dim={"type": "int", "constraints": {"min": 1}},
+    n_components={"type": "int", "constraints": {"min": 1}})
+RobustPCA._catalogue = _declared(
+    {"in": {"rule": "param", "param": "n_dim"},
+     "out": {"rule": "custom", "note": "n_components, or n_dim if null"}},
+    label="Robust PCA", n_dim={"type": "int", "constraints": {"min": 1}},
+    n_components={"type": "int", "constraints": {"min": 1}},
+    support_fraction={"type": "float",
+                      "constraints": {"exclusive_min": 0, "max": 1}})
+CenteredLogRatio._catalogue = _declared(
+    _OF_N, label="Centred log-ratio",
+    n_dim={"type": "int", "constraints": {"min": 2}})
+Rotation._catalogue = _declared(
+    _OF_N, n_dim={"type": "int", "constraints": {"min": 1}},
+    fixed={"type": "bool"})
+ScaledSimplex._catalogue = _declared(_SIZED, label="Scaled simplex",
+                                     size=_COUNT)
