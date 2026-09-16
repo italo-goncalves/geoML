@@ -1,4 +1,4 @@
-__version__ = '0.6.13'
+__version__ = '0.7.0'
 __author__ = 'Ítalo Gomes Gonçalves'
 
 # TensorFlow's C++ INFO wall -- device initialization, XLA compilation,

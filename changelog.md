@@ -126,6 +126,14 @@ defined one -- every such class lives in `kernels`, `latent.network`,
 `likelihood`, `models`, `transform` or `warping`, which stay where they are.
 `test_removed_paths.py` pins both halves. Three docstrings still pointed at
 an old path, and so did the plugin's implicit-modelling notebook.
+* **The release run**: the full suite, 1923 tests, and every chapter of the
+manual. Every chapter's figures came back as committed but chapter 17's
+two, which differ from their committed figures as at 0.6.12 and 0.6.13;
+three runs of this code agree with each other to the byte, so the
+difference is a number a release moved rather than a nondeterminism, and
+the figures are committed anew. Chapter 16 reproduced its own, as it now
+does in any process.
+
 ## version 0.6.13
 * **Fixed: writing an opened container back to its own store destroyed
 it.** `open` leaves the arrays on disk, and `to_zarr` onto the same path
