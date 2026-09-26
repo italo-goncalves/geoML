@@ -61,16 +61,16 @@ def test_log_determinant_matches_the_jacobian(kind):
     rows = np.random.default_rng(1).normal(size=[6, 3])
     reported = np.asarray(flow.forward(tf.constant(rows))[1])
 
+    # every bump of every row in one solve: 36 separate adaptive solves at
+    # this tolerance were three minutes of the suite, and the rows do not
+    # interact -- the shared step only makes each one more accurate
     step = 1e-5
+    bumps = np.concatenate([np.eye(3), -np.eye(3)]) * step
+    shifted = (rows[:, None, :] + bumps[None, :, :]).reshape(-1, 3)
+    moved = np.asarray(flow.forward(tf.constant(shifted))[0]).reshape(6, 6, 3)
     numeric = []
-    for row in rows:
-        jacobian = np.zeros([3, 3])
-        for column in range(3):
-            bump = np.zeros([1, 3])
-            bump[0, column] = step
-            plus = np.asarray(flow.forward(tf.constant(row[None] + bump))[0])
-            minus = np.asarray(flow.forward(tf.constant(row[None] - bump))[0])
-            jacobian[:, column] = (plus - minus)[0] / (2 * step)
+    for plus_minus in moved:
+        jacobian = (plus_minus[:3] - plus_minus[3:]).T / (2 * step)
         numeric.append(np.log(abs(np.linalg.det(jacobian))))
 
     assert np.allclose(reported, numeric, atol=1e-4)

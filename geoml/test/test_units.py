@@ -450,3 +450,24 @@ def test_a_divisor_must_be_positive():
 def test_the_table_is_shared_with_the_drillhole_module():
     import geoml.data.drillhole as dh
     assert dh.UNITS is UNITS
+
+
+def test_a_measurement_s_pit_is_the_same_in_either_unit():
+    """Where each assay falls in its predictive distribution does not
+    depend on the unit it was declared in. It did: the assays were read as
+    fractions of the whole and the samples came in percent, so every PIT of
+    a composition in percent was 0 -- in `cross_validate`'s scores too,
+    which read the truth the same way."""
+    rng = np.random.default_rng(3)
+    as_percent = rng.dirichlet([6.0, 3.0, 11.0], size=30) * 100.0
+    columns = {}
+    for values, units, cutoff in (
+            (as_percent, {"p": "%", "q": "%", "r": "%"}, 30.0),
+            (as_percent / 100.0, None, 0.30)):
+        model = _model(values, units, cutoff, iterations=5)
+        model.predict(model.data, n_sim=6)
+        columns[cutoff] = [model.data.get_metadata("pit_c_" + k)
+                           for k in ("p", "q", "r")]
+    for percent, plain in zip(columns[30.0], columns[0.30]):
+        assert 0.0 < np.nanmean(percent) < 1.0
+        np.testing.assert_array_equal(percent, plain)

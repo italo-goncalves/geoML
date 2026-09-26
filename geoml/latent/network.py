@@ -297,6 +297,22 @@ class _LatentVariable(_gpr.Parametric):
         self._sim_state = None
         self._explained_var = None
 
+    # Whether the node's output is Gaussian: True, False, or "parents",
+    # Gaussian exactly when every parent is. The training quadrature reads
+    # a leaf's mean and variance as a Gaussian's, so a model trains the
+    # likelihood of a leaf that is not on its realizations instead.
+    _GAUSSIAN = "parents"
+
+    @property
+    def gaussian(self):
+        """Whether the node's output is a Gaussian random variable."""
+        if self._GAUSSIAN != "parents":
+            return self._GAUSSIAN
+        parents = getattr(self, "parents", None)
+        if parents is None:
+            parents = [self.parent]
+        return all(p.gaussian for p in parents)
+
     def _summary_line(self):
         name = self.name or self.__class__.__name__
         if not name.startswith(self.__class__.__name__):
@@ -570,6 +586,8 @@ class _RootLatentVariable(_LatentVariable):
 
     A root latent variable node processes an input, passing it along to other nodes as a Gaussian random variable.
     """
+    _GAUSSIAN = True
+
     def __init__(self, name=None):
         super().__init__()
         self.root = self
@@ -679,6 +697,8 @@ class _Operation(_LatentVariable):
 
 
 class _GPNode(_FunctionalLatentVariable):
+    _GAUSSIAN = True
+
     def __init__(self, parent, name=None):
         super().__init__(parent, name=name)
         if not self.propagates_inducing_points:
@@ -1981,6 +2001,25 @@ class ProductOfExperts(_Operation):
 
 
 class Exponentiation(_FunctionalLatentVariable):
+    """
+    The exponential of a latent variable: a field that is always positive.
+
+    Each output is ``exp(sqrt(amp_scale) * f + amp_mean)`` of its parent's
+    output ``f``, the two parameters trained, and its moments are those of
+    the log-normal that makes. Meant as an amplitude multiplied into another
+    branch, so a field's variability can change from place to place. The
+    output is no longer Gaussian, so no inducing points pass through it and
+    nothing that needs them can sit above it.
+
+    Parameters
+    ----------
+    parent
+        The latent variable to exponentiate; the output has its size.
+    name
+        The node's name, numbered within the tree.
+    """
+    _GAUSSIAN = False
+
     def __init__(self, parent, name=None):
         super().__init__(parent, name=name)
         self._add_parameter("amp_mean", _gpr.RealParameter(0, -5, 5))
@@ -2042,6 +2081,24 @@ class Exponentiation(_FunctionalLatentVariable):
 
 
 class Multiply(_Operation):
+    """
+    The product of latent variables of one size, output by output.
+
+    The mean and variance are those of a product of independent variables,
+    and each realization is the product of the parents' realizations. The
+    usual use is an amplitude times a field, the amplitude an
+    `Exponentiation`. A product of Gaussians is not Gaussian, so no inducing
+    points pass through it.
+
+    Parameters
+    ----------
+    latent_variables
+        The latent variables to multiply, all of the same size.
+    name
+        The node's name, numbered within the tree.
+    """
+    _GAUSSIAN = False
+
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
         self._size = self._common_size()
@@ -2116,7 +2173,182 @@ class Multiply(_Operation):
         return _tf.constant(0.0, _tf.float64)
 
 
+class GaussianMixture(_Operation):
+    """
+    A mixture of latent variables, weighted by the softmax of others.
+
+    `weights` holds one latent variable per component, in the components'
+    order: the first latent variable of `weights` weighs the first
+    component, the second the second, and so on. At every location the
+    softmax of the weights, scaled by a trained amplitude, gives each
+    component its share, and the output is the components' sum under those
+    shares -- a field that follows one component where its weight
+    dominates and passes smoothly to another where the weights change
+    places. The amplitude sets how sharp the passage is: a large one makes
+    each realization nearly one component at a time, a small one blends
+    them.
+
+    The mixture is computed realization by realization, from the
+    realizations of the weights and of the components, so it keeps
+    whatever those share through common parents. The output is not
+    Gaussian: a model trains the likelihood of a leaf above this node on
+    its realizations, and no inducing points pass through it.
+
+    Parameters
+    ----------
+    weights
+        A node of one latent variable per component, in the order of
+        `components`.
+    components
+        Two or more nodes of one common size, which is the output's size.
+        Their order is the order of the weights' latent variables.
+    n_nodes
+        Quadrature points over the weights for the moments. A power of
+        two keeps the Sobol sequence balanced.
+    name
+        A name for this node, shown in the printed network and accepted by
+        `get_node`. Numbered automatically if omitted.
+
+    Raises
+    ------
+    SizeIncompatibilityError
+        If the weights do not have one latent variable per component, or
+        the components differ in size.
+
+    See Also
+    --------
+    ProductOfExperts : components weighted by their own variances.
+    geoml.likelihood.Mixture : a mixture of noise laws, not of fields.
+
+    Notes
+    -----
+    A component as flexible as the field it blends can fit every regime on
+    its own, and then the weights never switch: give the components a
+    smoother structure than the passage between regimes (a longer range).
+
+    The mean and variance take the weights as independent of the
+    components, and each weight as independent of the others: the softmax
+    is averaged over `n_nodes` scrambled Sobol points of the weights'
+    marginal Gaussians. Where the weights and the components share a
+    parent the moments miss that correlation; the realizations do not.
+    """
+    _GAUSSIAN = False
+
+    def __init__(self, weights, components, n_nodes=64, name=None):
+        components = list(components)
+        if len(components) < 2:
+            raise ValueError("a mixture needs at least two components")
+        super().__init__(weights, *components, name=name)
+        self.weights = weights
+        self.components = components
+        if weights.size != len(components):
+            raise SizeIncompatibilityError(
+                "%s: one weight per component, but %s has size %d for %d "
+                "components" % (self.name, weights.name, weights.size,
+                                len(components)))
+        sizes = [c.size for c in components]
+        if not all(s == sizes[0] for s in sizes):
+            raise SizeIncompatibilityError(
+                "%s: all components must have the same size. Found %s."
+                % (self.name, ", ".join("%s (size %d)" % (c.name, c.size)
+                                        for c in components)))
+        self._size = sizes[0]
+        self.propagates_inducing_points = False
+
+        # the weights' Gaussian sampled once, as `UncertainInputGP` samples
+        # its input: scrambled Sobol through the normal quantile, the
+        # scramble drawn from the package RNG, kept fixed so that a save
+        # replays the same nodes
+        self.n_nodes = int(n_nodes)
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            points = _rnd.sobol_engine(len(components), _rnd.rng()) \
+                .random(self.n_nodes)
+        nodes = _special.ndtri(points)
+        self._add_parameter("nodes", _gpr.RealParameter(
+            nodes, _np.full_like(nodes, -10.0), _np.full_like(nodes, 10.0),
+            fixed=True))
+        # the weights' variance multiplier: a GP node's prior variance is
+        # one, which caps how sharp the softmax of its realizations can be
+        self._add_parameter("amplitude", _gpr.PositiveParameter(1.0, 0.01, 100.0))
+
+    def refresh(self, jitter=1e-6):
+        for lat in self.parents:
+            lat.refresh(jitter)
+
+    def kl_divergence(self):
+        return _tf.constant(0.0, _tf.float64)
+
+    def _mixture_moments(self, w_mu, w_var, c_mu, c_var):
+        """Mean and variance of the mixture, `[n, size]` each, from the
+        weights' moments `[n, K]` and the components' `[K, n, size]`."""
+        nodes = self.parameters["nodes"].get_value()            # [q, K]
+        # the softmax at every node; the small constant keeps the root's
+        # derivative finite where a variance is exactly zero
+        latent = w_mu[None, :, :] \
+            + _tf.sqrt(w_var + 1e-12)[None, :, :] * nodes[:, None, :]
+        shares = _tf.nn.softmax(latent, axis=2)                 # [q, n, K]
+        first = _tf.reduce_mean(shares, axis=0)                 # [n, K]
+        second = _tf.reduce_mean(
+            shares[:, :, :, None] * shares[:, :, None, :], axis=0)  # [n, K, K]
+
+        mean = _tf.einsum("nk,knp->np", first, c_mu)
+        raw = _tf.einsum("nkl,knp,lnp->np", second, c_mu, c_mu) \
+            + _tf.einsum("nkk,knp->np", second, c_var)
+        return mean, _tf.maximum(raw - mean ** 2, 0.0)
+
+    def propagate(self, x, x_var=None):
+        with _tf.name_scope("gaussian_mixture_prediction"):
+            amplitude = self.parameters["amplitude"].get_value()
+            w_mu, w_var = self.weights.propagate(x, x_var)
+            w_mu = w_mu * _tf.sqrt(amplitude)
+            w_var = w_var * amplitude
+            w_exp = _tf.transpose(self.weights._explained_var) * amplitude
+            c_mu, c_var, c_exp = [], [], []
+            for c in self.components:
+                mean, var = c.propagate(x, x_var)
+                c_mu.append(mean)
+                c_var.append(var)
+                c_exp.append(_tf.transpose(c._explained_var))
+            c_mu = _tf.stack(c_mu, axis=0)
+            c_var = _tf.stack(c_var, axis=0)
+            c_exp = _tf.stack(c_exp, axis=0)
+
+            mean, var = self._mixture_moments(w_mu, w_var, c_mu, c_var)
+            # what conditioning explained away: the variance with the
+            # explained parts put back, less the variance without them
+            _, total = self._mixture_moments(
+                w_mu, w_var + w_exp, c_mu, c_var + c_exp)
+            self._explained_var = _tf.transpose(_tf.maximum(total - var, 0.0))
+            return mean, var
+
+    def simulate(self, n_sim, seed=(0, 0)):
+        # one seed for every parent, as `Stack` does: a node the weights and
+        # a component share then draws the same realizations on both paths
+        amplitude = self.parameters["amplitude"].get_value()
+        shares = _tf.nn.softmax(
+            self.weights.simulate(n_sim, seed) * _tf.sqrt(amplitude), axis=0)
+        sims = _tf.stack([c.simulate(n_sim, seed) for c in self.components],
+                         axis=0)                        # [K, size, n, n_sim]
+        return _tf.reduce_sum(shares[:, None, :, :] * sims, axis=0)
+
+
 class Add(_Operation):
+    """
+    The sum of latent variables of one size, output by output.
+
+    Means, variances and realizations add up, the parents taken as
+    independent. Inducing points pass through, summed, when every parent
+    passes its own on and all of them grow from one input, so a GP can sit
+    on the sum -- a trend plus a residual, or structures at several scales.
+
+    Parameters
+    ----------
+    latent_variables
+        The latent variables to add, all of the same size.
+    name
+        The node's name, numbered within the tree.
+    """
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
         self._size = self._common_size()
@@ -3133,9 +3365,11 @@ class GradientConstrainedInput(_RootLatentVariable):
 # node against these claims.
 _NAME = {"type": "str"}
 _SIZE = {"type": "int", "size_param": True, "constraints": {"min": 1}}
-_NO_PARENTS = {"param": None, "min": 0, "max": 0}
-_ONE_PARENT = {"param": "parent", "min": 1, "max": 1}
-_PARENTS = {"param": "latent_variables", "min": 1, "max": None}
+# `parents` is a list of slots, one per constructor parameter that takes
+# parents -- empty for an input, two for `GaussianMixture`
+_NO_PARENTS = []
+_ONE_PARENT = [{"param": "parent", "min": 1, "max": 1}]
+_PARENTS = [{"param": "latent_variables", "min": 1, "max": None}]
 
 
 def _declared(category, parents, sizing, propagates, requires=False,
@@ -3210,7 +3444,7 @@ RadialTrend._catalogue = _declared(
     "function", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
     label="Radial trend", parent={"type": "node"}, size=_SIZE)
 GPWalk._catalogue = _declared(
-    "function", dict(_ONE_PARENT, category=["latent"]),
+    "function", [dict(_ONE_PARENT[0], category=["latent"])],
     {"rule": "same_as_parent"}, "parents", label="GP walk",
     parent={"type": "node"},
     step={"type": "float", "constraints": {"exclusive_min": 0}},
@@ -3240,3 +3474,12 @@ ProductOfExperts._catalogue = _declared(
 Multiply._catalogue = _declared(
     "operation", _PARENTS, {"rule": "common"}, False,
     latent_variables={"type": "node[]"})
+GaussianMixture._catalogue = _declared(
+    "operation",
+    [{"param": "weights", "min": 1, "max": 1,
+      "size": {"rule": "len", "param": "components"}},
+     {"param": "components", "min": 2, "max": None}],
+    {"rule": "common", "param": "components"}, False,
+    label="Gaussian mixture", stability="internal",
+    weights={"type": "node"}, components={"type": "node[]"},
+    n_nodes={"type": "int", "constraints": {"min": 1}})

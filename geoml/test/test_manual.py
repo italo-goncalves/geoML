@@ -22,29 +22,33 @@ import sys
 import pytest
 
 MANUAL = pathlib.Path(__file__).resolve().parents[2] / "docs" / "manual"
+CHAPTERS = sorted(MANUAL.glob("[0-9][0-9]-*.md"))
 
 
-def test_every_chapter_runs():
-    chapters = sorted(MANUAL.glob("[0-9][0-9]-*.md"))
-    if not chapters:
+def test_the_manual_has_every_chapter():
+    if not CHAPTERS:
         pytest.skip("the manual is not in this checkout")
-    assert len(chapters) == 17, "expected seventeen chapters, found %d" % len(
-        chapters)
+    assert len(CHAPTERS) == 17, "expected seventeen chapters, found %d" % len(
+        CHAPTERS)
 
-    # one process per chapter. The chapters are independent namespaces
-    # already, and one process carrying all seventeen -- TensorFlow,
-    # matplotlib and pyvista accumulating across them -- was killed by the
-    # 16 GB GitHub runner (SIGTERM, exit 143, 22 minutes in) on the v0.6.9
-    # tag even with the rest of the suite split off into its own job. The
-    # runner reports a failure per chapter and exits non-zero; its output
-    # is the useful part, so it is captured and shown on failure
-    for path in chapters:
-        finished = subprocess.run(
-            [sys.executable, str(MANUAL / "run_blocks.py"), str(path)],
-            cwd=str(MANUAL.parent.parent),
-            env={**os.environ, "MPLBACKEND": "Agg"},
-            capture_output=True, text=True)
 
-        assert finished.returncode == 0, (
-            "%s did not run clean:\n%s" % (path.name, finished.stdout[-4000:]))
-        assert "ALL GREEN" in finished.stdout
+# One test per chapter, so that `run_parallel.py` can give each its own
+# process and the slowest chapter, not all seventeen, sets the wall time.
+# One process per chapter in any case: the chapters are independent
+# namespaces already, and one process carrying all seventeen -- TensorFlow,
+# matplotlib and pyvista accumulating across them -- was killed by the 16 GB
+# GitHub runner (SIGTERM, exit 143, 22 minutes in) on the v0.6.9 tag even
+# with the rest of the suite split off into its own job. The runner reports
+# a failure per chapter and exits non-zero; its output is the useful part,
+# so it is captured and shown on failure
+@pytest.mark.parametrize("path", CHAPTERS, ids=lambda p: p.stem)
+def test_the_chapter_runs(path):
+    finished = subprocess.run(
+        [sys.executable, str(MANUAL / "run_blocks.py"), str(path)],
+        cwd=str(MANUAL.parent.parent),
+        env={**os.environ, "MPLBACKEND": "Agg"},
+        capture_output=True, text=True)
+
+    assert finished.returncode == 0, (
+        "%s did not run clean:\n%s" % (path.name, finished.stdout[-4000:]))
+    assert "ALL GREEN" in finished.stdout

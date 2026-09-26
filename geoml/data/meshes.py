@@ -64,8 +64,24 @@ def _sheet_interpolator(surface):
         _np.asarray(surface.coordinates, dtype=float), surface.triangles)
 
 
+def _usable_cpus():
+    """The CPUs this process may run on: its affinity where the platform
+    says, which a container, a cgroup or a test runner pinning each job to
+    its own cores narrows -- `os.cpu_count` counts the machine's, and a
+    pool sized to it on a pinned process oversubscribes those cores, as
+    several test processes forking a pool each did until the desktop
+    froze (2026-09-25)."""
+    try:
+        return max(1, len(_os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, _os.cpu_count() or 1)
+
+
 def _uncovered_rule(uncovered):
-    """Splits the `uncovered` argument into refuse-or-not and a fill value."""
+    """Splits the `uncovered` argument into refuse-or-not and a fill value,
+    None standing for `numpy.nan`, which a catalogue cannot write down."""
+    if uncovered is None:
+        return False, _np.nan
     if isinstance(uncovered, str):
         if uncovered != "raise":
             raise ValueError(
@@ -1135,7 +1151,7 @@ class _DistanceQueries:
         self._measure = None
         if not (parallel and "fork" in _mp.get_all_start_methods()):
             return
-        self._workers = max(1, min(16, _os.cpu_count() or 1))
+        self._workers = min(16, _usable_cpus())
         if self._workers < 2:
             return
         try:

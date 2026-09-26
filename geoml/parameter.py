@@ -24,6 +24,7 @@
 import tensorflow as _tf
 import numpy as _np
 import pickle as _pickle
+import warnings as _warnings
 import functools as _functools
 
 import geoml.stats.random as _rnd
@@ -113,7 +114,12 @@ def _brief(value, depth):
 
 def _short_value(parameter):
     """A parameter's value: in full when small, summarized when not."""
-    value = parameter.get_value().numpy()
+    return _short(parameter.get_value().numpy())
+
+
+def _short(value):
+    """An array in full when small, summarized when not."""
+    value = _np.asarray(value)
     if value.ndim == 0:
         return "%g" % value
     if value.size <= 6:
@@ -204,6 +210,17 @@ class Parametric(object):
             self._all_parameters.append(parameter)
 
     def _add_parameter(self, name, parameter):
+        # said here rather than where the value was clipped, which knows
+        # neither the parameter's name nor whose it is
+        clipped = getattr(parameter, "_clipped_from", None)
+        if clipped is not None:
+            parameter._clipped_from = None
+            _warnings.warn(
+                "%s: %s = %s is outside [%s, %s] and was clipped to %s"
+                % (type(self).__name__, name, _short(clipped),
+                   _short(parameter._bounds[0]), _short(parameter._bounds[1]),
+                   _short(_np.asarray(parameter.get_value()))),
+                stacklevel=3)
         self.parameters[name] = parameter
         self._append_unique(parameter)
 
@@ -333,6 +350,16 @@ class RealParameter(object):
                                   str(min_val.shape)))
 
         self.shape = value.shape
+
+        # A value outside its bounds is clipped by `refresh` below, which is
+        # right for training and silent for a caller who asked for it; the
+        # owner says so when it registers the parameter. Wrapping and
+        # renormalizing parameters replace `refresh`, and clip nothing.
+        self._clipped_from = None
+        self._bounds = (min_val, max_val)
+        if type(self).refresh is RealParameter.refresh and _np.any(
+                (value < min_val) | (value > max_val)):
+            self._clipped_from = value
 
         self.variable = _tf.Variable(self._transform(value),
                                      dtype=_tf.float64, name=name)

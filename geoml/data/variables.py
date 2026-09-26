@@ -33,7 +33,8 @@ import geoml.storage as _storage
 
 from geoml.data.base import *
 from geoml.data.base import (
-    _Attribute, _TreeNode, _carry_rows, _copy_for_subset, _encode,
+    _Attribute, _TreeNode, _carry_rows, _code_dtype, _copy_for_subset,
+    _encode,
     _path_key, _subset_simulations)
 
 # `_Variable._Attribute` is the leaf class under another name (bound at
@@ -119,6 +120,21 @@ def _missing_value(attribute):
         return ""
     return _np.nan
 
+
+def _measured_in_order(attribute_class, coordinates, values, labels):
+    """A categorical measurement column coded against the variable's
+    `labels`, in their order, with anything else it holds appended after
+    them in the order pandas sorts it into -- so a class drawn by position
+    takes one colour in `predicted`, `measurements_a` and `measurements_b`
+    alike, and nothing measured is lost."""
+    # a label given twice is one category, as it always decoded
+    labels = list(dict.fromkeys(labels))
+    extra = [c for c in _pd.Categorical(_np.asarray(values)).categories
+             if c not in set(labels)]
+    full = labels + extra
+    codes = _pd.Categorical(_np.asarray(values), categories=full).codes
+    return attribute_class.encoded(
+        coordinates, codes.astype(_code_dtype(len(full))), labels=full)
 
 def _refuse_past_threshold(nbytes, name):
     """Refuses to hold `nbytes` of simulations whole past the size the store
@@ -612,6 +628,24 @@ class _Variable(_TreeNode):
     _ZARR_ATTRS = ()
     _ZARR_HAS_SIMS = False        # has a (n_data, n_sim) simulations store
 
+    # What each column holds, for a reader that colours or scales it without
+    # knowing the class -- `geoml.catalogue` publishes it. `(role, scale)`
+    # for every name in `_ZARR_ATTRS` and `_DICT_FAMILIES`, and for
+    # `simulations` where there are any; `test_catalogue.py` fails on a
+    # column left out. The role is `measurement` (the data), `value` (an
+    # estimate), `uncertainty` or `weight`; the scale is `unit` (the
+    # variable's own), `unit_squared`, `latent` (the model's standardized
+    # space), `latent_squared`, `unit_interval` (0 to 1), `log_odds`,
+    # `classes` (codes into the labels), `flag`, `ordinal` or
+    # `dimensionless`.
+    _COLUMNS: "dict[str, tuple[str, str]]" = {}
+    # what a family's columns are keyed by: `cutoff`, `probability` or
+    # `component`
+    _FAMILY_KEYS: "dict[str, str]" = {}
+    # the class of the parts a vector or categorical variable holds, whose
+    # columns are theirs rather than the variable's
+    _PART: "type | None" = None
+
     def _save_attr(self, group, prefix, role):
         """Write one ``_Attribute``'s store into ``group``; None-valued -> skip.
 
@@ -784,6 +818,26 @@ class ContinuousVariable(_Variable):
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
                       "responsibilities")
+    _COLUMNS = {
+        "measurements": ("measurement", "unit"),
+        "latent_mean": ("value", "latent"),
+        "latent_variance": ("uncertainty", "latent_squared"),
+        "prediction": ("value", "unit"),
+        "dispersion": ("uncertainty", "unit_squared"),
+        "noise_variance": ("uncertainty", "unit_squared"),
+        "quantiles": ("value", "unit"),
+        # the share of the realizations at or below a cut-off
+        "probabilities": ("value", "unit_interval"),
+        # the share of a block at or below a cut-off
+        "proportions": ("value", "unit_interval"),
+        # how often a cut-off passes through a block
+        "divided": ("uncertainty", "unit_interval"),
+        "responsibilities": ("value", "unit_interval"),
+        "simulations": ("value", "unit"),
+    }
+    _FAMILY_KEYS = {"quantiles": "probability", "probabilities": "cutoff",
+                    "proportions": "cutoff", "divided": "cutoff",
+                    "responsibilities": "component"}
     _NODE_ATTRS = ("cutoffs", "unit")
     # `dispersion` and the quantile families are read again off the
     # realizations instead (`_coarsen_realizations`, `_coarsen_into`)
@@ -1242,6 +1296,10 @@ class VectorVariable(_Variable):
     # the mixture is over the row, so the responsibilities belong to the
     # variable rather than to its components -- one answer per location
     _DICT_FAMILIES = ("responsibilities",)
+    # the mean of the components' latent variances
+    _COLUMNS = {"uncertainty": ("uncertainty", "latent_squared"),
+                "responsibilities": ("value", "unit_interval")}
+    _FAMILY_KEYS = {"responsibilities": "component"}
     _BLOCK_MEANS = ("uncertainty",)
     _LABEL_KIND = "components"
 
@@ -1615,6 +1673,19 @@ class _Category(_Variable):
                    "indicator_variance", "indicator_predicted")
     _ZARR_HAS_SIMS = True
     _DICT_FAMILIES = ("proportions", "divided")
+    _COLUMNS = {
+        "probability": ("value", "unit_interval"),
+        # 1 where measured in the category, 0 where not, a half at a contact
+        "indicator": ("measurement", "unit_interval"),
+        "indicator_mean": ("value", "latent"),
+        "indicator_variance": ("uncertainty", "latent_squared"),
+        # the category's log-odds against its best rival
+        "indicator_predicted": ("value", "log_odds"),
+        "proportions": ("value", "unit_interval"),
+        "divided": ("uncertainty", "unit_interval"),
+        "simulations": ("value", "latent"),
+    }
+    _FAMILY_KEYS = {"proportions": "cutoff", "divided": "cutoff"}
     _BLOCK_MEANS = ("probability", "indicator_mean", "indicator_variance",
                     "indicator_predicted")
     _BLOCK_MEAN_FAMILIES = ("proportions",)
@@ -1678,6 +1749,16 @@ class RockTypeVariable(_Variable):
 
     _ZARR_ATTRS = ("predicted", "entropy", "uncertainty",
                    "measurements_a", "measurements_b", "boundary")
+    _COLUMNS = {
+        "predicted": ("value", "classes"),
+        # divided by the log of the number of categories
+        "entropy": ("uncertainty", "unit_interval"),
+        # the root of the latent variance times the entropy
+        "uncertainty": ("uncertainty", "latent"),
+        "measurements_a": ("measurement", "classes"),
+        "measurements_b": ("measurement", "classes"),
+        "boundary": ("measurement", "flag"),
+    }
     _PREDICTED_MARKER = "entropy"
     # taken per sub-block and then averaged (`_resolve`); `predicted` is read
     # again off the averaged probabilities (`_coarsen_into`)
@@ -1744,12 +1825,14 @@ class RockTypeVariable(_Variable):
             self.boundary = self._Attribute(
                 coordinates, [False]*n_data, dtype=bool)
         else:
-            # their own categories, not the variable's: a measurement outside
-            # `labels` is still worth keeping as what it says
-            self.measurements_a = self._Attribute.encoded(
-                coordinates, measurements_a)
-            self.measurements_b = self._Attribute.encoded(
-                coordinates, measurements_b)
+            # the variable's categories first, in its order, so that a class
+            # has one code in every column; then whatever else was measured,
+            # since a measurement outside `labels` is still worth keeping as
+            # what it says
+            self.measurements_a = _measured_in_order(
+                self._Attribute, coordinates, measurements_a, labels)
+            self.measurements_b = _measured_in_order(
+                self._Attribute, coordinates, measurements_b, labels)
             self.boundary = self._Attribute(
                 coordinates, measurements_a != measurements_b, dtype=bool)
 
@@ -2029,6 +2112,8 @@ class CategoricalVariable(RockTypeVariable):
 
 class OrderedRockType(RockTypeVariable):
     _ZARR_ATTRS = RockTypeVariable._ZARR_ATTRS + ("implicit_values",)
+    _COLUMNS = dict(RockTypeVariable._COLUMNS,
+                    implicit_values=("measurement", "ordinal"))
 
     def __init__(self, name, coordinates, labels=None, measurements_a=None,
                  measurements_b=None):
@@ -2133,6 +2218,20 @@ class BinaryVariable(_Variable):
     _ZARR_ATTRS = ("indicator", "measurements", "weights", "predicted",
                    "probability", "entropy", "uncertainty",
                    "latent_mean", "latent_variance")
+    _COLUMNS = {
+        "indicator": ("measurement", "unit_interval"),
+        "measurements": ("measurement", "classes"),
+        "weights": ("weight", "dimensionless"),
+        "predicted": ("value", "classes"),
+        "probability": ("value", "unit_interval"),
+        # divided by the log of two
+        "entropy": ("uncertainty", "unit_interval"),
+        "uncertainty": ("uncertainty", "latent"),
+        "latent_mean": ("value", "latent"),
+        "latent_variance": ("uncertainty", "latent_squared"),
+        # the probability each realization gives
+        "simulations": ("value", "unit_interval"),
+    }
     _PREDICTED_MARKER = "entropy"
     # `entropy` and `uncertainty` are functions of the block's own
     # probability, not means over it, and stay out; `predicted` is read
@@ -2289,3 +2388,8 @@ class AnomalyVariable(BinaryVariable):
         return new_var
 
 
+# the parts' own columns: a vector variable's components and a categorical
+# one's categories, declared once where their classes are
+VectorVariable._PART = ContinuousVariable
+CompositionalVariable._PART = _Component
+RockTypeVariable._PART = _Category

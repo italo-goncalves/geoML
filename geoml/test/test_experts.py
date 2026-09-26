@@ -84,6 +84,24 @@ def test_combine_drops_duplicates():
     assert ind.combine(a, b, c, tolerance=0.01).n_data == 3
 
 
+def test_combine_merges_by_distance_not_by_cell():
+    """Two points 0.2 apart straddle a boundary of the 1.0 grid the old
+    code snapped to, and both stayed; two 1.3 apart share a cell of it, and
+    one went."""
+    close = np.array([[0.4, 0.0], [0.6, 0.0]])
+    assert ind.combine(close, tolerance=1.0).n_data == 1
+    apart = np.array([[0.51, 0.51], [1.44, 1.44]])
+    assert ind.combine(apart, tolerance=1.0).n_data == 2
+
+
+def test_combine_keeps_the_earlier_point_and_measures_against_kept_ones():
+    """A chain 0.6 apart at a tolerance of 1: the second goes for the
+    first, and the third stays because the one it is near was dropped."""
+    chain = np.array([[0.0], [0.6], [1.2]])
+    kept = ind.combine(chain, tolerance=1.0)
+    assert np.array_equal(np.asarray(kept.coordinates).ravel(), [0.0, 1.2])
+
+
 def test_combine_rejects_mixed_dimensions():
     a = geoml.data.PointData.from_array(np.zeros([2, 2]))
     b = geoml.data.PointData.from_array(np.zeros([2, 3]))

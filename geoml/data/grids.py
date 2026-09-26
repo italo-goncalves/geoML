@@ -500,10 +500,15 @@ class _GriddedData(_PointBased):
 
 
 class Grid1D(_GriddedData):
-    _GRID_NDIM = 1
-
     """
     Equally spaced points in 1D.
+
+    Nodes along one axis at a fixed spacing, from `start`, `n` of them.
+
+    The coordinates are never stored; they are generated a batch at a
+    time, so a grid of millions of nodes costs little to hold. What a model
+    predicts into for maps and sections, and what `from_data` builds around
+    another object's extent.
 
     Attributes
     ----------
@@ -514,6 +519,7 @@ class Grid1D(_GriddedData):
     grid_size : list
         The number of points in grid.
     """
+    _GRID_NDIM = 1
 
     def __init__(self, start: float, n: int,
                  step: "float | None" = None,
@@ -576,10 +582,16 @@ class Grid1D(_GriddedData):
 
 
 class Grid2D(_GriddedData):
-    _GRID_NDIM = 2
-
     """
     Equally spaced points in 2D.
+
+    Nodes on a regular lattice in the plane, `n` along each axis at the spacing
+    `step`, from `start`.
+
+    The coordinates are never stored; they are generated a batch at a
+    time, so a grid of millions of nodes costs little to hold. What a model
+    predicts into for maps and sections, and what `from_data` builds around
+    another object's extent.
 
     Attributes
     ----------
@@ -590,6 +602,7 @@ class Grid2D(_GriddedData):
     grid_size : list
         The number of points in grid.
     """
+    _GRID_NDIM = 2
 
     def __init__(self, start, n,
                  step: "float | _types.ArrayLike | None" = None,
@@ -656,10 +669,16 @@ class Grid2D(_GriddedData):
 
 
 class Grid3D(_GriddedData):
-    _GRID_NDIM = 3
-
     """
     Equally spaced points in 3D.
+
+    Nodes on a regular lattice in space, `n` along each axis at the spacing
+    `step`, from `start`.
+
+    The coordinates are never stored; they are generated a batch at a
+    time, so a grid of millions of nodes costs little to hold. What a model
+    predicts into for maps and sections, and what `from_data` builds around
+    another object's extent.
 
     Attributes
     ----------
@@ -670,6 +689,7 @@ class Grid3D(_GriddedData):
     grid_size : list
         The number of points in grid.
     """
+    _GRID_NDIM = 3
 
     def __init__(self, start, n,
                  step: "float | _types.ArrayLike | None" = None,
@@ -741,7 +761,7 @@ class Grid3D(_GriddedData):
         return _np.eye(3)
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
-                            uncovered=_np.nan):
+                            uncovered=None):
         """
         As `_SpatialData.assign_from_surface`, reading the sheet once for
         each column of cells rather than once for each cell.
@@ -845,6 +865,27 @@ def rotate(data, origin, azimuth=0.0, dip=0.0, rake=0.0, reverse=False):
 
 
 class RotatedGrid3D(Grid3D):
+    """
+    A regular lattice in space, turned about its first node.
+
+    `Grid3D` with an azimuth, a dip and a rake. The nodes are counted in the
+    lattice's own frame and turned into the world's as they are generated,
+    so a lattice can follow a deposit's strike and dip without holding its
+    coordinates.
+
+    Parameters
+    ----------
+    start
+        The first node, which the lattice turns about.
+    n
+        The number of nodes along each of the lattice's own axes.
+    step
+        The spacing along each of them.
+    azimuth, dip, rake
+        The rotation, in degrees.
+    labels
+        The coordinates' names.
+    """
     def __init__(self, start, n, step, azimuth=0.0, dip=0.0, rake=0.0, labels=None):
         self.azimuth = azimuth
         self.dip = dip

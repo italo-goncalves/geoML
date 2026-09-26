@@ -233,7 +233,11 @@ class _Warping(_gpr.Parametric):
 
 
 class Identity(_Warping):
-    """Identity warping."""
+    """Identity warping.
+
+    Leaves the data as they are: the model sees the variable in its own
+    units. What a continuous likelihood uses when it is given no warping.
+    """
     def __init__(self, size):
         super().__init__()
         self._size_in = size
@@ -673,7 +677,11 @@ class Log(_Warping):
 
 
 class Scale(ZScore):
-    """Linear scaling, assuming a mean of zero."""
+    """Linear scaling, assuming a mean of zero.
+
+    Divides each column by a scale and subtracts nothing, so zero stays
+    zero. Initialized from the data's range.
+    """
     def __init__(self, size, scale=1):
         super().__init__(
             size,
@@ -1067,6 +1075,11 @@ class SinhArcsinh(_Warping):
 class ChainedWarping(_Warping):
     """
     Chains multiple Warping objects.
+
+    Applies the warpings in order on the way into the model and in reverse
+    on the way out, the width each gives out being the width the next takes
+    in. Each link is initialized on the data as the links before it leave
+    them.
     """
     def __init__(self, *warpings):
         """
@@ -1552,6 +1565,21 @@ class TensorProductFlow(_ContinuousFlow):
 
 
 class PCA(_Warping):
+    """
+    Principal components: correlated columns turned into uncorrelated ones.
+
+    Centres the data, rotates them onto the eigenvectors of their covariance
+    and scales each component to unit variance, all fixed when the warping
+    is initialized on the data; nothing is trained. With fewer components
+    than columns the data are projected onto the leading ones.
+
+    Parameters
+    ----------
+    n_dim
+        The number of columns taken in.
+    n_components
+        The number given out; all of them if left out.
+    """
     _mixes = True
 
     def __init__(self, n_dim, n_components=None):
@@ -1600,6 +1628,23 @@ class PCA(_Warping):
 
 
 class RobustPCA(PCA):
+    """
+    Principal components of a robust covariance.
+
+    `PCA` with the mean and covariance estimated by the minimum covariance
+    determinant (FastMCD), from the most concentrated share of the data, so
+    a few outlying samples cannot set the axes. Seeded from the package
+    generator.
+
+    Parameters
+    ----------
+    n_dim
+        The number of columns taken in.
+    n_components
+        The number given out; all of them if left out.
+    support_fraction
+        The share of the samples the robust estimate is made from.
+    """
     def __init__(self, n_dim, n_components=None, support_fraction=0.75):
         super().__init__(n_dim, n_components)
         self.support_fraction = support_fraction
@@ -1831,6 +1876,12 @@ _OF_N = {"in": {"rule": "param", "param": "n_dim"},
 _COUNT = {"type": "int", "size_param": True, "constraints": {"min": 1}}
 _POSITIVE = {"type": "float", "constraints": {"exclusive_min": 0}}
 _EXPONENT = {"type": "float", "constraints": {"min": 0, "max": 2}}
+# what the unbounded-looking parameters are held in all the same
+_LOCATIONS = {"type": "float[]", "constraints": {"min": -1e9, "max": 1e9}}
+_SCALES = {"constraints": {"min": 1e-9, "max": 1e9}}
+# a scale given to `ZScore` or `Scale` sets its own bounds about itself, so
+# it is never clipped and has only to be positive
+_GIVEN_SCALE = {"constraints": {"exclusive_min": 0}}
 
 
 def _declared(sizing, label=None, stability=None, **params):
@@ -1846,26 +1897,28 @@ def _declared(sizing, label=None, stability=None, **params):
 
 Identity._catalogue = _declared(_SIZED, size=_COUNT)
 Spline._catalogue = _declared(
-    _SIZED, stability="experimental", size=_COUNT,
+    _SIZED, size=_COUNT,
     knots_per_arm={"type": "int", "constraints": {"min": 1}},
     backbone={"type": "enum", "constraints": {"choices": ["cubic", "rq"]}})
 ZScore._catalogue = _declared(
-    _SIZED, label="Z-score", size=_COUNT, mean={"type": "float[]"},
-    std={"type": "float[]"}, robust={"type": "bool"})
-Center._catalogue = _declared(_SIZED, size=_COUNT,
-                              mean={"type": "float[]"})
+    _SIZED, label="Z-score", size=_COUNT, mean=_LOCATIONS,
+    std=dict(_GIVEN_SCALE, type="float[]"), robust={"type": "bool"})
+Center._catalogue = _declared(_SIZED, size=_COUNT, mean=_LOCATIONS)
 Softplus._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
 Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
-Scale._catalogue = _declared(_SIZED, size=_COUNT, scale={"type": "json"})
+Scale._catalogue = _declared(_SIZED, size=_COUNT,
+                             scale=dict(_GIVEN_SCALE, type="json"))
 BoxCox._catalogue = _declared(
     _SIZED, label="Box-Cox", size=_COUNT, shift=_POSITIVE,
     exponent=_EXPONENT)
 YeoJohnson._catalogue = _declared(
     _SIZED, label="Yeo-Johnson", size=_COUNT, exponent=_EXPONENT)
-Arcsinh._catalogue = _declared(_SIZED, size=_COUNT, scale=_POSITIVE)
+Arcsinh._catalogue = _declared(_SIZED, size=_COUNT,
+                               scale=dict(_SCALES, type="float"))
 SinhArcsinh._catalogue = _declared(
-    _SIZED, label="Sinh-arcsinh", size=_COUNT, skewness={"type": "float"},
-    tailweight=_POSITIVE)
+    _SIZED, label="Sinh-arcsinh", size=_COUNT,
+    skewness={"type": "float", "constraints": {"min": -3, "max": 3}},
+    tailweight={"type": "float", "constraints": {"min": 0.1, "max": 10}})
 ChainedWarping._catalogue = _declared(
     {"in": {"rule": "custom", "note": "the first link's input"},
      "out": {"rule": "custom", "note": "the last link's output"}},
@@ -1883,12 +1936,14 @@ TensorProductFlow._catalogue = _declared(
     n_steps={"type": "int", "constraints": {"min": 1}}, rtol=_POSITIVE)
 PCA._catalogue = _declared(
     {"in": {"rule": "param", "param": "n_dim"},
-     "out": {"rule": "custom", "note": "n_components, or n_dim if null"}},
+     "out": {"rule": "param", "param": "n_components",
+             "fallback": {"rule": "param", "param": "n_dim"}}},
     n_dim={"type": "int", "constraints": {"min": 1}},
     n_components={"type": "int", "constraints": {"min": 1}})
 RobustPCA._catalogue = _declared(
     {"in": {"rule": "param", "param": "n_dim"},
-     "out": {"rule": "custom", "note": "n_components, or n_dim if null"}},
+     "out": {"rule": "param", "param": "n_components",
+             "fallback": {"rule": "param", "param": "n_dim"}}},
     label="Robust PCA", n_dim={"type": "int", "constraints": {"min": 1}},
     n_components={"type": "int", "constraints": {"min": 1}},
     support_fraction={"type": "float",

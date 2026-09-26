@@ -597,7 +597,7 @@ class _SpatialData(_TreeNode):
                 f"locations; this {type(self).__name__} has {self.n_dim}")
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
-                            uncovered=_np.nan):
+                            uncovered=None):
         """
         Records which side of a surface each location lies on.
 
@@ -628,9 +628,9 @@ class _SpatialData(_TreeNode):
         uncovered : float or "raise"
             What to make of a location the sheet does not reach. Its flag is
             left empty either way; the value given here is what a block
-            model's `fraction` column records for it — `numpy.nan` by
-            default, so an uncovered block cannot pass for an empty one, and
-            `0.0` to count it as nothing instead. Pass `"raise"` to refuse a
+            model's `fraction` column records for it — `numpy.nan` for
+            `None`, the default, so an uncovered block cannot pass for an
+            empty one, and `0.0` to count it as nothing instead. Pass `"raise"` to refuse a
             surface that does not cover every location, for the cases where
             it is required to.
         """
@@ -1158,7 +1158,11 @@ class _PointBased(_SpatialData):
 
 class PointData(_PointBased):
     """
-        Data represented as points in arbitrary locations.
+    Data represented as points in arbitrary locations.
+
+    The container samples come in, from a table with a column per
+    coordinate, and the one most predictions go out to when the locations
+    are not on a lattice. Variables and metadata are added to it by name.
     """
 
     def __init__(self, data, coordinates):
@@ -1632,7 +1636,13 @@ class PointData(_PointBased):
 
 
 class GaussianData(PointData):
-    """Points whose locations are uncertain, with a variance per coordinate."""
+    """Points whose locations are uncertain, with a variance per coordinate.
+
+    Each location is a Gaussian about its given coordinates -- a sample from
+    an uncertain survey, a composite smeared along its length. A model whose
+    input is a `GaussianInput` carries the variance into the kernel; any
+    other reads the coordinates alone.
+    """
 
     def __init__(self, data, coordinates_mean, coordinates_variance):
         super().__init__(data, coordinates_mean)
@@ -1691,6 +1701,23 @@ class GaussianData(PointData):
 
 
 class DirectionalData(PointData):
+    """
+    Points carrying a direction each: where a field's gradient is known.
+
+    Structural measurements -- a bedding's dip vector, a contact's normal --
+    as a unit vector per location, in columns beside the coordinates. What a
+    `GradientConstrainedInput` takes to make a field follow them. It is
+    training data, not something a model predicts into.
+
+    Parameters
+    ----------
+    data
+        A table with the coordinates and the direction's components.
+    coordinates
+        The names of the coordinate columns.
+    directions
+        The names of the direction's columns, one per coordinate.
+    """
     def __init__(self, data, coordinates, directions):
         """
 
@@ -1852,6 +1879,26 @@ def export_planes(coordinates, dip, azimuth, filename, size=1):
 
 
 class Section3D(PointData):
+    """
+    A planar section through a 3-D model, as a lattice of points.
+
+    A rectangle of `width` by `height` about `center`, turned to `azimuth`
+    and `dip`, with `n_x` by `n_y` nodes on it. What a model predicts into
+    to draw a cross-section that does not follow the coordinate axes.
+
+    Parameters
+    ----------
+    center
+        The section's centre.
+    azimuth, dip
+        Its orientation, in degrees.
+    width, height
+        Its size along and across strike.
+    n_x, n_y
+        The number of nodes along each side.
+    coordinate_labels
+        The coordinates' names.
+    """
     def __init__(self, center, azimuth, dip, width, height, n_x, n_y,
                  coordinate_labels=("X", "Y", "Z")):
         from geoml.data import Grid2D

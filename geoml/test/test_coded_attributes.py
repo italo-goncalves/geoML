@@ -95,6 +95,31 @@ def test_a_prediction_is_written_as_the_winning_position():
         ["basalt", "granite", "basalt", "granite", "basalt", "granite"])
 
 
+def test_every_column_codes_a_class_in_the_variable_s_order():
+    """GeoScape draws a class by its position, so `predicted` and the two
+    measurement columns must agree on it. Each measurement column used to
+    sort its own labels, so a class took a different code in each column
+    (item 28 of GeoScape's requirements)."""
+    point = _point()
+    point.add_rock_type_variable(
+        "rock", labels=["shale", "granite", "basalt"],
+        measurements_a=np.array(["shale", "granite", "basalt"] * 2),
+        measurements_b=np.array(["granite", "basalt", "gneiss"] * 2))
+    var = point.variables["rock"]
+
+    assert var.predicted.labels == ["shale", "granite", "basalt"]
+    assert var.measurements_a.labels == ["shale", "granite", "basalt"]
+    # a class the variable has no label for is kept, after the others
+    assert var.measurements_b.labels == \
+        ["shale", "granite", "basalt", "gneiss"]
+    assert np.array_equal(np.asarray(var.measurements_a.values),
+                          [0, 1, 2] * 2)
+    assert np.array_equal(np.asarray(var.measurements_b.values),
+                          [1, 2, 3] * 2)
+    assert np.array_equal(var.measurements_b.to_numpy(),
+                          ["granite", "basalt", "gneiss"] * 2)
+
+
 def test_measurements_keep_a_value_the_variable_has_no_label_for():
     """An `AnomalyVariable` labels the other class `_dummy`; the measurement
     still says what it actually was."""

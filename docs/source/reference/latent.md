@@ -47,6 +47,8 @@ The constructors' own arguments are documented in their docstrings.
    :show-inheritance:
 .. autoclass:: ProductOfExperts
    :show-inheritance:
+.. autoclass:: GaussianMixture
+   :show-inheritance:
 .. autoclass:: Stack
    :show-inheritance:
 .. autoclass:: Concatenate

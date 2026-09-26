@@ -148,13 +148,24 @@ class _Kernel(_gpr.Parametric):
 
 
 class Gaussian(_Kernel):
-    """Gaussian kernel"""
+    """Gaussian kernel.
+
+    ``exp(-3 d**2)`` of the distance measured in ranges, so the correlation
+    falls to 5% at one range. Infinitely differentiable: the smoothest field
+    of the kernels here, and the one for gently varying quantities and
+    structural surfaces.
+    """
     def kernelize(self, x):
         return _tf.exp(-3 * x**2)
 
 
 class Spherical(_Kernel):
-    """Spherical kernel"""
+    """Spherical kernel.
+
+    The geostatistical classic, ``1 - 1.5 d + 0.5 d**3`` of the distance in
+    ranges and zero past one range. Continuous but not differentiable at the
+    origin, so the field is rough at short scale, as a grade usually is.
+    """
     def __init__(self, epsilon: float = 1e-12):
         super().__init__()
         self._has_compact_support = True
@@ -168,7 +179,11 @@ class Spherical(_Kernel):
 
 
 class Exponential(_Kernel):
-    """Exponential kernel"""
+    """Exponential kernel.
+
+    ``exp(-3 d)`` of the distance in ranges, falling to 5% at one range.
+    The roughest of the kernels here: continuous, never differentiable.
+    """
     def __init__(self, epsilon: float = 1e-12):
         super().__init__()
         self.epsilon = epsilon  # required to be able to compute gradients
@@ -180,7 +195,12 @@ class Exponential(_Kernel):
 
 
 class Cubic(_Kernel):
-    """Cubic kernel"""
+    """Cubic kernel.
+
+    A polynomial in the distance in ranges that reaches zero at one range
+    and stays there, as the spherical does, while staying smooth at the
+    origin: a compactly supported stand-in for the Gaussian.
+    """
     def __init__(self):
         super().__init__()
         self._has_compact_support = True
@@ -193,7 +213,12 @@ class Cubic(_Kernel):
 
 
 class Constant(_Kernel):
-    """Constant kernel"""
+    """Constant kernel.
+
+    One at every distance: a field that takes one value everywhere. Its
+    matrix has rank one, so it is no kernel for a GP node, whose bias does
+    the same; it is kept for covariances built by hand.
+    """
     def kernelize(self, x):
         return _tf.ones_like(x)
 
@@ -206,25 +231,47 @@ class Constant(_Kernel):
 
 
 class Cosine(_Kernel):
-    """Cosine kernel"""
+    """Cosine kernel.
+
+    ``cos(2 pi d)`` of the distance in ranges: a field repeating with a
+    period of one range. A valid covariance along one axis only -- in two or
+    three dimensions a cosine of the distance is not, and the inducing
+    points' Cholesky can fail on it -- so it is no kernel for a GP node.
+    """
     def kernelize(self, x):
         return _tf.cos(2.0 * _np.pi * x)
 
 
 class Matern32(_Kernel):
-    """Once differentiable Matérn kernel."""
+    """Once differentiable Matérn kernel.
+
+    ``(1 + 5 d) exp(-5 d)`` of the distance in ranges: rougher than the
+    Gaussian and smoother than the exponential, the usual middle ground for
+    a physical quantity.
+    """
     def kernelize(self, x):
         return (1 + 5*x)*_tf.math.exp(-5*x)
 
 
 class Matern52(_Kernel):
-    """Twice differentiable Matérn kernel."""
+    """Twice differentiable Matérn kernel.
+
+    ``(1 + 6 d + 12 d**2) exp(-6 d)`` of the distance in ranges: one step
+    smoother than `Matern32`, still short of the Gaussian's perfect
+    smoothness.
+    """
     def kernelize(self, x):
         return (1 + 6*x + 12*x**2)*_tf.math.exp(-6*x)
 
 
 class RationalQuadratic(_Kernel):
-    """Rational quadratic (a.k.a. Cauchy) kernel."""
+    """Rational quadratic (a.k.a. Cauchy) kernel.
+
+    ``(1 + 3 d**2 / scale) ** -scale`` of the distance in ranges: a mixture
+    of Gaussian kernels over many ranges, which gives a long tail of weak
+    correlation. `scale` is trained; the larger it grows, the closer the
+    kernel comes to the Gaussian.
+    """
     def __init__(self, scale: float = 1):
         super().__init__()
         self._add_parameter("scale", _gpr.PositiveParameter(scale, 1e-3, 100))
@@ -595,7 +642,12 @@ class _WrapperCovariance(_AbstractCovariance):
         self._has_compact_support = self.base_covariance.has_compact_support
 
 class Linear(_AbstractCovariance):
-    """The linear covariance, the dot product of transformed coordinates."""
+    """The linear covariance, the dot product of transformed coordinates.
+
+    A field that is a linear function of the coordinates, as seen through
+    the transform: a trend, with the transform's parameters as its slopes.
+    Meant as a term in a `Sum` of covariances.
+    """
     def __init__(self, transform: "_gt._Transform | None" = None):
         """
         Parameters
@@ -635,7 +687,12 @@ class Linear(_AbstractCovariance):
 
 class Sum(_NodeCovariance):
     """A weighted sum of covariances, the weights trained and summing to
-    one."""
+    one.
+
+    Nested structures, as a variogram model has them: a short range and a
+    long one, or a trend and a residual. The weights share the one unit of
+    variance between the terms.
+    """
     def __init__(self, *args):
         """
         Parameters
@@ -660,7 +717,12 @@ class Sum(_NodeCovariance):
 
 
 class Product(_NodeCovariance):
-    """The product of covariances."""
+    """The product of covariances.
+
+    Correlated only where every factor is: a periodic covariance times a
+    decaying one gives a pattern that repeats and fades, and covariances of
+    different coordinates multiply into one over all of them.
+    """
     def __init__(self, *args):
         """
         Parameters
@@ -760,9 +822,15 @@ class Scale(_WrapperCovariance):
 # What `geoml.catalogue` cannot read off each class. A kernel is a function
 # of distance a GP node takes whole; a covariance, a kernel over transformed
 # coordinates, is what `GradientConstrainedInput` and the legacy models take.
-for _kernel in (Gaussian, Spherical, Exponential, Cubic, Constant, Cosine,
-                Matern32, Matern52):
+for _kernel in (Gaussian, Spherical, Exponential, Cubic, Matern32, Matern52):
     _kernel._catalogue = {"category": "kernel"}
+# Built and called like the others, and no choice for a GP node all the
+# same: a constant kernel's matrix has rank one, so a node's ranges get no
+# gradient and it does what the node's bias already does; a cosine of a
+# distance is no covariance at all in two or three dimensions, and the
+# inducing points' Cholesky can fail on it.
+for _kernel in (Constant, Cosine):
+    _kernel._catalogue = {"category": "kernel", "network": False}
 RationalQuadratic._catalogue = {
     "category": "kernel", "label": "Rational quadratic",
     "params": {"scale": {"constraints": {"min": 1e-3, "max": 100}}}}

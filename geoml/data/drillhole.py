@@ -296,6 +296,59 @@ def _fixed_runs(zones, length):
     return out
 
 
+def _contact_rows(merged, categorical):
+    """The rows of `merged` -- one support, sorted down each hole -- that a
+    contact follows: where the next row touches it in the same hole and some
+    categorical column holds another class, both sides logged. Merging runs
+    first changes nothing on one support: a class can only change between
+    neighbouring rows."""
+    if len(merged) < 2 or not categorical:
+        return _np.zeros(0, dtype=int)
+    hole = merged[HOLE].values
+    touching = (hole[1:] == hole[:-1]) & (_np.abs(
+        merged[FROM].values[1:] - merged[TO].values[:-1]) <= _TOL)
+    changes = _np.zeros(len(merged) - 1, dtype=bool)
+    for column in categorical:
+        value = merged[column].values
+        logged = ~_pd.isna(value[1:]) & ~_pd.isna(value[:-1])
+        changes |= logged & (value[1:] != value[:-1])
+    return _np.flatnonzero(touching & changes)
+
+
+def _with_contacts(database, coordinates, kept, merged, boundary,
+                   categorical):
+    """The interval points `kept` and the contacts after the rows
+    `boundary` of `merged`, in one table sorted down each hole, with the
+    class below each point per categorical column."""
+    above = merged.iloc[boundary].reset_index(drop=True)
+    after = merged.iloc[boundary + 1].reset_index(drop=True)
+    contact = _pd.DataFrame({c: _np.nan for c in merged.columns},
+                            index=_np.arange(len(boundary)))
+    contact[HOLE] = above[HOLE].values
+    contact[FROM] = above[TO].values
+    contact[TO] = above[TO].values
+    for column in categorical:
+        contact[column] = above[column].values
+
+    kept = kept.reset_index(drop=True)
+    table = _pd.concat([kept, contact], ignore_index=True)
+    below = {column: _np.concatenate([kept[column].values,
+                                      after[column].values])
+             for column in categorical}
+    points = _np.concatenate([
+        coordinates, database.coordinates_at(contact[HOLE].values,
+                                             contact[TO].values)])
+
+    # down each hole, the holes in the order they came
+    rank = {h: i for i, h in enumerate(_pd.unique(table[HOLE].values))}
+    middle = 0.5 * (table[FROM].values + table[TO].values)
+    order = _np.lexsort((middle, [rank[h] for h in table[HOLE].values]))
+    finite = _np.all(_np.isfinite(points[order]), axis=1)
+    order = order[finite]
+    return (points[order], table.iloc[order].reset_index(drop=True),
+            {column: values[order] for column, values in below.items()})
+
+
 def _merge_runs(data, column):
     """Merges touching intervals of the same hole that share a category."""
     hole = data[HOLE].values
@@ -1727,7 +1780,7 @@ class DrillholeData(_data._SpatialData):
         return reference.data[[HOLE, FROM, TO]]
 
     def as_point_data(self, tables=None, position=0.5, compositional=None,
-                      vector=None, drop_missing=True):
+                      vector=None, drop_missing=True, contacts=False):
         """
         Converts the interval data to points at the centre of each interval.
 
@@ -1771,6 +1824,17 @@ class DrillholeData(_data._SpatialData):
         drop_missing : bool
             Whether to drop points whose values are all missing, which happens
             where a composite falls in a gap.
+        contacts : bool
+            Whether to add the contacts. Every categorical column then
+            becomes a rock type variable, an interval's point carrying its
+            class on both sides, and a point is added at every depth where
+            some class changes between touching intervals of a hole -- one
+            point per depth, carrying every categorical column's class above
+            and below it (the same on both sides where a column runs through
+            unchanged, empty where it has no interval), no continuous value,
+            a `LENGTH` of zero and the boundary as its `DEPTH`. A change to
+            or from an unlogged stretch is no contact: an empty interval, or
+            a gap, says nothing about where the class ends.
 
         Returns
         -------
@@ -1814,8 +1878,17 @@ class DrillholeData(_data._SpatialData):
         if drop_missing and len(numeric) > 0:
             values = merged[numeric].values.astype(float)
             keep = keep & ~_np.all(_np.isnan(values), axis=1)
-        coordinates, merged = coordinates[keep], merged.loc[keep] \
-            .reset_index(drop=True)
+        # the class below each point, which only a contact tells apart from
+        # the class above it
+        below = {}
+        if contacts:
+            boundary = _contact_rows(merged, categorical)
+            coordinates, merged, below = _with_contacts(
+                self, coordinates[keep], merged.loc[keep], merged, boundary,
+                categorical)
+        else:
+            coordinates, merged = coordinates[keep], merged.loc[keep] \
+                .reset_index(drop=True)
 
         frame = _pd.concat(
             [_pd.DataFrame(coordinates, columns=["X", "Y", "Z"]), merged],
@@ -1842,8 +1915,14 @@ class DrillholeData(_data._SpatialData):
                 unit=column_units.get(column))
         for column in categorical:
             labels = _pd.unique(frame[column].dropna())
-            point.add_categorical_variable(
-                column, labels, measurements=frame[column].values)
+            if contacts:
+                point.add_rock_type_variable(
+                    column, labels=labels,
+                    measurements_a=frame[column].values,
+                    measurements_b=below[column])
+            else:
+                point.add_categorical_variable(
+                    column, labels, measurements=frame[column].values)
         for name, columns in (vector or {}).items():
             columns = list(columns)
             point.add_vector_variable(
@@ -1876,6 +1955,11 @@ class DrillholeData(_data._SpatialData):
         which is what an implicit model needs to place a boundary. The hole it
         came from and its depth down it are carried as the metadata columns
         `HOLEID` and `DEPTH`; a contact has no length, so none is recorded.
+
+        An interval logged without a category is a run of its own here, so
+        a class meeting one makes a contact with an empty side;
+        `as_point_data(contacts=True)` makes none there, an unlogged stretch
+        saying nothing about where a class ends.
 
         Parameters
         ----------

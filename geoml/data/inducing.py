@@ -46,6 +46,7 @@ irregular network is to choose the points first and then divide them:
 __all__ = ["from_kmeans", "from_grid", "combine", "grid_experts", "experts"]
 
 import numpy as _np
+import scipy.spatial as _spatial
 from sklearn.cluster import KMeans as _KMeans
 
 import geoml._types as _types
@@ -68,6 +69,10 @@ def from_kmeans(data: "_data._SpatialData | _types.ArrayLike", n: int,
                 seed: int | None = None) -> "_data.PointData":
     """
     Inducing points at the k-means centroids of the data.
+
+    The centroids follow the data's density: many inducing points where the
+    samples are crowded, few where they are sparse, which is where a sparse
+    GP needs them. Deterministic for a given `seed`.
 
     Parameters
     ----------
@@ -144,6 +149,10 @@ def from_grid(data: "_data._SpatialData | _types.ArrayLike",
     """
     Inducing points on a regular lattice covering the data.
 
+    Evenly spread whatever the data's density, so the model has something
+    to say away from the samples too. Often combined with `from_kmeans`,
+    through `combine`.
+
     Parameters
     ----------
     data
@@ -195,15 +204,25 @@ def combine(*sources: "_data._SpatialData | _types.ArrayLike",
             % ", ".join(str(d) for d in sorted(dims)))
 
     merged = _np.concatenate(arrays, axis=0)
-    if tolerance > 0:
-        # snapping to a grid of the tolerance turns "near duplicates" into
-        # exact ones, which `unique` can then remove in one pass
-        keys = _np.round(merged / tolerance)
-    else:
-        keys = merged
-    _, keep = _np.unique(keys, axis=0, return_index=True)
     labels = getattr(sources[0], "coordinate_labels", None)
-    return _as_points(merged[_np.sort(keep)], labels)
+    if tolerance <= 0:
+        _, keep = _np.unique(merged, axis=0, return_index=True)
+        return _as_points(merged[_np.sort(keep)], labels)
+
+    # Greedy in input order: a point is kept unless one kept before it lies
+    # closer than the tolerance. Snapping to a grid of the tolerance, which
+    # this replaced, kept two close points either side of a cell boundary
+    # and merged two up to tolerance * sqrt(d) apart inside one cell.
+    tree = _spatial.cKDTree(merged)
+    dropped = _np.zeros(len(merged), dtype=bool)
+    for i, near in enumerate(tree.query_ball_point(merged, tolerance)):
+        if dropped[i]:
+            continue
+        near = _np.asarray(near, dtype=int)
+        near = near[near > i]
+        close = _np.linalg.norm(merged[near] - merged[i], axis=1) < tolerance
+        dropped[near[close]] = True
+    return _as_points(merged[~dropped], labels)
 
 
 def grid_experts(data: "_data._SpatialData | _types.ArrayLike",
