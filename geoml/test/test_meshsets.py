@@ -367,6 +367,9 @@ def test_a_set_says_when_memory_leaves_it_fewer_workers(radial, monkeypatch,
     monkeypatch.setattr(msm, "_pool_size",
                         lambda cost, reserve, available, cpus: 1)
     monkeypatch.setattr(msm, "_available_bytes", lambda: 1)
+    # and more than one CPU to use: a runner pinned to one core has a pool
+    # of one whatever memory says, and nothing to warn about
+    monkeypatch.setattr(msm, "_usable_cpus", lambda: 4)
     with pytest.warns(UserWarning, match="memory"):
         made = MeshSet(radial, "g")
     assert np.array_equal(made.realization_volumes().to_numpy(),

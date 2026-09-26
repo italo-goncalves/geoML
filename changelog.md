@@ -1,3 +1,16 @@
+## version 0.8.1
+* **Fixed: a mesh-set test failed on CI's full job at the v0.8.0 tag.**
+`test_a_set_says_when_memory_leaves_it_fewer_workers` stubbed the memory
+down to one worker and expected the warning that says so. Since 0.8.0 the
+full job runs through `run_parallel.py`, two processes on a four-CPU
+runner, each pinned to one core, and the worker pools count only the cores
+a process may use: a pool of one on one core is not fewer than the CPUs,
+so nothing warned. The test stubs the CPU count as well now. No package
+code changed.
+* **The release run**: `test_meshsets.py` pinned to one core, as CI runs
+it, and CI's full job on the tag; the whole suite passed locally at 0.8.0
+on the same code.
+
 ## version 0.8.0
 Behaviour that changes, first:
 

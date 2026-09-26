@@ -238,6 +238,80 @@ leaf that is not Gaussian can train on its realizations; and the gate read
 from a rock-type leaf, where the indicator rule (the largest latent) and
 the mixture's softmax read one latent through two different links.
 
+**M — Overlapping mixture of GPs, as a likelihood** (agreed 2026-09-25;
+the result item L is after). Lázaro-Gredilla, Van Vaerenbergh & Lawrence
+(2012), *Overlapping Mixtures of Gaussian Processes for the data
+association problem*, Pattern Recognition 45(4). M global latent functions;
+each sample comes from exactly one, chosen by its value rather than its
+place, so the components cross and overlap anywhere and the prediction is
+a mixture of M Gaussians — multimodal where they separate. This is what
+`GaussianMixture` cannot do: it blends *values* in the latent, so a
+realization is bimodal only where its gate is sharp, which is why it failed
+the crossing gate; OMGP mixes *densities* in the likelihood, sample by
+sample, and its own first figure is two crossing trajectories.
+
+The design, settled:
+- **A likelihood, generalizing `likelihood.Mixture`** from several widths
+  around one latent location to several locations: component `m` reads
+  latent columns `m·P … (m+1)·P − 1` of a leaf of size `M·P` (a latent
+  size larger than the data's, as `CategoricalGaussianIndicator` has
+  already). The row-level mixture, `responsibilities`, contamination
+  flags and the compositional `weights` carry over; one shared warping,
+  the data warped once.
+- **The bound**: per location `log Σ_m π_m exp(E_q[log N(y | f_m)])`, the
+  paper's bound at its optimal labels. Each term is one-dimensional
+  quadrature on its own component's marginal, so the leaf stays Gaussian
+  and training is geoML's as it is — no Monte Carlo, no fixed draws.
+- **Two versions of the shares, both offered**: fixed `π` (the paper's,
+  trained as `Mixture`'s weights), and spatially varying, read from `M`
+  further latent columns through a softmax (a mixture of experts; the
+  expectation over those columns needs quadrature or samples — to settle
+  when built).
+- **A whole realization belongs to one component**: realization `s` takes
+  one label and that component's latent draw everywhere, so each
+  realization is a coherent field and the multimodality lives across the
+  ensemble. One label everywhere cannot follow shares that change from
+  place to place, so (decided 2026-09-25) **the realizations are divided
+  among the components in fixed numbers, not drawn**: with fixed shares in
+  proportion to `π`, so the plain ensemble *is* the mixture and nothing
+  downstream changes; with spatially varying shares in equal groups, each
+  an honest sample of its own component everywhere. The labels and the
+  per-location shares (the prior at a new location, the responsibility at
+  a measured one) are stored as columns, and the reductions that report a
+  mixture — quantiles, cut-off shares, the mixture mean — combine the
+  groups' statistics with the local shares. Anything summed over space —
+  a tonnage, a realization's contour, connectivity — stays defined, per
+  component. What ignores the grouping reads the fixed split, so on a
+  spatially varying mixture it is documented or refused. Rejected: labels
+  drawn from the mean share with a weight per realization per location —
+  exact point by point, but every reader of realizations would need the
+  weights, a spatial sum has no consistent weight when it varies inside
+  the region, and extreme local shares leave most of the ensemble weighing
+  next to nothing. It also hides the right answer at a measured sample: a
+  pick belonging to horizon 1 is not on horizon 2, and the other
+  component's realizations should not pass through it.
+- **Symmetry broken by initialization, not by changing training**:
+  components started identical stay identical (the shared-root collapse of
+  `GaussianMixture`'s gate 1), and the paper warns of local maxima. Start
+  the components apart — responsibilities from clustering the warped
+  values, or the component means at ordered offsets — through the
+  likelihood's `initialize`, the door every data-dependent start already
+  uses.
+- **Container columns**: a prediction and variance per component, a share
+  per component (the prior at a new location, the responsibility at a
+  measured one), and the mixture's mean and variance. Quantiles and
+  cut-off shares come from the realizations and need nothing new.
+
+Uses in geology: unlabelled contact picks from several horizons assigned
+to surfaces as they are modelled (the paper's data association), two grade
+populations overlapping in space, and an outlier component for robust
+modelling. A domain boundary switching one field for another is the gated
+problem instead (`GaussianMixture`, or the gate read from a rock type).
+Gates: the crossing sinusoids of `docs/benchmarks/gaussian_mixture_gates.py`
+— realizations near both curves where they are apart, and every sample's
+responsibility on its true curve — and the split sinusoids, where it must
+do no worse than one GP.
+
 **S — Fresh training draws** (found 2026-09-25, kept on the list by the
 user). Every training step passes `seed=options.seed`, so a likelihood that
 trains by Monte Carlo — a warping that mixes, and since 0.8.0 any leaf that
@@ -784,6 +858,48 @@ to 93-95% and was cancelled with no test failing; as one pytest process
 it peaks at 23.1 GB, and the runner has 16. The job runs one process per
 test file now: under a 14 GB cap every file passed, the heaviest peaking
 at 6.1 GB.)
+
+**M — Keep the package skill true at every release** (agreed 2026-09-26).
+Found: two skills both named `geo-ml` — the research skill outside the
+repository (research line, notation, LaTeX, style, and a section 5 on the
+package) and the package skill in `plugins/geoml/skills/` — whose package
+text had drifted apart, no script generating one from the other though this
+file's Version note said one did, and every release bumping only the
+version line: at 0.8.0 the package skill still named the shims removed in
+0.7.0 and never mentioned the parametric warpings, leaves, `MeshSet`, the
+catalogue, `progress` or `unpredicted`. Settled:
+- **Names**: the package skill is `geoml`, the research skill
+  `geoml-research`, so the two never share one in a session.
+- **One source**: the package skill holds all package knowledge. The
+  research skill's section 5 shrinks to a pointer and about ten lines (the
+  object model in a paragraph, the install line, where the manual and the
+  reference live), since it is also used where the plugin is not installed.
+- **Prose only for what the catalogue cannot say**: the object model, the
+  workflow, the recommendations, the gotchas, the geostatistical
+  intuitions. The class lists and argument details go; a recommendation
+  names its classes and sends the reader to the catalogue for arguments.
+  Internal classes are named nowhere, experimental ones only as such.
+- **The catalogue queried, not copied**: `python -m geoml.catalogue` gains
+  `--show NAME` (short or dotted; an ambiguous short name lists the
+  candidates), `--list CATEGORY` and `--json`, writing the whole file as
+  now when given a path. The skill has the agent query the installed
+  version for any signature or bound, and falls back to the site's
+  reference pages where geoML is not installed. A snapshot was rejected:
+  stale the moment the user installs another version, and the whole
+  catalogue is 282 KB (about 70k tokens).
+- **The manual replaces the notebooks**: the 17 chapters, run at every
+  release by `test_manual.py`, copied into `references/` as Markdown with
+  their figure links rewritten to the site (the figures are 5.7 MB); the
+  eight notebooks, which predate the path notation and nothing tests, go.
+  `notebook-style.md` stays.
+- **Checks**: a name check in CI's structural job (every dotted name and
+  every class or function the skill mentions resolves and is not
+  internal) and a code check at release (every Python block in the skill
+  runs).
+- **The release step**, written into CLAUDE.md's Version note: bump the
+  version; run `plugins/geoml/sync.py` (the chapters copied, links
+  rewritten); review the skill's prose against the changelog's top
+  section; both checks pass.
 
 (The tag-triggered manual CI job: **verified 2026-09-14**. At v0.6.9 it was
 killed at 22 minutes of a 90-minute budget with no pytest output, the OOM
