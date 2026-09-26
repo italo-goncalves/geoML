@@ -20,7 +20,8 @@ code.
 
 `build` returns it as a dictionary and `dumps` as JSON text;
 ``python -m geoml.catalogue [path]`` writes that text to a file or to the
-standard output. Signatures, defaults and descriptions come from the code.
+standard output, and ``--show NAME`` and ``--list CATEGORY`` answer for one
+entry or one category at a time. Signatures, defaults and descriptions come from the code.
 What introspection cannot know -- a class's category, how many parents it
 takes, how its output size follows from its arguments, whether inducing
 points pass through it -- each class declares beside its code, in a
@@ -484,22 +485,159 @@ def _references():
             (_data.PointData, "data:PointData"))
 
 
-def main(argv: "list[str] | None" = None) -> None:
-    """``python -m geoml.catalogue [path]``."""
+def entries(built: "dict[str, _Any]") -> "dict[str, dict[str, _Any]]":
+    """Every class, container and function of a built catalogue in one
+    mapping from dotted path to entry, a container's entry given the
+    category `container`."""
+    found = dict(built["classes"])
+    found.update(built["functions"])
+    for name, entry in built["containers"].items():
+        found[name] = dict(entry, category="container")
+    return found
+
+
+def find(built: "dict[str, _Any]", name: str) -> "list[str]":
+    """The dotted paths `name` can mean: itself where it is one, else every
+    path ending in it -- `BasicGP`, `latent.network.BasicGP`. More than one
+    path means the short name is ambiguous (`Gaussian` is a kernel and a
+    likelihood)."""
+    known = entries(built)
+    if name in known:
+        return [name]
+    return sorted(key for key in known if key.endswith("." + name))
+
+
+def _show(name, entry):
+    """One entry as text: what it is, then its arguments, then whatever
+    else it declares."""
+    lines = [name]
+    heading = [entry.get("category", ""), entry.get("stability", "")]
+    lines.append("  " + ", ".join(h for h in heading if h))
+    if entry.get("stability") == "internal":
+        lines.append("  internal: kept for saved models; not for new work")
+    for key in ("summary", "description"):
+        if entry.get(key):
+            lines.append("")
+            lines.append(entry[key])
+    params = entry.get("params", [])
+    if params:
+        lines.append("")
+        lines.append("Arguments:")
+    for param in params:
+        facts = [param.get("type", "")]
+        if param.get("required"):
+            facts.append("required")
+        elif "default" in param:
+            facts.append("default %s" % _json.dumps(param["default"]))
+        if param.get("nullable"):
+            facts.append("may be null")
+        if param.get("constraints"):
+            facts.append(_json.dumps(param["constraints"], sort_keys=True))
+        lines.append("  %s: %s" % (param["name"],
+                                   "; ".join(f for f in facts if f)))
+        if param.get("doc"):
+            lines.append("      " + param["doc"])
+    shown = {"category", "stability", "summary", "description", "params",
+             "label", "methods"}
+    rest = {k: v for k, v in entry.items() if k not in shown}
+    if rest:
+        lines.append("")
+    for key in sorted(rest):
+        lines.append("%s: %s" % (key, _json.dumps(rest[key], sort_keys=True)))
+    if entry.get("methods"):
+        lines.append("methods: " + ", ".join(sorted(entry["methods"])))
+    return "\n".join(lines) + "\n"
+
+
+def _listing(built, category):
+    """`(path, stability, summary)` for every entry of `category` that is
+    not internal, and how many internal ones were left out."""
+    rows, internal = [], 0
+    for name, entry in sorted(entries(built).items()):
+        if entry.get("category") != category:
+            continue
+        if entry.get("stability") == "internal":
+            internal += 1
+            continue
+        rows.append((name, entry.get("stability", "public"),
+                     entry.get("summary", "")))
+    return rows, internal
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    """``python -m geoml.catalogue [path | --show NAME | --list [CATEGORY]]``."""
     parser = _argparse.ArgumentParser(
         prog="python -m geoml.catalogue",
-        description="Write the catalogue of the geoML in use as JSON.")
+        description="Write the catalogue of the geoML in use as JSON, or "
+                    "look up one entry or one category of it.")
     parser.add_argument("path", nargs="?",
                         help="the file to write; the standard output if "
                              "left out")
-    target = parser.parse_args(argv).path
-    text = dumps()
-    if target is None:
-        _sys.stdout.write(text)
-    else:
-        with open(target, "w", encoding="utf-8", newline="\n") as file:
-            file.write(text)
+    parser.add_argument("--show", metavar="NAME",
+                        help="one class, container or function, by its "
+                             "short or dotted name")
+    parser.add_argument("--list", metavar="CATEGORY", nargs="?", const="",
+                        help="the entries of a category, internal ones "
+                             "left out; the categories if none is named")
+    parser.add_argument("--json", action="store_true",
+                        help="with --show or --list, JSON instead of text")
+    options = parser.parse_args(argv)
+    if options.show is None and options.list is None:
+        text = dumps()
+        if options.path is None:
+            _sys.stdout.write(text)
+        else:
+            with open(options.path, "w", encoding="utf-8",
+                      newline="\n") as file:
+                file.write(text)
+        return 0
+
+    built = build()
+    if options.show is not None:
+        matches = find(built, options.show)
+        if len(matches) != 1:
+            _sys.stdout.write(
+                "%s names %s; pass a dotted name:\n%s" % (
+                    options.show,
+                    "nothing in the catalogue" if not matches else
+                    "%d entries" % len(matches),
+                    "".join("  %s\n" % m for m in matches)))
+            return 1
+        entry = entries(built)[matches[0]]
+        _sys.stdout.write(
+            _json.dumps({matches[0]: entry}, sort_keys=True, indent=1,
+                        ensure_ascii=False) + "\n" if options.json
+            else _show(matches[0], entry))
+        return 0
+
+    if not options.list:
+        counts: "dict[str, int]" = {}
+        for entry in entries(built).values():
+            category = entry.get("category", "")
+            counts[category] = counts.get(category, 0) + 1
+        if options.json:
+            _sys.stdout.write(_json.dumps(counts, sort_keys=True) + "\n")
+        else:
+            _sys.stdout.write("".join("%-12s %d\n" % item
+                                      for item in sorted(counts.items())))
+        return 0
+    rows, internal = _listing(built, options.list)
+    if options.json:
+        _sys.stdout.write(_json.dumps(
+            [{"name": n, "stability": st, "summary": su}
+             for n, st, su in rows], indent=1, ensure_ascii=False) + "\n")
+        return 0
+    if not rows and not internal:
+        _sys.stdout.write("no category %r; --list alone names them\n"
+                          % options.list)
+        return 1
+    for name, stability, summary in rows:
+        flag = "" if stability == "public" else " [%s]" % stability
+        _sys.stdout.write("%s%s\n    %s\n" % (name, flag, summary))
+    if internal:
+        _sys.stdout.write("(%d internal left out)\n" % internal)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    _sys.exit(main())
