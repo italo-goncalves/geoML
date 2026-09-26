@@ -299,6 +299,10 @@ class _GPModel(_gpr.Parametric):
     def save(self, path: _types.PathLike) -> _types.PathLike:
         """Save the model's structure, parameters and training data.
 
+        The model is written as the constructor calls that built it, with
+        their arguments, and the parameters' values, so `open` rebuilds the
+        same model -- its seed included, so its simulations replay.
+
         Parameters
         ----------
         path
@@ -883,6 +887,23 @@ class VGPNetwork(_GPModel):
         # leaves refactor briefly did) made every older save refuse to open.
         for likelihood in self.likelihoods:
             self._register(likelihood)
+        # A leaf that is not Gaussian -- a mixture, a product, an
+        # exponential -- has a mean and variance the training quadrature
+        # would read as a Gaussian's, blurring what makes it not one; its
+        # likelihoods train on its realizations instead, where they can.
+        self._latent_gaussian = [True] * len(self.likelihoods)
+        for leaf, group in zip(self.leaves, self._leaf_groups):
+            if getattr(leaf, "gaussian", True):
+                continue
+            for i in group:
+                self._latent_gaussian[i] = False
+                if not self.likelihoods[i]._MONTE_CARLO:
+                    warnings.warn(
+                        "leaf %s is not Gaussian, but %s can only train on "
+                        "its mean and variance; it will be trained as if "
+                        "it were Gaussian"
+                        % (leaf.name, type(self.likelihoods[i]).__name__),
+                        stacklevel=2)
         # the cached refresh trace lives on the model, there being no single
         # node to hang it on once there are several leaves
         self._refresh_graph = None
@@ -1096,9 +1117,11 @@ class VGPNetwork(_GPModel):
             sims = self._by_likelihood(simss)
 
             elbo = _tf.constant(0.0, _tf.float64)
-            for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp in zip(
-                    self.likelihoods, mu, var, y_s,
-                    hv, sims, training_inputs):
+            for likelihood, mu_i, var_i, y_i, hv_i, sim_i, inp, gaussian \
+                    in zip(self.likelihoods, mu, var, y_s, hv, sims,
+                           training_inputs, self._latent_gaussian):
+                if not gaussian and likelihood._MONTE_CARLO:
+                    inp = dict(inp, latent_gaussian=False)
                 elbo = elbo + likelihood.log_lik(
                     mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
 
@@ -1523,7 +1546,8 @@ class VGPNetwork(_GPModel):
                 )
             return output
 
-    def predict(self, newdata: "_data._SpatialData", n_sim: int = 20,
+    def predict(self, newdata: "_data._SpatialData",
+                n_sim: "int | None" = None,
                 include_noise: bool = True,
                 where: _types.Where = None) -> None:
         """Predict at new locations, writing the answer into the container.
@@ -1538,7 +1562,8 @@ class VGPNetwork(_GPModel):
             The locations to predict, of the same dimension as the training
             data. Modified in place.
         n_sim
-            Number of realizations to draw per location.
+            Number of realizations to draw per location. `None` takes the
+            number `newdata` already holds, or 20 where it holds none.
         include_noise
             Whether to integrate the likelihood noise out of the answer. The
             prediction then reports the value the ground would show once
@@ -1547,18 +1572,43 @@ class VGPNetwork(_GPModel):
             variable. Turn it off to see the latent field alone.
         where
             One boolean per location, the indices of the locations to visit,
-            or `None` for all of them. Locations left out keep whatever they
-            hold, including their simulations, and a location never visited
-            stays missing.
+            the name of a boolean metadata column holding the same, or `None`
+            for all of them. Locations left out keep whatever they hold,
+            including their simulations, and a location never visited stays
+            missing.
+
+        Raises
+        ------
+        ValueError
+            If `where` names some locations of a variable that already holds
+            simulations, and `n_sim` asks for a different number of them.
 
         Notes
         -----
         A location's simulated values do not depend on what else is in its
         batch, so predicting a subset gives the same answer as predicting
         everything and reading that subset back.
+
+        Where `newdata` holds measurements -- the training data, a
+        validation set -- two things are written beside the prediction as
+        metadata, one column per variable component, for the figures that
+        compare a model with its data to read without the model:
+        `pit_<variable>[_<component>]`, where each measurement falls in the
+        predictive distribution of a measurement (0 to 1; uniform on data
+        the model did not see, if it is well calibrated), and
+        `warped_<variable>_<i>`, the measurements through the likelihood's
+        warping, as the model sees them. A block model, whose locations are
+        not points, gets neither.
         """
+        self._predict(newdata, n_sim, include_noise, where)
+
+    def _predict(self, newdata, n_sim, include_noise, where,
+                 check_measurements=True):
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
+        where = _where_mask(newdata, where)
+        n_sim = _simulation_count(newdata, self.variables, n_sim,
+                                  keep=where is not None)
 
         # managing variables
         variable_inputs = []
@@ -1583,7 +1633,8 @@ class VGPNetwork(_GPModel):
             # already skips. Never reallocate an existing one under `where` --
             # that would wipe the simulations the untouched locations hold,
             # which is the whole point of naming only some.
-            if where is None or fresh:
+            if where is None or fresh \
+                    or _stored_n_sim(newdata.variables[v]) is None:
                 newdata.variables[v].allocate_simulations(n_sim)
             variable_inputs.append(self.data.variables[v].prediction_input())
 
@@ -1609,6 +1660,72 @@ class VGPNetwork(_GPModel):
                 elementwise = lik.warped and lik.warping.elementwise
                 newdata.variables[v].update(batch, elementwise=elementwise,
                                             **upd)
+
+        if check_measurements:
+            self._check_measurements(newdata, where, n_sim)
+
+    def _check_measurements(self, newdata, where, n_sim):
+        """Writes `pit_*` and `warped_*` where `newdata` holds measurements
+        (see `predict`), at the locations `where` names. A column already
+        there keeps its values elsewhere, so a prediction finished in parts
+        fills it in parts."""
+        if newdata.rows_per_location != 1:
+            return
+        visit = _np.ones(newdata.n_data, dtype=bool) if where is None \
+            else where
+        truths = {v: _measured_truth(newdata.variables[v])
+                  for v, _ in self._measured_variables()}
+        rows = visit & _np.any(
+            [has.any(axis=1) for _, has, _ in truths.values()] or
+            [_np.zeros(newdata.n_data, dtype=bool)], axis=0)
+        if not rows.any():
+            return
+
+        def column(name):
+            if name in newdata.metadata:
+                return _np.asarray(newdata.get_metadata(name),
+                                   dtype=float).copy()
+            return _np.full(newdata.n_data, _np.nan)
+
+        # a pass of its own over the measured rows, silenced: it is part of
+        # the prediction a caller asked for, not a second one to report
+        pit = {}
+        with _progress.progress(None):
+            for batch, samples in self.measurement_batches(
+                    newdata, n_sim=n_sim, where=rows):
+                for v, sample in samples.items():
+                    truth, has, components = truths[v]
+                    for c, component in enumerate(components):
+                        measured = has[batch, c]
+                        if not measured.any():
+                            continue
+                        key = _pit_column(v, component)
+                        if key not in pit:
+                            pit[key] = column(key)
+                        pit[key][batch[measured]] = _pit(
+                            sample[measured, c, :], truth[batch, c][measured])
+        for key, values in pit.items():
+            newdata.add_metadata(key, values)
+
+        for v, lik in self._measured_variables():
+            values, has_value = newdata.variables[v].get_measurements()
+            values = _np.asarray(values, dtype=float)
+            if values.ndim == 1:
+                values = values[:, None]
+            has_value = _np.asarray(has_value)
+            if has_value.ndim == 1:
+                has_value = has_value[:, None]
+            # the whole row or nothing: a warping may mix the columns
+            full = rows & _np.all(has_value == 1.0, axis=1)
+            if not full.any():
+                continue
+            warped, _ = lik.warping.forward(values[full])
+            warped = _np.asarray(warped, dtype=float)
+            for i in range(warped.shape[1]):
+                key = "warped_%s_%d" % (v, i)
+                stored = column(key)
+                stored[full] = warped[:, i]
+                newdata.add_metadata(key, stored)
 
     def _over_batches(self, newdata, call, where=None, with_rows=False):
         """Runs `call(coordinates, variance, n_splits)` over `newdata` --
@@ -1758,7 +1875,8 @@ class VGPNetwork(_GPModel):
                 if lik.warped]
 
     def measurement_batches(self, newdata: "_data._SpatialData",
-                            n_sim: int = 20, n_nodes: int = 32):
+                            n_sim: int = 20, n_nodes: int = 32,
+                            where: _types.Where = None):
         """The measurement samples, a batch of locations at a time.
 
         What :meth:`predict_measurements` returns whole, yielded in the
@@ -1779,6 +1897,10 @@ class VGPNetwork(_GPModel):
             Latent realizations per location.
         n_nodes
             Equal-share noise values per realization.
+        where
+            One boolean per location, or the indices of the locations to
+            ask about; all of them by default. A location's sample does not
+            depend on which others are asked about with it.
 
         Yields
         ------
@@ -1851,7 +1973,7 @@ class VGPNetwork(_GPModel):
                     for k, (sim, lik) in enumerate(measured)]
 
         for rows, output in self._over_batches(newdata, batch_measure,
-                                               with_rows=True):
+                                               where=where, with_rows=True):
             # in the variable's own units, here rather than at the end: a
             # composition's parts reach the model as fractions of the whole,
             # and a streaming caller compares them against assays batch by
@@ -1955,7 +2077,69 @@ class VGPNetwork(_GPModel):
         return out
 
 
-def refine(model, blocks: "_data.BlockSet3D", n_sim: int = 20,
+def _where_mask(container, where):
+    """`where` as one boolean per location, or None for all of them.
+
+    A string names a boolean metadata column -- a stored filter, which is
+    what a block model has instead of being subsettable -- and indices
+    become the mask they select.
+    """
+    if where is None:
+        return None
+    if isinstance(where, str):
+        mask = _np.asarray(container.get_metadata(where)).ravel().astype(bool)
+    else:
+        mask = _np.asarray(where)
+        if mask.dtype != bool:
+            index = _np.zeros(container.n_data, dtype=bool)
+            index[mask] = True
+            mask = index
+    if mask.shape != (container.n_data,):
+        raise ValueError(
+            "`where` needs one value per location: got %d for %d"
+            % (mask.size, container.n_data))
+    return mask
+
+
+def _stored_n_sim(variable):
+    """How many realizations `variable` holds, or None if it holds none.
+    A vector or categorical variable keeps them on its components."""
+    stores = [variable.simulations] \
+        if getattr(variable, "simulations", None) is not None else []
+    stores += [c.simulations
+               for c in getattr(variable, "components", {}).values()
+               if getattr(c, "simulations", None) is not None]
+    return stores[0].shape[1] if stores else None
+
+
+def _simulation_count(container, names, n_sim, keep):
+    """The number of realizations a prediction into `container` draws.
+
+    `None` takes the number the container's variables already hold, or 20.
+    Under `keep` -- some locations visited, the rest keeping what they
+    hold -- an existing store is written into, never reallocated, so a
+    different number is refused before any batch runs: it would otherwise
+    fail part way through, or with one realization be copied into every
+    column without a word.
+    """
+    stored = {name: _stored_n_sim(container.variables[name])
+              for name in names if name in container.variables}
+    stored = {name: n for name, n in stored.items() if n is not None}
+    if n_sim is None:
+        return next(iter(stored.values()), 20)
+    if keep:
+        for name, count in stored.items():
+            if count != n_sim:
+                raise ValueError(
+                    "%s holds %d realization(s) and the prediction was asked "
+                    "for %d; predicting some locations writes into the "
+                    "realizations the others keep, so the numbers must agree "
+                    "(pass n_sim=None to take the stored one)"
+                    % (name, count, n_sim))
+    return n_sim
+
+
+def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
            split_on: "str | Sequence[str] | None" = None,
            tolerance: float = 0.05, include_noise: bool = True,
            where: _types.Where = None,
@@ -1985,7 +2169,8 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: int = 20,
         The coarse block model to start from. Not modified: each pass builds
         a new one.
     n_sim
-        Realizations to draw at every pass.
+        Realizations to draw at every pass. `None` takes the number `blocks`
+        already holds, or 20 where it holds none.
     split_on
         Which variables have a say in the decision. All of them by default.
     tolerance
@@ -2023,23 +2208,7 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: int = 20,
     the way to stop part way and inspect a pass. See
     `docs/variable-block-models.md`.
     """
-    keep = None
-    if where is not None:
-        if isinstance(where, str):
-            # a stored filter is an ordinary metadata column, which is what
-            # the block model has instead of being subsettable
-            keep = _np.asarray(
-                blocks.get_metadata(where)).ravel().astype(bool)
-        else:
-            keep = _np.asarray(where)
-            if keep.dtype != bool:
-                index = _np.zeros(blocks.n_data, dtype=bool)
-                index[keep] = True
-                keep = index
-        if keep.shape != (blocks.n_data,):
-            raise ValueError(
-                "`where` needs one value per block: got %d for %d"
-                % (keep.size, blocks.n_data))
+    keep = _where_mask(blocks, where)
 
     # No total: the passes are not bounded by `max_levels`, since each one
     # marks a different set and a block still at level 0 can be marked by
@@ -2354,8 +2523,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                     fold_model.train_svi(epochs=epochs)
                 else:
                     fold_model.train_full(max_iter=iterations)
-                fold_model.predict(oof, n_sim=n_sim, include_noise=True,
-                                   where=held)
+                fold_model._predict(oof, n_sim, True, held,
+                                    check_measurements=False)
 
                 held_points = oof[held]
                 held_rows = _np.flatnonzero(held)
@@ -2363,22 +2532,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                 # the truth is small -- one value a row per column -- so
                 # it is read once for the fold and indexed per batch; only
                 # the samples are large enough to be worth streaming
-                truths = {}
-                for v, _ in fold_model._measured_variables():
-                    y_true, has_value = \
-                        held_points.variables[v].get_measurements()
-                    y_true = _np.asarray(y_true, dtype=float)
-                    has_value = _np.asarray(has_value)
-                    if y_true.ndim == 1:
-                        y_true = y_true[:, None]
-                    if has_value.ndim == 1:
-                        has_value = has_value[:, None]
-                    # not `labels`: that name holds the fold assignments here,
-                    # and shadowing it made every fold after the first read
-                    # `held` as a scalar False
-                    parts = getattr(held_points.variables[v], "labels", None)
-                    truths[v] = (y_true, has_value,
-                                 [v] if parts is None else list(parts))
+                truths = {v: _measured_truth(held_points.variables[v])
+                          for v, _ in fold_model._measured_variables()}
 
                 # One pass over the fold's samples, a batch at a time, folding
                 # each into sufficient statistics -- counts and sums, never
@@ -2391,9 +2546,7 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                     for v, sample in samples.items():
                         y_true, has_value, components = truths[v]
                         for c, component in enumerate(components):
-                            column = has_value[batch, min(
-                                c, has_value.shape[1] - 1)]
-                            measured = column == 1
+                            measured = has_value[batch, c]
                             if not measured.any():
                                 continue
                             truth = y_true[batch, c][measured]
@@ -2401,15 +2554,12 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                             _accumulate(fold_acc.setdefault(
                                 (v, component), _fresh_scores()), truth, draw)
 
-                            # where each assay fell inside its own predictive
-                            # distribution (mid-rank, so ties split evenly) --
                             # what `conformalize` calibrates on
-                            u = (draw < truth[:, None]).mean(axis=1) \
-                                + 0.5 * (draw == truth[:, None]).mean(axis=1)
                             stored = pit.setdefault(
                                 (v, component),
                                 _np.full(data.n_data, _np.nan))
-                            stored[held_rows[batch][measured]] = u
+                            stored[held_rows[batch][measured]] = _pit(
+                                draw, truth)
 
                 for key, a in fold_acc.items():
                     v, component = key
@@ -2482,8 +2632,40 @@ def _scores_from(a):
     }
 
 
+def _measured_truth(variable):
+    """`(values, measured, components)` of a variable's measurements: the
+    values `(n_data, n_columns)` in the variable's own units, as the
+    measurement samples come, a boolean per value, and a name per column.
+
+    `get_measurements` is the model's door, and hands a composition's parts
+    over as fractions of the whole; compared with samples in the parts'
+    own units, a composition declared in percent was scored against numbers
+    a hundred times too small.
+    """
+    values, has_value = variable.get_measurements()
+    values = _np.asarray(variable.from_model_units(
+        _np.asarray(values, dtype=float)), dtype=float)
+    has_value = _np.asarray(has_value)
+    if values.ndim == 1:
+        values = values[:, None]
+    if has_value.ndim == 1:
+        has_value = has_value[:, None]
+    has_value = _np.broadcast_to(has_value == 1, values.shape)
+    parts = getattr(variable, "labels", None)
+    return values, has_value, [variable.name] if parts is None \
+        else list(parts)
+
+
+def _pit(draws, truth):
+    """Where each value of `truth` falls among its row of `draws`, as a
+    share -- mid-rank, so ties split evenly."""
+    return (draws < truth[:, None]).mean(axis=1) \
+        + 0.5 * (draws == truth[:, None]).mean(axis=1)
+
+
 def _pit_column(name, component):
-    """Where `cross_validate` keeps a component's out-of-fold PITs."""
+    """The metadata column a component's PITs are kept in, by `predict`
+    and, out of fold, by `cross_validate`."""
     if component is None or component == name:
         return "pit_%s" % name
     return "pit_%s_%s" % (name, component)

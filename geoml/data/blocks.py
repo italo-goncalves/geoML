@@ -179,7 +179,7 @@ def _blockdata(cls):
         return _sub_block_shares(self, test)
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
-                            fraction=None, uncovered=_np.nan):
+                            fraction=None, uncovered=None):
         """
         As `Grid3D.assign_from_surface`, measuring the partial blocks on
         request.
@@ -208,8 +208,8 @@ def _blockdata(cls):
             below the sheet. Costs `prod(discretization)` queries per block.
         uncovered : float or "raise"
             What the `fraction` column records for a block the sheet does not
-            reach: `numpy.nan` by default, so it cannot pass for a block
-            genuinely above ground, or `0.0` to count it as nothing. Pass
+            reach: `numpy.nan` for `None`, the default, so it cannot pass for
+            a block genuinely above ground, or `0.0` to count it as nothing. Pass
             `"raise"` to refuse a surface that does not cover every block.
         """
         _blocks_from_surface(self, base_assign_from_surface, surface, name,
@@ -256,16 +256,47 @@ def _blockdata(cls):
 
 @_blockdata
 class Blocks1D(Grid1D):
-    pass
+    """
+    Blocks along one axis, each averaged over its sub-blocks.
+
+    A block model: `Grid1D`'s lattice, each node the centre of a block of
+    the lattice's spacing.
+
+    A prediction is the mean over each block, taken from its `discretization`
+    sub-blocks, a regular lattice inside it; the variance within the block
+    is recorded as `dispersion`. What a resource is estimated on when every
+    block is the same size; `BlockSet3D` is the one whose blocks are not.
+    """
 
 
 @_blockdata
 class Blocks2D(Grid2D):
-    pass
+    """
+    Blocks in the plane, each averaged over its sub-blocks.
+
+    A block model: `Grid2D`'s lattice, each node the centre of a block of
+    the lattice's spacing.
+
+    A prediction is the mean over each block, taken from its `discretization`
+    sub-blocks, a regular lattice inside it; the variance within the block
+    is recorded as `dispersion`. What a resource is estimated on when every
+    block is the same size; `BlockSet3D` is the one whose blocks are not.
+    """
 
 
 @_blockdata
 class Blocks3D(Grid3D):
+    """
+    Blocks in space, each averaged over its sub-blocks.
+
+    A block model: `Grid3D`'s lattice, each node the centre of a block of
+    the lattice's spacing.
+
+    A prediction is the mean over each block, taken from its `discretization`
+    sub-blocks, a regular lattice inside it; the variance within the block
+    is recorded as `dispersion`. What a resource is estimated on when every
+    block is the same size; `BlockSet3D` is the one whose blocks are not.
+    """
     def as_pyvista(self, simulations=False, include="**"):
         """
         Converts this object to a pyvista one, carrying its variables.
@@ -1955,7 +1986,7 @@ class BlockSet3D(PointData):
         return self
 
     def assign_from_surface(self, surface, name, labels=("above", "below"),
-                            fraction=None, uncovered=_np.nan):
+                            fraction=None, uncovered=None):
         """
         As `Blocks3D.assign_from_surface`, over blocks of several sizes.
 
@@ -2030,19 +2061,22 @@ class BlockSet3D(PointData):
 
         What `split` leaves behind, and what a cancelled prediction did not
         reach: hand it to `predict(..., where=...)` and only those blocks
-        are visited. Without a variable it is the blocks the last split
-        made *together with* the ones whose values are missing -- the two
-        agree right after a split, when the children hold nothing, and
-        differ only where a prediction stopped part way or never covered
-        the ground. Naming a variable reads that one's missing values
-        alone.
+        are visited. Read off the missing values, as on every container,
+        once the set holds a variable; before anything has been predicted
+        into it, the blocks the last split made. Naming a variable reads
+        that one's missing values alone.
         """
         if variable is not None:
             return self.variables[variable].unpredicted()
-        # `_fresh` alone would call a half-predicted split complete, and
-        # the missing values alone would forget a child nothing has been
-        # asked about yet
-        return _np.array(self._fresh, dtype=bool)             | _SpatialData.unpredicted(self)
+        # A split leaves its children missing in every variable the set
+        # holds, so the values say it all; the flags are what is left to say
+        # it with no variable at all. Their union, which this was in 0.7.0,
+        # kept every block of a new set unpredicted after predicting it in
+        # full, the flags never being cleared.
+        if any(v._PREDICTED_MARKER is not None
+               for v in self.variables.values()):
+            return _SpatialData.unpredicted(self)
+        return _np.array(self._fresh, dtype=bool)
 
     # ------------------------------------------------------------------ #
     # what the model asks for

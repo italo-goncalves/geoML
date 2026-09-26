@@ -51,7 +51,8 @@ from geoml.data.containers import PointData
 from geoml.data.grids import Grid3D
 from geoml.data.meshes import (Mesh3D, Solid3D, Surface3D, _DistanceQueries,
                                _empty_solid, _from_manifold, _ground_under,
-                               _joined, _to_manifold, _within_body)
+                               _joined, _to_manifold, _usable_cpus,
+                               _within_body)
 from geoml.data.blocks import BlockSet3D, _contour_column, _sub_block_shares
 from geoml.data.io import (_GEOML_ZARR_FORMAT, _open_for_writing,
                            _rebuild_container, _refuse_overwriting,
@@ -769,7 +770,7 @@ def _default_workers(cost, stores, numbers):
     """The pool a set makes when not told how big: the CPUs, eight at most,
     and no more than memory holds at what one realization costs, said out
     loud when that is fewer."""
-    cpus = max(1, min(_WORKERS, _os.cpu_count() or 1))
+    cpus = min(_WORKERS, _usable_cpus())
     # the parent holds one group of realizations while the workers run
     reserve = min(_GROUP_BYTES,
                   8 * int(stores[0].shape[0]) * len(stores) * len(numbers))

@@ -17,7 +17,7 @@ import pytest
 import geoml
 import geoml.data.drillhole as drillhole
 from geoml.data.drillhole import (DrillholeData, IntervalTable, HOLE, FROM, TO,
-                             LENGTH)
+                             LENGTH, DEPTH)
 
 
 def _collar(holes=("H1",), x=0.0, y=0.0, z=100.0, length=100.0,
@@ -1437,3 +1437,72 @@ def test_recovery_survives_a_column_rename():
 
     assert holes.intervals["assay"].columns_with_role("recovery") == \
         ["core_recovery"]
+
+
+# --------------------------------------------------------------------------- #
+# points with their contacts (as_point_data(contacts=True))
+# --------------------------------------------------------------------------- #
+def _logged_holes():
+    """H1 changes alteration at 2 and 8 m and has a stretch with no rock
+    logged between 4 and 6; H2's two rocks are separated by a gap."""
+    holes = _drillholes(collar=_collar(holes=("H1", "H2"), dip=90.0,
+                                       azimuth=0.0, length=10.0))
+    frame = pd.DataFrame({
+        "HoleID": ["H1"] * 5 + ["H2"] * 2,
+        "From": [0.0, 2.0, 4.0, 6.0, 8.0, 0.0, 5.0],
+        "To": [2.0, 4.0, 6.0, 8.0, 10.0, 3.0, 10.0],
+        "Zn": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        "rock": ["ore", "ore", None, "waste", "waste", "ore", "waste"],
+        "alt": ["weak", "strong", "strong", "strong", "weak", "weak",
+                "weak"]})
+    holes.add_intervals("log", frame, hole="HoleID", fr="From", to="To",
+                        categorical=["rock", "alt"])
+    return holes
+
+
+def test_contacts_are_added_where_a_logged_class_changes():
+    point = _logged_holes().as_point_data(contacts=True)
+
+    length = point.get_metadata(LENGTH)
+    contact = length == 0
+    # 2 and 8 m down H1; nothing where rock meets the unlogged stretch, and
+    # nothing across H2's gap
+    assert np.array_equal(point.get_metadata(DEPTH)[contact], [2.0, 8.0])
+    assert list(point.get_metadata(HOLE)[contact]) == ["H1", "H1"]
+    assert np.all(np.isnan(np.asarray(point.get("Zn/measurements").values)
+                           [contact]))
+    assert point.n_data == 7 + 2
+
+
+def test_a_contact_carries_every_class_above_and_below_it():
+    point = _logged_holes().as_point_data(contacts=True)
+    contact = point.get_metadata(LENGTH) == 0
+
+    rock, alt = point.variables["rock"], point.variables["alt"]
+    assert isinstance(rock, geoml.data.RockTypeVariable)
+    # the rock runs through both contacts, the alteration changes at both
+    assert list(rock.measurements_a.to_numpy()[contact]) == ["ore", "waste"]
+    assert list(rock.measurements_b.to_numpy()[contact]) == ["ore", "waste"]
+    assert list(alt.measurements_a.to_numpy()[contact]) == ["weak", "strong"]
+    assert list(alt.measurements_b.to_numpy()[contact]) == ["strong", "weak"]
+    # an interval's own point has its class on both sides
+    assert np.array_equal(alt.measurements_a.to_numpy()[~contact],
+                          alt.measurements_b.to_numpy()[~contact])
+
+
+def test_the_points_run_down_each_hole():
+    point = _logged_holes().as_point_data(contacts=True)
+    holes = point.get_metadata(HOLE)
+    depth = point.get_metadata(DEPTH)
+    assert list(depth[holes == "H1"]) == [1.0, 2.0, 3.0, 5.0, 7.0, 8.0, 9.0]
+    assert list(depth[holes == "H2"]) == [1.5, 7.5]
+    # a contact sits at its depth down the hole: collared at z = 100
+    np.testing.assert_allclose(
+        np.asarray(point.coordinates)[(holes == "H1") & (depth == 8.0)],
+        [[0.0, 0.0, 92.0]])
+
+
+def test_without_contacts_the_conversion_is_what_it_was():
+    point = _logged_holes().as_point_data()
+    assert point.n_data == 7
+    assert type(point.variables["rock"]) is geoml.data.CategoricalVariable

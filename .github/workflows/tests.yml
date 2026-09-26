@@ -20,7 +20,9 @@
 # tags the other job went the same way, cancelled at 93-95% with no test
 # failing: as one process the suite peaks at 23.1 GB. It runs one process
 # per test file now, which bounds it at the heaviest file's peak, 6.1 GB
-# (test_uncertain_input_gp.py, measured 2026-09-15).
+# (test_uncertain_input_gp.py, measured 2026-09-15). Since 0.8.0 the files
+# go through `geoml/test/run_parallel.py`, two at a time, and the manual is
+# one test per chapter.
 
 name: tests
 
@@ -66,6 +68,7 @@ jobs:
           --ignore=geoml/test/test_plots.py
           --ignore=geoml/test/test_interactive.py
           --ignore=geoml/test/test_block_prediction.py
+          --ignore=geoml/test/test_gaussian_mixture.py
 
   full:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -82,19 +85,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
         run: pip install -e .[geoh5] pytest
+      # two at a time: the heaviest file peaks at 6.1 GB, the runner has 16
       - name: Full suite, one process per file, the manual aside
-        run: |
-          failed=()
-          for file in geoml/test/test_*.py; do
-            [ "$file" = geoml/test/test_manual.py ] && continue
-            python -m pytest -q "$file" \
-              --deselect geoml/test/test_real_cases.py::test_sunspot_deep_model \
-              || failed+=("$file")
-          done
-          if [ ${#failed[@]} -gt 0 ]; then
-            printf 'failed: %s\n' "${failed[@]}"
-            exit 1
-          fi
+        run: python geoml/test/run_parallel.py --no-manual -j 2
 
   manual:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'

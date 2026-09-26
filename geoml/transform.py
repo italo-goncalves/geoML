@@ -60,7 +60,11 @@ class _Transform(_gpr.Parametric):
         pass
 
 class Identity(_Transform):
-    """The identity transformation"""
+    """The identity transformation.
+
+    Hands the coordinates on as they are, so distances are measured in the
+    data's own units. What an input uses when it is given no transform.
+    """
     
     _linear = True
 
@@ -80,7 +84,7 @@ class Isotropic(_Transform):
         Parameters
         ----------
         r : double
-            The range. Must be positive.
+            The range, in [0.1, 10000]. The input the transform is given replaces these bounds with ones read off its inducing points' extent.
         """
         super().__init__()
         self._add_parameter("range", _gpr.PositiveParameter(r, 0.1, 10000))
@@ -133,9 +137,9 @@ class Anisotropy2D(_Ellipsoidal):
         azimuth : double
             Defined clockwise from north, and is aligned with maxrange.
         maxrange : double
-            The maximum range. Must be positive.
+            The maximum range, in [0.1, 10000]. The input the transform is given replaces these bounds with ones read off its inducing points' extent.
         minrange_fct : double
-            matrix multiple of maxrange, contained in the [0,1) interval.
+            The minimum range as a multiple of maxrange, in [0.05, 1].
         """
         super().__init__()
         self._add_parameter("maxrange",
@@ -232,6 +236,20 @@ class Anisotropy2DMath(_Ellipsoidal):
 
 
 class Anisotropy2DDynamic(_Ellipsoidal):
+    """
+    An anisotropy in two dimensions, learnt as a blend of fixed directions.
+
+    Holds `n_directions` ellipses at evenly spaced angles, their ranges
+    trained and their angles fixed, and trains a weight for each; the
+    ellipse used is their weighted sum. Where `Anisotropy2D` trains one
+    angle, which gradient descent can leave stuck in a local optimum, this
+    spreads the choice over the fixed angles.
+
+    Parameters
+    ----------
+    n_directions
+        How many fixed directions to blend.
+    """
     def __init__(self, n_directions: int = 9):
         super().__init__()
         self._base_transforms = []
@@ -280,11 +298,11 @@ class Anisotropy3D(_Ellipsoidal):
         Parameters
         ----------
         maxrange : double
-            The maximum range. Must be positive.
+            The maximum range, in [0.1, 10000]. The input the transform is given replaces these bounds with ones read off its inducing points' extent.
         midrange_fct : double
-            A multiple of maxrange, contained in the [0,1) interval.
+            The middle range as a multiple of maxrange, in [0.05, 1].
         minrange_fct : double
-            A multiple of midrange, contained in the [0,1) interval.
+            The minimum range as a multiple of midrange, in [0.01, 1].
         azimuth : double
             Defined clockwise from north, and is aligned with maxrange.
         dip : double
@@ -434,6 +452,21 @@ class Anisotropy3DMath(_Ellipsoidal):
 
 
 class Anisotropy3DDynamic(_Ellipsoidal):
+    """
+    An anisotropy in three dimensions, learnt as a blend of fixed
+    orientations.
+
+    Holds one ellipsoid per combination of `n_directions_per_axis` fixed
+    angles about each axis, their ranges trained and their angles fixed,
+    and trains a weight for each; the ellipsoid used is their weighted sum.
+    The three-dimensional form of `Anisotropy2DDynamic`, with its cube of
+    orientations.
+
+    Parameters
+    ----------
+    n_directions_per_axis
+        How many fixed angles to take about each axis.
+    """
     def __init__(self, n_directions_per_axis=3):
         super().__init__()
         self._base_transforms = []
@@ -666,6 +699,22 @@ class Concatenate(ChainedTransform):
 
 
 class RandomProjections(_Transform):
+    """
+    The coordinates projected onto fixed directions.
+
+    One output per direction: evenly spaced angles in two dimensions, random
+    unit vectors in more, drawn from `seed`. Nothing is trained. A way to
+    hand a kernel several one-dimensional views of the same space.
+
+    Parameters
+    ----------
+    n_dim
+        The width of the coordinates taken in, at least 2.
+    n_directions
+        How many directions to project onto; the width given out.
+    seed
+        Seeds the directions in three dimensions and more.
+    """
     _linear = True
 
     def __init__(self, n_dim, n_directions, seed=1234):
@@ -1390,6 +1439,15 @@ _PLANE = {"in": {"rule": "const", "value": 2},
 _SPACE = {"in": {"rule": "const", "value": 3},
           "out": {"rule": "const", "value": 3}}
 _FLOAT = {"type": "float"}
+
+
+def _between(low, high):
+    """A float held in [low, high]: a value outside is clipped, with a
+    warning, when the object is built."""
+    return {"type": "float", "constraints": {"min": low, "max": high}}
+
+
+_RANGE = _between(0.1, 10000)
 _SURFACE = {"points": {"type": "json"}, "normals": {"type": "json"},
             "basis": {"type": "enum",
                       "constraints": {"choices": list(_rbf._BASES)}},
@@ -1409,24 +1467,29 @@ def _declared(sizing, label=None, stability=None, **params):
 
 
 Identity._catalogue = _declared(_KEEPS)
-Isotropic._catalogue = _declared(
-    _KEEPS, r={"constraints": {"exclusive_min": 0}})
-Anisotropy2D._catalogue = _declared(_PLANE, label="Anisotropy 2D")
-Anisotropy2DMath._catalogue = _declared(_PLANE, label="Anisotropy 2D (x, y)")
+Isotropic._catalogue = _declared(_KEEPS, r=_RANGE)
+Anisotropy2D._catalogue = _declared(
+    _PLANE, label="Anisotropy 2D", maxrange=_RANGE,
+    minrange_fct=_between(0.05, 1))
+Anisotropy2DMath._catalogue = _declared(
+    _PLANE, label="Anisotropy 2D (x, y)", range_x=_RANGE, range_y=_RANGE)
 Anisotropy2DDynamic._catalogue = _declared(
     _PLANE, label="Dynamic anisotropy 2D")
 Anisotropy3D._catalogue = _declared(
-    _SPACE, label="Anisotropy 3D", maxrange=_FLOAT, midrange_fct=_FLOAT,
-    minrange_fct=_FLOAT, azimuth=_FLOAT, dip=_FLOAT, rake=_FLOAT)
+    _SPACE, label="Anisotropy 3D", maxrange=_RANGE,
+    midrange_fct=_between(0.05, 1), minrange_fct=_between(0.01, 1),
+    azimuth=_FLOAT, dip=_between(0, 90), rake=_between(-90, 90))
 Anisotropy3DMath._catalogue = _declared(
-    _SPACE, label="Anisotropy 3D (x, y, z)")
+    _SPACE, label="Anisotropy 3D (x, y, z)", range_x=_RANGE, range_y=_RANGE,
+    range_z=_RANGE)
 Anisotropy3DDynamic._catalogue = _declared(
     _SPACE, label="Dynamic anisotropy 3D",
     n_directions_per_axis={"type": "int", "constraints": {"min": 1}})
 ProjectionTo1D._catalogue = _declared(
     {"in": {"rule": "param", "param": "n_dim"},
      "out": {"rule": "const", "value": 1}},
-    label="Projection to 1D", n_dim={"type": "int", "constraints": {"min": 1}})
+    label="Projection to 1D", stability="experimental",
+    n_dim={"type": "int", "constraints": {"min": 1}})
 AnisotropyARD._catalogue = _declared(
     {"in": {"rule": "param", "param": "n_dim"},
      "out": {"rule": "param", "param": "n_dim"}},
@@ -1449,7 +1512,7 @@ Concatenate._catalogue = _declared(
 RandomProjections._catalogue = _declared(
     {"in": {"rule": "param", "param": "n_dim"},
      "out": {"rule": "param", "param": "n_directions"}},
-    label="Random projections",
+    label="Random projections", stability="experimental",
     n_dim={"type": "int", "constraints": {"min": 2}},
     n_directions={"type": "int", "constraints": {"min": 1}},
     seed={"type": "int"})

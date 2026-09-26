@@ -280,6 +280,12 @@ class _Likelihood(_gpr.Parametric):
     # and finding out the hard way.
     warped = False
 
+    # Whether `log_lik` can train on the latent realizations rather than on
+    # a Gaussian's mean and variance, which is what a leaf that is not
+    # Gaussian needs (`latent_gaussian=False`). The categorical likelihoods
+    # integrate over the moments only.
+    _MONTE_CARLO = False
+
     def __init__(self, size: int):
         super().__init__()
         self._size = size
@@ -558,6 +564,7 @@ class _ContinuousLikelihood(_Likelihood):
     hole over every warped column, and returns one log-derivative for the
     row rather than one per component).
     """
+    _MONTE_CARLO = True
     warped = True
 
     # Which parameters set how wide this noise is, and how they carry it: the
@@ -601,7 +608,7 @@ class _ContinuousLikelihood(_Likelihood):
         return self.warping.elementwise
 
     def log_lik(self, mu, var, y, has_value, samples=None,
-                *args, **kwargs):
+                *args, latent_gaussian=True, **kwargs):
         self.warping.refresh()
         y_warped, log_derivative = self.warping.forward(y)
 
@@ -611,7 +618,9 @@ class _ContinuousLikelihood(_Likelihood):
             # weighed whole
             has_value = _tf.reduce_mean(has_value, axis=1, keepdims=True)
 
-        if not self._column_quadrature():
+        # the quadrature reads `mu` and `var` as a Gaussian's, which a
+        # latent that is not Gaussian only resembles
+        if not (latent_gaussian and self._column_quadrature()):
             distribution = self._make_distribution(samples)
 
             log_density = distribution.log_prob(y_warped[:, :, None])
@@ -1346,6 +1355,14 @@ class Bernoulli(_Likelihood):
 
 
 class BernoulliMaximumMargin(_Likelihood):
+    """
+    A two-class likelihood with a margin, after a support vector machine's.
+
+    A logistic of the latent value whose slope doubles inside the margin,
+    between minus one and plus one, so samples are pushed out of it: past
+    plus one for one class and below minus one for the other, where a
+    sample on its own side costs little. `c_rate`, trained, sets the slope.
+    """
     def __init__(self):
         super().__init__(1)
         self._add_parameter("c_rate", _gpr.PositiveParameter(1, 1e-3, 1e3))
@@ -2042,11 +2059,13 @@ for _likelihood in (Gaussian, Laplace, Gamma, StudentT, EpsilonInsensitive,
                     Huber):
     _likelihood._catalogue = {"category": "likelihood", "size": _BY_WARPING,
                               "accepts": _GRADED}
+# the same likelihoods sized for a vector, kept so that the models saved
+# with them still open; a network takes the univariate form at any width
 for _likelihood in (MultivariateGaussian, MultivariateLaplace,
                     MultivariateEpsilonInsensitive, MultivariateHuber):
     _likelihood._catalogue = {
         "category": "likelihood", "size": _BY_WARPING,
-        "accepts": ["vector", "compositional"],
+        "accepts": ["vector", "compositional"], "stability": "internal",
         "params": {"n_components": {"constraints": {"min": 1}}}}
 Mixture._catalogue = {
     "category": "likelihood", "size": _BY_WARPING, "accepts": _GRADED,
@@ -2061,12 +2080,18 @@ for _likelihood in (Bernoulli, BernoulliMaximumMargin):
     _likelihood._catalogue = {"category": "likelihood",
                               "size": {"rule": "const", "value": 1},
                               "accepts": ["binary", "anomaly"]}
-for _likelihood in (CategoricalGaussianIndicator,
-                    HierarchicalGaussianIndicator):
+Bernoulli._catalogue = dict(
+    Bernoulli._catalogue,
+    params={"shift": {"constraints": {"min": -5, "max": 5}}})
+# `contour_rule` is how a realization of the variable picks its category,
+# which is what `MeshSet(rule=)` must be told: the container does not
+# record the likelihood that fitted it
+for _likelihood, _rule in ((CategoricalGaussianIndicator, "largest"),
+                           (HierarchicalGaussianIndicator, "priority")):
     _likelihood._catalogue = {
         "category": "likelihood",
         "size": {"rule": "from_variable", "property": "n_classes"},
-        "accepts": ["rock_type", "categorical"],
+        "accepts": ["rock_type", "categorical"], "contour_rule": _rule,
         "params": {"n_components": _CLASSES}}
 OrderedGaussianIndicator._catalogue = {
     "category": "likelihood", "size": {"rule": "const", "value": 1},

@@ -54,6 +54,17 @@ switches the prior off). A transform's or warping's `size` is `{"in",
 "out"}`, `in` null meaning any width and `same_as_parent` meaning the width
 it took; `chain.attaches_to` names the parameter a chain is handed to.
 
+Changed with `GaussianMixture` (0.8.0), the one node whose parents come
+in two kinds: `parents` is a list of slots on every node, one per
+constructor parameter taking parents and empty for an input -- one form
+for a parser rather than an object or a list -- and a slot may carry the
+`size` its parent must have (the weights,
+one per component: `{"rule": "len", "param": "components"}`); a `common`
+size rule may name the slot it reads. And every latent node carries
+`gaussian` -- `true`, `false` or `"parents"` -- read off the class
+attribute `_GAUSSIAN` rather than declared a second time, because a leaf
+that is not Gaussian trains on its realizations.
+
 ## Found on the way
 
 Each of these would have made a declaration false, and the tests below

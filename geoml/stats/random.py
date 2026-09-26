@@ -50,6 +50,11 @@ def set_seed(seed):
     """
     Seeds the generator used to initialize parameters.
 
+    The one seed a model has: parameter starts, the data-dependent starts of
+    the warpings, and the seed a model's options draw for training and
+    simulation all come from this generator. Called before a model is
+    built, it makes the whole run reproducible.
+
     Parameters
     ----------
     seed : int

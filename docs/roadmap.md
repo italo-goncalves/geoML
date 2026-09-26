@@ -194,6 +194,62 @@ likelihood heads, which the network never does today. Gate: a deposit with
 genuinely regime-split grades, scored held-out against the hard-domained
 workflow; the soft gate must beat the hard cut to earn its complexity.
 
+*Started 2026-09-25 (0.8.0): the free gate is `latent.GaussianMixture`,
+internal in the catalogue.* Settled in design: a soft blend per realization,
+`y = Σ softmax(w)_k c_k`, no temperature and no hard mode; K weights; the
+moments from fixed Sobol points over the weights, taken independent of the
+components; a leaf that is not Gaussian trains its continuous likelihood on
+the realizations (`gaussian` on every node), a likelihood with no samples
+path moment-matching with a warning. Measured
+(`docs/benchmarks/gaussian_mixture_gates.py`, 1-D sinusoids):
+- *Split at a boundary*: passes, RMSE 0.161 / CRPS 0.043 against one GP's
+  0.192 / 0.078, switch at 4.79 against the boundary at 5 — but only with
+  components smoother than the jump. On the GP's own root one component
+  fits everything (share 1.00). A `BasicGP` has unit prior variance, so
+  the node carries its own `amplitude` on the weights (decided 2026-09-25;
+  through `Scale` instead, 0.153 / 0.046). It trains to its ceiling of
+  100: the switch wants to be a step. Drawn
+  (`docs/benchmarks/figures/gaussian_mixture_gate1.png`), the components
+  are not "the left regime and the right": one smooth curve follows the
+  data left of the boundary and again past 7.5, the other only bridges
+  [5, 7].
+- *Against the construction in use* (chapter 5's deep GP: the input and
+  an inner two-column GP concatenated under an outer GP, root range 2):
+  RMSE 0.151 / CRPS 0.049 with the default kernels, 0.162 / 0.052 with the
+  chapter's spherical outer kernel. It follows the jump as closely as the
+  mixture, a better RMSE than its 0.161, but overshoots it (1.3 against
+  1.0 just before, ringing after) inside a band too narrow to cover the
+  miss, so the mixture's CRPS (0.043) is the better. Neither is bimodal on
+  the crossing curves. The deep GP's bound was still oscillating at 1000
+  iterations (step spread 0.34 against the mixture's 0.002). So on this
+  gate the mixture's gain over the construction in use is calibration, not
+  accuracy — too thin to make the node public on its own.
+- *Curves crossing throughout*: fails. The mixture blends the two into
+  their mean, no realization near either; the expected log-likelihood
+  rewards agreeing with each sample, and the weights never learn to switch
+  sample by sample.
+- *The training draws are the same every iteration* (`seed=options.seed`
+  on every step): the Monte Carlo bound is a fixed-sample average, biased
+  rather than noisy (item "Fresh training draws" below).
+
+Open: the real-deposit gate against hard domains (likely Jura) before the
+node is public; Monte Carlo paths for the categorical likelihoods, so a rock-type
+leaf that is not Gaussian can train on its realizations; and the gate read
+from a rock-type leaf, where the indicator rule (the largest latent) and
+the mixture's softmax read one latent through two different links.
+
+**S — Fresh training draws** (found 2026-09-25, kept on the list by the
+user). Every training step passes `seed=options.seed`, so a likelihood that
+trains by Monte Carlo — a warping that mixes, and since 0.8.0 any leaf that
+is not Gaussian — optimizes one fixed set of `training_samples`
+realizations: a sample-average bound, biased rather than noisy, which the
+model can partly fit. On gate 1 of `GaussianMixture`, 20 draws reach a
+bound of 36.2 and 50 draws 26.7, the scores against the truth better at 50
+(RMSE 0.141 / CRPS 0.037 against 0.161 / 0.043). Fix: a seed keyed by the
+iteration (the phase's count), so a run split into chunks still replays
+one call bit for bit. Gate: the same two numbers, and the chunked-training
+test in `test_early_stopping.py` still exact.
+
 **XL — Change of support from the theory of sampling.** From the author's
 paper draft, which is the specification. A window of volume `v` has grade
 `g ~ Beta(μ s(v), (1−μ) s(v))`: the mean pinned to the block grade at every
@@ -219,6 +275,15 @@ directional measurements with the variables by iterating the raw
 `variables` argument, so `variables="Rock"` walks the letters, looks up
 `"R"`, finds nothing and trains on no directional measurement at all. A
 list or the mapping spelling is unaffected. Iterate the normalized names.
+
+**S — `ProjectionTo1D` projects onto positive directions only**
+(found 2026-09-25, reading why the catalogue should not offer it). Its
+`directions` is a `PositiveParameter` in [0.001, 1], so a projection can
+point into the positive orthant and nowhere else -- in 2-D, north-east but
+never north-west. A signed unit vector (a `UnitColumnNormParameter`, as the
+dynamic anisotropies hold their weights) would let it point anywhere; the
+catalogue marks it `experimental` until then, and `RandomProjections` with
+it, nothing in it training.
 
 **S — A GP node that fails to build is left among its parent's children**
 (found by reading, 2026-09-15). `_FunctionalLatentVariable.__init__`
@@ -559,6 +624,20 @@ intersection and difference go to manifold3d itself and are exact; the
 rest of what Manifold offers was measured and replaces nothing of
 geoML's.)
 
+**S — Investigate what `get_contacts` makes of an unlogged interval**
+(asked 2026-09-25). `as_point_data(contacts=True)` makes no contact where
+a class meets an unlogged stretch or a gap, which is what GeoScape's "To
+points" does. `get_contacts` merges runs with two missing values counting
+as one run, so a class meeting an interval logged with no category makes a
+contact with one side empty -- and `as_classification_input` inherits it.
+Whether that is ever wanted, and whether the two should agree, is the
+question; nothing has been measured.
+
+**S — `BoundingBox._center` is half the extent, not the centre**
+(found by reading, 2026-09-25). `data/base.py` sets it to
+`(max - min) / 2`. Find what reads it before changing it: a reader that
+wanted the half-extent is right by accident.
+
 **S — Surface I/O residue.** OBJ/PLY/STL both ways, the vendor formats, and
 any attribute travelling with the geometry. Nothing has demanded them yet.
 
@@ -798,7 +877,8 @@ that attempt.
 re-measured 2026-09-15). The 251 errors this item used to list are gone.
 Pyright 1.1.411 over the `[tool.pyright]` list, run from the repository
 root in the `geoml` conda env, now reports **one**:
-`warping.py:1281` `"NoReturn" is not iterable`, on
+`warping.py:1294` (1281 before 0.8.0's docstrings) `"NoReturn" is not
+iterable`, on
 `_ContinuousFlow.initialize`'s `x, _ = self.forward(x)` -- the base class's
 `forward` raises, so the checker reads the call as returning nothing and
 the unpacking as impossible. It is on HEAD's version of the file too, so it
@@ -817,13 +897,38 @@ that build and run them, and reads what they leave behind. Its repository
 `docs/geoml-requirements.md`, revised 2026-09-15 against 0.6.11, and the
 catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
 is that list's numbering, and M3 and M4 its milestones. **Every item on it
-is met as of 0.7.0**; what is left below is the paperwork outside the code.
+is met as of 0.8.0**; what is left below is the paperwork outside the code.
 Three were met before the list was worked through -- one leaf per
 likelihood (item 2) and names replayed by a save (item 5), both in 0.6.10,
-and `geoml.__version__` at run time (item 7) -- then seven in 0.6.13, and
-items 1, 3, 8, 13 and 15 in 0.7.0. The done-notes below hold what each cost
-and what it taught; GeoScape's own requirements document has not been
-struck through to match.
+and `geoml.__version__` at run time (item 7) -- then seven in 0.6.13,
+items 1, 3, 8, 13 and 15 in 0.7.0, and the eighteen the list gained on
+2026-09-16 (16-33) in 0.8.0, item 26 turning out not to be a bug. The
+done-notes below hold what each cost and what it taught; GeoScape's
+requirements document is marked item by item since 0.8.0.
+
+(Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
+`description` on every entry, read off the docstring between its summary
+and its first section, and forty docstrings written to have one; every
+bound a constructor clips to declared as a constraint, a test holding each
+declaration to the built parameter and the constructor warning when it
+clips; `network: false` on `Constant` and `Cosine`; the multivariate
+likelihoods `internal`; `Spline` public, GeoScape passing `backbone="rq"`
+itself since the default must stay `"cubic"` for old saves; `PCA`'s width
+out a `param` rule with a `fallback`; `contour_rule` on the two
+categorical likelihoods; a `containers` section, every public container
+listed or left out with a reason, each built and predicted into by a test;
+each variable type's columns with a role and a scale. In the code:
+`predict(where=)` takes a stored filter's name, `n_sim=None` takes the
+target's count and a different one is refused under `where` (one
+realization used to be copied into every stored column without a word);
+`combine` merges by distance; a categorical's measurement columns share its
+order of labels; `as_point_data(contacts=True)`; and `predict` into
+measured data writes each measurement's PIT and its warped value as
+metadata. Two bugs came out of it: `BlockSet3D.unpredicted` never
+cleared its split flags, so a fully predicted set read as unpredicted
+throughout (0.7.0's union), and `cross_validate` scored a composition
+declared in units against its assays as fractions of the whole, every PIT
+0.)
 
 What GeoScape builds on, where a change must be flagged to it rather than
 made quietly: dotted class paths importable forever, already policy;

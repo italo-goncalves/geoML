@@ -26,6 +26,23 @@ def _points(n=200, seed=0):
 # --------------------------------------------------------------------------- #
 # from_data
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("cls, n_dim", [(geoml.data.Grid2D, 2),
+                                        (geoml.data.Grid3D, 3)])
+def test_from_bounding_box_reads_every_axis(cls, n_dim):
+    """A box keeps its corners as (1, n_dim) rows, so the first row is the
+    whole corner -- every axis reaches the constructor, not only the first
+    (reported as a bug by GeoScape's requirements, item 26; it is not one)."""
+    low = np.array([0.0, 100.0, 1000.0])[:n_dim]
+    high = np.array([10.0, 150.0, 1100.0])[:n_dim]
+    grid = cls.from_bounding_box(geoml.data.BoundingBox(low, high), step=5.0,
+                                 margin=0.0)
+    assert grid.n_dim == n_dim
+    assert np.array_equal(grid.grid_size, (high - low) / 5 + 1)
+    box = grid.bounding_box
+    assert np.allclose(box.min.ravel(), low)
+    assert np.allclose(box.max.ravel(), high)
+
+
 def test_the_grid_covers_the_data_with_its_margin():
     point, xyz = _points()
     grid = geoml.data.Grid3D.from_data(point, step=5.0, margin=0.1)

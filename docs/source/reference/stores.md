@@ -111,7 +111,18 @@ and `step`. Each metadata column and each variable's column gives the
 array holding it under `key`, such as `_metadata/HOLEID` or
 `zn/prediction`, and a column of text is stored as integer codes into its
 `labels`. Follow the keys rather than building the paths. Stores at format
-1 are not read.
+1 are not read. What each variable's columns hold -- a value or an
+uncertainty, and on what scale -- is in the catalogue's `variable_types`.
+Every column of a categorical variable codes its classes in the variable's
+order of `labels` since 0.8.0, a class measured outside them appended after.
+
+A container a model predicted into, where it holds measurements, carries two
+more families of metadata since 0.8.0: `pit_<variable>` (or
+`pit_<variable>_<component>` for a part of a vector variable), where each
+measurement falls in the predictive distribution of a measurement, from 0
+to 1; and `warped_<variable>_<i>`, the measurements through the
+likelihood's warping, one column per column the warping gives out. Both are
+missing where there is no measurement.
 
 A variable's realizations are one `(n_locations, n_sim)` array, and since
 0.7.0 a wide one is chunked on both axes: the location axis as always, and

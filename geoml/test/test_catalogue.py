@@ -194,6 +194,9 @@ def _calls(cls):
                latent.ProductOfExperts, latent.Multiply):
         return [((_gp(root, 2), _gp(root, 2)), {}),
                 ((_gp(root, 3), _gp(root, 3), _gp(root, 3)), {})]
+    if cls is latent.GaussianMixture:
+        return [((_gp(root, 2), [_gp(root, 1), _gp(root, 1)]), {}),
+                ((_gp(root, 3), [_gp(root, 2) for _ in range(3)]), {})]
     raise AssertionError("no stand-in parents for %s: add them to `_calls`"
                          % cls.__name__)
 
@@ -204,12 +207,25 @@ def _bound(cls, args, kwargs):
     return arguments.arguments
 
 
+def _slots(cls):
+    """The parents declaration: a list of slots, empty for an input."""
+    return cls._catalogue["parents"]
+
+
+def _chained(cls):
+    """Whether `cls` takes parents of any kind in its first slot, which is
+    where the pass-through tests put a parent that passes nothing on."""
+    slots = _slots(cls)
+    return len(slots) > 0 and "category" not in slots[0]
+
+
 def _parents(cls, arguments):
-    param = cls._catalogue["parents"]["param"]
-    if param is None:
-        return []
-    given = arguments[param]
-    return list(given) if isinstance(given, tuple) else [given]
+    found = []
+    for slot in _slots(cls):
+        given = arguments[slot["param"]]
+        found += list(given) if isinstance(given, (tuple, list)) \
+            else [given]
+    return found
 
 
 def _expected(rule, arguments, parents):
@@ -217,9 +233,13 @@ def _expected(rule, arguments, parents):
     if kind == "const":
         return rule["value"]
     if kind == "param":
+        if arguments[rule["param"]] is None and "fallback" in rule:
+            return _expected(rule["fallback"], arguments, parents)
         return arguments[rule["param"]]
     if kind == "len":
         return len(arguments[rule["param"]])
+    if kind == "common" and "param" in rule:
+        return arguments[rule["param"]][0].size
     if kind in ("same_as_parent", "common"):
         return parents[0].size
     if kind == "sum":
@@ -240,6 +260,19 @@ def _blocked(cls):
     return (product,) + tuple(args[1:]), kwargs
 
 
+def test_every_node_lists_its_parents_in_slots(built):
+    """One form for every node: a list, one slot per parameter taking
+    parents, empty for an input."""
+    for cls in NODES:
+        slots = built["classes"][catalogue.path(cls)]["parents"]
+        assert isinstance(slots, list), cls.__name__
+        for slot in slots:
+            assert {"param", "min", "max"} <= set(slot), cls.__name__
+            assert slot["param"] in inspect.signature(cls).parameters
+        if cls._catalogue["category"] == "input":
+            assert slots == []
+
+
 def test_every_node_has_stand_in_parents():
     for cls in NODES:
         assert _calls(cls)
@@ -255,7 +288,8 @@ def test_a_node_is_the_size_it_declares(cls):
 
 
 @pytest.mark.parametrize(
-    "cls", [c for c in NODES if c._catalogue["size"]["rule"] == "common"],
+    "cls", [c for c in NODES if c._catalogue["size"]["rule"] == "common"
+            and "param" not in c._catalogue["size"]],
     ids=lambda c: c.__name__)
 def test_a_node_of_common_size_refuses_two_sizes(cls):
     root = _root()
@@ -273,10 +307,8 @@ def test_inducing_points_pass_through_a_node_as_it_declares(cls):
             _gp(node, 1)
         return
     _gp(node, 1)
-    parents = cls._catalogue["parents"]
-    if claim == "parents" and parents["max"] != 0 \
-            and not cls._catalogue["requires_propagation"] \
-            and "category" not in parents:
+    if claim == "parents" and _chained(cls) \
+            and not cls._catalogue["requires_propagation"]:
         # and nothing passes through where a parent passes nothing on
         args, kwargs = _blocked(cls)
         with pytest.raises(latent.BrokenPropagationError):
@@ -284,8 +316,7 @@ def test_inducing_points_pass_through_a_node_as_it_declares(cls):
 
 
 @pytest.mark.parametrize(
-    "cls", [c for c in NODES if c._catalogue["parents"]["max"] != 0
-            and "category" not in c._catalogue["parents"]],
+    "cls", [c for c in NODES if _chained(c)],
     ids=lambda c: c.__name__)
 def test_a_node_needs_inducing_points_as_it_declares(cls):
     args, kwargs = _blocked(cls)
@@ -294,6 +325,20 @@ def test_a_node_needs_inducing_points_as_it_declares(cls):
             cls(*args, **kwargs)
     else:
         cls(*args, **kwargs)
+
+
+@pytest.mark.parametrize("cls", NODES, ids=lambda c: c.__name__)
+def test_a_node_is_gaussian_as_it_declares(cls, built):
+    """`True`, `False`, or `"parents"`: Gaussian with Gaussian parents,
+    and not where a parent is not."""
+    claim = built["classes"][catalogue.path(cls)]["gaussian"]
+    args, kwargs = _calls(cls)[0]
+    node = cls(*args, **kwargs)
+    assert node.gaussian is (claim is not False)
+    if claim == "parents" and _chained(cls) \
+            and not cls._catalogue["requires_propagation"]:
+        args, kwargs = _blocked(cls)
+        assert cls(*args, **kwargs).gaussian is False
 
 
 # --------------------------------------------------------------------------- #
@@ -518,3 +563,253 @@ def test_every_class_offered_survives_a_save(cls, tmp_path):
     back = persistence._decode(json.loads(json.dumps(node)),
                                persistence._Reader(group, store))
     assert type(back) is cls
+
+
+# --------------------------------------------------------------------------- #
+# descriptions: the prose of when and how, for everything offered
+# --------------------------------------------------------------------------- #
+def test_everything_offered_describes_itself(built):
+    """A reading program shows the description as help; one left empty is
+    a class it cannot explain."""
+    empty = [n for n, e in built["classes"].items()
+             if e["stability"] != "internal" and not e["description"]]
+    empty += [n for n, e in built["containers"].items()
+              if not e["description"]]
+    empty += [n for n, e in built["functions"].items()
+              if not e["description"]]
+    assert empty == []
+
+
+def test_a_description_is_not_its_summary(built):
+    for name, entry in built["classes"].items():
+        if entry["description"]:
+            assert not entry["description"].startswith(entry["summary"]), \
+                name
+
+
+# --------------------------------------------------------------------------- #
+# bounds: what a constructor clips, declared, and said when it happens
+# --------------------------------------------------------------------------- #
+# arguments that set a parameter of another name
+ALIASES = {(tr.Isotropic, "r"): "range", (wp.Scale, "scale"): "std"}
+# bounds read off the data a fault is fitted to, which no declaration holds,
+# and bounds a given scale sets about itself, which cannot clip it
+DATA_BOUNDED = {(tr.FaultDisplacement, "throw"),
+                (tr.FaultDisplacement, "strike_slip"),
+                (tr.FaultDisplacement, "width"),
+                (wp.ZScore, "std"), (wp.Scale, "scale")}
+
+
+def _clipped_arguments(cls, obj):
+    """`{argument: (min, max)}` for every argument whose value lands in a
+    parameter that clips it."""
+    import geoml.parameter as gpr
+    out = {}
+    for argument in inspect.signature(cls).parameters:
+        name = ALIASES.get((cls, argument), argument)
+        p = obj.parameters.get(name)
+        if type(p) not in (gpr.RealParameter, gpr.PositiveParameter) \
+                or (cls, argument) in DATA_BOUNDED:
+            continue
+        low = np.unique(np.asarray(p._back_transform(p.min_transformed)))
+        high = np.unique(np.asarray(p._back_transform(p.max_transformed)))
+        assert low.size == 1 and high.size == 1, (cls, argument)
+        out[argument] = (float(low[0]), float(high[0]))
+    return out
+
+
+@pytest.mark.parametrize("cls", OFFERED, ids=lambda c: c.__name__)
+def test_every_bound_a_constructor_clips_to_is_declared(cls, built):
+    obj = _instances(cls)
+    params = {p["name"]: p for p in built["classes"][catalogue.path(cls)]
+              ["params"]}
+    for argument, (low, high) in _clipped_arguments(cls, obj).items():
+        declared = params[argument].get("constraints", {})
+        assert np.isclose(declared.get("min", np.nan), low), \
+            (argument, declared)
+        assert np.isclose(declared.get("max", np.nan), high), \
+            (argument, declared)
+
+
+def test_a_value_outside_its_bounds_is_clipped_with_a_warning():
+    with pytest.warns(UserWarning, match=r"Anisotropy3D: dip = 120"):
+        anisotropy = tr.Anisotropy3D(dip=120)
+    assert float(anisotropy.parameters["dip"].get_value()) == 90.0
+
+
+def test_a_value_inside_its_bounds_says_nothing(recwarn):
+    tr.Anisotropy3D(dip=45, midrange_fct=0.5)
+    assert not [w for w in recwarn if "clipped" in str(w.message)]
+
+
+def test_an_angle_wraps_without_a_warning(recwarn):
+    anisotropy = tr.Anisotropy2D(azimuth=200)
+    assert not [w for w in recwarn if "clipped" in str(w.message)]
+    assert float(anisotropy.parameters["azimuth"].get_value()) == 20.0
+
+
+# --------------------------------------------------------------------------- #
+# what a network can and cannot use
+# --------------------------------------------------------------------------- #
+def test_the_kernels_a_gp_node_should_not_take_say_so(built):
+    refused = {n for n, e in built["classes"].items()
+               if e.get("network") is False}
+    assert refused == {"geoml.kernels.Constant", "geoml.kernels.Cosine"}
+
+
+def test_the_multivariate_likelihoods_are_not_offered(built):
+    for name in ("Gaussian", "Laplace", "EpsilonInsensitive", "Huber"):
+        entry = built["classes"]["geoml.likelihood.Multivariate" + name]
+        assert entry["stability"] == "internal"
+
+
+def test_a_categorical_likelihood_says_how_its_realizations_are_contoured(
+        built):
+    for name, entry in built["classes"].items():
+        if entry["category"] == "likelihood" \
+                and set(entry["accepts"]) & {"rock_type", "categorical"}:
+            assert entry["contour_rule"] in ("largest", "priority"), name
+    classes = built["classes"]
+    assert classes["geoml.likelihood.CategoricalGaussianIndicator"][
+        "contour_rule"] == "largest"
+    assert classes["geoml.likelihood.HierarchicalGaussianIndicator"][
+        "contour_rule"] == "priority"
+
+
+def test_a_pca_without_components_keeps_its_width():
+    for cls in (wp.PCA, wp.RobustPCA):
+        rule = cls._catalogue["size"]["out"]
+        arguments = _bound(cls, (4,), {})
+        assert cls(4).size_out == _expected(rule, arguments, []) == 4
+        arguments = _bound(cls, (4, 2), {})
+        assert cls(4, 2).size_out == _expected(rule, arguments, []) == 2
+
+
+# --------------------------------------------------------------------------- #
+# the columns a variable writes
+# --------------------------------------------------------------------------- #
+ROLES = {"measurement", "value", "uncertainty", "weight"}
+SCALES = {"unit", "unit_squared", "latent", "latent_squared",
+          "unit_interval", "log_odds", "classes", "flag", "ordinal",
+          "dimensionless"}
+
+
+def _variable_classes():
+    import geoml.data.variables as variables
+    found = []
+    for cls_name, _ in catalogue.VARIABLES.values():
+        cls = getattr(variables, cls_name)
+        found += [cls] + ([cls._PART] if cls._PART is not None else [])
+    return list(dict.fromkeys(found))
+
+
+@pytest.mark.parametrize("cls", _variable_classes(), ids=lambda c: c.__name__)
+def test_every_column_a_variable_writes_says_what_it_is(cls):
+    written = set(cls._ZARR_ATTRS) | set(cls._DICT_FAMILIES) \
+        | ({"simulations"} if cls._ZARR_HAS_SIMS else set())
+    assert set(cls._COLUMNS) == written
+    for name, (role, scale) in cls._COLUMNS.items():
+        assert role in ROLES and scale in SCALES, name
+    assert set(cls._FAMILY_KEYS) == set(cls._DICT_FAMILIES)
+    assert set(cls._FAMILY_KEYS.values()) <= {"cutoff", "probability",
+                                              "component"}
+
+
+def test_the_catalogue_lists_every_variable_type_s_columns(built):
+    for name, entry in built["variable_types"].items():
+        assert entry["columns"], name
+    assert "part_columns" in built["variable_types"]["rock_type"]
+    assert built["variable_types"]["continuous"]["columns"]["dispersion"] \
+        == {"role": "uncertainty", "scale": "unit_squared"}
+
+
+# --------------------------------------------------------------------------- #
+# containers: listed, built, predicted into
+# --------------------------------------------------------------------------- #
+def test_every_public_container_is_listed_or_left_out_with_a_reason():
+    import geoml.data as data
+    found = set()
+    for label, cls in vars(data).items():
+        if inspect.isclass(cls) and not label.startswith("_") \
+                and issubclass(cls, data._SpatialData):
+            found.add(catalogue.path(cls))
+    listed = set(catalogue.CONTAINERS) | set(catalogue.CONTAINERS_LEFT_OUT)
+    assert found == listed
+
+
+def _model(n_dim):
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(0)
+    coords = rng.uniform(0.0, 100.0, (30, n_dim))
+    point = geoml.data.PointData.from_array(coords)
+    point.add_continuous_variable("V", coords[:, 0] / 50.0)
+    model = geoml.models.VGPNetwork(
+        point, "V", lk.Gaussian(),
+        latent.BasicGP(latent.BasicInput(_points(8, n_dim),
+                                         transform=tr.Isotropic(30.0)),
+                       size=1),
+        options=geoml.models.GPOptions(verbose=False))
+    model.train_full(max_iter=1)
+    return model
+
+
+def _mesh(cls):
+    points = np.array([[10.0, 10, 10], [90, 10, 10], [50, 90, 10],
+                       [50, 50, 90]])
+    triangles = np.array([[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]])
+    if cls in (geoml.data.Surface3D, geoml.data.DTM3D):
+        triangles = triangles[:1]
+    normals = geoml.math.geometry.vertex_normals(points, triangles)
+    return cls(points, triangles, normals)
+
+
+def _container(name):
+    d = geoml.data
+    frame = pd.DataFrame({"X": [10.0, 50.0], "Y": [20.0, 60.0],
+                          "Z": [5.0, 40.0], "vX": [1.0, 2.0],
+                          "vY": [1.0, 2.0], "vZ": [1.0, 2.0]})
+    cls = catalogue.resolve(name)
+    return {
+        d.PointData: lambda: d.PointData(frame, ["X", "Y", "Z"]),
+        d.GaussianData: lambda: d.GaussianData(frame, ["X", "Y", "Z"],
+                                               ["vX", "vY", "vZ"]),
+        d.DirectionalData: lambda: d.DirectionalData(
+            frame, ["X", "Y", "Z"], ["vX", "vY", "vZ"]),
+        d.Section3D: lambda: d.Section3D([50, 50, 50], 30, 60, 40, 30, 3, 3),
+        d.Grid1D: lambda: d.Grid1D(0.0, 4, 20.0),
+        d.Grid2D: lambda: d.Grid2D([0, 0], [3, 3], [30, 30]),
+        d.Grid3D: lambda: d.Grid3D([0, 0, 0], [2, 2, 2], [40, 40, 40]),
+        d.RotatedGrid3D: lambda: d.RotatedGrid3D([0, 0, 0], [2, 2, 2],
+                                                 [40, 40, 40], azimuth=30),
+        d.Blocks1D: lambda: d.Blocks1D(0.0, 4, 20.0, discretization=[2]),
+        d.Blocks2D: lambda: d.Blocks2D([0, 0], [3, 3], [30, 30],
+                                       discretization=[2, 2]),
+        d.Blocks3D: lambda: d.Blocks3D([0, 0, 0], [2, 2, 2], [40, 40, 40],
+                                       discretization=[2, 2, 2]),
+        d.RotatedBlocks3D: lambda: d.RotatedBlocks3D(
+            [0, 0, 0], [2, 2, 2], [40, 40, 40], azimuth=30,
+            discretization=[2, 2, 2]),
+        d.BlockSet3D: lambda: d.BlockSet3D([0, 0, 0], [2, 2, 2],
+                                           [40, 40, 40]),
+        d.RotatedBlockSet3D: lambda: d.RotatedBlockSet3D(
+            [0, 0, 0], [2, 2, 2], [40, 40, 40], azimuth=30),
+    }.get(cls, lambda: _mesh(cls))()
+
+
+@pytest.fixture(scope="module")
+def models():
+    return {n: _model(n) for n in (1, 2, 3)}
+
+
+@pytest.mark.parametrize("name", catalogue.CONTAINERS)
+def test_a_container_is_built_and_predicted_into_as_it_declares(
+        name, built, models):
+    entry = built["containers"][name]
+    container = _container(name)
+    for method in entry["methods"]:
+        assert callable(getattr(container, method))
+    if not entry["predict_target"]:
+        return
+    model = models[container.n_dim]
+    model.predict(container, n_sim=2)
+    assert not container.unpredicted().any()

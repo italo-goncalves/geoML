@@ -1,3 +1,161 @@
+## version 0.8.0
+Behaviour that changes, first:
+
+* **`predict` refuses a number of realizations the target does not hold.**
+Predicting some locations (`where=`) writes into the realizations the
+others keep, so the count must agree: a different `n_sim` raises a
+`ValueError` naming both before any batch runs. It used to fail part way
+through a batch, or, asked for one realization, copy it into every stored
+column without a word. `n_sim` now defaults to `None`, which takes the
+number the target holds, or 20 where it holds none -- so a resumed or
+partial prediction need not repeat the count. `refine` has the same
+default. Predicting everything again may still change the count.
+* **`combine(tolerance=)` merges by distance.** A point is kept unless one
+kept before it lies closer than the tolerance, as the docstring always
+said. It used to snap every point to a grid of the tolerance and keep one
+per cell, so two points closer than the tolerance either side of a cell
+boundary both stayed and two up to `tolerance * sqrt(d)` apart in one cell
+merged. Scripts calling it with a tolerance get different inducing points.
+* **A categorical variable's columns share one order of labels.**
+`measurements_a` and `measurements_b` sorted their own labels, so a class
+had one code in `predicted` and another in each measurement column; they
+are coded against the variable's `labels` now, anything measured outside
+them appended after. Every reader decodes through the column's own label
+list, so stores written before read the same.
+* **`predict` into measured data writes two metadata columns per
+component.** `pit_<variable>[_<component>]`, where each measurement falls in
+the predictive distribution of a measurement, and `warped_<variable>_<i>`,
+the measurements through the likelihood's warping: what the accuracy plot
+and the transformed pairs need, readable from a store without the model
+(GeoScape's item 16). The same pass as `cross_validate`'s PITs, and the
+same names. A container with no measurements, and a block model, gets
+neither.
+* **A constructor value outside its parameter's bounds warns.** It was
+clipped silently, so an `Anisotropy3D(dip=120)` trained at 90 with nothing
+said; the warning names the class, the argument, the bounds and the value
+kept. Angles wrap as before and say nothing.
+* **`assign_from_surface(uncovered=)` defaults to `None`**, standing for
+`numpy.nan` as before -- a catalogue cannot write a NaN down.
+* **A leaf that is not Gaussian trains on its realizations.** Every latent
+node says whether its output is Gaussian (`gaussian`): `Multiply`,
+`Exponentiation` and the new `GaussianMixture` are not, and a node that
+combines its parents linearly is Gaussian only if they all are. The
+training quadrature reads a leaf's mean and variance as a Gaussian's, so a
+continuous likelihood above a leaf that is not now takes the expectation
+over the `training_samples` realizations instead. A model whose leaf is a
+product or an exponential trains differently; saved ones load and predict
+as before. A likelihood with no samples branch (`Bernoulli`, the
+categorical indicators, `GradientIndicator`) keeps the quadrature and
+warns.
+
+The catalogue, format 2 (GeoScape's items 18-23, 27, 29-33):
+
+* **A `description` on every entry**: the docstring's prose between its
+summary and its first section, and forty docstrings written so that every
+class, container and function offered has one.
+* **Every bound a constructor clips to is a constraint**: the
+anisotropies' ranges and factors, `dip` and `rake`, `Isotropic`'s range,
+`Bernoulli.shift`, the warpings' held-in-place scales and locations. A test
+holds each declaration to the parameter the constructor builds, so the two
+cannot drift; the docstrings that said "[0,1)" say the bounds the code
+holds. A range's bounds are replaced by ones read off the inducing points
+once the transform is given to an input, and its note says so.
+* **What a network should not take says so**: `network: false` on the
+`Constant` and `Cosine` kernels (a rank-one matrix; no covariance in two or
+three dimensions), `ProjectionTo1D` and `RandomProjections` experimental,
+the four `Multivariate*` likelihoods internal -- kept for the saves that
+name them, the univariate forms taking any width.
+* **`Spline` is public.** Its `backbone` default stays `"cubic"`, since a
+save records only the arguments passed and would replay a new default as
+a different model; a new network passes `backbone="rq"`.
+* **`PCA` and `RobustPCA` say their width out**: `n_components`, with a
+`fallback` to `n_dim` where it is null, in place of `custom`.
+* **`contour_rule`** on `CategoricalGaussianIndicator` (`largest`) and
+`HierarchicalGaussianIndicator` (`priority`): how `MeshSet(rule=)` must read
+their realizations, which the container does not record.
+* **A `containers` section**: every container a script builds or predicts
+into, with its constructor, `from_data`, `assign_from_surface` and
+`assign_from_solid` where it has them, and whether a model predicts into it
+-- a mesh does, at its vertices. Every public container is listed or left
+out with a reason, and a test builds each one and predicts into it.
+* **Each variable type's columns**, with a role (`measurement`, `value`,
+`uncertainty`, `weight`) and a scale (`unit`, `unit_squared`, `latent`,
+`latent_squared`, `unit_interval`, `log_odds`, `classes`, `flag`,
+`ordinal`, `dimensionless`), and the columns of its parts. Declared beside
+`_ZARR_ATTRS` on each class; a column without one fails a test.
+* **`gaussian` on every latent node**: `true`, `false` or `"parents"`, read
+off the class, so an editor can tell which leaves train on realizations.
+* **`parents` is a list of slots on every node**, one per constructor
+parameter taking parents, each with its `param`, `min` and `max`, and empty
+for an input. A slot may say the `size` its parent must have, and a
+`common` size rule may name the slot it reads (`param`): `GaussianMixture`,
+whose parents come in two kinds, is the one node using either.
+
+New:
+
+* **`latent.GaussianMixture(weights, components)`** (internal in the catalogue,
+roadmap item L): the components blended by the softmax of the weights,
+scaled by a trained `amplitude`, realization by realization; the weights'
+latent variables are taken in the components' order. Its moments come
+from 64 fixed Sobol points over the weights, and nothing that needs
+inducing points sits above it. On two sinusoids in opposite phase either
+side of a boundary it beats one GP against the truth (RMSE 0.161 against
+0.192, CRPS 0.043 against 0.078) and switches 0.2 before the boundary --
+once the components are smoother than the jump; given the one GP's own
+flexibility, one component fits everything and the weights never switch.
+The deep GP of chapter 5 follows the jump as closely (RMSE 0.151) but
+overshoots it inside too narrow a band (CRPS 0.049), so the mixture's gain
+over it is calibration. Where the two curves cross throughout it blends them rather than finding
+two modes (`docs/benchmarks/gaussian_mixture_gates.py`, which also draws
+the first gate).
+
+* **`predict(where="column")`** takes a boolean metadata column's name, as
+`refine` does, through one resolver.
+* **`as_point_data(contacts=True)`**: every categorical column a rock type
+variable, and a point at every depth where a logged class changes between
+touching intervals of a hole, carrying every categorical column above and
+below it, no continuous value, a `LENGTH` of zero and the boundary as its
+`DEPTH`. A change to or from an unlogged stretch or a gap is no contact.
+The points run down each hole (GeoScape's item 17).
+* **`measurement_batches(where=)`**, for the locations to ask about.
+
+Fixed:
+
+* **`BlockSet3D.unpredicted()` read a fully predicted set as unpredicted
+throughout.** 0.7.0 made it the union of the blocks the last split made and
+the missing values, and the split flags are never cleared, so a new set
+stayed flagged whatever was predicted into it. It reads the missing values
+once the set holds a variable, and the flags only before.
+* **`cross_validate` scored a composition declared in units against
+fractions.** The truth came through `get_measurements`, the model's door,
+which hands the parts over as fractions of the whole, and the samples in
+the parts' own units: a composition in percent was scored against numbers a
+hundred times too small, every PIT 0. The truth is read in the variable's
+units now, by the same helper the new PIT columns use.
+
+Tests:
+
+* **`test_gaussian_mixture.py`**: the refusals, the moments against brute
+force over the parents' marginals, nothing drawn on the moment path, batch
+invariance, the samples branch taken exactly where a leaf is not Gaussian,
+the warning, save and load, and the split gate. `test_catalogue.py` holds
+every node to its declared `gaussian`.
+* **`python geoml/test/run_parallel.py` runs the full suite** one process per
+file, several at a time, on half the CPUs by default, each process pinned to
+cores of its own, lowered in priority, with the GPU hidden. `test_manual.py`
+is one test per chapter, so its slowest chapter rather than all seventeen
+sets the wall time. CI's full job uses the runner two at a time. The worker
+pools of mesh sets and mesh distance queries count the CPUs a process may
+use, not the machine's (`_usable_cpus`): a first version of the runner, whose
+processes forked pools sized to all 32 threads and each took the display's
+GPU, froze the desktop.
+* **The flow's log-determinant test solves once**, every finite-difference
+bump in one batch, instead of 36 times: 271 s to 135 s.
+
+Not a bug: GeoScape's item 26, `Grid3D.from_bounding_box` passing only the
+first axis. A box keeps its corners as `(1, n_dim)` rows, so the first row
+is the whole corner; a test pins it on both grids.
+
 ## version 0.7.0
 * **The catalogue.** `geoml.catalogue` describes every class and function a
 model or a script may use as JSON, for programs that build geoML models

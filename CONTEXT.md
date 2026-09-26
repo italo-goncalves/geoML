@@ -142,6 +142,14 @@ top of it. Neither is a modelling choice — a join that exists only so a
 model can be split again is bookkeeping, and belongs in the model's
 constructor, not in its tree.
 
+**Gaussian mixture** (`latent.GaussianMixture`):
+A latent node whose output is its components blended by the softmax of its
+weights, realization by realization — a field that follows one component
+here and another there. A mixture of *fields*: not `likelihood.Mixture`,
+which mixes noise laws around one field, and not an expert, which is a
+tiling of inducing points and means nothing geologically.
+_Avoid_: mixture of experts, regime model
+
 **Inducing point**:
 One of the locations the variational approximation is pinned at. They are
 chosen, not trained, and their number is what governs cost.
@@ -207,6 +215,19 @@ _Avoid_: split, partition
 Predicted by a model that never saw the location. The only honest basis for
 a score.
 _Avoid_: test, held-out prediction
+
+**PIT**:
+Where a measurement falls in the model's predictive distribution of a
+measurement, as a share from 0 to 1. Uniform over data the model did not
+see if the model is calibrated; in-sample it crowds the middle. Kept as the
+`pit_*` metadata `predict` and `cross_validate` write.
+_Avoid_: rank, percentile, quantile (a quantile is a value, this is a share)
+
+**Contact**:
+A point where a logged class changes between touching intervals of a hole,
+carrying the class above and the class below. A class meeting an unlogged
+stretch or a gap makes none: the log says nothing about where it ended.
+_Avoid_: boundary point, transition
 
 **Declustering**:
 Weighting locations so that a statistic describes the *field* rather than
