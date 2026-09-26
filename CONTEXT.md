@@ -233,3 +233,24 @@ _Avoid_: boundary point, transition
 Weighting locations so that a statistic describes the *field* rather than
 the sampling, which is denser where the answer was already interesting.
 _Avoid_: debiasing, weighting
+
+## Describing the package
+
+**Catalogue**:
+The machine-readable description of everything a model or a script may use:
+each class and function with its arguments, bounds, sizes and stability,
+written by the installed geoML for itself. What a class *is* and what it
+accepts; never why or when to use it.
+_Avoid_: schema, registry, manifest
+
+**Package skill** (`geoml`):
+The agent-facing guide to using geoML, shipped with the repository: the
+object model, the workflow and the recommendations, with the exact API left
+to the catalogue. The one source of package knowledge for an agent.
+_Avoid_: the geoML skill (two skills answer to that)
+
+**Research skill** (`geoml-research`):
+The agent-facing guide to the research line behind geoML: notation, the
+papers, LaTeX and writing conventions. Kept outside the repository; for the
+package it points to the package skill.
+_Avoid_: the geoML skill
