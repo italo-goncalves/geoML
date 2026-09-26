@@ -89,7 +89,7 @@ Install it from within Claude Code:
 ```
 
 Claude then loads it by itself whenever a task involves geoML, or you can
-invoke it directly with `/geoml:geo-ml`. It costs about 200 tokens per
+invoke it directly with `/geoml:geoml`. It costs about 200 tokens per
 session until it is used.
 
 ## References

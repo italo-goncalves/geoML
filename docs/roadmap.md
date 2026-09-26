@@ -859,7 +859,9 @@ it peaks at 23.1 GB, and the runner has 16. The job runs one process per
 test file now: under a 14 GB cap every file passed, the heaviest peaking
 at 6.1 GB.)
 
-**M — Keep the package skill true at every release** (agreed 2026-09-26).
+**M — Keep the package skill true at every release** (agreed 2026-09-26;
+**built 2026-09-26**, 0.8.2: `--show`/`--list`/`--json`, `sync.py`, the
+skill rewritten, `test_skill.py` and `test_skill_release.py`).
 Found: two skills both named `geo-ml` — the research skill outside the
 repository (research line, notation, LaTeX, style, and a section 5 on the
 package) and the package skill in `plugins/geoml/skills/` — whose package

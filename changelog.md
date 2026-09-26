@@ -1,3 +1,37 @@
+## version 0.8.2
+The package skill, kept true (roadmap item "Keep the package skill true at
+every release"):
+
+* **`python -m geoml.catalogue --show NAME`** describes one class, container
+or function of the installed geoML, found by short or dotted name; a short
+name that means two things (`Gaussian`) lists the dotted candidates and
+exits 1. `--list` names the categories, `--list CATEGORY` their entries with
+the internal ones left out, and `--json` gives either as JSON. Writing the
+whole catalogue is unchanged.
+* **The package skill is rewritten and renamed `geoml`**
+(`plugins/geoml/skills/geoml/`; invoked as `/geoml:geoml`). It carries
+prose only for what the catalogue cannot say -- the object model, the
+workflow, the measured recommendations, the gotchas -- and sends the agent
+to the catalogue for arguments. It no longer names the shims removed in
+0.7.0 or the `Spline` chains the parametric links replaced, and it names
+no internal class and no experimental one without saying so.
+* **The manual replaces the notebooks** as the skill's worked examples:
+`plugins/geoml/sync.py` copies the seventeen chapters, which
+`test_manual.py` runs at every release, into `references/manual/`, their
+figure links pointed at the documentation site. The eight notebooks, which
+predated the path notation and which nothing tested, are gone.
+* **Two tests**: `test_skill.py` (structural) resolves every name the skill
+mentions against the package and the catalogue, and holds its version line
+to the package's; `test_skill_release.py` (release) runs the skill's Python
+blocks and fails if the manual's copy is not what a sync would write. Run
+against the 0.8.1 skill, the first found 11 names that no longer resolve,
+4 internal and 5 experimental ones unflagged.
+* **The research skill** outside the repository is renamed `geoml-research`
+and points to the package skill instead of describing the package itself.
+* **The release run**: the full suite, 2130 tests, and every chapter of the
+manual, through the runner in 19 minutes on 12 CPUs; every figure came back
+as committed.
+
 ## version 0.8.1
 * **Fixed: a mesh-set test failed on CI's full job at the v0.8.0 tag.**
 `test_a_set_says_when_memory_leaves_it_fewer_workers` stubbed the memory

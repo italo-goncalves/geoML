@@ -69,6 +69,7 @@ jobs:
           --ignore=geoml/test/test_interactive.py
           --ignore=geoml/test/test_block_prediction.py
           --ignore=geoml/test/test_gaussian_mixture.py
+          --ignore=geoml/test/test_skill_release.py
 
   full:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'

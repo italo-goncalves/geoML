@@ -1,21 +1,18 @@
 # geoML notebook style
 
 How Ítalo's geoML notebooks are written — imports, cell rhythm, the shape of a
-modelling workflow, plotting habits. Distilled from the seven current tutorial
-notebooks in `references/` (`01_…` – `07_…`, refreshed 2026-08-13). Follow this
-when writing or extending a geoML notebook.
-
-The notebooks in `_superseded_2026-04-26/` and the unnumbered ones (`08 …`,
-`09 …`, `Inducing points demo`, `VGP_training`, `Showcase/`) are older. They
-still show real cases, but where they disagree with this file, this file wins.
+modelling workflow, plotting habits. Distilled from the author's tutorial
+notebooks. Follow this when writing or extending a geoML notebook. For what
+to build, the manual's chapters in `references/manual/` are the worked
+examples, run against the package at every release; for what a class
+accepts, the catalogue (`python -m geoml.catalogue --show NAME`).
 
 ---
 
 ## 0. The one rule that overrides the notebooks
 
-**Access variables and attributes by tree path.** The notebooks were written
-across the transition and most still use the old attribute chains; `05` and
-parts of `07` use paths. Always write the path form.
+**Access variables and attributes by tree path.** Older notebooks use
+attribute chains; always write the path form.
 
 ```python
 # yes
@@ -65,9 +62,11 @@ grid.values("V/simulations")     # the whole ensemble into RAM
 grid.values("V/simulations/7")   # one realization, which is what you want
 ```
 
-### Verified path table
+### Path table
 
-Every row below was executed against geoML 0.6.3.
+Chapter 10 of the manual (`references/manual/10-containers-and-addressing.md`)
+is the current, tested account of the tree; the rows below are the common
+ones.
 
 **Continuous variable** (`ContinuousVariable`, and each component of a vector one)
 
@@ -236,14 +235,17 @@ comment naming each link's job; the size is positional and repeated:
 
 ```python
 warp = wp.ChainedWarping(
-    wp.Log(7),                      # non-negativity
-    wp.ZScore(7),                   # centering / scaling
+    wp.BoxCox(7),                   # skewness, positive grades
     wp.RobustPCA(7, 7),             # decorrelation
-    wp.Spline(7, knots_per_arm=5),  # asymmetry
+    wp.ZScore(7),                   # centering / scaling
+    wp.SinhArcsinh(7),              # remaining asymmetry and tails
     wp.ZScore(7),
 )
-likelihood = lk.EpsilonInsensitive(warp)
+likelihood = lk.Gaussian(warp)
 ```
+
+The skill's §1.4 says which chain fits which variable, and why the
+likelihood here is Gaussian.
 
 **Step 4 — training.** Keyword arguments, always in this order:
 
@@ -362,7 +364,7 @@ faces = pv_surf.faces.reshape(-1, 4)[:, 1:]   # [3, p1, p2, p3] per triangle
 ```
 
 Seaborn appears only for categorical scatter over a data frame
-(`data.as_data_frame()`), with an explicit `hue_order` and a palette built from
+(`container.as_data_frame()`), with an explicit `hue_order` and a palette built from
 a cmcrameri map via `rgb2hex`.
 
 ---

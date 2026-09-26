@@ -122,6 +122,44 @@ def test_the_catalogue_says_which_versions_it_describes(built):
     assert built["persistence_format"] == persistence._GEOML_MODEL_FORMAT
 
 
+# --------------------------------------------------------------------------- #
+# looking up one entry: what the package skill tells an agent to run
+# --------------------------------------------------------------------------- #
+def test_a_short_name_finds_its_entry(built, capsys):
+    assert catalogue.find(built, "BasicGP") == [
+        "geoml.latent.network.BasicGP"]
+    assert catalogue.main(["--show", "BasicGP"]) == 0
+    shown = capsys.readouterr().out
+    assert shown.startswith("geoml.latent.network.BasicGP\n")
+    assert "range_prior" in shown
+
+
+def test_an_ambiguous_or_unknown_name_lists_what_it_could_mean(capsys):
+    assert catalogue.main(["--show", "Gaussian"]) == 1
+    said = capsys.readouterr().out
+    assert "geoml.kernels.Gaussian" in said
+    assert "geoml.likelihood.Gaussian" in said
+    assert catalogue.main(["--show", "NoSuchThing"]) == 1
+
+
+def test_a_shown_entry_as_json_is_the_catalogue_s_own(built, capsys):
+    assert catalogue.main(["--show", "cross_validate", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown == {"geoml.models.cross_validate":
+                     built["functions"]["geoml.models.cross_validate"]}
+
+
+def test_a_listing_leaves_the_internal_entries_out(built, capsys):
+    assert catalogue.main(["--list", "latent", "--json"]) == 0
+    listed = {row["name"] for row in json.loads(capsys.readouterr().out)}
+    expected = {name for name, entry in built["classes"].items()
+                if entry["category"] == "latent"
+                and entry["stability"] != "internal"}
+    assert listed == expected
+    assert catalogue.main(["--list"]) == 0
+    assert "operation" in capsys.readouterr().out
+
+
 def test_the_same_geoml_writes_the_same_bytes(tmp_path):
     """The reading side pins a catalogue by its hash, so two builds may not
     differ in a byte -- which a set iterated into the output would make
