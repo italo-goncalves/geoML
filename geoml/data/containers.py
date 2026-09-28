@@ -879,17 +879,38 @@ class _SpatialData(_TreeNode):
         return path
 
     @classmethod
-    def open(cls, path: _types.PathLike) -> "_SpatialData":
+    def open(cls, path: _types.PathLike,
+             mode: str = "r+") -> "_SpatialData":
         """Rebuild a container previously saved with :meth:`to_zarr`.
 
         The stored container type is honoured regardless of which class ``open``
-        is called on. Variable arrays are reopened on disk (read/write), so the
-        result can be inspected or predicted into again without recomputing.
+        is called on. Variable arrays are reopened on disk, so the result can
+        be inspected, or predicted into again without recomputing.
+
+        Parameters
+        ----------
+        path
+            A directory written by :meth:`to_zarr`.
+        mode
+            `"r+"` (the default) to read and write the store's arrays, `"r"`
+            to read them only: a prediction into a stored variable, or any
+            other write into the store, is then refused. What is added to a
+            read-only container -- a new variable, a metadata column -- is
+            held in memory and never reaches the store; :meth:`to_zarr`
+            writes the lot somewhere else.
+
+        Raises
+        ------
+        ValueError
+            If `mode` is neither `"r"` nor `"r+"`, or the store was written
+            at another format.
         """
         from geoml.data.io import (
             _GEOML_ZARR_FORMAT, _rebuild_container, _rebuild_metadata,
             _rebuild_variable)
-        group = _zarr.open_group(path, mode="r+")
+        if mode not in ("r", "r+"):
+            raise ValueError("mode must be 'r' or 'r+', got %r" % (mode,))
+        group = _zarr.open_group(path, mode=mode)
         meta = dict(group.attrs["geoml"])
         written = meta.get("geoml_format", 1)
         if written != _GEOML_ZARR_FORMAT:

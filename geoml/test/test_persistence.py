@@ -305,3 +305,55 @@ def test_a_container_is_never_written_over_the_store_it_reads(tmp_path):
         np.asarray(again.variables["v"].measurements.values), values)
     # anywhere else is fine
     opened.to_zarr(str(tmp_path / "copy.zarr"))
+
+
+# --------------------------------------------------------------------------- #
+# opening read-only
+# --------------------------------------------------------------------------- #
+def test_a_store_opened_read_only_refuses_every_write(tmp_path):
+    """A program handing a store to a script that only reads it opens it
+    read-only (GeoScape's item 38): the values and a copy elsewhere as
+    usual, and a prediction into a stored variable or a write
+    into a column refused before anything reaches the store."""
+    model, grid = _model_and_grid()
+    model.predict(grid, n_sim=3)
+    path = str(tmp_path / "run.zarr")
+    grid.to_zarr(path)
+    before = np.asarray(grid.variables["v"].prediction.values).copy()
+
+    opened = geoml.data.Grid2D.open(path, mode="r")
+    np.testing.assert_array_equal(
+        opened.values("v/prediction"), before)
+    opened.to_zarr(str(tmp_path / "copy.zarr"))
+
+    with pytest.raises(ValueError, match="read-only"):
+        model.predict(opened, n_sim=3)
+    with pytest.raises(ValueError, match="read-only"):
+        opened.variables["v"].prediction.values[:2] = 0.0
+    np.testing.assert_array_equal(
+        geoml.data.Grid2D.open(path).values("v/prediction"), before)
+
+
+def test_a_new_variable_is_not_written_into_a_read_only_store(tmp_path):
+    """A masked subset reads as usual, and what is added in memory stays
+    in memory: a variable or a metadata column added to a read-only
+    container is not its store's."""
+    path = str(tmp_path / "pts.zarr")
+    _point().to_zarr(path)
+    opened = geoml.data.PointData.open(path, mode="r")
+    mask = np.arange(opened.n_data) % 2 == 0
+    np.testing.assert_array_equal(
+        opened[mask].values("v/measurements"),
+        opened.values("v/measurements")[mask])
+    opened.add_continuous_variable("w", np.arange(20.0))
+    opened.add_metadata("m", np.arange(20.0))
+    reopened = geoml.data.PointData.open(path)
+    assert "w" not in reopened.variables
+    assert "m" not in reopened.metadata
+
+
+def test_open_takes_only_the_two_modes(tmp_path):
+    path = str(tmp_path / "pts.zarr")
+    _point().to_zarr(path)
+    with pytest.raises(ValueError, match="'r' or 'r\\+'"):
+        geoml.data.PointData.open(path, mode="w")

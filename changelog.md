@@ -1,3 +1,19 @@
+## version 0.8.4
+GeoScape's items 37 and 38:
+
+* **A container opens read-only**: `open(path, mode="r")` on `PointData` and
+every container that inherits it -- grids, block sets, meshes. A prediction
+into a stored variable, or any other write into the store's arrays, is
+refused with a `ValueError` saying to open with `mode="r+"` or to write the
+container elsewhere with `to_zarr`; a variable or metadata column added in
+memory stays in memory. `"r+"` stays the default. A program handing its
+stores to a script that only reads them need no longer copy them first.
+* **`GPOptions.expert_propagation`'s docstring says what one layer is**
+(item 37): an operation over GP nodes, `Add` or `LinearCombination`, is
+still one, and the rule changes neither its answer nor its time. Measured
+on Walker Lake at 3 and 20 experts, the same log and the same means to the
+bit under both rules.
+
 ## version 0.8.3
 GeoScape's items 34 to 36:
 

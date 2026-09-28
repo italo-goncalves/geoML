@@ -1017,8 +1017,14 @@ and `geoml.__version__` at run time (item 7) -- then seven in 0.6.13,
 items 1, 3, 8, 13 and 15 in 0.7.0, and the eighteen the list gained on
 2026-09-16 (16-33) in 0.8.0, item 26 turning out not to be a bug, and
 the three added 2026-09-27 (34-36) in 0.8.3 -- item 34 a masked subset of
-any container opened from Zarr, not only `cross_validate`'s. The
-done-notes below hold what each cost and what it taught; GeoScape's
+any container opened from Zarr, not only `cross_validate`'s. Of the two
+added 2026-09-28, both in 0.8.4: item 38, read-only opens; and item 37,
+which asked `GPOptions.expert_propagation`'s docstring to say the option
+affects any network with experts. Measured, it does not -- a
+`LinearCombination` or `Add` of GP nodes over 3 and 20 experts trains to
+the same log and predicts the same means to the bit under both rules, in
+the same time -- so the docstring now says an operation over GP nodes is
+still one layer. The done-notes below hold what each cost and what it taught; GeoScape's
 requirements document is marked item by item since 0.8.0.
 
 (Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
