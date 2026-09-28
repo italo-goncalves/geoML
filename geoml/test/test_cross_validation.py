@@ -566,6 +566,31 @@ def test_the_out_of_fold_container_saves_and_opens_whole(walker_cv, tmp_path):
         == geoml.models.conformalize(oof, "V").nominal(0.9)
 
 
+def test_a_reopened_model_cross_validates_as_the_original_does(
+        walker_cv, tmp_path):
+    """GeoScape's case: the fitted model saved, reopened in another process
+    with its data read lazily from the store, and cross-validated there.
+    The out-of-fold container is made by masking the data, and a mask of
+    rows on a Zarr-backed store was refused (`VindexInvalidSelectionError`)
+    until 0.8.3. The fresh variational state is drawn from the package
+    generator, so both runs are seeded to the same number first; then they
+    agree to the bit."""
+    model = walker_cv[0]
+    path = tmp_path / "model"
+    model.save(str(path))
+    reopened = geoml.models.VGPNetwork.open(str(path))
+    runs = []
+    for fitted in (model, reopened):
+        geoml.set_seed(7)
+        runs.append(geoml.models.cross_validate(
+            fitted, iterations=30, n_sim=8, n_nodes=8))
+    (oof, scores), (again, again_scores) = runs
+    assert again.n_data == oof.n_data
+    np.testing.assert_array_equal(
+        again_scores.select_dtypes("number").to_numpy(dtype=float),
+        scores.select_dtypes("number").to_numpy(dtype=float))
+
+
 def test_conformalize_names_the_missing_column(walker_cv):
     _, _, oof, _ = walker_cv
     with pytest.raises(ValueError, match="no metadata column"):

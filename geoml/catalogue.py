@@ -75,6 +75,7 @@ FUNCTIONS = {
     # an import resolves, and `geoml.progress` is what a script writes
     "geoml._progress.progress": "workflow",
     "geoml.data.containers.PointData.unpredicted": "workflow",
+    "geoml.data.containers.PointData.spatial_k_fold": "workflow",
 }
 
 WORKFLOW = {
@@ -84,6 +85,8 @@ WORKFLOW = {
         "seed": "geoml.stats.random.set_seed",
         "train": ["geoml.models.VGPNetwork.train_full",
                   "geoml.models.VGPNetwork.train_svi"],
+        # the folds `validate` reads, written into the data first
+        "folds": "geoml.data.containers.PointData.spatial_k_fold",
         "validate": "geoml.models.cross_validate",
         "save": "geoml.models.VGPNetwork.save",
         "load": "geoml.models.VGPNetwork.open",
@@ -145,6 +148,12 @@ NOT_PREDICTED_INTO = ("geoml.data.containers.DirectionalData",)
 # the methods a script calls on a container it has built, where the class
 # has them
 CONTAINER_METHODS = ("from_data", "assign_from_surface", "assign_from_solid")
+# methods one container family has, declared for its class and inherited by
+# its subclasses: a name is not enough, `Mesh3D.split` separating a mesh's
+# pieces where `BlockSet3D.split` cuts blocks
+CLASS_METHODS = {
+    "geoml.data.blocks.BlockSet3D": ("split", "crossed_by", "unbalanced"),
+}
 
 # the variable types a likelihood can be bound to: the class, and what
 # beyond `length` -- the columns it hands a likelihood -- a size rule may
@@ -238,7 +247,8 @@ def class_entry(cls: type) -> "dict[str, _Any]":
 
 def container_entry(name: str) -> "dict[str, _Any]":
     """One container's entry: its constructor, whether a model predicts
-    into it, and the methods of `CONTAINER_METHODS` it has."""
+    into it, the methods of `CONTAINER_METHODS` it has, and those
+    `CLASS_METHODS` declares for it or a class it extends."""
     cls = resolve(name)
     entry: "dict[str, _Any]" = {
         "summary": _summary(cls), "description": _description(cls),
@@ -246,11 +256,14 @@ def container_entry(name: str) -> "dict[str, _Any]":
                               _parameter_docs(cls)),
         "predict_target": name not in NOT_PREDICTED_INTO,
         "methods": {}}
-    for method in CONTAINER_METHODS:
-        if hasattr(cls, method):
-            entry["methods"][method] = _function_entry(
-                name + "." + method, "container")
-            del entry["methods"][method]["category"]
+    methods = [m for m in CONTAINER_METHODS if hasattr(cls, m)]
+    for base in cls.__mro__:
+        methods += CLASS_METHODS.get(
+            "%s.%s" % (base.__module__, base.__qualname__), ())
+    for method in methods:
+        entry["methods"][method] = _function_entry(
+            name + "." + method, "container")
+        del entry["methods"][method]["category"]
     return entry
 
 
@@ -482,6 +495,7 @@ def _references():
             (_network._LatentVariable, "node"),
             (_data.DirectionalData, "data:DirectionalData"),
             (_data.BlockSet3D, "data:BlockSet3D"),
+            (_data.Mesh3D, "data:Mesh3D"),
             (_data.PointData, "data:PointData"))
 
 

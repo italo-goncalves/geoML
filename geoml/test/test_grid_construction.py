@@ -43,6 +43,13 @@ def test_from_bounding_box_reads_every_axis(cls, n_dim):
     assert np.allclose(box.max.ravel(), high)
 
 
+def test_a_box_s_centre_is_the_midpoint_of_its_corners():
+    """Not half the extent, which it was: the two agree only for a box whose
+    lower corner is the origin."""
+    box = geoml.data.BoundingBox([0.0, 100.0, 1000.0], [10.0, 150.0, 1100.0])
+    assert np.array_equal(box.center, [[5.0, 125.0, 1050.0]])
+
+
 def test_the_grid_covers_the_data_with_its_margin():
     point, xyz = _points()
     grid = geoml.data.Grid3D.from_data(point, step=5.0, margin=0.1)

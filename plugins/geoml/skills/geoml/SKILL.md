@@ -68,7 +68,7 @@ pip install git+https://github.com/italo-goncalves/geoML
 computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` breaks the Cholesky factorizations.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.2.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.3.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -224,6 +224,9 @@ The papers and the code name the same things differently.
 - **Reproducibility:** call `geoml.set_seed(seed)` *before constructing
   anything*. It is the only knob: parameter initialization and a model's
   simulation stream both draw from it, and a saved model keeps its seed.
+  `cross_validate` draws each fold's fresh variational state from the same
+  generator, so two runs in a row differ; set the seed right before each
+  run that must repeat.
 - **`values()` for what you compute with, `get()` for what you draw.**
   Never `values()` a bare `simulations` path: it reads every realization
   into memory at once, fatal on a block model. Read one realization

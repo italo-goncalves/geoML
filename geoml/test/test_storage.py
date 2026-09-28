@@ -43,6 +43,27 @@ def test_backends_are_interchangeable(tmp_path):
     assert np.allclose(np.asarray(npy), np.asarray(zrr))
 
 
+@pytest.mark.parametrize("shape", [(60,), (60, 4)])
+def test_a_row_mask_reads_and_writes_a_zarr_store_as_it_does_numpy(
+        tmp_path, shape):
+    """Zarr takes a boolean mask only of the array's whole shape, so a mask
+    of rows on a 2-D store was refused (`VindexInvalidSelectionError`) --
+    which is what subsetting a container opened from its store did, and
+    `cross_validate` on a reopened model with it."""
+    data = np.random.default_rng(0).random(shape)
+    mask = np.arange(shape[0]) % 3 == 0
+    npy = ArrayStore.from_numpy(data.copy())
+    zrr = ArrayStore.allocate(shape, backend="zarr",
+                              store=str(tmp_path / "m.zarr"))
+    zrr[:] = data
+    assert np.array_equal(zrr[mask], npy[mask])
+    for s in (npy, zrr):
+        s[mask] = -1.0
+    assert np.array_equal(np.asarray(zrr), np.asarray(npy))
+    assert np.array_equal(zrr[np.zeros(shape[0], dtype=bool)],
+                          npy[np.zeros(shape[0], dtype=bool)])
+
+
 def test_auto_backend_selects_by_size():
     small = ArrayStore.allocate((100,), backend="auto", threshold=DEFAULT_THRESHOLD)
     assert small.backend == "numpy"
