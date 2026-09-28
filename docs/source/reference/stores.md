@@ -1,8 +1,9 @@
 # Store formats
 
 What geoML writes to disk, for programs that read it without geoML: a
-container (`to_zarr`, read back by `open`) and a mesh set
-(`MeshSet.to_zarr`, read back by `MeshSet.open`). Both are Zarr version 3
+container (`to_zarr`, read back by `open`, which takes `mode="r"` to
+refuse every write into the store) and a mesh set (`MeshSet.to_zarr`, read
+back by `MeshSet.open`, always read-only). Both are Zarr version 3
 groups written by zarr-python 3 with its default codecs, `bytes` then
 `zstd` today. Read each array's dtype, chunk shape and codecs from its own
 metadata rather than assuming them.

@@ -168,7 +168,10 @@ class GPOptions(_ModelOptions):
             consensus and sometimes ahead, the consensus coupling appearing
             to slow optimization at large K. Only deep (multi-layer)
             networks are affected: below a terminal node the propagation
-            never runs.
+            never runs. An operation over GP nodes -- `Add`,
+            `LinearCombination` -- still makes one layer: the answer and
+            the time are the same under both rules until a GP node sits on
+            top.
         training_tolerance : float, optional
             When to stop training before its iteration count runs out, as a
             fraction. The bound is smoothed, and training stops once its

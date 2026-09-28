@@ -367,6 +367,12 @@ class ArrayStore:
 
     def __setitem__(self, item, value):
         if self._backend == "zarr":
+            if self._array.read_only:
+                # zarr refuses too, but without saying what to do instead
+                raise ValueError(
+                    "%s was opened read-only; open it with mode='r+' to "
+                    "write into it, or write the container to another "
+                    "store with to_zarr" % (self._store_path or "this store"))
             item = _rows_of_masks(item)
         self._array[item] = value
 

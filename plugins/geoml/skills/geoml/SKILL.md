@@ -68,7 +68,7 @@ pip install git+https://github.com/italo-goncalves/geoML
 computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` breaks the Cholesky factorizations.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.3.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.4.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -231,6 +231,10 @@ The papers and the code name the same things differently.
   Never `values()` a bare `simulations` path: it reads every realization
   into memory at once, fatal on a block model. Read one realization
   (`"V/simulations/7"`) or reduce in row bands.
+- **Open a store you only read with `mode="r"`.** A container's `open`
+  defaults to `"r+"`, and a prediction into it writes into the store.
+  Read-only, a write is refused and the store stays as it was; `to_zarr`
+  never writes over the store a container reads from.
 - **The stored realizations are of the ground; a measurement scatters
   around it.** Comparing a prediction with an assay needs
   `model.predict_measurements`, not the stored realizations.
