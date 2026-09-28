@@ -127,6 +127,22 @@ def _zarr_dtype(dtype):
     return _np.dtype(dtype.str) if dtype.kind in "biufc" else dtype
 
 
+def _rows_of_masks(item):
+    """A selection with every boolean mask in it turned into the indices it
+    keeps. Zarr takes a mask only of the array's whole shape, so a mask of
+    rows on a 2-D store -- what subsetting a container opened from its store
+    hands down -- was refused (`VindexInvalidSelectionError`); the indices
+    select the same rows."""
+    def one(part):
+        if isinstance(part, _np.ndarray) and part.dtype == bool \
+                and part.ndim == 1:
+            return _np.flatnonzero(part)
+        return part
+    if isinstance(item, tuple):
+        return tuple(one(part) for part in item)
+    return one(item)
+
+
 def _use_zarr(shape, dtype, threshold):
     """Whether an array of this shape/dtype should live on disk."""
     if _np.dtype(dtype) == object:
@@ -345,9 +361,13 @@ class ArrayStore:
     # ndarray-compatible surface
     # ------------------------------------------------------------------ #
     def __getitem__(self, item):
+        if self._backend == "zarr":
+            item = _rows_of_masks(item)
         return self._array[item]
 
     def __setitem__(self, item, value):
+        if self._backend == "zarr":
+            item = _rows_of_masks(item)
         self._array[item] = value
 
     def __array__(self, dtype=None, copy=None):

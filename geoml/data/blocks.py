@@ -2010,7 +2010,7 @@ class BlockSet3D(PointData):
         _blocks_from_solid(self, PointData.assign_from_solid, solid, name,
                            labels, fraction)
 
-    def crossed_by(self, mesh) -> _np.ndarray:
+    def crossed_by(self, mesh: "Mesh3D") -> _np.ndarray:
         """Which blocks a mesh passes through, and so which are worth cutting.
 
         A block is crossed when its sub-blocks fall on **both** sides of the

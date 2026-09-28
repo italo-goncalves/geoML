@@ -1,3 +1,31 @@
+## version 0.8.3
+GeoScape's items 34 to 36:
+
+* **Fixed: a container opened from its store refused a boolean mask of
+rows.** Zarr takes a mask only of the array's whole shape, so a mask of
+rows on a 2-D store -- coordinates, simulations -- raised
+`VindexInvalidSelectionError`, and with it every subset of an opened
+container by mask and `cross_validate` on a model reopened with
+`VGPNetwork.open`, which builds its out-of-fold container that way
+(GeoScape's item 34, seen since 0.7.0). `ArrayStore` hands zarr the rows a
+mask keeps, reading and writing. Two tests: a mask read and written on a
+Zarr store as on NumPy, and a reopened model cross-validating to the bit
+what the original does, the seed set before each -- the fresh variational
+state is drawn from the package generator, so two runs in a row differ by
+design.
+* **`spatial_k_fold` in the catalogue's workflow**, as `fit.folds`, beside
+`validate` (item 35).
+* **`BlockSet3D.split`, `crossed_by` and `unbalanced` in the catalogue**, under
+the methods of `BlockSet3D` and `RotatedBlockSet3D` (item 36). Declared for
+the class (`CLASS_METHODS`) rather than by name, since `Mesh3D` has a
+`split` of its own that separates a mesh's pieces; `crossed_by`'s mesh is
+annotated, and typed `data:Mesh3D`.
+
+Also:
+
+* **Fixed: `BoundingBox.center` was half the extent**, `(max - min) / 2`,
+not the midpoint of the corners (roadmap). Nothing in geoML read it.
+
 ## version 0.8.2
 The package skill, kept true (roadmap item "Keep the package skill true at
 every release"):

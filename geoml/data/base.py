@@ -89,7 +89,7 @@ class BoundingBox(object):
         self._n_dim = min_values.shape[1]
         self._min = min_values
         self._max = max_values
-        self._center = (max_values - min_values) / 2.0
+        self._center = (max_values + min_values) / 2.0
         self._diagonal = _np.sqrt(_np.sum((max_values - min_values)**2))
         self.labels = None
 

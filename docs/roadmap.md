@@ -707,11 +707,6 @@ contact with one side empty -- and `as_classification_input` inherits it.
 Whether that is ever wanted, and whether the two should agree, is the
 question; nothing has been measured.
 
-**S — `BoundingBox._center` is half the extent, not the centre**
-(found by reading, 2026-09-25). `data/base.py` sets it to
-`(max - min) / 2`. Find what reads it before changing it: a reader that
-wanted the half-extent is right by accident.
-
 **S — Surface I/O residue.** OBJ/PLY/STL both ways, the vendor formats, and
 any attribute travelling with the geometry. Nothing has demanded them yet.
 
@@ -1020,7 +1015,9 @@ Three were met before the list was worked through -- one leaf per
 likelihood (item 2) and names replayed by a save (item 5), both in 0.6.10,
 and `geoml.__version__` at run time (item 7) -- then seven in 0.6.13,
 items 1, 3, 8, 13 and 15 in 0.7.0, and the eighteen the list gained on
-2026-09-16 (16-33) in 0.8.0, item 26 turning out not to be a bug. The
+2026-09-16 (16-33) in 0.8.0, item 26 turning out not to be a bug, and
+the three added 2026-09-27 (34-36) in 0.8.3 -- item 34 a masked subset of
+any container opened from Zarr, not only `cross_validate`'s. The
 done-notes below hold what each cost and what it taught; GeoScape's
 requirements document is marked item by item since 0.8.0.
 

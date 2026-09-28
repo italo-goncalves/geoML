@@ -32,7 +32,7 @@ CATEGORIES = {"input", "latent", "function", "operation", "transform",
               "kernel", "covariance", "warping", "likelihood"}
 REFERENCES = {"ref:kernel", "ref:covariance", "ref:transform", "ref:warping",
               "ref:likelihood", "data:PointData", "data:DirectionalData",
-              "data:BlockSet3D"}
+              "data:BlockSet3D", "data:Mesh3D"}
 PLAIN = {"int", "float", "bool", "str", "enum", "node", "json"}
 NODES = [c for c in catalogue.classes()
          if c.__module__ == "geoml.latent.network"]
@@ -114,6 +114,36 @@ def test_the_workflow_names_what_the_catalogue_describes(built):
     assert built["workflow"]["fit"]["load"] == "geoml.models.VGPNetwork.open"
     for name in built["functions"]:
         catalogue.resolve(name)
+
+
+def test_the_workflow_names_the_folds_cross_validation_reads(built):
+    """GeoScape's item 35: the spatial folds are written by the data before
+    `validate` reads them, and a Script finds the call in the workflow."""
+    name = built["workflow"]["fit"]["folds"]
+    assert name == "geoml.data.containers.PointData.spatial_k_fold"
+    params = [p["name"] for p in built["functions"][name]["params"]]
+    assert params[:5] == ["test_data", "k", "groups", "seed", "name"]
+
+
+@pytest.mark.parametrize("name", ["geoml.data.blocks.BlockSet3D",
+                                  "geoml.data.blocks.RotatedBlockSet3D"])
+def test_a_block_set_lists_how_it_is_split(built, name):
+    """GeoScape's item 36: a Block Set split across Surfaces and Solids as it
+    is built calls these three, declared for `BlockSet3D` and inherited."""
+    methods = built["containers"][name]["methods"]
+    assert {"split", "crossed_by", "unbalanced"} <= set(methods)
+    split = [p["name"] for p in methods["split"]["params"]]
+    assert split[:2] == ["mask", "carry"]
+    [mesh] = methods["crossed_by"]["params"]
+    assert mesh["name"] == "mesh" and mesh["type"] == "data:Mesh3D"
+    assert [p["name"] for p in methods["unbalanced"]["params"]] == ["gap"]
+
+
+def test_a_mesh_does_not_list_the_block_set_s_split(built):
+    """`Mesh3D.split` separates a mesh's pieces; it is not the block set's
+    split and is not declared as one."""
+    for name in ("geoml.data.meshes.Mesh3D", "geoml.data.meshes.Solid3D"):
+        assert "split" not in built["containers"][name]["methods"]
 
 
 def test_the_catalogue_says_which_versions_it_describes(built):

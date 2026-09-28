@@ -65,6 +65,13 @@ size rule may name the slot it reads. And every latent node carries
 attribute `_GAUSSIAN` rather than declared a second time, because a leaf
 that is not Gaussian trains on its realizations.
 
+Added in 0.8.3 for GeoScape's items 35 and 36: `workflow.fit.folds` names
+`spatial_k_fold`, and a container's `methods` may hold what its family
+declares for itself (`CLASS_METHODS`, inherited by subclasses) -- the block
+set's `split`, `crossed_by` and `unbalanced`. Not a shared list by name:
+`Mesh3D.split` separates a mesh's pieces and would have been published as
+the block set's operation. A mesh argument is typed `data:Mesh3D`.
+
 ## Found on the way
 
 Each of these would have made a declaration false, and the tests below
