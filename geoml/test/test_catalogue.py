@@ -384,6 +384,26 @@ def test_inducing_points_pass_through_a_node_as_it_declares(cls):
 
 
 @pytest.mark.parametrize(
+    "cls", [c for c in NODES if c._catalogue["category"] != "input"],
+    ids=lambda c: c.__name__)
+def test_what_a_node_passes_on_is_its_own_size(cls):
+    """The inducing points a node passes on and their variance are both one
+    column per output: `RadialTrend` passed on its parent's variance, as
+    wide as the coordinates, and an `Add` over it and a GP node failed to
+    stack the two. (An input passes on coordinates.)"""
+    for args, kwargs in _calls(cls):
+        node = cls(*args, **kwargs)
+        if not node.propagates_inducing_points:
+            continue
+        # a GP node without children builds nothing to pass on
+        _gp(node, 1).refresh(1e-6)
+        for ip, ip_var in zip(node.inducing_points,
+                              node.inducing_points_variance):
+            assert ip.shape[1] == node.size, cls.__name__
+            assert ip_var.shape == ip.shape, cls.__name__
+
+
+@pytest.mark.parametrize(
     "cls", [c for c in NODES if _chained(c)],
     ids=lambda c: c.__name__)
 def test_a_node_needs_inducing_points_as_it_declares(cls):
@@ -785,8 +805,12 @@ def test_every_column_a_variable_writes_says_what_it_is(cls):
 
 def test_the_catalogue_lists_every_variable_type_s_columns(built):
     for name, entry in built["variable_types"].items():
-        assert entry["columns"], name
+        # a latent variable's columns are all its parts'
+        assert entry["columns"] or entry.get("part_columns"), name
     assert "part_columns" in built["variable_types"]["rock_type"]
+    assert built["variable_types"]["latent"]["part_columns"][
+        "latent_variance"] == {"role": "uncertainty",
+                               "scale": "latent_squared"}
     assert built["variable_types"]["continuous"]["columns"]["dispersion"] \
         == {"role": "uncertainty", "scale": "unit_squared"}
 

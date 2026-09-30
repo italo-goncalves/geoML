@@ -126,7 +126,7 @@ Most of the manual is spent reading these, so here they are in one place.
 | `V/simulations/<i>` | one realization |
 | `V/quantiles/<q>` | a quantile of the realizations |
 | `V/proportions/<c>` | the share at or below a cut-off, on a block model |
-| `V/divided/<c>` | how often the realizations disagree about the cut-off |
+| `V/divided/<c>` | whether the prediction crosses the cut-off inside the block (0 or 1) |
 
 The last two appear only where a block has an interior for the cut-off to
 cross, so they are written by a `BlockSet3D` prediction and not by a grid

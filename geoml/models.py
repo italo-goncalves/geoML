@@ -1605,6 +1605,171 @@ class VGPNetwork(_GPModel):
         """
         self._predict(newdata, n_sim, include_noise, where)
 
+    def predict_node(self, node: "_latent.network._LatentVariable",
+                     newdata: "_data._SpatialData",
+                     n_sim: "int | None" = None,
+                     name: "str | None" = None,
+                     labels: "Sequence[str] | None" = None,
+                     where: _types.Where = None) -> "_data.LatentVariable":
+        """Predict what a node inside the tree says, into a container.
+
+        The same prediction :meth:`predict` makes, stopped at `node` instead
+        of carried on to the likelihoods: the node's mean and variance at
+        every location, and its realizations, written as a
+        :class:`~geoml.data.LatentVariable` with one part per output of the
+        node. Where a `GPWalk` moved the coordinates, what a shared parent
+        says before two leaves diverge, what a `Linear` trend adds.
+
+        Realization `s` of the node is the one realization `s` of the first
+        leaf above it was built from, wherever operation nodes (`Add`,
+        `Linear`, `Scale`, ...) are all that stand between them; a GP node
+        above reads the node's mean and variance, never its realizations.
+
+        Parameters
+        ----------
+        node
+            A node of this model's tree, above its input.
+        newdata
+            The locations to predict, of the same dimension as the training
+            data: points, a grid, a section or a mesh. Modified in place.
+        n_sim
+            Number of realizations per location. `None` takes the number the
+            variable already holds, or 20.
+        name
+            The variable to write, the node's own name by default. A
+            `LatentVariable` of that name is written into; any other
+            variable of that name is refused.
+        labels
+            One name per output of the node, `"0"`, `"1"`, ... by default.
+        where
+            One boolean per location, the indices of the locations to visit,
+            the name of a boolean metadata column holding the same, or `None`
+            for all of them. Locations left out keep what they hold.
+
+        Returns
+        -------
+        LatentVariable
+            The variable written, as held by `newdata`.
+
+        Raises
+        ------
+        ValueError
+            If `node` is an input or not in this model's tree, if `newdata`
+            is a block model, if `labels` is not one per output, if `name`
+            is held by another kind of variable or one with other labels,
+            or if `where` names some locations of a variable holding a
+            different number of realizations.
+
+        See Also
+        --------
+        predict : the prediction carried on to the likelihoods.
+
+        Notes
+        -----
+        Point support only. A block's value is the mean over its sub-blocks
+        taken by the likelihood, and a node has none; predict on a
+        `Grid3D` over the same ground instead.
+        """
+        if not any(n is node for n in self._nodes()):
+            raise ValueError("%s is not a node of this model's tree"
+                             % getattr(node, "name", node))
+        if isinstance(node, _latent.network._RootLatentVariable):
+            raise ValueError(
+                "%s is an input, whose output is the transformed coordinates; "
+                "apply its transform to the coordinates instead" % node.name)
+        if isinstance(newdata, (_data.Blocks1D, _data.Blocks2D,
+                                _data.Blocks3D, _data.RotatedBlocks3D,
+                                _data.BlockSet3D)):
+            raise ValueError(
+                "a node predicts at points, and %s is a block model: a "
+                "block's value is the mean over its sub-blocks, which a "
+                "likelihood takes and a node has not; predict on a Grid3D "
+                "over the same ground instead" % type(newdata).__name__)
+        if self.data.n_dim != newdata.n_dim:
+            raise ValueError("dimension of newdata is incompatible with model")
+
+        called = str(node.name) if name is None else name
+        labels = [str(i) for i in range(node.size)] if labels is None \
+            else [str(label) for label in labels]
+        if len(labels) != node.size:
+            raise ValueError("%s has %d output(s) and %d label(s) were given"
+                             % (node.name, node.size, len(labels)))
+        variable = newdata.variables.get(called)
+        if variable is not None and (
+                not isinstance(variable, _data.LatentVariable)
+                or variable.labels != labels):
+            raise ValueError(
+                "%r is already a %s with labels %s; name the node's variable "
+                "otherwise" % (called, type(variable).__name__,
+                               getattr(variable, "labels", None)))
+
+        where = _where_mask(newdata, where)
+        n_sim = _simulation_count(newdata, [called], n_sim,
+                                  keep=where is not None)
+        if variable is None:
+            variable = _data.LatentVariable(called, newdata, labels)
+            newdata.variables[called] = variable
+            variable.allocate_simulations(n_sim)
+        elif where is None or _stored_n_sim(variable) is None:
+            variable.allocate_simulations(n_sim)
+
+        seed = [self.options.seed + self._seed_offset(node), 0]
+        traced = self._node_function(node)
+
+        def call(x, x_var, n_splits):
+            with _latent.simulation_rule(bool(self.options.qmc_simulations)), \
+                    _latent.propagation_rule(self.options.expert_propagation):
+                return traced(x, x_var, n_sim, seed)
+
+        for batch, (mean, variance, sims) in self._over_batches(
+                newdata, call, where):
+            variable.update(batch, latent_mean=mean.numpy(),
+                            latent_variance=variance.numpy(),
+                            simulations=sims.numpy())
+        return variable
+
+    def _node_function(self, node):
+        """`node.predict` in a graph, one per node and setting, as
+        `predict_raw` holds one for the leaves."""
+        jit = bool(self.options.jit_predict)
+        key = ("node", id(node), jit, bool(self.options.qmc_simulations),
+               self.options.expert_propagation)
+        traced = self._compiled.get(key)
+        if traced is None:
+            def body(x, x_var, n_sim, seed):
+                mu, var, sims, _ = node.predict(x, x_var=x_var, n_sim=n_sim,
+                                                seed=seed)
+                return (_tf.transpose(mu[:, :, 0]), _tf.transpose(var),
+                        _tf.transpose(sims, [1, 0, 2]))
+            traced = _tf.function(body, jit_compile=jit or None,
+                                  reduce_retracing=True)
+            self._compiled[key] = traced
+        return traced
+
+    def _seed_offset(self, node):
+        """What the model adds to its seed on the way from the first leaf
+        that reaches `node` down to it: parent `i` of an operation that
+        shifts its parents' seeds draws at `seed + i`."""
+        def search(current, offset):
+            if current is node:
+                return offset
+            parents = getattr(current, "parents", None)
+            if parents is None:
+                parent = getattr(current, "parent", None)
+                parents = [] if parent is None else [parent]
+            shifts = current._SHIFTS_PARENT_SEEDS
+            for i, parent in enumerate(parents):
+                found = search(parent, offset + (i if shifts else 0))
+                if found is not None:
+                    return found
+            return None
+
+        for leaf in self.leaves:
+            found = search(leaf, 0)
+            if found is not None:
+                return found
+        raise ValueError("%s is not a node of this model's tree" % node.name)
+
     def _predict(self, newdata, n_sim, include_noise, where,
                  check_measurements=True):
         if self.data.n_dim != newdata.n_dim:
@@ -2144,7 +2309,7 @@ def _simulation_count(container, names, n_sim, keep):
 
 def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
            split_on: "str | Sequence[str] | None" = None,
-           tolerance: float = 0.05, include_noise: bool = True,
+           tolerance: "float | None" = None, include_noise: bool = True,
            where: _types.Where = None,
            meshes: "Sequence[_data.Mesh3D] | None" = None,
            verbose: bool = False) -> "_data.BlockSet3D":
@@ -2152,8 +2317,8 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
 
     Predicts on the coarse blocks, splits the ones still in doubt, predicts
     only what the split created, and repeats. Three criteria mark a block for
-    splitting: its realizations disagree about which side of a cut-off or a
-    category boundary it falls on
+    splitting: the prediction at its sub-blocks falls on both sides of a
+    cut-off or a category boundary
     (:meth:`~geoml.data.BlockSet3D.needs_splitting`); a neighbour is more
     than one level finer than it (:meth:`~geoml.data.BlockSet3D.unbalanced`);
     or a mesh passes through it (:meth:`~geoml.data.BlockSet3D.crossed_by`).
@@ -2177,8 +2342,9 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     split_on
         Which variables have a say in the decision. All of them by default.
     tolerance
-        The share of realizations that must find a block divided before it is
-        cut.
+        Deprecated, and without effect: a block is divided or it is not. It
+        was the share of realizations that had to find a block divided, and
+        will be removed.
     include_noise
         Passed to :meth:`VGPNetwork.predict`.
     where
@@ -2212,6 +2378,11 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     `docs/variable-block-models.md`.
     """
     keep = _where_mask(blocks, where)
+    if tolerance is not None:
+        warnings.warn(
+            "`tolerance` has no effect since 0.8.5 -- a block is divided "
+            "where the prediction's sub-blocks straddle a cut-off, which is "
+            "yes or no -- and will be removed", FutureWarning, stacklevel=2)
 
     # No total: the passes are not bounded by `max_levels`, since each one
     # marks a different set and a block still at level 0 can be marked by
@@ -2219,11 +2390,11 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     # `unbalanced` reaches it. The loop stops when nothing is marked, and
     # there is no honest count to promise before that.
     with _progress.reporting("refine", None, "pass") as report:
-        return _refine_passes(model, blocks, n_sim, split_on, tolerance,
+        return _refine_passes(model, blocks, n_sim, split_on,
                               include_noise, keep, meshes, verbose, report)
 
 
-def _refine_passes(model, blocks, n_sim, split_on, tolerance, include_noise,
+def _refine_passes(model, blocks, n_sim, split_on, include_noise,
                    keep, meshes, verbose, report):
     """The body of :func:`refine`, one pass at a time. Separate only so that
     the reporting block can wrap a function that returns from its middle."""
@@ -2232,7 +2403,7 @@ def _refine_passes(model, blocks, n_sim, split_on, tolerance, include_noise,
 
     step = 0
     while True:
-        undecided = blocks.needs_splitting(split_on, tolerance=tolerance)
+        undecided = blocks.needs_splitting(split_on)
         uneven = blocks.unbalanced()
         crossed = _np.zeros(blocks.n_data, dtype=bool)
         for mesh in (meshes or []):
@@ -3485,6 +3656,13 @@ class ProjectedVGP(VGPNetwork):
             elbo = elbo * self.total_data / batch_size
 
             return elbo
+
+    def predict_node(self, node, newdata, n_sim=None, name=None,
+                     labels=None, where=None):
+        # a projected node's `predict` returns realizations alone
+        raise NotImplementedError(
+            "predict_node is for inducing-point networks; a ProjectedVGP's "
+            "nodes report realizations only")
 
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
                      n_sim=1, seed=0, jitter=1e-6, include_noise=True):

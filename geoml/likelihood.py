@@ -227,25 +227,21 @@ def _proportions(x, cutoffs, n_splits=None):
 
 
 def _divided(x, cutoffs, n_splits=None):
-    """How often a block is cut in two by each of `cutoffs`.
+    """Whether each of `cutoffs` cuts a block in two.
 
-    Not the same question as `_proportions`, and the difference is the whole
-    of what refining can and cannot fix. A block whose value is uncertain
-    around a cut-off has realizations either side of it, and *no* amount of
-    cutting will change that -- it is the model not knowing, and the answer to
-    it is another drillhole. A block whose sub-blocks disagree *within* one
-    realization is a block holding two answers, and cutting is exactly what
-    separates them.
+    Not the same question as `_proportions`. A block is divided where the
+    prediction at its sub-blocks -- the mean over the realizations, sub-block
+    by sub-block -- falls on both sides of the cut-off: the surface a contour
+    of the prediction draws runs through it, and cutting the block is what
+    lets that surface bend there. The realizations are averaged first, so a
+    block the model is merely unsure about is not divided: where the data do
+    not reach, every realization crosses the cut-off somewhere of its own and
+    their mean crosses it nowhere.
 
-    So the sub-blocks are judged one realization at a time -- is this block
-    divided, in this realization? -- and only then averaged over realizations.
-    Reading the share over sub-blocks and realizations together, as
-    `_proportions` does, would mix the two back into one number and mark for
-    splitting every block the model happens to be unsure about.
-
-    Returns `(n_blocks, n_var, n_cutoffs)`, the share of realizations in which
-    the block straddles each cut-off. Zero without a discretization: a
-    location has no sub-blocks to disagree.
+    Returns `(n_blocks, n_var, n_cutoffs)`, 1 where the block is divided and 0
+    where it is not. Zero without a discretization: a location has no
+    sub-blocks to disagree. A realization axis of one (the categorical
+    likelihoods, whose `ind_skew` is already an expectation) is its own mean.
     """
     cuts = _cutoff_matrix(cutoffs, x.dtype)
 
@@ -257,9 +253,11 @@ def _divided(x, cutoffs, n_splits=None):
     n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
+    # the prediction at each sub-block, a realization axis of one
+    grouped = _tf.reduce_mean(grouped, axis=3, keepdims=True)
     below = _tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
 
-    # per realization: what share of this block's sub-blocks sit below
+    # what share of this block's sub-blocks sit below
     share = _tf.reduce_mean(below, axis=1)
     straddles = _tf.cast(
         (share > 0.0) & (share < 1.0), x.dtype)

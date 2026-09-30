@@ -20,6 +20,7 @@ and the sub-block geometry behind the mesh assignments and `crossed_by`.
 """
 import copy as _copy
 import itertools as _iter
+import warnings as _warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -1766,17 +1767,20 @@ class BlockSet3D(PointData):
         return shares
 
     def needs_splitting(self, split_on: "str | Sequence[str] | None" = None,
-                        tolerance: float = 0.05) -> _np.ndarray:
-        """Which blocks hold more than one answer, and so are worth cutting.
+                        tolerance: "float | None" = None) -> _np.ndarray:
+        """Which blocks a decision's surface runs through, and so are worth
+        cutting.
 
-        A block whose sub-blocks agree, realization by realization, holds one
-        answer however finely it is cut. One whose sub-blocks disagree holds
-        two, and cutting is what separates them.
+        A block is marked where the prediction at its sub-blocks falls on both
+        sides of a cut-off, or of a category's boundary: the surface a contour
+        of the prediction draws passes through it, and cutting the block lets
+        that surface bend there.
 
         Note what this does *not* mark: a block the model is merely unsure
-        about. Realizations either side of a cut-off are the model not
-        knowing, and no amount of cutting will settle that -- the answer to it
-        is another drillhole. Only disagreement *within* a realization counts.
+        about. The prediction is the mean over the realizations, and where the
+        data do not reach, each realization crosses the cut-off somewhere of
+        its own while their mean crosses it nowhere -- cutting there would buy
+        blocks and no surface.
 
         The test is over every decision at once and any one is enough, which
         is the cautious way round on purpose: a block worth splitting for one
@@ -1791,14 +1795,23 @@ class BlockSet3D(PointData):
         ----------
         split_on : str or list, optional
             Which variables get a say. All of them by default.
-        tolerance : float
-            The share of realizations that must find the block divided. Small
-            but not zero, so that one realization in twenty does not carry it.
+        tolerance : float, optional
+            Deprecated, and without effect: a block is divided or it is not.
+            It was the share of realizations that had to find a block divided,
+            and will be removed.
         """
+        if tolerance is not None:
+            _warnings.warn(
+                "`tolerance` has no effect since 0.8.5 -- a block is divided "
+                "where the prediction's sub-blocks straddle a cut-off, which "
+                "is yes or no -- and will be removed", FutureWarning,
+                stacklevel=2)
         shares = self.block_shares(split_on)
         mask = _np.zeros(self.n_data, dtype=bool)
         for values in shares.values():
-            mask |= _np.asarray(values, dtype=float) > tolerance
+            # 0 or 1; a store written before 0.8.5 holds a share of the
+            # realizations, read here as a majority
+            mask |= _np.asarray(values, dtype=float) > 0.5
         return mask & (self._level < self.max_levels)
 
     def _by_level(self):

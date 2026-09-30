@@ -633,37 +633,61 @@ column per category for the kappa (2026-09-11), so where an overall score
 lives in the table is the open question.
 
 **S–M — Batched prediction from a latent node, into a container**
-(requested 2026-09-05). A node's `predict(x, x_var, n_sim, seed)` returns
-the raw four-tuple — mean, variance, simulations, explained variance — and
-nothing else: no batching, no refresh (a caller must `refresh` the tree by
-hand first, or the inducing points still point into the last training
-graph), and no container to land in. Everything that makes a model's
-prediction usable — `_over_batches`, the refresh-once-and-snapshot of
-`refresh_cached`, writing into a variable — lives on `VGPNetwork`, so the
-intermediate values of a tree are reachable only by hand: the benchmark
-that measured chapter 17's walked coordinates read them through
-`interpolate` in hand-cut chunks. Yet those intermediates are what a
-reader asks for — where a `GPWalk` moved the coordinates, what a shared
-parent says before two leaves diverge, what a `Linear` trend contributes —
-for interpretability, or curiosity. Wanted: `node.predict_into(container,
-n_sim=)` or `model.predict_node(node, container, n_sim=)`, batched and
-refreshed like the model's own `predict`, at any node of the tree. **The
-open design question is where the result lives.** Raw arrays are the cheap
-answer and lose the tree addressing, Zarr and the plots. A new variable
-kind is the better one — a *latent* variable of `size` columns holding
-`latent_mean`, `latent_variance` and the simulations, which is exactly the
-shape `ContinuousVariable` already keeps for a model's own output, minus
-what a node has none of: measurements, a likelihood, a unit, a
-back-transform. Declaring it through `_ZARR_ATTRS`/`_DICT_FAMILIES` makes
-the frame, pyvista, Zarr, subsetting and carrying free, as they are for
-every variable. To settle: whether it sits under a name of its own or
-under the variable whose tree it belongs to (`Elements/_latent/walked`),
-what `predict` on a block model does with it (sub-block fan-out and
-`_aggregate` are the likelihood's, and a node has no likelihood — the
-honest answer is point support only, refused on a `BlockSet3D`), and that
-the model's own `predict` keeps writing `latent_mean`/`latent_variance` on
-the measured variable as it does, this being a second door rather than a
-replacement.
+(requested 2026-09-05; plan agreed and **built 2026-09-28, 0.8.5**;
+`test_predict_node.py`. Found in the building: a prediction resumed from
+`unpredicted()` matches a whole one to rounding, 5e-15 at the last rows of
+a batch, not to the bit as the model's `predict` does -- the same draws,
+the batch's shape moving the arithmetic).
+A node's `predict(x, x_var, n_sim, seed)` returns the raw four-tuple and
+nothing else: no batching, no refresh, no container to land in, so the
+values inside a tree -- where a `GPWalk` moved the coordinates, what a
+shared parent says before two leaves diverge, what a `Linear` trend
+contributes -- were reachable only by hand (chapter 17's benchmark read the
+walked coordinates through `interpolate` in hand-cut chunks). Decided:
+
+- **The door is on the model**: `VGPNetwork.predict_node(node, container,
+  n_sim=None, name=None, labels=None, where=None)`, run on `_over_batches`
+  so the refresh, progress, cancel, `where=` (a mask or a stored filter)
+  and `n_sim=None` are `predict`'s own. Any node above the input, the
+  leaves included; an input node is refused (the transform answers that),
+  as is a node outside the model's tree, and on a `ProjectedVGP` if it does
+  not work there. The model's `predict` is unchanged.
+- **The result is a `LatentVariable`** of `size` columns, named after the
+  node unless `name=`, its parts labelled by `labels=` or numbered; each
+  holds `latent_mean` and `latent_variance` (the propagated moments) and
+  the simulations -- no prediction column, no measurements, likelihood,
+  unit or back-transform. Declared like every variable, so paths, frame,
+  pyvista, Zarr, subsetting and carrying come free; `latent_mean` is the
+  predicted marker. The docstring says the realizations carry only the
+  variance the inducing points explain, and that on a nonlinear node the
+  moments are approximations. An existing variable of the same name and
+  another class, size or simulation count is refused; a model refuses it
+  as a training target, as it refuses a `DerivedVariable`.
+- **Realization s is the draw the model used on the way to the first leaf
+  that reaches the node**: the seed shifts of `Add`, `LinearCombination`,
+  `Multiply` and `ProductOfExperts` (parent i gets `seed[0] + i`) replayed
+  along that path, so realization 7 of a trend is the trend inside
+  realization 7 of the output -- through operation nodes; a GP above
+  another reads its moments, not its draws. The gate: the node's
+  realizations, carried through the operations above, give the leaf's.
+- **Point support only**: `Blocks3D`, `BlockSet3D`, `RotatedBlockSet3D`
+  refused, a `Grid3D` over the same box suggested -- the sub-block average
+  is a likelihood's, and a node has none.
+- **Catalogue**: `predict_node` in the workflow, `LatentVariable` in
+  `variable_types` with its columns' roles and scales. The store format
+  stays 2; an older geoML meeting the class fails naming it.
+- **Docs**: a section of chapter 17 on the walked coordinates; no figures.
+
+**M — Latent variables as a model's input** (split from the item above,
+2026-09-28). A `LatentVariable` may enter a new model as a `GaussianInput`
+-- its `latent_mean` the coordinates, its `latent_variance` the location
+variance -- but the door is not settled because the use is wider than one
+variable: several latent variables joined into one input, and latent
+variables from different models joined. To settle: the door (a container
+method building a `GaussianData`, or `GaussianInput` taking variables),
+how variables from different containers are matched by location, and
+whether the full variance or the explained part goes in (the full one is
+the honest uncertainty of where a location sits).
 
 **M — Integrated gradients for explainability.** Attribution of a
 prediction to its inputs, computed as a quadrature sum of gradients along a
@@ -813,6 +837,35 @@ have them all, and left whole rather than cut; anything else is absent
 ground, where an open contour stops and a closed one closes, within a
 hundredth of a cell. `Mesh3D` refuses a point that is not a finite
 number.)
+
+**S–M — Refine on the average, not on every realization** (requested
+2026-09-29; **built 2026-09-29, 0.8.5**: 2633 blocks against 582 on the
+gate's case, the empty half left at 32 coarse blocks instead of 1439, the
+volume on the wrong side of the cut-off 625 m3 against 500;
+`docs/variable-block-models.md`). `needs_splitting` marks a block by `divided`
+(`likelihood._divided`): the share of realizations whose sub-blocks fall
+on both sides of a cut-off, each realization judged on its own. Where the
+data do not constrain the model, every realization is rough on its own
+account and straddles somewhere, so the unconstrained ground is refined as
+hard as the contacts are -- the blocks multiply where there is least to
+resolve. Wanted: judge the split on the average alone -- the sub-blocks of
+the prediction (the mean over realizations, per sub-block), a block cut
+where those fall on both sides of the cut-off, a category's on the mean
+`ind_skew`. This reverses `_divided`'s own argument (that a block is
+divided only if one realization holds two answers, so that model doubt
+never licenses a cut): the mean is smooth where the realizations disagree,
+which is the point. Only the continuous likelihoods change -- a category's
+`ind_skew` is read off the probabilities, already expectations. **Plan
+agreed 2026-09-29**: `_divided` judges the per-sub-block mean over
+realizations (the prediction at sub-block support, the field a contour is
+drawn on), so `divided` is redefined as a 0/1 flag, its catalogue role a
+`value` on `flag`; `tolerance` on `refine` and `needs_splitting` is kept
+and deprecated -- a warning when passed, removed later -- since any value
+under one now gives the same answer. The gate, red first: a small 3-D set
+with data in one half and inducing points in both, the unconstrained half
+left nearly unrefined, the contact still refined, the refined contour
+within a stated tolerance of a fine grid's; measured before and after, and
+recorded in `docs/variable-block-models.md`.
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a
