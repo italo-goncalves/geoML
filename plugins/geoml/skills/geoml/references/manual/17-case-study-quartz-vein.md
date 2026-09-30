@@ -278,7 +278,61 @@ up past the last hole. The uncertainty colouring is what makes the
 comparison fair, because it distinguishes a surface the model is
 committing to from one it is guessing at.
 
-## 17.6 Did the fold help?
+## 17.6 Where the walk moved the ground
+
+The deep model's answer rests on a node nobody measured: `walked`, the
+coordinates after the walk. `predict_node` stops the model's prediction at
+any node of the tree and writes what that node says into a container, as
+`predict` writes what the leaves say. Here it is asked where the walk takes
+every point of a plan section through the vein, and the answer is set
+against where the input put them before the walk.
+
+```python
+section = geoml.data.Grid3D(start=[24850, 15700, 1450], n=[31, 36, 1],
+                            step=[10, 10, 10])
+moved = deep_model.predict_node(walked, section, labels=["u", "v", "w"])
+
+# where the input puts the same points: its transform, about its centre
+deep_input.transform.refresh()
+before = np.asarray(deep_input.transform(
+    np.asarray(section.coordinates) - deep_input.center))
+shift = moved.get_predictions() - before
+print("the walk moves a point by %.2f ranges at most, %.2f on average"
+      % (np.linalg.norm(shift, axis=1).max(),
+         np.linalg.norm(shift, axis=1).mean()))
+
+plan = np.asarray(section.coordinates)
+figure, axes = plt.subplots(figsize=(6.5, 6.5))
+arrows = axes.quiver(plan[:, 0], plan[:, 1], shift[:, 0], shift[:, 1],
+                     np.linalg.norm(shift, axis=1), cmap="viridis")
+figure.colorbar(arrows, ax=axes, shrink=0.7,
+                label="displacement, in ranges")
+axes.set_aspect("equal")
+axes.set_xlabel("East")
+axes.set_ylabel("North")
+axes.set_title("The walk at RL 1450, in the transformed space")
+
+figure.savefig("figures/17-walk.png", dpi=150, bbox_inches="tight")
+```
+
+![Where the walk moves each point of a plan section](https://italo-goncalves.github.io/geoML/_images/17-walk.png)
+
+The arrows live in the space the input's ellipsoid made, where one unit is
+one range, so they say how far the walk carries each point measured in the
+lengths the stationary field sees. Where they are short the walk leaves
+the ground alone and the ellipsoid alone describes it; where they swing,
+the walk is doing the folding.
+
+`moved` is a `LatentVariable`: one part per output of the node, each
+holding the node's `latent_mean` and `latent_variance` and its
+realizations, all on the latent scale, since a node has no likelihood to
+back-transform through. It is saved, subsetted and read by path like any
+other variable, under the node's own name unless `name=` gives another
+(`section.values(moved.name + "/u/latent_mean")` is the first
+coordinate). A node is predicted at points only; a block's value is
+an average a likelihood takes, and a node has none.
+
+## 17.7 Did the fold help?
 
 A surface that fits better is not automatically a better model. The
 comparison that counts is on samples the model did not see, and with 53
@@ -310,6 +364,8 @@ the numbers above illustrate the machinery rather than settle the geology.
 
 > **In the code.** `geoml.latent.GPWalk` is the SDE node, and
 > `geoml.transform.Anisotropy3D` the ellipsoid it takes the burden off.
+> `VGPNetwork.predict_node` writes any node's prediction as a
+> `geoml.data.LatentVariable`.
 > `Attribute.get_contour(value)` builds the `Surface3D`, meshes take
 > predictions like any container, and `Mesh3D.simplify`, `.smooth` and the
 > booleans of chapter 12 apply to the result. `DrillholeData.merge_domains`

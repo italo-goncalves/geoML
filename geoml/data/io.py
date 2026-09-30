@@ -294,9 +294,10 @@ def _supported_top_variables():
     The internal ``_Category``/``_Component`` are only persisted recursively as
     components, never at the top level.
     """
-    return (ContinuousVariable, DerivedVariable, VectorVariable,
-            CompositionalVariable, RockTypeVariable, CategoricalVariable,
-            OrderedRockType, BinaryVariable, AnomalyVariable)
+    return (ContinuousVariable, DerivedVariable, LatentVariable,
+            VectorVariable, CompositionalVariable, RockTypeVariable,
+            CategoricalVariable, OrderedRockType, BinaryVariable,
+            AnomalyVariable)
 
 
 def _write_variable(group, variable):
@@ -317,6 +318,8 @@ def _rebuild_variable(container, group, vmeta):
         # the recipe (the function) lives in the script that derived it;
         # what is reloaded is the values, plus `parents` via node_attrs
         container.variables[name] = DerivedVariable(name, container)
+    elif cls_name == "LatentVariable":
+        container.variables[name] = LatentVariable(name, container, labels)
     elif cls_name == "VectorVariable":
         container.add_vector_variable(name, labels=labels)
     elif cls_name == "CompositionalVariable":

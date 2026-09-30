@@ -303,6 +303,12 @@ class _LatentVariable(_gpr.Parametric):
     # likelihood of a leaf that is not on its realizations instead.
     _GAUSSIAN = "parents"
 
+    # Whether `simulate` hands parent i the seed `[seed[0] + i, seed[1]]`
+    # rather than its own. `VGPNetwork.predict_node` replays the shifts
+    # along the path from a leaf, so that a node's realization s is the
+    # one the leaf's realization s was built from.
+    _SHIFTS_PARENT_SEEDS = False
+
     @property
     def gaussian(self):
         """Whether the node's output is a Gaussian random variable."""
@@ -1735,6 +1741,8 @@ class LinearCombination(_Operation):
 
     This node combines the inputs linearly with positive weights.
     """
+    _SHIFTS_PARENT_SEEDS = True
+
     def __init__(self, *latent_variables, unit_variance=True,
                  per_component=False, weight_concentration=2.0, name=None):
         """
@@ -1920,6 +1928,8 @@ class ProductOfExperts(_Operation):
 
     This node is not capable of propagating inducing points.
     """
+    _SHIFTS_PARENT_SEEDS = True
+
     def __init__(self, *latent_variables, name=None):
         """
         Initializer for ProductOfExperts.
@@ -2098,6 +2108,7 @@ class Multiply(_Operation):
         The node's name, numbered within the tree.
     """
     _GAUSSIAN = False
+    _SHIFTS_PARENT_SEEDS = True
 
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
@@ -2349,6 +2360,8 @@ class Add(_Operation):
     name
         The node's name, numbered within the tree.
     """
+    _SHIFTS_PARENT_SEEDS = True
+
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
         self._size = self._common_size()
@@ -2616,9 +2629,9 @@ class RadialTrend(_FunctionalLatentVariable):
                 _tf.transpose(self.compute_trend(_tf.transpose(ip)))
                 for ip in self.parent.inducing_points
             )
+            # deterministic, one column per output
             self.inducing_points_variance = tuple(
-                _tf.zeros_like(ip_var)
-                for ip_var in self.parent.inducing_points_variance
+                _tf.zeros_like(ip) for ip in self.inducing_points
             )
 
     def kl_divergence(self):

@@ -39,11 +39,14 @@ about each cut-off:
   its sub-blocks and realizations; one minus it is the recoverable
   fraction above, the number a grade–tonnage curve integrates. A
   category's is the share of the block inside the category;
-- `divided` is how often the *realizations disagree about whether the
-  cut-off crosses the block*. This is the one that licenses refinement. A
-  block whose realizations all agree, all ore or all waste, holds one
-  answer however finely it is cut, while a block the cut-off genuinely
-  crosses holds two, and only cutting can separate them.
+- `divided` says whether the cut-off *crosses the block in the
+  prediction*: 1 where the prediction at its sub-blocks falls on both
+  sides, 0 where it does not. This is the one that licenses refinement.
+  The prediction is the mean over the realizations, so a block the model
+  is merely unsure about is not divided: where the data do not reach,
+  every realization crosses the cut-off somewhere of its own and their
+  mean crosses it nowhere, and cutting there would buy blocks and no
+  surface.
 
 ## 8.2 The block model that refines itself
 
@@ -134,8 +137,9 @@ print("volume preserved:",
 The refinement went where the cut-off is, the shell of the pod, and
 nowhere else. The barren bulk stays coarse, the total volume is exact, and
 the finest blocks trace the boundary the decision actually depends on.
-This is the economy of the design: resolution is spent where the *answer*
-is uncertain, not where the field is merely variable.
+This is the economy of the design: resolution is spent where the
+prediction's boundary runs, not where the model is merely unsure or the
+field merely variable.
 
 ## 8.3 The curve it was all for
 

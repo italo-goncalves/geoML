@@ -62,6 +62,7 @@ FUNCTIONS = {
     "geoml.models.VGPNetwork.train_full": "workflow",
     "geoml.models.VGPNetwork.train_svi": "workflow",
     "geoml.models.VGPNetwork.predict": "workflow",
+    "geoml.models.VGPNetwork.predict_node": "workflow",
     "geoml.models.VGPNetwork.save": "workflow",
     "geoml.models.VGPNetwork.open": "workflow",
     "geoml.models.refine": "workflow",
@@ -94,6 +95,8 @@ WORKFLOW = {
     },
     "predict": {
         "predict": "geoml.models.VGPNetwork.predict",
+        # what a node inside the tree says, as a latent variable
+        "node": "geoml.models.VGPNetwork.predict_node",
         "refine": "geoml.models.refine",
         "reach": "geoml.data.containers.PointData.assign_from_data",
         "cutoffs": "geoml.data.variables.ContinuousVariable.set_cutoffs",
@@ -167,6 +170,8 @@ VARIABLES = {
     "ordered_rock_type": ("OrderedRockType", ("n_classes",)),
     "binary": ("BinaryVariable", ()),
     "anomaly": ("AnomalyVariable", ()),
+    # written by `predict_node`, never trained on
+    "latent": ("LatentVariable", ("n_components",)),
 }
 
 _KINDS = {_inspect.Parameter.POSITIONAL_ONLY: "positional",

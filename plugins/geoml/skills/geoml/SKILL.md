@@ -68,7 +68,7 @@ pip install git+https://github.com/italo-goncalves/geoML
 computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` breaks the Cholesky factorizations.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.4.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.5.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -196,7 +196,8 @@ in the catalogue.
   fold, and `models.conformalize` recalibrates the intervals. In-sample scores
   flatter; only out-of-fold ones speak for the ground between samples.
 - **Block models.** A `BlockSet3D` refined by `models.refine`: predict
-  coarse, split only the blocks the model cannot decide, predict what the
+  coarse, split only the blocks the prediction's surface runs through (a
+  block the model is merely unsure about is left whole), predict what the
   split made. `MeshSet` contours a column for the prediction and every
   realization at once, with volumes measured as it goes.
 
@@ -238,6 +239,10 @@ The papers and the code name the same things differently.
 - **The stored realizations are of the ground; a measurement scatters
   around it.** Comparing a prediction with an assay needs
   `model.predict_measurements`, not the stored realizations.
+- **A node inside the tree is predicted with `model.predict_node`**, into
+  a `LatentVariable` on the latent scale: what a `GPWalk` did to the
+  coordinates, what a trend adds. Points only, never a block model; its
+  realizations match the leaf's through operation nodes, not across a GP.
 - **Do not build models in a loop and expect the memory back.** TensorFlow
   keeps a trained model's graph machinery after the model is gone.
   `cross_validate` swaps data into one model for that reason; do the same.

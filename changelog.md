@@ -1,3 +1,49 @@
+## version 0.8.5
+* **A block is split where the prediction crosses a cut-off, not wherever
+some realization does** (roadmap). `divided` judged every realization on
+its own and `needs_splitting` cut a block when more than `tolerance` of them
+straddled a cut-off; where the data do not reach, every realization is as
+rough as the prior and crosses somewhere inside most blocks, so empty
+ground was refined as hard as the contacts. `likelihood._divided` now
+averages the realizations sub-block by sub-block first -- the prediction at
+sub-block support, the field a contour is drawn on -- and `divided` is 1
+where those straddle the cut-off, 0 where not (catalogue role `value` on
+`flag`). The categorical likelihoods already worked this way. `tolerance`
+on `refine` and `needs_splitting` has nothing left to decide: deprecated,
+a `FutureWarning` when passed, removed later; a store written before holds
+a share, read as a majority. Measured on the new gate's case
+(`docs/benchmarks/refine_on_the_mean.py`): 2633 blocks against 582, the
+half with no data kept at its 32 coarse blocks instead of cut into 1439,
+and the volume on the wrong side of the cut-off against a 5 m grid 625 m3
+against 500. One refinement test trained its model four iterations and
+passed only because the old criterion refined noise; it trains to 60 now.
+* **`VGPNetwork.predict_node(node, container)`: what a node inside the
+tree says, written into a container** (roadmap). The model's prediction
+stopped at any node above the input -- where a `GPWalk` moved the
+coordinates, what a shared parent says, what a trend adds -- batched,
+refreshed and resumable as `predict` is (`n_sim=None`, `where=`, progress,
+cancel, `unpredicted()`). It writes a new **`LatentVariable`**: one part
+per output of the node (`labels=`, numbered by default), each holding
+`latent_mean`, `latent_variance` and the realizations, on the latent scale,
+with no measurements, likelihood or back-transform; saved, subsetted and
+read by path like any variable, and refused as a model's training target.
+Realization s of a node is the one realization s of the first leaf above
+it was built from: the seed shifts `Add`, `LinearCombination`, `Multiply`
+and `ProductOfExperts` give their parents (declared as
+`_SHIFTS_PARENT_SEEDS`) are replayed along the path, so the parts of an
+`Add` sum to the leaf to 1e-10, where without the replay they missed by
+4.5. Point support only: block models are refused, a block's value being
+an average a likelihood takes. The catalogue lists `workflow.predict.node`
+and the `latent` variable type; chapter 17 gains a section on where the
+walk moves the ground. A store holding one opens in 0.8.5 and later.
+* **Fixed: a `RadialTrend` under an operation failed to train.** It passed
+on its parent's inducing-point variance -- as wide as the coordinates --
+beside inducing points of its own size, so an `Add` of a `RadialTrend` and
+a GP node on a 3-D input could not stack the two variances (`Dimension 1
+in both shapes must be equal, but are 1 and 3`). The variance is now zero
+at the node's own size. A new catalogue test refreshes every node that
+passes inducing points on and checks both are one column per output.
+
 ## version 0.8.4
 GeoScape's items 37 and 38:
 

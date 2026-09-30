@@ -79,7 +79,7 @@ writes them. `UNITS` is the table of names the package can divide by.
 .. automodule:: geoml.data.variables
    :members: ContinuousVariable, VectorVariable, CompositionalVariable,
              CategoricalVariable, RockTypeVariable, BinaryVariable,
-             DerivedVariable, UNITS
+             DerivedVariable, LatentVariable, UNITS
    :show-inheritance:
 ```
 

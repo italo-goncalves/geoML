@@ -686,6 +686,40 @@ Resolution at 2x2x2: a block carries `8 x n_sim` samples of its own interior —
 at 0 or 1 in 20 000 trials. `tolerance` defaults to 0.05, so one realization
 in twenty finding a block divided does not carry it.
 
+#### Judged on the mean since 0.8.5
+
+Judging each realization on its own mistook one thing for the other it was
+meant to keep apart. Where the data do not reach, every realization is as
+rough as the prior, and a rough field crosses a cut-off *somewhere inside*
+most blocks -- sub-blocks either side within one realization, which is what
+the argument above counted as two answers in one block. So the empty ground
+was refined as hard as the contacts, the blocks multiplying where there is
+least to resolve. The rough realizations there are the model not knowing,
+exactly the case cutting cannot settle.
+
+`_divided` now averages the realizations first, sub-block by sub-block --
+the prediction at sub-block support, the field a contour of the prediction
+is drawn on -- and a block is divided where those means fall on both sides
+of the cut-off: 0 or 1, which leaves `tolerance` with nothing to decide
+(deprecated, a warning when passed). The categorical likelihoods were
+already there, their `ind_skew` being read off the probabilities.
+
+Measured (`docs/benchmarks/refine_on_the_mean.py`, the case of
+`test_ground_without_data_is_not_refined`): data in the west half of a
+160 x 80 x 40 m box, a pod crossing cut-off 1.0 among them, inducing points
+in both halves, 64 coarse 20 m blocks refined to 5 m, the same model both
+times; "wrong side" is the volume of 5 m cells whose block is called above
+the cut-off where the model predicted on a 5 m grid says below, or the
+reverse.
+
+| criterion | blocks | west | east | wrong side |
+|---|---|---|---|---|
+| every realization, `tolerance=0.05` | 2633 | 1194 | 1439 | 625 m3 |
+| the mean | 582 | 550 | 32 | 500 m3 |
+
+The east half, with no data, stays at its 32 coarse blocks; 4.5x fewer
+blocks in all, and a fifth less volume on the wrong side.
+
 ### 7.4 The saving erodes with variable count
 
 Break-even is `p = 87.5%`. If V variables each independently mark a fraction

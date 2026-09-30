@@ -830,8 +830,8 @@ class ContinuousVariable(_Variable):
         "probabilities": ("value", "unit_interval"),
         # the share of a block at or below a cut-off
         "proportions": ("value", "unit_interval"),
-        # how often a cut-off passes through a block
-        "divided": ("uncertainty", "unit_interval"),
+        # whether the prediction's sub-blocks straddle a cut-off
+        "divided": ("value", "flag"),
         "responsibilities": ("value", "unit_interval"),
         "simulations": ("value", "unit"),
     }
@@ -1286,6 +1286,133 @@ class DerivedVariable(ContinuousVariable):
                         % (self.name, self._from()))
 
 
+class _LatentPart(_Variable):
+    """One output of a latent node: its moments and its realizations."""
+    latent_mean: _Attribute
+    latent_variance: _Attribute
+
+    _ZARR_ATTRS = ("latent_mean", "latent_variance")
+    _PREDICTED_MARKER = "latent_mean"
+    _ZARR_HAS_SIMS = True
+    _COLUMNS = {"latent_mean": ("value", "latent"),
+                "latent_variance": ("uncertainty", "latent_squared"),
+                "simulations": ("value", "latent")}
+
+    def __init__(self, name, coordinates):
+        super().__init__(name, coordinates)
+        self.latent_mean = self._Attribute(coordinates)
+        self.latent_variance = self._Attribute(coordinates)
+        self.simulations = None
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        return cls(variable.name, coordinates)
+
+    def get_simulations(self):
+        if self.simulations is not None:
+            _refuse_past_threshold(_store_bytes(self.simulations), self.name)
+        return _np.asarray(self.simulations)
+
+    def get_predictions(self):
+        return self.latent_mean.values.to_numpy()
+
+    def allocate_simulations(self, n_sim):
+        self.simulations = _storage.ArrayStore.allocate(
+            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            owner=self.coordinates)
+
+
+class LatentVariable(_Variable):
+    """
+    What a node inside a model's tree says, at every location.
+
+    Written by :meth:`geoml.models.VGPNetwork.predict_node`: one part per
+    output of the node, each holding the node's mean and variance there and
+    its realizations. Everything is on the latent scale -- a node has no
+    likelihood, so nothing is back-transformed, and there are no
+    measurements, units or cut-offs.
+
+    The moments are the node's own, carried up the tree from the inputs.
+    The realizations carry only the variance a GP node's inducing points
+    explain, so their spread can fall short of `latent_variance`; above a
+    nonlinear node (`Exponentiation`, `Multiply`, `GaussianMixture`) the
+    moments are an approximation and the realizations are the reference.
+
+    A model does not train on it: it holds a prediction, not measurements.
+
+    Attributes
+    ----------
+    components : dict
+        One part per output, keyed by label, each with `latent_mean`,
+        `latent_variance` and `simulations`.
+    """
+    components: "dict[str, _LatentPart]"
+
+    _PART = _LatentPart
+    _LABEL_KIND = "components"
+
+    def __init__(self, name, coordinates, labels):
+        super().__init__(name, coordinates)
+        self.labels = [str(label) for label in labels]
+        self._length = len(self.labels)
+        self.components = {label: _LatentPart(label, coordinates)
+                           for label in self.labels}
+
+    @classmethod
+    def from_variable(cls, coordinates, variable):
+        return cls(variable.name, coordinates, variable.labels)
+
+    @property
+    def n_sim(self):
+        return self.components[self.labels[0]].n_sim
+
+    def training_input(self, idx=None):
+        raise TypeError("%r is a latent node's prediction; a model cannot "
+                        "train on it" % self.name)
+
+    def get_measurements(self):
+        raise TypeError("%r is a latent node's prediction; it holds no "
+                        "measurements" % self.name)
+
+    def get_simulations(self):
+        stores = [self.components[label].simulations for label in self.labels]
+        if all(store is not None for store in stores):
+            _refuse_past_threshold(sum(_store_bytes(s) for s in stores),
+                                   self.name)
+        return _np.stack([self.components[label].get_simulations()
+                          for label in self.labels], axis=2)
+
+    def get_predictions(self):
+        return _np.stack([self.components[label].get_predictions()
+                          for label in self.labels], axis=1)
+
+    def allocate_simulations(self, n_sim):
+        for part in self.components.values():
+            part.allocate_simulations(n_sim)
+
+    def update(self, idx, **kwargs):
+        """Writes one batch: `latent_mean` and `latent_variance` as
+        `(rows, size)`, `simulations` as `(rows, size, n_sim)`."""
+        if "latent_mean" not in kwargs:
+            raise TypeError("%r is a latent node's prediction; a model's "
+                            "prediction cannot be written into it"
+                            % self.name)
+        mean = _np.asarray(kwargs["latent_mean"])
+        variance = _np.asarray(kwargs["latent_variance"])
+        sims = _np.asarray(kwargs["simulations"])
+        for i, label in enumerate(self.labels):
+            part = self.components[label]
+            part.latent_mean.values[idx] = mean[:, i]
+            part.latent_variance.values[idx] = variance[:, i]
+            part._sim_store()[idx, :] = sims[:, i, :]
+
+    def unpredicted(self):
+        """One boolean per location: True where any part is missing its
+        mean."""
+        return _np.any([part.unpredicted()
+                        for part in self.components.values()], axis=0)
+
+
 class VectorVariable(_Variable):
     uncertainty: _Attribute
     components: "dict[str, ContinuousVariable]"
@@ -1682,7 +1809,7 @@ class _Category(_Variable):
         # the category's log-odds against its best rival
         "indicator_predicted": ("value", "log_odds"),
         "proportions": ("value", "unit_interval"),
-        "divided": ("uncertainty", "unit_interval"),
+        "divided": ("value", "flag"),
         "simulations": ("value", "latent"),
     }
     _FAMILY_KEYS = {"proportions": "cutoff", "divided": "cutoff"}

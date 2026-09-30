@@ -582,6 +582,48 @@ def test_refining_stops_on_its_own():
     assert not np.any(refined.needs_splitting())
 
 
+def test_ground_without_data_is_not_refined():
+    """The data fill the west half of the box, a pod crossing the cut-off
+    among them; the inducing points cover both halves, so the realizations
+    east of the data are as rough as the prior. Each crosses the cut-off
+    somewhere in most blocks there, and judging the realizations one by one
+    marked that empty ground as hard as the pod's shell. The average -- the
+    prediction at sub-block support -- is flat there and crosses the
+    cut-off only where the shell runs."""
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(1234)
+    xyz = rng.uniform([0, 0, 0], [80, 80, 40], size=[300, 3])
+    radius = np.linalg.norm(xyz - np.array([40.0, 40.0, 20.0]), axis=1)
+    point = geoml.data.PointData.from_array(xyz)
+    point.add_continuous_variable(
+        "au", 4.0 * np.exp(-(radius / 20.0) ** 2) + 0.02)
+    point.variables["au"].set_cutoffs([1.0])
+
+    east = np.stack(np.meshgrid(np.arange(90, 160, 20.0),
+                                np.arange(10, 80, 20.0), [10.0, 30.0],
+                                indexing="ij"), axis=-1).reshape(-1, 3)
+    ip = geoml.data.inducing.combine(
+        geoml.data.inducing.from_kmeans(point, 60, seed=0), east)
+    root = geoml.latent.BasicInput(
+        [ip], transform=geoml.transform.Isotropic(15.0))
+    gp = geoml.latent.BasicGP(root, size=1, kernel=geoml.kernels.Gaussian())
+    model = geoml.models.VGPNetwork(
+        point, "au", geoml.likelihood.Gaussian(), gp,
+        options=geoml.models.GPOptions(verbose=False, training_samples=10))
+    model.train_full(max_iter=100)
+
+    blocks = geoml.data.BlockSet3D([10, 10, 10], [8, 4, 2], [20.0] * 3,
+                                   discretization=(2, 2, 2), max_levels=1)
+    model.predict(blocks, n_sim=20)
+    marked = blocks.needs_splitting()
+    centres = np.asarray(blocks.coordinates)
+    empty = centres[:, 0] > 90
+
+    assert not np.any(marked[empty])
+    # the pod's shell still cuts the blocks it runs through
+    assert np.any(marked[~empty])
+
+
 def _vector_model(seed=1234):
     """Two grades modelled together, so the components carry cut-offs of
     their own -- the shape `block_shares` used to guess wrong about."""
@@ -1049,6 +1091,9 @@ def test_refine_never_visits_the_ground_it_was_not_asked_about():
     Blocks left out are never predicted at any pass, and never cut either --
     they hold nothing to decide and draw no surface."""
     model = _model()
+    # trained until the prediction reaches the cut-off, which is what a
+    # block is divided by; four iterations leave it near the prior's mean
+    model.train_full(max_iter=60)
     model.data.variables["y"].set_cutoffs([0.5])
     blocks = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 8], [20.0, 20.0, 20.0],
                                    max_levels=2)
