@@ -150,6 +150,38 @@ def _refuse_past_threshold(nbytes, name):
                _storage.DEFAULT_THRESHOLD / 1024 ** 2))
 
 
+def _blank_like(store, coordinates):
+    """An empty realization store of `store`'s kind on `coordinates`:
+    missing (NaN, or -1 for integer labels) until written."""
+    dtype = _np.dtype(store.dtype)
+    fill = _np.nan if _np.issubdtype(dtype, _np.floating) else -1
+    return _storage.ArrayStore.allocate(
+        (coordinates.n_data, store.shape[1]), dtype=dtype, fill_value=fill,
+        owner=coordinates)
+
+
+def _write_mixture(variable, idx, kwargs):
+    """What a mixture of likelihoods adds to a prediction, on the node it
+    belongs to: each realization's population, and the expected share of
+    each population, filed as the responsibilities -- the share before a
+    measurement, which `VGPNetwork.responsibilities` updates where one was
+    read."""
+    if "population" in kwargs.keys():
+        labels = _np.asarray(kwargs["population"])
+        if variable.population is None:
+            variable.population = _storage.ArrayStore.allocate(
+                (variable.coordinates.n_data, labels.shape[1]),
+                dtype=_np.int8, fill_value=-1, owner=variable.coordinates)
+        variable.population[idx, :] = labels
+    if "shares" in kwargs.keys():
+        shares = _np.asarray(kwargs["shares"])
+        for k in range(shares.shape[1]):
+            if k not in variable.responsibilities:
+                variable.responsibilities[k] = variable._Attribute(
+                    variable.coordinates)
+            variable.responsibilities[k].values[idx] = shares[:, k]
+
+
 class _Variable(_TreeNode):
     """Representation of a dependent random variable."""
 
@@ -331,9 +363,10 @@ class _Variable(_TreeNode):
             fresh.labels = old.labels
             fresh.values[:n_kept] = _np.asarray(old.values)[keep]
 
-        if self._ZARR_HAS_SIMS and self.simulations is not None:
-            new.allocate_simulations(self.simulations.shape[1])
-            _carry_rows(self.simulations, new.simulations, keep)
+        for name, store in self.realization_stores():
+            fresh = _blank_like(store, new.coordinates)
+            setattr(new, name, fresh)
+            _carry_rows(store, fresh, keep)
 
         for family in self._DICT_FAMILIES:
             target = getattr(new, family)
@@ -421,8 +454,8 @@ class _Variable(_TreeNode):
             target = getattr(new, family)
             for key, attribute in (getattr(self, family, None) or {}).items():
                 target[key] = attribute[item]
-        if getattr(self, "simulations", None) is not None:
-            new.simulations = _subset_simulations(self.simulations, item)
+        for name, store in self.realization_stores():
+            setattr(new, name, _subset_simulations(store, item))
         theirs = new.child_nodes()
         for label, child in self.child_nodes().items():
             child._subset_into(theirs[label], item)
@@ -695,10 +728,14 @@ class _Variable(_TreeNode):
             info = self._save_attr(group, prefix, role)
             if info is not None:
                 meta["attrs"][role] = info
-        if self._ZARR_HAS_SIMS and self.simulations is not None:
-            key = prefix + "/simulations"
-            self.simulations.write_into(group, key)
-            meta["simulations"] = key
+        for name, store in self.realization_stores():
+            key = prefix + "/" + name
+            store.write_into(group, key)
+            if name == "simulations":
+                # the key every store written before the others existed has
+                meta["simulations"] = key
+            else:
+                meta.setdefault("stores", {})[name] = key
         # the dict families and the node's own facts, off the declarations,
         # with the Zarr key spelling the same string `get` takes:
         # `assay/Zn/quantiles/0.5`
@@ -740,6 +777,8 @@ class _Variable(_TreeNode):
         if meta.get("simulations") is not None:
             self.simulations = _storage.ArrayStore.wrap_zarr(
                 group[meta["simulations"]])
+        for name, key in meta.get("stores", {}).items():
+            setattr(self, name, _storage.ArrayStore.wrap_zarr(group[key]))
         for family, entries in meta.get("dicts", {}).items():
             target = getattr(self, family)
             for info in entries:
@@ -816,8 +855,10 @@ class ContinuousVariable(_Variable):
                    "prediction", "dispersion", "noise_variance")
     _PREDICTED_MARKER = "prediction"
     _ZARR_HAS_SIMS = True
+    # a mixture of likelihoods' population per realization, beside them
+    _REALIZATION_STORES = ("simulations", "population")
     _DICT_FAMILIES = ("quantiles", "probabilities", "proportions", "divided",
-                      "responsibilities")
+                      "responsibilities", "population_prediction")
     _COLUMNS = {
         "measurements": ("measurement", "unit"),
         "latent_mean": ("value", "latent"),
@@ -834,10 +875,15 @@ class ContinuousVariable(_Variable):
         "divided": ("value", "flag"),
         "responsibilities": ("value", "unit_interval"),
         "simulations": ("value", "unit"),
+        # which population of a mixture of likelihoods each realization
+        # takes here, and each population's own prediction
+        "population": ("value", "classes"),
+        "population_prediction": ("value", "unit"),
     }
     _FAMILY_KEYS = {"quantiles": "probability", "probabilities": "cutoff",
                     "proportions": "cutoff", "divided": "cutoff",
-                    "responsibilities": "component"}
+                    "responsibilities": "component",
+                    "population_prediction": "population"}
     _NODE_ATTRS = ("cutoffs", "unit")
     # `dispersion` and the quantile families are read again off the
     # realizations instead (`_coarsen_realizations`, `_coarsen_into`)
@@ -916,6 +962,12 @@ class ContinuousVariable(_Variable):
         # Which noise component each measurement came from, under a mixture
         # likelihood; empty under every other one. See `set_responsibilities`.
         self.responsibilities = _col.OrderedDict()
+
+        # Under a mixture of likelihoods: each realization's population at
+        # each location, `(n_data, n_sim)` small integers, and each
+        # population's own prediction. Absent under every other likelihood.
+        self.population = None
+        self.population_prediction = _col.OrderedDict()
 
     def set_unit(self, unit: "_types.Unit | None") -> "ContinuousVariable":
         """What the values are measured in.
@@ -1109,6 +1161,17 @@ class ContinuousVariable(_Variable):
             if sims.ndim == 3:
                 sims = sims[:, 0, :]
             self._sim_store()[idx, :] = sims
+
+        _write_mixture(self, idx, kwargs)
+        if "population_prediction" in kwargs.keys():
+            values = _np.asarray(kwargs["population_prediction"])
+            if values.ndim == 3:
+                values = values[:, 0, :]
+            for k in range(values.shape[1]):
+                if k not in self.population_prediction:
+                    self.population_prediction[k] = self._Attribute(
+                        self.coordinates)
+                self.population_prediction[k].values[idx] = values[:, k]
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
@@ -1420,12 +1483,15 @@ class VectorVariable(_Variable):
 
     _ZARR_ATTRS = ("uncertainty",)
     _PREDICTED_MARKER = "uncertainty"
-    # the mixture is over the row, so the responsibilities belong to the
-    # variable rather than to its components -- one answer per location
+    # the mixture is over the row, so the responsibilities -- and a mixture
+    # of likelihoods' population per realization -- belong to the variable
+    # rather than to its components: one answer per location
     _DICT_FAMILIES = ("responsibilities",)
+    _REALIZATION_STORES = ("simulations", "population")
     # the mean of the components' latent variances
     _COLUMNS = {"uncertainty": ("uncertainty", "latent_squared"),
-                "responsibilities": ("value", "unit_interval")}
+                "responsibilities": ("value", "unit_interval"),
+                "population": ("value", "classes")}
     _FAMILY_KEYS = {"responsibilities": "component"}
     _BLOCK_MEANS = ("uncertainty",)
     _LABEL_KIND = "components"
@@ -1456,6 +1522,7 @@ class VectorVariable(_Variable):
         # Which noise component each measurement came from, under a mixture
         # likelihood; empty under every other one.
         self.responsibilities = _col.OrderedDict()
+        self.population = None
 
     def get_measurements(self):
         # not allowing partial missing data
@@ -1555,7 +1622,11 @@ class VectorVariable(_Variable):
                     # this one takes only the cut-offs it declared
                     declared = len(self.components[lb].cutoffs or [])
                     values[key] = column[:, :declared]
+            if "population_prediction" in kwargs.keys():
+                values["population_prediction"] = _np.asarray(
+                    kwargs["population_prediction"])[:, i, :]
             self.components[lb].update(idx, **values)
+        _write_mixture(self, idx, kwargs)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 

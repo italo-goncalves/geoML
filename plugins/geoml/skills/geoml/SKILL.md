@@ -68,7 +68,7 @@ pip install git+https://github.com/italo-goncalves/geoML
 computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` breaks the Cholesky factorizations.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.5.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.6.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -176,6 +176,16 @@ in the catalogue.
   and over-wide intervals, though its bound may look better. For data with
   gross errors, `likelihood.Mixture` (experimental) names the bad readings,
   with its warping led by `ZScore(robust=True)`.
+- **Several populations.** Where one variable is drawn from populations that
+  differ in level or skew, ore and waste say, use
+  `likelihood.LikelihoodMixture` over continuous likelihoods, each with its
+  own warping. With `shares="latent"` the shares change from place to place:
+  read them from a GP node of their own, apart from the populations', and
+  where a domain was logged let a `CategoricalGaussianIndicator` with
+  `bias=True`, trained on every logged interval rather than the assayed ones
+  alone, read the same node. On one deposit it beat a single likelihood on
+  every metal out of fold, but its intervals came out narrower than the
+  held-out data supported; check them.
 - **Inducing points.** The data's own locations plus a regular backbone,
   divided into overlapping experts: `data.inducing.experts` over
   `data.inducing.combine`. How many a model can absorb depends on the whole

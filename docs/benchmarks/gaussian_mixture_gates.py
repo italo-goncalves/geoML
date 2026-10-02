@@ -57,12 +57,13 @@ def curves(x):
     return a, -a
 
 
-def samples(case, seed=0):
+def samples(case, seed=0, membership=False):
     rng = np.random.default_rng(seed)
     x = np.sort(rng.uniform(0.0, 10.0, N))
     a, b = curves(x)
     which = x >= BOUNDARY if case == "split" else rng.uniform(size=N) < 0.5
-    return x, np.where(which, b, a) + rng.normal(0.0, NOISE, N)
+    y = np.where(which, b, a) + rng.normal(0.0, NOISE, N)
+    return (x, y, which) if membership else (x, y)
 
 
 def data(case):
@@ -231,10 +232,182 @@ def figure(path="docs/benchmarks/figures/gaussian_mixture_gate1.png"):
     print("wrote", path)
 
 
+# --------------------------------------------------------------------------- #
+# likelihood.LikelihoodMixture, 2026-10-01: the same gates, and a third
+# --------------------------------------------------------------------------- #
+# The mixture of densities the roadmap's "mixture of likelihoods" item
+# designs: two latent columns of one GP on the range-2 root, one per
+# component, each component a Gaussian with its own warping.
+#
+# - **split** and **cross** as above, and on the cross the share of samples
+#   whose largest responsibility is on their own curve -- over all of them,
+#   and over those where the curves are more than 0.75 apart (nearer, a
+#   value cannot say which curve it came from: about a quarter of them).
+# - **skew**: two populations over the same ground, every sample from one
+#   at random -- a lognormal one, `exp(0.6 sin(2 pi x / 4) + 0.4 e)`, and a
+#   near-normal one, `3 + 0.5 sin(2 pi x / 6) + 0.1 e`. `separate` gives the
+#   first a Box-Cox warping and the second a z-score; `shared` hands both
+#   one Box-Cox chain. Scored on 400 fresh samples by the CRPS of the
+#   measurement's predictive distribution, and by the responsibilities on
+#   the training samples.
+
+def skew_samples(n, seed):
+    rng = np.random.default_rng(seed)
+    x = np.sort(rng.uniform(0.0, 10.0, n))
+    lognormal = np.exp(0.6 * np.sin(2 * np.pi * x / 4)
+                       + 0.4 * rng.normal(size=n))
+    normal = 3 + 0.5 * np.sin(2 * np.pi * x / 6) + 0.1 * rng.normal(size=n)
+    which = rng.uniform(size=n) < 0.5
+    return x, np.where(which, normal, lognormal), which
+
+
+def mixture_likelihood(arm):
+    import geoml.warping as wp
+    if arm == "latent":
+        return lk.LikelihoodMixture([lk.Gaussian(wp.ZScore(1)),
+                                     lk.Gaussian(wp.ZScore(1))],
+                                    shares="latent")
+    if arm == "separate_latent":
+        return lk.LikelihoodMixture([
+            lk.Gaussian(wp.ChainedWarping(wp.BoxCox(1), wp.ZScore(1))),
+            lk.Gaussian(wp.ZScore(1))], shares="latent")
+    if arm == "shared":
+        chain = wp.ChainedWarping(wp.BoxCox(1), wp.ZScore(1))
+        return lk.LikelihoodMixture([lk.Gaussian(chain), lk.Gaussian(chain)])
+    if arm == "separate":
+        return lk.LikelihoodMixture([
+            lk.Gaussian(wp.ChainedWarping(wp.BoxCox(1), wp.ZScore(1))),
+            lk.Gaussian(wp.ZScore(1))])
+    return lk.LikelihoodMixture([lk.Gaussian(wp.ZScore(1)),
+                                 lk.Gaussian(wp.ZScore(1))])
+
+
+def mixture_model(case, arm="mixture"):
+    geoml.set_seed(1234)
+    if case == "skew":
+        x, y, which = skew_samples(N, 0)
+    else:
+        x, y, which = samples(case, membership=True)
+    container = geoml.data.PointData.from_array(x[:, None], ["X"])
+    container.add_continuous_variable("v", y)
+    likelihood = mixture_likelihood(arm)
+    start = root(2.0)
+    if case == "split" and likelihood.shares == "latent":
+        # the populations and the shares on GPs of their own, so each
+        # trains its own range
+        node = latent.Concatenate(latent.BasicGP(start, size=2),
+                                  latent.BasicGP(start, size=2))
+    else:
+        node = latent.BasicGP(start, size=likelihood.size)
+    model = geoml.models.VGPNetwork(
+        container, "v", likelihood, node,
+        options=geoml.models.GPOptions(verbose=False, training_samples=20))
+    model.train_full(max_iter=ITERATIONS)
+    return model, container, which
+
+
+def agreement(model, container, which, apart=None):
+    """The share of samples whose largest responsibility is on their own
+    population, under the better of the two ways of naming them."""
+    first = model.responsibilities(container)["v"][:, 0] > 0.5
+    hits = first == which
+    keep = np.ones_like(hits) if apart is None else apart
+    return max(hits[keep].mean(), (~hits)[keep].mean())
+
+
+def mixture_run(case, arm="mixture"):
+    start = time.time()
+    model, container, which = mixture_model(case, arm)
+    row = {"arm": "likelihood_" + arm, "case": case,
+           "seconds": time.time() - start}
+    if "weights" in model.likelihoods[0].parameters:
+        row["shares"] = np.round(np.asarray(
+            model.likelihoods[0].parameters["weights"].get_value()), 2)
+    if "amplitude" in model.likelihoods[0].parameters:
+        row["amplitude"] = float(
+            model.likelihoods[0].parameters["amplitude"].get_value())
+        bias = np.asarray(model.likelihoods[0].parameters["bias"]
+                          .get_value())
+        row["bias_shares"] = np.round(np.exp(bias) / np.exp(bias).sum(), 2)
+    if case == "skew":
+        x, y, _ = skew_samples(400, 1)
+        target = geoml.data.PointData.from_array(x[:, None], ["X"])
+        draws = model.predict_measurements(target, n_sim=50)["v"][:, 0, :]
+        row["crps"] = metrics.crps(y, draws)
+        row["agreement"] = agreement(model, container, which)
+        return row
+
+    x = np.linspace(0.0, 10.0, 400)
+    a, b = curves(x)
+    target = geoml.data.PointData.from_array(x[:, None], ["X"])
+    model.predict(target, n_sim=200)
+    prediction = np.asarray(target.values("v/prediction"), dtype=float)
+    sims = np.asarray(target.variables["v"].get_simulations())
+    if case == "split":
+        truth = np.where(x >= BOUNDARY, b, a)
+        row["rmse"] = np.sqrt(np.mean((prediction - truth) ** 2))
+        row["crps"] = metrics.crps(truth, sims)
+    else:
+        apart = np.abs(a - b) > 0.75
+        near_a = (np.abs(sims - a[:, None]) < 0.25).mean(axis=1)[apart]
+        near_b = (np.abs(sims - b[:, None]) < 0.25).mean(axis=1)[apart]
+        row["bimodal"] = np.mean((near_a >= 0.2) & (near_b >= 0.2))
+        row["near_a"], row["near_b"] = near_a.mean(), near_b.mean()
+        xd, _, _ = samples("cross", membership=True)
+        ad, bd = curves(xd)
+        row["agreement_all"] = agreement(model, container, which)
+        row["agreement_apart"] = agreement(model, container, which,
+                                           np.abs(ad - bd) > 0.75)
+        # the same question asked where each sample is: is the component
+        # it is given to the one running along its own curve there -- a
+        # component may pass from one curve to the other at a crossing,
+        # where nothing tells them apart, which a single naming cannot see
+        on_own = local_agreement(model, container, which, ad, bd)
+        row["local_all"] = on_own.mean()
+        row["local_apart"] = on_own[np.abs(ad - bd) > 0.75].mean()
+    return row
+
+
+def local_agreement(model, container, which, a, b):
+    """Per sample: does the component holding its largest responsibility
+    run nearer its own curve than the other one, at its own x."""
+    lik = model.likelihoods[0]
+    probe = geoml.data.PointData.from_array(
+        np.asarray(container.coordinates), ["X"])
+    latent_var = model.predict_node(model.leaves[0], probe, n_sim=2,
+                                    name="latent")
+    mean = latent_var.get_predictions()
+    given = np.argmax(model.responsibilities(container)["v"], axis=1)
+    values = np.stack([np.asarray(c.warping.backward(mean[:, [k]]))[:, 0]
+                       for k, c in enumerate(lik.components)], axis=1)
+    at = values[np.arange(len(given)), given]
+    own = np.where(which, b, a)
+    other = np.where(which, a, b)
+    return np.abs(at - own) < np.abs(at - other)
+
+
 if __name__ == "__main__":
     import sys
     if sys.argv[1:] == ["figure"]:
         figure()
+        sys.exit()
+    if sys.argv[1:2] == ["likelihood"]:
+        if sys.argv[2:] == ["cross"]:
+            cases = (("cross", "mixture"),)
+        elif sys.argv[2:] == ["latent"]:
+            cases = (("split", "latent"), ("cross", "latent"),
+                     ("skew", "separate_latent"))
+        else:
+            cases = (("cross", "mixture"), ("split", "mixture"),
+                     ("skew", "separate"), ("skew", "shared"))
+        if len(cases) > 1:
+            row = run("gp", "split")
+            print("  ".join("%s=%s" % (k, ("%.3f" % v) if isinstance(
+                v, float) else v) for k, v in row.items()), flush=True)
+        for case, arm in cases:
+            row = mixture_run(case, arm)
+            print("  ".join("%s=%s" % (k, ("%.3f" % v) if isinstance(
+                v, float) else v) for k, v in row.items()), flush=True)
         sys.exit()
     for case, arms in (("split", ("gp", "deep", "deep_spherical", "shared",
                                   "smooth", "samples50")),

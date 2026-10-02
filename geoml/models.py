@@ -1825,7 +1825,8 @@ class VGPNetwork(_GPModel):
                 # projection no latent column belongs to any one component,
                 # and storing one under a component's name would be wrong
                 # in a way nobody would catch.
-                elementwise = lik.warped and lik.warping.elementwise
+                elementwise = lik._SINGLE_WARPING \
+                    and lik.warping.elementwise
                 newdata.variables[v].update(batch, elementwise=elementwise,
                                             **upd)
 
@@ -1883,6 +1884,10 @@ class VGPNetwork(_GPModel):
             has_value = _np.asarray(has_value)
             if has_value.ndim == 1:
                 has_value = has_value[:, None]
+            if not lik._SINGLE_WARPING:
+                # a mixture of likelihoods has a warped space per component
+                # and no one to store
+                continue
             # the whole row or nothing: a warping may mix the columns
             full = rows & _np.all(has_value == 1.0, axis=1)
             if not full.any():
@@ -2200,8 +2205,9 @@ class VGPNetwork(_GPModel):
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
 
+        mixtures = (_lk.Mixture, _lk.LikelihoodMixture)
         wanted = [(v, lik) for v, lik in zip(self.variables, self.likelihoods)
-                  if isinstance(lik, _lk.Mixture)]
+                  if isinstance(lik, mixtures)]
         if not wanted:
             raise ValueError(
                 "no variable in this model has a mixture likelihood, and "
@@ -2224,7 +2230,7 @@ class VGPNetwork(_GPModel):
             var = self._by_likelihood(vars_)
             return [(m, v) for m, v, lik
                     in zip(mu, var, self.likelihoods)
-                    if isinstance(lik, _lk.Mixture)]
+                    if isinstance(lik, mixtures)]
 
         chunks = {v: ([], []) for v, _ in wanted}
         for _, output in self._over_batches(newdata, batch_moments):

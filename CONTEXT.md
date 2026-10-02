@@ -186,6 +186,25 @@ What connects a latent field to measured values, holding the measurement
 error and the back-transformation. It holds no data of its own.
 _Avoid_: loss, observation model
 
+**Population**:
+One of the groups a mixture of likelihoods divides a variable's
+measurements into — ore and waste, or the picks of two horizons — each with
+its own latent field, noise and warping. A measurement comes from exactly
+one population; which one is what its responsibilities estimate.
+_Avoid_: component (a part of a vector variable), category (a class the
+data name), cluster, regime
+
+**Share**:
+How likely a population is at a location before anything there is
+measured. Fixed over the whole model, or a field of its own that changes
+from place to place.
+_Avoid_: weight, proportion (a share of a block below a cut-off), prior
+
+**Responsibility**:
+How likely a population is to have produced one measurement, once that
+measurement is known — the share updated by the value read.
+_Avoid_: posterior share, membership, assignment
+
 ## Long calls
 
 **Task**:

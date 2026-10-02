@@ -1,3 +1,59 @@
+## version 0.8.6
+* **`likelihood.LikelihoodMixture`: a mixture of whole likelihoods**
+(roadmap item on mixing densities). Every measurement comes from one of
+several populations, each with its own latent columns, family, noise and
+warping, so two populations may differ in skew as well as in location and
+may cross anywhere -- the overlapping mixture of GPs of Lázaro-Gredilla et
+al. (2012). Not today's `Mixture`, which keeps its name and mixes noise
+widths around one latent value. The bound per row is the log of the
+populations' densities in data space, each with its own warping's
+Jacobian, weighted by the shares. The shares are `"fixed"`, one per
+population trained over the model, or `"latent"`, the softmax of one more
+latent column per population, scaled by a trained `amplitude` and moved
+by a trained `bias` per population -- what the shares return to away from
+the data -- so they change from place to place; their columns are best a
+GP of their own, which a categorical likelihood on a logged domain may
+also read. `initialize` starts the populations apart: the rows clustered
+through a per-column Yeo-Johnson transform (normal scores tied at the
+median and the clustering broke the tie differently from run to run),
+each warping started on its group, the shares on the groups' sizes.
+Realization `s` holds one interleaved point and takes, at each location,
+the population whose interval of its own cumulative shares holds it, so
+the plain ensemble is the mixture and every reader of realizations --
+quantiles, cut-off shares, blocks, measurement samples,
+cross-validation -- needs nothing new. A prediction writes the expected
+shares under `responsibilities/<k>`, each population's prediction under
+`population_prediction/<k>`, and, at point support, each realization's
+population under `<variable>/population/<i>` (small integers, -1 where
+missing; absent where no mixture models the variable). Gates
+(`docs/benchmarks/gaussian_mixture_gates.py likelihood latent`): two
+regimes split at a boundary, rmse 0.146 and CRPS 0.031 against one GP's
+0.192 and 0.078; two crossing curves, bimodal everywhere they are apart,
+97.5% of samples given to the population running along their own curve;
+two populations of different skew, separate warpings beating one shared.
+On a deposit's Ag, Pb and Zn (a local benchmark, the data not ours to
+publish), out of fold by hole, every mixture beat the recommended vector
+chain on every metal, and shares learned from the metals alone found the
+logged ore between holes better than a rock-type likelihood trained on it.
+* **The realizations a variable holds are declared** (`_TreeNode
+._REALIZATION_STORES`, `realization_stores()`): carrying, subsetting,
+Zarr both ways, the export, the path and the realization walk loop over
+them, where each named `simulations`. A variable's population store rides
+every one of them.
+* **`CategoricalGaussianIndicator(n, bias=True)`: a trained bias per
+category.** Away from the data a category's latent value returns to zero
+and every category is as likely as the next; with the bias each latent
+value is shifted by a trained constant before the bound, the
+probabilities and the realizations read it, so the categories return to
+the proportions the data support -- a mesh set's `"largest"` winner
+follows it too. `HierarchicalGaussianIndicator` inherits it. Off by
+default: a saved model stores its parameters by position, and one more on
+every indicator would refuse every model saved before.
+* **The model diagram draws a mixture's populations**, one warping chain
+each from the leaf to the one variable, a warping they share drawn once;
+**`transformed_pairs` refuses a mixture**, which has no one warped space,
+and the `warped_*` metadata a prediction writes skips it.
+
 ## version 0.8.5
 * **A block is split where the prediction crosses a cut-off, not wherever
 some realization does** (roadmap). `divided` judged every realization on

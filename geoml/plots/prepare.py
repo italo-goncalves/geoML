@@ -32,6 +32,7 @@ import scipy.stats as _stats
 
 import geoml._types as _types
 import geoml.data as _data
+import geoml.likelihood as _lk
 import geoml.math.geometry as _geom
 import geoml.metrics as _gmet
 import geoml.storage as _storage
@@ -282,6 +283,10 @@ def warped_values(model, name: str):
                        % (name, ", ".join(names)))
 
     likelihood = model.likelihoods[names.index(name)]
+    if isinstance(likelihood, _lk.LikelihoodMixture):
+        raise TypeError(
+            "%s warps each population its own way, so there is no one "
+            "warped space to show" % type(likelihood).__name__)
     warping = getattr(likelihood, "warping", None)
     if warping is None:
         raise TypeError(

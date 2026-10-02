@@ -580,6 +580,9 @@ def _likelihood(cls, length):
         return cls(wp.Identity(length))
     if cls is lk.Mixture:
         return cls(wp.ZScore(length))
+    if cls is lk.LikelihoodMixture:
+        return cls([lk.Gaussian(wp.ZScore(length)),
+                    lk.Gaussian(wp.ZScore(length))], shares="latent")
     if cls in (lk.CategoricalGaussianIndicator,
                lk.HierarchicalGaussianIndicator):
         return cls(2)
@@ -794,13 +797,14 @@ def _variable_classes():
 @pytest.mark.parametrize("cls", _variable_classes(), ids=lambda c: c.__name__)
 def test_every_column_a_variable_writes_says_what_it_is(cls):
     written = set(cls._ZARR_ATTRS) | set(cls._DICT_FAMILIES) \
-        | ({"simulations"} if cls._ZARR_HAS_SIMS else set())
+        | ({"simulations"} if cls._ZARR_HAS_SIMS else set()) \
+        | (set(cls._REALIZATION_STORES) - {"simulations"})
     assert set(cls._COLUMNS) == written
     for name, (role, scale) in cls._COLUMNS.items():
         assert role in ROLES and scale in SCALES, name
     assert set(cls._FAMILY_KEYS) == set(cls._DICT_FAMILIES)
     assert set(cls._FAMILY_KEYS.values()) <= {"cutoff", "probability",
-                                              "component"}
+                                              "component", "population"}
 
 
 def test_the_catalogue_lists_every_variable_type_s_columns(built):

@@ -284,6 +284,12 @@ class _Likelihood(_gpr.Parametric):
     # integrate over the moments only.
     _MONTE_CARLO = False
 
+    # Whether the data reach the latent space through one `warping` of this
+    # likelihood's own, which the model reads for the warped values it
+    # stores; a mixture of likelihoods has one per component and none of
+    # its own.
+    _SINGLE_WARPING = False
+
     def __init__(self, size: int):
         super().__init__()
         self._size = size
@@ -564,6 +570,7 @@ class _ContinuousLikelihood(_Likelihood):
     """
     _MONTE_CARLO = True
     warped = True
+    _SINGLE_WARPING = True
 
     # Which parameters set how wide this noise is, and how they carry it: the
     # exponent by which each moves when the width is multiplied. A Gaussian's
@@ -1266,6 +1273,367 @@ class Mixture(_ContinuousLikelihood):
                                               keepdims=True)).numpy()
 
 
+def _interleaved_points(n):
+    """`(j + 0.5) / n` for j in 0..n-1, in an order that spreads them: the
+    rank of each index's base-2 radical inverse, so any first k points
+    sample (0, 1) about evenly."""
+    def radical_inverse(i):
+        value, scale = 0.0, 0.5
+        while i:
+            value += scale * (i & 1)
+            i >>= 1
+            scale /= 2
+        return value
+    order = _np.argsort(_np.argsort([radical_inverse(i) for i in range(n)]))
+    return (order + 0.5) / n
+
+
+class LikelihoodMixture(_Likelihood):
+    """
+    A mixture of whole likelihoods, each with its own latent value.
+
+    Every measurement comes from exactly one population, chosen by its value
+    rather than its place, so the populations cross and overlap anywhere and
+    a prediction is a mixture -- multimodal where they separate (the
+    overlapping mixture of GPs of Lázaro-Gredilla et al., 2012). Not to be
+    confused with :class:`Mixture`, which mixes several noise widths around
+    one latent value through one warping: here each population reads its own
+    latent columns and brings its own family, noise and warping, so two
+    populations may differ in skew as well as in location.
+
+    Population `k` reads the next `components[k].size` latent columns, in
+    the order given; under `shares="latent"` one more column per population
+    follows them, whose softmax, scaled by a trained `amplitude` and moved
+    by a trained `bias` per population, is the share of each population from
+    place to place -- the bias being what the shares return to away from the
+    data. A shared warping is the same object given to every component.
+    The share columns are best read from a GP of their own, apart from the
+    populations', which a categorical likelihood on a logged domain may
+    also read.
+
+    Parameters
+    ----------
+    components
+        Two or more continuous likelihoods, one per population, all reading
+        the variable's number of columns.
+    weights
+        The populations' shares under `shares="fixed"`, summing to one;
+        equal by default, and set from the data by `initialize`.
+    shares
+        `"fixed"`, one share per population over the whole model, or
+        `"latent"`, shares read from latent columns, so that they change
+        from place to place.
+
+    Notes
+    -----
+    The bound at each row is `log Σ_k π_k exp(E_q[log p_k(y | f_k)])`, each
+    population's density in data space with its own warping's Jacobian;
+    with latent shares it is averaged over the share columns' realizations.
+    Realization `s` holds one point `u_s` in (0, 1), interleaved, and at
+    each location belongs to the population whose interval of its own
+    cumulative shares holds it -- the same population everywhere when the
+    shares are fixed, one that changes where its share field crosses the
+    point when they are latent. Either way the fraction of realizations in a
+    population is the expected share, so the plain ensemble is the mixture.
+
+    References
+    ----------
+    Lázaro-Gredilla, M., Van Vaerenbergh, S. and Lawrence, N. D. (2012).
+    Overlapping mixtures of Gaussian processes for the data association
+    problem. Pattern Recognition, 45(4), 1386-1395.
+    """
+    _MONTE_CARLO = True
+    warped = True
+
+    def __init__(self, components: "Sequence[_ContinuousLikelihood]",
+                 weights: "_types.ArrayLike | None" = None,
+                 shares: str = "fixed"):
+        components = list(components)
+        if len(components) < 2:
+            raise ValueError("a mixture needs at least two components")
+        for component in components:
+            if not isinstance(component, _ContinuousLikelihood):
+                raise TypeError(
+                    "a component is a continuous likelihood, got %s"
+                    % type(component).__name__)
+        widths = {c.warping.size_in for c in components}
+        if len(widths) > 1:
+            raise ValueError(
+                "every component must read the variable's columns; these "
+                "read %s" % sorted(widths))
+        if shares not in ("fixed", "latent"):
+            raise ValueError("shares is 'fixed' or 'latent', got %r"
+                             % (shares,))
+        n = len(components)
+        self.n_populations = n
+        self.shares = shares
+        self._population_size = sum(c.size for c in components)
+        super().__init__(self._population_size
+                         + (n if shares == "latent" else 0))
+        self.components = [self._register(c) for c in components]
+        self.data_size = widths.pop()
+
+        if shares == "latent":
+            if weights is not None:
+                raise ValueError("weights are the fixed shares; latent "
+                                 "shares are read from the leaf")
+            # a variance, as `GaussianMixture`'s: the share columns come
+            # from a GP of prior variance one, which caps how sharply the
+            # shares can pass from one population to the next
+            self._add_parameter("amplitude",
+                                _gpr.PositiveParameter(1.0, 0.01, 100.0))
+            # what the shares return to where the share columns do (to
+            # zero, away from the data): equal shares unless trained
+            self._add_parameter("bias", _gpr.RealParameter(
+                _np.zeros(n), _np.full(n, -10.0), _np.full(n, 10.0)))
+            return
+        if weights is None:
+            weights = _np.full([n], 1.0 / n)
+        weights = _np.asarray(weights, dtype=float)
+        if weights.shape != (n,):
+            raise ValueError("one weight per component")
+        self._add_parameter("weights", _gpr.CompositionalParameter(weights))
+
+    def _slices(self):
+        start = 0
+        for component in self.components:
+            yield component, slice(start, start + component.size)
+            start += component.size
+
+    def _share_logits(self, columns):
+        """The share columns scaled by the amplitude and moved by the bias,
+        `(n, K, S)`."""
+        return columns * _tf.sqrt(self.parameters["amplitude"].get_value()) \
+            + self.parameters["bias"].get_value()[None, :, None]
+
+    def _share_values(self, latent):
+        """The shares, `(n, K, S)` for latent columns `(n, size, S)`, or
+        `(1, K, 1)` when they are fixed."""
+        if self.shares == "fixed":
+            return self.parameters["weights"].get_value()[None, :, None]
+        return _tf.nn.softmax(self._share_logits(
+            latent[:, self._population_size:, :]), axis=1)
+
+    def _row_terms(self, mu, var, y, samples, latent_gaussian):
+        """`E_q[log p_k(y | f_k)]` plus the warping's log-Jacobian, one
+        column per population, `(n, K)`."""
+        terms = []
+        for component, columns in self._slices():
+            component.warping.refresh()
+            warped, log_derivative = component.warping.forward(y)
+            if latent_gaussian and component._column_quadrature():
+                nodes = _tf.sqrt(2 * var[:, columns, None]) \
+                    * _ROOTS_64[None, None, :] + mu[:, columns, None]
+                log_density = component._make_distribution(nodes).log_prob(
+                    warped[:, :, None])
+                expected = _tf.reduce_sum(
+                    _tf.reduce_sum(log_density, axis=1)
+                    * _WEIGHTS_64[None, :], axis=1)
+            else:
+                log_density = component._make_distribution(
+                    samples[:, columns, :]).log_prob(warped[:, :, None])
+                expected = _tf.reduce_mean(
+                    _tf.reduce_sum(log_density, axis=1), axis=1)
+            terms.append(expected + log_derivative)
+        return _tf.stack(terms, axis=1)
+
+    def log_lik(self, mu, var, y, has_value, samples=None,
+                *args, latent_gaussian=True, **kwargs):
+        terms = self._row_terms(mu, var, y, samples, latent_gaussian)
+        if self.shares == "fixed":
+            log_w = _tf.math.log(self.parameters["weights"].get_value())
+            bound = _tf.reduce_logsumexp(terms + log_w[None, :], axis=1)
+        else:
+            # averaged over the share columns' realizations, inside the log
+            log_w = _tf.nn.log_softmax(self._share_logits(
+                samples[:, self._population_size:, :]), axis=1)
+            bound = _tf.reduce_mean(_tf.reduce_logsumexp(
+                terms[:, :, None] + log_w, axis=1), axis=1)
+        # the mixture is over the row: a row counts whole or not at all
+        row = _tf.reduce_min(has_value, axis=1)
+        return _tf.reduce_sum(bound * row)
+
+    def _location_labels(self, sims):
+        """Which population each realization takes at each location,
+        `(n, n_sim)`: the realization's interleaved point placed among its
+        own cumulative shares there."""
+        n_sim = sims.shape[2]
+        points = _tf.constant(_interleaved_points(n_sim), _tf.float64)
+        edges = _tf.cumsum(self._share_values(sims), axis=1)
+        below = _tf.cast(edges <= points[None, None, :], _tf.int32)
+        labels = _tf.minimum(_tf.reduce_sum(below, axis=1),
+                             self.n_populations - 1)
+        return labels + _tf.zeros([_tf.shape(sims)[0], 1], _tf.int32)
+
+    def labels(self, n_sim: int) -> _np.ndarray:
+        """Which population each of `n_sim` realizations belongs to, under
+        fixed shares (the same everywhere)."""
+        if self.shares != "fixed":
+            raise ValueError("under latent shares a realization's "
+                             "population changes from place to place")
+        dummy = _tf.zeros([1, self.size, n_sim], _tf.float64)
+        return self._location_labels(dummy).numpy()[0]
+
+    def _by_label(self, per_population, labels, n_nodes=1):
+        """One array out of one per population, each realization taken
+        from its own population at each location; `where`, so a value one
+        population cannot give (an overflow beyond its range) never reaches
+        another's."""
+        labels = _tf.tile(labels, [1, n_nodes])[:, None, :]
+        out = _tf.zeros_like(per_population[0])
+        for k, values in enumerate(per_population):
+            out = _tf.where(labels == k, values, out)
+        return out
+
+    def predict(self, mu, var, sims, explained_var, *args, include_noise=True,
+                n_splits=None, cutoffs=None, **kwargs):
+        labels = self._location_labels(sims)
+        values, noise, by_population = [], [], []
+        for component, columns in self._slices():
+            v, e = component._values_and_noise(sims[:, columns, :],
+                                               include_noise)
+            values.append(v)
+            noise.append(e)
+            by_population.append(
+                _aggregate(_tf.reduce_mean(v, axis=2), n_splits=n_splits))
+        values = self._by_label(values, labels)
+        noise = self._by_label(noise, labels)
+        shares = _tf.reduce_mean(
+            self._share_values(sims) + _tf.zeros_like(sims[:, :1, :1]),
+            axis=2)
+
+        dispersion = _tf.reduce_mean(
+            _dispersion(values, n_splits=n_splits), axis=2)
+        noise = _aggregate(_tf.reduce_mean(noise, axis=2), n_splits=n_splits)
+        sims_out = _aggregate(values, n_splits=n_splits)
+        var = _aggregate(var[:, :self._population_size], n_splits=n_splits)
+
+        out = {"simulations": sims_out,
+               "average_sim": _tf.reduce_mean(sims_out, axis=2),
+               "dispersion": dispersion,
+               "noise_variance": noise,
+               "uncertainty": _tf.reduce_mean(var, axis=1),
+               "population_prediction": _tf.stack(by_population, axis=2),
+               "shares": _aggregate(shares, n_splits=n_splits),
+               }
+        if n_splits is None:
+            # a population per realization is a point's; a block holds
+            # several, and a label cannot be averaged
+            out["population"] = labels
+        if cutoffs is not None:
+            out["proportions"] = _proportions(
+                values, cutoffs, n_splits=n_splits)
+            out["divided"] = _divided(values, cutoffs, n_splits=n_splits)
+        return out
+
+    def measurement_samples(self, sims, n_nodes=_MEASUREMENT_NODES,
+                            shift=None):
+        labels = self._location_labels(sims)
+        samples = []
+        for component, columns in self._slices():
+            samples.append(component.measurement_samples(
+                sims[:, columns, :], n_nodes,
+                None if shift is None else shift[:, columns, :]))
+        # `measurement_samples` lays the nodes out node by node
+        return self._by_label(samples, labels, n_nodes)
+
+    def _expected_log_shares(self, mu, var):
+        """`log E[share_k]` at each row, `(n, K)`: the fixed shares, or the
+        softmax averaged over 64 scrambled-Sobol draws of the share
+        columns."""
+        if self.shares == "fixed":
+            return _tf.math.log(
+                self.parameters["weights"].get_value())[None, :]
+        from scipy.stats import norm
+        points = _rnd.sobol_engine(self.n_populations, _SOBOL_SEED).random(
+            _SOBOL_NODES)
+        z = _tf.constant(norm.ppf(_np.clip(points, 1e-6, 1 - 1e-6)).T,
+                         _tf.float64)
+        columns = slice(self._population_size, self.size)
+        draws = mu[:, columns, None] + _tf.sqrt(var[:, columns, None]) \
+            * z[None, :, :]
+        return _tf.math.log(_tf.reduce_mean(
+            _tf.nn.softmax(self._share_logits(draws), axis=1), axis=2))
+
+    def responsibilities(self, latent_mean: _types.ArrayLike,
+                         latent_variance: _types.ArrayLike,
+                         values: _types.ArrayLike) -> _types.FloatArray:
+        """Posterior probability that each row came from each population.
+
+        Parameters
+        ----------
+        latent_mean, latent_variance
+            The latent posterior at the measured locations, `(n, size)`.
+        values
+            The measurements, in their own units, `(n, columns)`.
+
+        Returns
+        -------
+        ndarray
+            Of shape `(n, n_populations)`, rows summing to one.
+        """
+        mu = _tf.constant(_np.atleast_2d(latent_mean), _tf.float64)
+        var = _tf.constant(_np.atleast_2d(latent_variance), _tf.float64)
+        y = _tf.constant(_np.atleast_2d(values), _tf.float64)
+        log_gh = _tf.math.log(_WEIGHTS_64)[None, None, :]
+        log_lik = []
+        for component, columns in self._slices():
+            component.warping.refresh()
+            warped, log_derivative = component.warping.forward(y)
+            nodes = _tf.sqrt(2 * var[:, columns, None]) \
+                * _ROOTS_64[None, None, :] + mu[:, columns, None]
+            log_density = component._make_distribution(nodes).log_prob(
+                warped[:, :, None])
+            per_column = _tf.reduce_logsumexp(log_density + log_gh, axis=2)
+            log_lik.append(_tf.reduce_sum(per_column, axis=1)
+                           + log_derivative)
+        log_post = _tf.stack(log_lik, axis=1) \
+            + self._expected_log_shares(mu, var)
+        return _tf.exp(log_post - _tf.reduce_logsumexp(
+            log_post, axis=1, keepdims=True)).numpy()
+
+    def initialize(self, y, weights=None):
+        """Starts the populations apart: the rows clustered into as many
+        groups as there are populations, each component's warping started
+        on its own group, the shares -- fixed, or the latent shares' bias --
+        on the groups' sizes.
+
+        The clustering is on each column through a Yeo-Johnson power
+        transform, standardized, so a skewed grade splits into its
+        populations rather than its outliers while the gap between them
+        survives; seeded from the package generator.
+        """
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import PowerTransformer
+        y = _np.asarray(y, dtype=float)
+        if y.ndim == 1:
+            y = y[:, None]
+        n = y.shape[0]
+        # not normal scores: in one column they are symmetric whatever the
+        # data, so two groups always met at the median, and the two
+        # splits either side of it tied -- the clustering broke the tie
+        # differently from run to run
+        scores = PowerTransformer(method="yeo-johnson").fit_transform(y)
+        k = self.n_populations
+        groups = KMeans(k, n_init=10, random_state=int(
+            _rnd.rng().integers(2 ** 31))).fit_predict(scores)
+        # the lowest group first, so the populations keep a stable order
+        order = _np.argsort([scores[groups == g].mean() for g in range(k)])
+        w = _np.ones(n) if weights is None else _np.asarray(weights, float)
+        sizes = []
+        for component, g in zip(self.components, order):
+            member = groups == g
+            component.initialize(
+                y[member], None if weights is None else w[member])
+            sizes.append(w[member].sum())
+        sizes = _np.asarray(sizes) / _np.sum(sizes)
+        if self.shares == "fixed":
+            self.parameters["weights"].set_value(sizes)
+        else:
+            self.parameters["bias"].set_value(
+                _np.log(sizes) - _np.mean(_np.log(sizes)))
+
+
 class Bernoulli(_Likelihood):
     def __init__(self, shift: float = 0, sharpness: int = 1):
         """
@@ -1508,11 +1876,12 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
     Gaussian likelihood for indicator variables.
 
     Assumes mutually exclusive categories (i.e. no geological rules),
-    leading to maximum entropy far from the data points. Is capable of
-    dealing with boundary data.
+    leading to maximum entropy far from the data points -- or, with a
+    trained bias per category, to the proportions the bias settles on.
+    Is capable of dealing with boundary data.
     """
     def __init__(self, n_components: int, tol: float = 1e-3,
-                 sharpness: int = 1):
+                 sharpness: int = 1, bias: bool = False):
         """
         Initializer for CategoricalGaussianIndicator.
 
@@ -1525,14 +1894,37 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         sharpness : int
             Data augmentation. The weight of the data is multiplied by this
             factor. Results in sharper transitions between categories.
+        bias : bool
+            Whether each category's latent value is shifted by a trained
+            constant, so that where the latent values return to zero, away
+            from the data, the categories take the proportions the bias
+            gives them rather than equal ones.
         """
         super().__init__(n_components)
         self.tol = _tf.constant(tol, _tf.float64)
         self.sharpness = _tf.constant(sharpness, _tf.float64)
+        if bias:
+            # optional, never a default: a save stores its parameters by
+            # position, and one more on every indicator would refuse every
+            # model saved before it
+            self._add_parameter("bias", _gpr.RealParameter(
+                _np.zeros(n_components), _np.full(n_components, -10.0),
+                _np.full(n_components, 10.0)))
+
+    def _shifted(self, latent):
+        """`latent`, `(n, size)` or `(n, size, n_sim)`, moved by the bias
+        where there is one."""
+        if "bias" not in self.parameters:
+            return latent
+        bias = self.parameters["bias"].get_value()[None, :]
+        if len(latent.shape) == 3:
+            bias = bias[:, :, None]
+        return latent + bias
 
     def log_lik(self, mu, var, y, has_value, is_boundary=None,
                 samples=None, *args, **kwargs):
         y = 2 * y - 1
+        mu = self._shifted(mu)
 
         # if self._use_monte_carlo:
         #     # pos = _tf.where(
@@ -1602,6 +1994,7 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         return log_density * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
+        mu, sims = self._shifted(mu), self._shifted(sims)
         # n_cat = _tf.shape(mu)[1]
         # n_data = _tf.shape(mu)[0]
 
@@ -1650,6 +2043,7 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
     def log_lik(self, mu, var, y, has_value, is_boundary=None,
                 samples=None, *args, **kwargs):
         y = 2 * y - 1
+        mu = self._shifted(mu)
 
         n_data = _tf.shape(mu)[0]
 
@@ -1751,6 +2145,7 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
         return log_density * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
+        mu, sims = self._shifted(mu), self._shifted(sims)
         # n_data = _tf.shape(mu)[0]
         # mu = _tf.concat([
         #     _tf.ones([n_data, 1], _tf.float64),
@@ -2074,6 +2469,19 @@ Mixture._catalogue = {
                "separation": {"constraints": {"exclusive_min": 1}},
                "weights": {"type": "float[]"},
                "contamination": {"type": "bool[]"}}}
+# internal until its gates pass (roadmap: "A mixture of likelihoods"); its
+# leaf is the components' widths summed, plus one share column each when
+# the shares are latent
+LikelihoodMixture._catalogue = {
+    "category": "likelihood",
+    "size": {"rule": "custom",
+             "note": "the components' sizes summed, plus one per component "
+                     "under shares='latent'"},
+    "accepts": _GRADED,
+    "params": {"components": {"type": "ref:likelihood[]"},
+               "weights": {"type": "float[]"},
+               "shares": {"type": "enum", "constraints": {
+                   "choices": ["fixed", "latent"]}}}}
 for _likelihood in (Bernoulli, BernoulliMaximumMargin):
     _likelihood._catalogue = {"category": "likelihood",
                               "size": {"rule": "const", "value": 1},
