@@ -31,6 +31,7 @@ out, and the variables that come out -- and every edge is labelled with the
 number of variables travelling along it.
 """
 import geoml.latent as _latent
+import geoml.likelihood as _lk
 import geoml.warping as _warp
 
 
@@ -165,30 +166,46 @@ def _add_likelihoods(diagram, model, sources):
     own where the model was given one leaf each. The warpings are drawn
     backwards, the way the model generates a value rather than the way it
     reads one, so the arrows run with the rest of the diagram. `Identity` is
-    left out, having nothing to show.
+    left out, having nothing to show. A `LikelihoodMixture` draws one chain
+    per population, each leaving the leaf with that population's columns
+    and all of them arriving at the one variable; a warping the populations
+    share is one box.
     """
     for name, likelihood, size, source in zip(
             model.variables, model.likelihoods, model.lik_sizes, sources):
-        warping = getattr(likelihood, "warping", None)
-        chain = list(getattr(warping, "warpings", [warping]))
-        chain = [w for w in chain
-                 if w is not None and not isinstance(w, _warp.Identity)]
-
-        # a warping is a two-way step -- forward to read a value into the
-        # latent space, backward to generate one -- so every arrow from the
-        # first warping onwards is headed at both ends. The one that leaves the
-        # latent network is not: only that direction generates.
-        tail, both = source, False
-        for wrapping in reversed(chain):
-            head = diagram.box(id(wrapping), type(wrapping).__name__, "warping")
-            diagram.arrow(tail, head, size, both=both)
-            tail, size, both = head, wrapping.size_in, True
-
+        if isinstance(likelihood, _lk.LikelihoodMixture):
+            chains = [(c.warping, c.size) for c in likelihood.components]
+        else:
+            chains = [(getattr(likelihood, "warping", None), size)]
         variable = model.data.variables.get(name)
         label = "%s\n%s" % (name, type(likelihood).__name__)
-        head = diagram.box(("variable", name), label, "output")
-        diagram.arrow(tail, head,
-                      size if variable is None else variable.length, both=both)
+        output = diagram.box(("variable", name), label, "output")
+        drawn = set()
+
+        for warping, width in chains:
+            chain = list(getattr(warping, "warpings", [warping]))
+            chain = [w for w in chain
+                     if w is not None and not isinstance(w, _warp.Identity)]
+
+            # a warping is a two-way step -- forward to read a value into the
+            # latent space, backward to generate one -- so every arrow from
+            # the first warping onwards is headed at both ends. The one that
+            # leaves the latent network is not: only that direction
+            # generates.
+            tail, both = source, False
+            for wrapping in reversed(chain):
+                head = diagram.box(id(wrapping), type(wrapping).__name__,
+                                   "warping")
+                if (tail, head) not in drawn:
+                    diagram.arrow(tail, head, width, both=both)
+                    drawn.add((tail, head))
+                tail, width, both = head, wrapping.size_in, True
+
+            if (tail, output) not in drawn:
+                diagram.arrow(tail, output,
+                              width if variable is None else variable.length,
+                              both=both)
+                drawn.add((tail, output))
 
 
 def _legend():

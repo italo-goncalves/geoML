@@ -375,15 +375,14 @@ def _copy_for_subset(variable):
     # hang off its components
     stashed = []
     for _, node in variable.walk():
-        store = getattr(node, "simulations", None)
-        if store is not None:
-            stashed.append((node, store))
-            node.simulations = None
+        for name, store in list(node.realization_stores()):
+            stashed.append((node, name, store))
+            setattr(node, name, None)
     try:
         return _copy.deepcopy(variable, memo)
     finally:
-        for node, store in stashed:
-            node.simulations = store
+        for node, name, store in stashed:
+            setattr(node, name, store)
 
 
 def _column_detail(attribute, status=True):
@@ -498,10 +497,23 @@ class _TreeNode(object):
     _NODE_ATTRS = ()      # facts a rebuild must carry across; not arrays
     _DICT_FAMILIES = ()   # attribute families keyed by a cut-off
     _ZARR_ATTRS = ()
+    # the stores along the realization axis, `(n_data, n_sim)` each, by
+    # attribute name, which is also the name in a path:
+    # `au/simulations/7`. Walked by every consumer rather than named, so a
+    # second store -- a mixture's population per realization -- is
+    # subsetted, carried, saved and exported with no consumer told of it
+    _REALIZATION_STORES = ("simulations",)
 
     @property
     def _node_name(self):
         return getattr(self, "name", "")
+
+    def realization_stores(self):
+        """`(name, store)` for every realization store this node holds."""
+        for name in self._REALIZATION_STORES:
+            store = getattr(self, name, None)
+            if store is not None:
+                yield name, store
 
     def child_nodes(self):
         """The nodes directly beneath this one, by name."""
@@ -568,10 +580,9 @@ class _TreeNode(object):
                 if not attribute._has_content():
                     continue
                 yield full, attribute
-            store = getattr(node, "simulations", None)
-            if store is not None:
+            for name, store in node.realization_stores():
                 for i, values in _selected_simulations(store, simulations):
-                    full = path / "simulations" / str(i)
+                    full = path / name / str(i)
                     if _match_path(pattern, full.parts):
                         yield full, _Attribute(node.coordinates, values)
 
@@ -649,12 +660,12 @@ class _TreeNode(object):
             yield path, node
             for parts, attribute in node.own_leaves():
                 yield path / parts, attribute
-            store = getattr(node, "simulations", None)
-            if store is not None:
-                yield path / "simulations", store
+            for name, store in node.realization_stores():
+                yield path / name, store
                 if realizations:
                     for i in range(store.shape[1]):
-                        yield path / "simulations" / str(i), node.simulation(i)
+                        yield path / name / str(i), _Attribute(
+                            node.coordinates, store[:, i])
 
     def select(self, pattern="**", filled=None):
         """`{path: thing}` for everything matching a glob pattern.
@@ -794,8 +805,7 @@ class _TreeNode(object):
         names = sorted(self.child_nodes())
         names += sorted(str(VariablePath(parts))
                         for parts, _ in self.own_leaves())
-        if getattr(self, "simulations", None) is not None:
-            names.append("simulations")
+        names += [name for name, _ in self.realization_stores()]
         return names
 
     def _resolve(self, path):
@@ -809,13 +819,14 @@ class _TreeNode(object):
         if head in children:
             return children[head]._resolve(rest)
 
-        if head == "simulations" \
-                and getattr(self, "simulations", None) is not None:
+        stores = dict(self.realization_stores())
+        if head in stores:
             if len(rest) == 0:
-                return self.simulations
+                return stores[head]
             try:
-                return self.simulation(int(rest[0]))
-            except (ValueError, IndexError, NoDataError):
+                return _Attribute(self.coordinates,
+                                  stores[head][:, int(rest[0])])
+            except (ValueError, IndexError):
                 return None
 
         if len(rest) == 0:

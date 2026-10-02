@@ -238,79 +238,269 @@ leaf that is not Gaussian can train on its realizations; and the gate read
 from a rock-type leaf, where the indicator rule (the largest latent) and
 the mixture's softmax read one latent through two different links.
 
-**M — Overlapping mixture of GPs, as a likelihood** (agreed 2026-09-25;
-the result item L is after). Lázaro-Gredilla, Van Vaerenbergh & Lawrence
-(2012), *Overlapping Mixtures of Gaussian Processes for the data
-association problem*, Pattern Recognition 45(4). M global latent functions;
-each sample comes from exactly one, chosen by its value rather than its
-place, so the components cross and overlap anywhere and the prediction is
-a mixture of M Gaussians — multimodal where they separate. This is what
-`GaussianMixture` cannot do: it blends *values* in the latent, so a
-realization is bimodal only where its gate is sharp, which is why it failed
-the crossing gate; OMGP mixes *densities* in the likelihood, sample by
-sample, and its own first figure is two crossing trajectories.
+**M — A mixture of likelihoods: overlapping mixtures of GPs** (agreed
+2026-09-25, redesigned 2026-10-01 with a warping per component; **done
+2026-10-01, public from 0.8.6**: every gate below passed, phase 2 included).
+Lázaro-Gredilla, Van Vaerenbergh & Lawrence (2012), *Overlapping Mixtures of
+Gaussian Processes for the data association problem*, Pattern Recognition
+45(4). M global latent functions; each sample comes from exactly one,
+chosen by its value rather than its place, so the components cross and
+overlap anywhere and the prediction is a mixture -- multimodal where they
+separate. This is what `GaussianMixture` cannot do: it blends *values* in
+the latent, so a realization is bimodal only where its gate is sharp, which
+is why it failed the crossing gate; this mixes *densities* in the
+likelihood, sample by sample.
 
 The design, settled:
-- **A likelihood, generalizing `likelihood.Mixture`** from several widths
-  around one latent location to several locations: component `m` reads
-  latent columns `m·P … (m+1)·P − 1` of a leaf of size `M·P` (a latent
-  size larger than the data's, as `CategoricalGaussianIndicator` has
-  already). The row-level mixture, `responsibilities`, contamination
-  flags and the compositional `weights` carry over; one shared warping,
-  the data warped once.
-- **The bound**: per location `log Σ_m π_m exp(E_q[log N(y | f_m)])`, the
-  paper's bound at its optimal labels. Each term is one-dimensional
-  quadrature on its own component's marginal, so the leaf stays Gaussian
-  and training is geoML's as it is — no Monte Carlo, no fixed draws.
-- **Two versions of the shares, both offered**: fixed `π` (the paper's,
-  trained as `Mixture`'s weights), and spatially varying, read from `M`
-  further latent columns through a softmax (a mixture of experts; the
-  expectation over those columns needs quadrature or samples — to settle
-  when built).
-- **A whole realization belongs to one component**: realization `s` takes
-  one label and that component's latent draw everywhere, so each
-  realization is a coherent field and the multimodality lives across the
-  ensemble. One label everywhere cannot follow shares that change from
-  place to place, so (decided 2026-09-25) **the realizations are divided
-  among the components in fixed numbers, not drawn**: with fixed shares in
-  proportion to `π`, so the plain ensemble *is* the mixture and nothing
-  downstream changes; with spatially varying shares in equal groups, each
-  an honest sample of its own component everywhere. The labels and the
-  per-location shares (the prior at a new location, the responsibility at
-  a measured one) are stored as columns, and the reductions that report a
-  mixture — quantiles, cut-off shares, the mixture mean — combine the
-  groups' statistics with the local shares. Anything summed over space —
-  a tonnage, a realization's contour, connectivity — stays defined, per
-  component. What ignores the grouping reads the fixed split, so on a
-  spatially varying mixture it is documented or refused. Rejected: labels
-  drawn from the mean share with a weight per realization per location —
-  exact point by point, but every reader of realizations would need the
-  weights, a spatial sum has no consistent weight when it varies inside
-  the region, and extreme local shares leave most of the ensemble weighing
-  next to nothing. It also hides the right answer at a measured sample: a
-  pick belonging to horizon 1 is not on horizon 2, and the other
-  component's realizations should not pass through it.
-- **Symmetry broken by initialization, not by changing training**:
-  components started identical stay identical (the shared-root collapse of
-  `GaussianMixture`'s gate 1), and the paper warns of local maxima. Start
-  the components apart — responsibilities from clustering the warped
-  values, or the component means at ordered offsets — through the
-  likelihood's `initialize`, the door every data-dependent start already
-  uses.
-- **Container columns**: a prediction and variance per component, a share
-  per component (the prior at a new location, the responsibility at a
-  measured one), and the mixture's mean and variance. Quantiles and
-  cut-off shares come from the realizations and need nothing new.
+- **`likelihood.LikelihoodMixture(components)`**, beside today's `Mixture`
+  (noise scales around one latent value, one warping), which keeps its name
+  and path; the docstrings say how the two differ. Experimental, and
+  internal in the catalogue until the gates below pass.
+- **A component is any continuous likelihood instance**, with its own
+  family, noise and warping -- `[Gaussian(BoxCox(...)), Gaussian(ZScore(1))]`
+  -- today's `Mixture` included. A shared warping is the same object handed
+  to every component (persistence keeps it shared, and its Jacobian cancels
+  out of the sum). Every component takes the variable's width P, any P; a
+  mismatch is refused at construction.
+- **Component k reads its own slice of the leaf**, in list order; the leaf
+  is the sum of the components' latent widths (a `PCA` link can make one
+  narrower than P). A user wanting independent components builds the leaf
+  with `Stack`.
+- **The bound**, per row: `log Σ_k π_k exp(E_q[log p_k(y | f_k)])`, each
+  component's density in data space with its own warping's Jacobian -- the
+  term a shared warping lets factor out. Quadrature per component where its
+  warping is elementwise, Monte Carlo on realizations otherwise.
+- **Shares**: fixed `π`, trained (phase 1). Spatially varying shares read
+  from further latent columns through a softmax are phase 2, measured on
+  Tom East with the share columns on the same tree as a rock-type
+  likelihood on `Code_Simple`.
+- **Realizations divided among the components in fixed numbers**, in
+  proportion to `π` by largest remainder and interleaved, so any first k
+  hold the components in about the right proportions; the labels stored as
+  a node fact on the variable (one list, the same everywhere), a resumed
+  prediction refused if they would differ. Each realization goes through
+  its own component's noise and warping, so the plain ensemble *is* the
+  mixture and quantiles, cut-off shares, block support, measurement
+  samples and cross-validation need nothing new.
+- **Columns**: the mixture's usual ones; `responsibilities/<k>` -- the
+  posterior where measured, the prior share elsewhere -- written by the
+  outer mixture only (an inner noise `Mixture`'s are not, in phase 1); and
+  `component_prediction/<k>`, each component's prediction in data units.
+  The latent moments per component are what `predict_node` answers.
+- **No reaching for `lik.warping`**: the model, the diagram and the plots
+  ask the likelihood; warped metadata and the transformed pairs are skipped
+  for a mixture, which has no one warped space.
+- **Symmetry broken by initialization**: the data clustered into M groups
+  (seeded from the package generator), each component's warping
+  initialized on its group, `π` started at the group sizes -- so latent
+  zero means a different value in each component. Clustering on values
+  splits crossing curves at the crossing; the crossing gate says whether
+  training mends it, random responsibilities (the paper's) in reserve.
 
-Uses in geology: unlabelled contact picks from several horizons assigned
-to surfaces as they are modelled (the paper's data association), two grade
-populations overlapping in space, and an outlier component for robust
-modelling. A domain boundary switching one field for another is the gated
-problem instead (`GaussianMixture`, or the gate read from a rock type).
-Gates: the crossing sinusoids of `docs/benchmarks/gaussian_mixture_gates.py`
-— realizations near both curves where they are apart, and every sample's
-responsibility on its true curve — and the split sinusoids, where it must
-do no worse than one GP.
+Gates, before it is made public (`docs/benchmarks/gaussian_mixture_gates.py`,
+beside `GaussianMixture`'s, and a Tom East script reading a local copy the
+repository never holds):
+
+| gate | passes when |
+|---|---|
+| crossing sinusoids | realizations near both curves; ≥ 90% of samples' largest responsibility on their true curve |
+| split sinusoids | held-out rmse and CRPS within 5% of one GP |
+| population skew | separate warpings beat one shared warping on held-out CRPS; ≥ 80% largest responsibility on the true population |
+| Tom East (Ag, Pb, Zn as a vector; folds by hole) | held-out CRPS no worse than `BoxCox → RobustPCA → ZScore → SinhArcsinh → ZScore` in one likelihood; out of fold, the expected shares agreeing with `Code_Simple` at least as often as the rock type's own prediction does (changed 2026-10-01 from "well above chance") |
+
+A near miss is reported, not met by moving the threshold.
+
+**Phase 1 measured, 2026-10-01** (the class and the model's hooks built;
+the stored columns, labels fact, catalogue and diagram not yet):
+
+| gate | result | verdict |
+|---|---|---|
+| crossing | every location bimodal where the curves are apart, 49% / 49% of the realizations near each; the largest responsibility on the sample's own curve 63% under one global naming, **97.5% (100% apart)** asked locally -- a component passes from one curve to the other at a crossing, where nothing tells them apart | passes, on the local reading |
+| split | rmse 0.369, CRPS 0.114 against one GP's 0.192, 0.078; shares 0.08 / 0.92 | **fails**: fixed shares put the second component into every location -- what spatially varying shares (phase 2) are for |
+| population skew | separate warpings CRPS 0.561, agreement 96%; one shared warping 0.575, 93% | passes, narrowly (2.4% on CRPS) |
+| Tom East | CRPS Ag / Pb / Zn 49.4 / 3.67 / 3.10, goodness 0.87 / 0.82 / 0.81; one Gaussian through the recommended chain 68.3 / 3.96 / 4.17 (its rmse exploding, 5568 on Ag), through the components' own plain `BoxCox -> ZScore` 52.4 / 4.20 / 3.90 at goodness 0.73 / 0.60 / 0.67; shares 0.46 / 0.54, the largest responsibility agreeing with `Code_Simple` at 94% (in sample; chance 52.5%) | passes |
+
+The first run of these gates started the components from each column's
+normal scores, and the shared-warping arm came back at 54% and at 91% from
+one seed: on one column normal scores are symmetric whatever the data, so
+two groups always met at the median, the splits either side of it tied,
+and the clustering broke the tie differently from run to run. The start is
+a Yeo-Johnson power transform per column now, and every number above is
+from that start, repeated exactly three times. Decided 2026-10-01: the
+crossing gate is read locally (accepted), and the class stays internal
+until phase 2 passes the split gate.
+
+**Phase 2, agreed 2026-10-01: shares that change from place to place.**
+- `LikelihoodMixture(components, shares="fixed" | "latent")`; under
+  `"latent"` the leaf carries K share columns after the populations', their
+  softmax the shares, scaled by a trained `amplitude` (a variance, as
+  `GaussianMixture`'s) -- none at first, added when the split gate asked
+  for it: a share GP of prior variance one could not pass from one
+  population to the next sharply enough, and the realizations divided at the
+  boundary -- and moved by a trained `bias` per population, what the shares
+  return to away from the data (added 2026-10-01 at the user's request: Tom
+  East's ore is not half the ground), started by `initialize` on the
+  clustering's group sizes. A share
+  GP node may feed a rock-type likelihood before it is concatenated into the
+  mixture's leaf.
+- **Realizations**: realization s keeps its one interleaved point `u_s`,
+  and at each location takes the population whose interval of *that
+  realization's own* cumulative shares holds it. It changes population
+  where its share field crosses its point -- a smooth boundary, different
+  in every realization, carrying the boundary's uncertainty -- and at each
+  location the fraction of realizations in a population is the expected
+  share, so the plain ensemble stays the mixture and no reader changes.
+  Fixed shares are the special case (phase 1 unchanged). **This reverses
+  the 2026-09-25 rule** (a whole realization in one population, the
+  realizations split into equal groups, every reader weighting them by the
+  local shares): under shares that vary, that rule turned every reader of
+  realizations into a weighted one, and a tonnage read off one realization
+  could not hold one orebody. Rejected also: the point read against the
+  *mean* shares, which nests every realization's boundary inside one field.
+- **Training**: per row, the average over share realizations of
+  `log Σ_k softmax_k(g) exp(term_k)` -- on realizations, the path
+  non-Gaussian leaves already take, the fixed training draws a known bias
+  ("Fresh training draws" below).
+- **Storage**: each realization's population at each location, small
+  integers under `<variable>/population/<i>`, on the variable (a
+  vector's mixture is over the row), absent where no mixture models the
+  variable; coarsening leaves it missing. Built on a refactor first: the
+  realization axis was handled by the name `simulations` in about eight
+  places (carrying, coarsening, subsetting, Zarr both ways, the export, the
+  path, the realization walk), so a declared list of realization stores
+  replaces the name, held by a test before the population store exists.
+- **Gates**: the split gate (rmse and CRPS within 5% of one GP); crossing
+  and skew rerun under latent shares; Tom East with folds by hole, three
+  arms -- fixed shares, latent shares from the metals alone, latent shares
+  tied to `Code_Simple` -- scored by out-of-fold CRPS per metal and by the
+  expected shares' out-of-fold agreement with `Code_Simple`. Internal until
+  every gate passes; figures with the results.
+
+**Phase 2 measured, 2026-10-01.** Tom East's folds are built against the
+assayed intervals themselves (160 / 160 / 160 / 159 / 159). Built against
+every logged interval, most of them in holes with no assay, they mimicked
+distances so long that one fold held out 407 of the 798 and the rock type's
+own out-of-fold prediction agreed with the log at 0.609.
+
+| gate | no amplitude | with amplitude | populations and shares on separate GPs | verdict |
+|---|---|---|---|---|
+| split | rmse 0.221, CRPS 0.046 (one GP 0.192, 0.078) | rmse 0.166, CRPS 0.034, amplitude 26 | **rmse 0.149, CRPS 0.032**, amplitude 27 | passes |
+| crossing | local agreement 97.5% (100% apart) | the same, amplitude 0.035 | -- | unchanged |
+| skew | CRPS 0.567, agreement 96% | CRPS 0.558, 96%, amplitude 0.033 | -- | unchanged |
+
+The amplitude trains large where the shares must jump and near zero where
+they should be flat, which is what lets one construction serve both. On the
+split, the populations and the shares are two `BasicGP`s of two outputs
+each on the gate's grid of 45 inducing points, so each trains its own range.
+
+Tom East, out of fold over the new folds. Every arm reads one root: 500
+k-means centroids of the assayed intervals divided into five experts with
+10% overlap (110 points each), through `Anisotropy3D(100, 0.75, 0.5, 345,
+15, 70)`; the populations (six outputs) and the shares (two) on separate
+`BasicGP`s. Cross-validation drops the held-out data only -- a fold model
+rebuilt from the save holds the same 550 points to the bit, since only the
+`data` argument is swapped.
+
+| arm | CRPS Ag / Pb / Zn | goodness | expected shares agreeing with `Code_Simple` |
+|---|---|---|---|
+| one Gaussian, recommended chain | 84.6 / 4.25 / 3.48 (rmse on Ag 4e5) | 0.83 / 0.56 / 0.69 | -- |
+| one Gaussian, `BoxCox -> ZScore` | **46.0** / 3.77 / 3.45 | 0.71 / 0.64 / 0.55 | -- |
+| fixed shares | 46.7 / 3.32 / 2.89 | 0.78 / 0.81 / 0.79 | 0.525 (constant; chance 0.525) |
+| latent, metals alone | 47.3 / 3.44 / 2.85, amplitude 12.5 | 0.63 / 0.66 / 0.72 | 0.595 |
+| latent, tied to `Code_Simple` | 47.1 / **3.31 / 2.81**, amplitude 6.8 | 0.73 / 0.77 / 0.79 | **0.609**; the rock type's own 0.604 |
+
+Every mixture beats the recommended chain on every metal, so the CRPS half
+of the gate passes; the plain `BoxCox -> ZScore` likelihood is the best on
+Ag, by 1.5% over the best mixture, and the worst on Pb and Zn. The
+agreement half was "well above chance", and **decided 2026-10-01: the bar
+is the rock type's own out-of-fold prediction** -- the logged rock type is
+barely predictable between holes here, and a share field cannot know more
+about it than a likelihood trained on it. Against it the shares tied to the
+rock type pass, **0.609 against 0.604**; they follow that prediction at
+0.742. In sample the shares agree at 0.94 in every arm. **Every phase 2
+gate passes.**
+
+**With a bias per share** (same configuration; the baselines and fixed
+shares unchanged):
+
+| arm | CRPS Ag / Pb / Zn | goodness | agreement | shares away from the data |
+|---|---|---|---|---|
+| latent, metals alone | **45.6 / 3.28 / 2.71**, amplitude 11.6 | 0.66 / 0.68 / 0.75 | **0.713** | 0.978 / 0.022 |
+| latent, tied to `Code_Simple` | 46.8 / 3.29 / 2.81, amplitude 7.0 | 0.73 / 0.77 / 0.79 | 0.619; the rock type's own 0.605 | 0.537 / 0.463 |
+
+and the split gate rmse 0.146, CRPS 0.031, its bias at 0.96 / 0.04, the
+crossing and skew cases unchanged with their biases near equal shares. The
+shares from the metals alone now return to the lower population away from
+the data -- waste as the ground's background -- and are the best arm on every
+metal, Ag included, and the best predictor of the logged rock type out of
+fold, above the rock-type likelihood's own 0.605. Tied to the rock type the
+bias barely moves: the share columns are the rock-type likelihood's latent,
+and `CategoricalGaussianIndicator` has no bias of its own, so away from the
+data it says even odds and pulls the shares there. Goodness is lower for
+the metals-alone arm (0.66 to 0.75 against fixed shares' 0.78 to 0.81):
+its intervals are narrower than the held-out data support.
+
+**With a bias on the rock type too** (`CategoricalGaussianIndicator(2,
+bias=True)`, added 2026-10-01 at the user's request, optional because a
+save stores its parameters by position): CRPS 46.0 / 3.25 / 2.79, the
+shares' agreement 0.607 against the rock type's own 0.594, the shares
+returning to 0.677 / 0.323 and following the rock type at 0.932. The rock
+type's own bias trains small, +0.12 / -0.13: the likelihood sees only the
+798 assayed intervals, where Tom East is 52.5%, while across all 4585
+logged intervals it is 11.0% and across the 3787 never assayed 2.2% --
+the assays were taken where the ore is.
+
+**The rock type trained on every logged interval** (4585, the metals
+missing where unassayed; the 23 holes with no assay in the fold of the
+nearest assayed hole, so the assayed folds are unchanged; the inducing
+points still the assayed intervals'): the rock type's bias trains to
++1.17 / -1.17 and the shares return to 0.999 / 0.001 -- the waste
+background. CRPS 45.8 / 3.30 / 2.83, goodness 0.69 / 0.71 / 0.74; the
+shares' agreement on the assayed intervals 0.637 against the rock type's
+own 0.551, which fell from 0.594: read on the assayed intervals, half of
+them ore, a model that has learned the ground is mostly waste calls more
+of them waste. The bar was set on a sample the assays chose, and is
+fair only between arms that saw the same rock data. Training took 638 s
+against 159.
+
+Scored instead on every logged interval, out of fold, by balanced accuracy
+(the mean of the two categories' recall -- calling everything waste is
+right 89% of the time there, and scores 0.5):
+
+| | accuracy | recall Waste | recall Tom East | balanced |
+|---|---|---|---|---|
+| the rock type's own call, all logged | 0.893 | 0.976 | 0.219 | 0.598 |
+| the expected shares, all logged | 0.874 | 0.913 | 0.555 | **0.734** |
+| the rock type's own call, assayed | 0.551 | 0.897 | 0.239 | 0.568 |
+| the expected shares, assayed | 0.637 | 0.712 | 0.568 | **0.640** |
+
+The shares find two and a half times the ore the rock type does between
+holes, for a few points of waste recall: the metals at neighbouring holes
+tell them where the ore runs, which the logged rock type alone cannot.
+The rock type's own call is barely better than calling everything waste.
+Mapped (`likelihood_mixture_figures.py latent`), the shares tied to it now
+draw one continuous lens dipping steeply to the northwest inside a waste
+background, where they drew separate pockets at even odds between holes.
+
+The first run under these folds, on 150 k-means points in one expert
+through `Isotropic(80)` with populations and shares on one GP, gave fixed
+shares 44.1 / 3.26 / 2.81, latent 49.3 / 3.46 / 3.06 at 0.564 agreement,
+tied to the rock type 46.4 / 3.36 / 2.94 at 0.570 against the rock type's
+own 0.603 -- a near miss, which the anisotropy and the separate share GP
+closed; the plain chain was 58.6 / 5.58 / 8.46 there, so the configuration
+helped the single likelihood most.
+
+**L — A likelihood subsystem** (raised 2026-10-01, deferred). Likelihoods
+composed as warpings are chained: a small protocol every component
+implements (the latent columns it reads, its log density in data space at
+quadrature nodes or realizations, its back-transform with the noise
+integrated out, a measurement draw, `initialize`) and combinators over it --
+the mixture above, today's `Mixture` as a configuration of it, and
+**physics-driven likelihoods** whose mean is a known function of several
+latent columns (a forward model), trained on realizations through the path
+non-Gaussian leaves use. To settle when taken up: the protocol, the naming
+of the family (`Mixture` against `LikelihoodMixture`), and a first forward
+model.
 
 **S — Fresh training draws** (found 2026-09-25, kept on the list by the
 user). Every training step passes `seed=options.seed`, so a likelihood that

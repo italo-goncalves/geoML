@@ -211,6 +211,50 @@ def test_a_warping_that_does_nothing_is_left_out():
     assert "Identity" not in boxes
 
 
+def _mixture_model(components):
+    point = _points()
+    point.add_continuous_variable(
+        "grade", np.random.default_rng(1).uniform(0.1, 1.0, 30))
+    likelihood = geoml.likelihood.LikelihoodMixture(components,
+                                                    shares="latent")
+    geoml.set_seed(1234)
+    grid = geoml.data.Grid3D(start=[0, 0, 0], n=[3, 3, 3], step=[50, 50, 50])
+    return geoml.models.VGPNetwork(
+        point, "grade", likelihood,
+        latent.BasicGP(latent.BasicInput(grid), size=likelihood.size),
+        options=geoml.models.GPOptions(verbose=False))
+
+
+def test_a_mixture_draws_one_chain_per_population():
+    """Each population's warping leaves the leaf with that population's
+    columns, and every chain arrives at the one variable."""
+    dot = _mixture_model([
+        geoml.likelihood.Gaussian(warping.ChainedWarping(
+            warping.BoxCox(1), warping.ZScore(1))),
+        geoml.likelihood.Gaussian(warping.YeoJohnson(1))]).to_dot()
+    boxes, arrows = _boxes(dot), _arrows(dot)
+    sizes = {(a[0], a[1]): a[2] for a in arrows}
+
+    leaf = next(v[0] for k, v in boxes.items() if k.startswith("BasicGP_1"))
+    zscore, boxcox = boxes["ZScore"][0], boxes["BoxCox"][0]
+    yeo = boxes["YeoJohnson"][0]
+    variable = boxes["grade\\nLikelihoodMixture"][0]
+    assert sizes[(leaf, zscore)] == "1"
+    assert sizes[(zscore, boxcox)] == "1"
+    assert sizes[(boxcox, variable)] == "1"
+    assert sizes[(leaf, yeo)] == "1"
+    assert sizes[(yeo, variable)] == "1"
+    assert len(arrows) == 6          # the five above and the input's
+
+
+def test_a_warping_the_populations_share_is_one_box():
+    shared = warping.ZScore(1)
+    dot = _mixture_model([geoml.likelihood.Gaussian(shared),
+                          geoml.likelihood.Gaussian(shared)]).to_dot()
+    assert len(re.findall(r'label="ZScore"', dot)) == 1
+    assert len(_arrows(dot)) == 3    # input, leaf to ZScore, ZScore out
+
+
 def test_a_network_can_be_drawn_without_a_model():
     """Then there is nothing to say about outputs, so nothing is said."""
     boxes = _boxes(_network().to_dot())

@@ -522,3 +522,56 @@ def test_a_containers_own_namespace_renders_without_a_warning():
         warnings.simplefilter("error")
         names = render_all([p for p, _ in point.leaves()], "flat")
     assert len(set(names.values())) == len(names)
+
+
+# --------------------------------------------------------------------------- #
+# realization stores beyond `simulations`
+# --------------------------------------------------------------------------- #
+def test_a_second_realization_store_reaches_every_consumer(monkeypatch,
+                                                           tmp_path):
+    """A variable may hold more than one store along the realization axis
+    -- a mixture of likelihoods keeps each realization's population beside
+    its values -- and every consumer walks the declared stores rather than
+    naming `simulations`: subsetting, carrying, Zarr, the export and the
+    paths. Held here before any variable declares a second one."""
+    import geoml.storage as storage
+    from geoml.data.variables import ContinuousVariable
+    monkeypatch.setattr(ContinuousVariable, "_REALIZATION_STORES",
+                        ("simulations", "extra"))
+    point = _points(6)
+    variable = point.variables["au"]
+    variable.allocate_simulations(3)
+    variable.simulations[:, :] = np.arange(18.0).reshape(6, 3)
+    variable.extra = storage.ArrayStore.from_numpy(
+        np.arange(18.0).reshape(6, 3) + 100)
+
+    # the paths
+    np.testing.assert_array_equal(point.values("au/extra/1"),
+                                  np.arange(6) * 3 + 101.0)
+    assert "au/extra" in [str(p) for p, _ in point.addressable()]
+
+    # the export
+    frame = point.as_data_frame(simulations=True)
+    assert "au_extra_2" in frame.columns
+
+    # subsetting
+    part = point[np.array([0, 2, 4])]
+    np.testing.assert_array_equal(np.asarray(part.variables["au"].extra),
+                                  np.arange(18.0).reshape(6, 3)[[0, 2, 4]]
+                                  + 100)
+
+    # carrying onto a longer set of locations
+    keep = np.array([True, False, True, True, False, True])
+    longer = geoml.data.PointData.from_array(
+        np.zeros([6, 3]))
+    carried = variable.carry_to(longer, keep, 2)
+    np.testing.assert_array_equal(np.asarray(carried.extra)[:4],
+                                  np.asarray(variable.extra)[keep])
+    assert np.all(np.isnan(np.asarray(carried.extra)[4:]))
+
+    # Zarr, both ways
+    path = str(tmp_path / "stores.zarr")
+    point.to_zarr(path)
+    opened = geoml.data.PointData.open(path)
+    np.testing.assert_array_equal(np.asarray(opened.variables["au"].extra),
+                                  np.asarray(variable.extra))
