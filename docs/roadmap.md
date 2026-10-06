@@ -391,6 +391,71 @@ built and measured on the same branch (`train2.py`, `tom2.py`,
    (264-333 MB against 1075-1109); on Tom it is ahead on everything but
    balanced accuracy at 0.5.
 
+**Measured 2026-10-06, third round** -- the network's nodes by expert, and
+a fixed total of inducing points split among different numbers of experts
+on Tom. `test_batched_experts.py` holds 69 tests. The split ran from a
+frozen copy of the second round's commit, so the node work could go on
+beside it.
+
+- **Every node but five now trains and predicts by expert.** Refused, by
+  the user's choice: `AdditiveGP`, `UncertainInputGP`,
+  `GradientConstrainedInput` -- and with it directional data, which only
+  it reaches, `BasicGP`'s directional prediction being commented out --
+  `RadialTrend` and `GaussianMixture`. Taken: `MultiStructureGP`,
+  `GaussianInput`, several inputs (a list of leaves, or a `Stack` joining
+  trees), and below or above the GP nodes `Linear`, `SelectInput`,
+  `GPWalk`, `Bias`, `Scale`, `Add`, `LinearCombination` and a
+  `Concatenate` of any of them; `Multiply`, `ProductOfExperts` and
+  `Exponentiation` hand no inducing points on, so they sit above the GP
+  nodes only, as they always have.
+- **How.** Under slots every node that hands inducing points on holds them
+  as one tensor flattened over the slots, so the nodes working row by row
+  (`Linear`, `SelectInput`, `Bias`, `Scale`) need nothing of their own;
+  `Concatenate`, `LinearCombination` and `Add` align their parents' points
+  expert by expert (`_aligned_points`), a node computed from the input
+  alone holding every expert's and one downstream of a GP node the active
+  ones; `GPWalk` walks the active experts' points and its KL is a term per
+  expert, shared out as a GP node's is; `MultiStructureGP`'s covariance
+  takes leading axes. Several inputs: subsets and slots per input
+  (`expert_subset` and `expert_slots` take a mapping), the experts numbered
+  across the inputs and visited together, each batch an active set per
+  input, its data term divided by the number of inputs (a row's weights sum
+  to one per input), the KL shares read off the overlap across inputs;
+  prediction carries the weights in each input's own transformed space and
+  packs the groups input by input.
+- **Gates.** Each of 20 networks -- nine below a GP node, eight above,
+  `GaussianInput`, two inputs, a `Stack` of them -- predicts by expert with
+  every expert in the slots as the model does (prediction to 1e-7,
+  realizations 1e-6), and trains by expert in at most two traces with every
+  GP node's experts moving; on the walk, a sum below a GP node and two
+  inputs, the slots train as a trace per set does (bound to 1e-8). The 19
+  test files covering the nodes touched pass (767 s), the catalogue's
+  every-node tests included.
+- **One bug.** Two trees may number their nodes alike, and the working copy
+  was keyed by name: two inputs collided. It is keyed by the nodes' ids.
+- **A fixed total split** (Tom, 20 epochs, seed 1; training seconds and
+  peak device MB; by expert four visits, steps counted):
+
+  | total | experts | each | every expert: AUC / Brier / s / MB | by expert: AUC / Brier / s / MB |
+  |---|---|---|---|---|
+  | 1500 | 5 | 300 | 0.890 / 0.083 / 111 / 339 | 0.926 / 0.066 / 59 / 537 |
+  | 1500 | 10 | 150 | 0.868 / 0.098 / 118 / 236 | 0.912 / 0.072 / 49 / 248 |
+  | 1500 | 20 | 75 | 0.848 / 0.105 / 181 / 185 | 0.904 / 0.076 / 62 / 123 |
+  | 1500 | 40 | 37 | 0.846 / 0.113 / 328 / 156 | 0.884 / 0.083 / 108 / 63 |
+  | 6000 | 10 | 600 | 0.850 / 0.102 / 770 / 2220 | 0.889 / 0.091 / 531 / 2065 |
+  | 6000 | 20 | 300 | 0.815 / 0.112 / 422 / 1329 | 0.883 / 0.092 / 388 / 1018 |
+  | 6000 | 40 | 150 | 0.818 / 0.119 / 446 / 919 | 0.857 / 0.101 / 308 / 448 |
+
+  Fewer, larger experts score better by both methods at both totals, and
+  by expert is ahead on AUC and Brier at every split. Every expert's time
+  grows with the number of experts at 1500 points (111 s at 5, 328 s at 40
+  -- the 2026-08-06 finding again) and is lowest in the middle at 6000;
+  by expert's memory falls with the number of experts, but at 5 experts it
+  peaks above every expert's (537 MB against 339): a batch holds N / (J x
+  visits) rows, 800 here. The larger total scores worse at equal experts
+  (10 experts: 0.889 against 0.912 by expert) -- 20 epochs may not be
+  enough for 6000 points, or Tom's composites do not support them.
+
 Open, in the order they matter:
 
 1. **A learning-rate schedule tied to progress**, for the experts and the
@@ -402,7 +467,12 @@ Open, in the order they matter:
    budget would let the packed groups keep every location's 99%.
 3. **The rmse gap on the synthetic field** (0.015 at J = 16, 0.007 at 64)
    while CRPS is better by expert: unexplained.
-4. **Coverage**: directional data, several roots, the other GP nodes.
+4. **Batches sized to the experts**: training by expert draws N / (J x
+   visits) rows a batch, so few experts make large batches and a peak
+   above `train_svi`'s (5 experts on Tom: 537 MB against 339).
+5. **The five refused nodes**: `AdditiveGP`, `UncertainInputGP`,
+   `GradientConstrainedInput` (and directional data), `RadialTrend`,
+   `GaussianMixture`.
 
 **M–L — Propagate individual realizations through the tree** (requested
 2026-09-08). What happens today: moments at every node. `_GPNode.propagate`
