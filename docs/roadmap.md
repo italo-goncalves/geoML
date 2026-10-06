@@ -27,6 +27,383 @@ roots of their own work with no join at all, which is what a tree of
 inducing points near the drillholes beside a gridded tree for geophysics
 needs.)
 
+**L–XL — Batched experts: memory independent of the number of experts**
+(**top priority**, raised 2026-10-05). Train the product of experts on a
+few experts per step, down to one, so that device memory does not grow
+with the number of experts J. The research is a project of its own,
+`OneDrive\Claude\Research\Batched experts\`: a literature review
+(`report/literature_review.tex`, section 2), a notation table, and
+Proposition 1. Proposition 1 says that sampling s experts per step, scaled
+by J/s, gives an unbiased estimate of the bound when the bound splits into
+independent blocks, one per expert, with only the hyperparameters shared;
+it is checked by exact enumeration in
+`verification/expert_subsampling_unbiased.py`. No published method was
+found that samples experts per step together with data minibatches; the
+closest is ProSpar-GP (Li & Mak, JCGS 2025), which minibatches data only.
+That search is not yet complete.
+
+**What geoML does today** (read 2026-10-05; the research assumed it
+without reading the code):
+- **The bound does not split per expert.** `BasicGP._moments` predicts
+  every data point from *every* expert's inducing set and blends them with
+  `_GPNode.get_expert_weights`, soft weights normalized over all experts.
+  A data point therefore reaches every expert, and Proposition 1 does not
+  apply as stated. Only the KL term, `kl_divergence`, is a sum over
+  experts.
+- **Per step, `refresh` builds every expert:** its covariance, Cholesky
+  and inverse, and its smoothed covariance. That is the U_j² and U_j³
+  work, the memory to save. Under the default `expert_propagation=
+  "consensus"`, a node with children also predicts every expert's
+  inducing set from every other, which is O(J²).
+- **The stored parameters are O(U_j) per expert** (`alpha_white_i`,
+  `delta_i`, `bias_i`), so all of them can stay on the device and only the
+  sampled experts' computation need run. Data minibatching exists already
+  (`train_svi`).
+
+**The plan of record (the user's, 2026-10-06).**
+
+*Training.*
+- **Cache each data point's weight for each expert**, in one sweep over
+  the data: the expert weights the model already computes
+  (`_GPNode.get_expert_weights`), averaged over the latent outputs where a
+  node has several (and over the GP nodes, where a tree has several on one
+  root). An N by J table, refreshed once per epoch or less often.
+- **An epoch visits the experts in a random order.** For expert j, a batch
+  of data points is drawn with probability proportional to their weights
+  for j. The batches are random, and they fall where j matters.
+- **The batch updates the experts that are active on it.** The points of
+  expert j's batch sit mostly in j's ground, so the experts whose cached
+  weight is above a small threshold there are j and a few neighbours. Only
+  they are computed, and their local parameters (`alpha_white_i`,
+  `delta_i`, `bias_i`) are updated with each batch; the rest are truncated
+  out of the blend on that batch.
+- **One property worth keeping.** At a point the weights sum to one over
+  the experts, so if expert j's batch is sized by its total weight, each
+  data point is drawn equally often over an epoch, in expectation: the
+  epoch is a fair pass over the data. With equal batch sizes instead,
+  each drawn point's term is scaled by the inverse of its probability.
+  Both to be tried. The data term is scaled to the whole data set as
+  `train_svi` scales it; how each batch counts the KL of the experts it
+  updates is to be tested too.
+- **The global parameters** (ranges, the input transform, the likelihood
+  and its warping): **test whether they can be updated at every step**, or
+  whether their gradients must be accumulated over the epoch and applied
+  once. The accumulated gradient over a fair epoch is the full gradient's
+  estimate; a step per batch moves them on a gradient that sees one
+  expert's ground at a time.
+
+*Prediction.*
+- **The data's cached weights are interpolated to the targets** (grid
+  nodes, blocks, points) by a simple method: the nearest data point, or an
+  inverse-distance average of the k nearest, in the input's transformed
+  space. The result says which experts are active at each target.
+- **Targets are grouped by their set of active experts**, and each group
+  predicted with only those experts. A small truncation of the weights is
+  acceptable; its size is measured against predicting with every expert.
+- What any method must keep: a target's set depends on the target alone,
+  never on its batch, as the reproducibility contract promises; a rule
+  for targets far from every expert, where today every weight sits at the
+  floor and the prediction is the plain average of every expert's prior,
+  the k nearest say; and a block's set is the union over its sub-blocks.
+
+*The code.*
+- **Ideally new methods on `VGPNetwork` and little else**: one
+  `predict_*` (the user's words), and a `train_*` beside it, since
+  training needs an entry point too. The adaptations at the points of
+  contact are kept surgical. The main one: the expert loops in `BasicGP`
+  (`refresh`, `_moments`, `kl_divergence`) run over a given subset of the
+  experts rather than all of them, set as a context flag the way
+  `propagation_rule` is (so no signature changes). A traced function sees
+  the subset as a Python tuple, which retraces once per distinct subset;
+  if the subsets are few that is acceptable, and if not, the prototype
+  measures what a tensor index costs.
+- **All experiments outside the package**: a separate git worktree on its
+  own branch (`batched-experts`, from `claude`), with the scripts in its
+  `experiments/` and nothing merged until the gates pass. The
+  verification scripts stay in the research project.
+
+**Kept in reserve** (2026-10-05, not the plan): freezing the other
+experts' contributions as stored moments, which gives the exact gradient
+for one expert at a time; summing the global parameters' contributions
+over a sweep for their full gradient; making `expert_propagation=
+"independent"` the default, which leaves each expert's inducing set to
+itself at every node (measured 1.6x to 6.3x faster training as J grows
+from 5 to 40); and, for prediction, the expert's footprint in the
+kernel's space (exact for a compactly supported kernel), neighbouring
+experts, coarse to fine through `refine`, accumulating the weighted sums
+expert by expert, and a learned multi-label classifier, which is
+published (Jalali & Kasneci, NeurIPS 2022 workshop, arXiv 2211.09940).
+Also from the literature: selection through a sparse precision matrix
+between experts (Jalali, Pawelczyk & Kasneci 2021, arXiv 2102.01496); a
+gating network over sparse GP experts fitted by Cluster-Classify-Regress
+(Etienam et al., Machine Learning 2024, arXiv 2006.13309); patchwork
+kriging (Park & Apley, JMLR 2018); GRBCM (Liu et al., ICML 2018).
+
+**Steps, in order:**
+1. **The worktree and a baseline.** A synthetic case with many experts
+   and a real one (Tom v6 or Assen): peak device memory, time per epoch
+   and held-out scores, trained with every expert at once.
+2. **The weight table.** One sweep caching the N by J weights, averaged
+   over the latent outputs; how concentrated they are (how many experts
+   carry, say, 99% of a point's weight) decides how small the active sets
+   and the truncation are.
+3. **The subset of experts at the points of contact**, and its gate: with
+   every expert in the subset, training and prediction identical to
+   today's to the bit.
+4. **The training loop**: experts in random order, batches drawn by
+   weight, the active experts updated per batch; batch sizes by total
+   weight against equal sizes with the inverse-probability scaling; the
+   global parameters stepped per batch against accumulated per epoch.
+5. **Training gates:** peak memory flat in J; convergence and held-out
+   scores against step 1's baseline.
+6. **Prediction**: the weights interpolated to the targets, the targets
+   grouped by active set; against predicting with every expert, the error
+   the truncation costs, measured, and memory per batch against J; then
+   blocks and deep trees.
+7. The novelty search finished: Spatial Statistics, JABES, Mathematical
+   Geosciences, and the full texts of Zhang et al. (2023) and pFedGP.
+
+**Measured 2026-10-06** (prototype on branch `batched-experts`, worktree
+`geoML-batched`, not merged; experiments in its `experiments/
+batched_experts/`, results in `results/*.jsonl`, figures copied to the
+research project). Synthetic field whose ground and data grow with J (400
+rows and 150 inducing points per expert, 50-unit tiles), batches of 400,
+on the GPU; Tom's rock type (20 126 composites, a fifth of the holes held
+out) as the real case.
+
+- **The point of contact** is `latent.expert_subset(experts)`, a context
+  flag `BasicGP`'s loops (`refresh`, `_moments`, `simulate`,
+  `kl_divergence`, now `expert_kl_terms`) read, with the refresh trace and
+  `predict_raw` keyed by it and `_log_lik` split into an unscaled
+  `_data_log_lik`. Gate: with every expert in the subset the training log,
+  predictions and realizations are the unchanged package's to the bit, on
+  shallow and deep trees under both propagation rules -- single-threaded:
+  with default threading the unchanged package itself drifts ~1e-14
+  between processes on a model this size, which op determinism does not
+  remove. The methods: `expert_weights`, `train_by_expert`,
+  `predict_by_expert`; tests in `test_batched_experts.py` (9).
+- **Weights** (step 2): a point needs 1.9 / 3.1 / 3.9 experts on average
+  for 99% of its weight at J = 4 / 16 / 64, up to 21 at 64; 2.1-2.5 on
+  Tom, up to 9.
+- **Training memory falls as planned** -- peak device memory at J = 4 /
+  16 / 64: every expert 73 / 276 / 1101 MB, by expert (per epoch, four
+  visits) 94 MB at 16 and 208 at 64 (5.3x less); Tom J = 40, 907 against
+  392. The cost moves to the host: each active set is a traced step with
+  gradients, never given back, ~80 MB each (5.7 GB at J = 64 against
+  2.0).
+- **Global parameters must be accumulated over the epoch** (the step-4
+  question): stepped per batch on one region at a time they wander, the
+  weights spread (99% needs 6.9 experts at J = 16 against 2.6) and the
+  fixed sets drop 7% of the weight; held-out rmse 0.299 against 0.137.
+- **One visit per expert per epoch converges far too slowly**: an expert
+  takes one full step an epoch where `train_svi` gives it J noisy ones (J =
+  64: rmse 0.295 at 20 epochs against 0.088). Four visits (batches of
+  100) fix most of it -- J = 16: rmse 0.091, CRPS 0.129 against `train_svi`'s
+  0.076 / 0.139; J = 64: 0.121 / 0.145 against 0.088 / 0.135 at 783 s
+  against 922 -- sixteen are unstable (rmse back up from 0.094 to 0.113).
+  At equal time `train_svi` is ahead on rmse at every J measured.
+- **Tom**: four visits are better calibrated and call less ore -- J = 10,
+  Brier 0.072 against 0.098, balanced accuracy 0.690 against 0.769; J =
+  40, 0.101 against 0.120 and 0.750 against 0.770. Active sets are larger
+  on drillholes (16.6 of 40 experts).
+- **The active sets must be formed once and kept**: re-formed with each
+  weight table, a 16-expert run traced 76 steps and grew 6.6 GB.
+- **Prediction memory falls ten-fold**: J = 64, 180 MB against 1953 on a
+  point grid, 145 against 1885 on blocks; every location keeps at least
+  99% of its weight, the prediction moving by 0.020 at most (field sd ~1),
+  no Tom block's call changed above 0.015%. **Grouping is the cost**: by
+  exact active set 164 groups (a trace each) at J = 16 and 92 s against 3;
+  by the home expert's training set, falling back to the union of the
+  leading experts' sets, 16 groups at 16, 108 at 64 (149 s against 12),
+  and 317-707 on Tom's blocks between drillholes (556 s against 8). The
+  first home rule -- the leading expert's set alone -- dropped up to 40% of
+  a location's weight where it did not reach.
+- **A GP reading only a GP is out of reach of spatial experts**: the
+  second GP reads the first's output, where its experts are not local
+  (99% of a point's weight needs 12 of 16 experts, against 2.2 at the
+  first layer), so by expert it moves the prediction by 0.19 on average.
+- **Concatenating the coordinates into the second GP's input makes it
+  local again** (the user's proposal; `probe_deep_concat.py`, J = 16, 10
+  epochs of `train_svi`, independent propagation): 99% of a point's
+  weight needs 3.2 experts at the second layer (max 8) against 12.1 (max
+  15) for the GP reading only the GP, 2.7 at the first. The second GP's
+  ranges trained to 1.8 on each coordinate and 0.69 on the latent, an
+  expert's tile being 3.3 units wide in the transformed space -- the
+  locality rests on the coordinate ranges staying under the expert
+  spacing, and a longer training that stretches them would bring the
+  collapse back, so the gate reads them. Duvenaud et al. (AISTATS 2014)'s
+  input-connected networks are the same remedy for the same pathology.
+  The prototype needs four changes for it: accept a `Concatenate` of the
+  root and `BasicGP` nodes (`_expert_gp_nodes` refuses it), slice the
+  concatenated inducing points by the subset (`_parent_points`), form the
+  sets from both layers' weights (the layers share one partition, so one
+  set serves both), and gate consensus propagation, which under a subset
+  blends the first layer's experts at the second layer's inducing points
+  from the active ones only.
+- **Novelty** (`report/novelty_search_2026-10-06.md` in the research
+  project): possibly novel as a combination; the closest are PSVGP §4.2,
+  Hoang et al. (AAAI 2017), Yu et al. (IJCNN 2019) and ProSpar-GP, and
+  expert-choice routing (Zhou et al. 2022) as an analogue.
+
+**Measured 2026-10-06, second round** -- the eight open items above,
+built and measured on the same branch (`train2.py`, `tom2.py`,
+`predict2.py`, `probe_consensus.py`, tables by `summarize2.py`; results in
+`results/v2.jsonl`, `tom2.jsonl`, `prediction2.jsonl`,
+`consensus.jsonl`). `test_batched_experts.py` holds 24 tests.
+
+1. **One trace serves every set** (`latent.network.expert_slots`): the
+   active experts are computed in a fixed number of slots -- the largest
+   active set -- with their indices a tensor, an empty slot holding a
+   padding expert masked out of every blend, an expert's missing inducing
+   points padded with the identity's rows and columns. `BasicGP` has a
+   batched twin of `refresh`, `_moments`, `simulate` and the KL under it;
+   `covariance_matrix` takes leading batch axes (`x[..., :, None, :]`, the
+   same on matrices). Training steps a stacked copy of every expert's
+   `alpha_white`, `delta` and `bias` with a masked AMSGrad on the slots'
+   rows, written back to the parameters before each weight sweep and at the
+   end, a cancel included. Gate: against the trace-per-set path the bound
+   agrees to 1e-8 and the parameters to 1e-6 on the shallow and the
+   concatenated tree -- once the rate and the betas' powers are taken in
+   single precision as Keras takes them (in double precision every step
+   came out 6.7e-6 longer). J = 16: one trace against 16, 132 s against
+   307, host growth 305 MB against 1199, curves identical; J = 64 (epoch
+   update): 311 s against 783, host growth 341 MB against 5656, same
+   scores; device peak 278 MB against 208, every step padding to 19 slots.
+   With a trace no longer per set, the sets are re-formed at every weight
+   sweep (the slots only widen; two or three traces a run), which keeps
+   the dropped weight under 1%.
+2. **More shared steps were not the gap.** A round update (a step after
+   each round of the experts) brings the ranges where `train_svi` takes
+   them (2.05 against 2.0, J = 16) and scores worse than one step an
+   epoch: rmse 0.111 against 0.092, CRPS 0.138 against 0.130; at J = 64
+   0.123 / 0.135 against 0.121 / 0.144. The default is `"epoch"`.
+3. **The instability of many visits is the learning rates' clocks.** Each
+   expert's optimizer decays its rate 0.999 a step of its own, and an
+   expert steps on every batch whose set it is in -- with 16 visits about
+   94 steps an epoch, so its rate is at 2% by epoch 40, while the shared
+   parameters, one step an epoch, have hardly decayed: they keep moving
+   and the frozen experts cannot follow. Neither the batch size (25 and
+   100 rows both rise from epoch 40) nor stale sets explain it. Decaying
+   the experts on `train_svi`'s clock does (16 visits: rmse 0.081 at epoch
+   60, still falling, against 0.111) -- but at J = 64, four visits, that
+   clock let a seed rise late (0.114 at 40, 0.126 at 60), and putting the
+   shared parameters on it too freezes them before they converge, by
+   expert needing about three times `train_svi`'s epochs (ranges stop at
+   1.14 against 2.0). Rmse / CRPS at epoch 60, four visits:
+
+   | schedule | J = 16 (3 seeds) | J = 64 (3 seeds) |
+   |---|---|---|
+   | steps counted (the default, `decay="steps"`) | 0.095 +- 0.005 / 0.125 | 0.095 +- 0.004 / 0.126 +- 0.001 |
+   | experts on `train_svi`'s clock | 0.092 +- 0.005 / 0.125 | 0.126 / 0.135 (one seed) |
+   | both on it (`decay="epochs"`) | 0.096 +- 0.005 / 0.127 | 0.119 +- 0.005 / 0.143 +- 0.001 |
+
+   Four visits counting steps is the default; `decay="epochs"` is kept for
+   many visits, where it ends the late rise (16 visits, J = 16: 0.090 /
+   0.128, still falling).
+4. **Tom's ore calls were the threshold, not the model.** By expert ranks
+   ore better and is better calibrated; balanced accuracy at 0.5 rewards
+   `train_svi` for overstating ore (mean probability 0.24-0.28 against a
+   held-out share of 0.10), which puts more composites over the cut. At a
+   cut at the training share of ore by expert wins. Three seeds (the
+   schedule moves none of it by more than 0.005), training seconds from the
+   runs made alone on the GPU:
+
+   | Tom | AUC | Brier | balanced at 0.5 | at the ore share | mean p | train s |
+   |---|---|---|---|---|---|---|
+   | J = 10, every expert | 0.869 | 0.098 | 0.768 | 0.695 | 0.240 | 119 |
+   | J = 10, by expert | 0.911 | 0.073 | 0.690 | 0.774 | 0.172 | 55 |
+   | J = 40, every expert | 0.817 | 0.120 | 0.770 | 0.649 | 0.281 | 506 |
+   | J = 40, by expert | 0.854 | 0.101 | 0.742 | 0.680 | 0.242 | 314 |
+
+5. **Prediction in slots needs no grouping rule.** Each location takes its
+   own experts (those holding 99% of its weight), and the groups are
+   packed into as many slots as training's largest active set -- a
+   location needing more keeps its leading ones, `left_out` saying what
+   that drops; `slots=` takes a number instead, `pack=False` leaves a
+   location's answer depending on the location alone. Memory goes with
+   slots times rows a batch:
+
+   | every-expert model | groups | slots | seconds | peak MB | changed max / mean |
+   |---|---|---|---|---|---|
+   | J = 16 points, every expert | 1 | | 1.2 | 493 | |
+   | J = 16 points, slots | 11 | 10 | 1.7 | 231 | 0.020 / 0.0017 |
+   | J = 64 points, every expert | 1 | | 11.3 | 1952 | |
+   | J = 64 points, slots packed | 38 | 22 | 11.3 | 894 | 0.023 / 0.0020 |
+   | J = 64 points, slots unpacked | 1052 | 22 | 34.8 | 148 | 0.029 / 0.0047 |
+   | J = 64 points, ten slots | 214 | 10 | 15.2 | 210 | 0.111 / 0.0037 |
+   | J = 64 blocks, every expert | 1 | | 5.7 | 2134 | |
+   | J = 64 blocks, slots packed | 30 | 22 | 13.8 | 533 | 0.013 / 0.0012 |
+   | J = 64 blocks, ten slots | 121 | 10 | 19.5 | 366 | 0.079 / 0.0024 |
+   | Tom J = 40 blocks, every expert | 1 | | 10.8 | 1753 | |
+   | Tom J = 40 blocks, slots | 88 | 13 | 17.3 | 787 | 0.039, calls 0.02% |
+
+   Ten slots at J = 64 leave 4-5% of the locations short of 99% of their
+   weight, the worst at 17-21%. Tom's blocks went from 317-707 groups and
+   556 s to 88 and 17 s. A model trained by expert carries larger sets
+   (Tom J = 40: 24 slots, 1306 MB against 1909) -- the cap is the lever.
+6. **Deep trees through the coordinates work.** `Concatenate` refreshes
+   under a subset and under slots, `_expert_gp_nodes` takes a GP reading a
+   `Concatenate` of the input and `BasicGP` nodes, and the weight table
+   reads every GP node, a node past the first reading what the one expert
+   gives below it. Gates: by expert with every expert in the slots is the
+   model to 1e-9 under both propagation rules; a GP reading only a GP is
+   still taken, and still not local. J = 16, 60 epochs (by expert with the
+   experts on `train_svi`'s clock, the default when it ran):
+
+   | concatenated tree | rmse | CRPS | 2nd-layer coordinate range / tile | experts for 99% |
+   |---|---|---|---|---|
+   | every expert | 0.119 | 0.164 | 2.3 / 1.55 | 3.1 |
+   | by expert | 0.085 | 0.128 | 1.43 / 2.35 | 2.1 |
+
+   Every expert peaks at 0.112 by epoch 20-30 and falls back as its noise
+   shrinks; the second layer's coordinate ranges grow past an expert's
+   tile there (the input transform stretching too), and stay within it by
+   expert. **Consensus propagation under a subset is an approximation**
+   (`probe_consensus.py`): the second layer's inducing inputs move by
+   0.014 on average from the full blend (the first layer's sd 0.37) and by
+   0.57 at worst, at the sets' edges; the prediction by 0.023 on average,
+   0.34 at worst, rmse 0.135 against 0.125. Deep trees by expert should
+   propagate independently.
+7. **Coverage.** Wired in: progress and cancel (one event a batch, the
+   working copy written back on a cancel), `options.training_tolerance`,
+   `cross_validate(method="by_expert", expert_options=)`,
+   `refine(by_expert=True)`, and `predict_by_expert(where=)`, which
+   resumes from `unpredicted()`. Mesh sets never call the model and needed
+   nothing -- the list above was wrong to name them. Still refused:
+   directional data, leaves on several roots, GP nodes other than
+   `BasicGP` (each needs a slot path of its own). One bug found on the
+   way: a trace of one kind left its symbolic state on the nodes and the
+   next trace of the other kind collected it; `_graph_state` now takes only
+   tensors of the graph being traced.
+8. **Replication** (three seeds; training seconds from the runs made alone
+   on the GPU):
+
+   | synthetic, held-out | rmse | CRPS | train s |
+   |---|---|---|---|
+   | J = 16, every expert, 60 epochs | 0.080 +- 0.003 | 0.132 +- 0.006 | 168 |
+   | J = 16, by expert, 60 epochs | 0.095 +- 0.005 | 0.125 +- 0.004 | 130 |
+   | J = 64, every expert, 20 epochs | 0.088 +- 0.003 | 0.135 +- 0.001 | 922 |
+   | J = 64, by expert, 60 epochs | 0.095 +- 0.004 | 0.126 +- 0.001 | 1013-1070 |
+
+   At equal time (~1000 s at J = 64) by expert is behind on rmse and
+   ahead on CRPS -- ahead on both until ~650 s (figure
+   `round2_heldout_by_time_64.png`) -- with a quarter of the device memory
+   (264-333 MB against 1075-1109); on Tom it is ahead on everything but
+   balanced accuracy at 0.5.
+
+Open, in the order they matter:
+
+1. **A learning-rate schedule tied to progress**, for the experts and the
+   shared parameters alike (item 3): counted per step, many visits freeze
+   the experts while the shared parameters move on; on `train_svi`'s
+   clock, the shared parameters freeze before they converge.
+2. **Slots sized to memory, not to the largest set**: prediction memory
+   goes with slots times rows a batch, so choosing the batch from a memory
+   budget would let the packed groups keep every location's 99%.
+3. **The rmse gap on the synthetic field** (0.015 at J = 16, 0.007 at 64)
+   while CRPS is better by expert: unexplained.
+4. **Coverage**: directional data, several roots, the other GP nodes.
+
 **M–L — Propagate individual realizations through the tree** (requested
 2026-09-08). What happens today: moments at every node. `_GPNode.propagate`
 takes the parent's mean and variance and evaluates the expected kernel over
@@ -567,6 +944,32 @@ it should be.
 in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
 tape cuts peak GPU memory 3–4× and the step 1.5×.
+
+**S — Verify that `inducing.experts` overlaps neighbours, not far points**
+(raised by the user 2026-10-02, not yet measured). In some cases an expert
+holds points far from its own cluster, where the overlap should only lend
+it its neighbours' nearest points. Two suspects, read from the code:
+- **The size cap in `_balanced_labels`.** Every cluster is capped at
+  `ceil(n / k)` points, and points are placed in order of how strongly
+  they prefer their nearest centre, so the ambiguous ones come last. Where
+  the density is uneven, the nearby clusters are full by then, and a point
+  goes to whichever cluster still has room, however far away. This would
+  put far points in a cluster's own *core*, before any overlap.
+- **The Mahalanobis borrowing.** Each cluster borrows the points nearest
+  its centre in its own Mahalanobis metric. `_cluster_covariance` floors
+  the small eigenvalues at 1e-3 of the largest, so a cluster along a
+  drillhole is an ellipsoid many times longer than it is wide. Its nearest
+  points in that metric may lie far along the hole's line, past nearer
+  neighbours across it.
+
+The check: for each expert, the distance of every point, core and borrowed,
+to the core's centre, against the core's own spread; on a synthetic with
+uneven density and line-like clusters, and on Tom East's 500 k-means
+points in five experts (`docs/benchmarks/tom_east_mixture.py`). A point
+outside its core's spread is the symptom; which suspect put it there says
+the fix: a balance that will not send a point past a cluster's spread, or
+borrowing by Euclidean distance to the nearest core member rather than by
+the core's ellipsoid.
 
 ---
 
