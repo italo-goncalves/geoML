@@ -143,20 +143,15 @@ def test_blocks_take_the_union_of_their_sub_blocks():
     assert np.all(np.isfinite(blocks.values("v/prediction")))
 
 
-def test_what_the_prototype_does_not_handle_is_refused():
+@pytest.mark.parametrize("node", ["AdditiveGP", "UncertainInputGP"])
+def test_what_has_no_path_by_expert_is_refused(node):
+    data = _two_variables()
     geoml.set_seed(1234)
-    rng = np.random.default_rng(0)
-    data = geoml.data.PointData.from_array(rng.uniform(0, 1, (50, 2)),
-                                           ["X", "Y"])
-    data.add_continuous_variable("v", rng.normal(size=50))
-    ip = geoml.data.inducing.experts(
-        geoml.data.inducing.from_kmeans(data, 20, seed=0), 2, seed=0)
-    root = latent.BasicInput(ip)
-    walk = latent.GPWalk(latent.BasicGP(root, size=2), n_steps=2)
+    leaf = getattr(latent, node)(_input(data, 2), size=1)
     m = geoml.models.VGPNetwork(
-        data, "v", lk.Gaussian(), latent.BasicGP(walk, size=1),
+        data, "v", lk.Gaussian(), leaf,
         options=geoml.models.GPOptions(verbose=False))
-    with pytest.raises(ValueError, match="must read the input"):
+    with pytest.raises(ValueError, match="does not take"):
         m.train_by_expert(1)
 
 
@@ -389,3 +384,144 @@ def test_the_experts_rate_decays_on_the_epoch_clock_in_slots():
     assert m._by_expert["batches"] == 16
     with pytest.raises(ValueError, match="needs slots"):
         _model().train_by_expert(1, slots=False, decay="epochs")
+
+
+# --------------------------------------------------------------------------- #
+# the nodes a network may hold
+# --------------------------------------------------------------------------- #
+def _two_variables(n=300):
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 100, (n, 2))
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable(
+        "v", np.sin(x[:, 0] / 15) + np.cos(x[:, 1] / 20)
+        + 0.1 * rng.normal(size=n))
+    data.add_continuous_variable(
+        "w", np.cos(x[:, 0] / 25) - np.sin(x[:, 1] / 10)
+        + 0.1 * rng.normal(size=n))
+    return data
+
+
+def _input(data, n_experts, kind=latent.BasicInput, seed=0):
+    ip = geoml.data.inducing.from_kmeans(data, 30 * n_experts, seed=seed)
+    return kind(geoml.data.inducing.experts(ip, n_experts, seed=0),
+                transform=tr.Isotropic(20.0))
+
+
+def _gp(parent, size=1):
+    return latent.BasicGP(parent, size=size)
+
+
+# each builds the leaves for "v" (and "w" where there are two)
+NETWORKS = {
+    # below a GP node
+    "linear": lambda r: _gp(latent.Linear(r, size=2)),
+    "select": lambda r: _gp(latent.SelectInput(r, [0])),
+    "walk": lambda r: _gp(latent.GPWalk(_gp(r, 2), n_steps=5)),
+    "bias": lambda r: _gp(latent.Bias(r)),
+    "add": lambda r: _gp(latent.Concatenate(r, latent.Add(_gp(r), _gp(r)))),
+    "combination": lambda r: _gp(latent.Concatenate(
+        r, latent.LinearCombination(_gp(r), _gp(r)))),
+    "scale": lambda r: _gp(latent.Concatenate(r, latent.Scale(_gp(r)))),
+    "concatenated_linear": lambda r: _gp(latent.Concatenate(
+        latent.Linear(r, size=2), _gp(r))),
+    "multi_structure": lambda r: latent.MultiStructureGP(
+        r, size=1, n_structures=2),
+    # above the GP nodes
+    "add_above": lambda r: latent.Add(_gp(r), _gp(r)),
+    "multiply_above": lambda r: latent.Multiply(_gp(r), _gp(r)),
+    "product_above": lambda r: latent.ProductOfExperts(_gp(r), _gp(r)),
+    "exponentiation_above": lambda r: latent.Exponentiation(_gp(r)),
+    "combination_above": lambda r: latent.LinearCombination(_gp(r), _gp(r)),
+    "linear_above": lambda r: latent.Linear(_gp(r, 2), size=1),
+    "select_above": lambda r: latent.SelectInput(_gp(r, 2), [1]),
+    "scale_bias_above": lambda r: latent.Bias(latent.Scale(_gp(r))),
+}
+
+
+def _node_model(name):
+    data = _two_variables()
+    geoml.set_seed(1234)
+    options = geoml.models.GPOptions(verbose=False, training_batch_size=100,
+                                     expert_propagation="independent")
+    if name in ("two_inputs", "stack"):
+        first, second = _input(data, 2), _input(data, 3, seed=1)
+        leaves = [_gp(first), _gp(second)]
+        if name == "stack":
+            leaves = latent.Stack(*leaves)
+        return geoml.models.VGPNetwork(
+            data, ["v", "w"], [lk.Gaussian(wp.ZScore(1)),
+                               lk.Gaussian(wp.ZScore(1))],
+            leaves, options=options)
+    kind = latent.GaussianInput if name == "gaussian_input" \
+        else latent.BasicInput
+    root = _input(data, 4, kind)
+    leaf = _gp(root) if name == "gaussian_input" else NETWORKS[name](root)
+    return geoml.models.VGPNetwork(data, "v", lk.Gaussian(wp.ZScore(1)),
+                                   leaf, options=options)
+
+
+ALL_NETWORKS = sorted(NETWORKS) + ["gaussian_input", "two_inputs", "stack"]
+
+
+@pytest.mark.parametrize("name", ALL_NETWORKS)
+def test_a_network_predicts_by_expert_as_the_model_does(name):
+    """Every expert in the slots is the model, whatever the nodes."""
+    m = _node_model(name)
+    m.train_full(5)
+    a = geoml.data.PointData.from_array(_targets(8), ["X", "Y"])
+    b = geoml.data.PointData.from_array(_targets(8), ["X", "Y"])
+    m.predict(a, n_sim=4)
+    info = m.predict_by_expert(b, n_sim=4, coverage=1.0)
+    assert len(info["subsets"]) == 1
+    for v in m.variables:
+        np.testing.assert_allclose(a.values(v + "/prediction"),
+                                   b.values(v + "/prediction"),
+                                   rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(a.variables[v].get_simulations(),
+                                   b.variables[v].get_simulations(),
+                                   rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("name", ALL_NETWORKS)
+def test_a_network_trains_by_expert_in_one_trace(name):
+    m = _node_model(name)
+    gp = [n for n in m._nodes() if isinstance(n, latent.BasicGP)]
+    before = [np.asarray(n.parameters["alpha_white_0"].get_value())
+              for n in gp]
+    record = m.train_by_expert(2, batch_size=50)
+    assert np.all(np.isfinite(record["bound"]))
+    assert record["traces"] <= 2
+    for node, value in zip(gp, before):
+        assert not np.allclose(
+            value, np.asarray(node.parameters["alpha_white_0"].get_value()))
+    c = geoml.data.PointData.from_array(_targets(8), ["X", "Y"])
+    m.predict_by_expert(c, n_sim=3)
+    for v in m.variables:
+        assert np.all(np.isfinite(c.values(v + "/prediction")))
+
+
+@pytest.mark.parametrize("name", ["walk", "add", "two_inputs"])
+def test_a_network_trains_in_slots_as_by_set(name):
+    a, b = _node_model(name), _node_model(name)
+    ra = a.train_by_expert(2, batch_size=50, visits=2, slots=False,
+                           weights_every=10)
+    rb = b.train_by_expert(2, batch_size=50, visits=2, slots=True,
+                           weights_every=10, decay="steps")
+    np.testing.assert_allclose(ra["bound"], rb["bound"], rtol=1e-8)
+    assert rb["traces"] == 1
+
+
+def test_two_inputs_keep_a_set_and_a_slot_count_each():
+    m = _node_model("two_inputs")
+    table = m.expert_weights()
+    assert table.shape == (300, 5)
+    np.testing.assert_allclose(table[:, :2].sum(axis=1), 1.0)
+    np.testing.assert_allclose(table[:, 2:].sum(axis=1), 1.0)
+    record = m.train_by_expert(1, batch_size=50)
+    assert len(record["subsets"]) == 5
+    assert all(len(sets) == 2 for sets in record["subsets"])
+    c = geoml.data.PointData.from_array(_targets(8), ["X", "Y"])
+    info = m.predict_by_expert(c, n_sim=3)
+    assert len(info["slots"]) == 2
+    assert all(len(key) == 2 for key in info["subsets"])

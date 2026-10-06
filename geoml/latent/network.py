@@ -107,31 +107,54 @@ def propagation_rule(rule):
         _EXPERT_PROPAGATION = previous
 
 
-# Which experts a GP node computes, or None for all of them. Set through
+# Which experts the GP nodes compute, or None for all of them. Set through
 # `expert_subset` by the model's expert-by-expert training and prediction,
 # never directly; read at trace time, so it keys every traced function that
-# reads it, as the propagation rule does.
+# reads it, as the propagation rule does. A tuple applies to every input; a
+# dict maps an input's id to its own, for a network on several inputs.
 _EXPERT_SUBSET = None
 
 
 @_contextlib.contextmanager
 def expert_subset(experts):
-    """Computes only the given experts, by index, while active."""
+    """Computes only the given experts, by index, while active: a sequence
+    for every input, or a mapping from an input node to its experts."""
     global _EXPERT_SUBSET
     previous = _EXPERT_SUBSET
-    _EXPERT_SUBSET = None if experts is None \
-        else tuple(sorted(int(e) for e in experts))
+    if experts is None:
+        _EXPERT_SUBSET = None
+    elif isinstance(experts, dict):
+        _EXPERT_SUBSET = {id(root): tuple(sorted(int(e) for e in subset))
+                          for root, subset in experts.items()}
+    else:
+        _EXPERT_SUBSET = tuple(sorted(int(e) for e in experts))
     try:
         yield
     finally:
         _EXPERT_SUBSET = previous
 
 
-def _active_experts(n_experts):
-    """The indices of the experts a GP node computes: all, or the subset."""
-    if _EXPERT_SUBSET is None:
-        return tuple(range(n_experts))
+def _subset_of(root):
+    """The experts `root`'s GP nodes compute under a subset, or None."""
+    if _EXPERT_SUBSET is None or root is None:
+        return None
+    if isinstance(_EXPERT_SUBSET, dict):
+        return _EXPERT_SUBSET.get(id(root))
     return _EXPERT_SUBSET
+
+
+def _subset_key():
+    """What the subset adds to a trace's key."""
+    if isinstance(_EXPERT_SUBSET, dict):
+        return tuple(sorted(_EXPERT_SUBSET.items()))
+    return _EXPERT_SUBSET
+
+
+def _active_experts(root):
+    """The indices of the experts `root`'s GP nodes compute: all, or the
+    subset."""
+    subset = _subset_of(root)
+    return tuple(range(root.n_experts)) if subset is None else subset
 
 
 class _Slots:
@@ -142,7 +165,7 @@ class _Slots:
     `n_experts`, in a slot left empty -- and `mask` one where a slot holds
     a real expert: tensors when they are a traced step's arguments,
     Variables when a prediction's cached traces read them. `stacks`, when
-    given, maps each GP node's name to the raw values of its own
+    given, maps each GP node's id to the raw values of its own
     parameters (`alpha_white`, `delta`, `bias`) stacked over the experts
     and padded, which training steps in place of the parameters; otherwise
     they are stacked from the parameters."""
@@ -157,25 +180,43 @@ class _Slots:
 # The slots an expert-by-expert pass computes, or None. Set through
 # `expert_slots` by the model, never directly. Read at trace time like the
 # subset, but the experts in the slots are tensors, so only the number of
-# slots keys a trace.
+# slots keys a trace. One `_Slots` applies to every input; a dict maps an
+# input's id to its own.
 _EXPERT_SLOTS = None
 
 
 @_contextlib.contextmanager
 def expert_slots(slots):
-    """Computes only the experts in `slots` (a `_Slots`) while active."""
+    """Computes only the experts in `slots` while active: a `_Slots` for
+    every input, or a mapping from an input node to its own."""
     global _EXPERT_SLOTS
     previous = _EXPERT_SLOTS
-    _EXPERT_SLOTS = slots
+    _EXPERT_SLOTS = {id(root): value for root, value in slots.items()} \
+        if isinstance(slots, dict) else slots
     try:
         yield
     finally:
         _EXPERT_SLOTS = previous
 
 
+def _slots_of(root):
+    """The slots `root`'s nodes compute under, or None."""
+    if _EXPERT_SLOTS is None or root is None:
+        return None
+    if isinstance(_EXPERT_SLOTS, dict):
+        return _EXPERT_SLOTS.get(id(root))
+    return _EXPERT_SLOTS
+
+
 def _slots_key():
-    """What the active slots add to a trace's key: their number."""
-    return None if _EXPERT_SLOTS is None else ("slots", _EXPERT_SLOTS.size)
+    """What the active slots add to a trace's key: their number, per
+    input."""
+    if _EXPERT_SLOTS is None:
+        return None
+    if isinstance(_EXPERT_SLOTS, dict):
+        return ("slots",) + tuple(sorted(
+            (key, value.size) for key, value in _EXPERT_SLOTS.items()))
+    return ("slots", _EXPERT_SLOTS.size)
 
 
 def padded_inducing_points(root):
@@ -200,33 +241,61 @@ def padded_inducing_points(root):
     return cached
 
 
+def _slot_inputs(root):
+    """The input's own points for its active slots, before the transform,
+    flattened over the slots: `[slots * m, d]`."""
+    points, _ = padded_inducing_points(root)
+    base = _tf.gather(_tf.constant(points, _tf.float64),
+                      _slots_of(root).ids)
+    return _tf.reshape(base, [-1, points.shape[2]])
+
+
+def _slot_mask(root):
+    """Which of the active slots' inducing points are real: `[slots, m]`."""
+    _, mask = padded_inducing_points(root)
+    return _tf.gather(_tf.constant(mask, _tf.float64), _slots_of(root).ids)
+
+
 def _slot_points(node):
-    """The inducing points `node` hands on for the active slots: locations
-    `[slots, m, d]`, their variances, and the mask of real points
-    `[slots, m]`."""
-    slots = _EXPERT_SLOTS
-    if isinstance(node, _RootLatentVariable):
-        points, mask = padded_inducing_points(node)
-        base = _tf.gather(_tf.constant(points, _tf.float64), slots.ids)
-        x = node.transform(_tf.reshape(base, [-1, points.shape[2]])
-                           - node.center)
-        x = _tf.reshape(x, [slots.size, points.shape[1], -1])
-        return (x, _tf.zeros_like(x),
-                _tf.gather(_tf.constant(mask, _tf.float64), slots.ids))
-    return node.slots_points, node.slots_points_var, node.slots_point_mask
+    """The inducing points `node` hands on under slots, `[slots, m, d]`, and
+    their variances. Under slots every node holds them as one tensor
+    flattened over the slots -- a one-element tuple -- so that a node
+    working row by row (a `Linear`, a `Bias`, a `SelectInput`) needs nothing
+    of its own."""
+    m = padded_inducing_points(node.root)[0].shape[1]
+    size = _slots_of(node.root).size
+    return (_tf.reshape(node.inducing_points[0], [size, m, -1]),
+            _tf.reshape(node.inducing_points_variance[0], [size, m, -1]))
 
 
 def _points_of(node, ids):
     """The inducing points `node` hands on for the experts `ids`, in that
-    order, and their variances. An input holds every expert's; a node
-    refreshed under the same subset holds the active experts' only, in
-    their order. (Read off the subset rather than stamped on the node: a
-    cached refresh replays its trace without running this code.)"""
-    held = None if _EXPERT_SUBSET is None \
-        or isinstance(node, _RootLatentVariable) else _EXPERT_SUBSET
-    positions = ids if held is None else [held.index(i) for i in ids]
+    order, and their variances. A node holds every expert's -- the input,
+    and whatever is computed from the input alone -- or, refreshed under a
+    subset downstream of a GP node, the active experts' only, in their
+    order; the number held tells which. (Read off the node rather than
+    stamped on it: a cached refresh replays its trace without running this
+    code.)"""
+    if len(node.inducing_points) == node.root.n_experts:
+        positions = ids
+    else:
+        subset = _subset_of(node.root)
+        positions = [subset.index(i) for i in ids]
     return ([node.inducing_points[p] for p in positions],
             [node.inducing_points_variance[p] for p in positions])
+
+
+def _aligned_points(parents, root):
+    """The parents' inducing points, expert by expert: one row per expert
+    the node will hold -- every one, the active ones under a subset, or
+    under slots the one tensor flattened over them -- and in each row one
+    `(points, variances)` per parent."""
+    if _slots_of(root) is not None:
+        return [[(p.inducing_points[0], p.inducing_points_variance[0])
+                 for p in parents]]
+    ids = _active_experts(root)
+    held = [_points_of(p, ids) for p in parents]
+    return [[(h[0][k], h[1][k]) for h in held] for k in range(len(ids))]
 
 
 def _node_seed(seed, key):
@@ -348,7 +417,7 @@ def refresh_cached(network, jitter=1e-6, owner=None):
 
     # the propagation rule and the expert subset are Python-level branches
     # inside `refresh`, so they are baked into the trace and key the cache
-    key = (jitter, _EXPERT_PROPAGATION, _EXPERT_SUBSET, _slots_key())
+    key = (jitter, _EXPERT_PROPAGATION, _subset_key(), _slots_key())
     # every expert: one trace, replaced when the key changes; a subset of
     # them, or a number of slots: one trace each, kept, since a prediction
     # by expert visits several in turn and comes back to them
@@ -596,17 +665,31 @@ class _LatentVariable(_gpr.Parametric):
         return var
 
     def _cache_tuple(self, name, values):
+        # by position, or, where the node holds a subset's active experts
+        # only, by expert: each Variable keeps the one shape its expert
+        # gives it
+        root = getattr(self, "root", None)
+        subset = _subset_of(root)
+        ids = range(len(values)) if subset is None \
+            or len(values) == root.n_experts else subset
         return tuple(self._state_var(name + "_" + str(i), v)
-                     for i, v in enumerate(values))
+                     for i, v in zip(ids, values))
 
     def _cache_slot_state(self):
-        """Under slots, snapshots the `slots_*` state, named by the number of
-        slots: its shapes are fixed by that number, so one prediction trace
-        reads it whichever experts fill the slots."""
-        prefix = "slots%d_" % _EXPERT_SLOTS.size
+        """Under slots, snapshots the `slots_*` state and the inducing points
+        handed on (one tensor flattened over the slots), named by the number
+        of slots: their shapes are fixed by that number, so one prediction
+        trace reads them whichever experts fill the slots."""
+        prefix = "slots%d_" % _slots_of(self.root).size
         for name, value in list(vars(self).items()):
             if name.startswith("slots_") and isinstance(value, _tf.Tensor):
                 setattr(self, name, self._state_var(prefix + name, value))
+        for name in ("inducing_points", "inducing_points_variance"):
+            value = getattr(self, name, None)
+            if isinstance(value, tuple) and len(value) == 1 \
+                    and isinstance(value[0], _tf.Tensor):
+                setattr(self, name,
+                        (self._state_var(prefix + name, value[0]),))
 
     def cache_prediction_state(self):
         """
@@ -615,7 +698,7 @@ class _LatentVariable(_gpr.Parametric):
         Called once per prediction (after `refresh`) for every node in the
         network. Subclasses holding additional prediction state extend this.
         """
-        if _EXPERT_SLOTS is not None:
+        if _slots_of(getattr(self, "root", None)) is not None:
             self._cache_slot_state()
             return
         if self.inducing_points is not None:
@@ -886,14 +969,14 @@ class _GPNode(_FunctionalLatentVariable):
             return _tf.transpose(w_mu[:, :, 0]), _tf.transpose(w_var)
 
     def simulate(self, n_sim, seed=(0, 0)):
-        if _EXPERT_SLOTS is not None:
+        if _slots_of(self.root) is not None:
             return self._slot_simulate(n_sim, seed)
         cov_cross, mu, weights = self._swept()
         with _tf.name_scope("gp_simulation"):
             rnd = [
                 _simulation_normals([self.size, self.root.n_ip[i], n_sim],
                                     seed, key=self.name)
-                for i in _active_experts(self.root.n_experts)
+                for i in _active_experts(self.root)
             ]
             sims = [
                 _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c)) + d
@@ -986,12 +1069,21 @@ class BasicInput(_RootLatentVariable):
             self.center = 0.5 * (self.bounding_box.min + self.bounding_box.max)
 
     def get_root_inducing_points(self):
-        return self.base_inducing_points, self.inducing_points_variance
+        # under slots the active slots' points, flattened over them
+        if _slots_of(self) is not None:
+            base = _slot_inputs(self)
+            return (base,), (_tf.zeros([base.shape[0], self.size],
+                                       _tf.float64),)
+        return self.base_inducing_points, tuple(
+            _tf.zeros([n, self.size], _tf.float64) for n in self.n_ip)
 
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_input_refresh"):
             self.transform.refresh()
-            self.inducing_points = tuple(self.transform(ip - self.center) for ip in self.base_inducing_points)
+            base, variance = self.get_root_inducing_points()
+            self.inducing_points = tuple(self.transform(ip - self.center)
+                                         for ip in base)
+            self.inducing_points_variance = variance
 
     def propagate(self, x, x_var=None):
         x_tr = self.transform(x - self.center)
@@ -1154,20 +1246,12 @@ class Concatenate(Stack):
     def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
-        if _EXPERT_SLOTS is not None:
-            points = [_slot_points(lat) for lat in self.parents]
-            self.slots_points = _tf.concat([p[0] for p in points], axis=2)
-            self.slots_points_var = _tf.concat([p[1] for p in points],
-                                               axis=2)
-            self.slots_point_mask = points[0][2]
-            return
-        # every expert, or the active ones in their order under a subset
-        ids = _active_experts(self.root.n_experts)
-        held = [_points_of(lat, ids) for lat in self.parents]
-        self.inducing_points = tuple(_tf.concat(
-            [h[0][p] for h in held], axis=1) for p in range(len(ids)))
-        self.inducing_points_variance = tuple(_tf.concat(
-            [h[1][p] for h in held], axis=1) for p in range(len(ids)))
+        # every expert, the active ones under a subset, or the slots as one
+        rows = _aligned_points(self.parents, self.root)
+        self.inducing_points = tuple(
+            _tf.concat([p for p, _ in row], axis=1) for row in rows)
+        self.inducing_points_variance = tuple(
+            _tf.concat([v for _, v in row], axis=1) for row in rows)
 
 
 class BasicGP(_GPNode):
@@ -1331,7 +1415,7 @@ class BasicGP(_GPNode):
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_refresh"):
             self.parent.refresh(jitter)
-            if _EXPERT_SLOTS is not None:
+            if _slots_of(self.root) is not None:
                 self._slot_refresh(jitter)
                 return
 
@@ -1341,7 +1425,7 @@ class BasicGP(_GPNode):
 
             # every expert, or the subset an expert-by-expert pass asks for;
             # the tuples below hold the active experts in that order
-            ids = _active_experts(self.root.n_experts)
+            ids = _active_experts(self.root)
             ips, ipvs = self._parent_points(ids)
 
             eye = tuple(_tf.eye(self.root.n_ip[i], dtype=_tf.float64)
@@ -1469,9 +1553,9 @@ class BasicGP(_GPNode):
         """The active slots' own parameters -- `alpha_white` `[slots, size,
         m, 1]`, `delta` `[slots, size, m]`, `bias` `[slots]` -- with alpha
         zero and delta one where an expert has fewer points than `m`."""
-        slots = _EXPERT_SLOTS
+        slots = _slots_of(self.root)
         if slots.stacks is not None:
-            alpha, delta, bias = slots.stacks[self.name]
+            alpha, delta, bias = slots.stacks[id(self)]
         else:
             m = max(self.root.n_ip)
             n = self.root.n_ip
@@ -1504,8 +1588,9 @@ class BasicGP(_GPNode):
         covariance are the identity's and its alpha is zero, so it adds
         nothing to any expert, and an empty slot is masked out of every
         blend."""
-        slots = _EXPERT_SLOTS
-        ips, ipvs, pmask = _slot_points(self.parent)
+        slots = _slots_of(self.root)
+        ips, ipvs = _slot_points(self.parent)
+        pmask = _slot_mask(self.root)
         alpha_white, delta, bias = self._slot_locals()
         m = pmask.shape[1]
         eye = _tf.eye(m, dtype=_tf.float64)
@@ -1570,15 +1655,18 @@ class BasicGP(_GPNode):
                 _tf.reduce_sum(means * weights, axis=1), [0, 2, 1])
             points_var = _tf.transpose(
                 _tf.reduce_sum(pred_vars * weights, axis=1), [0, 2, 1])
-        self.slots_points = points
-        self.slots_points_var = points_var
-        self.slots_point_mask = pmask
+        # handed on as every node hands them on under slots: one tensor,
+        # flattened over the slots
+        self.inducing_points = (_tf.reshape(points, [-1, self.size]),)
+        self.inducing_points_variance = (
+            _tf.reshape(points_var, [-1, self.size]),)
 
     def _slot_moments(self, x, x_var=None):
         """`_moments` under slots, batched over them, an empty slot masked
         out of the blend."""
-        slots = _EXPERT_SLOTS
-        ips, ipvs, pmask = _slot_points(self.parent)
+        slots = _slots_of(self.root)
+        ips, ipvs = _slot_points(self.parent)
+        pmask = _slot_mask(self.root)
         cov_cross = self.covariance_matrix(x, ips, x_var, ipvs) \
             * pmask[:, None, :]
         mu = _tf.einsum("pab,psbc->psac", cov_cross, self.slots_alpha) \
@@ -1609,10 +1697,10 @@ class BasicGP(_GPNode):
             return _tf.reduce_sum(sims * weights[:, :, :, None], axis=0)
 
     def cache_prediction_state(self):
-        if _EXPERT_SLOTS is not None:
+        if _slots_of(self.root) is not None:
             self._cache_slot_state()
             return
-        if _EXPERT_SUBSET is None:
+        if _subset_of(self.root) is None:
             super().cache_prediction_state()
             self.alpha = self._cache_tuple("alpha", self.alpha)
             self.cov_inv = self._cache_tuple("cov_inv", self.cov_inv)
@@ -1623,7 +1711,7 @@ class BasicGP(_GPNode):
         # under a subset the tuples hold the active experts only, so each
         # snapshot is named after its expert rather than its position, and
         # a Variable keeps the one shape its expert gives it
-        ids = _active_experts(self.root.n_experts)
+        ids = _active_experts(self.root)
 
         def by_expert(name, values):
             return tuple(self._state_var("%s_%d" % (name, i), v)
@@ -1642,9 +1730,9 @@ class BasicGP(_GPNode):
 
     def _moments(self, x, x_var=None):
         with _tf.name_scope("basic_interpolation"):
-            if _EXPERT_SLOTS is not None:
+            if _slots_of(self.root) is not None:
                 return self._slot_moments(x, x_var)
-            ids = _active_experts(self.root.n_experts)
+            ids = _active_experts(self.root)
             ips, ipvs = self._parent_points(ids)
             cov_cross = [
                 self.covariance_matrix(x, ip, x_var, ip_var)
@@ -1676,16 +1764,16 @@ class BasicGP(_GPNode):
 
     def kl_divergence(self):
         with _tf.name_scope("basic_KL_divergence"):
-            if _EXPERT_SLOTS is not None:
+            if _slots_of(self.root) is not None:
                 return _tf.reduce_sum(self.expert_kl_terms()
-                                      * _EXPERT_SLOTS.mask)
+                                      * _slots_of(self.root).mask)
             return _tf.add_n(self.expert_kl_terms())
 
     def expert_kl_terms(self):
         """Each active expert's KL divergence, in the order of the active
         experts -- what `kl_divergence` adds up. Under slots a tensor over
         the slots, to which a padded point adds nothing."""
-        if _EXPERT_SLOTS is not None:
+        if _slots_of(self.root) is not None:
             pmask = self.slots_input_mask
             outer = pmask[:, :, None] * pmask[:, None, :]
             tr = _tf.reduce_sum(self.slots_cov_smooth_inv
@@ -1698,7 +1786,7 @@ class BasicGP(_GPNode):
                                    * pmask[:, None, :], axis=[1, 2])
             return 0.5 * (- tr + fit + det_1 - det_2)
         all_kl = []
-        for p, i in enumerate(_active_experts(self.root.n_experts)):
+        for p, i in enumerate(_active_experts(self.root)):
             delta = self.parameters[f"delta_{i}"].get_value()
             alpha_white = self.parameters[f"alpha_white_{i}"].get_value()
 
@@ -2213,12 +2301,14 @@ class LinearCombination(_Operation):
                 weights = weights[:, None, None]
 
             all_ip, all_ip_var = [], []
-            for i in range(self.root.n_experts):
-                ip = _tf.stack([lat.inducing_points[i] for lat in self.parents], axis=0)
+            # every expert, the active ones under a subset, or the slots as
+            # one
+            for row in _aligned_points(self.parents, self.root):
+                ip = _tf.stack([p for p, _ in row], axis=0)
                 ip = _tf.reduce_sum(ip * weights, axis=0)
                 all_ip.append(ip)
 
-                ip_var = _tf.stack([lat.inducing_points_variance[i] for lat in self.parents], axis=0)
+                ip_var = _tf.stack([v for _, v in row], axis=0)
                 ip_var = _tf.reduce_sum(ip_var * weights**2, axis=0)
                 all_ip_var.append(ip_var)
 
@@ -2747,12 +2837,14 @@ class Add(_Operation):
 
         if self.propagates_inducing_points:
             all_ip, all_ip_var = [], []
-            for i in range(self.root.n_experts):
-                ip = _tf.stack([lat.inducing_points[i] for lat in self.parents], axis=0)
+            # every expert, the active ones under a subset, or the slots as
+            # one
+            for row in _aligned_points(self.parents, self.root):
+                ip = _tf.stack([p for p, _ in row], axis=0)
                 ip = _tf.reduce_sum(ip, axis=0)
                 all_ip.append(ip)
 
-                ip_var = _tf.stack([lat.inducing_points_variance[i] for lat in self.parents], axis=0)
+                ip_var = _tf.stack([v for _, v in row], axis=0)
                 ip_var = _tf.reduce_sum(ip_var, axis=0)
                 all_ip_var.append(ip_var)
 
@@ -3131,8 +3223,11 @@ class GPWalk(_FunctionalLatentVariable):
         # )
 
         root_ip, root_var = self.root.get_root_inducing_points()
+        # every expert, the active ones under a subset, or the slots as one
+        positions = [0] if _slots_of(self.root) is not None \
+            else _active_experts(self.root)
         all_ip, all_ip_var = [], []
-        for i in range(self.root.n_experts):
+        for i in positions:
             ip, ip_var = self._walk(root_ip[i], root_var[i])
             all_ip.append(ip)
             all_ip_var.append(ip_var)
@@ -3155,13 +3250,25 @@ class GPWalk(_FunctionalLatentVariable):
         # )
         # kl = 0.5 * _tf.reduce_sum((mu_2 - mu_1) ** 2 / var_2)
 
-        kl = _tf.add_n([
-            0.5 * _tf.reduce_sum((mu_2 - mu_1) ** 2 / var_2)
-            for mu_1, mu_2, var_2 in zip(
-                self.parent.parent.inducing_points, self.inducing_points, self.inducing_points_variance
-            )
-        ])
-        return kl
+        slots = _slots_of(self.root)
+        if slots is not None:
+            return _tf.reduce_sum(self.expert_kl_terms() * slots.mask)
+        return _tf.add_n(self.expert_kl_terms())
+
+    def expert_kl_terms(self):
+        """Each active expert's term of the walk's KL, in the order of the
+        active experts; under slots a tensor over the slots, to which a
+        padded point adds nothing."""
+        if _slots_of(self.root) is not None:
+            mu_1, _ = _slot_points(self.walker)
+            mu_2, var_2 = _slot_points(self)
+            terms = 0.5 * _tf.reduce_sum((mu_2 - mu_1) ** 2 / var_2, axis=2)
+            return _tf.reduce_sum(terms * _slot_mask(self.root), axis=1)
+        ids = _active_experts(self.root)
+        mu_1, _ = _points_of(self.walker, ids)
+        mu_2, var_2 = _points_of(self, ids)
+        return [0.5 * _tf.reduce_sum((b - a) ** 2 / v)
+                for a, b, v in zip(mu_1, mu_2, var_2)]
 
     def compute_path(self, x, x_var=None):
         walker_mu, walker_var = self.walker.propagate(x, x_var)
@@ -3394,11 +3501,12 @@ class MultiStructureGP(BasicGP):
                 var_x = _tf.zeros_like(x)
             if var_y is None:
                 var_y = _tf.zeros_like(y)
-            var_x = var_x[:, None, :]
-            var_y = var_y[None, :, :]
+            # leading axes broadcast, as in `BasicGP.covariance_matrix`
+            var_x = var_x[..., :, None, :]
+            var_y = var_y[..., None, :, :]
 
-            # [n_data, n_data, n_dim]
-            dif = x[:, None, :] - y[None, :, :]
+            # [..., n_data, n_data, n_dim]
+            dif = x[..., :, None, :] - y[..., None, :, :]
 
             for n in range(self.n_structures):
                 ranges = self.parameters[f"ranges_{n}"].get_value()

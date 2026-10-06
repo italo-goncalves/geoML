@@ -1517,7 +1517,7 @@ class VGPNetwork(_GPModel):
         rule = self.options.expert_propagation
         # an expert subset is read at trace time too; `None` (every expert)
         # keeps the key every other caller has always used
-        subset = _latent.network._EXPERT_SUBSET
+        subset = _latent.network._subset_key()
         slots = _latent.network._slots_key()
         key = (jit, qmc, rule) if subset is None and slots is None \
             else (jit, qmc, rule, subset, slots)
@@ -1794,49 +1794,54 @@ class VGPNetwork(_GPModel):
     # ------------------------------------------------------------------ #
     # expert by expert
     # ------------------------------------------------------------------ #
-    def _expert_gp_nodes(self):
-        """The GP nodes an expert-by-expert pass computes, and their root,
-        after refusing a model it cannot handle: directional data, leaves
-        on several roots, an input other than a `BasicInput`, a GP node
-        that is not a `BasicGP`, or one that reads anything but the input,
-        another `BasicGP` or a `Concatenate` of those."""
+    def _expert_structure(self):
+        """The inputs whose experts an expert-by-expert pass visits, in the
+        network's order, and each one's GP nodes, after refusing what it
+        cannot handle: directional data, an input other than a
+        `BasicInput`, and the nodes with no expert-by-expert path --
+        `AdditiveGP`, `UncertainInputGP`, `GradientConstrainedInput`,
+        `RadialTrend`, `GaussianMixture`."""
         network = _latent.network
         if self.directional_data is not None:
             raise ValueError("training and predicting by expert does not "
                              "take directional data")
-        roots = {id(leaf.root) for leaf in self.leaves}
-        root = self.leaves[0].root
-        if len(roots) != 1 or root is None:
-            raise ValueError("training and predicting by expert needs every "
-                             "leaf on one root, whose experts it visits")
-        if not isinstance(root, network.BasicInput):
-            raise ValueError("training and predicting by expert needs a "
-                             "BasicInput at the root, and %s is a %s"
-                             % (root.name, type(root).__name__))
+        nodes = self._nodes()
+        refused = (network.AdditiveGP, network.UncertainInputGP,
+                   network.GradientConstrainedInput, network.RadialTrend,
+                   network.GaussianMixture)
+        for node in nodes:
+            if isinstance(node, refused):
+                raise ValueError("training and predicting by expert does not "
+                                 "take a %s (%s)"
+                                 % (type(node).__name__, node.name))
+        roots = [n for n in nodes
+                 if isinstance(n, network._RootLatentVariable)]
+        for root in roots:
+            if not isinstance(root, network.BasicInput):
+                raise ValueError("training and predicting by expert needs a "
+                                 "BasicInput at every root, and %s is a %s"
+                                 % (root.name, type(root).__name__))
+        gp = {id(r): [n for n in nodes if isinstance(n, network.BasicGP)
+                      and n.root is r] for r in roots}
+        return roots, gp
 
-        def readable(node):
-            return node is root or type(node) is network.BasicGP
+    def _expert_blocks(self):
+        """Each input with the first column of its experts in the weight
+        table and their number: the table holds every input's experts side
+        by side, in the network's order."""
+        roots, _ = self._expert_structure()
+        blocks, start = [], 0
+        for root in roots:
+            blocks.append((root, start, root.n_experts))
+            start += root.n_experts
+        return blocks
 
-        gp = [n for n in self._nodes() if isinstance(n, network._GPNode)]
-        for node in gp:
-            if type(node) is not network.BasicGP:
-                raise ValueError("training and predicting by expert takes "
-                                 "BasicGP nodes only, and %s is a %s"
-                                 % (node.name, type(node).__name__))
-            parent = node.parent
-            if readable(parent) or (
-                    type(parent) is network.Concatenate
-                    and all(readable(p) for p in parent.parents)):
-                continue
-            raise ValueError("%s reads %s; a GP node must read the input, "
-                             "another BasicGP or a Concatenate of those"
-                             % (node.name, parent.name))
-        return gp, root
-
-    def _transformed(self, container, rows=None):
+    def _transformed(self, container, rows=None, root=None):
         """The locations of `container` (every row of a block's fan-out) in
-        the input's transformed space, the space the kernels measure."""
-        _, root = self._expert_gp_nodes()
+        an input's transformed space, the space its kernels measure; the
+        first input by default."""
+        if root is None:
+            root = self._expert_structure()[0][0]
         rows = _np.arange(container.n_data) if rows is None else rows
         coords, _ = container.get_batched_coordinates(rows)
         out = []
@@ -1854,9 +1859,10 @@ class VGPNetwork(_GPModel):
         computation whatever their number: at every location the expert's
         explained variance gives its raw weight, the raw weights are
         normalized over the experts as the prediction normalizes them, and
-        averaged over the outputs of every GP node. A node that reads
-        another reads, in the sweep, what the one expert alone gives below
-        it -- which is the blend wherever that expert carries weight.
+        averaged over the outputs of every GP node on the expert's input. A
+        node that reads another reads, in the sweep, what the one expert
+        alone gives below it -- which is the blend wherever that expert
+        carries weight.
 
         Parameters
         ----------
@@ -1866,78 +1872,99 @@ class VGPNetwork(_GPModel):
         Returns
         -------
         ndarray
-            Of shape `(n, n_experts)`, rows summing to one.
+            Of shape `(n, n_experts)`, rows summing to one -- on a network
+            of several inputs, every input's experts side by side in the
+            network's order, each input's summing to one.
         """
-        gp, root = self._expert_gp_nodes()
+        roots, gp = self._expert_structure()
         container = self.data if container is None else container
         n_rows = container.n_data
-        n_experts = root.n_experts
-        n_out = sum(n.size for n in gp)
-        raw = _np.zeros([n_rows, n_experts, n_out])
         bands = self.options.batch_index(
             n_rows, batch_size=self.options.prediction_batch_size)
-        for j in range(n_experts):
-            with _latent.expert_subset((j,)):
-                for node in gp:
-                    node.refresh(self.options.jitter)
-                for band in bands:
-                    rows = _np.arange(n_rows)[band]
-                    coords, _ = container.get_batched_coordinates(rows)
-                    variance, _ = container.get_batched_variance(rows)
-                    x = _tf.constant(coords, _tf.float64)
-                    x_var = _tf.constant(variance, _tf.float64)
-                    column = 0
-                    for node in gp:
-                        _, var = node.interpolate(
-                            *node.parent.propagate(x, x_var))
-                        var = _np.asarray(var).T
-                        raw[band, j, column:column + node.size] = \
-                            (1 - var) / (var + 1e-6) + 1e-6
-                        column += node.size
-        weights = raw / raw.sum(axis=1, keepdims=True)
-        return weights.mean(axis=2)
+        blocks = []
+        for root in roots:
+            nodes = gp[id(root)]
+            n_out = sum(n.size for n in nodes)
+            raw = _np.zeros([n_rows, root.n_experts, n_out])
+            for j in range(root.n_experts):
+                with _latent.expert_subset({root: (j,)}):
+                    for node in nodes:
+                        node.refresh(self.options.jitter)
+                    for band in bands:
+                        rows = _np.arange(n_rows)[band]
+                        coords, _ = container.get_batched_coordinates(rows)
+                        variance, _ = container.get_batched_variance(rows)
+                        x = _tf.constant(coords, _tf.float64)
+                        x_var = _tf.constant(variance, _tf.float64)
+                        column = 0
+                        for node in nodes:
+                            _, var = node.interpolate(
+                                *node.parent.propagate(x, x_var))
+                            var = _np.asarray(var).T
+                            raw[band, j, column:column + node.size] = \
+                                (1 - var) / (var + 1e-6) + 1e-6
+                            column += node.size
+            weights = raw / raw.sum(axis=1, keepdims=True)
+            blocks.append(weights.mean(axis=2))
+        return _np.concatenate(blocks, axis=1)
 
     @staticmethod
-    def _expert_subsets(overlap, coverage):
-        """Each expert's active set: the experts holding `coverage` of the
-        weight its ground carries, `overlap[j, k]` being the weight expert
-        `k` has where expert `j` has it (the data's weights, multiplied and
-        summed). Returns the sets and the share each leaves out."""
-        subsets, dropped = [], []
-        for j in range(overlap.shape[0]):
-            order = _np.argsort(-overlap[j])
-            share = _np.cumsum(overlap[j, order]) / overlap[j].sum()
-            n = int(_np.searchsorted(share, coverage)) + 1
-            keep = set(order[:n].tolist()) | {j}
-            subsets.append(tuple(sorted(keep)))
-            dropped.append(1.0 - overlap[j, sorted(keep)].sum()
-                           / overlap[j].sum())
-        return subsets, _np.asarray(dropped)
+    def _expert_sets(overlap, coverage, blocks):
+        """Each expert's active sets, one per input: the experts of that
+        input holding `coverage` of the weight the expert's ground carries,
+        `overlap[g, h]` being the weight expert `h` has where expert `g`
+        has it (the data's weights, multiplied and summed); an expert is in
+        its own set. Returns the sets, as tuples of local indices per input,
+        and the largest share any of them leaves out."""
+        sets, dropped = [], []
+        for g in range(overlap.shape[0]):
+            per_input, worst = [], 0.0
+            for _, start, count in blocks:
+                row = overlap[g, start:start + count]
+                order = _np.argsort(-row)
+                share = _np.cumsum(row[order]) / row.sum()
+                n = int(_np.searchsorted(share, coverage)) + 1
+                keep = set(order[:n].tolist())
+                if start <= g < start + count:
+                    keep.add(g - start)
+                keep = tuple(sorted(keep))
+                per_input.append(keep)
+                worst = max(worst, 1.0 - row[list(keep)].sum() / row.sum())
+            sets.append(tuple(per_input))
+            dropped.append(worst)
+        return sets, _np.asarray(dropped)
 
-    def _expert_plan(self, coverage, subsets=None):
+    def _expert_plan(self, coverage, sets=None):
         """The weight table of the training data, and from it each expert's
-        batch distribution, active set and shares of the KL terms. Given
-        `subsets`, the active sets are kept and only the share of weight
-        each leaves out is measured afresh."""
+        batch distribution, active sets and shares of the KL terms. Given
+        `sets`, the active sets are kept and only the share of weight each
+        leaves out is measured afresh."""
+        blocks = self._expert_blocks()
         table = self.expert_weights()
         measured = _np.any(self.has_value > 0, axis=1)
         w = table * measured[:, None]
         total = w.sum(axis=0)
         overlap = w.T @ w
-        if subsets is None:
-            subsets, dropped = self._expert_subsets(overlap, coverage)
+        formed, dropped = self._expert_sets(overlap, coverage, blocks)
+        if sets is None:
+            sets = formed
         else:
-            dropped = _np.asarray(
-                [1.0 - overlap[j, list(s)].sum() / overlap[j].sum()
-                 for j, s in enumerate(subsets)])
+            dropped = _np.asarray([
+                max(1.0 - overlap[g, start:start + count][list(s)].sum()
+                    / overlap[g, start:start + count].sum()
+                    for s, (_, start, count) in zip(per_input, blocks))
+                for g, per_input in enumerate(sets)])
         # each expert's KL split among the batches it is active on, by the
         # weight it carries there, so an epoch counts it once
         carried = _np.zeros_like(overlap)
-        for j, subset in enumerate(subsets):
-            carried[j, list(subset)] = overlap[j, list(subset)]
+        for g, per_input in enumerate(sets):
+            for s, (_, start, _) in zip(per_input, blocks):
+                columns = [start + k for k in s]
+                carried[g, columns] = overlap[g, columns]
         shares = carried / carried.sum(axis=0, keepdims=True)
         return dict(table=table, measured=measured, total=total,
-                    subsets=subsets, dropped=dropped, shares=shares)
+                    sets=sets, dropped=dropped, shares=shares,
+                    blocks=blocks)
 
     @staticmethod
     def _expert_adam():
@@ -1948,22 +1975,24 @@ class VGPNetwork(_GPModel):
             _tf.keras.optimizers.schedules.ExponentialDecay(1e-2, 1, 0.999),
             amsgrad=True)
 
-    def _by_expert_state(self, gp, root, slots, decay="steps"):
+    def _by_expert_state(self, roots, gp, slots, decay="steps"):
         """What training by expert keeps between calls -- the optimizers,
         the batch generator, the active sets, the stopping rule -- made
         afresh when the trained parameters or the path change, and dropped
         by new data or a reset optimizer. The working copy and the traced
         steps outlive it, on the model."""
-        n_experts = root.n_experts
         local_ids = set()
-        local = [[] for _ in range(n_experts)]
-        for node in gp:
-            for k in range(n_experts):
-                for name in ("alpha_white_%d", "delta_%d", "bias_%d"):
-                    parameter = node.parameters[name % k]
-                    local_ids.add(id(parameter.variable))
-                    if not parameter.fixed:
-                        local[k].append(parameter.variable)
+        local = []
+        for root in roots:
+            for k in range(root.n_experts):
+                variables = []
+                for node in gp[id(root)]:
+                    for name in ("alpha_white_%d", "delta_%d", "bias_%d"):
+                        parameter = node.parameters[name % k]
+                        local_ids.add(id(parameter.variable))
+                        if not parameter.fixed:
+                            variables.append(parameter.variable)
+                local.append(variables)
         shared = [v for v in self.get_unfixed_variables()
                   if id(v) not in local_ids]
         key = (bool(slots), tuple(id(v) for vs in local for v in vs),
@@ -1985,7 +2014,7 @@ class VGPNetwork(_GPModel):
             clock=_tf.Variable(0.0, dtype=_tf.float64, trainable=False),
             rng=_np.random.default_rng(self.options.seed),
             converged=_Convergence(self.options.training_tolerance),
-            subsets=None)
+            sets=None)
         if decay == "epochs":
             # the shared parameters on train_svi's clock too: on their own
             # steps, one an epoch, they kept moving at the full rate while
@@ -1998,97 +2027,105 @@ class VGPNetwork(_GPModel):
         if shared:
             state["shared_optimizer"].build(shared)
         if slots:
-            store = self._expert_store(gp, root)
-            for name, variable in store.items():
-                if name == "t":
-                    variable.assign(_tf.zeros_like(variable))
+            store = self._expert_store(roots, gp)
+            for name, entry in store.items():
+                if isinstance(name, tuple):
+                    entry.assign(_tf.zeros_like(entry))
                     continue
                 for kind in ("alpha", "delta", "bias"):
                     for prefix in ("m_", "v_", "vh_"):
-                        moment = variable[prefix + kind]
+                        moment = entry[prefix + kind]
                         moment.assign(_tf.zeros_like(moment))
             state["store"] = store
         else:
-            optimizers = [self._expert_adam() for _ in range(n_experts)]
+            optimizers = [self._expert_adam() for _ in local]
             for optimizer, variables in zip(optimizers, local):
                 optimizer.build(variables)
             state.update(optimizers=optimizers, steps={})
         self._by_expert = state
         return state
 
-    def _expert_store(self, gp, root):
+    def _expert_store(self, roots, gp):
         """The working copy training by expert steps under slots: each GP
         node's `alpha_white`, `delta` and `bias` as raw values stacked over
-        the experts and padded, one padding expert after the last, beside
-        their bounds, which experts may move them, and AMSGrad's moments;
-        and each expert's step count. Made once per model, so that the
-        traced steps reading it stay valid; `_sync_expert_store` fills it
-        from the parameters and writes it back."""
+        its input's experts and padded, one padding expert after the last,
+        beside their bounds, which experts may move them, and AMSGrad's
+        moments; and each expert's step count, per input (`("t", id)`).
+        Keyed by the nodes' ids: two trees may number their nodes alike.
+        Made once per model, so that the traced steps reading it stay valid;
+        `_sync_expert_store` fills it from the parameters and writes it
+        back."""
         store = self.__dict__.get("_expert_store_vars")
         if store is not None:
             return store
-        n_experts = root.n_experts
-        m = max(root.n_ip)
-        store = {"t": _tf.Variable(_np.zeros(n_experts + 1), trainable=False,
-                                   dtype=_tf.float64)}
-        for node in gp:
-            shapes = dict(alpha=[n_experts + 1, node.size, m, 1],
-                          delta=[n_experts + 1, node.size, m],
-                          bias=[n_experts + 1])
-            entry = {}
-            for kind, shape in shapes.items():
-                entry[kind] = _tf.Variable(_np.zeros(shape),
-                                           dtype=_tf.float64)
-                for prefix in ("m_", "v_", "vh_", "lo_", "hi_"):
-                    entry[prefix + kind] = _tf.Variable(
-                        _np.zeros(shape), trainable=False, dtype=_tf.float64)
-                entry["free_" + kind] = _tf.Variable(
-                    _np.zeros(n_experts + 1), trainable=False,
-                    dtype=_tf.float64)
-            store[node.name] = entry
+        store = {}
+        for root in roots:
+            n_experts = root.n_experts
+            m = max(root.n_ip)
+            store[("t", id(root))] = _tf.Variable(
+                _np.zeros(n_experts + 1), trainable=False, dtype=_tf.float64)
+            for node in gp[id(root)]:
+                shapes = dict(alpha=[n_experts + 1, node.size, m, 1],
+                              delta=[n_experts + 1, node.size, m],
+                              bias=[n_experts + 1])
+                entry = {}
+                for kind, shape in shapes.items():
+                    entry[kind] = _tf.Variable(_np.zeros(shape),
+                                               dtype=_tf.float64)
+                    for prefix in ("m_", "v_", "vh_", "lo_", "hi_"):
+                        entry[prefix + kind] = _tf.Variable(
+                            _np.zeros(shape), trainable=False,
+                            dtype=_tf.float64)
+                    entry["free_" + kind] = _tf.Variable(
+                        _np.zeros(n_experts + 1), trainable=False,
+                        dtype=_tf.float64)
+                store[id(node)] = entry
         self._expert_store_vars = store
         return store
 
     @staticmethod
-    def _sync_expert_store(gp, root, store, back=False):
+    def _sync_expert_store(roots, gp, store, back=False):
         """Fills the working copy from the parameters -- values, bounds and
         which experts may move -- or, with `back`, writes it into them."""
         names = (("alpha", "alpha_white_%d"), ("delta", "delta_%d"),
                  ("bias", "bias_%d"))
-        for node in gp:
-            entry = store[node.name]
-            for kind, name in names:
-                if back:
-                    values = entry[kind].numpy()
+        for root in roots:
+            for node in gp[id(root)]:
+                entry = store[id(node)]
+                for kind, name in names:
+                    if back:
+                        values = entry[kind].numpy()
+                        for i, n in enumerate(root.n_ip):
+                            value = values[i] if kind == "bias" \
+                                else values[i, :, :n]
+                            node.parameters[name % i].variable.assign(value)
+                        continue
+                    value = _np.zeros(entry[kind].shape)
+                    lo, hi = _np.zeros_like(value), _np.zeros_like(value)
+                    free = _np.zeros(root.n_experts + 1)
                     for i, n in enumerate(root.n_ip):
-                        value = values[i] if kind == "bias" \
-                            else values[i, :, :n]
-                        node.parameters[name % i].variable.assign(value)
-                    continue
-                value = _np.zeros(entry[kind].shape)
-                lo, hi = _np.zeros_like(value), _np.zeros_like(value)
-                free = _np.zeros(root.n_experts + 1)
-                for i, n in enumerate(root.n_ip):
-                    parameter = node.parameters[name % i]
-                    at = i if kind == "bias" else (i, slice(None), slice(0, n))
-                    value[at] = parameter.variable.numpy()
-                    lo[at] = parameter.min_transformed.numpy()
-                    hi[at] = parameter.max_transformed.numpy()
-                    free[i] = 0.0 if parameter.fixed else 1.0
-                entry[kind].assign(value)
-                entry["lo_" + kind].assign(lo)
-                entry["hi_" + kind].assign(hi)
-                entry["free_" + kind].assign(free)
+                        parameter = node.parameters[name % i]
+                        at = i if kind == "bias" \
+                            else (i, slice(None), slice(0, n))
+                        value[at] = parameter.variable.numpy()
+                        lo[at] = parameter.min_transformed.numpy()
+                        hi[at] = parameter.max_transformed.numpy()
+                        free[i] = 0.0 if parameter.fixed else 1.0
+                    entry[kind].assign(value)
+                    entry["lo_" + kind].assign(lo)
+                    entry["hi_" + kind].assign(hi)
+                    entry["free_" + kind].assign(free)
 
     @staticmethod
-    def _expert_amsgrad(store, names, ids, mask, grads, clock=None):
-        """One step on the slots' rows of the working copy: Keras' Adam with
-        `amsgrad=True` at a rate decaying 0.999 a step, the steps counted
-        per expert as each expert's own optimizer would count them -- or,
-        given a `clock`, as many as `train_svi` would have taken by now. A
-        row in an empty slot, or one whose parameter is fixed, keeps what
-        it holds; a padded entry has no gradient, and stays where it is."""
-        t = _tf.gather(store["t"], ids)
+    def _expert_amsgrad(store, names, steps, ids, mask, grads, clock=None):
+        """One step on the slots' rows of one input's working copy: Keras'
+        Adam with `amsgrad=True` at a rate decaying 0.999 a step, the steps
+        counted per expert (`steps`) as each expert's own optimizer would
+        count them -- or, given a `clock`, as many as `train_svi` would have
+        taken by now. A row in an empty slot, or one whose parameter is
+        fixed, keeps what it holds; a padded entry has no gradient, and
+        stays where it is."""
+        t = _tf.gather(steps, ids)
         decayed = t if clock is None else clock + 0.0 * t
         # the rate and the betas raised to the step in single precision,
         # as Keras computes them: in double precision the steps come out
@@ -2132,7 +2169,7 @@ class VGPNetwork(_GPModel):
                                          (entry["vh_" + kind], vh1, vh0)):
                     target.scatter_nd_update(index,
                                              _tf.where(moving, new, old))
-        store["t"].scatter_nd_update(index, t + mask)
+        steps.scatter_nd_update(index, t + mask)
 
     def train_by_expert(self, epochs: int = 10,
                         batch_size: "int | None" = None,
@@ -2148,13 +2185,15 @@ class VGPNetwork(_GPModel):
         An epoch is `visits` rounds, each visiting every expert once in an
         order of its own. For expert `j` a batch of data rows is drawn with
         probability proportional to their weight for `j`, and the experts
-        active on it -- those holding `coverage` of the weight the batch
-        carries -- are the only ones computed; their own parameters take a
-        step on the batch. The batch's bound is the data term `W_j` times
-        its mean log-likelihood, `W_j` the expert's total weight, so the
-        experts' terms add up to the whole data term over an epoch, less
-        each active expert's share of its KL divergence, the shares adding
-        to one KL per expert over an epoch, and a share of the priors.
+        active on it -- on each input, those holding `coverage` of the
+        weight the batch carries -- are the only ones computed; their own
+        parameters take a step on the batch. The batch's bound is the data
+        term `W_j` times its mean log-likelihood, `W_j` the expert's total
+        weight, over the number of inputs, so the experts' terms add up to
+        the whole data term over an epoch, less each active expert's share
+        of its KL divergence, the shares adding to one KL per expert over
+        an epoch, and a share of the priors. A network on several inputs
+        visits every input's experts.
 
         Under `options.training_tolerance` training stops once the epochs'
         bound settles, as `train_svi`'s does, and a call made after that
@@ -2202,8 +2241,9 @@ class VGPNetwork(_GPModel):
         -------
         dict
             The run's record: the bound per epoch, seconds per epoch, the
-            active sets, the weight they drop, and the traces the steps
-            took.
+            active sets (on a network of several inputs, one per input
+            for each expert), the weight they drop, and the traces the
+            steps took.
         """
         if global_update not in ("batch", "round", "epoch"):
             raise ValueError("global_update is 'batch', 'round' or 'epoch', "
@@ -2214,11 +2254,18 @@ class VGPNetwork(_GPModel):
         if decay == "epochs" and not slots:
             raise ValueError("decay='epochs' needs slots: without, each "
                              "expert's optimizer keeps its own schedule")
-        gp, root = self._expert_gp_nodes()
-        n_experts = root.n_experts
+        network = _latent.network
+        roots, gp = self._expert_structure()
+        n_experts = sum(root.n_experts for root in roots)
         batch_size = batch_size or self.options.training_batch_size
-        state = self._by_expert_state(gp, root, slots, decay)
-        record = dict(bound=[], seconds=[], subsets=state["subsets"],
+        state = self._by_expert_state(roots, gp, slots, decay)
+
+        def readable(sets):
+            # one input: its set alone, as a single-input record reads
+            return sets if sets is None or len(roots) > 1 \
+                else [s[0] for s in sets]
+
+        record = dict(bound=[], seconds=[], subsets=readable(state["sets"]),
                       dropped=None, traces=0)
         if state["converged"].settled():
             if self.options.verbose:
@@ -2226,12 +2273,20 @@ class VGPNetwork(_GPModel):
             return record
         local, shared = state["local"], state["shared"]
         rng = state["rng"]
-        others = [n for n in self._nodes()
-                  if not isinstance(n, _latent.network._GPNode)]
-        names = [node.name for node in gp]
-        # the batches of an epoch, among which each expert's KL and the
-        # priors are shared out
+        nodes = self._nodes()
+        # the nodes whose KL is a term per expert, shared out among the
+        # batches each expert is active on: the GP nodes and the walks
+        per_expert = {
+            id(r): [n for n in nodes if getattr(n, "root", None) is r
+                    and isinstance(n, (network.BasicGP, network.GPWalk))]
+            for r in roots}
+        held = {id(n) for ns in per_expert.values() for n in ns}
+        others = [n for n in nodes if id(n) not in held]
+        names = {id(r): [id(node) for node in gp[id(r)]] for r in roots}
+        # the batches of an epoch, among which the KL of the rest and the
+        # priors are shared out; every row's weights sum to one per input
         per_epoch = n_experts * visits
+        n_inputs = len(roots)
 
         def objective(x, y, has_value, x_var, scale, shares):
             self._refresh(self.options.jitter)
@@ -2240,42 +2295,51 @@ class VGPNetwork(_GPModel):
                 x_var=x_var, samples=self.options.training_samples,
                 seed=self.options.seed)
             kl = _tf.constant(0.0, _tf.float64)
-            for node in gp:
-                terms = node.expert_kl_terms()
-                if isinstance(terms, list):
-                    terms = _tf.stack(terms)
-                kl = kl + _tf.reduce_sum(terms * shares)
+            for root, share in zip(roots, shares):
+                for node in per_expert[id(root)]:
+                    terms = node.expert_kl_terms()
+                    if isinstance(terms, list):
+                        terms = _tf.stack(terms)
+                    kl = kl + _tf.reduce_sum(terms * share)
             for node in others:
                 kl = kl + node.kl_divergence() / per_epoch
             return scale * data - kl + self.log_prior() / per_epoch
 
-        def slot_step(size):
+        def slot_step(sizes):
             # kept on the model across calls: one trace serves every set of
             # experts, and a trace with gradients is never given back
             steps = self.__dict__.setdefault("_expert_steps", {})
-            key = (size, visits, state["key"][2], decay)
+            key = (sizes, visits, state["key"][2], decay)
             if key in steps:
                 return steps[key]
             store = state["store"]
             stacks = {n: (store[n]["alpha"], store[n]["delta"],
-                          store[n]["bias"]) for n in names}
-            copies = [store[n][k] for n in names
+                          store[n]["bias"])
+                      for r in roots for n in names[id(r)]}
+            copies = [store[n][k] for r in roots for n in names[id(r)]
                       for k in ("alpha", "delta", "bias")]
 
             @_tf.function(reduce_retracing=True)
             def step(ids, mask, x, y, has_value, x_var, scale, shares,
                      clock):
-                with _latent.network.expert_slots(_latent.network._Slots(
-                        size, ids, mask, stacks)):
+                context = {root: network._Slots(size, i, m, stacks)
+                           for root, size, i, m in zip(roots, sizes, ids,
+                                                       mask)}
+                with network.expert_slots(context):
                     with _tf.GradientTape() as tape:
                         # negated inside the tape, which records only what
                         # is computed under it
                         loss = - objective(x, y, has_value, x_var, scale,
                                            shares)
                     grads = tape.gradient(loss, copies + shared)
-                self._expert_amsgrad(store, names, ids, mask,
-                                     grads[:len(copies)],
-                                     None if decay == "steps" else clock)
+                start = 0
+                for root, i, m in zip(roots, ids, mask):
+                    count = 3 * len(names[id(root)])
+                    self._expert_amsgrad(
+                        store, names[id(root)], store[("t", id(root))], i,
+                        m, grads[start:start + count],
+                        None if decay == "steps" else clock)
+                    start += count
                 shared_grads = [
                     _tf.zeros_like(v) if g is None
                     else _tf.convert_to_tensor(g)
@@ -2285,12 +2349,14 @@ class VGPNetwork(_GPModel):
             steps[key] = step
             return step
 
-        def set_step(subset):
-            key = (subset, visits)
+        def set_step(sets):
+            key = (sets, visits)
             if key in state["steps"]:
                 return state["steps"][key]
-            variables = [v for k in subset for v in local[k]]
-            counts = [len(local[k]) for k in subset]
+            experts = [start + k for s, (_, start, _) in
+                       zip(sets, plan["blocks"]) for k in s]
+            variables = [v for g in experts for v in local[g]]
+            counts = [len(local[g]) for g in experts]
             optimizers = state["optimizers"]
 
             @_tf.function(reduce_retracing=True)
@@ -2301,8 +2367,8 @@ class VGPNetwork(_GPModel):
                 grads = [_tf.zeros_like(v) if g is None else g
                          for g, v in zip(grads, variables + shared)]
                 start = 0
-                for k, count in zip(subset, counts):
-                    optimizers[k].apply_gradients(zip(
+                for g, count in zip(experts, counts):
+                    optimizers[g].apply_gradients(zip(
                         grads[start:start + count],
                         variables[start:start + count]))
                     start += count
@@ -2318,11 +2384,11 @@ class VGPNetwork(_GPModel):
         used = {}
         plan = None
         rows = None
-        size = None
+        sizes = None
         done = 0
         try:
             if slots:
-                self._sync_expert_store(gp, root, store)
+                self._sync_expert_store(roots, gp, store)
             with _latent.propagation_rule(self.options.expert_propagation), \
                     _progress.reporting("train", epochs * per_epoch,
                                         "batch") as report:
@@ -2331,7 +2397,7 @@ class VGPNetwork(_GPModel):
                     if plan is None or epoch % weights_every == 0:
                         if slots:
                             # the sweep reads the parameters
-                            self._sync_expert_store(gp, root, store,
+                            self._sync_expert_store(roots, gp, store,
                                                     back=True)
                         # in slots the active sets are formed afresh with
                         # every weight table, and follow the weights as the
@@ -2341,27 +2407,31 @@ class VGPNetwork(_GPModel):
                         # kept: re-formed, a 16-expert run traced 76 steps
                         # and grew 6.6 GB
                         plan = self._expert_plan(
-                            coverage, None if slots else state["subsets"])
-                        state["subsets"] = plan["subsets"]
+                            coverage, None if slots else state["sets"])
+                        state["sets"] = plan["sets"]
                         rows = _np.flatnonzero(plan["measured"])
-                        state["size"] = size = max(
-                            [state.get("size", 0)]
-                            + [len(s) for s in plan["subsets"]])
-                        record["subsets"] = plan["subsets"]
+                        widest = [max(len(sets[r]) for sets in plan["sets"])
+                                  for r in range(n_inputs)]
+                        previous = state.get("sizes") or [0] * n_inputs
+                        state["sizes"] = sizes = tuple(
+                            max(a, b) for a, b in zip(previous, widest))
+                        record["subsets"] = readable(plan["sets"])
                         record["dropped"] = plan["dropped"]
                     total = 0.0
                     summed = None
                     order = _np.concatenate([rng.permutation(n_experts)
                                              for _ in range(visits)])
-                    for position, j in enumerate(order):
-                        p = plan["table"][rows, j] \
-                            / plan["table"][rows, j].sum()
+                    for position, g in enumerate(order):
+                        p = plan["table"][rows, g] \
+                            / plan["table"][rows, g].sum()
                         idx = rows[rng.choice(len(rows), batch_size, p=p)]
-                        subset = plan["subsets"][j]
-                        shares = plan["shares"][j, list(subset)] / visits
+                        sets = plan["sets"][g]
+                        shares = [plan["shares"][g, [start + k for k in s]]
+                                  / visits for s, (_, start, _)
+                                  in zip(sets, plan["blocks"])]
                         scale = _tf.constant(
-                            plan["total"][j] / (batch_size * visits),
-                            _tf.float64)
+                            plan["total"][g]
+                            / (batch_size * visits * n_inputs), _tf.float64)
                         inputs = (
                             _tf.constant(self.data.coordinates[idx],
                                          _tf.float64),
@@ -2371,26 +2441,32 @@ class VGPNetwork(_GPModel):
                                 self.data.get_batched_variance(idx)[0],
                                 _tf.float64))
                         if slots:
-                            pad = size - len(subset)
-                            step = slot_step(size)
+                            pads = [size - len(s)
+                                    for size, s in zip(sizes, sets)]
+                            step = slot_step(sizes)
                             bound, grads = step(
-                                _tf.constant(list(subset) + [n_experts] * pad,
-                                             _tf.int32),
-                                _tf.constant([1.0] * len(subset)
-                                             + [0.0] * pad, _tf.float64),
+                                [_tf.constant(list(s) + [r.n_experts] * pad,
+                                              _tf.int32)
+                                 for s, r, pad in zip(sets, roots, pads)],
+                                [_tf.constant([1.0] * len(s) + [0.0] * pad,
+                                              _tf.float64)
+                                 for s, pad in zip(sets, pads)],
                                 *inputs, scale,
-                                _tf.constant(_np.concatenate(
-                                    [shares, _np.zeros(pad)]), _tf.float64),
+                                [_tf.constant(_np.concatenate(
+                                    [share, _np.zeros(pad)]), _tf.float64)
+                                 for share, pad in zip(shares, pads)],
                                 # the steps train_svi would have taken
                                 _tf.constant(
                                     state["batches"] * svi_steps / per_epoch,
                                     _tf.float64))
                         else:
-                            with _latent.expert_subset(subset):
-                                step = set_step(subset)
+                            with _latent.expert_subset(
+                                    dict(zip(roots, sets))):
+                                step = set_step(sets)
                                 bound, grads = step(
                                     *inputs, scale,
-                                    _tf.constant(shares, _tf.float64))
+                                    [_tf.constant(share, _tf.float64)
+                                     for share in shares])
                             for pr in self._all_parameters:
                                 pr.refresh()
                         used[id(step)] = step
@@ -2425,23 +2501,25 @@ class VGPNetwork(_GPModel):
         finally:
             # what training got to, cancelled or not
             if slots:
-                self._sync_expert_store(gp, root, store, back=True)
+                self._sync_expert_store(roots, gp, store, back=True)
         if self.options.verbose:
             print("\n")
         record["traces"] = sum(int(f.experimental_get_tracing_count())
                                for f in used.values())
         return record
 
-    def _slot_variables(self, size):
-        """The Variables a prediction's cached traces read the slots from,
-        one pair per number of slots, kept so that the traces stay valid."""
+    def _slot_variables(self, root, size):
+        """The Variables a prediction's cached traces read an input's slots
+        from, one pair per input and number of slots, kept so that the
+        traces stay valid."""
         held = self.__dict__.setdefault("_slot_vars", {})
-        if size not in held:
-            held[size] = (
+        key = (id(root), size)
+        if key not in held:
+            held[key] = (
                 _tf.Variable(_np.zeros(size, _np.int32), trainable=False),
                 _tf.Variable(_np.zeros(size), trainable=False,
                              dtype=_tf.float64))
-        return held[size]
+        return held[key]
 
     def predict_by_expert(self, newdata: "_data._SpatialData",
                           n_sim: "int | None" = None,
@@ -2454,30 +2532,30 @@ class VGPNetwork(_GPModel):
         """Predict with only the experts active at each location.
 
         The training data's expert weights are carried to the locations by
-        an inverse-distance average of the `neighbours` nearest data, in the
-        input's transformed space. A location's own experts are those
-        holding `coverage` of its weight, a block's the union over its
-        sub-blocks. Each group of locations is predicted with only its
-        experts, the rest left out of the blend.
+        an inverse-distance average of the `neighbours` nearest data, in
+        each input's transformed space. A location's own experts, on each
+        input, are those holding `coverage` of its weight, a block's the
+        union over its sub-blocks. Each group of locations is predicted
+        with only its experts, the rest left out of the blend.
 
-        Under `slots` every group is computed in as many slots as the
-        largest active set training forms from the data, so that one traced
-        refresh and one traced prediction serve them all and memory stays
-        where training's was. A location takes its own experts, or its
-        leading ones where it needs more than there are slots -- the weight
-        that leaves out is in `left_out`. With `pack`, groups are merged
-        wherever the experts of both fit in the slots, which costs nothing
-        a padded slot would not; a location then blends experts beyond its
-        own, so its answer depends, within the weight `coverage` leaves
-        out, on what is predicted beside it. Without, it depends on the
-        location alone.
+        Under `slots` every group is computed in as many slots, on each
+        input, as the largest active set training forms from the data, so
+        that one traced refresh and one traced prediction serve them all and
+        memory stays where training's was. A location takes its own
+        experts, or its leading ones where it needs more than there are
+        slots -- the weight that leaves out is in `left_out`. With `pack`,
+        groups are merged wherever the experts of both fit in the slots,
+        which costs nothing a padded slot would not; a location then blends
+        experts beyond its own, so its answer depends, within the weight
+        `coverage` leaves out, on what is predicted beside it. Without, it
+        depends on the location alone.
 
         Without slots each group is a trace of its own, and `grouping`
         keeps them few: under `"exact"` the locations are grouped by their
-        own experts; under `"home"` a location takes the active set
-        training forms for the first of its leading experts whose set
-        holds `coverage` of its weight, then the union of its leading
-        experts' sets, and its own only where neither does.
+        own experts; under `"home"` a location takes, on each input, the
+        active set training forms for the first of its leading experts
+        whose set holds `coverage` of its weight, then the union of its
+        leading experts' sets, and its own only where neither does.
 
         Parameters
         ----------
@@ -2498,9 +2576,10 @@ class VGPNetwork(_GPModel):
             they hold.
         slots
             Compute the groups in a fixed number of slots -- `True` for as
-            many as training's largest active set, or a number, memory
-            growing with it times `options.prediction_batch_size`; `False`
-            traces one prediction per group.
+            many as training's largest active set on each input, or a
+            number for every input, memory growing with it times
+            `options.prediction_batch_size`; `False` traces one prediction
+            per group.
         pack
             Under `slots`, merge groups whose experts fit the slots
             together.
@@ -2508,32 +2587,47 @@ class VGPNetwork(_GPModel):
         Returns
         -------
         dict
-            The groups (their active experts and sizes), the number of
-            slots, and the weight left out at each location, NaN where none
-            was predicted.
+            The groups (their active experts -- on a network of several
+            inputs, one set per input -- and sizes), the number of slots,
+            and the largest share of weight left out at each location, NaN
+            where none was predicted.
         """
         if grouping not in ("home", "exact"):
             raise ValueError("grouping is 'home' or 'exact', got %r"
                              % (grouping,))
         from scipy.spatial import cKDTree
-        _, root = self._expert_gp_nodes()
+        blocks = self._expert_blocks()
+        roots = [root for root, _, _ in blocks]
         mask = _where_mask(newdata, where)
         locations = _np.arange(newdata.n_data) if mask is None \
             else _np.flatnonzero(mask)
         table = self.expert_weights()
-        tree = cKDTree(self._transformed(self.data))
         rows_per = newdata.rows_per_location
-        targets = self._transformed(newdata, locations)
-        distance, nearest = tree.query(targets, k=neighbours)
-        inverse = 1.0 / (distance ** 2 + 1e-12)
-        weights = _np.einsum("rn,rnj->rj", inverse, table[nearest]) \
-            / inverse.sum(axis=1, keepdims=True)
-        weights = weights.reshape([len(locations), rows_per, -1])
+        measured = _np.any(self.has_value > 0, axis=1)
+        w = table * measured[:, None]
+        home, _ = self._expert_sets(w.T @ w, coverage, blocks)
 
-        groups = {}
-        left_out = _np.full(newdata.n_data, _np.nan)
+        # per input: the locations' weights, carried from the data in that
+        # input's own transformed space, and its training sets
+        per_input = []
+        for r, (root, start, count) in enumerate(blocks):
+            tree = cKDTree(self._transformed(self.data, root=root))
+            targets = self._transformed(newdata, locations, root=root)
+            distance, nearest = tree.query(targets, k=neighbours)
+            inverse = 1.0 / (distance ** 2 + 1e-12)
+            weights = _np.einsum(
+                "rn,rnj->rj", inverse,
+                table[:, start:start + count][nearest]) \
+                / inverse.sum(axis=1, keepdims=True)
+            weights = weights.reshape([len(locations), rows_per, -1])
+            home_sets = [sets[r] for sets in home[start:start + count]]
+            # in slots, as many as training's largest active set, so that
+            # prediction holds what training held, or as many as asked for
+            size = max(len(s) for s in home_sets) if slots is True \
+                else int(slots)
+            per_input.append((weights, home_sets, size))
 
-        def own_set(at):
+        def own_set(weights, at):
             keep = set()
             for row in weights[at]:
                 order = _np.argsort(-row)
@@ -2542,33 +2636,25 @@ class VGPNetwork(_GPModel):
                 keep |= set(order[:n].tolist())
             return tuple(sorted(keep))
 
-        def lost(at, subset):
+        def lost(weights, at, subset):
             return 1.0 - weights[at][:, list(subset)].sum(axis=1).min()
 
-        measured = _np.any(self.has_value > 0, axis=1)
-        w = table * measured[:, None]
-        home_sets, _ = self._expert_subsets(w.T @ w, coverage)
-        mean = weights.mean(axis=1)
-        # in slots, as many as training's largest active set, so that
-        # prediction holds what training held, or as many as asked for
-        size = max(len(s) for s in home_sets) if slots is True \
-            else int(slots)
-        for at, loc in enumerate(locations):
+        def choose(weights, home_sets, size, at):
+            mean = weights[at].mean(axis=0)
             subset = None
             if slots:
                 # a location's own experts -- grouping into few sets only
                 # ever saved traces, and in slots there is one -- its
                 # leading ones where it needs more than there are slots
-                subset = own_set(at)
+                subset = own_set(weights, at)
                 if len(subset) > size:
-                    subset = tuple(sorted(
-                        _np.argsort(-mean[at])[:size].tolist()))
+                    subset = tuple(sorted(_np.argsort(-mean)[:size].tolist()))
             elif grouping == "home":
                 # the first of its own leading experts whose set holds
                 # `coverage` of the location's weight
-                leading = _np.argsort(-mean[at])[:4]
+                leading = _np.argsort(-mean)[:4]
                 for k in leading:
-                    if lost(at, home_sets[k]) <= 1.0 - coverage:
+                    if lost(weights, at, home_sets[k]) <= 1.0 - coverage:
                         subset = home_sets[k]
                         break
                 # then the union of the leading experts' sets, a family of
@@ -2580,50 +2666,66 @@ class VGPNetwork(_GPModel):
                         break
                     union = tuple(sorted(set().union(
                         *(home_sets[k] for k in leading[:n]))))
-                    if lost(at, union) <= 1.0 - coverage:
+                    if lost(weights, at, union) <= 1.0 - coverage:
                         subset = union
             if subset is None:
-                subset = own_set(at)
-            groups.setdefault(subset, []).append(loc)
-            left_out[loc] = lost(at, subset)
+                subset = own_set(weights, at)
+            return subset
 
+        groups = {}
+        left_out = _np.full(newdata.n_data, _np.nan)
+        for at, loc in enumerate(locations):
+            key = tuple(choose(weights, home_sets, size, at)
+                        for weights, home_sets, size in per_input)
+            groups.setdefault(key, []).append(loc)
+            left_out[loc] = max(lost(weights, at, subset)
+                                for (weights, _, _), subset
+                                in zip(per_input, key))
+
+        sizes = [size for _, _, size in per_input]
         groups = sorted(groups.items(), key=lambda g: -len(g[1]))
         if slots and pack:
             packed = []
-            for subset, locs in groups:
+            for key, locs in groups:
                 for entry in packed:
-                    union = entry[0].union(subset)
-                    if len(union) <= size:
-                        entry[0] = union
+                    unions = [a.union(b) for a, b in zip(entry[0], key)]
+                    if all(len(u) <= size for u, size in zip(unions, sizes)):
+                        entry[0] = unions
                         entry[1] = entry[1] + locs
                         break
                 else:
-                    packed.append([set(subset), list(locs)])
-            groups = [(tuple(sorted(e[0])), e[1]) for e in packed]
+                    packed.append([[set(s) for s in key], list(locs)])
+            groups = [(tuple(tuple(sorted(s)) for s in e[0]), e[1])
+                      for e in packed]
 
         n_sim = _simulation_count(newdata, self.variables, n_sim,
                                   keep=mask is not None)
         network = _latent.network
         with _progress.reporting("predict_by_expert", len(groups),
                                  "group") as report:
-            for done, (subset, locs) in enumerate(groups):
+            for done, (key, locs) in enumerate(groups):
                 if slots:
-                    ids, filled = self._slot_variables(size)
-                    pad = size - len(subset)
-                    ids.assign(list(subset) + [root.n_experts] * pad)
-                    filled.assign([1.0] * len(subset) + [0.0] * pad)
-                    context = network.expert_slots(
-                        network._Slots(size, ids, filled))
+                    context = {}
+                    for root, subset, size in zip(roots, key, sizes):
+                        ids, filled = self._slot_variables(root, size)
+                        pad = size - len(subset)
+                        ids.assign(list(subset) + [root.n_experts] * pad)
+                        filled.assign([1.0] * len(subset) + [0.0] * pad)
+                        context[root] = network._Slots(size, ids, filled)
+                    context = network.expert_slots(context)
                 else:
-                    context = _latent.expert_subset(subset)
+                    context = _latent.expert_subset(dict(zip(roots, key)))
                 with context:
                     self._predict(newdata, n_sim, include_noise,
                                   _np.sort(_np.asarray(locs)),
                                   check_measurements=False)
                 report(done + 1)
-        return dict(subsets=[g[0] for g in groups],
+        single = len(roots) == 1
+        return dict(subsets=[g[0][0] if single else g[0] for g in groups],
                     sizes=[len(g[1]) for g in groups],
-                    slots=size if slots else None, left_out=left_out)
+                    slots=(sizes[0] if single else tuple(sizes))
+                    if slots else None,
+                    left_out=left_out)
 
     def _predict(self, newdata, n_sim, include_noise, where,
                  check_measurements=True):

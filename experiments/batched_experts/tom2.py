@@ -4,6 +4,9 @@ replication.
 
 Usage: python tom2.py <n_experts> <method> <epochs> <every> [seed]
 
+BE_TOTAL fixes the total of inducing points, split among the experts;
+otherwise each expert gets 150.
+
 As tom.py: a fifth of the holes held out (fixed by common.SEED), one
 BasicGP of two outputs, 150 inducing points per expert,
 `CategoricalGaussianIndicator(2)`. `method` is `svi` or `<update><visits>`
@@ -59,7 +62,9 @@ truth = rock[held] == "Ore"
 share = float(np.mean(rock[~held] == "Ore"))
 
 geoml.set_seed(seed)
-ip = geoml.data.inducing.from_kmeans(data, 150 * J, seed=0)
+# a fixed total split among the experts under BE_TOTAL, 150 each otherwise
+total = int(os.environ.get("BE_TOTAL") or 150 * J)
+ip = geoml.data.inducing.from_kmeans(data, total, seed=0)
 experts = geoml.data.inducing.experts(ip, J, overlap=0.1, seed=0)
 root = latent.BasicInput(experts, transform=tr.Isotropic(50.0))
 leaf = latent.BasicGP(root, size=2, kernel=geoml.kernels.Matern32())
@@ -93,7 +98,7 @@ def scores(by_expert=False):
 
 
 out = dict(case="tom", J=J, method=method, epochs=epochs, seed=seed, decay=decay,
-           clock="shared",
+           clock="shared", total=total,
            n=data.n_data, held_out=int(held.sum()), share_train=share,
            curve=[])
 train_seconds, train_peak, traces, record = 0.0, 0.0, 0, None

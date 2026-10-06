@@ -140,3 +140,21 @@ for r in rows("prediction2.jsonl"):
 print("== consensus under subsets")
 for r in rows("consensus.jsonl"):
     print(r)
+
+print("== Tom, a fixed total of inducing points split among the experts")
+for r in sorted((r for r in t2 if "total" in r),
+                key=lambda r: (r["total"], r["J"], r["method"])):
+    f = r["final_by_expert"]
+    b = r.get("blocks", {})
+    print("total %4d J=%2d (%3d each) %-6s auc %.3f brier %.3f "
+          "balanced %.3f at share %.3f | train %4.0f s %5.0f MB | blocks "
+          "%5.1f s %5.0f MB by expert %5.1f s %5.0f MB, %3s groups, %2s "
+          "slots" % (
+              r["total"], r["J"], r["total"] // r["J"], r["method"],
+              f["auc"], f["brier"], f["balanced"], f["balanced_at_share"],
+              r["train_seconds"], r["train_peak_mb"],
+              b.get("full_seconds", float("nan")),
+              b.get("full_peak_mb", float("nan")),
+              b.get("part_seconds", float("nan")),
+              b.get("part_peak_mb", float("nan")), b.get("groups"),
+              b.get("slots")))
