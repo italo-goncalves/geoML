@@ -39,6 +39,7 @@ import geoml
 
 import numpy as _np
 import pandas as _pd
+import scipy.spatial as _spatial
 import tensorflow as _tf
 import copy as _copy
 import itertools as _iter
@@ -1832,8 +1833,11 @@ class VGPNetwork(_GPModel):
         roots, _ = self._expert_structure()
         blocks, start = [], 0
         for root in roots:
-            blocks.append((root, start, root.n_experts))
-            start += root.n_experts
+            # every root here is a BasicInput, whose count is set when it
+            # is built
+            count = _cast(int, root.n_experts)
+            blocks.append((root, start, count))
+            start += count
         return blocks
 
     def _transformed(self, container, rows=None, root=None):
@@ -1876,24 +1880,26 @@ class VGPNetwork(_GPModel):
             of several inputs, every input's experts side by side in the
             network's order, each input's summing to one.
         """
-        roots, gp = self._expert_structure()
-        container = self.data if container is None else container
-        n_rows = container.n_data
+        _, gp = self._expert_structure()
+        # every container holding locations is point-based
+        data = _cast("_data.containers._PointBased",
+                     self.data if container is None else container)
+        n_rows = data.n_data
         bands = self.options.batch_index(
             n_rows, batch_size=self.options.prediction_batch_size)
         blocks = []
-        for root in roots:
+        for root, _, count in self._expert_blocks():
             nodes = gp[id(root)]
             n_out = sum(n.size for n in nodes)
-            raw = _np.zeros([n_rows, root.n_experts, n_out])
-            for j in range(root.n_experts):
+            raw = _np.zeros([n_rows, count, n_out])
+            for j in range(count):
                 with _latent.expert_subset({root: (j,)}):
                     for node in nodes:
                         node.refresh(self.options.jitter)
                     for band in bands:
                         rows = _np.arange(n_rows)[band]
-                        coords, _ = container.get_batched_coordinates(rows)
-                        variance, _ = container.get_batched_variance(rows)
+                        coords, _ = data.get_batched_coordinates(rows)
+                        variance, _ = data.get_batched_variance(rows)
                         x = _tf.constant(coords, _tf.float64)
                         x_var = _tf.constant(variance, _tf.float64)
                         column = 0
@@ -2421,7 +2427,7 @@ class VGPNetwork(_GPModel):
         partition = sampling != "replacement"
         network = _latent.network
         roots, gp = self._expert_structure()
-        n_experts = sum(root.n_experts for root in roots)
+        n_experts = sum(count for _, _, count in self._expert_blocks())
         batch_size = batch_size or self.options.training_batch_size
         state = self._by_expert_state(roots, gp, slots, decay)
 
@@ -2430,8 +2436,9 @@ class VGPNetwork(_GPModel):
             return sets if sets is None or len(roots) > 1 \
                 else [s[0] for s in sets]
 
-        record = dict(bound=[], seconds=[], subsets=readable(state["sets"]),
-                      dropped=None, traces=0, partition=[])
+        record: "dict[str, _Any]" = dict(
+            bound=[], seconds=[], subsets=readable(state["sets"]),
+            dropped=None, traces=0, partition=[])
         if state["converged"].settled():
             if self.options.verbose:
                 print("The bound has settled; nothing to train.")
@@ -2554,9 +2561,9 @@ class VGPNetwork(_GPModel):
         state.setdefault("batches", 0)
         svi_steps = self.data.n_data / self.options.training_batch_size
         used = {}
-        plan = None
-        rows = None
-        sizes = None
+        plan: "dict[str, _Any]" = {}
+        rows = _np.zeros(0, int)
+        sizes: "tuple[int, ...]" = ()
         done = 0
         try:
             if slots:
@@ -2567,7 +2574,7 @@ class VGPNetwork(_GPModel):
                         "batch") as report:
                 for epoch in range(epochs):
                     start_time = _time.perf_counter()
-                    if plan is None or epoch % weights_every == 0:
+                    if not plan or epoch % weights_every == 0:
                         if slots:
                             # the sweep reads the parameters
                             self._sync_expert_store(roots, gp, store,
@@ -2846,7 +2853,6 @@ class VGPNetwork(_GPModel):
         if grouping not in ("home", "exact"):
             raise ValueError("grouping is 'home' or 'exact', got %r"
                              % (grouping,))
-        from scipy.spatial import cKDTree
         blocks = self._expert_blocks()
         roots = [root for root, _, _ in blocks]
         mask = _where_mask(newdata, where)
@@ -2862,7 +2868,7 @@ class VGPNetwork(_GPModel):
         # input's own transformed space, and its training sets
         per_input = []
         for r, (root, start, count) in enumerate(blocks):
-            tree = cKDTree(self._transformed(self.data, root=root))
+            tree = _spatial.cKDTree(self._transformed(self.data, root=root))
             targets = self._transformed(newdata, locations, root=root)
             distance, nearest = tree.query(targets, k=neighbours)
             inverse = 1.0 / (distance ** 2 + 1e-12)
