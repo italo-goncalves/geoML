@@ -456,6 +456,185 @@ beside it.
   (10 experts: 0.889 against 0.912 by expert) -- 20 epochs may not be
   enough for 6000 points, or Tom's composites do not support them.
 
+**Measured 2026-10-06, fourth round** -- a partition of the rows, the
+user's design: each epoch the experts, in a random order, draw their share
+of the rows still unused, N / (J x visits), by their weight and without
+replacement, so that every row is read once an epoch and a row a dense
+expert's quota leaves behind falls to a later expert; only the batch's own
+expert steps on it, its KL counted whole in its own batches, the data term
+the batch's plain sum; each batch's active sets come from the rows it drew;
+the shared parameters step once an epoch or per batch
+(`train_by_expert(sampling="partition")`, `VGPNetwork._partition`). Gates:
+every row once an epoch, on one input and on two; at fixed parameters an
+epoch adds up to the bound to 1e-9; only the batch's own expert moves; the
+slots train as a trace per set does. Seed 1, the earlier runs alongside:
+
+| case | design | epochs | seconds | held-out |
+|---|---|---|---|---|
+| J = 16 | every expert | 60 | 168 | rmse 0.076, CRPS 0.139 |
+| J = 16 | with replacement, 4 visits | 60 | 130 | 0.092, 0.130 |
+| J = 16 | partition, 1 visit, shared once an epoch | 200 | 243 | 0.157, 0.150 |
+| J = 16 | partition, 1 visit, shared per batch | 200 | 310 | 0.178, 0.164 |
+| J = 16 | partition, 4 visits | 60 | 162 | 0.106, 0.136 |
+| J = 16 | partition, 16 visits | 60 | 476 | 0.079, 0.127 |
+| J = 64 | every expert | 20 | 922 | 0.088, 0.135 |
+| J = 64 | with replacement, 4 visits | 60 | 1013 | 0.097, 0.126 |
+| J = 64 | partition, 4 visits | 60 | 1349 | 0.112, 0.133 |
+| J = 64 | partition, 16 visits | 15 | 793 | 0.129, 0.148 |
+| Tom J = 10 | every expert (GPU) | 20 | 118 | AUC 0.868, Brier 0.098 |
+| Tom J = 10 | with replacement, 4 visits (CPU) | 20 | 102 | 0.911, 0.073 |
+| Tom J = 10 | partition, 4 visits (CPU) | 20 | 102 | 0.841, 0.084 |
+| Tom J = 10 | partition, 16 visits (CPU) | 20 | 185 | 0.892, 0.078 |
+| Tom J = 40 | every expert | 20 | 446 | 0.818, 0.119 |
+| Tom J = 40 | with replacement, 4 visits | 20 | 308 | 0.857, 0.101 |
+| Tom J = 40 | partition, 4 visits | 20 | 307 | 0.790, 0.114 |
+| Tom J = 40 | partition, 16 visits | 10 | 478 | 0.810, 0.109 |
+
+- **Per epoch the partition learns well, once an expert gets enough
+  steps**: at J = 16 with 16 visits it is the best by expert on rmse, and
+  still falling -- the instability of many visits with replacement gone,
+  since an expert steps on its own batches only, 16 steps an epoch rather
+  than about 94. One visit is far too slow, an expert stepping once an
+  epoch.
+- **Per second it loses everywhere measured.** The leftover rows spread the
+  late batches over the field, so their active sets grow -- at most 37
+  of 64 experts at 4 visits and 25 at 16, against 19 with replacement,
+  Tom J = 40 a mean of 13 to 14 and at most 29 -- and every slot pays for
+  the widest; with many visits the batches are small (25 rows) and a
+  step's fixed cost dominates. The late batches belong less to their
+  expert: in the last epoch their rows' weight for it 0.73 against 0.80
+  for the first quarter at J = 16, 0.54 against 0.68 on Tom J = 40.
+- **Shared parameters per batch are worse here too** (rmse 0.178 against
+  0.157).
+- Sampling with replacement stays the default; the partition is an option.
+- **Quotas by weight change the batches and nothing else** (measured
+  2026-10-07, `quotas="weight"`: each expert draws its share of the weight
+  the rows carry rather than an equal share, the remainders to the largest
+  fractions; the gates hold for both). Same seed, same epochs as above:
+
+  | case | visits | equal: seconds, score | weight: seconds, score | rows a batch | widest set, equal / weight | late own weight, equal / weight |
+  |---|---|---|---|---|---|---|
+  | J = 16 | 4 | 162, 0.106 / 0.136 | 157, 0.106 / 0.136 | 92-108 | 14 / 13 | 0.73 / 0.73 |
+  | J = 16 | 16 | 476, 0.079 / 0.127 | 473, 0.079 / 0.127 | 23-27 | 12 / 11 | 0.78 / 0.83 |
+  | J = 64 | 4 | 1349, 0.112 / 0.133 | 1398, 0.112 / 0.133 | 88-111 | 37 / 36 | 0.66 / 0.69 |
+  | J = 64 | 16 | 793, 0.129 / 0.148 | 735, 0.129 / 0.148 | 22-28 | 25 / 23 | 0.75 / 0.80 |
+  | Tom J = 10, CPU | 4 | 102, 0.841 / 0.084 | 101, 0.841 / 0.084 | 350-453 | 10 / 10 | 0.54 / 0.56 |
+  | Tom J = 10, CPU | 16 | 185, 0.892 / 0.078 | 203, 0.892 / 0.078 | 87-111 | 10 / 10 | 0.67 / 0.69 |
+  | Tom J = 40 | 4 | 307, 0.790 / 0.114 | 341, 0.790 / 0.113 | 69-137 | 29 / 34 | 0.54 / 0.59 |
+  | Tom J = 40 | 16 | 478, 0.810 / 0.109 | 517, 0.807 / 0.109 | 17-35 | 29 / 32 | 0.59 / 0.66 |
+
+  Scores are rmse / CRPS on the synthetic field and AUC / Brier on Tom.
+  On the synthetic field the experts carry nearly equal weight, so the
+  quotas hardly move; on Tom they span a factor of two. The late batches
+  belong more to their own expert, by up to 0.07, but the widest set, which
+  the cost follows, does not narrow -- on Tom it widens -- and every score
+  is the equal quotas' to the third decimal. Time moves by -7% to +11%,
+  the varying batch sizes taking two more traces. The leftover rows are
+  not a shortfall in the quotas: an expert drawing by weight takes rows
+  from its tails and leaves part of its core to its neighbours, whatever
+  its quota, and the last batches take what remains wherever it lies.
+- **Rows choosing their expert** (measured 2026-10-07,
+  `sampling="assignment"`): every row draws one expert from its own
+  weights, so a row lands in an expert's batch with exactly the probability
+  sampling with replacement gives it, and every row is read once; an
+  expert's rows are split into round(rows / target) batches, at least one,
+  the target N / (J x visits), so a crowded expert steps more often (3 to 6
+  times an epoch at 4 visits, 10 to 21 at 16 on Tom J = 40); its KL is
+  shared among its batches. The count of batches changes from epoch to
+  epoch, so the share of the rest's KL and of the priors a batch carries
+  is a step argument now, divided by as `/ per_epoch` was, the other paths
+  unchanged to the bit. Gates: every row once, the batches within 1.5 x
+  the target, each expert's KL shares adding to one, a row landing with its
+  weight over 4000 draws, the epoch adding up to the bound, the own expert
+  alone moving, slots as by set.
+
+  | case | visits | assignment: s, score | partition, equal: s, score | widest set, assignment / partition | own weight, first / last quarter |
+  |---|---|---|---|---|---|
+  | J = 16 | 4 | 148, 0.106 / 0.136 | 162, 0.106 / 0.136 | 11 / 14 | 0.82 / 0.81 |
+  | J = 16 | 16 | 430, 0.080 / 0.127 | 476, 0.079 / 0.127 | 10 / 12 | 0.85 / 0.85 |
+  | J = 64 | 4 | 1031, 0.111 / 0.132 | 1349, 0.112 / 0.133 | 24 / 37 | 0.78 / 0.78 |
+  | J = 64 | 16 | 704, 0.129 / 0.148 | 793, 0.129 / 0.148 | 23 / 25 | 0.84 / 0.84 |
+  | Tom J = 10, CPU | 4 | 86, 0.843 / 0.083 | 102, 0.841 / 0.084 | 9 / 10 | 0.60 / 0.64 |
+  | Tom J = 10, CPU | 16 | 205, 0.892 / 0.078 | 185, 0.892 / 0.078 | 10 / 10 | 0.69 / 0.70 |
+  | Tom J = 40 | 4 | 295, 0.791 / 0.113 | 307, 0.790 / 0.114 | 28 / 29 | 0.68 / 0.68 |
+  | Tom J = 40 | 16 | 483, 0.807 / 0.108 | 478, 0.810 / 0.109 | 29 / 29 | 0.69 / 0.68 |
+
+  It does what it was built for: no leftovers, the last batches as much
+  their expert's as the first, the widest set narrower on the synthetic
+  field (24 against 37 at J = 64), and the fastest of the three splits
+  there (1031 s against 1349). On Tom the widest set stays at 28-29, as
+  with replacement (25): the field's own clusters straddle experts.
+  **The scores do not move.** Three ways of splitting the rows, one score
+  to the third decimal in every case, and still short of sampling with
+  replacement at the same epochs (Tom J = 10 at 4 visits: 0.843 against
+  0.911; J = 16: 0.106 against 0.092). Since the assignment's batches hold
+  the rows replacement's draws do, what is left between them is who steps:
+  with replacement every active expert steps on every batch, about 51
+  steps an expert an epoch on Tom J = 40 at 4 visits (160 batches, 12.8
+  active each), against 3 to 6 here. The rule that only the batch's own
+  expert steps, not the row split, is what holds the partition back; the
+  next test is the assignment with every active expert stepping on the
+  batch's plain sum, each expert's KL shared by the weight it carries in
+  each batch so an epoch still counts it once.
+- **Every active expert stepping on the assigned rows** (measured
+  2026-10-07, `sampling="assignment", stepping="active"`): the rows as
+  above, every expert in a batch's active sets stepping on its plain sum,
+  each expert's KL shared among the epoch's batches it is active on by the
+  weight it carries in each, so an epoch still adds up to the bound (gate
+  as before, and every active expert moving on the first batch). Seed 1,
+  scores at the last epoch:
+
+  | case | visits | active stepping: s, score | own only: s, score | with replacement, 4 visits: s, score |
+  |---|---|---|---|---|
+  | J = 16 | 4 | 144, 0.090 / 0.129 | 148, 0.106 / 0.136 | 130, 0.092 / 0.130 |
+  | J = 16 | 16 | 446, 0.101 / 0.131 | 430, 0.080 / 0.127 | 422 at 16 visits, 0.111 / 0.134 |
+  | J = 64 | 4 | 1031, 0.094 / 0.126 | 1031, 0.111 / 0.132 | 1013, 0.097 / 0.126 |
+  | J = 64 | 16 | 708, 0.105 / 0.137 | 704, 0.129 / 0.148 | -- |
+  | Tom J = 10, CPU | 4 | 85, 0.907 / 0.073 | 86, 0.843 / 0.083 | 102, 0.911 / 0.073 |
+  | Tom J = 10, CPU | 16 | 188, 0.909 / 0.073 | 205, 0.892 / 0.078 | -- |
+  | Tom J = 40 | 4 | 299, 0.856 / 0.100 | 295, 0.791 / 0.113 | 308, 0.857 / 0.101 |
+  | Tom J = 40 | 16 | 479, 0.857 / 0.099 | 483, 0.807 / 0.108 | -- |
+
+  At 4 visits it matches sampling with replacement in all four cases --
+  ahead on the synthetic field, level on Tom -- in about the same time,
+  confirming that the own-expert rule was what held the partition back.
+  An expert now steps 12 to 87 times an epoch at 4 visits on Tom J = 40
+  and J = 64, crowded ones the most. At 16 visits the many-visits drift of
+  replacement returns (J = 16: 0.090 at epoch 40, 0.101 at 60; replacement
+  0.111), which is item 1 below. The widest set is that of the assignment
+  (23 at J = 64 against 19-21 with replacement), and peak device memory a
+  little above replacement's (411 MB against 333 at J = 64, 460 against
+  448 on Tom J = 40). What it adds over replacement: every row read once
+  an epoch, an epoch's batches adding up to the bound, no inverse-
+  probability scale, crowded experts taking more batches by construction.
+  One seed: whether it should replace sampling with replacement as the
+  default needs the replication the second round gave replacement.
+- **Replicated over three seeds** (2026-10-07; seeds 1-3, 4 visits, both
+  designs rerun on the GPU under the current code, scores of the
+  prediction by expert):
+
+  | case | with replacement: mean, s, MB | assignment, every active expert: mean, s, MB | assignment minus replacement, per seed |
+  |---|---|---|---|
+  | J = 16 (rmse / CRPS) | 0.094 +- 0.005 / 0.125 +- 0.004, 133, 118 | 0.093 +- 0.005 / 0.125 +- 0.005, 145, 135 | rmse -0.0022, -0.0014, -0.0021 |
+  | J = 64 | 0.095 +- 0.004 / 0.126 +- 0.001, 927, 325 | 0.092 +- 0.004 / 0.126 +- 0.001, 987, 381 | rmse -0.0029, -0.0021, -0.0027 |
+  | Tom J = 40 (AUC / Brier) | 0.854 +- 0.003 / 0.101 +- 0.001, 308, 447 | 0.856 +- 0.001 / 0.100 +- 0.001, 310, 463 | AUC -0.0014, +0.0007, +0.0056 |
+
+  The assignment is ahead on rmse in all six synthetic pairs, by about
+  0.002, and level or ahead on CRPS in all six; on Tom level or ahead on
+  Brier in all three and on AUC in two. It costs 6-9% more time on the
+  synthetic field and none on Tom, and 4-17% more device memory, its
+  widest set being the larger. (One replacement run on Tom, seed 2, shared
+  the GPU with another training job and took 496 s; its score is
+  unaffected and the time above leaves it out.) The seed-1 reruns check
+  the default path: sampling with replacement gives the second round's
+  numbers under the current code -- 0.09191149854906935 against
+  0.09191149854907349 at J = 16, 0.09664179726490743 against
+  0.09664179726491132 at J = 64, Tom identical -- the difference being
+  the known drift between processes under default threading. **The
+  assignment with every active expert stepping is `train_by_expert`'s
+  default since 2026-10-07** (`sampling="assignment", stepping="active"`);
+  sampling with replacement and the partition remain options.
+
 Open, in the order they matter:
 
 1. **A learning-rate schedule tied to progress**, for the experts and the
@@ -469,7 +648,11 @@ Open, in the order they matter:
    while CRPS is better by expert: unexplained.
 4. **Batches sized to the experts**: training by expert draws N / (J x
    visits) rows a batch, so few experts make large batches and a peak
-   above `train_svi`'s (5 experts on Tom: 537 MB against 339).
+   above `train_svi`'s (5 experts on Tom: 537 MB against 339). Batch
+   sizes by each expert's total weight, against equal sizes with the
+   inverse-probability scaling, were in the plan of record and never run
+   with replacement; under the partition they were run and changed
+   nothing (fourth round).
 5. **The five refused nodes**: `AdditiveGP`, `UncertainInputGP`,
    `GradientConstrainedInput` (and directional data), `RadialTrend`,
    `GaussianMixture`.
