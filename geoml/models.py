@@ -39,12 +39,14 @@ import geoml
 
 import numpy as _np
 import pandas as _pd
+import scipy.spatial as _spatial
 import tensorflow as _tf
 import copy as _copy
 import itertools as _iter
 import os as _os
 import shutil as _shutil
 import tempfile as _tempfile
+import time as _time
 import warnings
 
 import tensorflow_probability as _tfp
@@ -1102,6 +1104,21 @@ class VGPNetwork(_GPModel):
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
+            elbo = self._data_log_lik(x, y, has_value, training_inputs,
+                                      x_var=x_var, samples=samples, seed=seed)
+
+            # batch weight
+            batch_size = _tf.reduce_sum(has_value)
+            elbo = elbo * self.total_data / batch_size
+
+            return elbo
+
+    def _data_log_lik(self, x, y, has_value, training_inputs, x_var=None,
+                      samples=20, seed=0):
+        """The expected log-likelihood summed over the rows given, unscaled;
+        `_log_lik` scales it to the whole data set. Not traced on its own,
+        so a caller tracing it under an expert subset gets that subset."""
+        with _tf.name_scope("data_log_lik"):
             # prediction, one leaf at a time, then handed to the likelihoods
             # each leaf serves
             mus, vars_, simss = [], [], []
@@ -1127,10 +1144,6 @@ class VGPNetwork(_GPModel):
                     inp = dict(inp, latent_gaussian=False)
                 elbo = elbo + likelihood.log_lik(
                     mu_i, var_i, y_i, hv_i, samples=sim_i, **inp)
-
-            # batch weight
-            batch_size = _tf.reduce_sum(has_value)
-            elbo = elbo * self.total_data / batch_size
 
             return elbo
 
@@ -1198,6 +1211,8 @@ class VGPNetwork(_GPModel):
         self.data = data
         self.y, self.has_value = self._stacked_measurements(data)
         self.total_data.assign(float(_np.sum(self.has_value)))
+        # its active sets were formed on the old rows
+        self._by_expert = None
 
     def _reset_optimizer(self):
         """Zero the optimizer's memory in place -- its moment estimates and
@@ -1209,6 +1224,7 @@ class VGPNetwork(_GPModel):
         for variable in self.optimizer.variables:
             variable.assign(_tf.zeros(variable.shape, variable.dtype))
         self._phase = None
+        self._by_expert = None
 
     def _training_phase(self, variables, kind):
         """The stopping rule and the minibatch order a training call goes on
@@ -1500,7 +1516,13 @@ class VGPNetwork(_GPModel):
         jit = bool(self.options.jit_predict)
         qmc = bool(self.options.qmc_simulations)
         rule = self.options.expert_propagation
-        traced = self._compiled.get((jit, qmc, rule))
+        # an expert subset is read at trace time too; `None` (every expert)
+        # keeps the key every other caller has always used
+        subset = _latent.network._subset_key()
+        slots = _latent.network._slots_key()
+        key = (jit, qmc, rule) if subset is None and slots is None \
+            else (jit, qmc, rule, subset, slots)
+        traced = self._compiled.get(key)
         if traced is None:
             # `reduce_retracing` relaxes the batch shape, which is the one
             # thing that varies without meaning anything: a grid divides
@@ -1512,7 +1534,7 @@ class VGPNetwork(_GPModel):
             # baked into the graph and has to retrace.
             traced = _tf.function(self._predict_raw, jit_compile=jit or None,
                                   reduce_retracing=True)
-            self._compiled[(jit, qmc, rule)] = traced
+            self._compiled[key] = traced
         with _latent.simulation_rule(qmc), _latent.propagation_rule(rule):
             return traced(*args, **kwargs)
 
@@ -1769,6 +1791,1198 @@ class VGPNetwork(_GPModel):
             if found is not None:
                 return found
         raise ValueError("%s is not a node of this model's tree" % node.name)
+
+    # ------------------------------------------------------------------ #
+    # expert by expert
+    # ------------------------------------------------------------------ #
+    def _expert_structure(self):
+        """The inputs whose experts an expert-by-expert pass visits, in the
+        network's order, and each one's GP nodes, after refusing what it
+        cannot handle: directional data, an input other than a
+        `BasicInput`, and the nodes with no expert-by-expert path --
+        `AdditiveGP`, `UncertainInputGP`, `GradientConstrainedInput`,
+        `RadialTrend`, `GaussianMixture`."""
+        network = _latent.network
+        if self.directional_data is not None:
+            raise ValueError("training and predicting by expert does not "
+                             "take directional data")
+        nodes = self._nodes()
+        refused = (network.AdditiveGP, network.UncertainInputGP,
+                   network.GradientConstrainedInput, network.RadialTrend,
+                   network.GaussianMixture)
+        for node in nodes:
+            if isinstance(node, refused):
+                raise ValueError("training and predicting by expert does not "
+                                 "take a %s (%s)"
+                                 % (type(node).__name__, node.name))
+        roots = [n for n in nodes
+                 if isinstance(n, network._RootLatentVariable)]
+        for root in roots:
+            if not isinstance(root, network.BasicInput):
+                raise ValueError("training and predicting by expert needs a "
+                                 "BasicInput at every root, and %s is a %s"
+                                 % (root.name, type(root).__name__))
+        gp = {id(r): [n for n in nodes if isinstance(n, network.BasicGP)
+                      and n.root is r] for r in roots}
+        return roots, gp
+
+    def _expert_blocks(self):
+        """Each input with the first column of its experts in the weight
+        table and their number: the table holds every input's experts side
+        by side, in the network's order."""
+        roots, _ = self._expert_structure()
+        blocks, start = [], 0
+        for root in roots:
+            # every root here is a BasicInput, whose count is set when it
+            # is built
+            count = _cast(int, root.n_experts)
+            blocks.append((root, start, count))
+            start += count
+        return blocks
+
+    def _transformed(self, container, rows=None, root=None):
+        """The locations of `container` (every row of a block's fan-out) in
+        an input's transformed space, the space its kernels measure; the
+        first input by default."""
+        if root is None:
+            root = self._expert_structure()[0][0]
+        rows = _np.arange(container.n_data) if rows is None else rows
+        coords, _ = container.get_batched_coordinates(rows)
+        out = []
+        for band in self.options.batch_index(
+                len(coords), batch_size=self.options.prediction_batch_size):
+            x = _tf.constant(coords[band], _tf.float64)
+            out.append(_np.asarray(root.propagate(x)[0]))
+        return _np.concatenate(out, axis=0)
+
+    def expert_weights(self, container: "_data._SpatialData | None" = None
+                       ) -> _types.FloatArray:
+        """Each location's weight for each expert, as the model blends them.
+
+        One sweep, an expert at a time, so that memory holds one expert's
+        computation whatever their number: at every location the expert's
+        explained variance gives its raw weight, the raw weights are
+        normalized over the experts as the prediction normalizes them, and
+        averaged over the outputs of every GP node on the expert's input. A
+        node that reads another reads, in the sweep, what the one expert
+        alone gives below it -- which is the blend wherever that expert
+        carries weight.
+
+        Parameters
+        ----------
+        container
+            The locations, the training data by default.
+
+        Returns
+        -------
+        ndarray
+            Of shape `(n, n_experts)`, rows summing to one -- on a network
+            of several inputs, every input's experts side by side in the
+            network's order, each input's summing to one.
+        """
+        _, gp = self._expert_structure()
+        # every container holding locations is point-based
+        data = _cast("_data.containers._PointBased",
+                     self.data if container is None else container)
+        n_rows = data.n_data
+        bands = self.options.batch_index(
+            n_rows, batch_size=self.options.prediction_batch_size)
+        blocks = []
+        for root, _, count in self._expert_blocks():
+            nodes = gp[id(root)]
+            n_out = sum(n.size for n in nodes)
+            raw = _np.zeros([n_rows, count, n_out])
+            for j in range(count):
+                with _latent.expert_subset({root: (j,)}):
+                    for node in nodes:
+                        node.refresh(self.options.jitter)
+                    for band in bands:
+                        rows = _np.arange(n_rows)[band]
+                        coords, _ = data.get_batched_coordinates(rows)
+                        variance, _ = data.get_batched_variance(rows)
+                        x = _tf.constant(coords, _tf.float64)
+                        x_var = _tf.constant(variance, _tf.float64)
+                        column = 0
+                        for node in nodes:
+                            _, var = node.interpolate(
+                                *node.parent.propagate(x, x_var))
+                            var = _np.asarray(var).T
+                            raw[band, j, column:column + node.size] = \
+                                (1 - var) / (var + 1e-6) + 1e-6
+                            column += node.size
+            weights = raw / raw.sum(axis=1, keepdims=True)
+            blocks.append(weights.mean(axis=2))
+        return _np.concatenate(blocks, axis=1)
+
+    @staticmethod
+    def _expert_sets(overlap, coverage, blocks):
+        """Each expert's active sets, one per input: the experts of that
+        input holding `coverage` of the weight the expert's ground carries,
+        `overlap[g, h]` being the weight expert `h` has where expert `g`
+        has it (the data's weights, multiplied and summed); an expert is in
+        its own set. Returns the sets, as tuples of local indices per input,
+        and the largest share any of them leaves out."""
+        sets, dropped = [], []
+        for g in range(overlap.shape[0]):
+            per_input, worst = [], 0.0
+            for _, start, count in blocks:
+                row = overlap[g, start:start + count]
+                order = _np.argsort(-row)
+                share = _np.cumsum(row[order]) / row.sum()
+                n = int(_np.searchsorted(share, coverage)) + 1
+                keep = set(order[:n].tolist())
+                if start <= g < start + count:
+                    keep.add(g - start)
+                keep = tuple(sorted(keep))
+                per_input.append(keep)
+                worst = max(worst, 1.0 - row[list(keep)].sum() / row.sum())
+            sets.append(tuple(per_input))
+            dropped.append(worst)
+        return sets, _np.asarray(dropped)
+
+    def _expert_plan(self, coverage, sets=None):
+        """The weight table of the training data, and from it each expert's
+        batch distribution, active sets and shares of the KL terms. Given
+        `sets`, the active sets are kept and only the share of weight each
+        leaves out is measured afresh."""
+        blocks = self._expert_blocks()
+        table = self.expert_weights()
+        measured = _np.any(self.has_value > 0, axis=1)
+        w = table * measured[:, None]
+        total = w.sum(axis=0)
+        overlap = w.T @ w
+        formed, dropped = self._expert_sets(overlap, coverage, blocks)
+        if sets is None:
+            sets = formed
+        else:
+            dropped = _np.asarray([
+                max(1.0 - overlap[g, start:start + count][list(s)].sum()
+                    / overlap[g, start:start + count].sum()
+                    for s, (_, start, count) in zip(per_input, blocks))
+                for g, per_input in enumerate(sets)])
+        # each expert's KL split among the batches it is active on, by the
+        # weight it carries there, so an epoch counts it once
+        carried = _np.zeros_like(overlap)
+        for g, per_input in enumerate(sets):
+            for s, (_, start, _) in zip(per_input, blocks):
+                columns = [start + k for k in s]
+                carried[g, columns] = overlap[g, columns]
+        shares = carried / carried.sum(axis=0, keepdims=True)
+        return dict(table=table, measured=measured, total=total,
+                    sets=sets, dropped=dropped, shares=shares,
+                    blocks=blocks)
+
+    @staticmethod
+    def _partition(table, rows, order, rng, coverage, blocks,
+                   quotas="equal"):
+        """An epoch's batches under `sampling="partition"`: the experts, in
+        `order`, each draw their share of the rows still unused this epoch,
+        by their weight and without replacement, so that the batches split
+        the rows and every row is read once. A row an expert's quota leaves
+        behind falls to a later expert's batch. The shares are equal, or
+        under `quotas="weight"` proportional to the weight each expert
+        carries over the rows. Each batch's active sets are formed from the
+        rows it drew: on each input, the experts holding `coverage` of the
+        weight the batch carries, its own expert always. Returns, per batch,
+        the expert, the rows, the sets, each row's share of weight its sets
+        hold (the least over the inputs), the mean weight the rows have for
+        the expert and the share of the expert's KL the batch carries."""
+        left = _np.ones(len(rows), dtype=bool)
+        order = _np.asarray(order)
+        if quotas == "weight":
+            mass = table[rows][:, order].sum(axis=0)
+            exact = mass / mass.sum() * len(rows)
+            counts = _np.floor(exact).astype(int)
+            # the rows rounding leaves over go to the largest remainders
+            short = len(rows) - counts.sum()
+            counts[_np.argsort(counts - exact)[:short]] += 1
+        else:
+            counts = [len(part) for part in
+                      _np.array_split(_np.arange(len(rows)), len(order))]
+        batches = []
+        for g, quota in zip(order, counts):
+            available = _np.flatnonzero(left)
+            weight = table[rows[available], g]
+            pick = available[rng.choice(len(available), quota, replace=False,
+                                        p=weight / weight.sum())]
+            left[pick] = False
+            batches.append(VGPNetwork._batch(
+                table, rows[pick], g, coverage, blocks,
+                1.0 / _np.sum(order == g)))
+        return batches
+
+    @staticmethod
+    def _assignment(table, rows, rng, coverage, blocks, target):
+        """An epoch's batches under `sampling="assignment"`: every row draws
+        one expert from its own weights, so that a row lands in an expert's
+        batch with the probability its weight for the expert gives, and is
+        read once. An expert's rows are split into as many batches as
+        `target` rows each makes, rounded, at least one, so that a crowded
+        expert steps more often; an expert that drew no rows takes no step,
+        and its KL is left out of the epoch. The batches come in a random
+        order, as `_partition` returns them."""
+        weight = table[rows]
+        cumulative = _np.cumsum(weight, axis=1)
+        drawn = rng.random(len(rows)) * cumulative[:, -1]
+        chosen = _np.minimum((cumulative < drawn[:, None]).sum(axis=1),
+                             weight.shape[1] - 1)
+        batches = []
+        for g in _np.unique(chosen):
+            mine = rows[rng.permutation(_np.flatnonzero(chosen == g))]
+            k = max(1, int(round(len(mine) / target)))
+            batches.extend(VGPNetwork._batch(table, part, g, coverage,
+                                             blocks, 1.0 / k)
+                           for part in _np.array_split(mine, k))
+        return [batches[i] for i in rng.permutation(len(batches))]
+
+    @staticmethod
+    def _batch(table, idx, g, coverage, blocks, kl):
+        """Expert `g`'s batch of rows `idx` under a partition or an
+        assignment: on each input, the active experts are those holding
+        `coverage` of the weight the batch carries, its own expert always.
+        `kl` is the share of the expert's KL the batch carries."""
+        sets, cover = [], []
+        for _, start, count in blocks:
+            block = table[idx, start:start + count]
+            carried = block.sum(axis=0)
+            ranked = _np.argsort(-carried)
+            share = _np.cumsum(carried[ranked]) / carried.sum()
+            keep = set(ranked[:int(_np.searchsorted(share, coverage)) + 1]
+                       .tolist())
+            if start <= g < start + count:
+                keep.add(int(g - start))
+            keep = tuple(sorted(keep))
+            sets.append(keep)
+            cover.append(block[:, list(keep)].sum(axis=1))
+        return dict(expert=int(g), rows=idx, sets=tuple(sets),
+                    cover=_np.min(cover, axis=0),
+                    own=float(table[idx, g].mean()), kl=kl)
+
+    @staticmethod
+    def _active_shares(table, batches, blocks):
+        """Under `stepping="active"`: each expert's KL shared among the
+        epoch's batches it is active on, by the weight it carries in each,
+        so that an epoch counts it once. Returns, per batch, an array per
+        input over its active experts."""
+        carried = []
+        total = _np.zeros(table.shape[1])
+        for b in batches:
+            per_input = []
+            for s, (_, start, _) in zip(b["sets"], blocks):
+                columns = [start + k for k in s]
+                weight = table[b["rows"]][:, columns].sum(axis=0)
+                total[columns] += weight
+                per_input.append((columns, weight))
+            carried.append(per_input)
+        return [[weight / total[columns] for columns, weight in per_input]
+                for per_input in carried]
+
+    @staticmethod
+    def _expert_adam():
+        """The optimizer training by expert gives the shared parameters (and
+        each expert, on the path that traces a step per set): `train_svi`'s
+        rate, decaying 0.999 a step, with AMSGrad."""
+        return _tf.keras.optimizers.Adam(
+            _tf.keras.optimizers.schedules.ExponentialDecay(1e-2, 1, 0.999),
+            amsgrad=True)
+
+    def _by_expert_state(self, roots, gp, slots, decay="steps"):
+        """What training by expert keeps between calls -- the optimizers,
+        the batch generator, the active sets, the stopping rule -- made
+        afresh when the trained parameters or the path change, and dropped
+        by new data or a reset optimizer. The working copy and the traced
+        steps outlive it, on the model."""
+        local_ids = set()
+        local = []
+        for root in roots:
+            for k in range(root.n_experts):
+                variables = []
+                for node in gp[id(root)]:
+                    for name in ("alpha_white_%d", "delta_%d", "bias_%d"):
+                        parameter = node.parameters[name % k]
+                        local_ids.add(id(parameter.variable))
+                        if not parameter.fixed:
+                            variables.append(parameter.variable)
+                local.append(variables)
+        shared = [v for v in self.get_unfixed_variables()
+                  if id(v) not in local_ids]
+        key = (bool(slots), tuple(id(v) for vs in local for v in vs),
+               tuple(id(v) for v in shared), decay)
+        state = self.__dict__.get("_by_expert")
+        if state is not None and state["key"] == key:
+            # read afresh, so that a lowered tolerance trains on
+            state["converged"].tolerance = \
+                self.options.training_tolerance or 0.0
+            return state
+        held = {id(v) for v in shared}
+        state = dict(
+            key=key, local=local, shared=shared,
+            shared_parameters=[pr for pr in self._all_parameters
+                               if id(pr.variable) in held],
+            shared_optimizer=self._expert_adam(),
+            # the steps train_svi would have taken by now, which sets both
+            # rates under decay="epochs"
+            clock=_tf.Variable(0.0, dtype=_tf.float64, trainable=False),
+            rng=_np.random.default_rng(self.options.seed),
+            converged=_Convergence(self.options.training_tolerance),
+            sets=None)
+        if decay == "epochs":
+            # the shared parameters on train_svi's clock too: on their own
+            # steps, one an epoch, they kept moving at the full rate while
+            # the experts' had decayed to nothing, and the fit went back
+            clock = state["clock"]
+            state["shared_optimizer"] = _tf.keras.optimizers.Adam(
+                lambda: 1e-2 * _tf.pow(_tf.constant(0.999, _tf.float32),
+                                       _tf.cast(clock, _tf.float32)),
+                amsgrad=True)
+        if shared:
+            state["shared_optimizer"].build(shared)
+        if slots:
+            store = self._expert_store(roots, gp)
+            for name, entry in store.items():
+                if isinstance(name, tuple):
+                    entry.assign(_tf.zeros_like(entry))
+                    continue
+                for kind in ("alpha", "delta", "bias"):
+                    for prefix in ("m_", "v_", "vh_"):
+                        moment = entry[prefix + kind]
+                        moment.assign(_tf.zeros_like(moment))
+            state["store"] = store
+        else:
+            optimizers = [self._expert_adam() for _ in local]
+            for optimizer, variables in zip(optimizers, local):
+                optimizer.build(variables)
+            state.update(optimizers=optimizers, steps={})
+        self._by_expert = state
+        return state
+
+    def _expert_store(self, roots, gp):
+        """The working copy training by expert steps under slots: each GP
+        node's `alpha_white`, `delta` and `bias` as raw values stacked over
+        its input's experts and padded, one padding expert after the last,
+        beside their bounds, which experts may move them, and AMSGrad's
+        moments; and each expert's step count, per input (`("t", id)`).
+        Keyed by the nodes' ids: two trees may number their nodes alike.
+        Made once per model, so that the traced steps reading it stay valid;
+        `_sync_expert_store` fills it from the parameters and writes it
+        back."""
+        store = self.__dict__.get("_expert_store_vars")
+        if store is not None:
+            return store
+        store = {}
+        for root in roots:
+            n_experts = root.n_experts
+            m = max(root.n_ip)
+            store[("t", id(root))] = _tf.Variable(
+                _np.zeros(n_experts + 1), trainable=False, dtype=_tf.float64)
+            for node in gp[id(root)]:
+                shapes = dict(alpha=[n_experts + 1, node.size, m, 1],
+                              delta=[n_experts + 1, node.size, m],
+                              bias=[n_experts + 1])
+                entry = {}
+                for kind, shape in shapes.items():
+                    entry[kind] = _tf.Variable(_np.zeros(shape),
+                                               dtype=_tf.float64)
+                    for prefix in ("m_", "v_", "vh_", "lo_", "hi_"):
+                        entry[prefix + kind] = _tf.Variable(
+                            _np.zeros(shape), trainable=False,
+                            dtype=_tf.float64)
+                    entry["free_" + kind] = _tf.Variable(
+                        _np.zeros(n_experts + 1), trainable=False,
+                        dtype=_tf.float64)
+                store[id(node)] = entry
+        self._expert_store_vars = store
+        return store
+
+    @staticmethod
+    def _sync_expert_store(roots, gp, store, back=False):
+        """Fills the working copy from the parameters -- values, bounds and
+        which experts may move -- or, with `back`, writes it into them."""
+        names = (("alpha", "alpha_white_%d"), ("delta", "delta_%d"),
+                 ("bias", "bias_%d"))
+        for root in roots:
+            for node in gp[id(root)]:
+                entry = store[id(node)]
+                for kind, name in names:
+                    if back:
+                        values = entry[kind].numpy()
+                        for i, n in enumerate(root.n_ip):
+                            value = values[i] if kind == "bias" \
+                                else values[i, :, :n]
+                            node.parameters[name % i].variable.assign(value)
+                        continue
+                    value = _np.zeros(entry[kind].shape)
+                    lo, hi = _np.zeros_like(value), _np.zeros_like(value)
+                    free = _np.zeros(root.n_experts + 1)
+                    for i, n in enumerate(root.n_ip):
+                        parameter = node.parameters[name % i]
+                        at = i if kind == "bias" \
+                            else (i, slice(None), slice(0, n))
+                        value[at] = parameter.variable.numpy()
+                        lo[at] = parameter.min_transformed.numpy()
+                        hi[at] = parameter.max_transformed.numpy()
+                        free[i] = 0.0 if parameter.fixed else 1.0
+                    entry[kind].assign(value)
+                    entry["lo_" + kind].assign(lo)
+                    entry["hi_" + kind].assign(hi)
+                    entry["free_" + kind].assign(free)
+
+    @staticmethod
+    def _expert_amsgrad(store, names, steps, ids, mask, grads, clock=None):
+        """One step on the slots' rows of one input's working copy: Keras'
+        Adam with `amsgrad=True` at a rate decaying 0.999 a step, the steps
+        counted per expert (`steps`) as each expert's own optimizer would
+        count them -- or, given a `clock`, as many as `train_svi` would have
+        taken by now. A row in an empty slot, or one whose parameter is
+        fixed, keeps what it holds; a padded entry has no gradient, and
+        stays where it is."""
+        t = _tf.gather(steps, ids)
+        decayed = t if clock is None else clock + 0.0 * t
+        # the rate and the betas raised to the step in single precision,
+        # as Keras computes them: in double precision the steps come out
+        # 6.7e-6 longer, and the two paths drift apart
+        rate = _tf.cast(_tf.constant(1e-2, _tf.float32) * _tf.pow(
+            _tf.constant(0.999, _tf.float32),
+            _tf.cast(decayed, _tf.float32)), _tf.float64)
+        step = t + 1.0
+        beta_1 = _tf.cast(_tf.constant(0.9, _tf.float32), _tf.float64)
+        beta_2 = _tf.cast(_tf.constant(0.999, _tf.float32), _tf.float64)
+        alpha = rate * _tf.sqrt(1.0 - _tf.pow(beta_2, step)) \
+            / (1.0 - _tf.pow(beta_1, step))
+        index = ids[:, None]
+        grads = iter(grads)
+        for name in names:
+            entry = store[name]
+            for kind in ("alpha", "delta", "bias"):
+                grad = next(grads)
+                variable = entry[kind]
+                if grad is None:
+                    grad = _tf.zeros_like(variable)
+                grad = _tf.gather(_tf.convert_to_tensor(grad), ids)
+                shape = [-1] + [1] * (len(variable.shape) - 1)
+                moving = _tf.reshape(
+                    mask * _tf.gather(entry["free_" + kind], ids), shape) > 0
+                x0 = _tf.gather(variable, ids)
+                m0 = _tf.gather(entry["m_" + kind], ids)
+                v0 = _tf.gather(entry["v_" + kind], ids)
+                vh0 = _tf.gather(entry["vh_" + kind], ids)
+                m1 = m0 + (grad - m0) * (1.0 - 0.9)
+                v1 = v0 + (_tf.square(grad) - v0) * (1.0 - 0.999)
+                vh1 = _tf.maximum(vh0, v1)
+                x1 = x0 - m1 * _tf.reshape(alpha, shape) \
+                    / (_tf.sqrt(vh1) + 1e-7)
+                x1 = _tf.clip_by_value(
+                    x1, _tf.gather(entry["lo_" + kind], ids),
+                    _tf.gather(entry["hi_" + kind], ids))
+                for target, new, old in ((variable, x1, x0),
+                                         (entry["m_" + kind], m1, m0),
+                                         (entry["v_" + kind], v1, v0),
+                                         (entry["vh_" + kind], vh1, vh0)):
+                    target.scatter_nd_update(index,
+                                             _tf.where(moving, new, old))
+        steps.scatter_nd_update(index, t + mask)
+
+    def train_by_expert(self, epochs: int = 10,
+                        batch_size: "int | None" = None,
+                        coverage: float = 0.99,
+                        global_update: str = "epoch",
+                        weights_every: int = 1,
+                        visits: int = 1,
+                        slots: bool = True,
+                        decay: str = "steps",
+                        sampling: str = "assignment",
+                        quotas: str = "equal",
+                        stepping: str = "active"
+                        ) -> "dict[str, _Any]":
+        """Train an expert at a time, so memory does not grow with their
+        number.
+
+        Each epoch every data row draws one expert from its own weights, so
+        that a row lands in an expert's batch with the probability its
+        weight for the expert gives and is read once an epoch. An expert's
+        rows are split into batches of about N / (J x `visits`) rows, so a
+        crowded expert takes more of them, and the batches come in a random
+        order. The experts active on a batch -- on each input, those holding
+        `coverage` of the weight the batch carries, its own expert always --
+        are the only ones computed, and each takes a step on the batch's
+        bound: its data term as it stands, less each active expert's share
+        of its KL divergence, shared among the batches the expert is active
+        on by the weight it carries in each, and a share of the priors. An
+        epoch's batches add up to the bound. A network on several inputs
+        assigns each row to one expert among every input's.
+
+        Under `sampling="replacement"` an epoch is `visits` rounds instead,
+        each visiting every expert once in an order of its own: for expert
+        `j` a batch of `batch_size` rows is drawn with probability
+        proportional to their weight for `j`, and the batch's data term is
+        `W_j` times its mean log-likelihood, `W_j` the expert's total weight,
+        over the number of inputs, so that the experts' terms add up to the
+        whole data term over an epoch in expectation. Under
+        `sampling="partition"` the experts, in a random order, each draw
+        their share of the rows still unused -- by their weight, without
+        replacement -- so that a row a dense expert's quota leaves behind
+        falls to a later expert's batch. Under either split of the rows,
+        `stepping="own"` steps the batch's own expert alone, its KL counted
+        whole in its own batches.
+
+        Under `options.training_tolerance` training stops once the epochs'
+        bound settles, as `train_svi`'s does, and a call made after that
+        takes no step.
+
+        Parameters
+        ----------
+        epochs
+            Number of epochs.
+        batch_size
+            Rows per batch under `sampling="replacement"`,
+            `options.training_batch_size` by default; the other samplings
+            size their batches from `visits`.
+        coverage
+            The share of a batch's expert weight its active experts hold;
+            the rest are left out of its blend.
+        global_update
+            How the parameters every expert shares step: `"batch"` on each
+            batch's gradient; `"round"` once a round, on the gradients
+            added up over it; `"epoch"` once an epoch.
+        weights_every
+            Epochs between sweeps of the weight table, which sets the batch
+            distributions, the KL shares and, in slots, the active sets;
+            without slots the sets are formed from the first sweep and kept.
+        visits
+            About how many batches an expert takes an epoch: under an
+            assignment or a partition the batches hold N / (J x `visits`)
+            rows; under `"replacement"` the rounds per epoch, which with
+            `batch_size` divided by as much read as many rows in `visits`
+            times the steps.
+        slots
+            Compute the active experts in as many slots as the largest set
+            holds, so that one traced step serves every set; `False` traces
+            a step per set.
+        decay
+            How the learning rates decay, 0.999 a step: `"steps"` counts
+            each expert's own steps and the shared parameters' own, as an
+            optimizer of their own would; `"epochs"` counts, for both, the
+            steps `train_svi` would have taken by the same point, batches
+            of `options.training_batch_size` over the whole data an epoch,
+            so that the two decay together as they do there. Each expert
+            steps on every batch whose set it is in and the shared
+            parameters as `global_update` says, so on their own counts the
+            first falls faster than `train_svi`'s rate and the second
+            slower; on `train_svi`'s count both have decayed before
+            training by expert, which needs more epochs, has converged.
+            `"epochs"` needs slots.
+        sampling
+            `"assignment"` has each row choose its expert, an epoch as many
+            batches as the experts' rows make, and no rounds for
+            `global_update="round"`; `"replacement"` draws each expert's
+            batch from every row; `"partition"` has the experts split the
+            rows among themselves, as above.
+        quotas
+            Under `"partition"`, how many rows each expert draws: `"equal"`
+            shares, or by `"weight"`, each expert's share of the weight the
+            rows carry, so that a dense expert leaves fewer rows behind.
+        stepping
+            Under `"partition"` or `"assignment"`, which experts step on a
+            batch: its `"own"` expert alone, its KL counted whole in its
+            own batches, or every `"active"` one, each expert's KL shared
+            among the batches it is active on by the weight it carries
+            there.
+
+        Returns
+        -------
+        dict
+            The run's record: the bound per epoch, seconds per epoch, the
+            active sets (on a network of several inputs, one per input
+            for each expert), the weight they drop, and the traces the
+            steps took; under `"partition"` and `"assignment"` also, per
+            epoch, the batches, the fewest and most an expert stepped on,
+            the active sets' sizes, the fewest and most rows a batch drew,
+            the share of each row's weight its batch's sets hold, and the
+            weight the first and the last quarter of the batches have for
+            their own expert.
+        """
+        if global_update not in ("batch", "round", "epoch"):
+            raise ValueError("global_update is 'batch', 'round' or 'epoch', "
+                             "got %r" % (global_update,))
+        if decay not in ("steps", "epochs"):
+            raise ValueError("decay is 'steps' or 'epochs', got %r"
+                             % (decay,))
+        if decay == "epochs" and not slots:
+            raise ValueError("decay='epochs' needs slots: without, each "
+                             "expert's optimizer keeps its own schedule")
+        if sampling not in ("replacement", "partition", "assignment"):
+            raise ValueError("sampling is 'replacement', 'partition' or "
+                             "'assignment', got %r" % (sampling,))
+        if quotas not in ("equal", "weight"):
+            raise ValueError("quotas is 'equal' or 'weight', got %r"
+                             % (quotas,))
+        if stepping not in ("own", "active"):
+            raise ValueError("stepping is 'own' or 'active', got %r"
+                             % (stepping,))
+        assignment = sampling == "assignment"
+        if assignment and global_update == "round":
+            raise ValueError("sampling='assignment' has no rounds; "
+                             "global_update is 'batch' or 'epoch'")
+        # the rows split among the batches, the batch's own expert stepping
+        partition = sampling != "replacement"
+        network = _latent.network
+        roots, gp = self._expert_structure()
+        n_experts = sum(count for _, _, count in self._expert_blocks())
+        batch_size = batch_size or self.options.training_batch_size
+        state = self._by_expert_state(roots, gp, slots, decay)
+
+        def readable(sets):
+            # one input: its set alone, as a single-input record reads
+            return sets if sets is None or len(roots) > 1 \
+                else [s[0] for s in sets]
+
+        record: "dict[str, _Any]" = dict(
+            bound=[], seconds=[], subsets=readable(state["sets"]),
+            dropped=None, traces=0, partition=[])
+        if state["converged"].settled():
+            if self.options.verbose:
+                print("The bound has settled; nothing to train.")
+            return record
+        local, shared = state["local"], state["shared"]
+        rng = state["rng"]
+        nodes = self._nodes()
+        # the nodes whose KL is a term per expert, shared out among the
+        # batches each expert is active on: the GP nodes and the walks
+        per_expert = {
+            id(r): [n for n in nodes if getattr(n, "root", None) is r
+                    and isinstance(n, (network.BasicGP, network.GPWalk))]
+            for r in roots}
+        held = {id(n) for ns in per_expert.values() for n in ns}
+        others = [n for n in nodes if id(n) not in held]
+        names = {id(r): [id(node) for node in gp[id(r)]] for r in roots}
+        # the batches of an epoch, among which the KL of the rest and the
+        # priors are shared out (`n_batches`: under an assignment the count
+        # changes from epoch to epoch); every row's weights sum to one per
+        # input
+        per_epoch = n_experts * visits
+        n_inputs = len(roots)
+
+        def objective(x, y, has_value, x_var, scale, shares, n_batches):
+            self._refresh(self.options.jitter)
+            data = self._data_log_lik(
+                x, y, has_value, [{} for _ in self.variables],
+                x_var=x_var, samples=self.options.training_samples,
+                seed=self.options.seed)
+            kl = _tf.constant(0.0, _tf.float64)
+            for root, share in zip(roots, shares):
+                for node in per_expert[id(root)]:
+                    terms = node.expert_kl_terms()
+                    if isinstance(terms, list):
+                        terms = _tf.stack(terms)
+                    kl = kl + _tf.reduce_sum(terms * share)
+            for node in others:
+                kl = kl + node.kl_divergence() / n_batches
+            return scale * data - kl + self.log_prior() / n_batches
+
+        def slot_step(sizes):
+            # kept on the model across calls: one trace serves every set of
+            # experts, and a trace with gradients is never given back
+            steps = self.__dict__.setdefault("_expert_steps", {})
+            key = (sizes, visits, state["key"][2], decay)
+            if key in steps:
+                return steps[key]
+            store = state["store"]
+            stacks = {n: (store[n]["alpha"], store[n]["delta"],
+                          store[n]["bias"])
+                      for r in roots for n in names[id(r)]}
+            copies = [store[n][k] for r in roots for n in names[id(r)]
+                      for k in ("alpha", "delta", "bias")]
+
+            @_tf.function(reduce_retracing=True)
+            def step(ids, mask, moving, x, y, has_value, x_var, scale,
+                     shares, n_batches, clock):
+                context = {root: network._Slots(size, i, m, stacks)
+                           for root, size, i, m in zip(roots, sizes, ids,
+                                                       mask)}
+                with network.expert_slots(context):
+                    with _tf.GradientTape() as tape:
+                        # negated inside the tape, which records only what
+                        # is computed under it
+                        loss = - objective(x, y, has_value, x_var, scale,
+                                           shares, n_batches)
+                    grads = tape.gradient(loss, copies + shared)
+                start = 0
+                # the slots that step: every active expert, or the batch's
+                # own alone under a partition
+                for root, i, m in zip(roots, ids, moving):
+                    count = 3 * len(names[id(root)])
+                    self._expert_amsgrad(
+                        store, names[id(root)], store[("t", id(root))], i,
+                        m, grads[start:start + count],
+                        None if decay == "steps" else clock)
+                    start += count
+                shared_grads = [
+                    _tf.zeros_like(v) if g is None
+                    else _tf.convert_to_tensor(g)
+                    for g, v in zip(grads[len(copies):], shared)]
+                return - loss, shared_grads
+
+            steps[key] = step
+            return step
+
+        def set_step(sets, own=None):
+            key = (sets, visits, own)
+            if key in state["steps"]:
+                return state["steps"][key]
+            experts = [start + k for s, (_, start, _) in
+                       zip(sets, plan["blocks"]) for k in s]
+            if own is not None:
+                experts = [own]
+            variables = [v for g in experts for v in local[g]]
+            counts = [len(local[g]) for g in experts]
+            optimizers = state["optimizers"]
+
+            @_tf.function(reduce_retracing=True)
+            def step(x, y, has_value, x_var, scale, shares, n_batches):
+                with _tf.GradientTape() as tape:
+                    loss = - objective(x, y, has_value, x_var, scale, shares,
+                                       n_batches)
+                grads = tape.gradient(loss, variables + shared)
+                grads = [_tf.zeros_like(v) if g is None else g
+                         for g, v in zip(grads, variables + shared)]
+                start = 0
+                for g, count in zip(experts, counts):
+                    optimizers[g].apply_gradients(zip(
+                        grads[start:start + count],
+                        variables[start:start + count]))
+                    start += count
+                return - loss, grads[len(variables):]
+
+            state["steps"][key] = step
+            return step
+
+        converged = state["converged"]
+        store = state.get("store")
+        state.setdefault("batches", 0)
+        svi_steps = self.data.n_data / self.options.training_batch_size
+        used = {}
+        plan: "dict[str, _Any]" = {}
+        rows = _np.zeros(0, int)
+        sizes: "tuple[int, ...]" = ()
+        done = 0
+        try:
+            if slots:
+                self._sync_expert_store(roots, gp, store)
+            with _latent.propagation_rule(self.options.expert_propagation), \
+                    _progress.reporting(
+                        "train", None if assignment else epochs * per_epoch,
+                        "batch") as report:
+                for epoch in range(epochs):
+                    start_time = _time.perf_counter()
+                    if not plan or epoch % weights_every == 0:
+                        if slots:
+                            # the sweep reads the parameters
+                            self._sync_expert_store(roots, gp, store,
+                                                    back=True)
+                        # in slots the active sets are formed afresh with
+                        # every weight table, and follow the weights as the
+                        # ranges grow; the slots only ever widen, since a
+                        # new number of them is a new trace. On the path
+                        # tracing a step per set they are formed once and
+                        # kept: re-formed, a 16-expert run traced 76 steps
+                        # and grew 6.6 GB
+                        plan = self._expert_plan(
+                            coverage, None if slots else state["sets"])
+                        state["sets"] = plan["sets"]
+                        rows = _np.flatnonzero(plan["measured"])
+                        if not partition:
+                            widest = [max(len(sets[r])
+                                          for sets in plan["sets"])
+                                      for r in range(n_inputs)]
+                            previous = state.get("sizes") or [0] * n_inputs
+                            state["sizes"] = sizes = tuple(
+                                max(a, b) for a, b in zip(previous, widest))
+                        record["subsets"] = readable(plan["sets"])
+                        record["dropped"] = plan["dropped"]
+                    total = 0.0
+                    summed = None
+                    if assignment:
+                        batches = self._assignment(
+                            plan["table"], rows, rng, coverage,
+                            plan["blocks"], len(rows) / per_epoch)
+                        order = [b["expert"] for b in batches]
+                    else:
+                        order = _np.concatenate([rng.permutation(n_experts)
+                                                 for _ in range(visits)])
+                    if sampling == "partition":
+                        batches = self._partition(
+                            plan["table"], rows, order, rng, coverage,
+                            plan["blocks"], quotas)
+                    n_batches = _tf.constant(float(len(order)),
+                                             _tf.float64)
+                    if partition:
+                        widest = [max(len(b["sets"][r]) for b in batches)
+                                  for r in range(n_inputs)]
+                        previous = state.get("sizes") or [0] * n_inputs
+                        state["sizes"] = sizes = tuple(
+                            max(a, b) for a, b in zip(previous, widest))
+                        quarter = max(1, len(batches) // 4)
+                        cover = _np.concatenate([b["cover"] for b in batches])
+                        if stepping == "active":
+                            active = self._active_shares(
+                                plan["table"], batches, plan["blocks"])
+                            steps = _np.zeros(n_experts, int)
+                            for b in batches:
+                                for s, (_, start, _) in zip(b["sets"],
+                                                            plan["blocks"]):
+                                    steps[[start + k for k in s]] += 1
+                        else:
+                            steps = _np.bincount(order, minlength=n_experts)
+                        record["partition"].append(dict(
+                            batches=len(batches),
+                            steps=[int(steps.min()), int(steps.max())],
+                            set_mean=[float(_np.mean(
+                                [len(b["sets"][r]) for b in batches]))
+                                for r in range(n_inputs)],
+                            set_max=list(widest),
+                            rows=[min(len(b["rows"]) for b in batches),
+                                  max(len(b["rows"]) for b in batches)],
+                            cover_mean=float(cover.mean()),
+                            cover_p01=float(_np.quantile(cover, 0.01)),
+                            own_first=float(_np.mean(
+                                [b["own"] for b in batches[:quarter]])),
+                            own_last=float(_np.mean(
+                                [b["own"] for b in batches[-quarter:]]))))
+                    for position, g in enumerate(order):
+                        if partition:
+                            batch = batches[position]
+                            idx, sets = batch["rows"], batch["sets"]
+                            if stepping == "active":
+                                # every active expert steps on the batch's
+                                # sum, its KL shared by the weight it carries
+                                shares = active[position]
+                                moving = [_np.ones(len(s)) for s in sets]
+                            else:
+                                # the batch's own expert alone steps, and its
+                                # KL is counted whole in its own batches
+                                shares = [_np.asarray(
+                                    [batch["kl"] if start + k == g else 0.0
+                                     for k in s])
+                                    for s, (_, start, _)
+                                    in zip(sets, plan["blocks"])]
+                                moving = [_np.asarray(
+                                    [1.0 if start + k == g else 0.0
+                                     for k in s])
+                                    for s, (_, start, _)
+                                    in zip(sets, plan["blocks"])]
+                            scale = _tf.constant(1.0, _tf.float64)
+                        else:
+                            p = plan["table"][rows, g] \
+                                / plan["table"][rows, g].sum()
+                            idx = rows[rng.choice(len(rows), batch_size, p=p)]
+                            sets = plan["sets"][g]
+                            shares = [plan["shares"][g, [start + k for k in s]]
+                                      / visits for s, (_, start, _)
+                                      in zip(sets, plan["blocks"])]
+                            moving = [_np.ones(len(s)) for s in sets]
+                            scale = _tf.constant(
+                                plan["total"][g]
+                                / (batch_size * visits * n_inputs),
+                                _tf.float64)
+                        inputs = (
+                            _tf.constant(self.data.coordinates[idx],
+                                         _tf.float64),
+                            _tf.constant(self.y[idx], _tf.float64),
+                            _tf.constant(self.has_value[idx], _tf.float64),
+                            _tf.constant(
+                                self.data.get_batched_variance(idx)[0],
+                                _tf.float64))
+                        if slots:
+                            pads = [size - len(s)
+                                    for size, s in zip(sizes, sets)]
+                            step = slot_step(sizes)
+                            bound, grads = step(
+                                [_tf.constant(list(s) + [r.n_experts] * pad,
+                                              _tf.int32)
+                                 for s, r, pad in zip(sets, roots, pads)],
+                                [_tf.constant([1.0] * len(s) + [0.0] * pad,
+                                              _tf.float64)
+                                 for s, pad in zip(sets, pads)],
+                                [_tf.constant(_np.concatenate(
+                                    [m, _np.zeros(pad)]), _tf.float64)
+                                 for m, pad in zip(moving, pads)],
+                                *inputs, scale,
+                                [_tf.constant(_np.concatenate(
+                                    [share, _np.zeros(pad)]), _tf.float64)
+                                 for share, pad in zip(shares, pads)],
+                                n_batches,
+                                # the steps train_svi would have taken
+                                _tf.constant(
+                                    state["batches"] * svi_steps / per_epoch,
+                                    _tf.float64))
+                        else:
+                            with _latent.expert_subset(
+                                    dict(zip(roots, sets))):
+                                step = set_step(
+                                    sets, int(g) if partition
+                                    and stepping == "own" else None)
+                                bound, grads = step(
+                                    *inputs, scale,
+                                    [_tf.constant(share, _tf.float64)
+                                     for share in shares], n_batches)
+                            for pr in self._all_parameters:
+                                pr.refresh()
+                        used[id(step)] = step
+                        total += float(bound)
+                        summed = grads if summed is None else \
+                            [a + b for a, b in zip(summed, grads)]
+                        if global_update == "batch" or position + 1 == len(
+                                order) or (global_update == "round" and
+                                           (position + 1) % n_experts == 0):
+                            if shared:
+                                state["clock"].assign(
+                                    state["batches"] * svi_steps / per_epoch)
+                                state["shared_optimizer"].apply_gradients(
+                                    zip(summed, shared))
+                                for pr in state["shared_parameters"]:
+                                    pr.refresh()
+                            summed = None
+                        done += 1
+                        state["batches"] += 1
+                        report(done, bound=float(bound))
+                    record["bound"].append(total)
+                    record["seconds"].append(_time.perf_counter() - start_time)
+                    self.training_log.append(total)
+                    if self.options.verbose:
+                        print("\rEpoch %d | bound: %s" % (epoch + 1, total),
+                              end="")
+                    if converged.stop(total):
+                        if self.options.verbose:
+                            print("\nStopped at epoch %d: the bound has "
+                                  "settled" % (epoch + 1), end="")
+                        break
+        finally:
+            # what training got to, cancelled or not
+            if slots:
+                self._sync_expert_store(roots, gp, store, back=True)
+        if self.options.verbose:
+            print("\n")
+        record["traces"] = sum(int(f.experimental_get_tracing_count())
+                               for f in used.values())
+        return record
+
+    def _slot_variables(self, root, size):
+        """The Variables a prediction's cached traces read an input's slots
+        from, one pair per input and number of slots, kept so that the
+        traces stay valid."""
+        held = self.__dict__.setdefault("_slot_vars", {})
+        key = (id(root), size)
+        if key not in held:
+            held[key] = (
+                _tf.Variable(_np.zeros(size, _np.int32), trainable=False),
+                _tf.Variable(_np.zeros(size), trainable=False,
+                             dtype=_tf.float64))
+        return held[key]
+
+    def predict_by_expert(self, newdata: "_data._SpatialData",
+                          n_sim: "int | None" = None,
+                          coverage: float = 0.99, neighbours: int = 8,
+                          include_noise: bool = True,
+                          grouping: str = "home",
+                          where: _types.Where = None,
+                          slots: "bool | int" = True,
+                          pack: bool = True) -> "dict[str, _Any]":
+        """Predict with only the experts active at each location.
+
+        The training data's expert weights are carried to the locations by
+        an inverse-distance average of the `neighbours` nearest data, in
+        each input's transformed space. A location's own experts, on each
+        input, are those holding `coverage` of its weight, a block's the
+        union over its sub-blocks. Each group of locations is predicted
+        with only its experts, the rest left out of the blend.
+
+        Under `slots` every group is computed in as many slots, on each
+        input, as the largest active set training forms from the data, so
+        that one traced refresh and one traced prediction serve them all and
+        memory stays where training's was. A location takes its own
+        experts, or its leading ones where it needs more than there are
+        slots -- the weight that leaves out is in `left_out`. With `pack`,
+        groups are merged wherever the experts of both fit in the slots,
+        which costs nothing a padded slot would not; a location then blends
+        experts beyond its own, so its answer depends, within the weight
+        `coverage` leaves out, on what is predicted beside it. Without, it
+        depends on the location alone.
+
+        Without slots each group is a trace of its own, and `grouping`
+        keeps them few: under `"exact"` the locations are grouped by their
+        own experts; under `"home"` a location takes, on each input, the
+        active set training forms for the first of its leading experts
+        whose set holds `coverage` of its weight, then the union of its
+        leading experts' sets, and its own only where neither does.
+
+        Parameters
+        ----------
+        newdata
+            The locations to predict. Modified in place, as by `predict`.
+        n_sim
+            Number of realizations, as for `predict`.
+        coverage
+            The share of a location's expert weight its experts must hold.
+        neighbours
+            Data averaged into a location's weights.
+        include_noise
+            As for `predict`.
+        grouping
+            `"home"` or `"exact"`, without slots.
+        where
+            The locations to predict, as for `predict`; the rest keep what
+            they hold.
+        slots
+            Compute the groups in a fixed number of slots -- `True` for as
+            many as training's largest active set on each input, or a
+            number for every input, memory growing with it times
+            `options.prediction_batch_size`; `False` traces one prediction
+            per group.
+        pack
+            Under `slots`, merge groups whose experts fit the slots
+            together.
+
+        Returns
+        -------
+        dict
+            The groups (their active experts -- on a network of several
+            inputs, one set per input -- and sizes), the number of slots,
+            and the largest share of weight left out at each location, NaN
+            where none was predicted.
+        """
+        if grouping not in ("home", "exact"):
+            raise ValueError("grouping is 'home' or 'exact', got %r"
+                             % (grouping,))
+        blocks = self._expert_blocks()
+        roots = [root for root, _, _ in blocks]
+        mask = _where_mask(newdata, where)
+        locations = _np.arange(newdata.n_data) if mask is None \
+            else _np.flatnonzero(mask)
+        table = self.expert_weights()
+        rows_per = newdata.rows_per_location
+        measured = _np.any(self.has_value > 0, axis=1)
+        w = table * measured[:, None]
+        home, _ = self._expert_sets(w.T @ w, coverage, blocks)
+
+        # per input: the locations' weights, carried from the data in that
+        # input's own transformed space, and its training sets
+        per_input = []
+        for r, (root, start, count) in enumerate(blocks):
+            tree = _spatial.cKDTree(self._transformed(self.data, root=root))
+            targets = self._transformed(newdata, locations, root=root)
+            distance, nearest = tree.query(targets, k=neighbours)
+            inverse = 1.0 / (distance ** 2 + 1e-12)
+            weights = _np.einsum(
+                "rn,rnj->rj", inverse,
+                table[:, start:start + count][nearest]) \
+                / inverse.sum(axis=1, keepdims=True)
+            weights = weights.reshape([len(locations), rows_per, -1])
+            home_sets = [sets[r] for sets in home[start:start + count]]
+            # in slots, as many as training's largest active set, so that
+            # prediction holds what training held, or as many as asked for
+            size = max(len(s) for s in home_sets) if slots is True \
+                else int(slots)
+            per_input.append((weights, home_sets, size))
+
+        def own_set(weights, at):
+            keep = set()
+            for row in weights[at]:
+                order = _np.argsort(-row)
+                n = int(_np.searchsorted(_np.cumsum(row[order]),
+                                         coverage)) + 1
+                keep |= set(order[:n].tolist())
+            return tuple(sorted(keep))
+
+        def lost(weights, at, subset):
+            return 1.0 - weights[at][:, list(subset)].sum(axis=1).min()
+
+        def choose(weights, home_sets, size, at):
+            mean = weights[at].mean(axis=0)
+            subset = None
+            if slots:
+                # a location's own experts -- grouping into few sets only
+                # ever saved traces, and in slots there is one -- its
+                # leading ones where it needs more than there are slots
+                subset = own_set(weights, at)
+                if len(subset) > size:
+                    subset = tuple(sorted(_np.argsort(-mean)[:size].tolist()))
+            elif grouping == "home":
+                # the first of its own leading experts whose set holds
+                # `coverage` of the location's weight
+                leading = _np.argsort(-mean)[:4]
+                for k in leading:
+                    if lost(weights, at, home_sets[k]) <= 1.0 - coverage:
+                        subset = home_sets[k]
+                        break
+                # then the union of the leading experts' sets, a family of
+                # few members many locations share -- between drillholes a
+                # block blends experts no one set covers, and its own set
+                # was a group of its own nearly every time
+                for n in (2, 3):
+                    if subset is not None:
+                        break
+                    union = tuple(sorted(set().union(
+                        *(home_sets[k] for k in leading[:n]))))
+                    if lost(weights, at, union) <= 1.0 - coverage:
+                        subset = union
+            if subset is None:
+                subset = own_set(weights, at)
+            return subset
+
+        groups = {}
+        left_out = _np.full(newdata.n_data, _np.nan)
+        for at, loc in enumerate(locations):
+            key = tuple(choose(weights, home_sets, size, at)
+                        for weights, home_sets, size in per_input)
+            groups.setdefault(key, []).append(loc)
+            left_out[loc] = max(lost(weights, at, subset)
+                                for (weights, _, _), subset
+                                in zip(per_input, key))
+
+        sizes = [size for _, _, size in per_input]
+        groups = sorted(groups.items(), key=lambda g: -len(g[1]))
+        if slots and pack:
+            packed = []
+            for key, locs in groups:
+                for entry in packed:
+                    unions = [a.union(b) for a, b in zip(entry[0], key)]
+                    if all(len(u) <= size for u, size in zip(unions, sizes)):
+                        entry[0] = unions
+                        entry[1] = entry[1] + locs
+                        break
+                else:
+                    packed.append([[set(s) for s in key], list(locs)])
+            groups = [(tuple(tuple(sorted(s)) for s in e[0]), e[1])
+                      for e in packed]
+
+        n_sim = _simulation_count(newdata, self.variables, n_sim,
+                                  keep=mask is not None)
+        network = _latent.network
+        with _progress.reporting("predict_by_expert", len(groups),
+                                 "group") as report:
+            for done, (key, locs) in enumerate(groups):
+                if slots:
+                    context = {}
+                    for root, subset, size in zip(roots, key, sizes):
+                        ids, filled = self._slot_variables(root, size)
+                        pad = size - len(subset)
+                        ids.assign(list(subset) + [root.n_experts] * pad)
+                        filled.assign([1.0] * len(subset) + [0.0] * pad)
+                        context[root] = network._Slots(size, ids, filled)
+                    context = network.expert_slots(context)
+                else:
+                    context = _latent.expert_subset(dict(zip(roots, key)))
+                with context:
+                    self._predict(newdata, n_sim, include_noise,
+                                  _np.sort(_np.asarray(locs)),
+                                  check_measurements=False)
+                report(done + 1)
+        single = len(roots) == 1
+        return dict(subsets=[g[0][0] if single else g[0] for g in groups],
+                    sizes=[len(g[1]) for g in groups],
+                    slots=(sizes[0] if single else tuple(sizes))
+                    if slots else None,
+                    left_out=left_out)
 
     def _predict(self, newdata, n_sim, include_noise, where,
                  check_measurements=True):
@@ -2318,7 +3532,8 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
            tolerance: "float | None" = None, include_noise: bool = True,
            where: _types.Where = None,
            meshes: "Sequence[_data.Mesh3D] | None" = None,
-           verbose: bool = False) -> "_data.BlockSet3D":
+           verbose: bool = False,
+           by_expert: bool = False) -> "_data.BlockSet3D":
     """Predict on a block model, cutting finer wherever it cannot decide.
 
     Predicts on the coarse blocks, splits the ones still in doubt, predicts
@@ -2364,6 +3579,9 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
         side test per sub-block of every splittable block, each pass.
     verbose
         Print what each pass cut.
+    by_expert
+        Predict each pass with :meth:`VGPNetwork.predict_by_expert`, so
+        that memory does not grow with the number of experts.
 
     Returns
     -------
@@ -2397,14 +3615,16 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     # there is no honest count to promise before that.
     with _progress.reporting("refine", None, "pass") as report:
         return _refine_passes(model, blocks, n_sim, split_on,
-                              include_noise, keep, meshes, verbose, report)
+                              include_noise, keep, meshes, verbose, report,
+                              by_expert)
 
 
 def _refine_passes(model, blocks, n_sim, split_on, include_noise,
-                   keep, meshes, verbose, report):
+                   keep, meshes, verbose, report, by_expert=False):
     """The body of :func:`refine`, one pass at a time. Separate only so that
     the reporting block can wrap a function that returns from its middle."""
-    model.predict(blocks, n_sim=n_sim, include_noise=include_noise, where=keep)
+    predict = model.predict_by_expert if by_expert else model.predict
+    predict(blocks, n_sim=n_sim, include_noise=include_noise, where=keep)
     report(0)
 
     step = 0
@@ -2432,8 +3652,8 @@ def _refine_passes(model, blocks, n_sim, split_on, include_noise,
             keep = _np.concatenate(
                 [keep[~mask], _np.repeat(keep[mask], children)])
             visit = visit & keep
-        model.predict(blocks, n_sim=n_sim, include_noise=include_noise,
-                      where=visit)
+        predict(blocks, n_sim=n_sim, include_noise=include_noise,
+                where=visit)
         report(step)
         if verbose:
             print("pass %d: cut %d block(s) (%d undecided, %d crossed by a "
@@ -2517,7 +3737,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                    refit: str = "variational", iterations: int = 200,
                    method: str = "full", epochs: int = 50,
                    n_sim: int = 20, n_nodes: int = 32,
-                   path: _types.PathLike | None = None
+                   path: _types.PathLike | None = None,
+                   expert_options: "dict[str, _Any] | None" = None
                    ) -> "tuple[_data._SpatialData, _pd.DataFrame]":
     """Score a model on folds it never saw, with one short refit per fold.
 
@@ -2566,14 +3787,17 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     method
         `"full"` to refit each fold on all its data at every iteration, or
         `"svi"` to refit in minibatches of
-        `options.training_batch_size` -- the same choice as
+        `options.training_batch_size`, or `"by_expert"` to refit with
+        :meth:`VGPNetwork.train_by_expert` and predict the held-out rows
+        with :meth:`VGPNetwork.predict_by_expert` -- the same choice as
         :meth:`VGPNetwork.train_full` against
         :meth:`VGPNetwork.train_svi`, and worth making for the same
         reason: a fold refit costs the whole reduced data set per
         iteration whatever is frozen, so a model too large to train
         full-batch is too large to cross-validate that way.
     epochs
-        Passes over each fold's data, under `method="svi"`. A separate
+        Passes over each fold's data, under `method="svi"` or
+        `method="by_expert"`. A separate
         argument from `iterations` because the two count different things:
         an epoch is one visit to the data in batches, so it is many
         gradient steps, and the numbers that make sense for one are wrong
@@ -2586,6 +3810,9 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     path
         Where to keep the saved model and its fold copies. A temporary
         directory, removed at the end, unless one is given.
+    expert_options
+        Keywords for :meth:`VGPNetwork.train_by_expert` under
+        `method="by_expert"`.
 
     Returns
     -------
@@ -2647,9 +3874,10 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         raise ValueError(
             "refit must be 'variational', 'leaves' or 'all', got %r"
             % (refit,))
-    if method not in ("full", "svi"):
+    if method not in ("full", "svi", "by_expert"):
         raise ValueError(
-            "method must be 'full' or 'svi', got %r" % (method,))
+            "method must be 'full', 'svi' or 'by_expert', got %r"
+            % (method,))
 
     cleanup = path is None
     if cleanup:
@@ -2701,10 +3929,16 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                 # copy already has whatever the original was trained with
                 if method == "svi":
                     fold_model.train_svi(epochs=epochs)
+                elif method == "by_expert":
+                    fold_model.train_by_expert(epochs=epochs,
+                                               **(expert_options or {}))
                 else:
                     fold_model.train_full(max_iter=iterations)
-                fold_model._predict(oof, n_sim, True, held,
-                                    check_measurements=False)
+                if method == "by_expert":
+                    fold_model.predict_by_expert(oof, n_sim, where=held)
+                else:
+                    fold_model._predict(oof, n_sim, True, held,
+                                        check_measurements=False)
 
                 held_points = oof[held]
                 held_rows = _np.flatnonzero(held)
