@@ -8,6 +8,7 @@ the experts in a fixed number of slots so that one trace serves every set.
 (`experiments/batched_experts/`); these tests pin the plumbing.
 """
 import numpy as np
+import tensorflow as tf
 import pytest
 
 import geoml
@@ -190,9 +191,10 @@ def test_the_slots_train_as_the_sets_do(build):
     a, b = build(), build()
     # one sweep of the weights, so that both keep the sets it forms
     ra = a.train_by_expert(3, batch_size=50, visits=2, slots=False,
-                           weights_every=10)
+                           weights_every=10, sampling="replacement")
     rb = b.train_by_expert(3, batch_size=50, visits=2, slots=True,
-                           weights_every=10, decay="steps")
+                           weights_every=10, decay="steps",
+                           sampling="replacement")
     np.testing.assert_allclose(ra["bound"], rb["bound"], rtol=1e-8)
     np.testing.assert_allclose(_local_values(a), _local_values(b),
                                rtol=1e-6, atol=1e-9)
@@ -205,7 +207,8 @@ def test_the_slots_train_as_the_sets_do(build):
 def test_a_round_steps_the_shared_parameters_once_a_round():
     for update, steps in (("batch", 12), ("round", 3), ("epoch", 1)):
         m = _model()
-        m.train_by_expert(1, batch_size=50, visits=3, global_update=update)
+        m.train_by_expert(1, batch_size=50, visits=3, global_update=update,
+                          sampling="replacement")
         assert int(m._by_expert["shared_optimizer"].iterations) == steps
     with pytest.raises(ValueError, match="'round'"):
         m.train_by_expert(1, global_update="sometimes")
@@ -236,7 +239,8 @@ def test_concatenated_coordinates_keep_the_second_layer_local():
     needed = (np.cumsum(ordered, axis=1) < 0.99).sum(axis=1) + 1
     assert needed.mean() < 4
     record = m.train_by_expert(2, batch_size=50)
-    assert record["traces"] == 1
+    # the batches differ in size, and the second shape relaxes the trace
+    assert record["traces"] <= 2
     assert np.all(np.isfinite(record["bound"]))
 
 
@@ -281,14 +285,19 @@ def test_prediction_by_expert_takes_where_and_resumes():
                                rtol=1e-12, atol=1e-14)
 
 
-def test_training_by_expert_reports_and_can_be_cancelled():
+@pytest.mark.parametrize("sampling", ["assignment", "replacement"])
+def test_training_by_expert_reports_and_can_be_cancelled(sampling):
     m = _model()
     seen = []
     with geoml.progress(seen.append):
-        m.train_by_expert(2, batch_size=50, visits=2)
+        m.train_by_expert(2, batch_size=50, visits=2, sampling=sampling)
     batches = [e for e in seen if e.task == "train"]
-    assert [e.done for e in batches] == list(range(1, 17))
-    assert all(e.total == 16 and e.unit == "batch" for e in batches)
+    assert [e.done for e in batches] == list(range(1, len(batches) + 1))
+    # an assignment's epochs hold as many batches as the experts' rows
+    # make, so it reports no total
+    total = 16 if sampling == "replacement" else None
+    assert total is None or len(batches) == total
+    assert all(e.total == total and e.unit == "batch" for e in batches)
     assert all(np.isfinite(e.bound) for e in batches)
 
     class Stop(Exception):
@@ -302,7 +311,7 @@ def test_training_by_expert_reports_and_can_be_cancelled():
     before = _local_values(m)
     with pytest.raises(Stop):
         with geoml.progress(stop_at_five):
-            m.train_by_expert(2, batch_size=50, visits=2)
+            m.train_by_expert(2, batch_size=50, visits=2, sampling=sampling)
     # what the five steps did is in the parameters
     assert not np.allclose(before, _local_values(m))
 
@@ -509,7 +518,7 @@ def test_a_network_trains_in_slots_as_by_set(name):
     rb = b.train_by_expert(2, batch_size=50, visits=2, slots=True,
                            weights_every=10, decay="steps")
     np.testing.assert_allclose(ra["bound"], rb["bound"], rtol=1e-8)
-    assert rb["traces"] == 1
+    assert rb["traces"] <= 2
 
 
 def test_two_inputs_keep_a_set_and_a_slot_count_each():
@@ -525,3 +534,164 @@ def test_two_inputs_keep_a_set_and_a_slot_count_each():
     info = m.predict_by_expert(c, n_sim=3)
     assert len(info["slots"]) == 2
     assert all(len(key) == 2 for key in info["subsets"])
+
+
+# --------------------------------------------------------------------------- #
+# a partition of the rows: every row once an epoch, the batch's expert alone
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("quotas", ["equal", "weight"])
+@pytest.mark.parametrize("name", ["one_input", "two_inputs"])
+def test_a_partition_reads_every_row_once_an_epoch(name, quotas):
+    m = _model() if name == "one_input" else _node_model(name)
+    table = m.expert_weights()
+    rows = np.arange(m.data.n_data)
+    blocks = m._expert_blocks()
+    order = np.random.default_rng(0).permutation(table.shape[1])
+    batches = geoml.models.VGPNetwork._partition(
+        table, rows, order, np.random.default_rng(1), 0.99, blocks, quotas)
+    drawn = np.concatenate([b["rows"] for b in batches])
+    np.testing.assert_array_equal(np.sort(drawn), rows)
+    sizes = np.asarray([len(b["rows"]) for b in batches])
+    if quotas == "equal":
+        assert sizes.max() - sizes.min() <= 1
+    else:
+        mass = table.sum(axis=0)[order]
+        exact = mass / mass.sum() * len(rows)
+        assert np.all(np.abs(sizes - exact) < 1)
+        assert sizes.max() - sizes.min() > 1
+    for b in batches:
+        for (_, start, count), s in zip(blocks, b["sets"]):
+            if start <= b["expert"] < start + count:
+                assert b["expert"] - start in s
+
+
+@pytest.mark.parametrize("name", ["one_input", "two_inputs"])
+def test_an_assignment_reads_every_row_once_an_epoch(name):
+    m = _model() if name == "one_input" else _node_model(name)
+    table = m.expert_weights()
+    rows = np.arange(m.data.n_data)
+    blocks = m._expert_blocks()
+    target = len(rows) / (2 * table.shape[1])
+    batches = geoml.models.VGPNetwork._assignment(
+        table, rows, np.random.default_rng(1), 0.99, blocks, target)
+    drawn = np.concatenate([b["rows"] for b in batches])
+    np.testing.assert_array_equal(np.sort(drawn), rows)
+    # a crowded expert's rows split into batches of about the target, its
+    # KL shared out among them
+    assert max(len(b["rows"]) for b in batches) <= 1.5 * target + 1
+    kl = np.zeros(table.shape[1])
+    for b in batches:
+        kl[b["expert"]] += b["kl"]
+        for (_, start, count), s in zip(blocks, b["sets"]):
+            if start <= b["expert"] < start + count:
+                assert b["expert"] - start in s
+    np.testing.assert_allclose(kl[kl > 0], 1.0)
+
+
+def test_an_assignment_lands_a_row_with_its_weight():
+    rng = np.random.default_rng(0)
+    table = rng.dirichlet(np.ones(4), size=30)
+    rows = np.arange(30)
+    seen = np.zeros_like(table)
+    for _ in range(4000):
+        for b in geoml.models.VGPNetwork._assignment(
+                table, rows, rng, 0.99, [(None, 0, 4)], 30.0):
+            seen[b["rows"], b["expert"]] += 1
+    np.testing.assert_allclose(seen / 4000, table, atol=0.035)
+
+
+def test_an_assignment_has_no_rounds():
+    with pytest.raises(ValueError, match="no rounds"):
+        _model().train_by_expert(1, sampling="assignment",
+                                 global_update="round")
+
+
+@pytest.mark.parametrize("sampling, quotas, stepping", [
+    ("partition", "equal", "own"), ("partition", "weight", "own"),
+    ("assignment", "equal", "own"), ("partition", "equal", "active"),
+    ("assignment", "equal", "active")])
+def test_an_epoch_of_a_partition_adds_up_to_the_bound(sampling, quotas,
+                                                      stepping):
+    """At fixed parameters, every expert active: each row counts once, each
+    expert's KL once, the rest and the priors once. (The reference is built
+    from its pieces: `_training_elbo` keeps the trace `train_full` made,
+    which counts the priors of parameters unfixed at the time.)"""
+    m = _model()
+    m.train_full(5)
+    for parameter in m._all_parameters:
+        parameter.fix()
+    rows = np.arange(m.data.n_data)
+    m._refresh(m.options.jitter)
+    data = float(m._data_log_lik(
+        tf.constant(m.data.coordinates, tf.float64),
+        tf.constant(m.y, tf.float64), tf.constant(m.has_value, tf.float64),
+        [{} for _ in m.variables],
+        x_var=tf.constant(m.data.get_batched_variance(rows)[0], tf.float64),
+        samples=m.options.training_samples, seed=m.options.seed))
+    kl = float(tf.add_n([node.kl_divergence() for node in m._nodes()]))
+    full = data - kl + float(m.log_prior())
+    record = m.train_by_expert(1, coverage=1.0, sampling=sampling,
+                               quotas=quotas, stepping=stepping)
+    np.testing.assert_allclose(record["bound"][0], full, rtol=1e-9)
+
+
+@pytest.mark.parametrize("sampling", ["partition", "assignment"])
+def test_a_partition_steps_only_the_batch_s_own_expert(sampling):
+    m = _model()
+    leaf = m.leaves[0]
+
+    def values():
+        return [np.asarray(leaf.parameters["alpha_white_%d" % k].get_value())
+                for k in range(4)]
+
+    class Stop(Exception):
+        pass
+
+    def stop(event):
+        if event.task == "train" and event.done == 1:
+            raise Stop
+
+    before = values()
+    with pytest.raises(Stop):
+        with geoml.progress(stop):
+            m.train_by_expert(1, sampling=sampling, stepping="own")
+    moved = [k for k, (a, b) in enumerate(zip(before, values()))
+             if not np.allclose(a, b)]
+    assert len(moved) == 1
+
+
+def test_an_assignment_steps_every_active_expert():
+    m = _model()
+    leaf = m.leaves[0]
+
+    def values():
+        return [np.asarray(leaf.parameters["alpha_white_%d" % k].get_value())
+                for k in range(4)]
+
+    class Stop(Exception):
+        pass
+
+    def stop(event):
+        if event.task == "train" and event.done == 1:
+            raise Stop
+
+    before = values()
+    with pytest.raises(Stop):
+        with geoml.progress(stop):
+            m.train_by_expert(1, coverage=1.0, sampling="assignment",
+                              stepping="active")
+    moved = [k for k, (a, b) in enumerate(zip(before, values()))
+             if not np.allclose(a, b)]
+    assert len(moved) == 4
+
+
+@pytest.mark.parametrize("sampling, stepping", [
+    ("partition", "own"), ("assignment", "own"), ("assignment", "active")])
+def test_a_partition_trains_in_slots_as_by_set(sampling, stepping):
+    a, b = _model(), _model()
+    ra = a.train_by_expert(2, slots=False, weights_every=10,
+                           sampling=sampling, stepping=stepping)
+    rb = b.train_by_expert(2, slots=True, weights_every=10, decay="steps",
+                           sampling=sampling, stepping=stepping)
+    np.testing.assert_allclose(ra["bound"], rb["bound"], rtol=1e-8)
+    assert rb["partition"][0]["cover_mean"] > 0.95

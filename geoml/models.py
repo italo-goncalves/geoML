@@ -1967,6 +1967,111 @@ class VGPNetwork(_GPModel):
                     blocks=blocks)
 
     @staticmethod
+    def _partition(table, rows, order, rng, coverage, blocks,
+                   quotas="equal"):
+        """An epoch's batches under `sampling="partition"`: the experts, in
+        `order`, each draw their share of the rows still unused this epoch,
+        by their weight and without replacement, so that the batches split
+        the rows and every row is read once. A row an expert's quota leaves
+        behind falls to a later expert's batch. The shares are equal, or
+        under `quotas="weight"` proportional to the weight each expert
+        carries over the rows. Each batch's active sets are formed from the
+        rows it drew: on each input, the experts holding `coverage` of the
+        weight the batch carries, its own expert always. Returns, per batch,
+        the expert, the rows, the sets, each row's share of weight its sets
+        hold (the least over the inputs), the mean weight the rows have for
+        the expert and the share of the expert's KL the batch carries."""
+        left = _np.ones(len(rows), dtype=bool)
+        order = _np.asarray(order)
+        if quotas == "weight":
+            mass = table[rows][:, order].sum(axis=0)
+            exact = mass / mass.sum() * len(rows)
+            counts = _np.floor(exact).astype(int)
+            # the rows rounding leaves over go to the largest remainders
+            short = len(rows) - counts.sum()
+            counts[_np.argsort(counts - exact)[:short]] += 1
+        else:
+            counts = [len(part) for part in
+                      _np.array_split(_np.arange(len(rows)), len(order))]
+        batches = []
+        for g, quota in zip(order, counts):
+            available = _np.flatnonzero(left)
+            weight = table[rows[available], g]
+            pick = available[rng.choice(len(available), quota, replace=False,
+                                        p=weight / weight.sum())]
+            left[pick] = False
+            batches.append(VGPNetwork._batch(
+                table, rows[pick], g, coverage, blocks,
+                1.0 / _np.sum(order == g)))
+        return batches
+
+    @staticmethod
+    def _assignment(table, rows, rng, coverage, blocks, target):
+        """An epoch's batches under `sampling="assignment"`: every row draws
+        one expert from its own weights, so that a row lands in an expert's
+        batch with the probability its weight for the expert gives, and is
+        read once. An expert's rows are split into as many batches as
+        `target` rows each makes, rounded, at least one, so that a crowded
+        expert steps more often; an expert that drew no rows takes no step,
+        and its KL is left out of the epoch. The batches come in a random
+        order, as `_partition` returns them."""
+        weight = table[rows]
+        cumulative = _np.cumsum(weight, axis=1)
+        drawn = rng.random(len(rows)) * cumulative[:, -1]
+        chosen = _np.minimum((cumulative < drawn[:, None]).sum(axis=1),
+                             weight.shape[1] - 1)
+        batches = []
+        for g in _np.unique(chosen):
+            mine = rows[rng.permutation(_np.flatnonzero(chosen == g))]
+            k = max(1, int(round(len(mine) / target)))
+            batches.extend(VGPNetwork._batch(table, part, g, coverage,
+                                             blocks, 1.0 / k)
+                           for part in _np.array_split(mine, k))
+        return [batches[i] for i in rng.permutation(len(batches))]
+
+    @staticmethod
+    def _batch(table, idx, g, coverage, blocks, kl):
+        """Expert `g`'s batch of rows `idx` under a partition or an
+        assignment: on each input, the active experts are those holding
+        `coverage` of the weight the batch carries, its own expert always.
+        `kl` is the share of the expert's KL the batch carries."""
+        sets, cover = [], []
+        for _, start, count in blocks:
+            block = table[idx, start:start + count]
+            carried = block.sum(axis=0)
+            ranked = _np.argsort(-carried)
+            share = _np.cumsum(carried[ranked]) / carried.sum()
+            keep = set(ranked[:int(_np.searchsorted(share, coverage)) + 1]
+                       .tolist())
+            if start <= g < start + count:
+                keep.add(int(g - start))
+            keep = tuple(sorted(keep))
+            sets.append(keep)
+            cover.append(block[:, list(keep)].sum(axis=1))
+        return dict(expert=int(g), rows=idx, sets=tuple(sets),
+                    cover=_np.min(cover, axis=0),
+                    own=float(table[idx, g].mean()), kl=kl)
+
+    @staticmethod
+    def _active_shares(table, batches, blocks):
+        """Under `stepping="active"`: each expert's KL shared among the
+        epoch's batches it is active on, by the weight it carries in each,
+        so that an epoch counts it once. Returns, per batch, an array per
+        input over its active experts."""
+        carried = []
+        total = _np.zeros(table.shape[1])
+        for b in batches:
+            per_input = []
+            for s, (_, start, _) in zip(b["sets"], blocks):
+                columns = [start + k for k in s]
+                weight = table[b["rows"]][:, columns].sum(axis=0)
+                total[columns] += weight
+                per_input.append((columns, weight))
+            carried.append(per_input)
+        return [[weight / total[columns] for columns, weight in per_input]
+                for per_input in carried]
+
+    @staticmethod
     def _expert_adam():
         """The optimizer training by expert gives the shared parameters (and
         each expert, on the path that traces a step per set): `train_svi`'s
@@ -2178,22 +2283,41 @@ class VGPNetwork(_GPModel):
                         weights_every: int = 1,
                         visits: int = 1,
                         slots: bool = True,
-                        decay: str = "steps") -> "dict[str, _Any]":
+                        decay: str = "steps",
+                        sampling: str = "assignment",
+                        quotas: str = "equal",
+                        stepping: str = "active"
+                        ) -> "dict[str, _Any]":
         """Train an expert at a time, so memory does not grow with their
         number.
 
-        An epoch is `visits` rounds, each visiting every expert once in an
-        order of its own. For expert `j` a batch of data rows is drawn with
-        probability proportional to their weight for `j`, and the experts
-        active on it -- on each input, those holding `coverage` of the
-        weight the batch carries -- are the only ones computed; their own
-        parameters take a step on the batch. The batch's bound is the data
-        term `W_j` times its mean log-likelihood, `W_j` the expert's total
-        weight, over the number of inputs, so the experts' terms add up to
-        the whole data term over an epoch, less each active expert's share
-        of its KL divergence, the shares adding to one KL per expert over
-        an epoch, and a share of the priors. A network on several inputs
-        visits every input's experts.
+        Each epoch every data row draws one expert from its own weights, so
+        that a row lands in an expert's batch with the probability its
+        weight for the expert gives and is read once an epoch. An expert's
+        rows are split into batches of about N / (J x `visits`) rows, so a
+        crowded expert takes more of them, and the batches come in a random
+        order. The experts active on a batch -- on each input, those holding
+        `coverage` of the weight the batch carries, its own expert always --
+        are the only ones computed, and each takes a step on the batch's
+        bound: its data term as it stands, less each active expert's share
+        of its KL divergence, shared among the batches the expert is active
+        on by the weight it carries in each, and a share of the priors. An
+        epoch's batches add up to the bound. A network on several inputs
+        assigns each row to one expert among every input's.
+
+        Under `sampling="replacement"` an epoch is `visits` rounds instead,
+        each visiting every expert once in an order of its own: for expert
+        `j` a batch of `batch_size` rows is drawn with probability
+        proportional to their weight for `j`, and the batch's data term is
+        `W_j` times its mean log-likelihood, `W_j` the expert's total weight,
+        over the number of inputs, so that the experts' terms add up to the
+        whole data term over an epoch in expectation. Under
+        `sampling="partition"` the experts, in a random order, each draw
+        their share of the rows still unused -- by their weight, without
+        replacement -- so that a row a dense expert's quota leaves behind
+        falls to a later expert's batch. Under either split of the rows,
+        `stepping="own"` steps the batch's own expert alone, its KL counted
+        whole in its own batches.
 
         Under `options.training_tolerance` training stops once the epochs'
         bound settles, as `train_svi`'s does, and a call made after that
@@ -2204,7 +2328,9 @@ class VGPNetwork(_GPModel):
         epochs
             Number of epochs.
         batch_size
-            Rows per batch, `options.training_batch_size` by default.
+            Rows per batch under `sampling="replacement"`,
+            `options.training_batch_size` by default; the other samplings
+            size their batches from `visits`.
         coverage
             The share of a batch's expert weight its active experts hold;
             the rest are left out of its blend.
@@ -2217,8 +2343,11 @@ class VGPNetwork(_GPModel):
             distributions, the KL shares and, in slots, the active sets;
             without slots the sets are formed from the first sweep and kept.
         visits
-            Rounds per epoch; with `batch_size` divided by as much, an epoch
-            reads as many rows and takes `visits` times the steps.
+            About how many batches an expert takes an epoch: under an
+            assignment or a partition the batches hold N / (J x `visits`)
+            rows; under `"replacement"` the rounds per epoch, which with
+            `batch_size` divided by as much read as many rows in `visits`
+            times the steps.
         slots
             Compute the active experts in as many slots as the largest set
             holds, so that one traced step serves every set; `False` traces
@@ -2236,6 +2365,22 @@ class VGPNetwork(_GPModel):
             slower; on `train_svi`'s count both have decayed before
             training by expert, which needs more epochs, has converged.
             `"epochs"` needs slots.
+        sampling
+            `"assignment"` has each row choose its expert, an epoch as many
+            batches as the experts' rows make, and no rounds for
+            `global_update="round"`; `"replacement"` draws each expert's
+            batch from every row; `"partition"` has the experts split the
+            rows among themselves, as above.
+        quotas
+            Under `"partition"`, how many rows each expert draws: `"equal"`
+            shares, or by `"weight"`, each expert's share of the weight the
+            rows carry, so that a dense expert leaves fewer rows behind.
+        stepping
+            Under `"partition"` or `"assignment"`, which experts step on a
+            batch: its `"own"` expert alone, its KL counted whole in its
+            own batches, or every `"active"` one, each expert's KL shared
+            among the batches it is active on by the weight it carries
+            there.
 
         Returns
         -------
@@ -2243,7 +2388,12 @@ class VGPNetwork(_GPModel):
             The run's record: the bound per epoch, seconds per epoch, the
             active sets (on a network of several inputs, one per input
             for each expert), the weight they drop, and the traces the
-            steps took.
+            steps took; under `"partition"` and `"assignment"` also, per
+            epoch, the batches, the fewest and most an expert stepped on,
+            the active sets' sizes, the fewest and most rows a batch drew,
+            the share of each row's weight its batch's sets hold, and the
+            weight the first and the last quarter of the batches have for
+            their own expert.
         """
         if global_update not in ("batch", "round", "epoch"):
             raise ValueError("global_update is 'batch', 'round' or 'epoch', "
@@ -2254,6 +2404,21 @@ class VGPNetwork(_GPModel):
         if decay == "epochs" and not slots:
             raise ValueError("decay='epochs' needs slots: without, each "
                              "expert's optimizer keeps its own schedule")
+        if sampling not in ("replacement", "partition", "assignment"):
+            raise ValueError("sampling is 'replacement', 'partition' or "
+                             "'assignment', got %r" % (sampling,))
+        if quotas not in ("equal", "weight"):
+            raise ValueError("quotas is 'equal' or 'weight', got %r"
+                             % (quotas,))
+        if stepping not in ("own", "active"):
+            raise ValueError("stepping is 'own' or 'active', got %r"
+                             % (stepping,))
+        assignment = sampling == "assignment"
+        if assignment and global_update == "round":
+            raise ValueError("sampling='assignment' has no rounds; "
+                             "global_update is 'batch' or 'epoch'")
+        # the rows split among the batches, the batch's own expert stepping
+        partition = sampling != "replacement"
         network = _latent.network
         roots, gp = self._expert_structure()
         n_experts = sum(root.n_experts for root in roots)
@@ -2266,7 +2431,7 @@ class VGPNetwork(_GPModel):
                 else [s[0] for s in sets]
 
         record = dict(bound=[], seconds=[], subsets=readable(state["sets"]),
-                      dropped=None, traces=0)
+                      dropped=None, traces=0, partition=[])
         if state["converged"].settled():
             if self.options.verbose:
                 print("The bound has settled; nothing to train.")
@@ -2284,11 +2449,13 @@ class VGPNetwork(_GPModel):
         others = [n for n in nodes if id(n) not in held]
         names = {id(r): [id(node) for node in gp[id(r)]] for r in roots}
         # the batches of an epoch, among which the KL of the rest and the
-        # priors are shared out; every row's weights sum to one per input
+        # priors are shared out (`n_batches`: under an assignment the count
+        # changes from epoch to epoch); every row's weights sum to one per
+        # input
         per_epoch = n_experts * visits
         n_inputs = len(roots)
 
-        def objective(x, y, has_value, x_var, scale, shares):
+        def objective(x, y, has_value, x_var, scale, shares, n_batches):
             self._refresh(self.options.jitter)
             data = self._data_log_lik(
                 x, y, has_value, [{} for _ in self.variables],
@@ -2302,8 +2469,8 @@ class VGPNetwork(_GPModel):
                         terms = _tf.stack(terms)
                     kl = kl + _tf.reduce_sum(terms * share)
             for node in others:
-                kl = kl + node.kl_divergence() / per_epoch
-            return scale * data - kl + self.log_prior() / per_epoch
+                kl = kl + node.kl_divergence() / n_batches
+            return scale * data - kl + self.log_prior() / n_batches
 
         def slot_step(sizes):
             # kept on the model across calls: one trace serves every set of
@@ -2320,8 +2487,8 @@ class VGPNetwork(_GPModel):
                       for k in ("alpha", "delta", "bias")]
 
             @_tf.function(reduce_retracing=True)
-            def step(ids, mask, x, y, has_value, x_var, scale, shares,
-                     clock):
+            def step(ids, mask, moving, x, y, has_value, x_var, scale,
+                     shares, n_batches, clock):
                 context = {root: network._Slots(size, i, m, stacks)
                            for root, size, i, m in zip(roots, sizes, ids,
                                                        mask)}
@@ -2330,10 +2497,12 @@ class VGPNetwork(_GPModel):
                         # negated inside the tape, which records only what
                         # is computed under it
                         loss = - objective(x, y, has_value, x_var, scale,
-                                           shares)
+                                           shares, n_batches)
                     grads = tape.gradient(loss, copies + shared)
                 start = 0
-                for root, i, m in zip(roots, ids, mask):
+                # the slots that step: every active expert, or the batch's
+                # own alone under a partition
+                for root, i, m in zip(roots, ids, moving):
                     count = 3 * len(names[id(root)])
                     self._expert_amsgrad(
                         store, names[id(root)], store[("t", id(root))], i,
@@ -2349,20 +2518,23 @@ class VGPNetwork(_GPModel):
             steps[key] = step
             return step
 
-        def set_step(sets):
-            key = (sets, visits)
+        def set_step(sets, own=None):
+            key = (sets, visits, own)
             if key in state["steps"]:
                 return state["steps"][key]
             experts = [start + k for s, (_, start, _) in
                        zip(sets, plan["blocks"]) for k in s]
+            if own is not None:
+                experts = [own]
             variables = [v for g in experts for v in local[g]]
             counts = [len(local[g]) for g in experts]
             optimizers = state["optimizers"]
 
             @_tf.function(reduce_retracing=True)
-            def step(x, y, has_value, x_var, scale, shares):
+            def step(x, y, has_value, x_var, scale, shares, n_batches):
                 with _tf.GradientTape() as tape:
-                    loss = - objective(x, y, has_value, x_var, scale, shares)
+                    loss = - objective(x, y, has_value, x_var, scale, shares,
+                                       n_batches)
                 grads = tape.gradient(loss, variables + shared)
                 grads = [_tf.zeros_like(v) if g is None else g
                          for g, v in zip(grads, variables + shared)]
@@ -2390,8 +2562,9 @@ class VGPNetwork(_GPModel):
             if slots:
                 self._sync_expert_store(roots, gp, store)
             with _latent.propagation_rule(self.options.expert_propagation), \
-                    _progress.reporting("train", epochs * per_epoch,
-                                        "batch") as report:
+                    _progress.reporting(
+                        "train", None if assignment else epochs * per_epoch,
+                        "batch") as report:
                 for epoch in range(epochs):
                     start_time = _time.perf_counter()
                     if plan is None or epoch % weights_every == 0:
@@ -2410,28 +2583,100 @@ class VGPNetwork(_GPModel):
                             coverage, None if slots else state["sets"])
                         state["sets"] = plan["sets"]
                         rows = _np.flatnonzero(plan["measured"])
-                        widest = [max(len(sets[r]) for sets in plan["sets"])
-                                  for r in range(n_inputs)]
-                        previous = state.get("sizes") or [0] * n_inputs
-                        state["sizes"] = sizes = tuple(
-                            max(a, b) for a, b in zip(previous, widest))
+                        if not partition:
+                            widest = [max(len(sets[r])
+                                          for sets in plan["sets"])
+                                      for r in range(n_inputs)]
+                            previous = state.get("sizes") or [0] * n_inputs
+                            state["sizes"] = sizes = tuple(
+                                max(a, b) for a, b in zip(previous, widest))
                         record["subsets"] = readable(plan["sets"])
                         record["dropped"] = plan["dropped"]
                     total = 0.0
                     summed = None
-                    order = _np.concatenate([rng.permutation(n_experts)
-                                             for _ in range(visits)])
+                    if assignment:
+                        batches = self._assignment(
+                            plan["table"], rows, rng, coverage,
+                            plan["blocks"], len(rows) / per_epoch)
+                        order = [b["expert"] for b in batches]
+                    else:
+                        order = _np.concatenate([rng.permutation(n_experts)
+                                                 for _ in range(visits)])
+                    if sampling == "partition":
+                        batches = self._partition(
+                            plan["table"], rows, order, rng, coverage,
+                            plan["blocks"], quotas)
+                    n_batches = _tf.constant(float(len(order)),
+                                             _tf.float64)
+                    if partition:
+                        widest = [max(len(b["sets"][r]) for b in batches)
+                                  for r in range(n_inputs)]
+                        previous = state.get("sizes") or [0] * n_inputs
+                        state["sizes"] = sizes = tuple(
+                            max(a, b) for a, b in zip(previous, widest))
+                        quarter = max(1, len(batches) // 4)
+                        cover = _np.concatenate([b["cover"] for b in batches])
+                        if stepping == "active":
+                            active = self._active_shares(
+                                plan["table"], batches, plan["blocks"])
+                            steps = _np.zeros(n_experts, int)
+                            for b in batches:
+                                for s, (_, start, _) in zip(b["sets"],
+                                                            plan["blocks"]):
+                                    steps[[start + k for k in s]] += 1
+                        else:
+                            steps = _np.bincount(order, minlength=n_experts)
+                        record["partition"].append(dict(
+                            batches=len(batches),
+                            steps=[int(steps.min()), int(steps.max())],
+                            set_mean=[float(_np.mean(
+                                [len(b["sets"][r]) for b in batches]))
+                                for r in range(n_inputs)],
+                            set_max=list(widest),
+                            rows=[min(len(b["rows"]) for b in batches),
+                                  max(len(b["rows"]) for b in batches)],
+                            cover_mean=float(cover.mean()),
+                            cover_p01=float(_np.quantile(cover, 0.01)),
+                            own_first=float(_np.mean(
+                                [b["own"] for b in batches[:quarter]])),
+                            own_last=float(_np.mean(
+                                [b["own"] for b in batches[-quarter:]]))))
                     for position, g in enumerate(order):
-                        p = plan["table"][rows, g] \
-                            / plan["table"][rows, g].sum()
-                        idx = rows[rng.choice(len(rows), batch_size, p=p)]
-                        sets = plan["sets"][g]
-                        shares = [plan["shares"][g, [start + k for k in s]]
-                                  / visits for s, (_, start, _)
-                                  in zip(sets, plan["blocks"])]
-                        scale = _tf.constant(
-                            plan["total"][g]
-                            / (batch_size * visits * n_inputs), _tf.float64)
+                        if partition:
+                            batch = batches[position]
+                            idx, sets = batch["rows"], batch["sets"]
+                            if stepping == "active":
+                                # every active expert steps on the batch's
+                                # sum, its KL shared by the weight it carries
+                                shares = active[position]
+                                moving = [_np.ones(len(s)) for s in sets]
+                            else:
+                                # the batch's own expert alone steps, and its
+                                # KL is counted whole in its own batches
+                                shares = [_np.asarray(
+                                    [batch["kl"] if start + k == g else 0.0
+                                     for k in s])
+                                    for s, (_, start, _)
+                                    in zip(sets, plan["blocks"])]
+                                moving = [_np.asarray(
+                                    [1.0 if start + k == g else 0.0
+                                     for k in s])
+                                    for s, (_, start, _)
+                                    in zip(sets, plan["blocks"])]
+                            scale = _tf.constant(1.0, _tf.float64)
+                        else:
+                            p = plan["table"][rows, g] \
+                                / plan["table"][rows, g].sum()
+                            idx = rows[rng.choice(len(rows), batch_size, p=p)]
+                            sets = plan["sets"][g]
+                            shares = [plan["shares"][g, [start + k for k in s]]
+                                      / visits for s, (_, start, _)
+                                      in zip(sets, plan["blocks"])]
+                            moving = [_np.ones(len(s)) for s in sets]
+                            scale = _tf.constant(
+                                plan["total"][g]
+                                / (batch_size * visits * n_inputs),
+                                _tf.float64)
                         inputs = (
                             _tf.constant(self.data.coordinates[idx],
                                          _tf.float64),
@@ -2451,10 +2696,14 @@ class VGPNetwork(_GPModel):
                                 [_tf.constant([1.0] * len(s) + [0.0] * pad,
                                               _tf.float64)
                                  for s, pad in zip(sets, pads)],
+                                [_tf.constant(_np.concatenate(
+                                    [m, _np.zeros(pad)]), _tf.float64)
+                                 for m, pad in zip(moving, pads)],
                                 *inputs, scale,
                                 [_tf.constant(_np.concatenate(
                                     [share, _np.zeros(pad)]), _tf.float64)
                                  for share, pad in zip(shares, pads)],
+                                n_batches,
                                 # the steps train_svi would have taken
                                 _tf.constant(
                                     state["batches"] * svi_steps / per_epoch,
@@ -2462,11 +2711,13 @@ class VGPNetwork(_GPModel):
                         else:
                             with _latent.expert_subset(
                                     dict(zip(roots, sets))):
-                                step = set_step(sets)
+                                step = set_step(
+                                    sets, int(g) if partition
+                                    and stepping == "own" else None)
                                 bound, grads = step(
                                     *inputs, scale,
                                     [_tf.constant(share, _tf.float64)
-                                     for share in shares])
+                                     for share in shares], n_batches)
                             for pr in self._all_parameters:
                                 pr.refresh()
                         used[id(step)] = step

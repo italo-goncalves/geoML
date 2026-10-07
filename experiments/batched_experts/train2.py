@@ -33,6 +33,12 @@ update = core.rstrip("0123456789")
 visits = int(core[len(update):] or 1)
 batch = int(os.environ.get("BE_BATCH", 400 // visits))
 decay = os.environ.get("BE_DECAY") or "steps"
+# "partition" splits the rows among the experts, a batch N / (J x visits)
+sampling = os.environ.get("BE_SAMPLING") or "replacement"
+# under a partition, "equal" quotas or by "weight"
+quotas = os.environ.get("BE_QUOTAS") or "equal"
+# under a partition or an assignment, "own" or "active" stepping
+stepping = os.environ.get("BE_STEPPING") or "own"
 
 
 def rss_mb():
@@ -47,7 +53,7 @@ m = common.model(data, J, deep=deep, seed=seed,
                  propagation="consensus" if case == "shallow"
                  else "independent")
 out = dict(case=case, J=J, method=method, epochs=epochs, seed=seed, decay=decay,
-           clock="shared",
+           clock="shared", sampling=sampling, quotas=quotas, stepping=stepping,
            batch=batch if method != "svi" else 400, slots=slots,
            n=data.n_data, curve=[])
 
@@ -71,7 +77,10 @@ for chunk in range(epochs // every):
     else:
         record = m.train_by_expert(every, batch_size=batch,
                                    global_update=update, visits=visits,
-                                   slots=slots, decay=decay)
+                                   slots=slots, decay=decay,
+                                   sampling=sampling, quotas=quotas, stepping=stepping)
+        if record["partition"]:
+            out.setdefault("partition", []).extend(record["partition"])
         traces = max(traces, record["traces"])
     train_seconds += time.perf_counter() - start
     train_peak = max(train_peak, common.gpu_peak_mb())

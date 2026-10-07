@@ -1062,6 +1062,10 @@ class BasicInput(_RootLatentVariable):
 
         self.base_inducing_points = tuple(_tf.constant(ip.coordinates, dtype=_tf.float64) for ip in inducing_points)
         self.inducing_points_variance = tuple(_tf.zeros([n, self.size], _tf.float64) for n in self.n_ip)
+        # kept, made once and eagerly: under slots the variances are swapped
+        # for the slots' own, and a refresh puts these back -- never fresh
+        # zeros, which a trace would leave behind as symbolic tensors
+        self._zero_variances = self.inducing_points_variance
 
         # self.center = _np.zeros_like(transform(self.bounding_box.max.astype(_np.float64)))
         self.center = _np.zeros_like(self.bounding_box.max.astype(_np.float64))
@@ -1074,8 +1078,7 @@ class BasicInput(_RootLatentVariable):
             base = _slot_inputs(self)
             return (base,), (_tf.zeros([base.shape[0], self.size],
                                        _tf.float64),)
-        return self.base_inducing_points, tuple(
-            _tf.zeros([n, self.size], _tf.float64) for n in self.n_ip)
+        return self.base_inducing_points, self._zero_variances
 
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_input_refresh"):

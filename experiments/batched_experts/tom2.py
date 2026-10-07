@@ -41,6 +41,12 @@ core = method[:-len("-sets")] if not slots else method
 update = core.rstrip("0123456789")
 visits = int(core[len(update):] or 1)
 decay = os.environ.get("BE_DECAY") or "steps"
+# "partition" splits the rows among the experts, a batch N / (J x visits)
+sampling = os.environ.get("BE_SAMPLING") or "replacement"
+# under a partition, "equal" quotas or by "weight"
+quotas = os.environ.get("BE_QUOTAS") or "equal"
+# under a partition or an assignment, "own" or "active" stepping
+stepping = os.environ.get("BE_STEPPING") or "own"
 
 npz = np.load("local_data/tom_composites.npz")
 coords, rock, holes = npz["coords"], npz["rock"], npz["holes"]
@@ -98,7 +104,7 @@ def scores(by_expert=False):
 
 
 out = dict(case="tom", J=J, method=method, epochs=epochs, seed=seed, decay=decay,
-           clock="shared", total=total,
+           clock="shared", total=total, sampling=sampling, quotas=quotas, stepping=stepping,
            n=data.n_data, held_out=int(held.sum()), share_train=share,
            curve=[])
 train_seconds, train_peak, traces, record = 0.0, 0.0, 0, None
@@ -110,7 +116,10 @@ for chunk in range(epochs // every):
     else:
         record = m.train_by_expert(
             every, batch_size=data.n_data // (J * visits),
-            global_update=update, visits=visits, slots=slots, decay=decay)
+            global_update=update, visits=visits, slots=slots, decay=decay,
+            sampling=sampling, quotas=quotas, stepping=stepping)
+        if record["partition"]:
+            out.setdefault("partition", []).extend(record["partition"])
         traces = max(traces, record["traces"])
     train_seconds += time.perf_counter() - start
     train_peak = max(train_peak, common.gpu_peak_mb())
