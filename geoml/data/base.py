@@ -351,8 +351,9 @@ def _subset_simulations(store, item):
     hundreds of gigabytes and the end of the session. Dask indexes the chunks
     instead, so what is materialized is the answer rather than the source.
     """
+    # the type stored, which the read widened
     return _storage.ArrayStore.from_numpy(
-        _np.asarray(store.as_dask()[item]))
+        _np.asarray(store.as_dask()[item]).astype(store.dtype))
 
 
 def _copy_for_subset(variable):

@@ -4,8 +4,10 @@ What geoML writes to disk, for programs that read it without geoML: a
 container (`to_zarr`, read back by `open`, which takes `mode="r"` to
 refuse every write into the store) and a mesh set (`MeshSet.to_zarr`, read
 back by `MeshSet.open`, always read-only). Both are Zarr version 3
-groups written by zarr-python 3 with its default codecs, `bytes` then
-`zstd` today. Read each array's dtype, chunk shape and codecs from its own
+groups written by zarr-python 3. Since 0.8.7 every numeric array wider than
+a byte is written `bytes`, then `numcodecs.shuffle` at the element's width,
+then `zstd`; one-byte arrays, and every array written earlier, `bytes` then
+`zstd`. Read each array's dtype, chunk shape and codecs from its own
 metadata rather than assuming them.
 
 ## Attributes and versions
@@ -131,3 +133,7 @@ the realization axis in groups of ten, so that reading one realization
 reads about a tenth of the array rather than all of it. Read the chunk
 shape from the array's own metadata -- a store written earlier keeps the
 chunks it was written with, and a narrow array is still one chunk across.
+Realizations are written as float32 since 0.8.7 (float64 under
+`geoml.set_realization_dtype("float64")`, and in every store written
+earlier); the prediction, its variances and every other column stay
+float64.

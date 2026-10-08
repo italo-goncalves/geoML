@@ -1,3 +1,71 @@
+## version 0.8.7
+* **Training and predicting a product of experts an expert at a time:
+`VGPNetwork.train_by_expert`, `predict_by_expert` and `expert_weights`**
+(roadmap, batched experts). A model divided among many experts computed
+every expert on every batch, so memory grew with their number.
+`expert_weights` gives each location's weight for each expert, as the
+prediction blends them, from one sweep an expert at a time. Training by
+expert assigns every data row to one expert each epoch, drawn from the
+row's own weights, splits each expert's rows into batches of about
+N / (J x `visits`) -- a crowded expert taking more of them -- and computes
+on a batch only the experts holding `coverage` of the weight it carries;
+each of them steps on the batch's sum, its KL shared among the batches it
+is active on by the weight it carries in each, so an epoch's batches add
+up to the bound. Every expert keeps an optimizer state of its own, the
+parameters the experts share step once an epoch on the gradients summed
+over it (`global_update`), and one traced step serves every set of active
+experts, computed in as many padded slots as the widest set holds
+(`slots`). Sampling each expert's batch with replacement and a partition
+of the rows among the experts remain options (`sampling`, `quotas`,
+`stepping`); the assignment beat the partition and, over three seeds,
+matched or beat sampling with replacement.
+`predict_by_expert` predicts each location with its own experts, grouped
+and packed into slots, and agrees with `predict` to 1e-7 when every
+expert is in the slots. Against `train_svi` at the same expert count
+(`experiments/batched_experts`, three seeds): on a synthetic field with
+64 experts, rmse 0.088-0.094 against 0.085-0.091 but CRPS 0.125-0.126
+against 0.134-0.136, in about the same time and a third of the device
+memory (about 380 MB against 1100); on a deposit's rock types with 40
+experts (a local benchmark, the data not ours to publish), AUC 0.855-0.857
+against 0.817-0.818 and Brier 0.099-0.100 against 0.120-0.122, in 310 s
+against 450-560 and half the memory. Progress and cancelling as
+`train_svi` has them, and `options.training_tolerance` ends training once
+the epochs' bound settles. `cross_validate(method="by_expert",
+expert_options=...)` refits each fold this way and `refine(...,
+by_expert=True, expert_options=...)` predicts each pass so.
+* **Every latent node trains and predicts by expert but five**:
+`MultiStructureGP`, `GaussianInput`, `Linear`, `SelectInput`, `GPWalk`,
+`Bias`, `Scale`, `Add`, `LinearCombination` and `Concatenate` below or
+above the GP nodes, `Multiply`, `ProductOfExperts` and `Exponentiation`
+above them, and several inputs -- a list of leaves, or a `Stack` joining
+trees -- each input with experts of its own. Refused, with a message:
+`AdditiveGP`, `UncertainInputGP`, `GradientConstrainedInput` (and so
+directional data), `RadialTrend` and `GaussianMixture`. A deep GP whose
+input concatenates the coordinates stays local, so its experts can be
+trained one at a time; one fed by a GP alone spreads every expert over the
+field.
+* **Realizations stored as float32, every array byte-shuffled before
+zstd** (GeoScape's item 40). A project's disk is mostly realizations, and
+float64 left zstd little to find. Realizations are now stored as float32
+by default -- `geoml.set_realization_dtype("float64")` keeps the old width,
+and a store keeps the type it was made with -- in memory and on disk alike,
+so a container reads the same numbers before and after a save. The model
+still computes in float64: every read of a float32 store widens it back
+(`ArrayStore.__getitem__`, `__array__`, `as_dask`), so the Cholesky
+factors, the reductions and every figure see float64, while a store's
+`dtype` reports what it holds, so subsets, copies and blanks made from it
+stay float32. The prediction, its variances and every other column stay
+float64. Every numeric array wider than a byte is written `bytes`, then
+`numcodecs.shuffle` at the element's width, then `zstd` -- a codec of its
+own, not Blosc, which a browser would need a dependency to read; stores
+written before open as they were. Measured on a 908 000-block model's
+realizations (`docs/benchmarks/realization_codecs.py`, three variables of
+25 realizations): 0.39 of 0.8.6's bytes on disk, the shuffle alone 0.85,
+writes and reads as fast, and the largest change float32 makes 1.2e-6 of
+the spread between realizations. `get_simulations` counts a float32 store
+at the float64 it is read as. Two seed gates of `predict_node` store
+float64, since they check the draws to 1e-10 rather than the storage.
+
 ## version 0.8.6
 * **`likelihood.LikelihoodMixture`: a mixture of whole likelihoods**
 (roadmap item on mixing densities). Every measurement comes from one of

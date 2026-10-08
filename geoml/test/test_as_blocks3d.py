@@ -161,7 +161,8 @@ def test_the_prediction_and_every_realization_keep_their_mass(model):
     coarse = np.asarray(regular.variables["y"].simulations).sum(axis=0)
     source = (np.asarray(fine.variables["y"].simulations)
               * fine.block_volume[:, None]).sum(axis=0)
-    assert np.allclose(coarse * volume, source, rtol=1e-12)
+    # a gathered realization is stored as realizations are, float32
+    assert np.allclose(coarse * volume, source, rtol=1e-6)
     # a share of a block below the cut-off is a volume, and keeps it too
     assert np.isclose(
         (regular.values("y/proportions/0.5") * volume).sum(),

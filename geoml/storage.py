@@ -33,7 +33,8 @@ NumPy. This module is deliberately independent of ``data.py`` so it can be
 tested in isolation.
 """
 
-__all__ = ["ArrayStore", "DEFAULT_THRESHOLD", "store_columns"]
+__all__ = ["ArrayStore", "DEFAULT_THRESHOLD", "store_columns",
+           "set_realization_dtype", "realization_dtype"]
 
 import os as _os
 import shutil as _shutil
@@ -45,6 +46,7 @@ from typing import Any as _Any
 
 import numpy as _np
 import zarr as _zarr
+from zarr.codecs import Shuffle as _Shuffle, ZstdCodec as _Zstd
 
 import geoml._types as _types
 import dask.array as _da
@@ -76,6 +78,62 @@ _MIN_SPLIT_COLUMNS = 32
 # ten columns a chunk is ten times the rows and so fewer, longer reads.
 # Ten wins on every measure; `docs/benchmarks/realization_chunks.py`.
 _COLUMNS_PER_CHUNK = 10
+
+# What realizations are stored as. The model computes in float64 and every
+# read of a float32 store widens back to float64, so the narrower type is a
+# matter of disk and memory only: seven significant digits are far finer
+# than the spread between realizations, and a store of them takes half the
+# room before compression and less after (GeoScape's item 40).
+_REALIZATION_DTYPE = _np.dtype(_np.float32)
+
+
+def set_realization_dtype(dtype: _Any) -> None:
+    """Set what realizations are stored as from now on.
+
+    Realizations are stored as float32 by default; the model computes in
+    float64 whatever they are stored as, and a store of float32 reads back
+    as float64. A store keeps the type it was made with.
+
+    Parameters
+    ----------
+    dtype
+        `"float32"` (the default) or `"float64"`.
+
+    Raises
+    ------
+    ValueError
+        For any other type.
+    """
+    global _REALIZATION_DTYPE
+    dtype = _np.dtype(dtype)
+    if dtype not in (_np.dtype(_np.float32), _np.dtype(_np.float64)):
+        raise ValueError("realizations are stored as float32 or float64, "
+                         "not %s" % dtype)
+    _REALIZATION_DTYPE = dtype
+
+
+def realization_dtype() -> _np.dtype:
+    """What realizations are stored as now; see `set_realization_dtype`."""
+    return _REALIZATION_DTYPE
+
+
+def _widened(values):
+    """`values` as the model computes with them: float32 read as float64."""
+    if getattr(values, "dtype", None) == _np.float32:
+        return values.astype(_np.float64)
+    return values
+
+
+def _compressors(dtype):
+    """The codecs after `bytes`: a byte shuffle at the element's width, then
+    zstd. Shuffled, the bytes of equal significance sit together, which is
+    what lets floats compress; GeoScape's reader undoes `numcodecs.shuffle`
+    without a dependency, which Blosc's built-in shuffle would need. A
+    one-byte type has nothing to shuffle."""
+    dtype = _np.dtype(dtype)
+    if dtype.kind in "biufc" and dtype.itemsize > 1:
+        return [_Shuffle(elementsize=dtype.itemsize), _Zstd()]
+    return "auto"
 
 
 def _leading_chunk(shape, dtype):
@@ -174,7 +232,7 @@ class _ScratchGroup:
         self._count += 1
         return self._group.create_array(
             name=name, shape=shape, chunks=chunks, dtype=dtype,
-            fill_value=fill_value)
+            fill_value=fill_value, compressors=_compressors(dtype))
 
     def close(self):
         self._group = None
@@ -324,7 +382,8 @@ class ArrayStore:
 
         array = _zarr.create_array(
             store=store, shape=shape, chunks=chunks,
-            dtype=_zarr_dtype(dtype), fill_value=fill_value)
+            dtype=_zarr_dtype(dtype), fill_value=fill_value,
+            compressors=_compressors(dtype))
         return cls(array, backend="zarr", store_path=store_path, _tempdir=tempdir)
 
     @classmethod
@@ -353,7 +412,8 @@ class ArrayStore:
         fill = _np.nan if _np.issubdtype(_np.dtype(self.dtype), _np.floating) else 0
         target = group.create_array(
             name=name, shape=self.shape, chunks=chunks,
-            dtype=_zarr_dtype(self.dtype), fill_value=fill)
+            dtype=_zarr_dtype(self.dtype), fill_value=fill,
+            compressors=_compressors(self.dtype))
         _da.store(self.as_dask(), target, lock=False)
         return target
 
@@ -363,7 +423,7 @@ class ArrayStore:
     def __getitem__(self, item):
         if self._backend == "zarr":
             item = _rows_of_masks(item)
-        return self._array[item]
+        return _widened(self._array[item])
 
     def __setitem__(self, item, value):
         if self._backend == "zarr":
@@ -376,13 +436,18 @@ class ArrayStore:
             item = _rows_of_masks(item)
         self._array[item] = value
 
-    def __array__(self, dtype=None, copy=None):
+    def _stored(self):
+        """The values as stored, not widened: what a copy keeps."""
         if self._backend == "zarr":
-            array = _np.asarray(self._array[...])
+            return _np.asarray(self._array[...])
+        return _np.asarray(self._array)
+
+    def __array__(self, dtype=None, copy=None):
+        array = self._stored()
+        made_copy = self._backend == "zarr"
+        if array.dtype == _np.float32:
+            array = _widened(array)
             made_copy = True
-        else:
-            array = _np.asarray(self._array)
-            made_copy = False
         if dtype is not None and array.dtype != _np.dtype(dtype):
             array = array.astype(dtype)
             made_copy = True
@@ -396,6 +461,8 @@ class ArrayStore:
 
     @property
     def dtype(self):
+        """The type stored, which a store made like this one takes; a
+        float32 store reads back as float64."""
         return self._array.dtype
 
     @property
@@ -439,10 +506,11 @@ class ArrayStore:
     def __copy__(self):
         # Copies are always independent NumPy-backed stores: sharing a Zarr
         # array (and its temp directory) across stores would risk double-free.
-        return ArrayStore.from_numpy(self.__array__().copy())
+        # They keep the type stored, not the one a read widens to.
+        return ArrayStore.from_numpy(_np.array(self._stored()))
 
     def __deepcopy__(self, memo):
-        return ArrayStore.from_numpy(self.__array__().copy())
+        return ArrayStore.from_numpy(_np.array(self._stored()))
 
     # ------------------------------------------------------------------ #
     # labelled / lazy views
@@ -450,8 +518,10 @@ class ArrayStore:
     def as_dask(self) -> "_da.Array":
         """A dask array view (lazy & chunked for Zarr, single-chunk for NumPy)."""
         if self._backend == "zarr":
-            return _da.from_array(self._array, chunks=self._array.chunks)
-        return _da.from_array(self._array, chunks=-1)
+            darr = _da.from_array(self._array, chunks=self._array.chunks)
+        else:
+            darr = _da.from_array(self._array, chunks=-1)
+        return _widened(darr)
 
     def as_xarray(self, dims=None, coords=None, name=None):
         """A labelled ``xarray.DataArray`` over this store (dask-backed)."""

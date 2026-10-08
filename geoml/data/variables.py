@@ -105,7 +105,11 @@ def _units_per_label(units, labels):
 
 
 def _store_bytes(store):
-    return int(_np.prod(store.shape)) * _np.dtype(store.dtype).itemsize
+    """What `store` takes in memory read whole: float32 is read as float64."""
+    itemsize = _np.dtype(store.dtype).itemsize
+    if _np.dtype(store.dtype) == _np.float32:
+        itemsize = 8
+    return int(_np.prod(store.shape)) * itemsize
 
 
 def _missing_value(attribute):
@@ -1175,7 +1179,8 @@ class ContinuousVariable(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            (self.coordinates.n_data, n_sim),
+            dtype=_storage.realization_dtype(), fill_value=_np.nan,
             owner=self.coordinates)
 
     def _coarsen_realizations(self, new, grouping, valid):
@@ -1381,7 +1386,8 @@ class _LatentPart(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            (self.coordinates.n_data, n_sim),
+            dtype=_storage.realization_dtype(), fill_value=_np.nan,
             owner=self.coordinates)
 
 
@@ -1716,7 +1722,8 @@ class _Component(ContinuousVariable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            (self.coordinates.n_data, n_sim),
+            dtype=_storage.realization_dtype(), fill_value=_np.nan,
             owner=self.coordinates)
 
     def get_simulations(self):
@@ -1933,7 +1940,8 @@ class _Category(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            (self.coordinates.n_data, n_sim),
+            dtype=_storage.realization_dtype(), fill_value=_np.nan,
             owner=self.coordinates)
 
 class RockTypeVariable(_Variable):
@@ -2549,7 +2557,8 @@ class BinaryVariable(_Variable):
 
     def allocate_simulations(self, n_sim):
         self.simulations = _storage.ArrayStore.allocate(
-            (self.coordinates.n_data, n_sim), dtype=float, fill_value=_np.nan,
+            (self.coordinates.n_data, n_sim),
+            dtype=_storage.realization_dtype(), fill_value=_np.nan,
             owner=self.coordinates)
 
     @classmethod
