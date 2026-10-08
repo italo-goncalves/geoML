@@ -70,7 +70,7 @@ computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` (half the disk, every read widened back to `float64`);
 `geoml.set_realization_dtype("float64")` keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.7.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.8.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -190,7 +190,13 @@ in the catalogue.
   held-out data supported; check them.
 - **Inducing points.** The data's own locations plus a regular backbone,
   divided into overlapping experts: `data.inducing.experts` over
-  `data.inducing.combine`. How many a model can absorb depends on the whole
+  `data.inducing.combine`. Where the survey does not fill its box -- a fan
+  of drillholes -- take the backbone from `data.inducing.from_hull`, which
+  keeps the lattice inside the data's hull and a margin around it. Experts
+  come out compact and share points with every neighbour once each borrows
+  at least as many points as it has neighbours: keep experts large enough
+  for their overlap (an overlap of 0.1 on 25-point experts cannot reach six
+  neighbours). How many points a model can absorb depends on the whole
   configuration; measure it on held-out data rather than carrying a number
   across problems.
 - **Structure.** One variable influencing another: `Linear` off the first's
