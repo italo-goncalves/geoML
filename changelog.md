@@ -1,3 +1,40 @@
+## version 0.8.8
+* **`inducing.experts` makes compact experts that borrow from their
+neighbours** (roadmap). Clusters were k-means capped at n/k, filled one
+point at a time, so the nearby clusters filled first and the last points
+went to whichever cluster still had room, however far; and each borrowed
+the points nearest its centre in its own Mahalanobis metric, which along a
+drillhole reached past its neighbours down the hole. Now the k-means
+assignment is solved for all the points at once with every cluster's size
+bounded -- within `balance` of n/k, 10% by default, a new argument; zero
+for equal sizes -- as a transport problem over each point's 8 nearest
+centres (the full one where that has no solution), so clusters trade
+points for compactness; and an expert borrows up to `overlap` of its own
+count, rounded up, evenly from its neighbours -- the clusters some member
+of it faces as its nearest point outside it -- one point from each a
+round, that neighbour's nearest to its own members. Borrowing by nearness
+alone took every point from the one or two nearest: on drillholes in 20
+experts, 28 of 44 touching pairs shared nothing at the default overlap and
+17 at 0.2; borrowing evenly, 12 of 43 at 0.1, where an expert of 25 points
+borrows 3 against up to six neighbours, and none at 0.2. On Tom East's
+assayed holes at 20 experts the worst core
+member sits 2.2 median radii from its centre instead of 6.2, the most
+isolated 2.9 core spacings from its nearest fellow instead of 21.8, and a
+borrowed point's median gap is about one spacing instead of 2.1
+(`docs/benchmarks/expert_overlap.py`, which keeps the old algorithm and
+two other candidates); a held-out rock model scored better at 5 experts
+and worse at 20, so geometry decided. 6000 points in 64 experts take
+about 10 s. Rebuilt models divide their points differently; saved ones
+keep theirs.
+* **Prediction by expert drew other realizations where experts differ in
+size.** The slots drew one array of normals at the padded size for every
+expert, where `simulate` draws each expert's at its own size; a draw
+fills its array in order, so past the first output a smaller expert's
+numbers were others, and a GP of two outputs under a node predicted by
+expert as far as 1.8 from the model's realizations, its moments agreeing.
+Equal experts hid it; the bounded sizes above showed it. The slots now
+gather each expert's own draw.
+
 ## version 0.8.7
 * **Training and predicting a product of experts an expert at a time:
 `VGPNetwork.train_by_expert`, `predict_by_expert` and `expert_weights`**

@@ -33,9 +33,10 @@ seam where the experts meet. They differ only in how the division is made.
 `grid_experts` cuts space into regular blocks and extends each by one step, so
 every expert is the same size and its neighbours are known in advance -- the
 Moore neighbourhood, 8 in the plane and 26 in space. `experts` is the unordered
-counterpart: it clusters whatever points it is given and grows each cluster by
-a fraction of its own Mahalanobis radius, which suits a survey that does not
-fill its bounding box, such as drillholes or a shoreline.
+counterpart: it clusters whatever points it is given into compact clusters of
+about the same size and lends each the points nearest its own, which suits a
+survey that does not fill its bounding box, such as drillholes or a
+shoreline.
 
 `experts` takes inducing points rather than data, so the usual way to build an
 irregular network is to choose the points first and then divide them:
@@ -45,7 +46,11 @@ irregular network is to choose the points first and then divide them:
 
 __all__ = ["from_kmeans", "from_grid", "combine", "grid_experts", "experts"]
 
+from typing import cast as _cast
+
 import numpy as _np
+import scipy.optimize as _optimize
+import scipy.sparse as _sparse
 import scipy.spatial as _spatial
 from sklearn.cluster import KMeans as _KMeans
 
@@ -279,86 +284,112 @@ def grid_experts(data: "_data._SpatialData | _types.ArrayLike",
     return sets
 
 
-def _balanced_labels(coordinates, n_clusters, seed):
+def _bounded_assignment(cost, low, high, candidates=None):
     """
-    Cluster assignment with every cluster capped at the same size.
+    Each point's cluster, minimizing the summed `cost` with every cluster
+    holding between `low` and `high` points, or None where no assignment
+    fits.
 
-    Plain k-means leaves clusters of wildly different sizes, and an expert
-    cannot draw more inducing points than its cluster holds. Points are
-    offered their preferred cluster in order of how much the choice costs
-    them -- the ones with the least to gain elsewhere go first -- and a
-    cluster stops accepting once it is full.
+    A transport problem: every point sends one unit, every cluster takes
+    between its bounds. Its constraint matrix is totally unimodular, so the
+    simplex returns a vertex whose entries are whole -- one cluster per
+    point -- and the largest entry of each row names it. With `candidates`,
+    a point may go only to that many of its nearest clusters: the far ones
+    never take it at the optimum, and leaving them out divides the problem
+    by the number of clusters over the candidates.
     """
-    n_data = coordinates.shape[0]
-    centers = _KMeans(n_clusters, n_init=10, random_state=seed).fit(
-        coordinates).cluster_centers_
-
-    distance = ((coordinates[:, None, :] - centers[None, :, :]) ** 2).sum(-1)
-    capacity = int(_np.ceil(n_data / n_clusters))
-
-    order = _np.argsort(distance.min(axis=1) - distance.max(axis=1))
-    preference = _np.argsort(distance, axis=1)
-    labels = _np.full(n_data, -1, dtype=int)
-    counts = _np.zeros(n_clusters, dtype=int)
-
-    for i in order:
-        for j in preference[i]:
-            if counts[j] < capacity:
-                labels[i] = j
-                counts[j] += 1
-                break
-    return labels
-
-
-def _cluster_covariance(members, n_dim, floor=1e-3):
-    """
-    A cluster's covariance, kept invertible.
-
-    A cluster of samples taken along a single drillhole is very nearly a line,
-    which leaves the covariance singular and the Mahalanobis distance across
-    that line unbounded — the expert would reach over the whole survey. Raising
-    the smallest eigenvalues to a fraction of the largest bounds the ellipsoid
-    in every direction while leaving the shape alone where it is well
-    determined.
-    """
-    if members.shape[0] > n_dim:
-        covariance = _np.atleast_2d(_np.cov(members, rowvar=False))
+    n_points, n_clusters = cost.shape
+    if candidates is None or candidates >= n_clusters:
+        options = _np.broadcast_to(_np.arange(n_clusters),
+                                   (n_points, n_clusters))
     else:
-        covariance = _np.eye(n_dim) * max(float(members.var()), 1.0)
+        options = _np.argpartition(cost, candidates - 1, axis=1)[
+            :, :candidates]
+    width = options.shape[1]
+    columns = _np.arange(n_points * width)
+    ones = _np.ones(n_points * width)
+    each = _sparse.csr_matrix(
+        (ones, (_np.repeat(_np.arange(n_points), width), columns)),
+        shape=(n_points, n_points * width))
+    taken = _sparse.csr_matrix(
+        (ones, (options.ravel(), columns)),
+        shape=(n_clusters, n_points * width))
+    result = _optimize.linprog(
+        _np.take_along_axis(cost, options, axis=1).ravel(),
+        A_ub=_sparse.vstack([taken, -taken]),
+        b_ub=_np.concatenate([_np.full(n_clusters, high),
+                              _np.full(n_clusters, -low)]),
+        A_eq=each, b_eq=_np.ones(n_points), bounds=(0, 1),
+        method="highs-ds")
+    if result.status != 0:
+        return None
+    chosen = _np.argmax(result.x.reshape(n_points, width), axis=1)
+    return options[_np.arange(n_points), chosen]
 
-    values, vectors = _np.linalg.eigh(covariance)
-    if values.max() <= 0:  # every member in the same place
-        return _np.eye(n_dim)
-    values = _np.maximum(values, floor * values.max())
-    return (vectors * values) @ vectors.T
 
+def _balanced_labels(coordinates, n_clusters, balance, seed, rounds=30):
+    """
+    Compact clusters whose sizes stay within `balance` of the mean.
 
-def _mahalanobis(points, center, covariance):
-    chol = _np.linalg.cholesky(covariance)
-    solved = _np.linalg.solve(chol, (points - center).T)
-    return _np.sqrt((solved ** 2).sum(axis=0))
+    k-means with its assignment step bounded (Bradley, Bennett & Demiriz
+    2000): every round assigns the points to the centres at the least
+    summed squared distance that keeps each cluster between
+    `(1 - balance)` and `(1 + balance)` times `n / n_clusters` points, then
+    moves each centre to its points' mean, until nothing moves. Solved
+    whole, the assignment lets clusters trade points; placing them one at a
+    time, as an earlier version did, filled the nearby clusters first and
+    sent what came last to whichever cluster still had room, however far.
+    """
+    n_points = coordinates.shape[0]
+    mean = n_points / n_clusters
+    low = max(1, int(_np.floor(mean * (1 - balance))))
+    high = int(_np.ceil(mean * (1 + balance)))
+    centres = _KMeans(n_clusters, n_init=10, random_state=seed).fit(
+        coordinates).cluster_centers_
+    labels = None
+    for _ in range(rounds):
+        cost = ((coordinates[:, None, :] - centres[None]) ** 2).sum(-1)
+        assigned = _bounded_assignment(cost, low, high, candidates=8)
+        if assigned is None:
+            # with every cluster a candidate there is always a solution, the
+            # bounds holding n between low * k and high * k
+            assigned = _cast(_np.ndarray,
+                             _bounded_assignment(cost, low, high))
+        if labels is not None and _np.array_equal(assigned, labels):
+            break
+        labels = assigned
+        centres = _np.stack([coordinates[labels == j].mean(axis=0)
+                             for j in range(n_clusters)])
+    return labels
 
 
 def experts(points: "_data._SpatialData | _types.ArrayLike",
             n_experts: int, overlap: float = 0.1,
-            seed: int | None = None) -> "list[_data.PointData]":
+            seed: int | None = None,
+            balance: float = 0.1) -> "list[_data.PointData]":
     """
     Experts from overlapping clusters of an unstructured point set.
 
     The unordered counterpart to `grid_experts`, for inducing points that
-    follow the data rather than a lattice. The points are split into clusters
-    of about the same size, and each cluster then borrows a further `overlap`
-    of its own count from its surroundings: the points nearest its centre, in
-    Mahalanobis distance, among those belonging to other clusters. A borrowed
-    point keeps its own cluster too, so neighbouring experts come to share the
-    points between them — which is what stops a prediction showing a seam where
-    one expert gives way to the next, and is the irregular equivalent of the
-    one step of margin `grid_experts` adds to each block.
+    follow the data rather than a lattice. The points are split into compact
+    clusters of about the same size -- k-means whose assignment keeps every
+    cluster within `balance` of the mean size, solved for all the points at
+    once, so that clusters trade points rather than fill up -- and each
+    cluster then borrows up to `overlap` of its own count, rounded up, from
+    its neighbours evenly: one point from each neighbour a round, that
+    neighbour's nearest to any of its own members, so a cluster with many
+    neighbours spreads its overlap over all of them. A borrowed point keeps
+    its own cluster too, so neighbouring experts come to share the points
+    between them — which is what stops a prediction showing a seam where one
+    expert gives way to the next, and is the irregular equivalent of the one
+    step of margin `grid_experts` adds to each block. An expert reaches every
+    neighbour once its overlap is at least its number of neighbours, which
+    asks for experts that are not too small.
 
     Counting the overlap in points rather than in distance is what keeps the
-    experts the same size. Growing each cluster's Mahalanobis radius instead
-    lets a cluster in a crowded part of the survey swallow far more than one
-    out on its own, and the experts come out wildly uneven.
+    experts the same size. Growing each cluster by a radius instead lets a
+    cluster in a crowded part of the survey swallow far more than one out on
+    its own, and the experts come out wildly uneven.
 
     Since this divides inducing points rather than data, the usual call is
     ``experts(from_kmeans(data, 1500), 12)``.
@@ -372,11 +403,15 @@ def experts(points: "_data._SpatialData | _types.ArrayLike",
         Number of experts. Must not exceed the number of points.
     overlap
         How many points each expert borrows from its neighbours, as a fraction
-        of its own count, so an expert ends up with about `1 + overlap` times
-        the points its cluster holds. Zero leaves the experts a strict
-        partition, sharing nothing.
+        of its own count, rounded up, so an expert ends up with about
+        `1 + overlap` times the points its cluster holds. Zero leaves the
+        experts a strict partition, sharing nothing.
     seed
         Passed to `sklearn.cluster.KMeans` for a reproducible result.
+    balance
+        How far a cluster's size may stray from `n_points / n_experts`, as a
+        fraction of it: the room the clusters have to trade points for
+        compactness. Zero makes them all the same size, within one point.
 
     Returns
     -------
@@ -384,7 +419,7 @@ def experts(points: "_data._SpatialData | _types.ArrayLike",
         One set per expert: its own cluster, plus what it borrowed.
     """
     coordinates = _coordinates(points)
-    n_points, n_dim = coordinates.shape
+    n_points = coordinates.shape[0]
     n_experts = int(n_experts)
     if not 1 <= n_experts <= n_points:
         raise ValueError(
@@ -392,27 +427,66 @@ def experts(points: "_data._SpatialData | _types.ArrayLike",
             "got %d" % (n_points, n_experts))
     if overlap < 0:
         raise ValueError("overlap must not be negative, got %r" % overlap)
+    if not 0 <= balance < 1:
+        raise ValueError("balance must be in [0, 1), got %r" % balance)
 
-    labels = _balanced_labels(coordinates, n_experts, seed)
+    labels = _balanced_labels(coordinates, n_experts, balance, seed)
     coordinate_labels = getattr(points, "coordinate_labels", None)
+    neighbours = _neighbours(coordinates, labels, n_experts)
 
     sets = []
     for j in range(n_experts):
         core = labels == j
         keep = core.copy()
-
-        members = coordinates[core]
-        outside = _np.flatnonzero(~core)
-        borrowed = min(int(round(overlap * core.sum())), outside.size)
-
-        if borrowed > 0:
-            covariance = _cluster_covariance(members, n_dim)
-            distance = _mahalanobis(coordinates, members.mean(axis=0),
-                                    covariance)[outside]
-            if borrowed < outside.size:
-                outside = outside[_np.argpartition(distance, borrowed - 1)
-                                  [:borrowed]]
-            keep[outside] = True
-
+        budget = int(_np.ceil(overlap * core.sum()))
+        if budget > 0 and neighbours[j]:
+            keep[_borrowed(coordinates, labels, j, neighbours[j], budget)]                 = True
         sets.append(_as_points(coordinates[keep], coordinate_labels))
     return sets
+
+
+def _neighbours(coordinates, labels, n_experts):
+    """Each cluster's neighbours: the clusters some member of it has as
+    its nearest point outside it, or that have it so. Read off the points
+    themselves, it needs no distance to tune and adapts to how far apart
+    the points of a survey are."""
+    faced = [set() for _ in range(n_experts)]
+    for j in range(n_experts):
+        core = labels == j
+        if core.all():
+            continue
+        outside = _np.flatnonzero(~core)
+        nearest = _spatial.cKDTree(coordinates[outside]).query(
+            coordinates[core])[1]
+        for other in _np.unique(labels[outside[nearest]]):
+            faced[j].add(int(other))
+            faced[int(other)].add(j)
+    return [sorted(f) for f in faced]
+
+
+def _borrowed(coordinates, labels, j, neighbours, budget):
+    """The points cluster `j` borrows: from each neighbour in turn, nearest
+    first, the neighbour's point nearest any of `j`'s members, one each a
+    round, until `budget` points or the neighbours run out. Spread over the
+    neighbours, the overlap reaches every side of the cluster -- taken by
+    nearness alone it came from the one or two nearest, and most touching
+    experts shared nothing."""
+    tree = _spatial.cKDTree(coordinates[labels == j])
+    queues = []
+    for other in neighbours:
+        members = _np.flatnonzero(labels == other)
+        distance = tree.query(coordinates[members])[0]
+        order = _np.argsort(distance)
+        queues.append((distance[order[0]], members[order]))
+    queues.sort(key=lambda queue: queue[0])
+    taken = []
+    depth = 0
+    while len(taken) < budget:
+        before = len(taken)
+        for _, members in queues:
+            if depth < members.size and len(taken) < budget:
+                taken.append(members[depth])
+        if len(taken) == before:
+            break
+        depth += 1
+    return _np.asarray(taken, dtype=int)
