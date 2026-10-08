@@ -1198,32 +1198,6 @@ in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
 tape cuts peak GPU memory 3–4× and the step 1.5×.
 
-**S — Verify that `inducing.experts` overlaps neighbours, not far points**
-(raised by the user 2026-10-02, not yet measured). In some cases an expert
-holds points far from its own cluster, where the overlap should only lend
-it its neighbours' nearest points. Two suspects, read from the code:
-- **The size cap in `_balanced_labels`.** Every cluster is capped at
-  `ceil(n / k)` points, and points are placed in order of how strongly
-  they prefer their nearest centre, so the ambiguous ones come last. Where
-  the density is uneven, the nearby clusters are full by then, and a point
-  goes to whichever cluster still has room, however far away. This would
-  put far points in a cluster's own *core*, before any overlap.
-- **The Mahalanobis borrowing.** Each cluster borrows the points nearest
-  its centre in its own Mahalanobis metric. `_cluster_covariance` floors
-  the small eigenvalues at 1e-3 of the largest, so a cluster along a
-  drillhole is an ellipsoid many times longer than it is wide. Its nearest
-  points in that metric may lie far along the hole's line, past nearer
-  neighbours across it.
-
-The check: for each expert, the distance of every point, core and borrowed,
-to the core's centre, against the core's own spread; on a synthetic with
-uneven density and line-like clusters, and on Tom East's 500 k-means
-points in five experts (`docs/benchmarks/tom_east_mixture.py`). A point
-outside its core's spread is the symptom; which suspect put it there says
-the fix: a balance that will not send a point past a cluster's spread, or
-borrowing by Euclidean distance to the nearest core member rather than by
-the core's ellipsoid.
-
 ---
 
 ## 3. Diagnostics and validation
@@ -2064,6 +2038,52 @@ neither, Scripts being text and portal services not distribution.
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**Experts that keep to their neighbours -- done** (raised 2026-10-02,
+measured and replaced 2026-10-08, 0.8.8). `inducing.experts` lent an
+expert points far from its own cluster. Both suspects were real: the cap
+at n/k in `_balanced_labels`, placing points one at a time, filled the
+nearby clusters first and sent the last points to whichever cluster had
+room -- whole cores of 25 assembled from leftovers at 20 experts -- and
+borrowing by the core's Mahalanobis distance from its centre, the
+ellipsoid of a cluster along a drillhole, reached past the neighbours down
+the hole's line. Measured (`docs/benchmarks/expert_overlap.py`, which keeps
+the old algorithm) on 500 k-means points of drillholes with uneven density
+and on Tom East's assayed holes, against three compact algorithms with a
++-10% size band and borrowing by Euclidean distance to the nearest core
+member -- trading points after the cap, a size-bounded k-means assignment
+solved as a transport problem, and recursive bisection along the
+principal axis. Worst over the experts, at 20 on Tom East: a core member
+6.22 median radii from its centre and an isolated one 21.8 core spacings
+from its nearest fellow, against 2.64 / 6.51 trading, 2.17 / 2.86
+transport and 3.58 / 18.0 bisection; borrowed points' median gap 2.13
+spacings against about one for all three. The held-out score of a rock
+model (three seeds, which barely differ since a layout is one per
+algorithm) did not decide it: transport best at 5 experts (AUC 0.896
+against 0.875), worst at 20 (0.799 against 0.825), trading and bisection
+between. The figures showed transport's cores tiling the field and
+following the holes, and the user chose on geometry. `experts` is now
+k-means with the transport assignment (`balance=0.1`), each point's 8
+nearest centres as its candidates -- 6000 points in 64 experts 45 s to
+10 s, the same assignment wherever that is feasible, the full problem
+where not. **Borrowing is spread over the neighbours** (the user's rule):
+up to `ceil(overlap x own)` points, one from each neighbour a round, that
+neighbour's nearest to the core, nearest neighbour first; a neighbour is a
+cluster some member faces as its nearest point outside, or that faces it.
+Borrowing by nearness alone left most touching experts sharing nothing --
+on the drillhole case at 20 experts, 28 of 44 touching pairs at overlap
+0.1, 17 at 0.2, 6 still at 0.5 -- since every point came from the one or
+two nearest neighbours. Spread, 12 of 43 facing pairs at 0.1, where an
+expert of 25 points borrows 3 against up to six neighbours, and none at
+0.2 or more: the rule reaches every neighbour once an expert is large
+enough for its overlap. Tests in `test_experts.py`: the band, even
+borrowing, every facing neighbour shared where the budget covers them,
+and compact cores along the drillhole case, which the old algorithm
+fails. On the way, prediction by expert was found drawing other normals
+for a GP of two outputs wherever experts differ in size -- a slot drew one
+array at the padded size where `simulate` draws each expert's at its own,
+and a draw fills its array in order -- hidden while experts were equal;
+the slots now gather each expert's own draw.
 
 **Mesh sets — done** (2026-09-11, 0.6.10). `geoml/data/meshsets.py`;
 design record `docs/mesh-sets.md`, measurements

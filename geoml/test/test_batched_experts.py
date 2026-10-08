@@ -109,7 +109,8 @@ def test_prediction_by_expert_with_full_coverage_is_the_prediction():
     c = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
     m.predict_by_expert(c, n_sim=5, coverage=1.0)
     np.testing.assert_allclose(a.values("v/prediction"),
-                               c.values("v/prediction"), rtol=1e-10)
+                               c.values("v/prediction"), rtol=1e-10,
+                               atol=1e-12)
 
 
 def test_prediction_by_expert_truncates_little_and_ignores_batching():
@@ -269,8 +270,10 @@ def test_prediction_in_slots_is_prediction_by_set():
     ia = m.predict_by_expert(a, n_sim=5, slots=False, grouping="exact")
     ib = m.predict_by_expert(b, n_sim=5, slots=True, pack=False)
     assert ia["subsets"] == ib["subsets"]
+    # an absolute floor: values near zero differ in the last bits
     np.testing.assert_allclose(a.values("v/prediction"),
-                               b.values("v/prediction"), rtol=1e-10)
+                               b.values("v/prediction"), rtol=1e-10,
+                               atol=1e-12)
     np.testing.assert_allclose(a.variables["v"].get_simulations(),
                                b.variables["v"].get_simulations(),
                                rtol=1e-9, atol=1e-12)
@@ -414,7 +417,10 @@ def test_the_experts_rate_decays_on_the_epoch_clock_in_slots():
     m = _model()
     record = m.train_by_expert(2, batch_size=50, visits=2, decay="epochs")
     assert np.all(np.isfinite(record["bound"]))
-    assert m._by_expert["batches"] == 16
+    # the clock counts the batches taken, which under an assignment are as
+    # many as the experts' rows make
+    assert m._by_expert["batches"] == sum(
+        epoch["batches"] for epoch in record["partition"])
     with pytest.raises(ValueError, match="needs slots"):
         _model().train_by_expert(1, slots=False, decay="epochs")
 
@@ -508,9 +514,13 @@ def test_a_network_predicts_by_expert_as_the_model_does(name):
     info = m.predict_by_expert(b, n_sim=4, coverage=1.0)
     assert len(info["subsets"]) == 1
     for v in m.variables:
+        # an absolute floor of 1e-7: experts of unequal size run padded,
+        # which reorders the rounding, and `SelectInput` projects the
+        # points onto one coordinate, leaving covariances conditioned at
+        # 1e18 that magnify it to 2e-8; a fault misses by tenths
         np.testing.assert_allclose(a.values(v + "/prediction"),
                                    b.values(v + "/prediction"),
-                                   rtol=1e-7, atol=1e-9)
+                                   rtol=1e-7, atol=1e-7)
         np.testing.assert_allclose(a.variables[v].get_simulations(),
                                    b.variables[v].get_simulations(),
                                    rtol=1e-6, atol=1e-8)

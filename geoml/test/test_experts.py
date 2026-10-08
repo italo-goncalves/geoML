@@ -75,6 +75,54 @@ def test_from_grid_covers_the_data():
         assert np.allclose(spacing, 40)
 
 
+def _l_shape():
+    """Samples along an L: the bottom and the left of a 100 m square, so
+    the hull holds an empty corner the samples never reach."""
+    rng = np.random.default_rng(0)
+    bottom = np.column_stack([rng.uniform(0, 100, 200), rng.uniform(0, 10, 200)])
+    left = np.column_stack([rng.uniform(0, 10, 200), rng.uniform(0, 100, 200)])
+    return np.vstack([bottom, left])
+
+
+def test_from_hull_keeps_the_hull_and_a_margin():
+    from scipy.spatial import Delaunay, cKDTree
+    data = _l_shape()
+    kept = np.asarray(ind.from_hull(data, 5.0, 12.0).coordinates)
+    # the whole lattice: the same grid over the box grown by the distance
+    box = np.vstack([data.min(axis=0) - 12.0, data.max(axis=0) + 12.0])
+    every = np.asarray(ind.from_grid(box, 5.0).coordinates)
+    inside = Delaunay(data).find_simplex(every) >= 0
+    gap = cKDTree(data).query(every)[0]
+    expected = every[inside | (gap <= 12.0)]
+    assert {tuple(p) for p in kept} == {tuple(p) for p in expected}
+    # the hull's empty corner is kept, far as it is from every sample
+    assert np.any(inside & (gap > 30.0))
+    assert kept.shape[0] < every.shape[0]
+
+
+def test_from_hull_at_zero_distance_is_the_hull():
+    from scipy.spatial import Delaunay
+    data = _l_shape()
+    kept = np.asarray(ind.from_hull(data, 5.0, 0.0).coordinates)
+    assert np.all(Delaunay(data).find_simplex(kept) >= 0)
+
+
+def test_from_hull_on_flat_data_keeps_what_is_near():
+    """A section in space encloses no volume: the distance alone decides."""
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(0)
+    data = np.column_stack([rng.uniform(0, 50, 100), rng.uniform(0, 50, 100),
+                            np.zeros(100)])
+    kept = np.asarray(ind.from_hull(data, 5.0, 4.0).coordinates)
+    assert kept.shape[0] > 0
+    assert np.all(cKDTree(data).query(kept)[0] <= 4.0)
+
+
+def test_from_hull_refuses_a_negative_distance():
+    with pytest.raises(ValueError, match="negative"):
+        ind.from_hull(_l_shape(), 5.0, -1.0)
+
+
 def test_combine_drops_duplicates():
     a = geoml.data.PointData.from_array(np.array([[0.0, 0.0], [1.0, 1.0]]))
     b = geoml.data.PointData.from_array(np.array([[1.0, 1.0], [2.0, 2.0]]))
@@ -163,11 +211,11 @@ def test_overlap_is_a_fraction_of_the_experts_own_points():
     points = ind.from_kmeans(walker_point, 200, seed=0)
     core = [s.n_data for s in ind.experts(points, 5, overlap=0.0, seed=0)]
 
-    for overlap in (0.2, 0.5):
+    for overlap in (0.1, 0.2, 0.5):
         sizes = [s.n_data for s in ind.experts(points, 5, overlap=overlap,
                                                seed=0)]
         for own, grown in zip(core, sizes):
-            assert grown == own + round(overlap * own)
+            assert grown == own + int(np.ceil(overlap * own))
 
 
 def test_overlap_keeps_the_experts_the_same_size():
@@ -179,7 +227,8 @@ def test_overlap_keeps_the_experts_the_same_size():
     points = geoml.data.PointData.from_array(
         np.concatenate([crowded, sparse]))
 
-    sizes = [s.n_data for s in ind.experts(points, 6, overlap=0.25, seed=0)]
+    sizes = [s.n_data for s in ind.experts(points, 6, overlap=0.25, seed=0,
+                                           balance=0.0)]
     assert max(sizes) / min(sizes) < 1.1
 
 
@@ -212,6 +261,115 @@ def test_experts_survive_a_collinear_cluster():
         assert np.all(np.isfinite(np.asarray(s.coordinates)))
 
 
+def _drillholes():
+    """Holes dipping 60 degrees, samples every 2 m: a dense block 10 m
+    apart beside a sparse spread 60 m apart, as 500 k-means points."""
+    rng = np.random.default_rng(0)
+    collars = np.vstack([
+        np.column_stack([g.ravel() for g in np.meshgrid(
+            np.arange(0, 100, 10.0), np.arange(0, 100, 10.0))]),
+        np.column_stack([g.ravel() for g in np.meshgrid(
+            np.arange(150, 600, 60.0), np.arange(0, 600, 60.0))])])
+    collars = collars + rng.normal(0, 2, collars.shape)
+    down = np.arange(0, 200, 2.0)
+    direction = np.array([0.0, np.cos(np.radians(60)),
+                          -np.sin(np.radians(60))])
+    samples = np.vstack([np.column_stack([np.full_like(down, c[0]),
+                                          np.full_like(down, c[1]),
+                                          np.zeros_like(down)])
+                         + down[:, None] * direction for c in collars])
+    data = geoml.data.PointData.from_array(samples, ["X", "Y", "Z"])
+    return np.asarray(ind.from_kmeans(data, 500, seed=0).coordinates)
+
+
+def _cores(points, n_experts, balance=0.1):
+    return ind._balanced_labels(points, n_experts, balance, 0)
+
+
+@pytest.mark.parametrize("balance", [0.0, 0.1, 0.3])
+def test_a_core_stays_within_the_balance(balance):
+    points = _drillholes()
+    sizes = np.bincount(_cores(points, 20, balance), minlength=20)
+    mean = len(points) / 20
+    assert sizes.sum() == len(points)
+    assert sizes.min() >= np.floor(mean * (1 - balance))
+    assert sizes.max() <= np.ceil(mean * (1 + balance))
+
+
+def _taken(points, labels, sets, j):
+    """What expert `j` borrowed, as indices into `points`."""
+    held = sets[j]
+    inside = (points[:, None] == held[None]).all(-1).any(1)
+    return np.flatnonzero(inside & (labels != j))
+
+
+def test_an_expert_borrows_evenly_from_its_neighbours():
+    """One point from each neighbour a round: the counts taken from two
+    neighbours differ by at most one unless one ran out, and what is taken
+    from a neighbour is its nearest to the borrower's own members."""
+    points = _drillholes()
+    labels = _cores(points, 5)
+    sets = [np.asarray(s.coordinates)
+            for s in ind.experts(points, 5, overlap=0.3, seed=0)]
+    neighbours = ind._neighbours(points, labels, 5)
+    for j in range(5):
+        taken = _taken(points, labels, sets, j)
+        own = points[labels == j]
+        counts = []
+        for other in neighbours[j]:
+            members = np.flatnonzero(labels == other)
+            gap = np.min(np.linalg.norm(
+                points[members][:, None] - own[None], axis=2), axis=1)
+            mine = np.isin(members, taken)
+            counts.append((mine.sum(), members.size))
+            if mine.any() and not mine.all():
+                assert gap[mine].max() <= gap[~mine].min() + 1e-9
+        assert set(labels[taken]) <= set(neighbours[j])
+        exhausted = [c for c, size in counts if c == size]
+        rest = [c for c, size in counts if c < size]
+        if rest:
+            assert max(rest) - min(rest) <= 1
+            assert all(c <= max(rest) for c in exhausted)
+
+
+def test_cores_stay_compact_along_uneven_drillholes():
+    """The case 0.8.7 failed: capped clusters filled from leftovers had
+    members 3.4 median radii out and lent points two spacings away."""
+    points = _drillholes()
+    labels = _cores(points, 20)
+    sets = ind.experts(points, 20, overlap=0.1, seed=0)
+    for j, s in enumerate(sets):
+        own = points[labels == j]
+        radius = np.linalg.norm(own - own.mean(axis=0), axis=1)
+        assert radius.max() / np.median(radius) < 2.5
+        spacing = np.median(np.sort(np.linalg.norm(
+            own[:, None] - own[None], axis=2), axis=1)[:, 1])
+        held = np.asarray(s.coordinates)
+        lent = held[~(held[:, None] == own[None]).all(-1).any(1)]
+        if len(lent):
+            gap = np.min(np.linalg.norm(lent[:, None] - own[None], axis=2),
+                         axis=1)
+            assert gap.max() / spacing < 1.5
+
+
+@pytest.mark.parametrize("overlap", [0.1, 0.3])
+@pytest.mark.parametrize("n_experts", [5, 20])
+def test_neighbouring_experts_share_points(n_experts, overlap):
+    """The overlap's purpose: an expert whose share covers its neighbours
+    shares a point with every one of them, so a prediction blends across
+    where they meet; one whose share does not -- an expert too small for
+    its overlap -- still spends it on as many neighbours, nearest first."""
+    points = _drillholes()
+    labels = _cores(points, n_experts)
+    sets = [np.asarray(s.coordinates) for s in ind.experts(
+        points, n_experts, overlap=overlap, seed=0)]
+    neighbours = ind._neighbours(points, labels, n_experts)
+    for j in range(n_experts):
+        budget = int(np.ceil(overlap * np.sum(labels == j)))
+        reached = set(labels[_taken(points, labels, sets, j)])
+        assert len(reached) == min(budget, len(neighbours[j]))
+
+
 def test_experts_rejects_an_impossible_request():
     walker_point, _ = _walker()
     points = ind.from_kmeans(walker_point, 40, seed=0)
@@ -219,6 +377,8 @@ def test_experts_rejects_an_impossible_request():
         ind.experts(points, points.n_data + 1)
     with pytest.raises(ValueError, match="negative"):
         ind.experts(points, 3, overlap=-0.1)
+    with pytest.raises(ValueError, match="balance"):
+        ind.experts(points, 3, balance=1.0)
 
 
 # --------------------------------------------------------------------------- #

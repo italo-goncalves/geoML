@@ -1687,16 +1687,26 @@ class BasicGP(_GPNode):
         return cov_cross, mu, weights, w_mu, w_var, w_exp_var
 
     def _slot_simulate(self, n_sim, seed):
-        """`simulate` under slots: one draw of normals, which the experts of
-        a node share as they always have."""
+        """`simulate` under slots: the normals each expert draws in
+        `simulate`, gathered into the slots."""
+        slots = _slots_of(self.root)
         cov_cross, mu, weights = self._swept()
         with _tf.name_scope("gp_simulation"):
             m = cov_cross.shape[-1]
-            rnd = _simulation_normals([self.size, m, n_sim], seed,
-                                      key=self.name)
+            # each expert's normals drawn at its own size, as `simulate`
+            # draws them, and padded: a draw fills its array in order, so
+            # one draw at the padded size gives a smaller expert's second
+            # output other numbers. A padded point's normals reach nothing,
+            # its covariance with every location being masked to zero
+            drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim], seed,
+                                                 key=self.name),
+                             [[0, 0], [0, m - n], [0, 0]])
+                     for n in self.root.n_ip]
+            drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
+            rnd = _tf.gather(_tf.stack(drawn), slots.ids)
             sims = _tf.einsum(
                 "pab,psbc->psac", cov_cross,
-                _tf.matmul(self.slots_chol_r, rnd[None])) + mu
+                _tf.matmul(self.slots_chol_r, rnd)) + mu
             return _tf.reduce_sum(sims * weights[:, :, :, None], axis=0)
 
     def cache_prediction_state(self):
