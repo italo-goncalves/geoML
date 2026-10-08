@@ -375,8 +375,11 @@ def test_a_declared_unit_changes_nothing_but_the_scale(gate):
     for key, factor in (("prediction", 100.0), ("simulations", 100.0),
                         ("median", 100.0), ("measurements", 100.0),
                         ("dispersion", 100.0 ** 2), ("noise", 100.0 ** 2)):
+        # realizations are stored as float32, each side rounded on its own,
+        # and the median is read off them
+        rtol = 2 * np.finfo(np.float32).eps             if key in ("simulations", "median") else 1e-10
         np.testing.assert_allclose(percent[key], plain[key] * factor,
-                                   rtol=1e-10, atol=0.0,
+                                   rtol=rtol, atol=0.0,
                                    err_msg="%s did not scale by %g"
                                            % (key, factor))
 

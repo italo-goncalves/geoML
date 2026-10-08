@@ -28,7 +28,9 @@ With the same geoML, the same libraries, the same machine and the same
 device, and `set_seed` before anything is built:
 
 - the initial parameters, the training log, the predictions, the
-  realizations and the measurement samples, bit for bit, in any process;
+  realizations and the measurement samples, bit for bit, in any process --
+  the realizations as they are stored, float32 by default, the model
+  computing in float64 and every read widening them back;
 - a location's realizations whatever the batching, and whichever call
   computed them, given one fit, one seed and one number of realizations --
   so a target predicted in pieces holds the ensemble it would have held

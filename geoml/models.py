@@ -2769,12 +2769,14 @@ class VGPNetwork(_GPModel):
     def _slot_variables(self, root, size):
         """The Variables a prediction's cached traces read an input's slots
         from, one pair per input and number of slots, kept so that the
-        traces stay valid."""
+        traces stay valid. The ids are int64: TensorFlow keeps an int32
+        Variable in host memory, which an XLA-compiled prediction on a GPU
+        cannot read."""
         held = self.__dict__.setdefault("_slot_vars", {})
         key = (id(root), size)
         if key not in held:
             held[key] = (
-                _tf.Variable(_np.zeros(size, _np.int32), trainable=False),
+                _tf.Variable(_np.zeros(size, _np.int64), trainable=False),
                 _tf.Variable(_np.zeros(size), trainable=False,
                              dtype=_tf.float64))
         return held[key]
@@ -3533,7 +3535,9 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
            where: _types.Where = None,
            meshes: "Sequence[_data.Mesh3D] | None" = None,
            verbose: bool = False,
-           by_expert: bool = False) -> "_data.BlockSet3D":
+           by_expert: bool = False,
+           expert_options: "dict[str, _Any] | None" = None
+           ) -> "_data.BlockSet3D":
     """Predict on a block model, cutting finer wherever it cannot decide.
 
     Predicts on the coarse blocks, splits the ones still in doubt, predicts
@@ -3582,6 +3586,10 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     by_expert
         Predict each pass with :meth:`VGPNetwork.predict_by_expert`, so
         that memory does not grow with the number of experts.
+    expert_options
+        Keywords for :meth:`VGPNetwork.predict_by_expert` under
+        `by_expert` -- `coverage`, `neighbours`, `grouping`, `slots`,
+        `pack`.
 
     Returns
     -------
@@ -3616,14 +3624,19 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     with _progress.reporting("refine", None, "pass") as report:
         return _refine_passes(model, blocks, n_sim, split_on,
                               include_noise, keep, meshes, verbose, report,
-                              by_expert)
+                              by_expert, expert_options)
 
 
 def _refine_passes(model, blocks, n_sim, split_on, include_noise,
-                   keep, meshes, verbose, report, by_expert=False):
+                   keep, meshes, verbose, report, by_expert=False,
+                   expert_options=None):
     """The body of :func:`refine`, one pass at a time. Separate only so that
     the reporting block can wrap a function that returns from its middle."""
-    predict = model.predict_by_expert if by_expert else model.predict
+    predict = model.predict
+    if by_expert:
+        def predict(*args, **kwargs):
+            return model.predict_by_expert(*args, **kwargs,
+                                           **(expert_options or {}))
     predict(blocks, n_sim=n_sim, include_noise=include_noise, where=keep)
     report(0)
 

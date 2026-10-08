@@ -30,6 +30,7 @@ __all__ = [
 
 from . import *
 from .stats.random import set_seed
+from .storage import set_realization_dtype
 
 # Internal, unadvertised, but kept reachable as attributes: parameter and
 # storage arrive through the import graph regardless; persistence does not.

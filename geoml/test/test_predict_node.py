@@ -50,7 +50,16 @@ def _sims(variable):
                      for part in variable.components.values()], axis=1)
 
 
-def test_the_parts_realizations_add_up_to_the_leaf_s():
+@pytest.fixture
+def float64_realizations():
+    """The seed gates compare realizations to 1e-10, which is a check of
+    the draws and not of how they are stored."""
+    geoml.set_realization_dtype("float64")
+    yield
+    geoml.set_realization_dtype("float32")
+
+
+def test_the_parts_realizations_add_up_to_the_leaf_s(float64_realizations):
     model, _, _, leaf, (a, b, c) = _model(_sum_of_three)
     grid = _grid()
     for node, name in ((leaf, "leaf"), (a, "a"), (b, "b"), (c, "c")):
@@ -64,7 +73,8 @@ def test_the_parts_realizations_add_up_to_the_leaf_s():
                            _sims(grid.variables["c"]))
 
 
-def test_a_product_s_realizations_are_its_parents_multiplied():
+def test_a_product_s_realizations_are_its_parents_multiplied(
+        float64_realizations):
     def product(root):
         a, b = _gp(root), _gp(root)
         return gl.Multiply(a, b), (a, b)

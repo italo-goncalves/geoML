@@ -244,6 +244,23 @@ def test_concatenated_coordinates_keep_the_second_layer_local():
     assert np.all(np.isfinite(record["bound"]))
 
 
+def test_prediction_in_slots_compiles_with_xla():
+    """The slots' ids are a Variable the traced prediction reads; an int32
+    one sat in host memory, which XLA on a GPU could not reach. (Only a
+    GPU shows it; on a CPU this checks the compiled answer.)"""
+    m = _model()
+    m.train_full(10)
+    a = geoml.data.PointData.from_array(_targets(20), ["X", "Y"])
+    b = geoml.data.PointData.from_array(_targets(20), ["X", "Y"])
+    m.predict_by_expert(a, n_sim=5)
+    m.options.jit_predict = True
+    m.predict_by_expert(b, n_sim=5)
+    # the latent moments: XLA draws its own normals from the same seed, so
+    # the realizations and what is read off them differ
+    np.testing.assert_allclose(a.values("v/latent_mean"),
+                               b.values("v/latent_mean"), atol=1e-8)
+
+
 def test_prediction_in_slots_is_prediction_by_set():
     m = _model()
     m.train_full(10)
@@ -357,6 +374,13 @@ def test_refinement_by_expert():
     b = geoml.models.refine(model, blocks, n_sim=4, by_expert=True)
     assert b.is_full() and not np.any(b.unpredicted())
     assert abs(a.n_data - b.n_data) <= 0.1 * a.n_data
+    # with every expert in the slots, each pass is the model's prediction,
+    # and so are the cuts
+    c = geoml.models.refine(model, blocks, n_sim=4, by_expert=True,
+                            expert_options={"coverage": 1.0})
+    assert c.n_data == a.n_data
+    np.testing.assert_allclose(c.values("V/prediction"),
+                               a.values("V/prediction"), atol=1e-6)
 
 
 def test_the_paths_take_turns_on_one_model():

@@ -32,7 +32,7 @@ against 450-560 and half the memory. Progress and cancelling as
 `train_svi` has them, and `options.training_tolerance` ends training once
 the epochs' bound settles. `cross_validate(method="by_expert",
 expert_options=...)` refits each fold this way and `refine(...,
-by_expert=True)` predicts each pass so.
+by_expert=True, expert_options=...)` predicts each pass so.
 * **Every latent node trains and predicts by expert but five**:
 `MultiStructureGP`, `GaussianInput`, `Linear`, `SelectInput`, `GPWalk`,
 `Bias`, `Scale`, `Add`, `LinearCombination` and `Concatenate` below or
@@ -44,6 +44,27 @@ directional data), `RadialTrend` and `GaussianMixture`. A deep GP whose
 input concatenates the coordinates stays local, so its experts can be
 trained one at a time; one fed by a GP alone spreads every expert over the
 field.
+* **Realizations stored as float32, every array byte-shuffled before
+zstd** (GeoScape's item 40). A project's disk is mostly realizations, and
+float64 left zstd little to find. Realizations are now stored as float32
+by default -- `geoml.set_realization_dtype("float64")` keeps the old width,
+and a store keeps the type it was made with -- in memory and on disk alike,
+so a container reads the same numbers before and after a save. The model
+still computes in float64: every read of a float32 store widens it back
+(`ArrayStore.__getitem__`, `__array__`, `as_dask`), so the Cholesky
+factors, the reductions and every figure see float64, while a store's
+`dtype` reports what it holds, so subsets, copies and blanks made from it
+stay float32. The prediction, its variances and every other column stay
+float64. Every numeric array wider than a byte is written `bytes`, then
+`numcodecs.shuffle` at the element's width, then `zstd` -- a codec of its
+own, not Blosc, which a browser would need a dependency to read; stores
+written before open as they were. Measured on a 908 000-block model's
+realizations (`docs/benchmarks/realization_codecs.py`, three variables of
+25 realizations): 0.39 of 0.8.6's bytes on disk, the shuffle alone 0.85,
+writes and reads as fast, and the largest change float32 makes 1.2e-6 of
+the spread between realizations. `get_simulations` counts a float32 store
+at the float64 it is read as. Two seed gates of `predict_node` store
+float64, since they check the draws to 1e-10 rather than the storage.
 
 ## version 0.8.6
 * **`likelihood.LikelihoodMixture`: a mixture of whole likelihoods**

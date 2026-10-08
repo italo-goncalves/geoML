@@ -40,12 +40,15 @@ def _radial(cutoffs=(20.0, 30.0, 40.0), offsets=OFFSETS):
                                    discretization=(2, 2, 2), max_levels=2)
     blocks = blocks.split(np.arange(blocks.n_data))
     distance = np.linalg.norm(np.asarray(blocks.coordinates) - CENTRE, axis=1)
-    blocks.add_continuous_variable("g", 50.0 - distance)
+    # the field as realizations are stored, so that the one with no offset
+    # is the prediction to the bit
+    field = (50.0 - distance).astype(np.float32).astype(float)
+    blocks.add_continuous_variable("g", field)
     var = blocks.variables["g"]
-    var.prediction.values[:] = 50.0 - distance
+    var.prediction.values[:] = field
     if offsets is not None:
         var.allocate_simulations(len(offsets))
-        var.simulations[:, :] = (50.0 - distance)[:, None] + offsets[None, :]
+        var.simulations[:, :] = field[:, None] + offsets[None, :]
     if cutoffs is not None:
         var.set_cutoffs(list(cutoffs))
     return blocks
