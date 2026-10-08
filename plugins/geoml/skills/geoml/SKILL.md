@@ -66,9 +66,11 @@ pip install git+https://github.com/italo-goncalves/geoML
 ```
 **Backend:** TensorFlow 2.x + TensorFlow-Probability, GPU-accelerated. All
 computation is in `float64`: geostatistical matrices are ill-conditioned and
-`float32` breaks the Cholesky factorizations.
+`float32` breaks the Cholesky factorizations. Realizations are *stored* as
+`float32` (half the disk, every read widened back to `float64`);
+`geoml.set_realization_dtype("float64")` keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.6.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.7.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -201,6 +203,16 @@ in the catalogue.
 - **Training.** `GPOptions(training_tolerance=0.01)` stops once the bound
   has settled; the last few percent of the bound buys sharpness held-out
   data does not support.
+- **Many experts.** When memory grows with their number, train and predict
+  an expert at a time: `model.train_by_expert`, `model.predict_by_expert`,
+  and `refine(..., by_expert=True)` for a block model. It matched or beat
+  `train_svi` on CRPS and on a deposit's rock types in a third to a half of
+  the device memory, a little behind on rmse on a smooth synthetic field.
+  Fewer, larger experts scored better than many small ones at a fixed
+  total of inducing points. A deep GP fed by another needs the coordinates
+  concatenated into its input to stay local; one fed by a GP alone spreads
+  every expert over the field. Five nodes are refused; the message names
+  them.
 - **Validation.** `PointData.spatial_k_fold` writes folds that resemble the
   real prediction task, `models.cross_validate` scores the model out of
   fold, and `models.conformalize` recalibrates the intervals. In-sample scores
@@ -237,7 +249,9 @@ The papers and the code name the same things differently.
   simulation stream both draw from it, and a saved model keeps its seed.
   `cross_validate` draws each fold's fresh variational state from the same
   generator, so two runs in a row differ; set the seed right before each
-  run that must repeat.
+  run that must repeat. Under `GPOptions(jit_predict=True)` XLA draws other
+  normals from the same seed: the latent moments agree, the realizations do
+  not.
 - **`values()` for what you compute with, `get()` for what you draw.**
   Never `values()` a bare `simulations` path: it reads every realization
   into memory at once, fatal on a block model. Read one realization
