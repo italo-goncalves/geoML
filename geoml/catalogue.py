@@ -53,6 +53,7 @@ MODULES = ("geoml.latent.network", "geoml.latent.fourier", "geoml.kernels",
 FUNCTIONS = {
     "geoml.data.inducing.from_kmeans": "inducing",
     "geoml.data.inducing.from_grid": "inducing",
+    "geoml.data.inducing.from_hull": "inducing",
     "geoml.data.inducing.combine": "inducing",
     "geoml.data.inducing.grid_experts": "inducing",
     "geoml.data.inducing.experts": "inducing",

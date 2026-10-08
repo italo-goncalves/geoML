@@ -75,6 +75,54 @@ def test_from_grid_covers_the_data():
         assert np.allclose(spacing, 40)
 
 
+def _l_shape():
+    """Samples along an L: the bottom and the left of a 100 m square, so
+    the hull holds an empty corner the samples never reach."""
+    rng = np.random.default_rng(0)
+    bottom = np.column_stack([rng.uniform(0, 100, 200), rng.uniform(0, 10, 200)])
+    left = np.column_stack([rng.uniform(0, 10, 200), rng.uniform(0, 100, 200)])
+    return np.vstack([bottom, left])
+
+
+def test_from_hull_keeps_the_hull_and_a_margin():
+    from scipy.spatial import Delaunay, cKDTree
+    data = _l_shape()
+    kept = np.asarray(ind.from_hull(data, 5.0, 12.0).coordinates)
+    # the whole lattice: the same grid over the box grown by the distance
+    box = np.vstack([data.min(axis=0) - 12.0, data.max(axis=0) + 12.0])
+    every = np.asarray(ind.from_grid(box, 5.0).coordinates)
+    inside = Delaunay(data).find_simplex(every) >= 0
+    gap = cKDTree(data).query(every)[0]
+    expected = every[inside | (gap <= 12.0)]
+    assert {tuple(p) for p in kept} == {tuple(p) for p in expected}
+    # the hull's empty corner is kept, far as it is from every sample
+    assert np.any(inside & (gap > 30.0))
+    assert kept.shape[0] < every.shape[0]
+
+
+def test_from_hull_at_zero_distance_is_the_hull():
+    from scipy.spatial import Delaunay
+    data = _l_shape()
+    kept = np.asarray(ind.from_hull(data, 5.0, 0.0).coordinates)
+    assert np.all(Delaunay(data).find_simplex(kept) >= 0)
+
+
+def test_from_hull_on_flat_data_keeps_what_is_near():
+    """A section in space encloses no volume: the distance alone decides."""
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(0)
+    data = np.column_stack([rng.uniform(0, 50, 100), rng.uniform(0, 50, 100),
+                            np.zeros(100)])
+    kept = np.asarray(ind.from_hull(data, 5.0, 4.0).coordinates)
+    assert kept.shape[0] > 0
+    assert np.all(cKDTree(data).query(kept)[0] <= 4.0)
+
+
+def test_from_hull_refuses_a_negative_distance():
+    with pytest.raises(ValueError, match="negative"):
+        ind.from_hull(_l_shape(), 5.0, -1.0)
+
+
 def test_combine_drops_duplicates():
     a = geoml.data.PointData.from_array(np.array([[0.0, 0.0], [1.0, 1.0]]))
     b = geoml.data.PointData.from_array(np.array([[1.0, 1.0], [2.0, 2.0]]))

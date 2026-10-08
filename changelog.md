@@ -1,4 +1,11 @@
 ## version 0.8.8
+* **`inducing.from_hull(data, step, distance)`: a lattice kept where the
+data reach.** The regular lattice of `from_grid`, grown by `distance`
+beyond the data's box, keeps every node inside the data's convex hull and,
+outside it, the nodes within `distance` of a sample -- an even backbone
+over the survey and a margin around it, without the empty corners of the
+box. Data that enclose no volume, a section in space, keep the nodes near
+them.
 * **`inducing.experts` makes compact experts that borrow from their
 neighbours** (roadmap). Clusters were k-means capped at n/k, filled one
 point at a time, so the nearby clusters filled first and the last points

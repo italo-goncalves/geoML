@@ -23,6 +23,7 @@ functions here produce them:
 
     from_kmeans(data, n)          one set, at the k-means centroids of the data
     from_grid(data, step)         one set, on a regular lattice
+    from_hull(data, step, d)      one set, on a lattice kept where the data reach
     combine(a, b, ...)            one set out of several, duplicates dropped
     grid_experts(data, step)      a list of sets, laid out as overlapping blocks
     experts(points, n_experts)    a list of sets, from overlapping clusters
@@ -44,7 +45,8 @@ irregular network is to choose the points first and then divide them:
     sets = experts(from_kmeans(data, 1500), 12)
 """
 
-__all__ = ["from_kmeans", "from_grid", "combine", "grid_experts", "experts"]
+__all__ = ["from_kmeans", "from_grid", "from_hull", "combine", "grid_experts",
+           "experts"]
 
 from typing import cast as _cast
 
@@ -176,6 +178,68 @@ def from_grid(data: "_data._SpatialData | _types.ArrayLike",
     nodes = _lattice(_lattice_axes(coordinates, step))
     return _as_points(nodes, getattr(data, "coordinate_labels", None))
 
+
+def _inside_hull(coordinates, nodes):
+    """Which `nodes` lie inside the convex hull of `coordinates`. Data that
+    span fewer dimensions than they have -- a section in space, a single
+    line -- enclose no volume, and nothing is inside."""
+    if coordinates.shape[1] == 1:
+        return (nodes[:, 0] >= coordinates[:, 0].min())             & (nodes[:, 0] <= coordinates[:, 0].max())
+    try:
+        triangulation = _spatial.Delaunay(coordinates)
+    except _spatial.QhullError:
+        return _np.zeros(len(nodes), dtype=bool)
+    return triangulation.find_simplex(nodes) >= 0
+
+
+def from_hull(data: "_data._SpatialData | _types.ArrayLike",
+              step: "float | _types.ArrayLike",
+              distance: float) -> "_data.PointData":
+    """
+    Inducing points on a regular lattice, kept where the data reach.
+
+    The lattice of `from_grid`, extended by `distance` beyond the data's box,
+    loses the nodes the data say nothing about: every node inside the
+    data's convex hull stays, and a node outside it stays only within
+    `distance` of a sample. A survey that does not fill its box -- a fan of
+    drillholes, a shoreline -- keeps an even backbone where it is, and a
+    margin of `distance` around it, without the nodes in the empty corners.
+
+    Parameters
+    ----------
+    data
+        A spatial container, or an `(n_data, n_dim)` array of coordinates.
+    step
+        Spacing between neighbouring nodes, one value per dimension or a
+        single value for all of them.
+    distance
+        How far outside the convex hull a node may lie from the nearest
+        sample and stay. Zero keeps the hull alone. Data that enclose no
+        volume -- every sample on one plane in space, say -- have nothing
+        inside, and the distance alone decides.
+
+    Returns
+    -------
+    geoml.data.PointData
+        The nodes kept, the first axis varying slowest.
+
+    See Also
+    --------
+    from_grid : the whole lattice over the data's box.
+    """
+    coordinates = _coordinates(data)
+    step = _step_vector(step, coordinates.shape[1])
+    if distance < 0:
+        raise ValueError("distance must not be negative, got %r" % distance)
+    margin = _np.vstack([coordinates.min(axis=0) - distance,
+                         coordinates.max(axis=0) + distance])
+    nodes = _lattice(_lattice_axes(margin, step))
+    keep = _inside_hull(coordinates, nodes)
+    outside = _np.flatnonzero(~keep)
+    if outside.size:
+        gap = _spatial.cKDTree(coordinates).query(nodes[outside])[0]
+        keep[outside[gap <= distance]] = True
+    return _as_points(nodes[keep], getattr(data, "coordinate_labels", None))
 
 def combine(*sources: "_data._SpatialData | _types.ArrayLike",
             tolerance: float = 0.0) -> "_data.PointData":
