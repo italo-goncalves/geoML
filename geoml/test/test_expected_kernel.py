@@ -1,0 +1,638 @@
+# geoML - machine learning models for geospatial data
+# Copyright (C) 2026  Ítalo Gomes Gonçalves
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR a PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""The expected kernel, E[k(h(x), h(y))] over jointly Gaussian inputs."""
+import numpy as np
+import pytest
+import tensorflow as tf
+
+import geoml
+from geoml.latent import network as _net
+
+KERNELS = {
+    "Gaussian": geoml.kernels.Gaussian,
+    "Exponential": geoml.kernels.Exponential,
+    "Matern32": geoml.kernels.Matern32,
+    "Matern52": geoml.kernels.Matern52,
+    "RationalQuadratic": lambda: geoml.kernels.RationalQuadratic(0.7),
+}
+
+
+def _joint_inputs(n=12, dim=2, seed=3):
+    """Means, variances and covariances of a random Gaussian input at `n`
+    locations, one independent field per dimension, correlated between
+    locations: `[n, dim]`, `[n, dim]`, `[n, n, dim]`."""
+    rng = np.random.default_rng(seed)
+    mean = rng.uniform(-0.8, 0.8, [n, dim])
+    covs = []
+    for _ in range(dim):
+        features = rng.normal(size=[n, 3]) * 0.3
+        sites = rng.uniform(0, 1, [n, 1])
+        smooth = 0.15 * np.exp(-(sites - sites.T) ** 2 / 0.1)
+        covs.append(features @ features.T + smooth + 1e-9 * np.eye(n))
+    cov = np.stack(covs, axis=-1)
+    var = np.stack([np.diag(c) for c in covs], axis=-1)
+    return mean, var, cov
+
+
+def _kernel_values(kernel, d):
+    return np.asarray(kernel.kernelize(tf.constant(d, tf.float64)))
+
+
+def _monte_carlo(kernel, ranges, mean, cov, draws=400_000, seed=11):
+    """The average of k over draws of the joint input, and its standard
+    error, `[n, n]` each."""
+    rng = np.random.default_rng(seed)
+    n, dim = mean.shape
+    roots = [np.linalg.cholesky(cov[:, :, s]) for s in range(dim)]
+    total = np.zeros([n, n])
+    square = np.zeros([n, n])
+    done = 0
+    while done < draws:
+        size = min(20_000, draws - done)
+        h = np.stack([mean[:, s][None, :]
+                      + rng.normal(size=[size, n]) @ roots[s].T
+                      for s in range(dim)], axis=-1)       # [size, n, dim]
+        d = np.sqrt(np.sum(((h[:, :, None, :] - h[:, None, :, :])
+                            / ranges) ** 2, axis=-1))
+        k = _kernel_values(kernel, d)
+        total += k.sum(0)
+        square += (k ** 2).sum(0)
+        done += size
+    avg = total / draws
+    se = np.sqrt(np.maximum(square / draws - avg ** 2, 0.0) / draws)
+    return avg, se
+
+
+def _expected(kernel, ranges, mean, var, cov):
+    r = tf.constant(np.asarray(ranges, float).reshape([1, 1, -1]), tf.float64)
+    m = tf.constant(mean, tf.float64)
+    v = None if var is None else tf.constant(var, tf.float64)
+    c = None if cov is None else tf.constant(cov, tf.float64)
+    return np.asarray(_net._expected_kernel(kernel, r, m, v, m, v, c))
+
+
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_no_uncertainty_is_the_kernel(name):
+    kernel = KERNELS[name]()
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-1, 1, [40, 2])
+    ranges = np.array([0.6, 1.3])
+    d = np.sqrt(np.sum(((x[:, None] - x[None]) / ranges) ** 2, -1))
+    got = _expected(kernel, ranges, x, None, None)
+    tolerance = 1e-12 if name == "Gaussian" else 1e-5
+    assert np.abs(got - _kernel_values(kernel, d)).max() < tolerance
+    # one place, no uncertainty: one, exactly
+    assert np.all(np.diag(got) == 1.0)
+
+
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_against_monte_carlo(name):
+    kernel = KERNELS[name]()
+    mean, var, cov = _joint_inputs()
+    ranges = np.array([0.7, 1.1])
+    got = _expected(kernel, ranges, mean, var, cov)
+    avg, se = _monte_carlo(kernel, ranges, mean, cov)
+    off = ~np.eye(len(mean), dtype=bool)
+    assert np.abs(got - avg)[off].max() < 0.005
+    assert (np.abs(got - avg)[off] / se[off]).max() < 5.0
+
+
+def test_the_covariance_between_locations_matters():
+    # the research's finding: dropping the cross terms costs ~60x the error
+    kernel = geoml.kernels.Gaussian()
+    mean, var, cov = _joint_inputs()
+    ranges = np.array([0.7, 1.1])
+    avg, _ = _monte_carlo(kernel, ranges, mean, cov, draws=100_000)
+    off = ~np.eye(len(mean), dtype=bool)
+    joint = np.abs(_expected(kernel, ranges, mean, var, cov) - avg)[off].max()
+    alone = np.abs(_expected(kernel, ranges, mean, var, None) - avg)[off].max()
+    assert alone > 10 * joint
+
+
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_positive_definite(name):
+    kernel = KERNELS[name]()
+    mean, var, cov = _joint_inputs(n=40, dim=3, seed=5)
+    got = _expected(kernel, [0.4, 0.9, 2.0], mean, var, cov)
+    assert np.allclose(got, got.T, atol=1e-14)
+    assert np.linalg.eigvalsh(got).min() > -1e-10
+
+
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_gradients_are_finite_on_the_diagonal(name):
+    kernel = KERNELS[name]()
+    mean, var, cov = _joint_inputs(n=8)
+    m = tf.Variable(mean)
+    c = tf.Variable(cov)
+    r = tf.Variable(np.array([[[0.7, 1.1]]]))
+    with tf.GradientTape() as tape:
+        v = tf.transpose(tf.linalg.diag_part(tf.transpose(c, [2, 0, 1])))
+        k = _net._expected_kernel(kernel, r, m, v, m, v, c)
+        loss = tf.reduce_sum(k ** 2)
+    grads = tape.gradient(loss, [m, c, r] + list(
+        p.variable for p in kernel.all_parameters))
+    for g in grads:
+        assert g is not None
+        assert np.all(np.isfinite(np.asarray(g)))
+
+
+def _network(build, n_experts=1, kernel=None, seed=2, propagation="joint"):
+    """An input, the nodes `build(root)` makes on it, and a leaf GP on top.
+
+    `build` returns the node the leaf reads, the GP nodes on the input
+    below it, and a function from draws of those GPs (`{id(gp): [c, p,
+    size]}`) and the input's locations (`[p, d]`) to what the leaf reads
+    (`[c, p, d']`). The GPs' posteriors are made informative by hand."""
+    geoml.set_seed(seed)
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 100, [60, 2])
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable("v", np.sin(x[:, 0] / 20))
+    ip = geoml.data.inducing.from_kmeans(data, 30, seed=0)
+    if n_experts > 1:
+        ip = geoml.data.inducing.experts(ip, n_experts, seed=0)
+    root = geoml.latent.BasicInput(ip, geoml.transform.Isotropic(40))
+    below, hidden, mapping = build(root)
+    leaf = geoml.latent.BasicGP(below, size=1, kernel=kernel)
+    model = geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(), leaf,
+        options=geoml.models.GPOptions(
+            verbose=False, propagation=propagation,
+            expert_propagation="independent" if propagation == "joint"
+            else "consensus"))
+    for gp in hidden:
+        for i in range(root.n_experts):
+            gp.parameters["alpha_white_%d" % i].set_value(
+                rng.normal(size=[gp.size, root.n_ip[i], 1]))
+            gp.parameters["delta_%d" % i].set_value(
+                np.full([gp.size, root.n_ip[i]], 0.05))
+    leaf.parameters["ranges"].set_value(np.full([1, 1, below.size], 0.6))
+    return model, leaf, hidden, mapping, x
+
+
+def _two_layers(root):
+    hidden = geoml.latent.BasicGP(root, size=2)
+    return hidden, [hidden], lambda h, r: h[id(hidden)]
+
+
+def _hidden_posterior(hidden, root, x, e):
+    """A GP on the input, expert `e`: its joint posterior at the data and
+    at the expert's inducing points, built from the kernel directly --
+    means `[p, s]` and covariances `[s, p, p]`, `p` the data then the
+    inducing points."""
+    x_tr = np.asarray(root.propagate(tf.constant(x))[0])
+    z = np.asarray(root.inducing_points[e])
+    points = tf.constant(np.concatenate([x_tr, z]))
+    k_pp = np.asarray(hidden.covariance_matrix(points, points))
+    k_pz = k_pp[:, len(x):]
+    alpha = np.asarray(hidden.alpha[e])[:, :, 0]
+    bias = float(hidden.parameters["bias_%d" % e].get_value())
+    inv = np.asarray(hidden.cov_smooth_inv[e])
+    mean = (k_pz @ alpha.T) + bias
+    cov = np.stack([k_pp - k_pz @ inv[s] @ k_pz.T for s in range(len(inv))])
+    return mean, cov, np.concatenate([x_tr, z])
+
+
+def _leaf_against_draws(model, leaf, hidden, mapping, x, draws=200_000):
+    """The largest difference between the leaf's covariances with each
+    expert's inducing points -- with the data and among themselves -- and
+    their average over draws of the GPs' posteriors pushed through the
+    nodes between."""
+    root = leaf.root
+    rng = np.random.default_rng(7)
+    x = x[:20]
+    n = len(x)
+    worst = 0.0
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        parent = leaf.parent.propagate(tf.constant(x))
+        cov_cross = leaf._expert_moments(parent[0], parent[1],
+                                         parent.experts)[0]
+        ranges = np.asarray(leaf.parameters["ranges"].get_value())[0, 0]
+        for e in range(root.n_experts):
+            posteriors = {}
+            for gp in hidden:
+                mean, cov, points = _hidden_posterior(gp, root, x, e)
+                roots = [np.linalg.cholesky(c + 1e-10 * np.eye(len(c)))
+                         for c in cov]
+                posteriors[id(gp)] = (mean, roots)
+            p = len(points)
+            total = np.zeros([p, p])
+            for _ in range(draws // 10_000):
+                h = {key: np.stack([m[:, s] + rng.normal(size=[10_000, p])
+                                    @ r[s].T for s in range(len(r))], -1)
+                     for key, (m, r) in posteriors.items()}
+                g = mapping(h, points)
+                d = np.sqrt(np.sum(((g[:, :, None] - g[:, None]) / ranges)
+                                   ** 2, -1))
+                total += _kernel_values(leaf.kernel, d).sum(0)
+            avg = total / draws
+            k_xz = np.asarray(cov_cross[e])
+            k_zz = np.asarray(leaf.cov[e]) - model.options.jitter * np.eye(
+                p - n)
+            worst = max(worst, np.abs(k_xz - avg[:n, n:]).max(),
+                        np.abs(k_zz - avg[n:, n:]).max())
+    return worst
+
+
+@pytest.mark.parametrize("n_experts", [1, 3])
+@pytest.mark.parametrize("name", ["Gaussian", "Matern52"])
+def test_a_leaf_reads_its_parents_posterior(n_experts, name):
+    args = _network(_two_layers, n_experts, KERNELS[name]())
+    assert _leaf_against_draws(*args) < 0.005
+
+
+def _one_at_a_time(root):
+    # a linear map to one output, scaled, shifted, joined to the
+    # coordinates and one coordinate dropped: each output's covariance is
+    # exact through all of them
+    hidden = geoml.latent.BasicGP(root, size=2)
+    linear = geoml.latent.Linear(hidden, size=1, unit_norm=False)
+    linear.parameters["weights"].set_value([[0.8], [-0.5]])
+    scale = geoml.latent.Scale(linear)
+    scale.parameters["scale"].set_value([2.0])
+    bias = geoml.latent.Bias(scale)
+    bias.parameters["bias"].set_value([0.3])
+    below = geoml.latent.SelectInput(geoml.latent.Concatenate(bias, root),
+                                     [0, 2])
+
+    def mapping(h, r):
+        g = 0.3 + np.sqrt(2.0) * (h[id(hidden)] @ np.array([0.8, -0.5]))
+        both = np.concatenate(
+            [g[..., None], np.broadcast_to(r, g.shape + (2,))], -1)
+        return both[..., [0, 2]]
+
+    return below, [hidden], mapping
+
+
+def _independent_parents(root):
+    # sums of GPs that share nothing: the covariances add
+    a, b, c = (geoml.latent.BasicGP(root, size=1) for _ in range(3))
+    combination = geoml.latent.LinearCombination(geoml.latent.Add(a, b), c)
+    combination.parameters["weights"].set_value([0.7, 0.3])
+    below = geoml.latent.Concatenate(combination, root)
+
+    def mapping(h, r):
+        g = 0.7 * (h[id(a)] + h[id(b)]) + 0.3 * h[id(c)]
+        return np.concatenate([g, np.broadcast_to(r, g.shape[:2] + (2,))],
+                              -1)
+
+    return below, [a, b, c], mapping
+
+
+@pytest.mark.parametrize("build", [_one_at_a_time, _independent_parents])
+def test_the_operations_carry_the_covariance(build):
+    assert _leaf_against_draws(*_network(build)) < 0.005
+
+
+def _three_layers(root):
+    first = geoml.latent.BasicGP(root, size=2)
+    second = geoml.latent.BasicGP(first, size=2)
+    return second, [first], None
+
+
+@pytest.mark.parametrize("n_experts", [1, 3])
+def test_three_layers_chain_the_posteriors(n_experts):
+    """A GP on a GP on a GP: the middle one's posterior, rebuilt here from
+    the first one's under the expected kernel, is what the leaf reads."""
+    model, leaf, (first,), _, x = _network(_three_layers, n_experts)
+    second, root = leaf.parent, leaf.root
+    rng = np.random.default_rng(3)
+    for i in range(root.n_experts):
+        second.parameters["alpha_white_%d" % i].set_value(
+            rng.normal(size=[2, root.n_ip[i], 1]))
+        second.parameters["delta_%d" % i].set_value(
+            np.full([2, root.n_ip[i]], 0.05))
+    x = x[:20]
+    n = len(x)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        parent = second.propagate(tf.constant(x))
+        cov_cross = leaf._expert_moments(parent[0], parent[1],
+                                         parent.experts)[0]
+        for e in range(root.n_experts):
+            mean, cov, _ = _hidden_posterior(first, root, x, e)
+            var = np.stack([np.diag(c) for c in cov], -1)
+            k2 = np.asarray(second.expected_covariance(
+                tf.constant(mean), tf.constant(var), tf.constant(mean),
+                tf.constant(var), tf.constant(np.transpose(cov, [1, 2, 0]))))
+            k2_zz = k2[n:, n:] + model.options.jitter * np.eye(len(k2) - n)
+            alpha = np.linalg.solve(k2_zz, np.linalg.cholesky(k2_zz)
+                                    @ np.asarray(second.parameters[
+                                        "alpha_white_%d" % e].get_value()
+                                    )[:, :, 0].T)
+            bias = float(second.parameters["bias_%d" % e].get_value())
+            delta = np.asarray(second.parameters["delta_%d" % e].get_value())
+            m2 = k2[:, n:] @ alpha + bias
+            c2 = np.stack([k2 - k2[:, n:] @ np.linalg.inv(
+                k2_zz + np.diag(delta[s])) @ k2[n:, :] for s in range(2)], -1)
+            v2 = np.stack([np.diag(c2[:, :, s]) for s in range(2)], -1)
+            k3 = np.asarray(leaf.expected_covariance(
+                tf.constant(m2[:n]), tf.constant(v2[:n]),
+                tf.constant(m2[n:]), tf.constant(v2[n:]),
+                tf.constant(c2[:n, n:])))
+            np.testing.assert_allclose(np.asarray(cov_cross[e]), k3,
+                                       atol=2e-6)
+
+
+def test_the_marginal_rule_is_far_off_on_the_same_network():
+    # the same check under the rule before 0.9.0 -- what the gate is for
+    args = _network(_two_layers, propagation="marginal")
+    assert _leaf_against_draws(*args, draws=40_000) > 0.05
+
+
+def test_a_wide_input_returns_to_the_constant_a_kernel_tends_to():
+    # a very uncertain input makes two locations unrelated: the Matern
+    # family falls to zero, the rational quadratic to its constant part
+    mean = np.zeros([2, 1])
+    var = np.full([2, 1], 1e6)
+    for name in ("Gaussian", "Exponential", "Matern32", "Matern52"):
+        got = _expected(KERNELS[name](), [1.0], mean, var, None)
+        assert got[0, 1] < 1e-2
+
+
+# --------------------------------------------------------------------------- #
+# the model
+# --------------------------------------------------------------------------- #
+def _walker_model(depth, propagation, kernel=None, n_experts=2, seed=4):
+    geoml.set_seed(seed)
+    point, _ = geoml.datasets.walker()
+    ip = geoml.data.inducing.experts(
+        geoml.data.inducing.from_kmeans(point, 20 * n_experts, seed=0),
+        n_experts, seed=0)
+    root = geoml.latent.BasicInput(ip, geoml.transform.Isotropic(50))
+    node = root
+    for _ in range(depth - 1):
+        node = geoml.latent.Concatenate(geoml.latent.BasicGP(node, size=1),
+                                        root)
+    leaf = geoml.latent.BasicGP(node, size=1, kernel=kernel)
+    options = geoml.models.GPOptions(
+        verbose=False, propagation=propagation,
+        expert_propagation="independent")
+    return geoml.models.VGPNetwork(point, "V", geoml.likelihood.Gaussian(),
+                                   leaf, options=options)
+
+
+def _grid():
+    return geoml.data.Grid2D(start=[1, 1], end=[256, 291], n=[10, 10])
+
+
+def _predicted(model, n_sim=3):
+    grid = _grid()
+    model.predict(grid, n_sim=n_sim)
+    v = grid.variables["V"]
+    return (np.asarray(v.latent_mean.values), np.asarray(v.latent_variance.values),
+            np.asarray(v.simulations))
+
+
+def test_a_single_layer_model_is_the_same_under_both_rules():
+    # an input is certain, so the expected kernel is the kernel itself
+    out = {}
+    for rule in ("joint", "marginal"):
+        model = _walker_model(1, rule)
+        model.train_full(5)
+        out[rule] = (np.array(model.training_log),) + _predicted(model)
+    for a, b in zip(out["joint"], out["marginal"]):
+        assert np.array_equal(a, b)
+
+
+def test_a_deep_model_differs_between_the_rules():
+    out = {}
+    for rule in ("joint", "marginal"):
+        model = _walker_model(2, rule)
+        model.train_full(5)
+        out[rule] = _predicted(model)[0]
+    assert not np.allclose(out["joint"], out["marginal"])
+
+
+def test_a_deep_model_is_batch_invariant_and_finite():
+    model = _walker_model(3, "joint")
+    model.train_full(5)
+    whole = _predicted(model)
+    model.options.prediction_batch_size = 17
+    parts = _predicted(model)
+    for a, b in zip(whole, parts):
+        assert np.all(np.isfinite(a))
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-11)
+
+
+def test_the_options_refuse_the_consensus():
+    with pytest.raises(ValueError, match="independent"):
+        geoml.models.GPOptions(propagation="joint",
+                               expert_propagation="consensus")
+    model = _walker_model(2, "joint")
+    model.options.expert_propagation = "consensus"
+    with pytest.raises(ValueError, match="independent"):
+        model.train_full(1)
+
+
+@pytest.mark.parametrize("kernel", [geoml.kernels.Spherical,
+                                    geoml.kernels.Cubic])
+def test_a_kernel_that_is_no_mixture_is_refused_on_an_uncertain_input(kernel):
+    with pytest.raises(ValueError, match="scale mixture"):
+        _walker_model(2, "joint", kernel=kernel())
+    # on the input itself it is the kernel it always was
+    _walker_model(1, "joint", kernel=kernel())
+    # and under the marginal rule nothing is refused
+    _walker_model(2, "marginal", kernel=kernel())
+
+
+def test_cosine_is_refused_in_a_network():
+    with pytest.raises(ValueError, match="Cosine"):
+        _walker_model(1, "joint", kernel=geoml.kernels.Cosine())
+
+
+def test_nodes_without_an_expected_kernel_are_refused():
+    point, _ = geoml.datasets.walker()
+    ip = geoml.data.inducing.from_kmeans(point, 20, seed=0)
+
+    def build(make):
+        root = geoml.latent.BasicInput(ip, geoml.transform.Isotropic(50))
+        return geoml.models.VGPNetwork(
+            point, "V", geoml.likelihood.Gaussian(), make(root),
+            options=geoml.models.GPOptions(verbose=False))
+
+    with pytest.raises(ValueError, match="RadialTrend"):
+        build(lambda r: geoml.latent.BasicGP(geoml.latent.RadialTrend(
+            geoml.latent.BasicGP(r, size=2), size=1)))
+    with pytest.raises(ValueError, match="UncertainInputGP"):
+        build(lambda r: geoml.latent.BasicGP(
+            geoml.latent.UncertainInputGP(r, size=1)))
+    # a walk reads its field at uncertain positions
+    with pytest.raises(ValueError, match="GPWalk"):
+        build(lambda r: geoml.latent.BasicGP(geoml.latent.GPWalk(
+            geoml.latent.BasicGP(r, size=2, kernel=geoml.kernels.Cubic()))))
+    # on a certain input, read by nothing, they are what they were
+    build(lambda r: geoml.latent.UncertainInputGP(r, size=1))
+    build(lambda r: geoml.latent.BasicGP(geoml.latent.RadialTrend(r)))
+
+
+def test_the_rule_is_saved_and_an_older_save_keeps_the_marginal_one(tmp_path):
+    import zarr
+    model = _walker_model(2, "joint")
+    model.train_full(3)
+    before = _predicted(model)
+    path = str(tmp_path / "joint.zarr")
+    model.save(path)
+    loaded = geoml.models.VGPNetwork.open(path)
+    assert loaded.options.propagation == "joint"
+    for a, b in zip(before, _predicted(loaded)):
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-14)
+
+    # a save from before 0.9.0 names neither option: it opens under the
+    # rules it was trained with, and predicts as that model does
+    group = zarr.open_group(path, mode="r+")
+    meta = dict(group.attrs["geoml_model"])
+
+    def strip(node):
+        if isinstance(node, dict):
+            if node.get("$") == "options":
+                node["values"].pop("propagation", None)
+                node["values"]["expert_propagation"] = "consensus"
+            for value in node.values():
+                strip(value)
+        elif isinstance(node, list):
+            for value in node:
+                strip(value)
+
+    strip(meta)
+    group.attrs["geoml_model"] = meta
+    old = geoml.models.VGPNetwork.open(path)
+    assert old.options.propagation == "marginal"
+    model.options.propagation = "marginal"
+    model.options.expert_propagation = "consensus"
+    for a, b in zip(_predicted(model), _predicted(old)):
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-14)
+
+
+# --------------------------------------------------------------------------- #
+# the walk
+# --------------------------------------------------------------------------- #
+def _walk_model(n_experts, amp=8.0, delta=0.3, seed=6):
+    """An input, a field of two outputs on it, a walk, and a GP on the
+    walk; the field's posterior made uncertain by hand."""
+    geoml.set_seed(seed)
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0, 100, [60, 2])
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable("v", np.sin(x[:, 0] / 20))
+    ip = geoml.data.inducing.from_kmeans(data, 30, seed=0)
+    if n_experts > 1:
+        ip = geoml.data.inducing.experts(ip, n_experts, seed=0)
+    root = geoml.latent.BasicInput(ip, geoml.transform.Isotropic(40))
+    field = geoml.latent.BasicGP(root, size=2)
+    walk = geoml.latent.GPWalk(field)
+    leaf = geoml.latent.BasicGP(walk, size=1)
+    model = geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(), leaf,
+        options=geoml.models.GPOptions(verbose=False))
+    for i in range(root.n_experts):
+        field.parameters["alpha_white_%d" % i].set_value(
+            rng.normal(size=[2, root.n_ip[i], 1]))
+        field.parameters["delta_%d" % i].set_value(
+            np.full([2, root.n_ip[i]], delta))
+    walk.parameters["amp"].set_value(amp)
+    return model, walk, x
+
+
+def _walk_against_draws(model, walk, x, draws=10_000, seed=8):
+    """The walk's moments and covariances, expert by expert, against walks
+    along `draws` realizations of each expert's field: the largest mean
+    error in the draws' standard deviations, the variance ratios' range,
+    and the largest covariance error on the scale of a correlation."""
+    root, field = walk.root, walk.field
+    rng = np.random.default_rng(seed)
+    x = x[:20]
+    n = len(x)
+    step = walk.step * float(walk.parameters["amp"].get_value())
+    worst_mean, ratios, worst_cov = 0.0, [], 0.0
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        moments = walk.propagate(tf.constant(x))
+        for e in range(root.n_experts):
+            chain = moments.experts[e]
+            z = np.asarray(root.inducing_points[e])
+            starts = np.concatenate(
+                [np.asarray(root.propagate(tf.constant(x))[0]), z])
+            alpha = np.asarray(field.alpha[e])[:, :, 0]
+            root_r = np.asarray(field.chol_r[e])
+            bias = float(field.parameters["bias_%d" % e].get_value())
+            eta = rng.normal(size=[draws, 2, len(z)])
+            coef = alpha[None] + np.einsum("sml,rsl->rsm", root_r, eta)
+            # the variance the inducing points leave unexplained, each
+            # walker's own normals, the same along its path
+            own = rng.normal(size=[draws, len(starts), 2])
+            k_inv = np.asarray(field.cov_inv[e])
+            p = np.broadcast_to(starts, (draws,) + starts.shape).copy()
+            for _ in range(walk.n_steps):
+                k = np.asarray(field.covariance_matrix(
+                    tf.constant(p), tf.constant(z)))
+                left = np.maximum(1.0 - np.einsum(
+                    "rnm,ml,rnl->rn", k, k_inv, k), 0.0)
+                p = p + step * (np.einsum("rnm,rsm->rns", k, coef) + bias
+                                + np.sqrt(left)[..., None] * own)
+            mean, var = p.mean(0), p.var(0)
+            dev = p - mean
+            cov_xz = np.einsum("rnd,rjd->njd", dev[:, :n], dev[:, n:]) / draws
+            cov_zz = np.einsum("rnd,rjd->njd", dev[:, n:], dev[:, n:]) / draws
+            got_mean = np.concatenate(
+                [np.asarray(chain.mean), np.asarray(walk.inducing_points[e])])
+            got_var = np.concatenate(
+                [np.asarray(chain.variance),
+                 np.asarray(walk.inducing_points_variance[e])])
+            worst_mean = max(worst_mean,
+                             (np.abs(got_mean - mean) / np.sqrt(var)).max())
+            ratios.append(got_var / var)
+            scale_xz = np.sqrt(var[:n, None, :] * var[None, n:, :])
+            scale_zz = np.sqrt(var[n:, None, :] * var[None, n:, :])
+            worst_cov = max(
+                worst_cov,
+                (np.abs(np.asarray(chain.covariance) - cov_xz)
+                 / scale_xz).max(),
+                (np.abs(np.asarray(walk.inducing_points_covariance[e])
+                        - cov_zz) / scale_zz).max())
+    ratios = np.concatenate([r.ravel() for r in ratios])
+    return worst_mean, (ratios.min(), ratios.max()), worst_cov
+
+
+@pytest.mark.parametrize("n_experts", [1, 3])
+def test_the_walk_against_walks_along_sampled_fields(n_experts):
+    # a reach of a tenth of the field's range: accurate to twice it, and
+    # past that the linearized spread errs both ways (the roadmap)
+    worst_mean, (low, high), worst_cov = _walk_against_draws(
+        *_walk_model(n_experts, amp=1.0), draws=40_000)
+    assert worst_mean < 0.2
+    assert 0.8 < low and high < 1.25
+    assert worst_cov < 0.05
+
+
+def test_a_model_on_a_walk_trains_and_predicts():
+    model, walk, x = _walk_model(2)
+    model.train_full(5)
+    assert np.all(np.isfinite(model.training_log))
+    whole = _predicted_v(model)
+    model.options.prediction_batch_size = 13
+    for a, b in zip(whole, _predicted_v(model)):
+        assert np.all(np.isfinite(a))
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-11)
+
+
+def _predicted_v(model):
+    grid = geoml.data.Grid2D(start=[0, 0], end=[100, 100], n=[8, 8])
+    model.predict(grid, n_sim=3)
+    v = grid.variables["v"]
+    return (np.asarray(v.latent_mean.values),
+            np.asarray(v.latent_variance.values), np.asarray(v.simulations))

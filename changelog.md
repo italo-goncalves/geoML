@@ -1,3 +1,58 @@
+## version 0.9.0
+* **Deep networks read their inner layers through the expected kernel**
+(`GPOptions(propagation="joint")`, the default for a new model). A GP node
+whose input is another node's uncertain output now averages its kernel
+over that input's distribution, which needs the variance of the
+*difference* between two locations' inputs: so every node hands its
+children its covariance between the data and the inducing points, and
+among the inducing points, along with its variances. Before, each
+location's variance travelled alone and widened the child's range by half
+of it, which a short-range child barely registers: on a folded synthetic
+section a two-layer network's predictive variance was 0.002 of its own
+posterior's, training bought a tiny noise with that confidence, and new
+drillholes scored -25.4 nats each (calibration 5.3) where the expected
+kernel scores -9.0 (1.19) and a flat GP -12.2; beside the coordinates,
+-18.9 against -11.1. Gaussian kernel in closed form; the exponential, the
+Matérn kernels and the rational quadratic -- scale mixtures of Gaussians --
+over a fixed set of components with positive weights, so the inducing
+points' matrix stays positive definite, within 1e-6 (4e-5 for the rational
+quadratic) of the exact average. A single-layer model is unchanged to the
+bit. Design record and measurements: `docs/expected-kernel.md`,
+`docs/benchmarks/expected_kernel.py`; the research: Lu & Shafto (2021).
+* **Saved models keep the rule they were trained with.** An older save
+opens with `propagation="marginal"` and `expert_propagation="consensus"`,
+under which the code is the old code -- a deep network, three experts,
+training by expert and a tree of `Add`, `Linear`, `SelectInput` and
+`Scale` reproduce 0.8.8 bit for bit. `GPOptions(propagation="marginal")`
+keeps the old rule for a new model.
+* **`expert_propagation="independent"` is the default** for a new model:
+the expected kernel chains each expert to its parent's same expert, and is
+refused with the consensus.
+* **Under the expected kernel, refused at construction**: `Spherical` and
+`Cubic` on an uncertain input (they are no mixtures of Gaussians: a
+spherical Gram matrix in six dimensions has a negative eigenvalue), so
+chapter 5's deep model takes a `Matern32`; the same in a `GPWalk`'s
+field, which the walk reads at uncertain positions; `Cosine` in any GP node;
+`UncertainInputGP` on a GP or read by one; `RadialTrend` on an uncertain
+input; a GP node on a `GradientConstrainedInput`. Each is refused when the
+model is built, never when a node is, so a save naming one still opens.
+* **`GPWalk` walks one random field** under the expected kernel: points
+carry their covariance with each other along the walk, the field is read
+with the uncertainty accumulated so far (an uncertain walker slows down),
+the field's variance its inducing points leave unexplained moves each point
+on its own (so far from the data a walk is uncertain), and each realization
+walks a realization of the field. The walk's KL keeps pricing the inducing
+points' displacement against the walk's spread; `precision` is ignored and
+deprecated. On the folded section the walk network scores -10.5 a new hole
+against -31.7 under the old rule, calibration 1.26; without the
+displacement term it trained a near-certain deformation (1.97), and without
+the unexplained variance chapter 16's rock model put a confident region over
+unsampled ground. Fixed draws of the field walked exactly were measured as
+an alternative and dropped: no better, at 3 to 6 times the cost.
+* **`propagate` returns a `_Moments`**, which still unpacks as the
+`(mean, variance)` pair and carries the experts' chains beside it; GP
+nodes keep `inducing_points_covariance` beside the variance.
+
 ## version 0.8.8
 * **`inducing.from_hull(data, step, distance)`: a lattice kept where the
 data reach.** The regular lattice of `from_grid`, grown by `distance`

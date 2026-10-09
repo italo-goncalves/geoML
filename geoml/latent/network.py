@@ -26,6 +26,7 @@ import geoml.stats.random as _rnd
 import numpy as _np
 import tensorflow as _tf
 import tensorflow_probability as _tfp
+import collections as _collections
 import contextlib as _contextlib
 import warnings as _warnings
 import zlib as _zlib
@@ -94,17 +95,26 @@ def simulation_rule(qmc):
 # read at trace time by `BasicGP.refresh`.
 _EXPERT_PROPAGATION = "consensus"
 
+# Whether a GP node reads an uncertain input through the expected kernel,
+# its parent handing on the covariance between locations, or through the
+# marginal rule of the versions before 0.9.0. Set with the rule above, from
+# `GPOptions.propagation`, and read at trace time like it.
+_JOINT_PROPAGATION = False
+
 
 @_contextlib.contextmanager
-def propagation_rule(rule):
-    """Chooses how experts propagate their inducing sets while active."""
-    global _EXPERT_PROPAGATION
-    previous = _EXPERT_PROPAGATION
+def propagation_rule(rule, joint=False):
+    """Chooses how experts propagate their inducing sets, and whether
+    uncertainty travels with its covariance between locations, while
+    active."""
+    global _EXPERT_PROPAGATION, _JOINT_PROPAGATION
+    previous = _EXPERT_PROPAGATION, _JOINT_PROPAGATION
     _EXPERT_PROPAGATION = rule
+    _JOINT_PROPAGATION = bool(joint)
     try:
         yield
     finally:
-        _EXPERT_PROPAGATION = previous
+        _EXPERT_PROPAGATION, _JOINT_PROPAGATION = previous
 
 
 # Which experts the GP nodes compute, or None for all of them. Set through
@@ -298,6 +308,210 @@ def _aligned_points(parents, root):
     return [[(h[0][k], h[1][k]) for h in held] for k in range(len(ids))]
 
 
+# --------------------------------------------------------------------------- #
+# what a node hands its children
+# --------------------------------------------------------------------------- #
+class _Joint(_collections.namedtuple("_Joint", "mean variance covariance")):
+    """One expert's chain at the data, under the expected kernel.
+
+    `mean` is `[n, size]`; `variance` the same, or None where the node is
+    certain; `covariance` `[n, m, size]`, between the node's outputs at the
+    data and at the expert's `m` inducing points, or None where there is
+    none. Under slots a leading slot axis comes first -- of length one
+    where every slot holds the same, as an input's output does -- and the
+    inducing points are the slot's, padded.
+
+    Each output is taken as independent of the others: a node mixing its
+    parent's outputs (`Linear`, `LinearCombination`) gives each output the
+    covariance its rule gives a variance, and drops the covariance between
+    outputs it creates.
+    """
+
+
+class _Moments(tuple):
+    """What `propagate` hands on: ``(mean, variance)``, each `[n, size]` and
+    blended over the experts, unpacking as the pair it always was -- and
+    `experts`, one `_Joint` per active expert (one for all of them under
+    slots), where a GP node under the expected kernel reads this node's
+    output, and None elsewhere."""
+
+    def __new__(cls, mean, variance, experts=None):
+        moments = super().__new__(cls, (mean, variance))
+        moments.experts = experts
+        return moments
+
+    @property
+    def mean(self):
+        return self[0]
+
+    @property
+    def variance(self):
+        return self[1]
+
+
+def _feeds_gp(node):
+    """Whether a GP node reads this node's output: directly, or through
+    nodes that pass the inducing points on."""
+    for child in node.children:
+        if isinstance(child, _GPNode):
+            return True
+        if child.propagates_inducing_points and _feeds_gp(child):
+            return True
+    return False
+
+
+def _wants_joint(node):
+    """Whether `node` hands its children the expected kernel's chain."""
+    return _JOINT_PROPAGATION and _feeds_gp(node)
+
+
+def _certain(experts):
+    """Whether a chain carries no uncertainty at all, as an input's does:
+    a GP node above it takes the plain kernel."""
+    return all(e.variance is None and e.covariance is None for e in experts)
+
+
+def _held_by_all(node, mean, variance=None):
+    """The chain of an output that no expert gives -- an input's: the same
+    for every expert, with no covariance with the inducing points."""
+    if _slots_of(node.root) is not None:
+        return (_Joint(mean[None], None if variance is None
+                       else variance[None], None),)
+    return tuple(_Joint(mean, variance, None)
+                 for _ in _active_experts(node.root))
+
+
+def _map_chain(experts, mean, spread):
+    """Each expert's chain through a node acting output by output: `mean`
+    applied to the means, `spread` to the variances and the covariances."""
+    if experts is None:
+        return None
+    return tuple(_Joint(mean(e.mean),
+                        None if e.variance is None else spread(e.variance),
+                        None if e.covariance is None
+                        else spread(e.covariance))
+                 for e in experts)
+
+
+def _chain_of(moments):
+    """The chain a parent's `propagate` handed on, or None."""
+    return getattr(moments, "experts", None)
+
+
+def _added(values, weights=None, power=1):
+    """Tensors added up, each times its weight to `power` where weights
+    are given (one per value, broadcasting over the last axis); a None is
+    zero, and the sum is None where every value is."""
+    kept = [v if weights is None else v * weights[i] ** power
+            for i, v in enumerate(values) if v is not None]
+    if not kept:
+        return None
+    return _tf.add_n(_broadcast_all(kept))
+
+
+def _side_by_side(values, sizes):
+    """Tensors joined along their last axis, one per parent of the sizes
+    given; a None is zero, shaped as the others but for its own size, and
+    the result is None where every value is."""
+    if all(v is None for v in values):
+        return None
+    shape = _tf.shape(next(v for v in values if v is not None))
+    filled = [_tf.zeros(_tf.concat([shape[:-1], [size]], 0), _tf.float64)
+              if v is None else v for v, size in zip(values, sizes)]
+    return _tf.concat(_broadcast_leading(filled), axis=-1)
+
+
+def _combined_covariances(rows, combine):
+    """A node's covariances at the inducing points from its parents', one
+    row per expert, `combine` applied to each: None where no parent holds
+    any."""
+    if all(c is None for row in rows for c in row):
+        return None
+    return tuple(combine(row) for row in rows)
+
+
+def _sum_chains(chains, weights=None):
+    """The chains of several parents added, expert by expert -- each times
+    its weight and its spreads times the square, where weights are given --
+    the parents taken as independent, as their variances are."""
+    if any(c is None for c in chains):
+        return None
+    return tuple(_Joint(_added([p.mean for p in parts], weights, 1),
+                        _added([p.variance for p in parts], weights, 2),
+                        _added([p.covariance for p in parts], weights, 2))
+                 for parts in zip(*chains))
+
+
+def _broadcast_all(values):
+    """Tensors brought to one shape, for adding up."""
+    if len(values) < 2:
+        return values
+    shape = _tf.shape(values[0])
+    for v in values[1:]:
+        shape = _tf.broadcast_dynamic_shape(shape, _tf.shape(v))
+    return [_tf.broadcast_to(v, shape) for v in values]
+
+
+def _joined_chains(chains, sizes):
+    """The chains of several parents side by side, output after output,
+    as `Concatenate` joins them; a part one parent lacks is zero."""
+    if any(c is None for c in chains):
+        return None
+    return tuple(_Joint(
+        _tf.concat(_broadcast_leading([p.mean for p in parts]), axis=-1),
+        _side_by_side([p.variance for p in parts], sizes),
+        _side_by_side([p.covariance for p in parts], sizes))
+        for parts in zip(*chains))
+
+
+def _broadcast_leading(values):
+    """Tensors brought to one shape on every axis but the last, which is
+    what they are to be joined along."""
+    if len(values) < 2:
+        return values
+    shape = _tf.shape(values[0])[:-1]
+    for v in values[1:]:
+        shape = _tf.broadcast_dynamic_shape(shape, _tf.shape(v)[:-1])
+    return [_tf.broadcast_to(v, _tf.concat([shape, _tf.shape(v)[-1:]], 0))
+            for v in values]
+
+
+def _covariances_of(node, ids):
+    """The covariances between `node`'s outputs at the inducing points of
+    the experts `ids`, `[m, m, size]` each, or None for each where the node
+    holds none (see `_points_of`)."""
+    held = node.inducing_points_covariance
+    if held is None:
+        return [None] * len(ids)
+    if len(held) == node.root.n_experts:
+        positions = ids
+    else:
+        subset = _subset_of(node.root)
+        positions = [subset.index(i) for i in ids]
+    return [held[p] for p in positions]
+
+
+def _aligned_covariances(parents, root):
+    """`_aligned_points` for the covariances: one row per expert the node
+    will hold, one entry per parent, None where a parent holds none."""
+    if _slots_of(root) is not None:
+        return [[None if p.inducing_points_covariance is None
+                 else p.inducing_points_covariance[0] for p in parents]]
+    ids = _active_experts(root)
+    held = [_covariances_of(p, ids) for p in parents]
+    return [[h[k] for h in held] for k in range(len(ids))]
+
+
+def _slot_covariance(node):
+    """The covariances `node` hands on under slots, `[slots, m, m, size]`,
+    or None (see `_slot_points`)."""
+    if node.inducing_points_covariance is None:
+        return None
+    m = padded_inducing_points(node.root)[0].shape[1]
+    size = _slots_of(node.root).size
+    return _tf.reshape(node.inducing_points_covariance[0], [size, m, m, -1])
+
+
 def _node_seed(seed, key):
     """The seed for one node's draw: the sweep's seed with the node's name
     folded into its second entry.
@@ -355,6 +569,137 @@ def _simulation_normals(shape, seed, key=None):
         normals = normals[rng.permutation(n_sim)]
     return _tf.constant(
         normals.reshape([n_sim, size, n]).transpose([1, 2, 0]), _tf.float64)
+
+
+# --------------------------------------------------------------------------- #
+# the expected kernel
+# --------------------------------------------------------------------------- #
+# A GP node whose input is another node's uncertain output takes, under
+# `GPOptions(propagation="joint")`, the covariance E[k(h(x), h(y))] over the
+# input's joint distribution -- which needs the variance of the difference
+# h(x) - h(y), so the covariance between the two locations as well as their
+# variances. For the Gaussian kernel the expectation is closed. The kernels
+# that are scale mixtures of Gaussians, k(d) = E_w[exp(-w d^2)], take it
+# component by component, over a fixed set of components with positive
+# weights: a positive sum of expected Gaussian kernels is a covariance
+# whatever its nodes, so the inducing points' matrix stays positive definite,
+# where nodes placed pair by pair (measured first: Laplace-Hermite about each
+# pair's tilted measure) err by 7e-3 on the exponential and guarantee
+# nothing. Derivation and measurements: `docs/expected-kernel.md`.
+
+# the Matern family as mixtures: w = c^2 / (4 g), g ~ Gamma(nu, 1), as
+# (nu, c) at the rate each class uses, with where the trapezoid in log g
+# they are integrated on starts -- a rougher kernel puts more of its mass at
+# small g, the exponential's cusp the most. The trapezoid ends at 3.5 with
+# a step of 0.5: measured against adaptive quadrature over unit ranges,
+# distances to 1.5 and variances to 5 in one to three dimensions, 1e-7 for
+# the exponential (52 components) and the Matern32 (32), 1e-6 for the
+# Matern52 (28)
+_MATERN_MIXTURES = {_kr.Exponential: (0.5, 3.0, -22.0),
+                    _kr.Matern32: (1.5, 5.0, -12.0),
+                    _kr.Matern52: (2.5, 6.0, -10.0)}
+_MATERN_GRID = (3.5, 0.5)
+# the rational quadratic's components, on a grid that follows its trained
+# `scale` (narrow and far up when it is large, long when it is small):
+# 4e-5 or better for scales from 1e-3 to 100
+_RQ_NODES = 48
+
+
+def _expected_kernel_supported(kernel):
+    """Whether a GP node can read an uncertain input with `kernel`: the
+    Gaussian, and the scale mixtures of Gaussians."""
+    return type(kernel) in (_kr.Gaussian, _kr.RationalQuadratic) \
+        or type(kernel) in _MATERN_MIXTURES
+
+
+def _matern_components(nu, c, lo):
+    """The fixed components of a Matern kernel: rates `w`, weights, and the
+    mass beyond the grid -- a constant (g past the grid, w toward zero) and
+    a nugget (g below it, w toward infinity)."""
+    hi, h = _MATERN_GRID
+    y = _np.arange(lo, hi + h / 2, h)
+    weights = h * _np.exp(nu * y - _np.exp(y) - _special.gammaln(nu))
+    weights[0] *= 0.5
+    weights[-1] *= 0.5
+    below = _special.gammainc(nu, _np.exp(lo))
+    above = _special.gammaincc(nu, _np.exp(hi))
+    weights *= (1.0 - below - above) / weights.sum()
+    return c ** 2 / 4.0 / _np.exp(y), weights, above, below
+
+
+def _rq_components(alpha):
+    """The rational quadratic's components at `scale` alpha, as tensors:
+    w = 3 g / alpha, g ~ Gamma(alpha, 1), on a trapezoid in log g placed
+    about the mode and wide enough for the tail a small alpha has."""
+    q = _RQ_NODES
+    centre = _tf.math.log(alpha)
+    width = 8.0 / _tf.sqrt(alpha)
+    lo = _tf.maximum(_tf.math.log(1e-7 * alpha / 3.0), centre - width)
+    hi = _tf.minimum(_tf.math.log(1e9 * alpha / 3.0),
+                     centre + _tf.maximum(4.0, width))
+    step = (hi - lo) / (q - 1)
+    y = lo + step * _tf.range(q, dtype=_tf.float64)
+    ends = _tf.constant([0.5] + [1.0] * (q - 2) + [0.5], _tf.float64)
+    weights = ends * step * _tf.exp(
+        alpha * y - _tf.exp(y) - _tf.math.lgamma(alpha))
+    below = _tf.math.igamma(alpha, _tf.exp(lo))
+    above = _tf.math.igammac(alpha, _tf.exp(hi))
+    weights = weights * (1.0 - below - above) / _tf.reduce_sum(weights)
+    return 3.0 * _tf.exp(y) / alpha, weights, below, above
+
+
+def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None):
+    """E[k(h(x), h(y))] over jointly Gaussian inputs.
+
+    `mean_x` is `[..., n, d]` and `mean_y` `[..., m, d]`; the variances are
+    shaped alike, or None for none; `cov` is the covariance between the two,
+    `[..., n, m, d]`, or None for independent inputs. Each input dimension
+    is taken as independent of the others. Returns `[..., n, m]`.
+    """
+    with _tf.name_scope("expected_kernel"):
+        r2 = ranges ** 2
+        dif2 = (mean_x[..., :, None, :] - mean_y[..., None, :, :]) ** 2 / r2
+        # the variance of the difference, in squared ranges
+        v = _tf.zeros_like(dif2)
+        if var_x is not None:
+            v = v + var_x[..., :, None, :]
+        if var_y is not None:
+            v = v + var_y[..., None, :, :]
+        if cov is not None:
+            v = v - 2.0 * cov
+        v = _tf.maximum(v / r2, 0.0)
+
+        if type(kernel) is _kr.Gaussian:
+            return _tf.exp(-0.5 * _tf.reduce_sum(_tf.math.log1p(6.0 * v), -1)
+                           - 3.0 * _tf.reduce_sum(dif2 / (1.0 + 6.0 * v), -1))
+
+        if type(kernel) is _kr.RationalQuadratic:
+            alpha = kernel.parameters["scale"].get_value()
+            omega, weights, constant, _ = _rq_components(alpha)
+            q = _RQ_NODES
+        elif type(kernel) in _MATERN_MIXTURES:
+            omega, weights, constant, _ = (
+                _tf.constant(a, _tf.float64) for a in
+                _matern_components(*_MATERN_MIXTURES[type(kernel)]))
+            q = int(omega.shape[0])
+        else:
+            raise NotImplementedError(
+                "the expected kernel takes the Gaussian kernel or a scale "
+                "mixture of Gaussians (Exponential, Matern32, Matern52, "
+                "RationalQuadratic); %s is neither" % type(kernel).__name__)
+        total = constant + _tf.zeros_like(dif2[..., 0])
+        for i in range(q):
+            w = omega[i]
+            total = total + weights[i] * _tf.exp(
+                -0.5 * _tf.reduce_sum(_tf.math.log1p(2.0 * w * v), -1)
+                - w * _tf.reduce_sum(dif2 / (1.0 + 2.0 * w * v), -1))
+        # the nugget's mass reaches only a pair at one place with nothing
+        # uncertain between them, where every component reads one: such a
+        # pair is one, exactly, as the diagonal of the inducing points'
+        # matrix must be, rather than the weights' sum to rounding
+        same = _tf.logical_and(_tf.equal(_tf.reduce_sum(dif2, -1), 0.0),
+                               _tf.equal(_tf.reduce_sum(v, -1), 0.0))
+        return _tf.where(same, _tf.ones_like(total), total)
 
 
 def _graph_state(node):
@@ -417,7 +762,8 @@ def refresh_cached(network, jitter=1e-6, owner=None):
 
     # the propagation rule and the expert subset are Python-level branches
     # inside `refresh`, so they are baked into the trace and key the cache
-    key = (jitter, _EXPERT_PROPAGATION, _subset_key(), _slots_key())
+    key = (jitter, _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _subset_key(),
+           _slots_key())
     # every expert: one trace, replaced when the key changes; a subset of
     # them, or a number of slots: one trace each, kept, since a prediction
     # by expert visits several in turn and comes back to them
@@ -494,6 +840,10 @@ class _LatentVariable(_gpr.Parametric):
         # These are TensorFlow attributes, defined at graph execution time
         self.inducing_points = None
         self.inducing_points_variance = None
+        # under the expected kernel, the covariance between the outputs at
+        # an expert's inducing points, `[m, m, size]` per expert (a tuple
+        # like the points), or None where the outputs there are certain
+        self.inducing_points_covariance = None
 
         # Non-trainable Variables holding a snapshot of the prediction state, so
         # a cached (tf.function) prediction graph reads current values instead of
@@ -684,7 +1034,8 @@ class _LatentVariable(_gpr.Parametric):
         for name, value in list(vars(self).items()):
             if name.startswith("slots_") and isinstance(value, _tf.Tensor):
                 setattr(self, name, self._state_var(prefix + name, value))
-        for name in ("inducing_points", "inducing_points_variance"):
+        for name in ("inducing_points", "inducing_points_variance",
+                     "inducing_points_covariance"):
             value = getattr(self, name, None)
             if isinstance(value, tuple) and len(value) == 1 \
                     and isinstance(value[0], _tf.Tensor):
@@ -707,6 +1058,9 @@ class _LatentVariable(_gpr.Parametric):
         if self.inducing_points_variance is not None:
             self.inducing_points_variance = self._cache_tuple(
                 "inducing_points_variance", self.inducing_points_variance)
+        if self.inducing_points_covariance is not None:
+            self.inducing_points_covariance = self._cache_tuple(
+                "inducing_points_covariance", self.inducing_points_covariance)
 
     def get_unique_parents(self):
         raise NotImplementedError
@@ -776,10 +1130,12 @@ class _LatentVariable(_gpr.Parametric):
 
         Returns
         -------
-        mu
-            Mean of the output.
-        var
-            Variance of the output.
+        _Moments
+            The mean and the variance of the output, `[n, size]` each, which
+            unpack as a pair; and, under the expected kernel and where a GP
+            node reads the output, each expert's chain in `experts`: the
+            output's moments as that expert alone gives them, and its
+            covariance with the expert's inducing points.
         """
         raise NotImplementedError
 
@@ -942,6 +1298,10 @@ class _Operation(_LatentVariable):
 class _GPNode(_FunctionalLatentVariable):
     _GAUSSIAN = True
 
+    # Whether the node reads its parent's chain under the expected kernel.
+    # `UncertainInputGP` integrates over its input's marginal itself.
+    _READS_CHAIN = True
+
     def __init__(self, parent, name=None):
         super().__init__(parent, name=name)
         if not self.propagates_inducing_points:
@@ -961,12 +1321,28 @@ class _GPNode(_FunctionalLatentVariable):
 
     def propagate(self, x, x_var=None):
         with _tf.name_scope("gp_prediction"):
-            x, x_var = self.parent.propagate(x, x_var)
-            cov_cross, mu, weights, w_mu, w_var, w_exp_var = \
-                self._moments(x, x_var)
+            parent = self.parent.propagate(x, x_var)
+            x, x_var = parent
+            if not self._READS_CHAIN:
+                cov_cross, mu, weights, w_mu, w_var, w_exp_var = \
+                    self._moments(x, x_var)
+                experts = None
+            else:
+                # the parent's chain, where it carries any uncertainty;
+                # otherwise the plain kernel, as before the expected kernel
+                chain = _chain_of(parent) if _JOINT_PROPAGATION else None
+                if chain is not None and _certain(chain):
+                    chain = None
+                cov_cross, mu, var, explained = \
+                    self._expert_moments(x, x_var, chain)
+                weights, w_mu, w_var, w_exp_var = \
+                    self._blend(mu, var, explained)
+                experts = self._chain(cov_cross, mu, var) \
+                    if _wants_joint(self) else None
             self._sim_state = (cov_cross, mu, weights)
             self._explained_var = w_exp_var
-            return _tf.transpose(w_mu[:, :, 0]), _tf.transpose(w_var)
+            return _Moments(_tf.transpose(w_mu[:, :, 0]),
+                            _tf.transpose(w_var), experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         if _slots_of(self.root) is not None:
@@ -1092,7 +1468,9 @@ class BasicInput(_RootLatentVariable):
         x_tr = self.transform(x - self.center)
         self._sim_state = (x_tr,)
         self._explained_var = _tf.zeros_like(_tf.transpose(x_tr))
-        return x_tr, _tf.zeros_like(x_tr)
+        return _Moments(x_tr, _tf.zeros_like(x_tr),
+                        _held_by_all(self, x_tr) if _wants_joint(self)
+                        else None)
 
     def simulate(self, n_sim, seed=(0, 0)):
         (x_tr,) = self._swept()
@@ -1194,7 +1572,13 @@ class GaussianInput(BasicInput):
                 * x_var[:, :, None], axis=1)
         self._sim_state = (x_tr,)
         self._explained_var = _tf.zeros_like(_tf.transpose(x_tr))
-        return x_tr, var_tr
+        experts = None
+        if _wants_joint(self):
+            # each location's own uncertainty, unrelated to any other's
+            # and to the inducing points, which are exact
+            experts = _held_by_all(self, x_tr,
+                                   None if x_var is None else var_tr)
+        return _Moments(x_tr, var_tr, experts)
 
 
 class Stack(_Operation):
@@ -1208,17 +1592,23 @@ class Stack(_Operation):
         self._size = sum([p.size for p in self.parents])
 
     def propagate(self, x, x_var=None):
-        means, variances, exp_vars = [], [], []
+        means, variances, exp_vars, chains = [], [], [], []
         for lat in self.parents:
-            m, v = lat.propagate(x, x_var)
+            moments = lat.propagate(x, x_var)
+            m, v = moments
             means.append(m)
             variances.append(v)
             exp_vars.append(lat._explained_var)
+            chains.append(_chain_of(moments))
 
         mean = _tf.concat(means, axis=1)
         var = _tf.concat(variances, axis=1)
         self._explained_var = _tf.concat(exp_vars, axis=0)
-        return mean, var
+        # a `Concatenate` hands its parents' chains on side by side
+        experts = None
+        if self.propagates_inducing_points and _wants_joint(self):
+            experts = _joined_chains(chains, [p.size for p in self.parents])
+        return _Moments(mean, var, experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         return _tf.concat([lat.simulate(n_sim, seed)
@@ -1255,6 +1645,10 @@ class Concatenate(Stack):
             _tf.concat([p for p, _ in row], axis=1) for row in rows)
         self.inducing_points_variance = tuple(
             _tf.concat([v for _, v in row], axis=1) for row in rows)
+        sizes = [p.size for p in self.parents]
+        self.inducing_points_covariance = _combined_covariances(
+            _aligned_covariances(self.parents, self.root),
+            lambda row: _side_by_side(row, sizes))
 
 
 class BasicGP(_GPNode):
@@ -1314,6 +1708,7 @@ class BasicGP(_GPNode):
         self.cov_smooth_inv = None
         self.chol_r = None
         self.alpha = None
+        self.joint_gain = None
 
         self.prior_cov = None
         self.prior_cov_inv = None
@@ -1434,10 +1829,22 @@ class BasicGP(_GPNode):
             eye = tuple(_tf.eye(self.root.n_ip[i], dtype=_tf.float64)
                         for i in ids)
 
-            cov = tuple(
-                    self.covariance_matrix(ip, ip, ip_var, ip_var) + e * jitter
-                    for ip, ip_var, e in zip(ips, ipvs, eye)
-            )
+            # under the expected kernel, where the parent's outputs at the
+            # inducing points are uncertain, their covariance is what the
+            # kernel is averaged over
+            ipcs = _covariances_of(self.parent, ids)
+            raw = None
+            if self._READS_CHAIN and _JOINT_PROPAGATION \
+                    and any(c is not None for c in ipcs):
+                raw = tuple(
+                    self.expected_covariance(ip, ip_var, ip, ip_var, c)
+                    for ip, ip_var, c in zip(ips, ipvs, ipcs))
+                cov = tuple(r + e * jitter for r, e in zip(raw, eye))
+            else:
+                cov = tuple(
+                        self.covariance_matrix(ip, ip, ip_var, ip_var) + e * jitter
+                        for ip, ip_var, e in zip(ips, ipvs, eye)
+                )
             chol = tuple(_tf.linalg.cholesky(mat) for mat in cov)
             cov_inv = tuple(_tf.linalg.cholesky_solve(mat, e) for mat, e in zip(chol, eye))
 
@@ -1472,6 +1879,12 @@ class BasicGP(_GPNode):
                 self._whitened_root(chol, d, e)
                 for chol, d, e in zip(self.cov_chol, delta, eye)
             )
+            # the factor that turns a covariance with the inducing points
+            # into the posterior's: `(K + D)^-1 D`, per output
+            self.joint_gain = tuple(
+                inv * d[:, None, :]
+                for inv, d in zip(self.cov_smooth_inv, delta)
+            ) if _wants_joint(self) else None
 
             # inducing points
             alpha_white = tuple(self.parameters[f"alpha_white_{i}"].get_value() for i in ids)
@@ -1498,12 +1911,43 @@ class BasicGP(_GPNode):
             # with quality within a few percent either way. Under an expert
             # subset the sets are those of the active experts, in their
             # order, and only the active experts are consulted.
+            self.inducing_points_covariance = None
             if len(self.children) > 0:
                 bias = [self.parameters[f'bias_{i}'].get_value() for i in ids]
 
                 self.inducing_points = []
                 self.inducing_points_variance = []
-                if _EXPERT_PROPAGATION == "independent":
+                if _JOINT_PROPAGATION:
+                    # each expert speaks for its own set, as under the
+                    # independent rule, and where a GP node reads the
+                    # result, hands on the covariance between its outputs
+                    # there -- `K (K + D)^-1 D`, made symmetric -- whose
+                    # diagonal is the variance, exactly
+                    covariances = []
+                    for p in range(len(ids)):
+                        k = raw[p] if raw is not None else \
+                            self.covariance_matrix(ips[p], ips[p], ipvs[p],
+                                                   ipvs[p])
+                        mean = _tf.einsum(
+                            "ab,sbc->sac", k, self.alpha[p]) + bias[p]
+                        self.inducing_points.append(
+                            _tf.transpose(mean[:, :, 0]))
+                        if self.joint_gain is None:
+                            pred_var = 1.0 - _tf.reduce_sum(
+                                _tf.einsum("ab,sbc->sac", k,
+                                           self.cov_smooth_inv[p])
+                                * k[None, :, :], axis=2)
+                            self.inducing_points_variance.append(
+                                _tf.transpose(pred_var))
+                            continue
+                        c = _tf.einsum("ab,sbc->sac", k, self.joint_gain[p])
+                        c = 0.5 * (c + _tf.transpose(c, [0, 2, 1]))
+                        self.inducing_points_variance.append(
+                            _tf.transpose(_tf.linalg.diag_part(c)))
+                        covariances.append(_tf.transpose(c, [1, 2, 0]))
+                    if covariances:
+                        self.inducing_points_covariance = tuple(covariances)
+                elif _EXPERT_PROPAGATION == "independent":
                     for p in range(len(ids)):
                         ip_i = ips[p]
                         ipv_i = ipvs[p]
@@ -1598,7 +2042,12 @@ class BasicGP(_GPNode):
         m = pmask.shape[1]
         eye = _tf.eye(m, dtype=_tf.float64)
         outer = pmask[:, :, None] * pmask[:, None, :]
-        raw = self.covariance_matrix(ips, ips, ipvs, ipvs) * outer
+        ipcs = _slot_covariance(self.parent)
+        if self._READS_CHAIN and _JOINT_PROPAGATION and ipcs is not None:
+            raw = self.expected_covariance(ips, ipvs, ips, ipvs, ipcs) \
+                * outer
+        else:
+            raw = self.covariance_matrix(ips, ips, ipvs, ipvs) * outer
         cov = raw + eye[None] * (1.0 - pmask)[:, None, :] \
             + eye[None] * jitter
         chol = _tf.linalg.cholesky(cov)
@@ -1628,10 +2077,31 @@ class BasicGP(_GPNode):
         self.slots_alpha_white = alpha_white
         self.slots_delta = delta
         self.slots_input_mask = pmask
+        # `(K + D)^-1 D`, as `refresh` keeps it per expert
+        self.slots_joint_gain = smooth_inv * delta[:, :, None, :] \
+            if _wants_joint(self) else None
 
+        self.inducing_points_covariance = None
         if len(self.children) == 0:
             return
-        if _EXPERT_PROPAGATION == "independent":
+        if _JOINT_PROPAGATION:
+            # each slot speaks for its own set, and hands on the covariance
+            # of its outputs there where a GP node reads them, as `refresh`
+            mean = _tf.einsum("pab,psbc->psac", raw, alpha) \
+                + bias[:, None, None, None]
+            points = _tf.transpose(mean[:, :, :, 0], [0, 2, 1])
+            if self.slots_joint_gain is None:
+                pred_var = 1.0 - _tf.reduce_sum(
+                    _tf.einsum("pab,psbc->psac", raw, smooth_inv)
+                    * raw[:, None, :, :], axis=3)
+            else:
+                c = _tf.einsum("pab,psbc->psac", raw, self.slots_joint_gain)
+                c = 0.5 * (c + _tf.transpose(c, [0, 1, 3, 2]))
+                pred_var = _tf.linalg.diag_part(c)
+                self.inducing_points_covariance = (_tf.reshape(
+                    _tf.transpose(c, [0, 2, 3, 1]), [-1, m, self.size]),)
+            points_var = _tf.transpose(pred_var, [0, 2, 1])
+        elif _EXPERT_PROPAGATION == "independent":
             mean = _tf.einsum("pab,psbc->psac", raw, alpha) \
                 + bias[:, None, None, None]
             pred_var = 1.0 - _tf.reduce_sum(
@@ -1664,27 +2134,25 @@ class BasicGP(_GPNode):
         self.inducing_points_variance = (
             _tf.reshape(points_var, [-1, self.size]),)
 
-    def _slot_moments(self, x, x_var=None):
-        """`_moments` under slots, batched over them, an empty slot masked
-        out of the blend."""
-        slots = _slots_of(self.root)
+    def _slot_expert_moments(self, x, x_var=None, chain=None):
+        """`_expert_moments` under slots, batched over them; `_blend`
+        masks an empty slot out."""
         ips, ipvs = _slot_points(self.parent)
         pmask = _slot_mask(self.root)
-        cov_cross = self.covariance_matrix(x, ips, x_var, ipvs) \
-            * pmask[:, None, :]
+        if chain is None:
+            cov_cross = self.covariance_matrix(x, ips, x_var, ipvs)
+        else:
+            (e,) = chain
+            cov_cross = self.expected_covariance(e.mean, e.variance, ips,
+                                                 ipvs, e.covariance)
+        cov_cross = cov_cross * pmask[:, None, :]
         mu = _tf.einsum("pab,psbc->psac", cov_cross, self.slots_alpha) \
             + self.slots_bias[:, None, None, None]
         explained_var = _tf.reduce_sum(
             _tf.einsum("pab,psbc->psac", cov_cross, self.slots_cov_smooth_inv)
             * cov_cross[:, None, :, :], axis=3)
         var = _tf.maximum(1.0 - explained_var, 0.0)
-        raw_w = ((1.0 - var) / (var + 1e-6) + 1e-6) \
-            * slots.mask[:, None, None]
-        weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
-        w_mu = _tf.reduce_sum(mu * weights[:, :, :, None], axis=0)
-        w_var = _tf.reduce_sum(var * weights, axis=0)
-        w_exp_var = _tf.reduce_sum(explained_var * weights, axis=0)
-        return cov_cross, mu, weights, w_mu, w_var, w_exp_var
+        return cov_cross, mu, var, explained_var
 
     def _slot_simulate(self, n_sim, seed):
         """`simulate` under slots: the normals each expert draws in
@@ -1720,6 +2188,9 @@ class BasicGP(_GPNode):
             self.cov_smooth_inv = self._cache_tuple(
                 "cov_smooth_inv", self.cov_smooth_inv)
             self.chol_r = self._cache_tuple("chol_r", self.chol_r)
+            if self.joint_gain is not None:
+                self.joint_gain = self._cache_tuple("joint_gain",
+                                                    self.joint_gain)
             return
         # under a subset the tuples hold the active experts only, so each
         # snapshot is named after its expert rather than its position, and
@@ -1736,6 +2207,11 @@ class BasicGP(_GPNode):
         if self.inducing_points_variance is not None:
             self.inducing_points_variance = by_expert(
                 "inducing_points_variance", self.inducing_points_variance)
+        if self.inducing_points_covariance is not None:
+            self.inducing_points_covariance = by_expert(
+                "inducing_points_covariance", self.inducing_points_covariance)
+        if self.joint_gain is not None:
+            self.joint_gain = by_expert("joint_gain", self.joint_gain)
         self.alpha = by_expert("alpha", self.alpha)
         self.cov_inv = by_expert("cov_inv", self.cov_inv)
         self.cov_smooth_inv = by_expert("cov_smooth_inv", self.cov_smooth_inv)
@@ -1743,14 +2219,42 @@ class BasicGP(_GPNode):
 
     def _moments(self, x, x_var=None):
         with _tf.name_scope("basic_interpolation"):
+            cov_cross, mu, var, explained = self._expert_moments(x, x_var)
+            weights, w_mu, w_var, w_exp_var = self._blend(mu, var, explained)
+            return cov_cross, mu, weights, w_mu, w_var, w_exp_var
+
+    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None):
+        """The covariance between two sets of uncertain inputs under the
+        expected kernel: `mean_x` `[..., n, d]`, `mean_y` `[..., m, d]`,
+        their variances alike or None, and their covariance
+        `[..., n, m, d]` or None. Returns `[..., n, m]`."""
+        return _expected_kernel(self.kernel,
+                                self.parameters["ranges"].get_value(),
+                                mean_x, var_x, mean_y, var_y, cov)
+
+    def _expert_moments(self, x, x_var=None, chain=None):
+        """Each active expert's moments at already-propagated locations:
+        the covariance with its inducing points, its mean `[size, n, 1]`,
+        and its variance and the variance it explains `[size, n]` -- lists
+        over the experts, the variances stacked, or under slots tensors
+        with a leading slot axis. `chain`, the parent's chain under the
+        expected kernel, takes the place of `x` and `x_var`."""
+        with _tf.name_scope("basic_interpolation"):
             if _slots_of(self.root) is not None:
-                return self._slot_moments(x, x_var)
+                return self._slot_expert_moments(x, x_var, chain)
             ids = _active_experts(self.root)
             ips, ipvs = self._parent_points(ids)
-            cov_cross = [
-                self.covariance_matrix(x, ip, x_var, ip_var)
-                for ip, ip_var in zip(ips, ipvs)
-            ]
+            if chain is None:
+                cov_cross = [
+                    self.covariance_matrix(x, ip, x_var, ip_var)
+                    for ip, ip_var in zip(ips, ipvs)
+                ]
+            else:
+                cov_cross = [
+                    self.expected_covariance(e.mean, e.variance, ip, ip_var,
+                                             e.covariance)
+                    for e, ip, ip_var in zip(chain, ips, ipvs)
+                ]
 
             bias = [self.parameters[f'bias_{i}'].get_value() for i in ids]
             mu = [
@@ -1766,14 +2270,43 @@ class BasicGP(_GPNode):
                 for m1, m2 in zip(cov_cross, self.cov_smooth_inv)
             ]
             var = _tf.stack([_tf.maximum(1.0 - v, 0.0) for v in explained_var], axis=0)
+            return cov_cross, mu, var, explained_var
 
-            weights = _GPNode.get_expert_weights(var)
+    def _blend(self, mu, var, explained_var):
+        """The experts' moments blended by their weights: the weights, the
+        mean `[size, n, 1]`, the variance and the explained variance."""
+        slots = _slots_of(self.root)
+        if slots is not None:
+            raw_w = ((1.0 - var) / (var + 1e-6) + 1e-6) \
+                * slots.mask[:, None, None]
+            weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
+            w_mu = _tf.reduce_sum(mu * weights[:, :, :, None], axis=0)
+            w_var = _tf.reduce_sum(var * weights, axis=0)
+            w_exp_var = _tf.reduce_sum(explained_var * weights, axis=0)
+            return weights, w_mu, w_var, w_exp_var
 
-            w_mu = _tf.reduce_sum(_tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0)
-            w_var = _tf.reduce_sum(_tf.stack(var, axis=0) * weights, axis=0)
-            w_exp_var = _tf.reduce_sum(_tf.stack(explained_var, axis=0) * weights, axis=0)
+        weights = _GPNode.get_expert_weights(var)
 
-            return cov_cross, mu, weights, w_mu, w_var, w_exp_var
+        w_mu = _tf.reduce_sum(_tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0)
+        w_var = _tf.reduce_sum(_tf.stack(var, axis=0) * weights, axis=0)
+        w_exp_var = _tf.reduce_sum(_tf.stack(explained_var, axis=0) * weights, axis=0)
+        return weights, w_mu, w_var, w_exp_var
+
+    def _chain(self, cov_cross, mu, var):
+        """What this node hands a GP node above it under the expected
+        kernel: each expert's mean and variance at the data, and the
+        covariance between its outputs there and at its inducing points --
+        the posterior's own, `k_x (K + D)^-1 D`."""
+        if _slots_of(self.root) is not None:
+            return (_Joint(_tf.transpose(mu[:, :, :, 0], [0, 2, 1]),
+                           _tf.transpose(var, [0, 2, 1]),
+                           _tf.einsum("pnb,psbc->pncs", cov_cross,
+                                      self.slots_joint_gain)),)
+        return tuple(
+            _Joint(_tf.transpose(mu[p][:, :, 0]), _tf.transpose(var[p]),
+                   _tf.einsum("nb,sbc->ncs", cov_cross[p],
+                              self.joint_gain[p]))
+            for p in range(len(mu)))
 
     def kl_divergence(self):
         with _tf.name_scope("basic_KL_divergence"):
@@ -1912,6 +2445,21 @@ class AdditiveGP(BasicGP):
             cov = _tf.reduce_mean(cov, axis=-1)
             return cov
 
+    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None):
+        # one dimension at a time, as the covariance is built
+        ranges = self.parameters["ranges"].get_value() \
+            * _tf.ones([1, 1, self.parent.size], _tf.float64)
+
+        def column(t, d):
+            return None if t is None else t[..., d:d + 1]
+
+        return _tf.reduce_mean(_tf.stack([
+            _expected_kernel(self.kernel, ranges[..., d:d + 1],
+                             mean_x[..., d:d + 1], column(var_x, d),
+                             mean_y[..., d:d + 1], column(var_y, d),
+                             column(cov, d))
+            for d in range(self.parent.size)], axis=-1), axis=-1)
+
 
 class UncertainInputGP(BasicGP):
     """
@@ -1963,6 +2511,8 @@ class UncertainInputGP(BasicGP):
     where `BasicGP` computes one, and the same factor in memory for them.
     Given an input with no variance the node is `BasicGP`.
     """
+    _READS_CHAIN = False
+
     def __init__(self, parent, size=1, kernel=None, fix_range=False,
                  isotropic=False, range_prior=2.0, n_nodes=32, name=None):
         super().__init__(parent, size=size, kernel=kernel,
@@ -2127,6 +2677,10 @@ class Linear(_FunctionalLatentVariable):
                 _tf.matmul(ip_var, weights**2)
                 for ip_var in self.parent.inducing_points_variance
             )
+            held = self.parent.inducing_points_covariance
+            self.inducing_points_covariance = None if held is None \
+                else tuple(_tf.einsum("...s,st->...t", c, weights ** 2)
+                           for c in held)
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
@@ -2134,13 +2688,20 @@ class Linear(_FunctionalLatentVariable):
     def propagate(self, x, x_var=None):
         weights = self.parameters["weights"].get_value()
 
-        mean, var = self.parent.propagate(x, x_var)
+        parent = self.parent.propagate(x, x_var)
+        mean, var = parent
         mu = _tf.einsum("xab,xy->yab", _tf.transpose(mean)[:, :, None],
                         weights)
         var = _tf.einsum("xa,xy->ya", _tf.transpose(var), weights ** 2)
         self._explained_var = _tf.einsum(
             "xa,xy->ya", self.parent._explained_var, weights ** 2)
-        return _tf.transpose(mu[:, :, 0]), _tf.transpose(var)
+        experts = _map_chain(
+            _chain_of(parent),
+            lambda m: _tf.einsum("...s,st->...t", m, weights),
+            lambda v: _tf.einsum("...s,st->...t", v, weights ** 2)) \
+            if _wants_joint(self) else None
+        return _Moments(_tf.transpose(mu[:, :, 0]), _tf.transpose(var),
+                        experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         weights = self.parameters["weights"].get_value()
@@ -2183,12 +2744,19 @@ class SelectInput(_FunctionalLatentVariable):
         self._size = len(columns)
 
     def propagate(self, x, x_var=None):
-        mean, var = self.parent.propagate(x, x_var)
+        parent = self.parent.propagate(x, x_var)
+        mean, var = parent
         mean = _tf.gather(mean, self.columns, axis=1)
         var = _tf.gather(var, self.columns, axis=1)
         self._explained_var = _tf.gather(
             self.parent._explained_var, self.columns, axis=0)
-        return mean, var
+
+        def pick(t):
+            return _tf.gather(t, self.columns, axis=-1)
+
+        experts = _map_chain(_chain_of(parent), pick, pick) \
+            if _wants_joint(self) else None
+        return _Moments(mean, var, experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         return _tf.gather(self.parent.simulate(n_sim, seed),
@@ -2206,6 +2774,9 @@ class SelectInput(_FunctionalLatentVariable):
                 _tf.gather(ip_var, self.columns, axis=1)
                 for ip_var in self.parent.inducing_points_variance
             )
+            held = self.parent.inducing_points_covariance
+            self.inducing_points_covariance = None if held is None \
+                else tuple(_tf.gather(c, self.columns, axis=-1) for c in held)
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
@@ -2327,14 +2898,27 @@ class LinearCombination(_Operation):
 
             self.inducing_points = tuple(all_ip)
             self.inducing_points_variance = tuple(all_ip_var)
+            per_parent = self._parent_weights()
+            self.inducing_points_covariance = _combined_covariances(
+                _aligned_covariances(self.parents, self.root),
+                lambda row: _added(row, per_parent, 2))
+
+    def _parent_weights(self):
+        """Each parent's weight, as a scalar or one per output, to act on
+        a last axis of outputs."""
+        weights = self.parameters["weights"].get_value()
+        return [weights[i] for i in range(len(self.parents))]
 
     def propagate(self, x, x_var=None):
         all_mu = []
         all_var = []
         all_explained_var = []
+        chains = []
 
         for v in self.parents:
-            mean, var = v.propagate(x, x_var)
+            moments = v.propagate(x, x_var)
+            mean, var = moments
+            chains.append(_chain_of(moments))
             all_mu.append(_tf.transpose(mean)[:, :, None])
             all_var.append(_tf.transpose(var))
             all_explained_var.append(v._explained_var)
@@ -2351,7 +2935,11 @@ class LinearCombination(_Operation):
             all_explained_var * self._weights_for(all_explained_var) ** 2,
             axis=-1)
 
-        return _tf.transpose(all_mu[:, :, 0]), _tf.transpose(all_var)
+        experts = _sum_chains(chains, self._parent_weights()) \
+            if self.propagates_inducing_points and _wants_joint(self) \
+            else None
+        return _Moments(_tf.transpose(all_mu[:, :, 0]),
+                        _tf.transpose(all_var), experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         all_sims = _tf.stack(
@@ -2863,14 +3451,19 @@ class Add(_Operation):
 
             self.inducing_points = tuple(all_ip)
             self.inducing_points_variance = tuple(all_ip_var)
+            self.inducing_points_covariance = _combined_covariances(
+                _aligned_covariances(self.parents, self.root), _added)
 
     def propagate(self, x, x_var=None):
         all_mu = []
         all_var = []
         all_explained_var = []
+        chains = []
 
         for v in self.parents:
-            mean, var = v.propagate(x, x_var)
+            moments = v.propagate(x, x_var)
+            mean, var = moments
+            chains.append(_chain_of(moments))
             all_mu.append(_tf.transpose(mean)[:, :, None])
             all_var.append(_tf.transpose(var))
             all_explained_var.append(v._explained_var)
@@ -2883,7 +3476,11 @@ class Add(_Operation):
         all_var = _tf.reduce_sum(all_var, axis=-1)
         self._explained_var = _tf.reduce_sum(all_explained_var, axis=-1)
 
-        return _tf.transpose(all_mu[:, :, 0]), _tf.transpose(all_var)
+        experts = _sum_chains(chains) \
+            if self.propagates_inducing_points and _wants_joint(self) \
+            else None
+        return _Moments(_tf.transpose(all_mu[:, :, 0]),
+                        _tf.transpose(all_var), experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         all_sims = _tf.stack(
@@ -2943,15 +3540,20 @@ class Bias(_FunctionalLatentVariable):
         if self.propagates_inducing_points:
             self.inducing_points = tuple(ip + bias for ip in self.parent.inducing_points)
             self.inducing_points_variance = self.parent.inducing_points_variance
+            self.inducing_points_covariance = \
+                self.parent.inducing_points_covariance
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
 
     def propagate(self, x, x_var=None):
         bias = self.parameters["bias"].get_value()
-        mean, var = self.parent.propagate(x, x_var)
+        parent = self.parent.propagate(x, x_var)
+        mean, var = parent
         self._explained_var = self.parent._explained_var
-        return mean + bias[None, :], var
+        experts = _map_chain(_chain_of(parent), lambda m: m + bias,
+                             lambda v: v) if _wants_joint(self) else None
+        return _Moments(mean + bias[None, :], var, experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         bias = self.parameters["bias"].get_value()
@@ -2988,15 +3590,24 @@ class Scale(_FunctionalLatentVariable):
         if self.propagates_inducing_points:
             self.inducing_points = tuple(ip * _tf.sqrt(scale) for ip in self.parent.inducing_points)
             self.inducing_points_variance = tuple(ip_var * scale for ip_var in self.parent.inducing_points_variance)
+            held = self.parent.inducing_points_covariance
+            self.inducing_points_covariance = None if held is None \
+                else tuple(c * scale[0] for c in held)
 
     def kl_divergence(self):
         return _tf.constant(0.0, _tf.float64)
 
     def propagate(self, x, x_var=None):
         scale = self.parameters["scale"].get_value()
-        mean, var = self.parent.propagate(x, x_var)
+        parent = self.parent.propagate(x, x_var)
+        mean, var = parent
         self._explained_var = self.parent._explained_var * scale[:, None]
-        return mean * _tf.sqrt(scale[None, :]), var * scale[None, :]
+        experts = _map_chain(_chain_of(parent),
+                             lambda m: m * _tf.sqrt(scale),
+                             lambda v: v * scale) \
+            if _wants_joint(self) else None
+        return _Moments(mean * _tf.sqrt(scale[None, :]), var * scale[None, :],
+                        experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         scale = self.parameters["scale"].get_value()
@@ -3121,7 +3732,12 @@ class RadialTrend(_FunctionalLatentVariable):
         trend = self.compute_trend(_tf.transpose(mean))
         self._sim_state = (trend,)
         self._explained_var = _tf.zeros_like(trend)
-        return _tf.transpose(trend), _tf.zeros_like(_tf.transpose(trend))
+        # certain, on a certain input: a random one is refused under the
+        # expected kernel, its variance being dropped here
+        experts = _held_by_all(self, _tf.transpose(trend)) \
+            if _wants_joint(self) else None
+        return _Moments(_tf.transpose(trend),
+                        _tf.zeros_like(_tf.transpose(trend)), experts)
 
     def simulate(self, n_sim, seed=(0, 0)):
         (trend,) = self._swept()
@@ -3140,14 +3756,31 @@ class RadialTrend(_FunctionalLatentVariable):
 
 class GPWalk(_FunctionalLatentVariable):
     """
-    Stochastic Differential Equation.
+    A walk along an uncertain vector field.
 
-    This node uses the vector field defined by its parent to move points in space. After each step the field is
-    reevaluated and the point's mean, variance, and direction is updated. It is very effective to learn non-stationary
-    patterns, but it is computationally expensive.
+    This node uses the vector field defined by its parent to move points in
+    space: `n_steps` steps of `step` times the field, scaled by a trained
+    amplitude, the field read again where each step lands. It learns
+    non-stationary patterns -- a GP above it reads coordinates that the
+    field has stretched and folded -- at the cost of the steps.
 
-    The node's parent (a GP) defines the vector field and the parent's parent contains the coordinates that will be
-    moved. Both must have the same size.
+    The node's parent (a GP) defines the vector field and the parent's
+    parent contains the coordinates that will be moved. Both must have the
+    same size.
+
+    Under the expected kernel (`GPOptions(propagation="joint")`, the default
+    since 0.9.0) the field is one random field, the same at every step: a
+    point carries its uncertainty and its covariance with every other point
+    along, the field is read under the expected kernel with the uncertainty
+    accumulated so far -- so an uncertain walker reads a weaker field and
+    slows down -- and more steps refine the path rather than adding noise.
+    `step * n_steps * amp` is the walk's reach. The field's variance that
+    its inducing points leave unexplained -- the whole prior far from them --
+    moves each point on its own, so far from the data a walk is uncertain.
+    Each realization walks a realization of the field. The walk's KL term
+    prices the inducing points' displacement against the walk's spread
+    where they land; the `precision` parameter belongs to the marginal rule
+    of the versions before and is ignored here.
     """
     def __init__(self, parent, step=0.01, n_steps=10, name=None):
         """
@@ -3199,6 +3832,16 @@ class GPWalk(_FunctionalLatentVariable):
             "precision",
             _gpr.PositiveParameter(0.1, 0.01, 100)
         )
+        # under the expected kernel, the walked inducing points'
+        # sensitivities to their starts and to the field (see `_joint_walk`)
+        self.walk_a = None
+        self.walk_h = None
+
+    def cache_prediction_state(self):
+        super().cache_prediction_state()
+        if _slots_of(self.root) is None and self.walk_a is not None:
+            self.walk_a = self._cache_tuple("walk_a", self.walk_a)
+            self.walk_h = self._cache_tuple("walk_h", self.walk_h)
 
     def _walk(self, x, x_var=None):
         """The moment stepping, stash-free: `refresh` walks the inducing
@@ -3223,7 +3866,280 @@ class GPWalk(_FunctionalLatentVariable):
 
         return walker_mu, walker_var
 
+    # ------------------------------------------------------------------ #
+    # under the expected kernel
+    # ------------------------------------------------------------------ #
+    # The field is a GP whose realizations are `k(u, U) (alpha + R eta) + b`
+    # -- `R` its `chol_r`, `eta` standard normals, `U` its inducing inputs,
+    # the walker's outputs there -- one random field, the same at every
+    # step. A point's deviation from its mean path is carried, linearized,
+    # as its sensitivity to its own start (`a`, `[n, d, d]`) and to `eta`
+    # (`h`, `[n, d, d, m]`): its variance and its covariance with any other
+    # point, the walked inducing points included, follow in closed form. The
+    # field is read at each step under the expected kernel with the
+    # uncertainty accumulated so far, and its slope taken as the expected
+    # gradient (Stein's lemma), so an uncertain walker reads a weaker,
+    # smoother field. The covariance between a point's deviation and the
+    # field values it meets is left out of the mean (second order).
+
+    def _fields(self):
+        """The field's state for each expert the walk computes: its inducing
+        inputs and their variance, `alpha`, `chol_r`, `(K + D)^-1`, the bias
+        and, under slots, the mask of real points -- one tuple per active
+        expert, or one with a leading slot axis."""
+        field = self.field
+        if _slots_of(self.root) is not None:
+            u, u_var = _slot_points(self.walker)
+            return [(u, u_var, field.slots_alpha, field.slots_chol_r,
+                     field.slots_cov_smooth_inv,
+                     field.slots_bias[:, None, None], _slot_mask(self.root))]
+        ids = _active_experts(self.root)
+        us, u_vars = _points_of(self.walker, ids)
+        return [(us[p], u_vars[p], field.alpha[p], field.chol_r[p],
+                 field.cov_smooth_inv[p],
+                 field.parameters["bias_%d" % i].get_value(), None)
+                for p, i in enumerate(ids)]
+
+    def _joint_walk(self, mean, var0, cov0, field):
+        """Walks points from `mean` `[..., n, d]`, their variance `var0` and
+        their covariance with the field's inducing inputs `cov0`
+        `[..., n, m, d]` (None for none), along one expert's field. Returns
+        the end `mean`, the sensitivities `a` and `h`, and the field's
+        variance at the start `[..., d, n]`, which weighs the experts."""
+        u, u_var, alpha, root_r, smooth_inv, bias, mask = field
+        step = self.step * self.parameters["amp"].get_value()
+        size = self.size
+        eye = _tf.eye(size, dtype=_tf.float64)
+        mean = _tf.broadcast_to(mean, _tf.concat(
+            [_tf.shape(u)[:-2], _tf.shape(mean)[-2:]], 0)) \
+            if mask is not None else mean
+        lead = _tf.shape(mean)[:-1]
+        a = _tf.broadcast_to(eye, _tf.concat([lead, [size, size]], 0))
+        h = _tf.zeros(_tf.concat([lead, [size, size, _tf.shape(u)[-2]]], 0),
+                      _tf.float64)
+        # the field's variance its inducing points do not explain, 1 - k K^-1
+        # k, small near them and the whole prior far from them: carried as
+        # each point's sensitivity to normals of its own, the same along its
+        # path and shared with no other point
+        r = _tf.zeros(_tf.concat([lead, [size, size]], 0), _tf.float64)
+        start_var = None
+        for k in range(self.n_steps):
+            v = _tf.reduce_sum(h ** 2, axis=[-2, -1]) \
+                + _tf.reduce_sum(r ** 2, axis=-1)
+            if var0 is not None:
+                v = v + _tf.einsum("...de,...e->...d", a ** 2, var0)
+            c = None if cov0 is None else \
+                cov0 * _tf.linalg.diag_part(a)[..., :, None, :]
+            # the field at the walkers, and its expected slope there
+            slopes, gradients = [], []
+            for d in range(size):
+                tangent = _tf.broadcast_to(
+                    _tf.one_hot(d, size, dtype=_tf.float64), _tf.shape(mean))
+                with _tf.autodiff.ForwardAccumulator(mean, tangent) as acc:
+                    cov = self.field.expected_covariance(mean, v, u, u_var, c)
+                    if mask is not None:
+                        cov = cov * mask[..., None, :]
+                    f = _tf.einsum("...nm,...smo->...ns", cov, alpha) + bias
+                slopes.append(acc.jvp(f))
+                gradients.append(acc.jvp(cov))
+            jac = _tf.stack(slopes, axis=-1)                # [..., n, d, d]
+            # a walker the field's uncertainty has pushed is correlated with
+            # the field it meets: E[k(w, U) R eta] = E[grad k] Cov(w, eta) R
+            # (Stein's lemma), zero at the first step
+            if k > 0:
+                f = f + _tf.einsum("...njd,...sjl,...ndsl->...ns",
+                                   _tf.stack(gradients, axis=-1), root_r, h)
+            if k == 0:
+                explained = _tf.reduce_sum(
+                    _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
+                    * cov[..., None, :, :], axis=-1)
+                start_var = _tf.maximum(1.0 - explained, 0.0)
+            g = _tf.einsum("...nm,...sml->...snl", cov, root_r)
+            mean = mean + step * f
+            a = a + step * _tf.einsum("...ij,...jk->...ik", jac, a)
+            h = h + step * (_tf.einsum("...ij,...jsq->...isq", jac, h)
+                            + _tf.einsum("...snq,ds->...ndsq", g, eye))
+            # (K + D)^-1 and R R^T = K^-1 - (K + D)^-1 together give
+            # k K^-1 k, and what is left of the prior is unexplained
+            smooth = _tf.reduce_sum(
+                _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
+                * cov[..., None, :, :], axis=-1)
+            left = _tf.maximum(
+                1.0 - smooth - _tf.reduce_sum(g ** 2, axis=-1), 0.0)
+            positive = left > 0.0
+            sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, left, 1.0)),
+                           _tf.zeros_like(left))
+            r = r + step * (_tf.einsum("...ij,...js->...is", jac, r)
+                            + _tf.einsum("...sn,ds->...nds", sd, eye))
+        return mean, a, h, r, start_var
+
+    @staticmethod
+    def _walked_covariance(a_x, h_x, a_y, h_y, cov0):
+        """The covariance between the ends of two sets of walks, `[..., n,
+        m, d]`: through the field, and through their starts' covariance
+        `cov0` where they had one."""
+        cov = _tf.einsum("...ndsq,...jdsq->...njd", h_x, h_y)
+        if cov0 is not None:
+            cov = cov + _tf.einsum("...nde,...jde,...nje->...njd",
+                                   a_x, a_y, cov0)
+        return cov
+
+    @staticmethod
+    def _walked_variance(a, h, r, var0):
+        v = _tf.reduce_sum(h ** 2, axis=[-2, -1]) \
+            + _tf.reduce_sum(r ** 2, axis=-1)
+        if var0 is not None:
+            v = v + _tf.einsum("...de,...e->...d", a ** 2, var0)
+        return v
+
+    def _joint_propagate(self, x, x_var):
+        walker = self.walker.propagate(x, x_var)
+        chain = _chain_of(walker)
+        if chain is None:
+            chain = _held_by_all(self, walker[0])
+        slots = _slots_of(self.root)
+        fields = self._fields()
+        held_a = (self.slots_walk_a,) if slots is not None else self.walk_a
+        held_h = (self.slots_walk_h,) if slots is not None else self.walk_h
+        means, variances, covariances, start = [], [], [], []
+        for e, field, a_z, h_z in zip(chain, fields, held_a, held_h):
+            mean, a, h, r, start_var = self._joint_walk(
+                e.mean, e.variance, e.covariance, field)
+            means.append(mean)
+            variances.append(self._walked_variance(a, h, r, e.variance))
+            if _wants_joint(self):
+                covariances.append(self._walked_covariance(
+                    a, h, a_z, h_z, e.covariance))
+            start.append(start_var)
+        if slots is not None:
+            raw_w = ((1.0 - start[0]) / (start[0] + 1e-6) + 1e-6) \
+                * slots.mask[:, None, None]
+            weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
+            stacked_mean = _tf.transpose(means[0], [0, 2, 1])
+            stacked_var = _tf.transpose(variances[0], [0, 2, 1])
+        else:
+            weights = _GPNode.get_expert_weights(_tf.stack(start, axis=0))
+            stacked_mean = _tf.stack([_tf.transpose(m) for m in means], 0)
+            stacked_var = _tf.stack([_tf.transpose(v) for v in variances], 0)
+        w_mean = _tf.reduce_sum(stacked_mean * weights, axis=0)
+        w_var = _tf.reduce_sum(stacked_var * weights, axis=0)
+        experts = tuple(_Joint(m, v, c) for m, v, c in
+                        zip(means, variances, covariances)) \
+            if _wants_joint(self) else None
+        self._sim_state = ("joint", weights)
+        self._explained_var = _tf.zeros_like(w_var)
+        return _Moments(_tf.transpose(w_mean), _tf.transpose(w_var), experts)
+
+    def _joint_refresh(self):
+        """The inducing points walked along each expert's field: their means,
+        variances and, where a GP node reads them, covariances, with the
+        sensitivities `propagate` needs for the data's covariance with
+        them."""
+        slots = _slots_of(self.root)
+        if slots is not None:
+            u, u_var = _slot_points(self.walker)
+            starts = [(u, u_var, _slot_covariance(self.walker))]
+        else:
+            ids = _active_experts(self.root)
+            us, u_vars = _points_of(self.walker, ids)
+            starts = list(zip(us, u_vars, _covariances_of(self.walker, ids)))
+        points, variances, covariances, a_all, h_all = [], [], [], [], []
+        for (u, u_var, cov0), field in zip(starts, self._fields()):
+            mean, a, h, r, _ = self._joint_walk(u, u_var, cov0, field)
+            cov = self._walked_covariance(a, h, a, h, cov0)
+            cov = 0.5 * (cov + _tf.einsum("...njd->...jnd", cov))
+            # each point's own share of the unexplained variance, on the
+            # diagonal only
+            own = _tf.reduce_sum(r ** 2, axis=-1)                # [..., m, d]
+            m_z = _tf.shape(own)[-2]
+            cov = cov + _tf.eye(m_z, dtype=_tf.float64)[:, :, None] \
+                * own[..., :, None, :]
+            var = _tf.linalg.matrix_transpose(_tf.linalg.diag_part(
+                _tf.einsum("...njd->...dnj", cov)))
+            if slots is not None:
+                m = u.shape[-2]
+                points.append(_tf.reshape(mean, [-1, self.size]))
+                variances.append(_tf.reshape(var, [-1, self.size]))
+                covariances.append(_tf.reshape(cov, [-1, m, self.size]))
+            else:
+                points.append(mean)
+                variances.append(var)
+                covariances.append(cov)
+            a_all.append(a)
+            h_all.append(h)
+        self.inducing_points = tuple(points)
+        self.inducing_points_variance = tuple(variances)
+        self.inducing_points_covariance = tuple(covariances) \
+            if _wants_joint(self) else None
+        if slots is not None:
+            self.slots_walk_a, self.slots_walk_h = a_all[0], h_all[0]
+            self.walk_a = self.walk_h = None
+        else:
+            self.walk_a, self.walk_h = tuple(a_all), tuple(h_all)
+
+    def _joint_simulate(self, n_sim, seed):
+        """Each realization walks a realization of the field -- the field's
+        own normals, so that realization s of the walk rides realization s
+        of the field -- from the walker's realization, and the experts are
+        blended as the moments are."""
+        _, weights = self._swept()
+        step = self.step * self.parameters["amp"].get_value()
+        field = self.field
+        starts = _tf.transpose(self.walker.simulate(n_sim, seed), [2, 1, 0])
+        slots = _slots_of(self.root)
+        if slots is not None:
+            u, _ = _slot_points(self.walker)
+            mask = _slot_mask(self.root)
+            m = u.shape[-2]
+            drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim], seed,
+                                                 key=field.name),
+                             [[0, 0], [0, m - n], [0, 0]])
+                     for n in self.root.n_ip]
+            drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
+            rnd = _tf.gather(_tf.stack(drawn), slots.ids)
+            coef = field.slots_alpha + _tf.matmul(field.slots_chol_r, rnd)
+            groups = [(u, _tf.transpose(coef, [3, 0, 1, 2]),
+                       field.slots_bias[:, None, None], mask)]
+        else:
+            ids = _active_experts(self.root)
+            us, _ = _points_of(self.walker, ids)
+            groups = []
+            for p, i in enumerate(ids):
+                rnd = _simulation_normals(
+                    [self.size, self.root.n_ip[i], n_sim], seed,
+                    key=field.name)
+                coef = field.alpha[p] + _tf.matmul(field.chol_r[p], rnd)
+                groups.append((us[p], _tf.transpose(coef, [2, 0, 1]),
+                               field.parameters["bias_%d" % i].get_value(),
+                               None))
+        ends = []
+        for u, coef, bias, mask in groups:
+            def walk(args, u=u, bias=bias, mask=mask):
+                position, c = args
+                if mask is not None:
+                    position = _tf.broadcast_to(
+                        position, _tf.concat([_tf.shape(u)[:1],
+                                              _tf.shape(position)], 0))
+                for _ in range(self.n_steps):
+                    k = field.covariance_matrix(position, u)
+                    if mask is not None:
+                        k = k * mask[:, None, :]
+                    position = position + step * (
+                        _tf.einsum("...nm,...sm->...ns", k, c) + bias)
+                return position
+            ends.append(_tf.map_fn(walk, (starts, coef),
+                                   fn_output_signature=_tf.float64))
+        if slots is not None:
+            # [n_sim, slots, n, d] -> [slots, d, n, n_sim]
+            stacked = _tf.transpose(ends[0], [1, 3, 2, 0])
+        else:
+            stacked = _tf.stack([_tf.transpose(e, [2, 1, 0]) for e in ends],
+                                axis=0)
+        return _tf.reduce_sum(stacked * weights[..., None], axis=0)
+
     def propagate(self, x, x_var=None):
+        if _JOINT_PROPAGATION:
+            return self._joint_propagate(x, x_var)
         walker_mu, walker_var = self._walk(x, x_var)
         self._sim_state = (walker_mu, walker_var)
         self._explained_var = _tf.zeros_like(_tf.transpose(walker_var))
@@ -3231,6 +4147,11 @@ class GPWalk(_FunctionalLatentVariable):
 
     def refresh(self, jitter=1e-6):
         self.field.refresh(jitter)
+        if _JOINT_PROPAGATION:
+            self._joint_refresh()
+            return
+        self.inducing_points_covariance = None
+        self.walk_a = self.walk_h = None
         # self.inducing_points, self.inducing_points_variance = self.propagate(
         #     *self.root.get_root_inducing_points()
         # )
@@ -3265,13 +4186,28 @@ class GPWalk(_FunctionalLatentVariable):
 
         slots = _slots_of(self.root)
         if slots is not None:
-            return _tf.reduce_sum(self.expert_kl_terms() * slots.mask)
-        return _tf.add_n(self.expert_kl_terms())
+            total = _tf.reduce_sum(self.expert_kl_terms() * slots.mask)
+        else:
+            total = _tf.add_n(self.expert_kl_terms())
+        if _JOINT_PROPAGATION:
+            # `precision` is ignored under the expected kernel, and given a
+            # zero gradient rather than none, which the optimizer would warn
+            # about at every trace
+            total = total + 0.0 * _tf.reduce_sum(
+                self.parameters["precision"].get_value())
+        return total
 
     def expert_kl_terms(self):
         """Each active expert's term of the walk's KL, in the order of the
         active experts; under slots a tensor over the slots, to which a
-        padded point adds nothing."""
+        padded point adds nothing.
+
+        The inducing points' displacement against the walk's own spread
+        where they land, under either rule. Under the expected kernel it is
+        what keeps the walk honest: without it the field's KL alone let
+        training buy a near-certain deformation (measured on a folded
+        section, calibration 1.97 against 1.26 with it), where a prior on
+        `amp` changed nothing."""
         if _slots_of(self.root) is not None:
             mu_1, _ = _slot_points(self.walker)
             mu_2, var_2 = _slot_points(self)
@@ -3309,6 +4245,8 @@ class GPWalk(_FunctionalLatentVariable):
         return all_mu, all_var
 
     def simulate(self, n_sim, seed=(0, 0)):
+        if isinstance(self._swept()[0], str):
+            return self._joint_simulate(n_sim, seed)
         walker_mu, walker_var = self._swept()
         mu = _tf.transpose(walker_mu)[:, :, None]
         var = _tf.transpose(walker_var)
@@ -3541,6 +4479,14 @@ class MultiStructureGP(BasicGP):
 
             cov = _tf.add_n(cov_mats)
             return cov
+
+    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None):
+        weights = self.parameters["weights"].get_value()
+        return _tf.add_n([
+            _expected_kernel(self.kernel,
+                             self.parameters[f"ranges_{n}"].get_value(),
+                             mean_x, var_x, mean_y, var_y, cov) * weights[n]
+            for n in range(self.n_structures)])
 
 
 class GradientConstrainedInput(_RootLatentVariable):

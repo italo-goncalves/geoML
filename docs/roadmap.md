@@ -27,6 +27,270 @@ roots of their own work with no join at all, which is what a tree of
 inducing points near the drillholes beside a gridded tree for geophysics
 needs.)
 
+**L — The expected kernel: deep networks that stop overfitting** (agreed
+2026-10-08, for 0.9.0; **built 2026-10-08** on branch `expected-kernel`,
+design record `docs/expected-kernel.md`: gates 1-3 passed -- the kernel
+within 0.0008 of 4e5 draws for every kernel, a leaf within 0.005 of draws
+of its parent's posterior through every supported operation, the folded
+section's deep networks at -9.0 and -11.1 a new hole against -25.4 and
+-18.9 under the old rule and -12.2 for a VGP, calibrations 1.19 and 1.31
+-- and the walk's first gate only at a short reach, see below). Found in the research
+project *Spatial cross-validation* (`report/new_covariance.md`,
+`report/dgp_propagation.tex`): a GP node hands its children only its
+variance at each location, the child treats any two locations as
+independent and inflates its range by half the input variance where the
+Gaussian kernel's own weight is 6, so a deep model's leaf barely feels the
+hidden layer's uncertainty. Its predictive variance read 0.002 of the
+model's own Monte Carlo predictive, the bound bought a tiny noise variance
+with that, and on a folded synthetic section scored per new drillhole:
+
+| Model | Log score per new hole |
+|---|---|
+| geoML `dgp` (marginal propagation) | −155.2 |
+| geoML `dgpc` (input-connected) | −31.2 |
+| VGP | −12.15 |
+| expected kernel, `dgp-cu` | −9.26 |
+| oracle on the unfolded coordinates | +3.1 |
+
+The expected kernel `E[k(h(x), h(x'))]` needs the variance of the
+*difference* `h(x) − h(x')`, so a node passes its children its covariance
+between locations; the child stays an ordinary sparse GP on the root's
+inducing points at the same O(N·U²) cost, its KL and the likelihood door
+unchanged. Decided:
+- **An option, old saves untouched**: `GPOptions(propagation=)`, the class
+  attribute `"marginal"` (what an old save falls back to) and the
+  `__init__` default `"joint"`; under `"marginal"` the code is today's.
+  `expert_propagation` likewise defaults to `"independent"` for new models.
+- **What travels**: per output, an N×U covariance (data against inducing
+  points, made in `propagate`) and a U×U one (inducing points against each
+  other, made in `refresh`). Mixing operations apply their rule entry by
+  entry, as to the variances today, so the covariance *between outputs* is
+  dropped after a `Linear` as it is now. A GP node's own posterior
+  covariance against its inducing points is `k_x (K+Λ)⁻¹ Λ`.
+- **The signature**: `propagate` returns a private named tuple
+  `_Moments(mean, variance, covariance)`, each a list over experts,
+  `covariance` `[size, n, m_e]` or `None` (a deterministic node, or
+  marginal mode); a refresh stores `inducing_points_covariance`
+  `[size, m_e, m_e]` beside the variance, which stays its diagonal; slots
+  carry the same with a leading slot axis.
+- **Experts chain per expert**: child expert *e* reads its parent's expert
+  *e* at the data and at its inducing points; moments stay per expert along
+  the chain and are blended only where a value leaves the tree (a leaf,
+  `predict_node`). `"joint"` with `"consensus"` is refused. Slots and
+  subsets work under `"joint"` in 0.9.0, the subset gate ("every expert in
+  the subset changes nothing") held on shallow and deep trees.
+- **Kernels**: the Gaussian in closed form; `Exponential`, `Matern32`,
+  `Matern52` and `RationalQuadratic`, scale mixtures of Gaussians, by a
+  fixed-node 1-D quadrature over the mixing measure. `Spherical` and
+  `Cubic` are **not** scale mixtures (measured 2026-10-08: a Spherical
+  Gram matrix in R⁶ has eigenvalue −0.026, and the best non-negative
+  Gaussian mixture misses Spherical by 0.020 and Cubic by 0.015 against
+  6e-7 for Matern32), and are refused under a random input with Cosine
+  refused in every GP node of a network; the remaining kernels cover the
+  uses.
+- **Nodes**: supported under `"joint"` are the inputs (`GaussianInput`'s
+  location variance entering the difference with no covariance against the
+  inducing points), `SelectInput`, `Linear`,
+  `Scale`, `Bias`, `Add`, `LinearCombination`, `Concatenate`, `BasicGP`,
+  `MultiStructureGP`, `AdditiveGP` and `GPWalk` (below); refused under a
+  random input are `UncertainInputGP` and `RadialTrend`, and a GP on a
+  `GradientConstrainedInput` (item below); a `GPWalk`'s field takes a
+  mixture kernel too, the walk reading it at uncertain positions;
+  `Multiply`, `Exponentiation`, `GaussianMixture`, `ProductOfExperts` and
+  `Stack` never feed a GP and keep their moments.
+- **Every refusal lives in `VGPNetwork`'s constructor under `"joint"`**,
+  never in a node's, so a save under `"marginal"` keeps opening.
+- **Realizations**: a GP node draws as now, `K_eff(x,Z)·chol_r·normals +
+  mean` -- the right marginal and the explained covariance, not conditioned
+  on the parent's realizations (that is the item "Propagate individual
+  realizations" below, a different model).
+- **Changed while building**: the walk's own KL stays (measured
+  necessary, see below), and the walk carries the field's unexplained
+  variance.
+- **Left out**: centring (identity plus amplitude) and the node-role rule;
+  the input connection is the recommended construction, which the manual
+  says, and nothing enforces it.
+- **Gates**: (1) the expected kernel against 2×10⁴ joint Monte Carlo draws
+  of the parent, max error under 0.005, on one expert, several, and three
+  layers; (2) on the folded section, 200 new holes, `"joint"` beats
+  `"marginal"` and the VGP on mean log score with calibration 1–1.5;
+  (3) chapter 5's deep GP rerun under `"joint"` and recorded. Nothing ships
+  unless (1) and (2) pass. `docs/benchmarks/expected_kernel.py`.
+- **`GPWalk` before the release** (added 2026-10-08): the walk carries the
+  covariances its children need, the field read at each step under the
+  expected kernel with the uncertainty the walk has accumulated, so an
+  uncertain walker reads a weaker field and slows down (and far from the
+  data drifts at the field's bias). The walk is an Euler solve of
+  `dw/dt = amp·f(w)` along **one** uncertain field, not fresh noise each
+  step: the field's residual is taken fully correlated along a point's
+  path, so its standard deviations add (spread `~K·s·sd_f`, where an SDE's
+  would be `~sqrt(K)·s·sd_f`), `n_steps` refines the solve rather than
+  adding noise, and `step·n_steps·amp` is the reach. The covariance against
+  the start positions (where the field's inducing points sit) is updated
+  exactly by Stein's lemma with the expected gradient of the expected
+  kernel; the covariances between two moved positions, which the children
+  need, by the expected Jacobian on both sides. Departing from 0.8's
+  numbers is accepted: the node's goal is analytical non-stationary kernel
+  learning. The fallback, if the gate refuses the analytic walk, is Q fixed
+  field samples walked exactly. Under `"joint"`
+  the `precision` parameter (the variance divided by `1 + precision` each
+  step) is ignored and on the deprecation list (section 5); the walk's own
+  KL was planned to go with it and was kept, measured (below). Realization *s* walks a field draw of its
+  own from the simulation stream. Gates: the walk's moments and
+  covariances against 10⁴ brute-force trajectories on one expert and on
+  several; a `GPWalk` network on the folded section under `"joint"`
+  against `"marginal"` on the 200 new holes. **Measured 2026-10-08**: the
+  linearized walk matches walks along sampled fields within their noise at
+  a reach up to a tenth of the field's range (mean 0.03 sd, variance ratio
+  0.96-1.05, covariance 0.05), and falls short beyond it -- variance ratio
+  down to 0.53 at amp 4 and 0.14 at amp 8, covariance off by 0.42 and
+  0.83. The folded section's walk network trains to amp 3 and scores -10.75
+  a new hole against -31.65 under the old rule (VGP -12.17), median -1.67,
+  but calibration 1.93. **Settled 2026-10-08** (the user's decision to
+  measure the fallback first, then to price the walk): fixed field draws
+  walked exactly scored the same (-10.95 and -11.57, calibration 1.95 and
+  2.07) at 3-6x the cost, and left chapter 16's confident region over
+  unsampled ground, so the linearization was never the problem -- dropped.
+  The cause of the region was the field's unexplained variance, which the
+  walk now carries per point (chapter 16's geometry and metals'
+  calibration back to 0.8.8's); the calibration's was an unpriced
+  deformation, which the walk's displacement KL fixes (1.97 -> 1.26, score
+  -10.46) where priors on `amp` changed nothing -- so that KL stays, against
+  the plan, and only `precision` is deprecated. The walk is accurate to a
+  reach of a fifth of the field's range and errs both ways beyond it.
+  Record: `docs/expected-kernel.md`, "The walk".
+- **Phases**: (1) the expected kernel and its quadrature as a function,
+  gate 1 on one expert; (2) `_Moments` through every node under
+  `"marginal"`, covariance always `None`, the covering tests to the bit;
+  (3) `"joint"` in the network -- the two matrices, per-expert chains, the
+  refusals, `GPOptions` -- and gate 1 on several experts and three layers;
+  (4) slots and subsets, the subset gate; (5) gates 2 and 3; (6) `GPWalk`
+  and its gates; then the changelog, the manual (chapter 5, concatenation
+  as the recommended construction), the skill and
+  `docs/expected-kernel.md`. The release waits for the user's word. The
+  range bound stays at its default unless gate 2 shows it decides the
+  score; the covariance path takes the double-`where` square root, whose
+  second derivatives are finite at zero distance.
+
+**M — Eight Gaussians and the second moment in `BasicGP`** (agreed
+2026-10-08, the two items below; for 0.9.0). Plan of record:
+1. **Tables.** `Exponential`, `Matern32` and `Matern52` read an uncertain
+   input through 8 fitted Gaussians each (rates and weights stored as
+   constants in `network.py`, weights summing to one; refitted by
+   `docs/benchmarks/kernel_mixtures.py`), independent of range and
+   uncertainty; the rational quadratic keeps its `scale`-adaptive rule and a
+   certain input the exact kernel. Gate: kernel error <= 1e-3 each, the
+   expected-kernel tests (the no-uncertainty tolerance relaxed to 1e-3),
+   positive definite, speed on chapter 5 and chapter 16. **1b**: the walk's
+   slopes in closed form per component, replacing a forward-mode pass per
+   dimension.
+2. **Second moment.** Where the inducing points are certain (a
+   `GaussianInput` root, through `Linear`/`SelectInput`), under `"joint"`
+   only: `v = 1 - tr(C L) + alphaᵀ L alpha - m²`, `L_ij = E[k(x, z_i)
+   k(x, z_j)]` in closed form per pair of components (one for the Gaussian,
+   36 for a table), `MultiStructureGP` over pairs of structures,
+   `AdditiveGP` within and across dimensions; the explained variance
+   `tr(C L)`. Deep networks (uncertain inducing inputs, the research's ~11%)
+   stay out -- their own item, later. Gate: against `girard()` to 1e-10
+   (Gaussian), against the exact mixture on Walker Lake mean and variance
+   within 2% at every input variance for all four kernels; bit-identical
+   with no input variance; slots as sets.
+3. **The input's spread integrated like noise** (the user's choice over
+   realizations at drawn inputs, after
+   `docs/benchmarks/uncertain_input_realizations.py`: on a 1-D field at an
+   input sd of 0.4 the 5%/95% quantiles miss the exact mixture by 0.224
+   with the expected kernel alone, 0.092 integrated like noise, 0.038 at
+   drawn inputs whose realizations turn spiky). The realizations stay the
+   expected kernel's; what they leave out because the input is uncertain,
+   `Delta = tr((R Rᵀ + alpha alphaᵀ) Cov k)`, `Cov k = L - l lᵀ` -- never
+   negative -- rides beside them as a per-location latent jitter: a GP node
+   returns it beside its four outputs (an attribute on the tuple, as
+   `_Moments`), `_predict_raw` hands it to the likelihood, and
+   `integrated_backward` and `measurement_samples` take `sims + sqrt(Delta)
+   eta` over a few Gauss-Hermite nodes `eta` on top of the noise nodes
+   (about 8x the back-transform, at uncertain inputs only); the categorical
+   likelihoods the same in their probabilities. Training needs nothing: the
+   quadrature over the latent variance already integrates it. Gate:
+   `prediction` and the quantiles in data units against the exact mixture
+   through a nonlinear warping; with no input variance, bit-identical.
+4. **Training gate** on the `GaussianInput` plan's jittered locations:
+   held-out coverage and CRPS against the expected kernel alone and against
+   `UncertainInputGP`; time and memory at m = 100 and 300 (`L` is `n m²` per
+   expert under a gradient).
+5. `UncertainInputGP` deprecated with a warning naming `BasicGP`, removed in
+   the breaking version; changelog, design record, skill.
+
+**S — Fewer components for the Matérn kernels' expected kernel** (measured
+2026-10-08). The fixed trapezoid (52, 32 and 28 components for the
+exponential, Matern32 and Matern52) is accurate to 1e-7, far below any
+gate; the best positive mixture of 8 Gaussians, fitted once and stored as
+constants (weights summing to one, so the diagonal stays exact), misses the
+kernel by 5.5e-4, 1.5e-4 and 9.4e-5 on [0, 3] ranges, which bounds the
+expected kernel's error too (the expectation is linear in the mixture) --
+3.5 to 6.5 times fewer evaluations, still positive definite by
+construction. With it, the walk's slopes in closed form (each component's
+derivative in the mean is `-2 w mu / (r² (1 + 2 w v))` times itself) rather
+than one forward-mode pass per dimension. **Rejected on the way**:
+Paciorek's form with the kernel substituted, `prod (1 + kappa v)^(-1/2)
+R(sqrt(sum mu² / (1 + kappa v)))`, its inflation `kappa` fitted per kernel
+(23.8, 10.4, 8.1): it is the expectation only for the Gaussian, and misses
+it by 0.10-0.13 (exponential), 0.04-0.06 (Matern32) and 0.03-0.04
+(Matern52) in one to three dimensions; positive definite for independent
+inputs (Paciorek's theorem, by congruence) and not guaranteed with
+correlated ones, though no failure turned up on near-singular lattices.
+
+**M — A principled price for the walk** (from the expected kernel,
+2026-10-08). The walk's KL under the expected kernel is the marginal rule's
+term, `1/2 sum (m_walked - m_start)² / v_walked` over the inducing points:
+not a KL (it treats the start as a prior and divides by the posterior's
+variance, with no trace or log-determinant), and since the displacement and
+its spread both scale with `amp`, in effect a penalty on the field's
+signal-to-noise ratio where it moves points. It works -- the folded
+section's calibration 1.97 -> 1.26, where MAP priors on `amp` (Gamma at mode
+1, exponential) changed nothing -- because it keeps the walk uncertain. In
+a proper bound the walk adds no random variable of its own, so no KL; what
+the point estimates miss is the uncertainty in the deformation's scale.
+The principled version: `amp` a random variable, a log-normal variational
+posterior `q(log amp)` against a prior whose base model is no deformation
+(an exponential on `amp`, the PC prior), `KL(q || p)` in the bound, and the
+walk's moments averaged over `q` -- a few Gauss-Hermite nodes in `log amp`,
+each a walk, the mean and covariance by the law of total variance over
+them; the realizations each at a node. Gate: on the folded section without
+the displacement term, calibration within 1-1.5 and a score at least the
+heuristic's (-10.46); chapter 16's rock maps no worse; the cost (one walk
+per node) against the term it replaces.
+
+**M — The second moment of a GP at an uncertain input** (Girard's term,
+measured 2026-10-08 on Walker Lake, `GaussianInput` root). Under the
+expected kernel `BasicGP`'s mean at an uncertain input is within 1-2% of
+the exact mixture's (better than `UncertainInputGP`'s 32 Sobol nodes, 3-9%),
+but its variance misses the variance of the mean over the input -- the
+matched GP's variance is `1 - E[k] (K + D)^-1 E[k]` -- by 18-133% for the
+Gaussian and 8-89% for the Matern32 at input variances of 0.01-3 squared
+ranges, where `UncertainInputGP` is within 1-3%. So `UncertainInputGP` is
+not obsolete for a single node on an uncertain input. The fix that would
+retire it: `E[k kᵀ]` (closed for the Gaussian, Girard; through the mixture
+for the others) for the variance, `tr((K+D)^-1 Cov k) - alphaᵀ Cov(k)
+alpha`; in a deep network the same term is what the research measured at
+~11% of the leaf's variance.
+
+**M — Covariance between a node's outputs** (from the expected kernel,
+2026-10-08). Mixing operations drop it, as they drop it for the variances
+today; the closed form takes a full S×S block per pair of locations
+(`det(I + 6Σ/r²)^(-1/2) exp(-3 mᵀ(r²I + 6Σ)⁻¹ m)`) at `[n, m, S, S]` and a
+determinant a pair. Worth it only if a tree mixing columns under a GP
+measures worse than the same tree unmixed.
+
+**M — `UncertainInputGP`, `RadialTrend` and `GradientConstrainedInput`
+under the expected kernel** (from the expected kernel, 2026-10-08). Refused
+under `"joint"`: a GP node on a `GradientConstrainedInput`, a random root
+whose covariance between locations is not carried (its refresh also hands
+on predictions at the directional rows, which no child can read);
+`UncertainInputGP`'s Sobol mixture of marginals is what the
+expected kernel replaces, so it may simply retire (see the simplification
+item in section 5); `RadialTrend` is a nonlinear function of its parent's
+mean whose variance is dropped.
+
 **L–XL — Batched experts: memory independent of the number of experts**
 (**top priority**, raised 2026-10-05). Train the product of experts on a
 few experts per step, down to one, so that device memory does not grow
@@ -1726,6 +1990,33 @@ to 93-95% and was cancelled with no test failing; as one pytest process
 it peaks at 23.1 GB, and the runner has 16. The job runs one process per
 test file now: under a 14 GB cap every file passed, the heaviest peaking
 at 6.1 GB.)
+
+**L — Simplify after the expected kernel, breaking old saves** (agreed
+2026-10-08, after 0.9.0; a major version). 0.9.0 keeps every save opening
+by carrying two propagation rules side by side. Once the expected kernel
+has been in use for a release, drop what it made obsolete, and say in the
+changelog that saves from before cannot be read (or ship a converter that
+refits):
+- `GPOptions(propagation=)` and marginal propagation: the Paciorek
+  inflation in `covariance_matrix`, `inducing_points_variance` as a
+  separate diagonal, and the `None` covariance branch in every node.
+- `GPOptions(expert_propagation=)` and the consensus rule (the O(E²)
+  cross-prediction in `BasicGP.refresh` and its slot twin).
+- `Spherical`, `Cubic` and `Cosine` as kernels of a GP node, and the
+  refusals that guard them.
+- Possibly the `kernel` argument itself, nodes described by their
+  smoothness instead (the Matérn family's order, the Gaussian as its
+  limit), which every remaining kernel is a point of.
+- `UncertainInputGP`, once `BasicGP` takes the second moment at an
+  uncertain input (the item in section 1): measured 2026-10-08, the expected
+  kernel alone misses the variance there by up to 133%, where
+  `UncertainInputGP` is within 3%.
+- **Deprecated in 0.9.0** (ignored under `"joint"`, removed here):
+  `GPWalk`'s `precision` parameter and the variance shrinking it drives.
+  (The walk's own KL term was to go too, and was measured necessary: see
+  the 0.9.0 item.)
+Measure nothing new for it: it removes code whose replacement the 0.9.0
+gates passed.
 
 **M — Keep the package skill true at every release** (agreed 2026-09-26;
 **built 2026-09-26**, 0.8.2: `--show`/`--list`/`--json`, `sync.py`, the

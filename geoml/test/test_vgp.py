@@ -261,17 +261,17 @@ def test_jit_holds_one_traced_function_per_setting():
     model.train_full(max_iter=5)
 
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False, "consensus")}
-    first = model._compiled[(False, False, "consensus")]
+    assert set(model._compiled) == {(False, False, model._propagation_key())}
+    first = model._compiled[(False, False, model._propagation_key())]
 
     model.options.jit_predict = True
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False, "consensus"),
-                                    (True, False, "consensus")}
+    assert set(model._compiled) == {(False, False, model._propagation_key()),
+                                    (True, False, model._propagation_key())}
 
     model.options.jit_predict = False
     model.predict(grid, n_sim=4)
-    assert model._compiled[(False, False, "consensus")] is first
+    assert model._compiled[(False, False, model._propagation_key())] is first
     # reused, not rebuilt
 
 
@@ -439,16 +439,16 @@ def test_the_training_step_is_traced_once_per_model():
         options=geoml.models.GPOptions(verbose=False, training_samples=4))
 
     model.train_full(max_iter=2)
-    _, optimizer, step = model._step
+    _, optimizer, _, step = model._step
     # two on the first call: TensorFlow traces a function that creates
     # variables (the optimizer's slots) once more for the steady state
     traced = step.experimental_get_tracing_count()
     model.train_full(max_iter=2)
-    assert model._step[2] is step
+    assert model._step[3] is step
     assert step.experimental_get_tracing_count() == traced
 
     model.set_learning_rate(1e-3)
     model.train_full(max_iter=2)
-    assert model._step[2] is not step
+    assert model._step[3] is not step
     assert model._step[1] is model.optimizer
 

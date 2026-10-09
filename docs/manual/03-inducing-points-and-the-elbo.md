@@ -209,13 +209,15 @@ that no seam shows where one hands over to the next.
   version: clustered experts that follow the data, each borrowing a share
   of its neighbours' points.
 
-With many experts, one option matters.
-`GPOptions(expert_propagation="independent")` lets each expert speak for
-its own inducing set alone, instead of all experts cross-predicting each
-other (`"consensus"`, the default). Measured on this package, training
-runs 1.6× faster at 5 experts and 6.3× at 40, prediction up to 8×, with
-quality within a few percent either way. Past roughly ten experts the
-consensus is paying a quadratic bill for a cosmetic agreement.
+With many experts in a deep network, each expert speaks for its own
+inducing set alone (`GPOptions(expert_propagation="independent")`, the
+default since 0.9.0), where models saved before had all experts
+cross-predicting each other (`"consensus"`). Measured on this package,
+the independent rule trains 1.6× faster at 5 experts and 6.3× at 40,
+predicts up to 8× faster, with quality within a few percent either way.
+Past roughly ten experts the consensus was paying a quadratic bill for a
+cosmetic agreement, and the expected kernel of chapter 5 takes each
+expert's own chain.
 
 ## 3.5 Walker Lake, sparse
 

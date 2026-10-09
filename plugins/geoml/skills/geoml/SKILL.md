@@ -206,6 +206,15 @@ in the catalogue.
   reads the moved space. Independent parts of a model can sit on
   independent trees, one leaf each. Chapter 16 builds the first two, one
   leaf per variable.
+- **Depth.** Since 0.9.0 a GP node reading another node's uncertain output
+  averages its kernel over it, the covariance between locations included
+  (the expected kernel, `GPOptions(propagation="joint")`, the default); a
+  model saved before keeps the old rule, which made deep networks
+  overconfident (`propagation="marginal"`). Build a deep network with the
+  coordinates concatenated beside the inner GP (`Concatenate(root,
+  inner)`). A GP on an uncertain input takes the Gaussian, exponential,
+  Matérn or rational quadratic kernel; spherical and cubic are refused
+  there, and the error message says so.
 - **Training.** `GPOptions(training_tolerance=0.01)` stops once the bound
   has settled; the last few percent of the bound buys sharpness held-out
   data does not support.
@@ -236,8 +245,9 @@ The papers and the code name the same things differently.
 | Paper concept | In the code |
 |---|---|
 | Inducing points $\mathbf{T}$, $\mathbf{u}$ | the container given to `BasicInput(inducing_points=…)`, read by the GP nodes above it |
-| DGP uncertainty propagation | each node takes and returns a mean and a variance; there is no separate class |
-| Paciorek kernel | no class of that name: the non-stationary covariance is inside the node propagation |
+| DGP uncertainty propagation | each node hands on a mean, a variance and its covariance with the inducing points; there is no separate class |
+| Expected kernel | inside the GP nodes, under `GPOptions(propagation="joint")` |
+| Paciorek kernel | the propagation before 0.9.0, kept for older saves as `propagation="marginal"` |
 | SDE node | `latent.GPWalk` |
 | Local experts | overlapping inducing sets from `data.inducing.experts` |
 | CLR transform | `warping.CenteredLogRatio` |

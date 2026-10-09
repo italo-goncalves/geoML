@@ -173,9 +173,13 @@ def _deep_model(n_experts=4, propagation="independent"):
     leaf = latent.BasicGP(latent.Concatenate(root, first), size=1)
     return geoml.models.VGPNetwork(
         data, "v", lk.Gaussian(wp.ZScore(1)), leaf,
-        options=geoml.models.GPOptions(verbose=False,
-                                       training_batch_size=100,
-                                       expert_propagation=propagation))
+        options=geoml.models.GPOptions(
+            verbose=False, training_batch_size=100,
+            expert_propagation=propagation,
+            # the consensus rule is the marginal rule's; the expected
+            # kernel takes the independent one
+            propagation="marginal" if propagation == "consensus"
+            else "joint"))
 
 
 def _local_values(m):

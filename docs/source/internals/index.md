@@ -13,6 +13,7 @@ mesh-sets
 catalogue
 variable-paths
 cross-validation
+expected-kernel
 parameter-priors
 implicit-surfaces
 sparse-experts
