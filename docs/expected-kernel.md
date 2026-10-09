@@ -219,7 +219,18 @@ walk that folds the space puts sharper features on the grid than a
 stationary field does. The chapter now contours a `BlockSet3D` refined at
 the contact instead -- 20 m blocks cut to 2.5 m where the vein's boundary
 runs, 63,193 blocks for the deep model -- and draws the smooth surface
-(158,455 m²) in less time than the 5 m grid took.
+(158,455 m²) in less time than the 5 m grid took. The chapter then took
+the user's tested training schedule (2026-10-09): 1 m spacing for the
+training points, the stationary model 1000 full iterations at 2e-2, the
+deep model minibatches of 500, 20 epochs at 5e-2 and 60 at 1e-2. At 2 m
+the deep vein came out in patches, at 1 m a coherent sheet with either
+reader (isotropic: agreement 0.997, 127,690 m²; a range per direction:
+0.998, 149,516 m²) -- but only from the chapter's seed: built after the
+stationary model had drawn from the stream, it settled on a fragmented
+vein, so the chapter reseeds it and says why. The stationary model ends at
+the higher bound and the higher in-sample agreement (1.000 against 0.997)
+and draws the vein as tubes along the holes; the chapter runs in 33
+minutes.
 
 **Fixed draws of the field, walked exactly, were measured and dropped.**
 32 or 64 draws scored like the linearized walk on the folded section
