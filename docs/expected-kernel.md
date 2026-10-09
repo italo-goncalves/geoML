@@ -186,11 +186,13 @@ down; its slope is the expected gradient (Stein's lemma), and the
 correlation between a walker the field has pushed and the field it then
 meets enters the mean the same way. A realization walks a realization of
 the field -- the field's own normals, so realization `s` of the walk rides
-realization `s` of the field. The walk's KL prices the inducing points'
-displacement against the walk's spread where they land; `precision` is
-ignored (deprecated).
+realization `s` of the field. The walk adds no random variable and so no
+KL of its own: the field's KL prices the deformation, and a GP node reading
+the walk keeps its ranges where they start (`VGPNetwork._hold_walk_ranges`).
+The marginal rule's displacement term and `precision` are ignored
+(deprecated).
 
-Three findings settled it, in order.
+Four findings settled it, in order.
 
 **The unexplained variance first.** The walk was first built on the
 explained part alone, the part a realization carries. On chapter 16's Jura
@@ -201,9 +203,12 @@ the GP above read it confidently. Carrying the unexplained part removed the
 region and brought the metals' calibration back to 0.8.8's (goodness Cd
 0.86, Co 0.87, Cr 0.91, Cu 0.82, Ni 0.81, Pb 0.95, Zn 0.85 against 0.85,
 0.89, 0.91, 0.82, 0.81, 0.93, 0.85; without it 0.84, 0.86, 0.90, 0.80,
-0.78, 0.93, 0.83). With the displacement KL as well (below), the final
-walk: 0.85, 0.88, 0.92, 0.82, 0.81, 0.93, 0.86, and rock maps much like
-0.8.8's.
+0.78, 0.93, 0.83). With the displacement KL as well (below): 0.86, 0.87,
+0.91, 0.82, 0.81, 0.95, 0.85, and rock maps much like 0.8.8's; with the
+rock GP's ranges held instead, the final walk: 0.86, 0.89, 0.93, 0.82,
+0.82, 0.94, 0.85, the rock maps the same and a little less sure away from
+the samples. On chapter 17's vein the held ranges set the walk to work: it
+moves a point 0.45 ranges at most (0.13 on average) where it moved 0.07.
 
 **Fixed draws of the field, walked exactly, were measured and dropped.**
 32 or 64 draws scored like the linearized walk on the folded section
@@ -212,21 +217,67 @@ against 1.93), left the Jura region in place, and cost 3 to 6 times as
 much; with that few draws the moments are noisy (variance ratio 0.4-2.5).
 The linearization was never what went wrong.
 
-**The displacement KL stays.** With the field's KL alone the walk network
-trained a near-certain deformation: calibration about 1.95 on the folded
-section under every variant above. Priced through the amplitude, nothing
-moved; through the displacement, the calibration came right:
+**A displacement term first priced it.** With the field's KL alone the
+walk network trained a near-certain deformation: calibration about 1.95 on
+the folded section under every variant above. Priced through the
+amplitude, nothing moved; through the displacement of the walked inducing
+points against their spread, `1/2 sum (moved - start)² / spread²`, the
+calibration came right on the first seed:
 
 | Price | Score a new hole | Median | Calibration | Reach |
 |---|---|---|---|---|
 | none | -11.28 | -1.46 | 1.97 | 0.26 |
-| displacement (the walk's KL) | -10.46 | -5.59 | 1.26 | 0.29 |
+| displacement | -10.46 | -5.59 | 1.26 | 0.29 |
 | Gamma prior on `amp`, mode 1, c = 2 | -11.24 | -1.49 | 1.97 | 0.26 |
 | Gamma prior on `amp`, mode 1, c = 5 | -11.15 | -1.55 | 1.96 | 0.24 |
 | exponential prior on `amp`, rate 1 | -11.21 | -1.51 | 1.96 | 0.25 |
 | exponential prior on `amp`, rate 3 | -11.08 | -1.61 | 1.94 | 0.23 |
 
-The median pays for honest intervals.
+**The leaf's ranges, held, replaced it** (2026-10-09). The term is no KL --
+it treats the start as a prior and divides by the posterior's spread -- so
+it was taken apart. Freezing one group of parameters at a time without it
+(one seed) put the cause in the trained deformation's certainty: it moved
+points about five times its own spread (0.268 against 0.052 leaf ranges;
+1.3 times with the term), and the leaf's range co-adapted, 5.5 against 3.3.
+Freezing the field's ranges, `amp` or the field's posterior variance each
+moved the calibration toward one (1.18, 1.54, 1.65); freezing the leaf's
+ranges moved the score from -11.3 to -4.0. Stretching the walked
+coordinates and lengthening the leaf's ranges give the same function, and
+training settled the trade toward a long range on a confident deformation.
+Three fixes were then tried in order, on three seeds
+(`docs/benchmarks/walk_price.py`), against the gate of a calibration
+within 1-1.5 and a score at least the term's:
+
+| Price | Score a new hole (mean) | Calibration (seeds 2026, 1, 2) |
+|---|---|---|
+| displacement | -10.73 | 1.26, 2.24, 1.14 |
+| none | -11.21 | 1.97, 2.74, 1.59 |
+| a proper prior: `amp`, the field's scale, fixed at 0.3 | -12.31 | 1.02, 1.64, 0.98 |
+| the same at 1 | -12.27 | 1.54, 3.16, 1.48 |
+| the same at 3 | -9.51 | 1.82, 2.83, 0.65 |
+| the leaf's range prior at strength 10 | -9.82 | 1.48, 2.42, 1.20 |
+| the leaf's range prior at strength 50 | -6.83 | 0.66, 1.63, 0.45 |
+| **the leaf's ranges held at 1** | **-5.00** | 0.35, 1.17, 0.49 |
+| the same at 0.5 | -5.33 | 0.58, 0.51, 0.59 |
+| the same at 2 | -5.38 | 0.41, 1.44, 0.56 |
+| `amp` uncertain, exponential prior at rate 1 | -11.29 | 1.93, 2.72, 1.36 |
+| the same at rate 3 | -11.24 | 1.92, 2.75, 1.57 |
+| displacement with the leaf's ranges held | -9.63 | 0.63, 0.74, 0.69 |
+| displacement with the leaf's range prior at 50 | -9.18 | 0.81, 1.40, 0.70 |
+
+No price passes the calibration on every seed -- the displacement term
+fails the second (2.24). Held ranges score twice as well a new hole on
+every seed (-4.0, -7.8 and -3.2 against -10.5, -12.7 and -9.0), whatever
+the value held, and err wide where they err: the walk then unfolds the
+section (0.85 leaf ranges against 0.18) and its spread is honest about it.
+A proper prior through the field's scale has no scale that works on every
+seed: small, the walk barely moves (0.04 leaf ranges) and underfits; large,
+it is the unpriced walk. An uncertain `amp` -- `log amp ~ N(m, s²)` against
+an exponential prior, linearized as one deviation shared by every point
+along its displacement -- collapsed to `s` = 0.05-0.07 on two seeds: one
+scalar's entropy is worth a nat or two against the data's. So the walk is
+priced by the field's KL alone, the leaf's ranges are held, and the
+displacement term is deprecated with the marginal rule.
 
 Against walks along sampled fields -- each walker with normals of its own
 for the unexplained part, criteria fixed before measuring (mean within 0.2

@@ -203,7 +203,9 @@ in the catalogue.
   field, added to the second's GP through `LinearCombination`, with
   `unit_norm=False` so the model can decline the influence. A field that is
   not stationary: `GPWalk` moves the coordinates and a stationary kernel
-  reads the moved space. Independent parts of a model can sit on
+  reads the moved space; since 0.9.0 the GP reading the walk keeps its
+  ranges where they start (the walk's unit), so the walk does the
+  deforming. Independent parts of a model can sit on
   independent trees, one leaf each. Chapter 16 builds the first two, one
   leaf per variable.
 - **Depth.** Since 0.9.0 a GP node reading another node's uncertain output

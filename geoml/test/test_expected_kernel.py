@@ -664,6 +664,54 @@ def test_a_model_on_a_walk_trains_and_predicts():
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-11)
 
 
+def _walk_network(propagation, leaf_node=geoml.latent.BasicGP):
+    geoml.set_seed(3)
+    x = np.random.default_rng(3).uniform(0, 100, [60, 2])
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable("v", np.sin(x[:, 0] / 20))
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(data, 30, seed=0),
+        geoml.transform.Isotropic(40))
+    walk = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2))
+    leaf = leaf_node(walk, size=1)
+    model = geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(), leaf,
+        options=geoml.models.GPOptions(
+            verbose=False, propagation=propagation,
+            expert_propagation="independent" if propagation == "joint"
+            else "consensus"))
+    return model, walk, leaf
+
+
+@pytest.mark.parametrize("leaf_node", [geoml.latent.BasicGP,
+                                       geoml.latent.MultiStructureGP])
+def test_a_gp_reading_a_walk_keeps_its_ranges(leaf_node):
+    # the walk's unit: stretching the walked coordinates and lengthening
+    # the ranges that read them give the same function
+    model, walk, leaf = _walk_network("joint", leaf_node)
+    ranges = {k: np.array(p.get_value()) for k, p in leaf.parameters.items()
+              if k.startswith("ranges")}
+    assert ranges and all(leaf.parameters[k].fixed for k in ranges)
+    model.train_full(5)
+    for k, value in ranges.items():
+        np.testing.assert_array_equal(leaf.parameters[k].get_value(), value)
+    # the field's ranges train, and so does the old rule's leaf
+    assert not walk.field.parameters["ranges"].fixed
+    _, _, leaf = _walk_network("marginal", leaf_node)
+    assert not any(p.fixed for k, p in leaf.parameters.items()
+                   if k.startswith("ranges"))
+
+
+def test_the_walk_adds_no_kl_under_the_expected_kernel():
+    for propagation, nothing in (("joint", True), ("marginal", False)):
+        model, walk, _ = _walk_network(propagation)
+        walk.parameters["amp"].set_value(5.0)
+        with model._propagation():
+            model._refresh(model.options.jitter)
+            kl = float(walk.kl_divergence())
+        assert (kl == 0.0) == nothing, (propagation, kl)
+
+
 def _predicted_v(model):
     grid = geoml.data.Grid2D(start=[0, 0], end=[100, 100], n=[8, 8])
     model.predict(grid, n_sim=3)

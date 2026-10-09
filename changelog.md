@@ -86,14 +86,23 @@ with the uncertainty accumulated so far (an uncertain walker slows down),
 the field's variance its inducing points leave unexplained moves each point
 on its own (so far from the data a walk is uncertain), and each realization
 walks a realization of the field, the field's slope read in closed form.
-The walk's KL keeps pricing the inducing
-points' displacement against the walk's spread; `precision` is ignored and
-deprecated. On the folded section the walk network scores -10.5 a new hole
-against -31.7 under the old rule, calibration 1.26; without the
-displacement term it trained a near-certain deformation (1.97), and without
-the unexplained variance chapter 16's rock model put a confident region over
-unsampled ground. Fixed draws of the field walked exactly were measured as
-an alternative and dropped: no better, at 3 to 6 times the cost.
+The walk adds no KL of its own: the field's prices the deformation, and **a
+GP node reading the walk keeps its ranges where they start**, the walk's
+unit -- stretching the walked coordinates and lengthening the ranges that
+read them give the same function, and training settled that trade toward
+a long range on a near-certain deformation (calibration 1.97 to 2.74 on
+the folded section's three seeds). On the folded section the walk network
+scores -5.0 a new hole on average over three seeds against -31.7 under the
+old rule (a VGP -12.2), and its intervals err wide where they err
+(calibration 0.35-1.17). Measured and dropped on the way: a displacement
+term (-10.7, calibration up to 2.24), a proper prior through the field's
+fixed scale (no scale works on every seed), a stronger prior on the leaf's
+range (-6.8), and an uncertain `amp` (its uncertainty collapsed). The
+marginal rule's displacement term and `precision` are ignored and
+deprecated. Without the unexplained variance chapter 16's rock model put a
+confident region over unsampled ground. Fixed draws of the field walked
+exactly were measured as an alternative and dropped: no better, at 3 to 6
+times the cost.
 * **`propagate` returns a `_Moments`**, which still unpacks as the
 `(mean, variance)` pair and carries the experts' chains beside it; GP
 nodes keep `inducing_points_covariance` beside the variance.

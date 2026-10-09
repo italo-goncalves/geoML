@@ -4195,10 +4195,14 @@ class GPWalk(_FunctionalLatentVariable):
     `step * n_steps * amp` is the walk's reach. The field's variance that
     its inducing points leave unexplained -- the whole prior far from them --
     moves each point on its own, so far from the data a walk is uncertain.
-    Each realization walks a realization of the field. The walk's KL term
-    prices the inducing points' displacement against the walk's spread
-    where they land; the `precision` parameter belongs to the marginal rule
-    of the versions before and is ignored here.
+    Each realization walks a realization of the field. The walk adds no
+    random variable of its own: the field's KL prices the deformation, and
+    a GP node reading the walk keeps its ranges where they start, the
+    walk's unit -- stretching the walked coordinates and lengthening the
+    ranges that read them would give the same function. Under the marginal
+    rule of the versions before, a KL term prices the inducing points'
+    displacement against the walk's spread instead, and `precision` shrinks
+    the variance at each step; both are deprecated, and ignored here.
     """
     def __init__(self, parent, step=0.01, n_steps=10, name=None):
         """
@@ -4616,12 +4620,19 @@ class GPWalk(_FunctionalLatentVariable):
         active experts; under slots a tensor over the slots, to which a
         padded point adds nothing.
 
-        The inducing points' displacement against the walk's own spread
-        where they land, under either rule. Under the expected kernel it is
-        what keeps the walk honest: without it the field's KL alone let
-        training buy a near-certain deformation (measured on a folded
-        section, calibration 1.97 against 1.26 with it), where a prior on
-        `amp` changed nothing."""
+        Under the marginal rule, the inducing points' displacement against
+        the walk's own spread where they land. Under the expected kernel the
+        walk adds no random variable of its own, so nothing: the field's KL
+        prices the deformation, and the GP node reading the walk keeps its
+        ranges (`VGPNetwork._hold_walk_ranges`). The displacement term did
+        that job by a heuristic -- calibration 1.97 to 1.26 on the folded
+        section's first seed, 2.24 on another -- and holding the ranges
+        scored -5.0 a new hole on three seeds against its -10.7."""
+        if _JOINT_PROPAGATION:
+            if _slots_of(self.root) is not None:
+                return _tf.zeros([_slots_of(self.root).size], _tf.float64)
+            return [_tf.constant(0.0, _tf.float64)
+                    for _ in _active_experts(self.root)]
         if _slots_of(self.root) is not None:
             mu_1, _ = _slot_points(self.walker)
             mu_2, var_2 = _slot_points(self)

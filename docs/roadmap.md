@@ -154,10 +154,13 @@ unchanged. Decided:
   The cause of the region was the field's unexplained variance, which the
   walk now carries per point (chapter 16's geometry and metals'
   calibration back to 0.8.8's); the calibration's was an unpriced
-  deformation, which the walk's displacement KL fixes (1.97 -> 1.26, score
-  -10.46) where priors on `amp` changed nothing -- so that KL stays, against
-  the plan, and only `precision` is deprecated. The walk is accurate to a
-  reach of a fifth of the field's range and errs both ways beyond it.
+  deformation, which the walk's displacement KL fixed on one seed (1.97 ->
+  1.26, score -10.46) where priors on `amp` changed nothing. **Replaced
+  2026-10-09** (the user's order of fixes, three seeds): a GP node reading
+  the walk keeps its ranges, the walk adds no KL, and the displacement term
+  is deprecated with `precision` -- see "A principled price for the walk".
+  The walk is accurate to a reach of a fifth of the field's range and errs
+  both ways beyond it.
   Record: `docs/expected-kernel.md`, "The walk".
 - **Phases**: (1) the expected kernel and its quadrature as a function,
   gate 1 on one expert; (2) `_Moments` through every node under
@@ -259,7 +262,19 @@ inputs (Paciorek's theorem, by congruence) and not guaranteed with
 correlated ones, though no failure turned up on near-singular lattices.
 
 **M — A principled price for the walk** (from the expected kernel,
-2026-10-08). The walk's KL under the expected kernel is the marginal rule's
+2026-10-08; **settled 2026-10-09**: the leaf's ranges held, the field's KL
+the only price -- -5.0 a new hole on the folded section's three seeds
+against the displacement term's -10.7, intervals erring wide (calibration
+0.35-1.17) where the term's erred narrow (1.14-2.24). The fixes tried in
+the user's order: a proper zero-displacement prior through the field's
+fixed scale (`amp` 0.3, 1, 3: -12.3, -12.3, -9.5, no scale right on every
+seed), the trade-off priced (the leaf's range prior at 10 and 50: -9.8 and
+-6.8; held at 0.5, 1, 2: -5.3, -5.0, -5.4), and an uncertain `amp`
+(linearized, its uncertainty collapsed to 0.05-0.07 on two seeds: -11.3).
+Diagnosis: freezing one group at a time put the cause in the walk's stretch
+and the reader's range being one degree of freedom. Record:
+`docs/expected-kernel.md`, "The walk"; `docs/benchmarks/walk_price.py`.
+What follows is the plan as it stood.) The walk's KL under the expected kernel is the marginal rule's
 term, `1/2 sum (m_walked - m_start)² / v_walked` over the inducing points:
 not a KL (it treats the start as a prior and divides by the posterior's
 variance, with no trace or log-determinant), and since the displacement and
@@ -2033,9 +2048,11 @@ refits):
   kernel alone misses the variance there by up to 133%, where
   `UncertainInputGP` is within 3%.
 - **Deprecated in 0.9.0** (ignored under `"joint"`, removed here):
-  `GPWalk`'s `precision` parameter and the variance shrinking it drives.
-  (The walk's own KL term was to go too, and was measured necessary: see
-  the 0.9.0 item.)
+  `GPWalk`'s `precision` parameter and the variance shrinking it drives,
+  and the walk's displacement term, `1/2 sum (moved - start)² / spread²`
+  over the walked inducing points -- replaced under `"joint"` by holding
+  the ranges of the GP node that reads the walk (measured 2026-10-09: -5.0
+  a new hole on the folded section against -10.7).
 Measure nothing new for it: it removes code whose replacement the 0.9.0
 gates passed.
 
