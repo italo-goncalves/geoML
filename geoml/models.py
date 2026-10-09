@@ -3287,8 +3287,14 @@ class VGPNetwork(_GPModel):
 
             x = _tf.constant(data_coords, _tf.float64)
             x_var = _tf.constant(data_var, _tf.float64)
-            yield batch, (call(x, x_var, splits, batch) if with_rows
-                          else call(x, x_var, splits))
+            # under the rule the state was refreshed under: a caller that
+            # reads the leaves itself (`measurement_batches`,
+            # `responsibilities`) would otherwise run them under the module's
+            # default against a refresh made under the model's
+            with self._propagation():
+                out = call(x, x_var, splits, batch) if with_rows \
+                    else call(x, x_var, splits)
+            yield batch, out
 
         _progress.emit("predict", len(batch_id), len(batch_id), "batch")
 

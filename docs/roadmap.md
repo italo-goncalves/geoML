@@ -173,7 +173,10 @@ unchanged. Decided:
   second derivatives are finite at zero distance.
 
 **M — Eight Gaussians and the second moment in `BasicGP`** (agreed
-2026-10-08, the two items below; for 0.9.0). Plan of record:
+2026-10-08, the two items below; for 0.9.0; **steps 1 and 1b built
+2026-10-08**: kernel errors 5.1e-4, 9.8e-6 and 9.1e-6, gate 1 unchanged,
+chapter 5's deep model 262 s to 74 s at 100 iterations with the same
+scores). Plan of record:
 1. **Tables.** `Exponential`, `Matern32` and `Matern52` read an uncertain
    input through 8 fitted Gaussians each (rates and weights stored as
    constants in `network.py`, weights summing to one; refitted by
@@ -221,7 +224,7 @@ unchanged. Decided:
    the breaking version; changelog, design record, skill.
 
 **S — Fewer components for the Matérn kernels' expected kernel** (measured
-2026-10-08). The fixed trapezoid (52, 32 and 28 components for the
+2026-10-08; **built** as step 1 of the item above). The fixed trapezoid (52, 32 and 28 components for the
 exponential, Matern32 and Matern52) is accurate to 1e-7, far below any
 gate; the best positive mixture of 8 Gaussians, fitted once and stored as
 constants (weights summing to one, so the diagonal stays exact), misses the

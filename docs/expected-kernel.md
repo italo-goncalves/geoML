@@ -58,25 +58,38 @@ covariance whatever they are, and the inducing points' matrix stays
 positive definite: a positive sum of expected Gaussian kernels is one.
 Components placed pair by pair were tried first -- Laplace-Hermite about
 each pair's tilted measure -- and erred by 7e-3 on the exponential, with no
-such guarantee. The Matérn kernels integrate a trapezoid in `log g` at
-step 0.5 up to 3.5, from -22 for the exponential (52 components, its cusp
-puts mass at small `g`), -12 for the Matern32 (32) and -10 for the Matern52
-(28); the rational quadratic a trapezoid
-of 48 placed about its mode, which moves with the trained `scale`. The mass
-outside each grid is a constant (`w` toward zero) and a nugget (`w` toward
-infinity), the nugget reaching only a pair at one place with nothing
-uncertain between them, which reads one exactly.
+such guarantee. The Matérn kernels are read through **eight Gaussians
+each**, fitted once and kept as constants (`_KERNEL_MIXTURES`, refitted by
+`docs/benchmarks/kernel_mixtures.py`): the positive mixture closest to the
+kernel in the largest error over [0, 6] ranges, its weights summing to one
+so that a covariance's diagonal stays one. They miss the kernel by 5.1e-4
+(exponential), 9.8e-6 (Matern32) and 9.1e-6 (Matern52), and the expected
+kernel by no more at any range and any uncertainty, the expectation being
+linear in the mixture. They replaced a trapezoid over each kernel's own
+mixing measure, accurate to 1e-7 at 52, 32 and 28 components: 3.5 to 6.5
+times the evaluations for an accuracy no gate asks for. The rational
+quadratic keeps a trapezoid of 48 placed about its mode, which moves with
+the trained `scale`; the mass outside its grid is a constant (`w` toward
+zero) and a nugget (`w` toward infinity), the nugget reaching only a pair
+at one place with nothing uncertain between them, which reads one exactly.
+**Rejected on the way**: Paciorek's form with the kernel substituted for the
+Gaussian, its inflation fitted per kernel -- the expectation only for the
+Gaussian, and 0.03 to 0.13 off for the others.
+
+Each component's derivative in the mean is closed too, `-2 w (m(x) -
+m(y)) / (r² (1 + 2 w v))` times the component, which is how a `GPWalk`
+reads the slope of its field: one pass, where it took one forward-mode pass
+per dimension.
 
 Measured against adaptive quadrature over unit ranges, distances to 1.5
-and variances to 5, in one to three dimensions: 1e-7 for the exponential and
-the Matern32, 1e-6 for the Matern52, 4e-5 or better for the rational quadratic at scales from
-1e-3 to 100. Against the average of the kernel over 4e5 draws of a jointly
+and variances to 5, in one to three dimensions, the rational quadratic
+is within 4e-5 at scales from 1e-3 to 100. Against the average of the kernel over 4e5 draws of a jointly
 Gaussian input at twelve locations (gate 1, the function):
 
 | Kernel | Error | In standard errors | Correlation dropped | Marginal rule |
 |---|---|---|---|---|
 | Gaussian | 0.0008 | 2.1 | 0.195 | 0.796 |
-| Exponential | 0.0004 | 2.2 | 0.107 | 0.616 |
+| Exponential | 0.0005 | 3.0 | 0.107 | 0.616 |
 | Matern32 | 0.0005 | 2.3 | 0.138 | 0.773 |
 | Matern52 | 0.0006 | 2.2 | 0.159 | 0.794 |
 | RationalQuadratic | 0.0007 | 2.1 | 0.201 | 0.618 |
@@ -242,7 +255,7 @@ uncertain input), scored against the exhaustive grid at every 20th node:
 |---|---|---|---|---|---|---|
 | flat | - | 100 | 170.4 | 100.7 | 0.49 | 18 |
 | deep | marginal | 100 | 163.9 | 94.5 | 0.54 | 106 |
-| deep | joint | 100 | 163.0 | 91.8 | 0.60 | 262 |
+| deep | joint | 100 | 163.0 | 91.8 | 0.60 | 74 |
 | flat | - | 400 | 162.0 | 102.2 | 0.32 | 31 |
 | deep | marginal | 400 | 160.9 | 100.1 | 0.32 | 169 |
 | deep | joint | 400 | 158.5 | 95.8 | 0.39 | 707 |
@@ -250,16 +263,20 @@ uncertain input), scored against the exhaustive grid at every 20th node:
 The expected kernel scores best at both lengths, by a little: Walker Lake's
 geometry is only mildly curved (chapter 5). The coverage is low for every
 model, the realizations being of the ground and the exhaustive values
-carrying the variability below it. The times are with 52 components for
-the Matern32, cut to 32 afterwards.
+carrying the variability below it. The times at 400 iterations are with
+the trapezoid's 52 components for the Matern32; at 100, re-timed with the
+table of eight, the expected kernel went from 262 s to 74 s with the
+same scores to the last figure shown, faster than the marginal rule's
+106 s.
 
 ## Cost
 
 The Gaussian kernel's expectation costs what the old covariance did. A
-scale mixture costs one Gaussian evaluation per component and pair (28 to
-52 for the Matérn family, 48 for the rational quadratic) wherever its input
-is uncertain, in memory as well under a gradient: on chapter 5's model,
-about sixteen experts and a Matern32 outer node at 52 components, a
-training iteration cost 2.5 to 4.2 times the old rule's. A GP node feeding
+scale mixture costs one Gaussian evaluation per component and pair (8 for
+the Matérn family, 48 for the rational quadratic) wherever its input is
+uncertain, in memory as well under a gradient: on chapter 5's model, about
+sixteen experts and a Matern32 outer node, a training iteration cost 2.5
+to 4.2 times the old rule's at the trapezoid's 52 components, and 0.7
+times at the table's eight. A GP node feeding
 another adds `k_x (K + D)^-1 D`, `n m² size` per expert, the order of its
 explained variance.

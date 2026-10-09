@@ -587,18 +587,38 @@ def _simulation_normals(shape, seed, key=None):
 # pair's tilted measure) err by 7e-3 on the exponential and guarantee
 # nothing. Derivation and measurements: `docs/expected-kernel.md`.
 
-# the Matern family as mixtures: w = c^2 / (4 g), g ~ Gamma(nu, 1), as
-# (nu, c) at the rate each class uses, with where the trapezoid in log g
-# they are integrated on starts -- a rougher kernel puts more of its mass at
-# small g, the exponential's cusp the most. The trapezoid ends at 3.5 with
-# a step of 0.5: measured against adaptive quadrature over unit ranges,
-# distances to 1.5 and variances to 5 in one to three dimensions, 1e-7 for
-# the exponential (52 components) and the Matern32 (32), 1e-6 for the
-# Matern52 (28)
-_MATERN_MIXTURES = {_kr.Exponential: (0.5, 3.0, -22.0),
-                    _kr.Matern32: (1.5, 5.0, -12.0),
-                    _kr.Matern52: (2.5, 6.0, -10.0)}
-_MATERN_GRID = (3.5, 0.5)
+# the Matern family read through 8 fitted Gaussians each, sum_q w_q
+# exp(-r_q d^2) over the distance in ranges, the weights summing to one so
+# that a covariance's diagonal stays one: fitted by
+# `docs/benchmarks/kernel_mixtures.py`, the largest error over [0, 6] ranges
+# 5.1e-4 (exponential), 9.8e-6 (Matern32) and 9.1e-6 (Matern52) -- which
+# bounds the expected kernel's at any range and any uncertainty, the
+# expectation being linear in the mixture. Measured against the trapezoid
+# over each kernel's own mixing measure they replace (52, 32 and 28
+# components, 1e-7): 3.5 to 6.5 times fewer evaluations
+_KERNEL_MIXTURES = {
+    _kr.Exponential: (
+        (0.99353925727621273, 3.3888193300513523, 12.918190801234061,
+         57.032592822643089, 305.13453091903932, 2169.502626707987,
+         24917.497245652659, 921566.41220288316),
+        (0.10583563086085193, 0.30159085568923139, 0.278218876296772,
+         0.16919913539835968, 0.086494459885879116, 0.039068092644517549,
+         0.015136513506592337, 0.0044564357177960439)),
+    _kr.Matern32: (
+        (1.0880466624657978, 2.2363121733574021, 4.7231391881645335,
+         10.67412121993307, 26.587831672090051, 76.258839280320188,
+         275.93676370152588, 1671.1712412119864),
+        (0.036588330279395669, 0.23342241322629709, 0.35523711836715716,
+         0.24168940845966788, 0.09897435763757878, 0.027991020429147327,
+         0.0054965623174983106, 0.00060078928325784677)),
+    _kr.Matern52: (
+        (1.2580597454939826, 2.4331415607782336, 4.8849517861830112,
+         10.770000331335869, 27.79264531658427, 67.822283244787457,
+         113.55171525815763, 14964.867586466944),
+        (0.054071122242525964, 0.32679209607345494, 0.40374906109805481,
+         0.1782403835619305, 0.034268505964559853, 0.0010506800096522499,
+         0.0018281490507311728, 1.9990905547959023e-09)),
+}
 # the rational quadratic's components, on a grid that follows its trained
 # `scale` (narrow and far up when it is large, long when it is small):
 # 4e-5 or better for scales from 1e-3 to 100
@@ -609,22 +629,29 @@ def _expected_kernel_supported(kernel):
     """Whether a GP node can read an uncertain input with `kernel`: the
     Gaussian, and the scale mixtures of Gaussians."""
     return type(kernel) in (_kr.Gaussian, _kr.RationalQuadratic) \
-        or type(kernel) in _MATERN_MIXTURES
+        or type(kernel) in _KERNEL_MIXTURES
 
 
-def _matern_components(nu, c, lo):
-    """The fixed components of a Matern kernel: rates `w`, weights, and the
-    mass beyond the grid -- a constant (g past the grid, w toward zero) and
-    a nugget (g below it, w toward infinity)."""
-    hi, h = _MATERN_GRID
-    y = _np.arange(lo, hi + h / 2, h)
-    weights = h * _np.exp(nu * y - _np.exp(y) - _special.gammaln(nu))
-    weights[0] *= 0.5
-    weights[-1] *= 0.5
-    below = _special.gammainc(nu, _np.exp(lo))
-    above = _special.gammaincc(nu, _np.exp(hi))
-    weights *= (1.0 - below - above) / weights.sum()
-    return c ** 2 / 4.0 / _np.exp(y), weights, above, below
+def _kernel_components(kernel):
+    """`kernel` as a positive mixture of Gaussians in the distance in
+    ranges, `constant + sum_q w_q exp(-r_q d^2)`: the rates and the weights
+    as tensors, and the constant part -- one component for the Gaussian, the
+    fitted table for the Matern family, the rational quadratic's grid."""
+    if type(kernel) is _kr.Gaussian:
+        return (_tf.constant([3.0], _tf.float64),
+                _tf.constant([1.0], _tf.float64), 0.0)
+    if type(kernel) is _kr.RationalQuadratic:
+        omega, weights, below, _ = _rq_components(
+            kernel.parameters["scale"].get_value())
+        return omega, weights, below
+    if type(kernel) in _KERNEL_MIXTURES:
+        rates, weights = _KERNEL_MIXTURES[type(kernel)]
+        return (_tf.constant(rates, _tf.float64),
+                _tf.constant(weights, _tf.float64), 0.0)
+    raise NotImplementedError(
+        "the expected kernel takes the Gaussian kernel or a scale mixture of "
+        "Gaussians (Exponential, Matern32, Matern52, RationalQuadratic); %s "
+        "is neither" % type(kernel).__name__)
 
 
 def _rq_components(alpha):
@@ -648,17 +675,21 @@ def _rq_components(alpha):
     return 3.0 * _tf.exp(y) / alpha, weights, below, above
 
 
-def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None):
+def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None,
+                     gradient=False):
     """E[k(h(x), h(y))] over jointly Gaussian inputs.
 
     `mean_x` is `[..., n, d]` and `mean_y` `[..., m, d]`; the variances are
     shaped alike, or None for none; `cov` is the covariance between the two,
     `[..., n, m, d]`, or None for independent inputs. Each input dimension
-    is taken as independent of the others. Returns `[..., n, m]`.
+    is taken as independent of the others. Returns `[..., n, m]`, and with
+    `gradient` also its derivative in `mean_x` at fixed variances,
+    `[..., n, m, d]` -- in closed form, component by component.
     """
     with _tf.name_scope("expected_kernel"):
         r2 = ranges ** 2
-        dif2 = (mean_x[..., :, None, :] - mean_y[..., None, :, :]) ** 2 / r2
+        dif = mean_x[..., :, None, :] - mean_y[..., None, :, :]
+        dif2 = dif ** 2 / r2
         # the variance of the difference, in squared ranges
         v = _tf.zeros_like(dif2)
         if var_x is not None:
@@ -669,37 +700,27 @@ def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None):
             v = v - 2.0 * cov
         v = _tf.maximum(v / r2, 0.0)
 
-        if type(kernel) is _kr.Gaussian:
-            return _tf.exp(-0.5 * _tf.reduce_sum(_tf.math.log1p(6.0 * v), -1)
-                           - 3.0 * _tf.reduce_sum(dif2 / (1.0 + 6.0 * v), -1))
-
-        if type(kernel) is _kr.RationalQuadratic:
-            alpha = kernel.parameters["scale"].get_value()
-            omega, weights, constant, _ = _rq_components(alpha)
-            q = _RQ_NODES
-        elif type(kernel) in _MATERN_MIXTURES:
-            omega, weights, constant, _ = (
-                _tf.constant(a, _tf.float64) for a in
-                _matern_components(*_MATERN_MIXTURES[type(kernel)]))
-            q = int(omega.shape[0])
-        else:
-            raise NotImplementedError(
-                "the expected kernel takes the Gaussian kernel or a scale "
-                "mixture of Gaussians (Exponential, Matern32, Matern52, "
-                "RationalQuadratic); %s is neither" % type(kernel).__name__)
+        omega, weights, constant = _kernel_components(kernel)
         total = constant + _tf.zeros_like(dif2[..., 0])
-        for i in range(q):
+        slope = _tf.zeros_like(dif2) if gradient else None
+        for i in range(int(omega.shape[0])):
             w = omega[i]
-            total = total + weights[i] * _tf.exp(
+            inflated = 1.0 + 2.0 * w * v
+            term = weights[i] * _tf.exp(
                 -0.5 * _tf.reduce_sum(_tf.math.log1p(2.0 * w * v), -1)
-                - w * _tf.reduce_sum(dif2 / (1.0 + 2.0 * w * v), -1))
-        # the nugget's mass reaches only a pair at one place with nothing
-        # uncertain between them, where every component reads one: such a
-        # pair is one, exactly, as the diagonal of the inducing points'
-        # matrix must be, rather than the weights' sum to rounding
+                - w * _tf.reduce_sum(dif2 / inflated, -1))
+            total = total + term
+            if gradient:
+                slope = slope - term[..., None] * 2.0 * w * dif \
+                    / (r2 * inflated)
+        # a pair at one place with nothing uncertain between them, where
+        # every component reads one, is one exactly, as the diagonal of the
+        # inducing points' matrix must be, rather than the weights' sum to
+        # rounding
         same = _tf.logical_and(_tf.equal(_tf.reduce_sum(dif2, -1), 0.0),
                                _tf.equal(_tf.reduce_sum(v, -1), 0.0))
-        return _tf.where(same, _tf.ones_like(total), total)
+        total = _tf.where(same, _tf.ones_like(total), total)
+        return (total, slope) if gradient else total
 
 
 def _graph_state(node):
@@ -2223,14 +2244,16 @@ class BasicGP(_GPNode):
             weights, w_mu, w_var, w_exp_var = self._blend(mu, var, explained)
             return cov_cross, mu, weights, w_mu, w_var, w_exp_var
 
-    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None):
+    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None,
+                            gradient=False):
         """The covariance between two sets of uncertain inputs under the
         expected kernel: `mean_x` `[..., n, d]`, `mean_y` `[..., m, d]`,
         their variances alike or None, and their covariance
-        `[..., n, m, d]` or None. Returns `[..., n, m]`."""
+        `[..., n, m, d]` or None. Returns `[..., n, m]`, and with
+        `gradient` its derivative in `mean_x`, `[..., n, m, d]`."""
         return _expected_kernel(self.kernel,
                                 self.parameters["ranges"].get_value(),
-                                mean_x, var_x, mean_y, var_y, cov)
+                                mean_x, var_x, mean_y, var_y, cov, gradient)
 
     def _expert_moments(self, x, x_var=None, chain=None):
         """Each active expert's moments at already-propagated locations:
@@ -2445,7 +2468,8 @@ class AdditiveGP(BasicGP):
             cov = _tf.reduce_mean(cov, axis=-1)
             return cov
 
-    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None):
+    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None,
+                            gradient=False):
         # one dimension at a time, as the covariance is built
         ranges = self.parameters["ranges"].get_value() \
             * _tf.ones([1, 1, self.parent.size], _tf.float64)
@@ -2453,12 +2477,16 @@ class AdditiveGP(BasicGP):
         def column(t, d):
             return None if t is None else t[..., d:d + 1]
 
-        return _tf.reduce_mean(_tf.stack([
-            _expected_kernel(self.kernel, ranges[..., d:d + 1],
-                             mean_x[..., d:d + 1], column(var_x, d),
-                             mean_y[..., d:d + 1], column(var_y, d),
-                             column(cov, d))
-            for d in range(self.parent.size)], axis=-1), axis=-1)
+        parts = [_expected_kernel(self.kernel, ranges[..., d:d + 1],
+                                  mean_x[..., d:d + 1], column(var_x, d),
+                                  mean_y[..., d:d + 1], column(var_y, d),
+                                  column(cov, d), gradient)
+                 for d in range(self.parent.size)]
+        if not gradient:
+            return _tf.reduce_mean(_tf.stack(parts, axis=-1), axis=-1)
+        # each dimension's kernel moves with its own coordinate only
+        return (_tf.reduce_mean(_tf.stack([p[0] for p in parts], -1), -1),
+                _tf.concat([p[1] for p in parts], axis=-1) / self.parent.size)
 
 
 class UncertainInputGP(BasicGP):
@@ -3930,25 +3958,21 @@ class GPWalk(_FunctionalLatentVariable):
                 v = v + _tf.einsum("...de,...e->...d", a ** 2, var0)
             c = None if cov0 is None else \
                 cov0 * _tf.linalg.diag_part(a)[..., :, None, :]
-            # the field at the walkers, and its expected slope there
-            slopes, gradients = [], []
-            for d in range(size):
-                tangent = _tf.broadcast_to(
-                    _tf.one_hot(d, size, dtype=_tf.float64), _tf.shape(mean))
-                with _tf.autodiff.ForwardAccumulator(mean, tangent) as acc:
-                    cov = self.field.expected_covariance(mean, v, u, u_var, c)
-                    if mask is not None:
-                        cov = cov * mask[..., None, :]
-                    f = _tf.einsum("...nm,...smo->...ns", cov, alpha) + bias
-                slopes.append(acc.jvp(f))
-                gradients.append(acc.jvp(cov))
-            jac = _tf.stack(slopes, axis=-1)                # [..., n, d, d]
+            # the field at the walkers, and its expected slope there, the
+            # derivative in the walkers' mean in closed form
+            cov, grad = self.field.expected_covariance(
+                mean, v, u, u_var, c, gradient=True)
+            if mask is not None:
+                cov = cov * mask[..., None, :]
+                grad = grad * mask[..., None, :, None]
+            f = _tf.einsum("...nm,...smo->...ns", cov, alpha) + bias
+            jac = _tf.einsum("...nmd,...smo->...nsd", grad, alpha)
             # a walker the field's uncertainty has pushed is correlated with
             # the field it meets: E[k(w, U) R eta] = E[grad k] Cov(w, eta) R
             # (Stein's lemma), zero at the first step
             if k > 0:
                 f = f + _tf.einsum("...njd,...sjl,...ndsl->...ns",
-                                   _tf.stack(gradients, axis=-1), root_r, h)
+                                   grad, root_r, h)
             if k == 0:
                 explained = _tf.reduce_sum(
                     _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
@@ -4480,13 +4504,17 @@ class MultiStructureGP(BasicGP):
             cov = _tf.add_n(cov_mats)
             return cov
 
-    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None):
+    def expected_covariance(self, mean_x, var_x, mean_y, var_y, cov=None,
+                            gradient=False):
         weights = self.parameters["weights"].get_value()
-        return _tf.add_n([
-            _expected_kernel(self.kernel,
-                             self.parameters[f"ranges_{n}"].get_value(),
-                             mean_x, var_x, mean_y, var_y, cov) * weights[n]
-            for n in range(self.n_structures)])
+        parts = [_expected_kernel(self.kernel,
+                                  self.parameters[f"ranges_{n}"].get_value(),
+                                  mean_x, var_x, mean_y, var_y, cov, gradient)
+                 for n in range(self.n_structures)]
+        if not gradient:
+            return _tf.add_n([p * weights[n] for n, p in enumerate(parts)])
+        return (_tf.add_n([p[0] * weights[n] for n, p in enumerate(parts)]),
+                _tf.add_n([p[1] * weights[n] for n, p in enumerate(parts)]))
 
 
 class GradientConstrainedInput(_RootLatentVariable):

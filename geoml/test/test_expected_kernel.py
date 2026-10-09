@@ -92,10 +92,42 @@ def test_no_uncertainty_is_the_kernel(name):
     ranges = np.array([0.6, 1.3])
     d = np.sqrt(np.sum(((x[:, None] - x[None]) / ranges) ** 2, -1))
     got = _expected(kernel, ranges, x, None, None)
-    tolerance = 1e-12 if name == "Gaussian" else 1e-5
+    # the Matern family through its fitted table of Gaussians
+    tolerance = 1e-12 if name == "Gaussian" else 1e-3
     assert np.abs(got - _kernel_values(kernel, d)).max() < tolerance
     # one place, no uncertainty: one, exactly
     assert np.all(np.diag(got) == 1.0)
+
+
+@pytest.mark.parametrize("name", ["Exponential", "Matern32", "Matern52"])
+def test_the_tables_are_the_kernels(name):
+    # a positive mixture whose weights sum to one, within 1e-3 of the
+    # kernel wherever it reaches -- which bounds the expected kernel's error
+    rates, weights = _net._KERNEL_MIXTURES[type(KERNELS[name]())]
+    assert np.all(np.asarray(rates) > 0) and np.all(np.asarray(weights) >= 0)
+    assert abs(sum(weights) - 1.0) < 1e-12
+    d = np.concatenate([np.geomspace(1e-6, 0.1, 200), np.linspace(0.1, 8, 800)])
+    table = np.exp(-np.outer(d ** 2, rates)) @ np.asarray(weights)
+    assert np.abs(table - _kernel_values(KERNELS[name](), d)).max() < 1e-3
+
+
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_the_gradient_is_the_derivative(name):
+    kernel = KERNELS[name]()
+    mean, var, cov = _joint_inputs(n=8)
+    m = tf.Variable(mean)
+    r = tf.constant(np.array([[[0.7, 1.1]]]))
+    v = tf.constant(var)
+    c = tf.constant(cov)
+    with tf.GradientTape() as tape:
+        k = _net._expected_kernel(kernel, r, m, v, tf.constant(mean), v, c)
+        weights = tf.constant(np.random.default_rng(1).normal(size=[8, 8]))
+        loss = tf.reduce_sum(k * weights)
+    automatic = np.asarray(tape.gradient(loss, m))
+    _, slope = _net._expected_kernel(kernel, r, m, v, tf.constant(mean), v,
+                                     c, gradient=True)
+    closed = np.einsum("nmd,nm->nd", np.asarray(slope), np.asarray(weights))
+    np.testing.assert_allclose(closed, automatic, rtol=1e-9, atol=1e-12)
 
 
 @pytest.mark.parametrize("name", list(KERNELS))
@@ -636,3 +668,22 @@ def _predicted_v(model):
     v = grid.variables["v"]
     return (np.asarray(v.latent_mean.values),
             np.asarray(v.latent_variance.values), np.asarray(v.simulations))
+
+
+def test_every_batch_runs_under_the_model_s_rule():
+    # the batches of a prediction, of the measurement samples, of the PIT
+    # check and of the responsibilities read the state the refresh made
+    # under the model's rule, and must propagate under it too
+    model = _walker_model(2, "joint")
+    seen = []
+
+    def call(x, x_var, n_splits):
+        seen.append((_net._JOINT_PROPAGATION, _net._EXPERT_PROPAGATION))
+        return None
+
+    for _ in model._over_batches(_grid(), call):
+        pass
+    assert seen and all(rule == (True, "independent") for rule in seen)
+    samples = model.predict_measurements(_grid(), n_sim=2)
+    assert np.all(np.isfinite(samples["V"]))
+

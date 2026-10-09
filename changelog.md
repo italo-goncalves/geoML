@@ -15,8 +15,12 @@ kernel scores -9.0 (1.19) and a flat GP -12.2; beside the coordinates,
 -18.9 against -11.1. Gaussian kernel in closed form; the exponential, the
 Matérn kernels and the rational quadratic -- scale mixtures of Gaussians --
 over a fixed set of components with positive weights, so the inducing
-points' matrix stays positive definite, within 1e-6 (4e-5 for the rational
-quadratic) of the exact average. A single-layer model is unchanged to the
+points' matrix stays positive definite: the Matérn family through eight
+Gaussians each, fitted once and kept as constants (within 5.1e-4 of the
+exponential, 1e-5 of the Matern32 and Matern52, at any range and any
+uncertainty), the rational quadratic through 48 that follow its `scale`
+(4e-5). On chapter 5's deep model a training iteration costs 0.7 times the
+old rule's. A single-layer model is unchanged to the
 bit. Design record and measurements: `docs/expected-kernel.md`,
 `docs/benchmarks/expected_kernel.py`; the research: Lu & Shafto (2021).
 * **Saved models keep the rule they were trained with.** An older save
@@ -41,7 +45,8 @@ carry their covariance with each other along the walk, the field is read
 with the uncertainty accumulated so far (an uncertain walker slows down),
 the field's variance its inducing points leave unexplained moves each point
 on its own (so far from the data a walk is uncertain), and each realization
-walks a realization of the field. The walk's KL keeps pricing the inducing
+walks a realization of the field, the field's slope read in closed form.
+The walk's KL keeps pricing the inducing
 points' displacement against the walk's spread; `precision` is ignored and
 deprecated. On the folded section the walk network scores -10.5 a new hole
 against -31.7 under the old rule, calibration 1.26; without the
