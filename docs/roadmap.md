@@ -232,7 +232,8 @@ shape). Plan of record:
    user chose the hybrid (closed form for the Gaussian, quadrature for the
    others): 19x and 17x, 2.9 and 6.4 GB.
 5. `UncertainInputGP` deprecated with a warning naming `BasicGP`, removed in
-   the breaking version; changelog, design record, skill.
+   the breaking version; changelog, design record, skill. **Done
+   2026-10-09.**
 
 **S — Fewer components for the Matérn kernels' expected kernel** (measured
 2026-10-08; **built** as step 1 of the item above). The fixed trapezoid (52, 32 and 28 components for the
@@ -275,7 +276,9 @@ heuristic's (-10.46); chapter 16's rock maps no worse; the cost (one walk
 per node) against the term it replaces.
 
 **M — The second moment of a GP at an uncertain input** (Girard's term,
-measured 2026-10-08 on Walker Lake, `GaussianInput` root). Under the
+measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
+2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
+deprecated). Under the
 expected kernel `BasicGP`'s mean at an uncertain input is within 1-2% of
 the exact mixture's (better than `UncertainInputGP`'s 32 Sobol nodes, 3-9%),
 but its variance misses the variance of the mean over the input -- the
@@ -301,8 +304,8 @@ under `"joint"`: a GP node on a `GradientConstrainedInput`, a random root
 whose covariance between locations is not carried (its refresh also hands
 on predictions at the directional rows, which no child can read);
 `UncertainInputGP`'s Sobol mixture of marginals is what the
-expected kernel replaces, so it may simply retire (see the simplification
-item in section 5); `RadialTrend` is a nonlinear function of its parent's
+expected kernel replaces, and it is deprecated since 2026-10-09 (removed
+with the simplification item in section 5); `RadialTrend` is a nonlinear function of its parent's
 mean whose variance is dropped.
 
 **L–XL — Batched experts: memory independent of the number of experts**

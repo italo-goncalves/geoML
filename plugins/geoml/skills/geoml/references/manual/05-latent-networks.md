@@ -20,14 +20,17 @@ ellipsoid, made composable.
 and a variance per coordinate, which is what a `GaussianData` container
 holds (chapter 10). It is built for a high-dimensional input with missing
 entries, each given the mean and variance it could have, and it serves an
-uncertain location the same way. The variance rides through the transform
-and `UncertainInputGP` integrates over it by quadrature, so such a row is
-used for what it says rather than dropped or imputed. `BasicGP` reads an
-uncertain input through the expected kernel instead (5.1, depth), its
-kernel averaged over the input's uncertainty; before 0.9.0 it read it
-through an inflated kernel that was measured to understate the resulting
-spread several times over. For a location error a noise term already
-absorbs, `BasicGP` was measured the better choice.
+uncertain location the same way. The variance rides through the transform,
+and a `BasicGP` above takes the moments of the mixture over it: the
+expected kernel (5.1, depth) for the mean, and for the variance the spread
+of the posterior's mean over the input as well, in closed form for the
+Gaussian kernel and over 64 points of the input for the others. So such a
+row is used for what it says rather than dropped or imputed. Before 0.9.0
+`BasicGP` read an uncertain input through an inflated kernel, measured to
+understate the spread several times over, and `UncertainInputGP`, now
+deprecated, integrated over it by quadrature. For a location error a noise
+term already absorbs, telling the model nothing was measured the better
+choice.
 
 **Workers.** `BasicGP(parent, size=k)` is the GP node of chapter 3. The
 `size` argument gives it $k$ latent columns that share one kernel and one

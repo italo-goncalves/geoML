@@ -214,7 +214,11 @@ in the catalogue.
   coordinates concatenated beside the inner GP (`Concatenate(root,
   inner)`). A GP on an uncertain input takes the Gaussian, exponential,
   Matérn or rational quadratic kernel; spherical and cubic are refused
-  there, and the error message says so.
+  there, and the error message says so. On a `GaussianInput` a `BasicGP`
+  takes the mixture's moments (the variance of the mean over the input
+  included) and the likelihood integrates what its realizations leave
+  out; `UncertainInputGP` is deprecated. A location error is still better
+  left untold: a noise term absorbs it.
 - **Training.** `GPOptions(training_tolerance=0.01)` stops once the bound
   has settled; the last few percent of the bound buys sharpness held-out
   data does not support.

@@ -2821,15 +2821,20 @@ class AdditiveGP(BasicGP):
 
 class UncertainInputGP(BasicGP):
     """
-    GP node that integrates over the uncertainty of its input.
+    GP node that integrates over the uncertainty of its input by
+    quadrature. Deprecated.
 
+    Deprecated since 0.9.0, and to be removed: under the expected kernel
+    (`GPOptions(propagation="joint")`, the default for a new model) a
+    `BasicGP` on an uncertain input takes the mixture's moments in closed
+    form, more closely than this node's quadrature, and the likelihood
+    integrates what its realizations leave out. Under the old rule
     `BasicGP` reads an uncertain input through an inflated covariance --
-    Paciorek's nonstationary form, a valid kernel for any stationary
-    correlation -- and takes its moments as if the input were one point
-    under that kernel. Against the exact mixture over the input's Gaussian
-    that path understates the predictive variance several times over and
-    misplaces the mean once the input variance reaches a tenth of the
-    squared range. This node computes the mixture instead: `n_nodes`
+    Paciorek's nonstationary form -- and takes its moments as if the input
+    were one point under that kernel, which understates the predictive
+    variance several times over and misplaces the mean once the input
+    variance reaches a tenth of the squared range. This node computes the
+    mixture instead: `n_nodes`
     scrambled Sobol points of the input's Gaussian, the deterministic
     posterior at each of them, and the mixture's moments out -- the mean of
     the means, the mean of the variances plus the variance of the means.
@@ -2873,6 +2878,12 @@ class UncertainInputGP(BasicGP):
 
     def __init__(self, parent, size=1, kernel=None, fix_range=False,
                  isotropic=False, range_prior=2.0, n_nodes=32, name=None):
+        _warnings.warn(
+            "UncertainInputGP is deprecated since 0.9.0 and will be removed: "
+            "a BasicGP takes the mixture's moments at an uncertain input in "
+            "closed form under the expected kernel "
+            "(GPOptions(propagation='joint'), the default)", FutureWarning,
+            stacklevel=2)
         super().__init__(parent, size=size, kernel=kernel,
                          fix_range=fix_range, isotropic=isotropic,
                          range_prior=range_prior, name=name)

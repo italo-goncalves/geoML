@@ -286,6 +286,9 @@ kernel plus the quadrature's covariance of `k`, the spread of the mean and
 the jitter variances over the points, never negative. The rational
 quadratic takes it the same way. Deep networks, whose inducing points are
 themselves uncertain, keep the first moment; that is its own roadmap item.
+`UncertainInputGP`, which took the mixture by quadrature over every
+expert's whole posterior, is deprecated with a `FutureWarning` and goes in
+the breaking version.
 
 | m | Kernel | First moment | Second moment | `UncertainInputGP`, 32 nodes |
 |---|---|---|---|---|

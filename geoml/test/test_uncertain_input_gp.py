@@ -254,3 +254,10 @@ def test_the_diagram_names_the_node():
     model, _ = _model(point, geoml.latent.GaussianInput(
         inducing, transform=tr.Isotropic(40.0)), max_iter=0)
     assert "UncertainInputGP" in model.to_dot()
+
+
+def test_the_node_is_deprecated():
+    _, inducing, _ = _training_data()
+    root = geoml.latent.GaussianInput(inducing)
+    with pytest.warns(FutureWarning, match="BasicGP"):
+        geoml.latent.UncertainInputGP(root)

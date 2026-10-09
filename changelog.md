@@ -58,6 +58,9 @@ passed and nothing changes.
 kernel the signed difference in each dimension, which the Matérn kernels
 read as a growing exponential on one side; the Gaussian, exponential and
 spherical kernels square or root it and are unchanged to the bit.
+* **`UncertainInputGP` is deprecated** (a `FutureWarning` at construction)
+and will be removed in the breaking version: `BasicGP` takes the
+mixture's moments under the expected kernel.
 * **Saved models keep the rule they were trained with.** An older save
 opens with `propagation="marginal"` and `expert_propagation="consensus"`,
 under which the code is the old code -- a deep network, three experts,
