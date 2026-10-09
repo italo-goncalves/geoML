@@ -18,7 +18,9 @@
 
 Usage: python docs/benchmarks/second_moment.py walker [NODES [KERNEL...]]
        python docs/benchmarks/second_moment.py train [A] [B5] [B15]
+       python docs/benchmarks/second_moment.py linear
        python docs/benchmarks/second_moment.py cost M [KERNEL [first|uigp]]
+       python docs/benchmarks/second_moment.py cost M KERNEL experts=K [by]
 
 train -- the `GaussianInput` gate's two cases (`gaussian_input.py`):
 eight inputs with 30% of their entries missing, given their conditional
@@ -157,6 +159,97 @@ def walker(kernels=KERNELS):
                                           np.mean(mc_v)) + errors))
     print("largest error of the second moment, mean or variance: "
           + ", ".join("%s %.3f" % kv for kv in worst.items()))
+
+
+# --------------------------------------------------------------------------- #
+# the input's linear part
+# --------------------------------------------------------------------------- #
+def symmetric_nodes(q, d):
+    """`_input_nodes` at `q` points: half Sobol, half their negatives,
+    whitened."""
+    with np.errstate(all="ignore"):
+        half = norm.ppf(np.clip(qmc.Sobol(d, scramble=True, seed=_net._QUADRATURE_SEED)
+                                .random(q // 2), 1e-6, 1 - 1e-6))
+    nodes = np.concatenate([half, -half])
+    root = np.linalg.cholesky(nodes.T @ nodes / len(nodes))
+    return np.linalg.solve(root, nodes.T).T
+
+
+def kernel_jacobian(gp, u, z):
+    """d k(u, z_i) / d u, `[n, m, d]`, through the node's own kernel."""
+    columns = []
+    for dim in range(u.shape[1]):
+        tangent = np.zeros_like(u)
+        tangent[:, dim] = 1.0
+        x = tf.constant(u)
+        with tf.autodiff.ForwardAccumulator(x, tf.constant(tangent)) as acc:
+            k = gp.covariance_matrix(x, z)
+        columns.append(acc.jvp(k).numpy())
+    return np.stack(columns, axis=-1)
+
+
+def linear_part(kernels=("Exponential", "Matern32"), counts=(16, 32, 64)):
+    """The variance at uncertain inputs: the quadrature at several node
+    counts, the same with the input's linear part taken analytically (a
+    control variate, `Cov k = J S Jᵀ + Cov(k - J delta)`), and the linear
+    part alone (the delta method, no quadrature), against Monte Carlo."""
+    print("Variance error against the mixture (Monte Carlo, %d draws), "
+          "relative to its mean; Walker Lake, %d locations" % (N_MC, N_QUERY))
+    print("%-12s %6s | %s | %9s | %s"
+          % ("kernel", "var/r2",
+             " ".join("%7s" % ("q=%d" % q) for q in counts), "linear",
+             "largest change from the analytic linear part"))
+    for name in kernels:
+        model, root, gp = walker_model(name)
+        rng = np.random.default_rng(SEED)
+        with model._propagation():
+            model._refresh(model.options.jitter)
+            u_raw = rng.uniform([0, 0], [260, 300], size=(N_QUERY, 2))
+            u = root.propagate(tf.constant(u_raw), None)[0].numpy()
+            z = gp.parent.inducing_points[0]
+            w = np.asarray(gp.parameters["ranges"].get_value()).ravel()
+            inv = gp.cov_smooth_inv[0].numpy()[0]
+            alpha = gp.alpha[0].numpy()[0, :, 0]
+            jac = kernel_jacobian(gp, u, z)                      # [n, m, d]
+            for level in LEVELS:
+                var = np.broadcast_to(level * w ** 2, u.shape).copy()
+                _, mc_v = monte_carlo(gp, u, var, rng)
+                l = gp.expected_covariance(tf.constant(u), tf.constant(var),
+                                           z, tf.zeros_like(z)).numpy()
+                base = 1.0 - np.einsum("ni,ij,nj->n", l, inv, l)
+                errors, change = [], 0.0
+                for q in counts:
+                    nodes = symmetric_nodes(q, u.shape[1])
+                    delta = np.sqrt(var)[:, None, :] * nodes[None]   # [n, q, d]
+                    draws = (u[:, None, :] + delta).reshape(-1, u.shape[1])
+                    k = gp.covariance_matrix(tf.constant(draws), z).numpy() \
+                        .reshape(len(u), q, -1)
+                    dk = k - k.mean(1, keepdims=True)
+                    f = k @ alpha
+                    v = base - np.einsum("nqi,ij,nqj->nq", dk, inv, dk).mean(1) \
+                        + f.var(1)
+                    errors.append(np.mean(np.abs(v - mc_v)) / np.mean(mc_v))
+                    # with the linear part analytic: Cov k = J S Jᵀ +
+                    # Cov_q(k - J delta) + the cross terms, over the nodes
+                    lin = np.einsum("nmd,nqd->nqm", jac, delta)
+                    rest = dk - (lin - lin.mean(1, keepdims=True))
+                    exact_lin = np.einsum("nid,nd,ij,njd->n", jac, var, inv,
+                                          jac)
+                    cross = 2 * np.einsum("nqi,ij,nqj->nq", lin
+                                          - lin.mean(1, keepdims=True), inv,
+                                          rest).mean(1)
+                    v_lin = base - exact_lin \
+                        - np.einsum("nqi,ij,nqj->nq", rest, inv, rest).mean(1) \
+                        - cross + f.var(1)
+                    change = max(change, np.max(np.abs(v_lin - v)))
+                # the linear part alone: no quadrature at all
+                v_delta = base - np.einsum("nid,nd,ij,njd->n", jac, var, inv,
+                                           jac) \
+                    + np.sum((np.einsum("nmd,m->nd", jac, alpha)) ** 2 * var, 1)
+                delta_error = np.mean(np.abs(v_delta - mc_v)) / np.mean(mc_v)
+                print("%-12s %6.2f | %s | %9.3f | %.1e"
+                      % (name, level, " ".join("%7.3f" % e for e in errors),
+                         delta_error, change), flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -299,10 +392,12 @@ def train_gate(parts=("A", "B5", "B15")):
 
 
 def cost(m, kernel_name="Matern32", n=1000, iterations=20,
-         node=geoml.latent.BasicGP):
+         node=geoml.latent.BasicGP, experts=1, by_expert=False):
     """Seconds an iteration and the process's peak memory, training on `n`
-    uncertain locations with `m` inducing points; run in a fresh process
-    per setting, the peak being the process's."""
+    uncertain locations with `m` inducing points, divided among `experts`
+    (`by_expert`: an epoch of `train_by_expert` in place of an iteration,
+    both one pass over the data); run in a fresh process per setting, the
+    peak being the process's."""
     import resource
     import time
     rng = np.random.default_rng(0)
@@ -312,20 +407,29 @@ def cost(m, kernel_name="Matern32", n=1000, iterations=20,
     data.add_continuous_variable("v", np.sin(x[:, 0] / 15)
                                  + np.cos(x[:, 1] / 20))
     geoml.set_seed(0)
+    inducing = geoml.data.inducing.from_kmeans(data, m, seed=0)
+    if experts > 1:
+        inducing = geoml.data.inducing.experts(inducing, experts, seed=0)
     root = geoml.latent.GaussianInput(
-        geoml.data.inducing.from_kmeans(data, m, seed=0),
-        transform=geoml.transform.Isotropic(20.0))
+        inducing, transform=geoml.transform.Isotropic(20.0))
     gp = node(root, size=1, kernel=getattr(geoml.kernels, kernel_name)())
     model = geoml.models.VGPNetwork(
         data, "v", geoml.likelihood.Gaussian(geoml.warping.ZScore(1)), gp,
         options=geoml.models.GPOptions(verbose=False))
-    model.train_full(2)                       # the trace
-    start = time.perf_counter()
-    model.train_full(iterations)
-    seconds = (time.perf_counter() - start) / iterations
+    if by_expert:
+        model.train_by_expert(1)              # the traces
+        start = time.perf_counter()
+        model.train_by_expert(3)
+        seconds = (time.perf_counter() - start) / 3
+    else:
+        model.train_full(2)                   # the trace
+        start = time.perf_counter()
+        model.train_full(iterations)
+        seconds = (time.perf_counter() - start) / iterations
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2
-    print("m %d, %s, %s, n %d: %.3f s an iteration, peak %.2f GB"
-          % (m, kernel_name, type(gp).__name__, n, seconds, peak))
+    print("m %d in %d expert(s)%s, %s, %s, n %d: %.3f s a pass, peak %.2f GB"
+          % (m, experts, " by expert" if by_expert else "", kernel_name,
+             type(gp).__name__, n, seconds, peak))
 
 
 def main(argv):
@@ -336,6 +440,8 @@ def main(argv):
         if len(argv) > 1:
             _net._QUADRATURE_NODES = int(argv[1])
         walker(tuple(argv[2:]) or KERNELS)
+    elif command == "linear":
+        linear_part()
     elif command == "train":
         train_gate(tuple(argv[1:]) or ("A", "B5", "B15"))
     elif command == "cost":
@@ -344,6 +450,9 @@ def main(argv):
                 cost(int(argv[1]), argv[2])
         elif len(argv) > 3 and argv[3] == "uigp":
             cost(int(argv[1]), argv[2], node=geoml.latent.UncertainInputGP)
+        elif len(argv) > 3 and argv[3].startswith("experts="):
+            cost(int(argv[1]), argv[2], experts=int(argv[3][8:]),
+                 by_expert=len(argv) > 4 and argv[4] == "by")
         else:
             cost(int(argv[1]), argv[2] if len(argv) > 2 else "Matern32")
     else:

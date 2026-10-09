@@ -300,6 +300,42 @@ the breaking version.
 Seconds a training iteration and the process's peak, 1000 uncertain
 locations.
 
+Where the 1.24 s of a Matern32 step at 300 inducing points goes, gradient
+included: 0.90 s reading the kernel at the 64 points (0.42 s through plain
+distances, without the uncertain-input normalization that is exactly one
+at certain points), 0.18 s the trace against `(K + D)^-1`, 0.05 s the
+first moment. The trace taken through the Cholesky factor of `K + D` was
+measured 2.3 to 3.9 times slower as a triangular solve, and 1.2 times
+faster as a product with the factor's inverse -- 3% of a step. Reading
+the kernel at the points through plain distances costs 0.405 s through the
+differences and 0.245 s through the expansion `|x|² + |z|² - 2 x zᵀ`
+(within 3e-13), against the node's covariance's 0.913 s.
+
+**Experts do not make it cheaper in time**, measured 2026-10-09
+(`second_moment.py cost 300 Matern32 experts=K [by]`): the kernel at the
+points is read against every inducing point once, whatever the experts,
+and dominates; the trace, which experts do divide, is the smaller part.
+
+| m = 300 in | Seconds a pass | Peak |
+|---|---|---|
+| 1 expert | 1.24 | 6.0 GB |
+| 3 experts | 1.31 | 6.5 GB |
+| 6 experts | 1.30 | 7.0 GB |
+| 3 experts, `train_by_expert` | 1.52 | 3.6 GB |
+| 6 experts, `train_by_expert` | 1.54 | 2.5 GB |
+
+Training by expert buys memory instead: 2.4 times less at six experts.
+
+**Taking the input's linear part analytically buys nothing**, measured
+2026-10-09 (`second_moment.py linear`): the node set is symmetric and
+whitened to the input's covariance, so the quadrature already integrates
+the linear part of `k` exactly, and subtracting it as a control variate
+(`Cov k = J S Jᵀ + Cov(k - J delta)` and the cross terms) changes the
+variance by 1e-12 at most. The linear part alone -- the delta method, no
+quadrature -- misses by 29% to 100 times on Walker Lake, the kernels'
+slopes being local. Fewer points cost accuracy directly: 3-7% at 16, 2.5-7.5%
+at 32, 1.2-2.6% at 64 for this scramble.
+
 Measured on Walker Lake (`docs/benchmarks/second_moment.py`, one
 `BasicGP`, 100 inducing points, 200 locations, input variance a multiple
 of the squared range), the error against the mixture by Monte Carlo (3000
