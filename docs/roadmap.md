@@ -176,7 +176,9 @@ unchanged. Decided:
 2026-10-08, the two items below; for 0.9.0; **steps 1 and 1b built
 2026-10-08**: kernel errors 5.1e-4, 9.8e-6 and 9.1e-6, gate 1 unchanged,
 chapter 5's deep model 262 s to 74 s at 100 iterations with the same
-scores). Plan of record:
+scores; **step 2 built 2026-10-08**: Girard to 1e-10, Walker within 1.8%
+for all four kernels, `docs/benchmarks/second_moment.py`). Plan of
+record:
 1. **Tables.** `Exponential`, `Matern32` and `Matern52` read an uncertain
    input through 8 fitted Gaussians each (rates and weights stored as
    constants in `network.py`, weights summing to one; refitted by

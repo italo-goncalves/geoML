@@ -328,6 +328,14 @@ class _Joint(_collections.namedtuple("_Joint", "mean variance covariance")):
     """
 
 
+class _Second(_collections.namedtuple("_Second", "left jitter")):
+    """What the second moment adds to an expert's moments: `left`, the
+    variance its inducing points leave, `1 - explained` -- what the experts
+    are weighted by, the variance less the spread of the mean -- and
+    `jitter`, the latent variance its realizations leave out, or None where
+    it is not asked for."""
+
+
 class _Moments(tuple):
     """What `propagate` hands on: ``(mean, variance)``, each `[n, size]` and
     blended over the experts, unpacking as the pair it always was -- and
@@ -721,6 +729,74 @@ def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None,
                                _tf.equal(_tf.reduce_sum(v, -1), 0.0))
         total = _tf.where(same, _tf.ones_like(total), total)
         return (total, slope) if gradient else total
+
+
+def _kernel_items(kernel, ranges, weight=1.0):
+    """`kernel` at `ranges` as the Gaussians the second moment pairs up:
+    `(weight, rates)` per component, `weight * w_q exp(-sum rates d²)` over
+    the offsets in the input's own units, `rates` `[d]` (or `[1]`)."""
+    omega, weights, constant = _kernel_components(kernel)
+    if not isinstance(constant, float) or constant != 0.0:
+        raise NotImplementedError(
+            "the second moment takes the Gaussian kernel and the Matern "
+            "family's tables, not %s" % type(kernel).__name__)
+    r2 = _tf.reshape(ranges, [-1]) ** 2
+    return [(weight * weights[q], omega[q] / r2)
+            for q in range(int(omega.shape[0]))]
+
+
+def _second_moment_supported(kernel):
+    """Whether a GP node reading an uncertain input with `kernel` takes the
+    second moment: the Gaussian and the fitted tables -- not the rational
+    quadratic, whose 48 components make 1176 pairs."""
+    return type(kernel) is _kr.Gaussian or type(kernel) in _KERNEL_MIXTURES
+
+
+def _second_moment(items, mean, var, points, weights):
+    """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]` over `x ~ N(mean, var)` and
+    certain points `z`, the kernel given as `_kernel_items`.
+
+    `mean` and `var` are `[..., n, d]`, `points` `[..., m, d]` and `weights`
+    `[..., k, m, m]`, symmetric. Returns `[..., k, n]`.
+
+    Each pair of components `(a, b)` gives, per input dimension,
+    `exp(-ab/(a+b) (z_i - z_j)²)` times the expectation of
+    `exp(-(a+b) (x - z_ij)²)` about their weighted midpoint `z_ij`, which is
+    `(1 + 2(a+b)var)^(-1/2) exp(-(a e_i + b e_j)² / ((a+b)(1 + 2(a+b)var)))`
+    in the offsets `e = mean - z`. Expanded, the part tying `i`, `j` and the
+    location together is one bilinear form in the offsets, so the whole
+    exponent is one product of matrices, `[..., n, m, m]`, and never an
+    array with the dimensions on it as well.
+    """
+    with _tf.name_scope("second_moment"):
+        e = mean[..., :, None, :] - points[..., None, :, :]
+        gaps = (points[..., :, None, :] - points[..., None, :, :]) ** 2
+        ones = _tf.ones_like(e[..., :1])
+        total = None
+        for p in range(len(items)):
+            for q in range(p, len(items)):
+                (wa, a), (wb, b) = items[p], items[q]
+                c = a + b
+                inflated = 1.0 + 2.0 * c * var                 # [..., n, d]
+                scaled = e / (c * inflated)[..., :, None, :]
+                # the bilinear form with the squares and the normalization
+                # folded in as two more coordinates: left [2ab e/(c s), u + h,
+                # 1], right [e, 1, v], so one product gives every term
+                own = _tf.reduce_sum(a ** 2 * e * scaled, -1, keepdims=True) \
+                    + 0.5 * _tf.reduce_sum(_tf.math.log(inflated), -1)[
+                        ..., :, None, None]
+                other = _tf.reduce_sum(b ** 2 * e * scaled, -1, keepdims=True)
+                left = _tf.concat([2.0 * a * b * scaled, own, ones], -1)
+                right = _tf.concat([e, ones, other], -1)
+                exponent = _tf.matmul(left, right, transpose_b=True) \
+                    + _tf.reduce_sum(a * b / c * gaps, -1)[..., None, :, :]
+                term = _tf.einsum("...nij,...kij->...kn", _tf.exp(-exponent),
+                                  weights)
+                # the pair (b, a) is the transpose of (a, b), and the weights
+                # are symmetric
+                term = term * (wa * wb * (1.0 if p == q else 2.0))
+                total = term if total is None else total + term
+        return total
 
 
 def _graph_state(node):
@@ -1354,10 +1430,11 @@ class _GPNode(_FunctionalLatentVariable):
                 chain = _chain_of(parent) if _JOINT_PROPAGATION else None
                 if chain is not None and _certain(chain):
                     chain = None
-                cov_cross, mu, var, explained = \
-                    self._expert_moments(x, x_var, chain)
-                weights, w_mu, w_var, w_exp_var = \
-                    self._blend(mu, var, explained)
+                cov_cross, mu, var, explained, second = \
+                    self._expert_moments(x, x_var, chain, with_second=True)
+                weights, w_mu, w_var, w_exp_var = self._blend(
+                    mu, var, explained,
+                    None if second is None else second.left)
                 experts = self._chain(cov_cross, mu, var) \
                     if _wants_joint(self) else None
             self._sim_state = (cov_cross, mu, weights)
@@ -2155,7 +2232,8 @@ class BasicGP(_GPNode):
         self.inducing_points_variance = (
             _tf.reshape(points_var, [-1, self.size]),)
 
-    def _slot_expert_moments(self, x, x_var=None, chain=None):
+    def _slot_expert_moments(self, x, x_var=None, chain=None,
+                             with_second=False):
         """`_expert_moments` under slots, batched over them; `_blend`
         masks an empty slot out."""
         ips, ipvs = _slot_points(self.parent)
@@ -2169,11 +2247,24 @@ class BasicGP(_GPNode):
         cov_cross = cov_cross * pmask[:, None, :]
         mu = _tf.einsum("pab,psbc->psac", cov_cross, self.slots_alpha) \
             + self.slots_bias[:, None, None, None]
+        if chain is not None and self._takes_second_moment(
+                chain, [_slot_covariance(self.parent)]):
+            # a padded point reaches nothing: its row and column of every
+            # matrix the moments are read through are zero
+            outer = pmask[:, None, :, None] * pmask[:, None, None, :]
+            var, explained_var = self._mixture_moments(
+                chain[0], ips, self.slots_cov_smooth_inv * outer,
+                self.slots_alpha, mu[..., 0]
+                - self.slots_bias[:, None, None])
+            second = _Second(_tf.maximum(1.0 - explained_var, 0.0), None)
+            return (cov_cross, mu, var, explained_var) \
+                + ((second,) if with_second else ())
         explained_var = _tf.reduce_sum(
             _tf.einsum("pab,psbc->psac", cov_cross, self.slots_cov_smooth_inv)
             * cov_cross[:, None, :, :], axis=3)
         var = _tf.maximum(1.0 - explained_var, 0.0)
-        return cov_cross, mu, var, explained_var
+        return (cov_cross, mu, var, explained_var) \
+            + ((None,) if with_second else ())
 
     def _slot_simulate(self, n_sim, seed):
         """`simulate` under slots: the normals each expert draws in
@@ -2255,16 +2346,20 @@ class BasicGP(_GPNode):
                                 self.parameters["ranges"].get_value(),
                                 mean_x, var_x, mean_y, var_y, cov, gradient)
 
-    def _expert_moments(self, x, x_var=None, chain=None):
+    def _expert_moments(self, x, x_var=None, chain=None, with_second=False):
         """Each active expert's moments at already-propagated locations:
         the covariance with its inducing points, its mean `[size, n, 1]`,
         and its variance and the variance it explains `[size, n]` -- lists
         over the experts, the variances stacked, or under slots tensors
         with a leading slot axis. `chain`, the parent's chain under the
-        expected kernel, takes the place of `x` and `x_var`."""
+        expected kernel, takes the place of `x` and `x_var`. With
+        `with_second`, also a `_Second` where the second moment is taken
+        (the variances in it stacked or batched as the variance), and None
+        where it is not."""
         with _tf.name_scope("basic_interpolation"):
             if _slots_of(self.root) is not None:
-                return self._slot_expert_moments(x, x_var, chain)
+                return self._slot_expert_moments(x, x_var, chain,
+                                                 with_second)
             ids = _active_experts(self.root)
             ips, ipvs = self._parent_points(ids)
             if chain is None:
@@ -2285,6 +2380,19 @@ class BasicGP(_GPNode):
                 for mat, vec, b in zip(cov_cross, self.alpha, bias)
             ]
 
+            if chain is not None and self._takes_second_moment(
+                    chain, _covariances_of(self.parent, ids)):
+                moments = [
+                    self._mixture_moments(e, ip, inv, a, m[..., 0] - b)
+                    for e, ip, inv, a, m, b in zip(
+                        chain, ips, self.cov_smooth_inv, self.alpha, mu, bias)]
+                var = _tf.stack([v for v, _ in moments], axis=0)
+                explained_var = [x for _, x in moments]
+                second = _Second(_tf.maximum(
+                    1.0 - _tf.stack(explained_var, axis=0), 0.0), None)
+                return (cov_cross, mu, var, explained_var) \
+                    + ((second,) if with_second else ())
+
             explained_var = [
                 _tf.reduce_sum(
                     _tf.einsum("ab,sbc->sac", m1, m2) * m1[None, :, :],
@@ -2293,14 +2401,21 @@ class BasicGP(_GPNode):
                 for m1, m2 in zip(cov_cross, self.cov_smooth_inv)
             ]
             var = _tf.stack([_tf.maximum(1.0 - v, 0.0) for v in explained_var], axis=0)
-            return cov_cross, mu, var, explained_var
+            return (cov_cross, mu, var, explained_var) \
+                + ((None,) if with_second else ())
 
-    def _blend(self, mu, var, explained_var):
+    def _blend(self, mu, var, explained_var, left=None):
         """The experts' moments blended by their weights: the weights, the
-        mean `[size, n, 1]`, the variance and the explained variance."""
+        mean `[size, n, 1]`, the variance and the explained variance.
+
+        An expert is weighted by the variance its inducing points leave:
+        the variance itself, or `left` where the second moment adds to the
+        variance the spread of the mean over an uncertain input, which says
+        nothing of how well the expert knows the ground there."""
+        weigh = var if left is None else left
         slots = _slots_of(self.root)
         if slots is not None:
-            raw_w = ((1.0 - var) / (var + 1e-6) + 1e-6) \
+            raw_w = ((1.0 - weigh) / (weigh + 1e-6) + 1e-6) \
                 * slots.mask[:, None, None]
             weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
             w_mu = _tf.reduce_sum(mu * weights[:, :, :, None], axis=0)
@@ -2308,12 +2423,53 @@ class BasicGP(_GPNode):
             w_exp_var = _tf.reduce_sum(explained_var * weights, axis=0)
             return weights, w_mu, w_var, w_exp_var
 
-        weights = _GPNode.get_expert_weights(var)
+        weights = _GPNode.get_expert_weights(weigh)
 
         w_mu = _tf.reduce_sum(_tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0)
         w_var = _tf.reduce_sum(_tf.stack(var, axis=0) * weights, axis=0)
         w_exp_var = _tf.reduce_sum(_tf.stack(explained_var, axis=0) * weights, axis=0)
         return weights, w_mu, w_var, w_exp_var
+
+    def _takes_second_moment(self, chain, covariances):
+        """Whether the moments at an uncertain input are completed by the
+        second moment: under the expected kernel, where the input is
+        uncertain and its inducing points are not -- an input's own output,
+        through nodes acting row by row -- and the kernel is one the second
+        moment takes."""
+        return (self._READS_CHAIN
+                and all(e.covariance is None for e in chain)
+                and all(c is None for c in covariances)
+                and _second_moment_supported(self.kernel))
+
+    def _kernel_items(self):
+        """The kernel as the Gaussians `_second_moment` pairs up."""
+        return _kernel_items(self.kernel,
+                             self.parameters["ranges"].get_value())
+
+    def _second_moments(self, mean, var, points, weights):
+        """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]`, `[..., k, n]`: see
+        `_second_moment`."""
+        return _second_moment(self._kernel_items(), mean, var, points,
+                              weights)
+
+    def _mixture_moments(self, chain, points, smooth_inv, alpha, offset):
+        """One expert's variance and explained variance at an uncertain
+        input over certain inducing points: the mixture's, exactly.
+
+        With `L = E[k(x, z) k(x, z)ᵀ]`, the posterior's variance averaged
+        over the input is `1 - tr((K + D)^-1 L)`, the variance of its mean
+        `alphaᵀ L alpha - (l alpha)²` (Girard's second moment), and the
+        variance explained is the first trace. `offset` is the expected
+        kernel's mean less the bias, `l alpha`, `[..., size, n]`."""
+        var = chain.variance
+        if var is None:
+            var = _tf.zeros_like(chain.mean)
+        outer = alpha * _tf.linalg.matrix_transpose(alpha)
+        moments = self._second_moments(chain.mean, var, points,
+                                       _tf.concat([smooth_inv, outer], -3))
+        explained = moments[..., :self.size, :]
+        spread = _tf.maximum(moments[..., self.size:, :] - offset ** 2, 0.0)
+        return _tf.maximum(1.0 - explained, 0.0) + spread, explained
 
     def _chain(self, cov_cross, mu, var):
         """What this node hands a GP node above it under the expected
@@ -2453,7 +2609,9 @@ class AdditiveGP(BasicGP):
             dif = x[:, None, :] - y[None, :, :]
 
             total_var = ranges**2 + (var_x + var_y) / 2
-            dist = dif / _tf.sqrt(total_var)
+            # a distance, so never negative: the Matern kernels read a
+            # negative one as a growing exponential
+            dist = _tf.abs(dif) / _tf.sqrt(total_var)
             cov = self.kernel.kernelize(dist)
 
             # normalization
@@ -2487,6 +2645,33 @@ class AdditiveGP(BasicGP):
         # each dimension's kernel moves with its own coordinate only
         return (_tf.reduce_mean(_tf.stack([p[0] for p in parts], -1), -1),
                 _tf.concat([p[1] for p in parts], axis=-1) / self.parent.size)
+
+    def _second_moments(self, mean, var, points, weights):
+        # the mean of one kernel per dimension: two dimensions' kernels are
+        # independent over an input whose dimensions are, so a pair of them
+        # is the product of their first moments, and a dimension with
+        # itself its own second moment --
+        # L = (s sᵀ - sum_d l_d l_dᵀ + sum_d L_d) / D², s = sum_d l_d
+        size = self.parent.size
+        ranges = self.parameters["ranges"].get_value() \
+            * _tf.ones([1, 1, size], _tf.float64)
+        own, firsts = [], []
+        for d in range(size):
+            column = slice(d, d + 1)
+            own.append(_second_moment(
+                _kernel_items(self.kernel, ranges[..., column]),
+                mean[..., column], var[..., column], points[..., column],
+                weights))
+            firsts.append(_expected_kernel(
+                self.kernel, ranges[..., column], mean[..., column],
+                var[..., column], points[..., column], None))
+
+        def form(first):                       # first [..., n, m]
+            return _tf.einsum("...ni,...kij,...nj->...kn", first, weights,
+                              first)
+
+        return (form(_tf.add_n(firsts)) - _tf.add_n([form(f) for f in firsts])
+                + _tf.add_n(own)) / size ** 2
 
 
 class UncertainInputGP(BasicGP):
@@ -4515,6 +4700,15 @@ class MultiStructureGP(BasicGP):
             return _tf.add_n([p * weights[n] for n, p in enumerate(parts)])
         return (_tf.add_n([p[0] * weights[n] for n, p in enumerate(parts)]),
                 _tf.add_n([p[1] * weights[n] for n, p in enumerate(parts)]))
+
+    def _kernel_items(self):
+        # every structure's components, each weighted by its structure: a
+        # pair across two structures pairs Gaussians of two ranges
+        weights = self.parameters["weights"].get_value()
+        return [item for n in range(self.n_structures)
+                for item in _kernel_items(
+                    self.kernel, self.parameters[f"ranges_{n}"].get_value(),
+                    weights[n])]
 
 
 class GradientConstrainedInput(_RootLatentVariable):

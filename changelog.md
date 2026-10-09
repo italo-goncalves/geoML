@@ -23,6 +23,24 @@ uncertainty), the rational quadratic through 48 that follow its `scale`
 old rule's. A single-layer model is unchanged to the
 bit. Design record and measurements: `docs/expected-kernel.md`,
 `docs/benchmarks/expected_kernel.py`; the research: Lu & Shafto (2021).
+* **A GP at an uncertain input takes the mixture's moments** under the
+expected kernel, where its inducing points are certain (a `GaussianInput`
+root, through nodes acting row by row): the expected kernel alone averages
+the kernel before the posterior is formed and misses that the posterior's
+mean moves with the input, overstating the variance by up to 130% on
+Walker Lake; Girard's second moment completes it, `var = 1 - tr((K + D)^-1
+L) + alphaᵀ L alpha - (l alpha)²` with `L = E[k(x, z) k(x, z)ᵀ]` in closed
+form per pair of the kernel's Gaussians. Within 2% of the mixture by Monte
+Carlo in mean and variance at every input variance tried, for the
+Gaussian, exponential, Matern32 and Matern52 kernels, below the 32-node
+quadrature of `UncertainInputGP`; `BasicGP`, `MultiStructureGP` and
+`AdditiveGP`. The rational quadratic and deep networks keep the first
+moment. An expert is weighted by the variance its inducing points leave,
+which is the variance itself wherever the second moment is not taken.
+* **`AdditiveGP` reads a distance as a distance**: its covariance handed the
+kernel the signed difference in each dimension, which the Matérn kernels
+read as a growing exponential on one side; the Gaussian, exponential and
+spherical kernels square or root it and are unchanged to the bit.
 * **Saved models keep the rule they were trained with.** An older save
 opens with `propagation="marginal"` and `expert_propagation="consensus"`,
 under which the code is the old code -- a deep network, three experts,

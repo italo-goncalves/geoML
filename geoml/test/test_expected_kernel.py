@@ -15,8 +15,10 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """The expected kernel, E[k(h(x), h(y))] over jointly Gaussian inputs."""
 import numpy as np
+import pandas as pd
 import pytest
 import tensorflow as tf
+from scipy.stats import norm, qmc
 
 import geoml
 from geoml.latent import network as _net
@@ -687,3 +689,185 @@ def test_every_batch_runs_under_the_model_s_rule():
     samples = model.predict_measurements(_grid(), n_sim=2)
     assert np.all(np.isfinite(samples["V"]))
 
+
+# --------------------------------------------------------------------------- #
+# the second moment
+# --------------------------------------------------------------------------- #
+NODES = {"basic": geoml.latent.BasicGP,
+         "multi": geoml.latent.MultiStructureGP,
+         "additive": geoml.latent.AdditiveGP}
+
+
+def _uncertain_data(x, var=None):
+    data = geoml.data.PointData.from_array(x, ["X", "Y"]) if var is None \
+        else geoml.data.GaussianData(
+            pd.DataFrame({"X": x[:, 0], "Y": x[:, 1], "VX": var[:, 0],
+                          "VY": var[:, 1]}), ["X", "Y"], ["VX", "VY"])
+    data.add_continuous_variable("v", np.sin(x[:, 0] / 20))
+    data.add_continuous_variable("w", np.cos(x[:, 1] / 15))
+    return data
+
+
+def _uncertain_model(kernel=None, node="basic", n_experts=1, seed=5,
+                     var=None):
+    """A GP of two outputs on an uncertain input, its posterior made
+    informative by hand."""
+    geoml.set_seed(seed)
+    rng = np.random.default_rng(seed)
+    data = _uncertain_data(rng.uniform(0, 100, [80, 2]), var)
+    ip = geoml.data.inducing.from_kmeans(
+        data, 30 if n_experts == 1 else 20 * n_experts, seed=0)
+    if n_experts > 1:
+        ip = geoml.data.inducing.experts(ip, n_experts, seed=0)
+    root = geoml.latent.GaussianInput(ip, geoml.transform.Isotropic(40))
+    leaf = NODES[node](root, size=2, kernel=kernel)
+    model = geoml.models.VGPNetwork(
+        data, {"v": geoml.likelihood.Gaussian(),
+               "w": geoml.likelihood.Gaussian()}, latent_network=leaf,
+        options=geoml.models.GPOptions(verbose=False))
+    for i in range(root.n_experts):
+        leaf.parameters["alpha_white_%d" % i].set_value(
+            rng.normal(size=[2, root.n_ip[i], 1]))
+        leaf.parameters["delta_%d" % i].set_value(
+            np.full([2, root.n_ip[i]], 0.05))
+        leaf.parameters["bias_%d" % i].set_value(0.3)
+    if node == "multi":
+        leaf.parameters["ranges_0"].set_value(np.full([1, 1, 2], 0.9))
+        leaf.parameters["ranges_1"].set_value(np.full([1, 1, 2], 0.35))
+        leaf.parameters["weights"].set_value(np.array([0.6, 0.4]))
+    else:
+        leaf.parameters["ranges"].set_value(np.array([[[0.5, 0.8]]]))
+    return model, leaf
+
+
+def _queries(leaf, level, n=15, seed=9):
+    """Locations, and variances `level` times the squared ranges -- the
+    longest structure's -- in the input's own units."""
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(10, 90, [n, 2])
+    name = "ranges_0" if "ranges_0" in leaf.parameters else "ranges"
+    ranges = np.asarray(leaf.parameters[name].get_value()).ravel() * 40
+    return x, np.broadcast_to(level * ranges ** 2, x.shape).copy()
+
+
+def _node_moments(model, leaf, x, var):
+    """The node's mean and variance at the uncertain locations, `[n,
+    size]`, and the locations in the transformed space."""
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        mean, variance = leaf.propagate(tf.constant(x), tf.constant(var))
+        x_tr, var_tr = leaf.root.propagate(tf.constant(x), tf.constant(var))
+    return (np.asarray(mean), np.asarray(variance), np.asarray(x_tr),
+            np.asarray(var_tr))
+
+
+def _mixture(model, leaf, x_tr, var_tr, points=4096):
+    """The exact mixture's mean and variance, `[n, size]`: the posterior at
+    known points, over scrambled Sobol points of each input's Gaussian."""
+    nodes = norm.ppf(qmc.Sobol(2, scramble=True, seed=0).random(points))
+    draws = x_tr[:, None, :] + np.sqrt(var_tr)[:, None, :] * nodes[None]
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        mu, v = leaf.interpolate(tf.constant(draws.reshape(-1, 2)), None)
+    mu = np.asarray(mu)[:, :, 0].reshape(2, len(x_tr), points)
+    v = np.asarray(v).reshape(2, len(x_tr), points)
+    return mu.mean(-1).T, (v.mean(-1) + mu.var(-1)).T
+
+
+def test_the_second_moment_is_girard_s_for_the_gaussian_kernel():
+    model, leaf = _uncertain_model()
+    for level in (0.05, 0.5, 2.0):
+        x, var = _queries(leaf, level)
+        mean, variance, u, s = _node_moments(model, leaf, x, var)
+        # Girard's closed form, written out: geoML's Gaussian kernel is
+        # exp(-3 d² / w²), a Gaussian of squared width w² / 6
+        z = np.asarray(leaf.parent.inducing_points[0])
+        w = np.asarray(leaf.parameters["ranges"].get_value()).ravel()
+        s2 = w ** 2 / 6.0
+        c1 = np.prod((1 + s / s2) ** -0.5, axis=1)
+        ell = c1[:, None] * np.exp(-((u[:, None] - z[None]) ** 2
+                                     / (2 * (s2 + s)[:, None])).sum(-1))
+        c2 = np.prod((1 + 2 * s / s2) ** -0.5, axis=1)
+        mid = 0.5 * (z[:, None] + z[None])
+        pair = np.exp(-((z[:, None] - z[None]) ** 2 / (4 * s2)).sum(-1))
+        bias = float(leaf.parameters["bias_0"].get_value())
+        for out in range(2):
+            alpha = np.asarray(leaf.alpha[0])[out, :, 0]
+            inv = np.asarray(leaf.cov_smooth_inv[0])[out]
+            expected = []
+            for i in range(len(u)):
+                big = c2[i] * pair * np.exp(-((u[i] - mid) ** 2
+                                              / (s2 + 2 * s[i])).sum(-1))
+                expected.append(1.0 - np.sum(inv * big) + alpha @ big @ alpha
+                                - (ell[i] @ alpha) ** 2)
+            np.testing.assert_allclose(mean[:, out], ell @ alpha + bias,
+                                       rtol=1e-10, atol=1e-12)
+            np.testing.assert_allclose(variance[:, out], expected,
+                                       rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("name", ["Gaussian", "Exponential", "Matern32",
+                                  "Matern52"])
+@pytest.mark.parametrize("node", list(NODES))
+def test_the_moments_are_the_mixture_s(node, name):
+    model, leaf = _uncertain_model(KERNELS[name](), node)
+    for level in (0.05, 0.3, 1.0):
+        x, var = _queries(leaf, level)
+        mean, variance, u, s = _node_moments(model, leaf, x, var)
+        exact_mean, exact_var = _mixture(model, leaf, u, s)
+        for got, want in ((mean, exact_mean), (variance, exact_var)):
+            error = np.mean(np.abs(got - want)) / np.mean(np.abs(want))
+            assert error < 0.02, (level, error)
+
+
+def test_no_input_variance_takes_no_second_moment():
+    # zero variance: the mixture is one point, and the moments are the
+    # kernel's; no variance at all: the plain kernel, as always
+    model, leaf = _uncertain_model()
+    x, var = _queries(leaf, 0.0)
+    with_zeros = _node_moments(model, leaf, x, var)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        mean, variance = leaf.propagate(tf.constant(x), None)
+    np.testing.assert_allclose(with_zeros[0], mean, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(with_zeros[1], variance, rtol=1e-10,
+                               atol=1e-12)
+
+
+def test_the_rational_quadratic_keeps_the_first_moment():
+    model, leaf = _uncertain_model(KERNELS["RationalQuadratic"]())
+    x, var = _queries(leaf, 1.0)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        parent = leaf.parent.propagate(tf.constant(x), tf.constant(var))
+        assert not leaf._takes_second_moment(parent.experts, [None])
+        _, variance = leaf.propagate(tf.constant(x), tf.constant(var))
+    assert np.all(np.isfinite(np.asarray(variance)))
+
+
+def _uncertain_targets(n=40, seed=12):
+    rng = np.random.default_rng(seed)
+    return _uncertain_data(rng.uniform(0, 100, [n, 2]),
+                           rng.uniform(0, 400, [n, 2]))
+
+
+def test_the_slots_take_the_second_moment_as_the_sets_do():
+    model, _ = _uncertain_model(n_experts=3)
+    a, b = _uncertain_targets(), _uncertain_targets()
+    model.predict(a, n_sim=4)
+    info = model.predict_by_expert(b, n_sim=4, coverage=1.0)
+    assert info["slots"] == 3
+    for path in ("v/latent_mean", "v/latent_variance", "w/latent_variance"):
+        np.testing.assert_allclose(a.values(path), b.values(path),
+                                   rtol=1e-9, atol=1e-12)
+
+
+def test_a_model_trains_on_uncertain_locations():
+    # some locations exact, the rest uncertain
+    var = np.random.default_rng(3).choice([0.0, 25.0, 400.0], [80, 2])
+    model, _ = _uncertain_model(KERNELS["Matern32"](), n_experts=2, var=var)
+    model.train_full(10)
+    assert np.all(np.isfinite(model.training_log))
+    targets = _uncertain_targets()
+    model.predict(targets, n_sim=3)
+    assert np.all(np.isfinite(targets.values("v/latent_variance")))

@@ -243,7 +243,63 @@ covariance within 0.05 on a correlation scale), one expert:
 Accurate to a reach of a fifth of the field's range; beyond it the
 linearized spread errs both ways (without the unexplained part it fell
 short only, to a ratio of 0.14 at amp 8). The folded section trains to a
-reach of 0.3.
+reach of 0.3. With the field's slope read in closed form the folded
+section's walk network trains its 2000 iterations in 48 s, against 53 to
+56 s through forward-mode passes, to the same scores.
+
+## The second moment
+
+Where the inducing points are certain -- a `GaussianInput` root, through
+nodes acting row by row -- and the input is uncertain, the expected kernel
+alone gets the moments wrong: averaging the kernel before the posterior is
+formed leaves out that the posterior's mean moves with the input. A GP
+node there completes them with Girard's second moment, `L = E[k(x, z)
+k(x, z)ᵀ]` beside `l = E[k(x, z)]`:
+
+    var = 1 - tr((K + D)^-1 L) + alphaᵀ L alpha - (l alpha)²
+
+the posterior's variance averaged over the input plus the variance of its
+mean, which is the mixture's exactly; the explained variance is the trace,
+`tr((K + D)^-1 L)`, and an expert is weighted by what that leaves, since
+the spread of the mean says nothing of how well the expert knows the
+ground. Each pair of the kernel's Gaussians `(a, b)` gives, per input
+dimension, `exp(-ab/(a+b) (z_i - z_j)²)` times the expectation of
+`exp(-(a+b)(x - z_ij)²)` about their weighted midpoint -- one pair for the
+Gaussian kernel, 36 for a Matérn table (a pair and its transpose taken
+once), and for `MultiStructureGP` every pair across its structures' tables.
+The part tying `i`, `j` and the location together is a bilinear form in the
+offsets `x - z`, so the exponent of a pair is one product of matrices,
+`[n, m, m]`, never an array with the dimensions on it as well. An
+`AdditiveGP` reads its dimensions as independent: `L = (s sᵀ - sum_d l_d
+l_dᵀ + sum_d L_d) / D²`, `s = sum_d l_d`. The rational quadratic keeps the
+first moment alone: its 48 components would make 1176 pairs. Deep networks,
+whose inducing points are themselves uncertain, keep it too; that is its
+own roadmap item.
+
+Measured on Walker Lake (`docs/benchmarks/second_moment.py`, one
+`BasicGP`, 100 inducing points, 200 locations, input variance a multiple
+of the squared range), the error against the mixture by Monte Carlo (3000
+draws a location), relative to its mean; the Matérn kernels lie between
+these two:
+
+| Kernel | var / r² | Variance, second moment | Variance, first alone | Paciorek | Quadrature, 32 nodes | Mean, second moment | Mean, Paciorek |
+|---|---|---|---|---|---|---|---|
+| Gaussian | 0.01 | 0.007 | 0.627 | 0.281 | 0.009 | 0.007 | 0.112 |
+| Gaussian | 0.1 | 0.013 | 1.317 | 0.727 | 0.031 | 0.018 | 0.613 |
+| Gaussian | 1 | 0.009 | 0.468 | 0.899 | 0.019 | 0.015 | 0.602 |
+| Gaussian | 3 | 0.005 | 0.176 | 0.855 | 0.029 | 0.012 | 0.712 |
+| Exponential | 0.01 | 0.006 | 0.408 | 0.380 | 0.023 | 0.013 | 0.613 |
+| Exponential | 0.1 | 0.007 | 0.440 | 0.664 | 0.025 | 0.012 | 0.680 |
+| Exponential | 1 | 0.003 | 0.098 | 0.764 | 0.012 | 0.007 | 0.681 |
+| Exponential | 3 | 0.002 | 0.037 | 0.640 | 0.008 | 0.005 | 0.620 |
+
+The largest error of the second moment, mean or variance, is 0.018
+(Gaussian), 0.013 (exponential), 0.014 (Matern32) and 0.015 (Matern52),
+the Monte Carlo's own included -- within the 2% gate everywhere, and below
+the 32-node quadrature `UncertainInputGP` takes. The first moment alone
+overstates the variance by up to 130%: `tr((K + D)^-1 L)` exceeds `l (K +
+D)^-1 lᵀ`, and the spread of the mean is missing. For the Gaussian kernel
+the node is Girard's closed form to 1e-10 (`test_expected_kernel.py`).
 
 ## Gate 3: chapter 5
 
