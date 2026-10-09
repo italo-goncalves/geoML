@@ -86,20 +86,23 @@ with the uncertainty accumulated so far (an uncertain walker slows down),
 the field's variance its inducing points leave unexplained moves each point
 on its own (so far from the data a walk is uncertain), and each realization
 walks a realization of the field, the field's slope read in closed form.
-The walk adds no KL of its own: the field's prices the deformation, and **a
-GP node reading the walk keeps its ranges where they start**, the walk's
-unit -- stretching the walked coordinates and lengthening the ranges that
-read them give the same function, and training settled that trade toward
-a long range on a near-certain deformation (calibration 1.97 to 2.74 on
-the folded section's three seeds). On the folded section the walk network
-scores -5.0 a new hole on average over three seeds against -31.7 under the
-old rule (a VGP -12.2), and its intervals err wide where they err
-(calibration 0.35-1.17). Measured and dropped on the way: a displacement
-term (-10.7, calibration up to 2.24), a proper prior through the field's
-fixed scale (no scale works on every seed), a stronger prior on the leaf's
-range (-6.8), and an uncertain `amp` (its uncertainty collapsed). The
-marginal rule's displacement term and `precision` are ignored and
-deprecated. Without the unexplained variance chapter 16's rock model put a
+The walk adds no KL of its own: the field's prices the deformation. **Build
+the GP that reads the walk with `isotropic=True`** (documented, not
+enforced): a range per dimension in the reader is a second description of
+the anisotropy the walk already bends, and training settled that trade on
+a stretched reader over a near-certain walk (calibration 1.97 to 2.74 on
+the folded section's three seeds). With an isotropic reader the walk
+network scores -6.1 a new hole on average over three seeds against -31.7
+under the old rule (a VGP -12.2), its intervals erring wide where they err
+(calibration 0.45-1.14); the anisotropy the model starts from belongs in
+the input's transform. Chapters 16 and 17 build their readers that way.
+Measured and dropped on the way: a displacement term (-10.7, calibration
+up to 2.24), a proper prior through the field's fixed scale (no scale
+works on every seed), a stronger prior on the reader's ranges (no effect
+once it is isotropic), an uncertain `amp` (its uncertainty collapsed), and
+the reader's ranges held where they start (-5.0, but a fixed scale the user
+did not choose). The marginal rule's displacement term and `precision` are
+ignored and deprecated. Without the unexplained variance chapter 16's rock model put a
 confident region over unsampled ground. Fixed draws of the field walked
 exactly were measured as an alternative and dropped: no better, at 3 to 6
 times the cost.

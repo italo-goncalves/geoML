@@ -90,7 +90,10 @@ inner GP of two columns moves the coordinates, `GPWalk` integrates that
 movement over a few steps, and the rock-type fields are modelled on the
 result. A stationary kernel in the moved space is a non-stationary one in
 the real space, which is chapter 5's argument applied to a contact rather
-than to a grade.
+than to a grade. The rock GP reading the walk is isotropic: the walk
+already bends the space, and a range per direction on top of it would be a
+second way to say the same thing, which training resolves into a
+stretched, overconfident reader.
 
 ```python
 displacement = geoml.latent.BasicGP(
@@ -99,7 +102,8 @@ displacement = geoml.latent.BasicGP(
 walked = geoml.latent.GPWalk(displacement, n_steps=5)
 
 rock_gp = geoml.latent.BasicGP(
-    walked, size=len(rocks), kernel=geoml.kernels.Matern32())
+    walked, size=len(rocks), kernel=geoml.kernels.Matern32(),
+    isotropic=True)
 ```
 
 **The geology reaches the grades as a trend that is added to them.** A

@@ -156,9 +156,10 @@ unchanged. Decided:
   calibration back to 0.8.8's); the calibration's was an unpriced
   deformation, which the walk's displacement KL fixed on one seed (1.97 ->
   1.26, score -10.46) where priors on `amp` changed nothing. **Replaced
-  2026-10-09** (the user's order of fixes, three seeds): a GP node reading
-  the walk keeps its ranges, the walk adds no KL, and the displacement term
-  is deprecated with `precision` -- see "A principled price for the walk".
+  2026-10-09** (the user's order of fixes, three seeds): the walk adds no
+  KL, the GP reading it is advised to be isotropic, and the displacement
+  term is deprecated with `precision` -- see "A principled price for the
+  walk".
   The walk is accurate to a reach of a fifth of the field's range and errs
   both ways beyond it.
   Record: `docs/expected-kernel.md`, "The walk".
@@ -262,11 +263,15 @@ inputs (Paciorek's theorem, by congruence) and not guaranteed with
 correlated ones, though no failure turned up on near-singular lattices.
 
 **M — A principled price for the walk** (from the expected kernel,
-2026-10-08; **settled 2026-10-09**: the leaf's ranges held, the field's KL
-the only price -- -5.0 a new hole on the folded section's three seeds
-against the displacement term's -10.7, intervals erring wide (calibration
-0.35-1.17) where the term's erred narrow (1.14-2.24). The fixes tried in
-the user's order: a proper zero-displacement prior through the field's
+2026-10-08; **settled 2026-10-09**: the field's KL the only price, and the
+GP reading the walk built isotropic -- documented, not enforced -- -6.1 a
+new hole on the folded section's three seeds against the displacement
+term's -10.7, intervals erring wide (calibration 0.45-1.14) where the
+term's erred narrow (1.14-2.24). The reader's ranges held where they start
+scored -5.0 and were the library's for a day; the user's reading of
+chapter 17 put the trouble in the ranges differing between dimensions, not
+their scale, and the starting anisotropy in the input's transform, where
+the user sets it. The fixes tried in the user's order: a proper zero-displacement prior through the field's
 fixed scale (`amp` 0.3, 1, 3: -12.3, -12.3, -9.5, no scale right on every
 seed), the trade-off priced (the leaf's range prior at 10 and 50: -9.8 and
 -6.8; held at 0.5, 1, 2: -5.3, -5.0, -5.4), and an uncertain `amp`
@@ -2050,9 +2055,9 @@ refits):
 - **Deprecated in 0.9.0** (ignored under `"joint"`, removed here):
   `GPWalk`'s `precision` parameter and the variance shrinking it drives,
   and the walk's displacement term, `1/2 sum (moved - start)² / spread²`
-  over the walked inducing points -- replaced under `"joint"` by holding
-  the ranges of the GP node that reads the walk (measured 2026-10-09: -5.0
-  a new hole on the folded section against -10.7).
+  over the walked inducing points -- replaced under `"joint"` by an
+  isotropic GP reading the walk, documented (measured 2026-10-09: -6.1 a
+  new hole on the folded section against -10.7).
 Measure nothing new for it: it removes code whose replacement the 0.9.0
 gates passed.
 

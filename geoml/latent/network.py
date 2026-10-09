@@ -4196,13 +4196,19 @@ class GPWalk(_FunctionalLatentVariable):
     its inducing points leave unexplained -- the whole prior far from them --
     moves each point on its own, so far from the data a walk is uncertain.
     Each realization walks a realization of the field. The walk adds no
-    random variable of its own: the field's KL prices the deformation, and
-    a GP node reading the walk keeps its ranges where they start, the
-    walk's unit -- stretching the walked coordinates and lengthening the
-    ranges that read them would give the same function. Under the marginal
-    rule of the versions before, a KL term prices the inducing points'
-    displacement against the walk's spread instead, and `precision` shrinks
-    the variance at each step; both are deprecated, and ignored here.
+    random variable of its own: the field's KL prices the deformation.
+    Under the marginal rule of the versions before, a KL term prices the
+    inducing points' displacement against the walk's spread instead, and
+    `precision` shrinks the variance at each step; both are deprecated, and
+    ignored here.
+
+    Build the GP that reads the walk with `isotropic=True`. The walk
+    already bends the space, so a range per dimension in its reader is a
+    second way to say the same thing, and training settles the trade on a
+    reader stretched along one axis over a near-certain walk -- intervals
+    too narrow on new data. The anisotropy the model starts from belongs in
+    the input's transform, where it carries what is known beforehand, and
+    the reader's one range is relative to it.
     """
     def __init__(self, parent, step=0.01, n_steps=10, name=None):
         """
@@ -4623,11 +4629,10 @@ class GPWalk(_FunctionalLatentVariable):
         Under the marginal rule, the inducing points' displacement against
         the walk's own spread where they land. Under the expected kernel the
         walk adds no random variable of its own, so nothing: the field's KL
-        prices the deformation, and the GP node reading the walk keeps its
-        ranges (`VGPNetwork._hold_walk_ranges`). The displacement term did
-        that job by a heuristic -- calibration 1.97 to 1.26 on the folded
-        section's first seed, 2.24 on another -- and holding the ranges
-        scored -5.0 a new hole on three seeds against its -10.7."""
+        prices the deformation. The displacement term did that job by a
+        heuristic -- calibration 1.97 to 1.26 on the folded section's first
+        seed, 2.24 on another -- and an isotropic GP reading the walk scored
+        -6.1 a new hole on three seeds against its -10.7."""
         if _JOINT_PROPAGATION:
             if _slots_of(self.root) is not None:
                 return _tf.zeros([_slots_of(self.root).size], _tf.float64)

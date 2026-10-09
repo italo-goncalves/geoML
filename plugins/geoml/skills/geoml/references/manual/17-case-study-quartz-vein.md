@@ -139,9 +139,9 @@ at the data and free to move during training. Both models in this chapter
 share that construction, so it is worth naming once.
 
 ```python
-def implicit_model(root_node, data, iterations=120):
+def implicit_model(root_node, data, iterations=120, isotropic=False):
     """A one-field implicit model on the given input node."""
-    field = geoml.latent.BasicGP(root_node, size=1)
+    field = geoml.latent.BasicGP(root_node, size=1, isotropic=isotropic)
     indicators = geoml.latent.Linear(field, size=2)
 
     model = geoml.models.VGPNetwork(
@@ -170,7 +170,11 @@ Chapter 5's argument, applied. Rather than asking one ellipsoid to
 describe a folded surface, let a *vector field* move the coordinates and
 model a stationary field in the moved space. `GPWalk` integrates the
 movement in a few steps, and everything downstream is unchanged: the same
-one-field implicit model, reading transformed coordinates.
+one-field implicit model, reading transformed coordinates -- with one range
+instead of three. The ellipsoid still carries the anisotropy the model
+starts from; the walk bends the space from there, and a range per
+direction in the field reading it would be a second way to say the same
+thing, which training resolves into a stretched, overconfident field.
 
 ```python
 deep_input = geoml.latent.BasicInput(
@@ -182,7 +186,7 @@ deep_input = geoml.latent.BasicInput(
 displacement = geoml.latent.BasicGP(deep_input, size=3)
 walked = geoml.latent.GPWalk(displacement, n_steps=5)
 
-deep_model = implicit_model(walked, dense)
+deep_model = implicit_model(walked, dense, isotropic=True)
 
 figure, axes = plt.subplots(figsize=(7, 4.2))
 axes.plot(flat_model.training_log, label="stationary")
@@ -203,25 +207,31 @@ question chapter 13 exists to answer, and the honest check is below.
 ## 17.5 The surfaces
 
 The deliverable is the zero level set of the vein's indicator. Contour it
-out of a grid, then predict *onto the resulting surface* so that every
-triangle carries the model's uncertainty there. Both models get the same
-treatment, on the same grid.
+out of a block model, then predict *onto the resulting surface* so that
+every triangle carries the model's uncertainty there. The blocks start at
+20 m and `refine` (chapter 8) cuts them down to 2.5 m wherever the
+vein's boundary runs through them, so the resolution goes to the contact
+and nowhere else. A regular grid at 2.5 m would hold two million points
+for the same surface, and a coarser one draws a walked surface in steps:
+the walk folds the space, which puts sharper features on the lattice than
+a stationary field does. Both models get the same treatment.
 
 ```python
-grid = geoml.data.Grid3D(start=[24850, 15700, 1300],
-                         end=[25150, 16050, 1600],
-                         n=[61, 71, 61])
-
 surfaces = {}
 
 for name, trained in [("stationary", flat_model), ("deep", deep_model)]:
-    trained.predict(grid)
-    surface = grid.get(
-        "SIMPLE LITO/Vein/indicator_predicted").get_contour(0.0)
+    blocks = geoml.data.BlockSet3D(
+        start=[24860, 15710, 1310],
+        n=[15, 18, 15],
+        step=[20.0, 20.0, 20.0],
+        discretization=(2, 2, 2),
+        max_levels=3)
+    blocks = geoml.models.refine(trained, blocks)
+    surface = blocks.get_contour("SIMPLE LITO/Vein/indicator_predicted", 0.0)
     trained.predict(surface)
     surfaces[name] = surface
-    print("%-11s %6d triangles, %8.0f m2"
-          % (name, len(surface.triangles), surface.area))
+    print("%-11s %6d blocks, %6d triangles, %8.0f m2"
+          % (name, blocks.n_data, len(surface.triangles), surface.area))
 ```
 
 The contour is taken at zero because the category indicators are log-odds.
@@ -271,7 +281,7 @@ the map of where the next hole is worth drilling.
 The difference between the two is the fold. One ellipsoid has to describe
 a surface whose attitude changes along strike, and it cannot: the
 stationary answer breaks into pieces, loses the vein between hole fences,
-and flares into high-uncertainty skirts at the edges of the grid. The
+and flares into high-uncertainty skirts at the edges of the model. The
 walked input lets the same kernel follow the roll, and the deep answer is
 a single coherent sheet that stays with the intersections and only opens
 up past the last hole. The uncertainty colouring is what makes the
@@ -366,7 +376,8 @@ the numbers above illustrate the machinery rather than settle the geology.
 > `geoml.transform.Anisotropy3D` the ellipsoid it takes the burden off.
 > `VGPNetwork.predict_node` writes any node's prediction as a
 > `geoml.data.LatentVariable`.
-> `Attribute.get_contour(value)` builds the `Surface3D`, meshes take
+> `models.refine` cuts a `data.BlockSet3D` where the contact runs and
+> `BlockSet3D.get_contour(path, value)` builds the surface; meshes take
 > predictions like any container, and `Mesh3D.simplify`, `.smooth` and the
 > booleans of chapter 12 apply to the result. `DrillholeData.merge_domains`
 > collapses the runs the log records, and `as_classification_input` puts

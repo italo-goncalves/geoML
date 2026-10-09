@@ -28,20 +28,23 @@ in the leaf's ranges, the walk's `amp` and the leaf's range. Measured
 
 The arms, by what prices the deformation:
 
-- `default`: the library -- the field's KL, and the leaf's ranges held
-  where they start (`VGPNetwork._hold_walk_ranges`); `held 0.5`, `held 2`
-  hold them at another value;
+- `held 1`, `held 0.5`, `held 2`: the field's KL, and the leaf's ranges
+  held at that value;
 - `displacement`: the term 0.9.0's development carried, `1/2 sum (moved -
   start)² / spread²` over the walked inducing points, the leaf free;
   `displacement, held` and `displacement, prior 50` beside a held or
   priced leaf;
-- `none`: the field's KL alone, the leaf free;
+- `none`: the field's KL alone, the leaf free -- the library with a range
+  per dimension in the reader;
 - `amp 0.3`, `amp 1`, `amp 3`: a proper prior, no displacement -- `amp`
   scales the field, so fixing it fixes the deformation's prior scale;
 - `prior 10`, `prior 50`: the leaf's range prior made stronger;
 - `uncertain amp, rate 1` and `rate 3`: `log amp ~ N(log amp, s²)` against
   an exponential prior on `amp`, linearized -- one deviation shared by
-  every point, along its displacement.
+  every point, along its displacement;
+- `isotropic`, `isotropic, prior 10` and `prior 50`: the leaf free, one
+  range for every dimension, its range prior at strength 2, 10 or 50 --
+  the library as `GPWalk` advises building it.
 """
 
 import sys
@@ -56,7 +59,6 @@ sys.path.insert(0, "docs/benchmarks")
 import expected_kernel as ek  # noqa: E402
 
 GPWalk = geoml.latent.GPWalk
-HOLD = geoml.models.VGPNetwork._hold_walk_ranges
 WALK = GPWalk._joint_walk
 KL = GPWalk.kl_divergence
 TERMS = GPWalk.expert_kl_terms
@@ -98,7 +100,7 @@ GPWalk.kl_divergence = scale_kl
 # name: (displacement term, leaf held at, leaf range prior, amp fixed at,
 #        uncertain amp's prior rate); a leaf held at None trains its ranges
 ARMS = {
-    "default": (False, 1.0, 2.0, None, None),
+    "held 1": (False, 1.0, 2.0, None, None),
     "held 0.5": (False, 0.5, 2.0, None, None),
     "held 2": (False, 2.0, 2.0, None, None),
     "displacement": (True, None, 2.0, None, None),
@@ -112,14 +114,16 @@ ARMS = {
     "prior 50": (False, None, 50.0, None, None),
     "uncertain amp, rate 1": (False, None, 2.0, None, 1.0),
     "uncertain amp, rate 3": (False, None, 2.0, None, 3.0),
+    # the reader free but isotropic, its range prior made stricter
+    "isotropic": (False, None, 2.0, None, None),
+    "isotropic, prior 10": (False, None, 10.0, None, None),
+    "isotropic, prior 50": (False, None, 50.0, None, None),
 }
 
 
 def run(seed, name, data, new, holes):
     priced, held, leaf_prior, amp, rate = ARMS[name]
     GPWalk.expert_kl_terms = displacement if priced else TERMS
-    geoml.models.VGPNetwork._hold_walk_ranges = HOLD if held is not None \
-        else (lambda self: None)
     geoml.set_seed(seed)
     root = geoml.latent.BasicInput(
         geoml.data.inducing.from_kmeans(data, ek.N_IND, seed=seed))
@@ -127,9 +131,11 @@ def run(seed, name, data, new, holes):
     if rate is not None:
         walk._add_parameter("amp_sd", gpr.PositiveParameter(0.3, 1e-3, 3.0))
         walk._amp_rate = rate
-    leaf = geoml.latent.BasicGP(walk, size=1, range_prior=leaf_prior)
+    leaf = geoml.latent.BasicGP(walk, size=1, range_prior=leaf_prior,
+                                isotropic=name.startswith("isotropic"))
     if held is not None:
         leaf.parameters["ranges"].set_value(np.full([1, 1, 2], held))
+        leaf.parameters["ranges"].fix()
     model = geoml.models.VGPNetwork(
         data, "V", geoml.likelihood.Gaussian(), leaf,
         options=geoml.models.GPOptions(verbose=False))

@@ -187,8 +187,9 @@ correlation between a walker the field has pushed and the field it then
 meets enters the mean the same way. A realization walks a realization of
 the field -- the field's own normals, so realization `s` of the walk rides
 realization `s` of the field. The walk adds no random variable and so no
-KL of its own: the field's KL prices the deformation, and a GP node reading
-the walk keeps its ranges where they start (`VGPNetwork._hold_walk_ranges`).
+KL of its own: the field's KL prices the deformation. The GP that reads the
+walk should be built isotropic (`BasicGP(..., isotropic=True)`), which the
+docstring, chapters 16 and 17 and the skill say and nothing enforces.
 The marginal rule's displacement term and `precision` are ignored
 (deprecated).
 
@@ -205,10 +206,20 @@ region and brought the metals' calibration back to 0.8.8's (goodness Cd
 0.89, 0.91, 0.82, 0.81, 0.93, 0.85; without it 0.84, 0.86, 0.90, 0.80,
 0.78, 0.93, 0.83). With the displacement KL as well (below): 0.86, 0.87,
 0.91, 0.82, 0.81, 0.95, 0.85, and rock maps much like 0.8.8's; with the
-rock GP's ranges held instead, the final walk: 0.86, 0.89, 0.93, 0.82,
-0.82, 0.94, 0.85, the rock maps the same and a little less sure away from
-the samples. On chapter 17's vein the held ranges set the walk to work: it
-moves a point 0.45 ranges at most (0.13 on average) where it moved 0.07.
+rock GP's ranges held at one instead, 0.86, 0.89, 0.93, 0.82, 0.82, 0.94,
+0.85, and with the rock GP isotropic and free (the final walk), 0.84, 0.88,
+0.92, 0.82, 0.82, 0.94, 0.85 -- the rock maps the same both ways and a
+little less sure away from the samples. On chapter 17's vein either sets
+the walk to work: it moves a point 0.45 (held) or 0.51 (isotropic) ranges
+at most where it moved 0.07. Its vein surface then came out saw-toothed
+along its upper edges, which was the chapter's 5 m grid, not the model:
+contoured from a 2.5 m grid the same model's surface is smooth, with 2.5%
+more area (162,967 against 159,043 m²) on four times the triangles. A
+walk that folds the space puts sharper features on the grid than a
+stationary field does. The chapter now contours a `BlockSet3D` refined at
+the contact instead -- 20 m blocks cut to 2.5 m where the vein's boundary
+runs, 63,193 blocks for the deep model -- and draws the smooth surface
+(158,455 m²) in less time than the 5 m grid took.
 
 **Fixed draws of the field, walked exactly, were measured and dropped.**
 32 or 64 draws scored like the linearized walk on the folded section
@@ -233,7 +244,7 @@ calibration came right on the first seed:
 | exponential prior on `amp`, rate 1 | -11.21 | -1.51 | 1.96 | 0.25 |
 | exponential prior on `amp`, rate 3 | -11.08 | -1.61 | 1.94 | 0.23 |
 
-**The leaf's ranges, held, replaced it** (2026-10-09). The term is no KL --
+**An isotropic reader replaced it** (2026-10-09). The term is no KL --
 it treats the start as a prior and divides by the posterior's spread -- so
 it was taken apart. Freezing one group of parameters at a time without it
 (one seed) put the cause in the trained deformation's certainty: it moved
@@ -264,6 +275,9 @@ within 1-1.5 and a score at least the term's:
 | the same at rate 3 | -11.24 | 1.92, 2.75, 1.57 |
 | displacement with the leaf's ranges held | -9.63 | 0.63, 0.74, 0.69 |
 | displacement with the leaf's range prior at 50 | -9.18 | 0.81, 1.40, 0.70 |
+| **the leaf isotropic and free, range prior at 2** | **-6.14** | 0.58, 1.14, 0.46 |
+| the same, prior at 10 | -6.09 | 0.57, 1.14, 0.45 |
+| the same, prior at 50 | -6.20 | 0.52, 1.15, 0.49 |
 
 No price passes the calibration on every seed -- the displacement term
 fails the second (2.24). Held ranges score twice as well a new hole on
@@ -275,9 +289,21 @@ seed: small, the walk barely moves (0.04 leaf ranges) and underfits; large,
 it is the unpriced walk. An uncertain `amp` -- `log amp ~ N(m, s²)` against
 an exponential prior, linearized as one deviation shared by every point
 along its displacement -- collapsed to `s` = 0.05-0.07 on two seeds: one
-scalar's entropy is worth a nat or two against the data's. So the walk is
-priced by the field's KL alone, the leaf's ranges are held, and the
-displacement term is deprecated with the marginal rule.
+scalar's entropy is worth a nat or two against the data's.
+
+Held ranges were the library's for a day, and the user's reading of
+chapter 17 corrected the diagnosis: what goes wrong is the leaf's ranges
+differing between dimensions -- the walk and the reader both describing the
+anisotropy -- not their absolute value, and the anisotropy the model starts
+from is information the user puts in the input's transform, the reader's
+ranges being relative to it. An isotropic leaf, free, takes the score from
+-11.2 to -6.1 on its own; how strict its range prior is does not matter
+(its one range settles at 1.1-1.5 at every strength), and on chapters 16
+and 17 it draws what the held ranges drew. So the walk is priced by the
+field's KL alone, the reader is advised -- not forced -- to be isotropic,
+and the displacement term is deprecated with the marginal rule. The
+advice cannot be a default: a save records only the arguments passed, and a
+reader saved anisotropic would reopen with one range in place of several.
 
 Against walks along sampled fields -- each walker with normals of its own
 for the unexplained part, criteria fixed before measuring (mean within 0.2

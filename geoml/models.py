@@ -946,7 +946,6 @@ class VGPNetwork(_GPModel):
         self._refresh_graph = None
         if getattr(self.options, "propagation", "marginal") == "joint":
             self._check_expected_kernel()
-            self._hold_walk_ranges()
 
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
@@ -1092,29 +1091,8 @@ class VGPNetwork(_GPModel):
         joint = getattr(self.options, "propagation", "marginal") == "joint"
         if joint:
             self._check_expected_kernel()
-            self._hold_walk_ranges()
         return _latent.propagation_rule(self.options.expert_propagation,
                                         joint=joint)
-
-    def _hold_walk_ranges(self):
-        """Under the expected kernel, a GP node reading a `GPWalk` keeps its
-        ranges where they start: the walk's unit.
-
-        Stretching the walked coordinates and lengthening the ranges that
-        read them give the same function, and training resolved that toward
-        a long range on a near-certain deformation -- overconfident on new
-        data (calibration 1.97 to 2.74 on the folded section's three seeds).
-        Held, the walk does the deforming and the field's KL prices it:
-        the score a new hole -5.0 against the displacement term's -10.7,
-        whatever the held value (0.5, 1 or 2). Record:
-        `docs/expected-kernel.md`, "The walk"."""
-        network = _latent.network
-        for node in self._nodes():
-            if isinstance(node, network._GPNode) \
-                    and isinstance(node.parent, network.GPWalk):
-                for name, parameter in node.parameters.items():
-                    if name.startswith("ranges"):
-                        parameter.fix()
 
     def _propagation_key(self):
         """What the propagation adds to a cached trace's key."""
