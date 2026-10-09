@@ -37,6 +37,19 @@ quadrature of `UncertainInputGP`; `BasicGP`, `MultiStructureGP` and
 `AdditiveGP`. The rational quadratic and deep networks keep the first
 moment. An expert is weighted by the variance its inducing points leave,
 which is the variance itself wherever the second moment is not taken.
+* **The realizations stay the expected kernel's, and what they leave out
+is integrated like noise.** At an uncertain input each realization is
+read at the input's mean, so it carries less than the mixture's spread:
+the difference, `tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ))`, travels beside the
+realizations as a latent jitter (`predict` returns it on its tuple; the
+nodes acting linearly carry it), and a continuous likelihood integrates it
+beside its noise -- the reported value over eight Gauss-Hermite nodes of
+it, a measurement sample drawing it. Through a bending warping the
+prediction comes within 1% of realizations at drawn inputs (20 to 26%
+without), and the 5% and 95% quantiles of a measurement within 4 to 5% of
+the interval's width (27 to 32% without). Categorical probabilities come
+from the moments and hold it already. Without input variance nothing is
+passed and nothing changes.
 * **`AdditiveGP` reads a distance as a distance**: its covariance handed the
 kernel the signed difference in each dimension, which the Matérn kernels
 read as a growing exponential on one side; the Gaussian, exponential and

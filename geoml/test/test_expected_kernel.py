@@ -709,7 +709,7 @@ def _uncertain_data(x, var=None):
 
 
 def _uncertain_model(kernel=None, node="basic", n_experts=1, seed=5,
-                     var=None):
+                     var=None, likelihood=geoml.likelihood.Gaussian):
     """A GP of two outputs on an uncertain input, its posterior made
     informative by hand."""
     geoml.set_seed(seed)
@@ -722,8 +722,7 @@ def _uncertain_model(kernel=None, node="basic", n_experts=1, seed=5,
     root = geoml.latent.GaussianInput(ip, geoml.transform.Isotropic(40))
     leaf = NODES[node](root, size=2, kernel=kernel)
     model = geoml.models.VGPNetwork(
-        data, {"v": geoml.likelihood.Gaussian(),
-               "w": geoml.likelihood.Gaussian()}, latent_network=leaf,
+        data, {"v": likelihood(), "w": likelihood()}, latent_network=leaf,
         options=geoml.models.GPOptions(verbose=False))
     for i in range(root.n_experts):
         leaf.parameters["alpha_white_%d" % i].set_value(
@@ -845,10 +844,10 @@ def test_the_rational_quadratic_keeps_the_first_moment():
     assert np.all(np.isfinite(np.asarray(variance)))
 
 
-def _uncertain_targets(n=40, seed=12):
+def _uncertain_targets(n=40, seed=12, spread=400.0):
     rng = np.random.default_rng(seed)
     return _uncertain_data(rng.uniform(0, 100, [n, 2]),
-                           rng.uniform(0, 400, [n, 2]))
+                           rng.uniform(0, spread, [n, 2]))
 
 
 def test_the_slots_take_the_second_moment_as_the_sets_do():
@@ -871,3 +870,176 @@ def test_a_model_trains_on_uncertain_locations():
     targets = _uncertain_targets()
     model.predict(targets, n_sim=3)
     assert np.all(np.isfinite(targets.values("v/latent_variance")))
+
+
+# --------------------------------------------------------------------------- #
+# the input's spread, integrated like noise
+# --------------------------------------------------------------------------- #
+def _warped(model):
+    """The model's likelihoods given a warping that bends: a sinh-arcsinh
+    set by hand, heavy on one side."""
+    for lik in model.likelihoods:
+        lik.warping.parameters["skewness"].set_value(np.array([0.8]))
+        lik.warping.parameters["tailweight"].set_value(np.array([0.6]))
+    return model
+
+
+def _warped_model(kernel=None):
+    model, leaf = _uncertain_model(
+        kernel, likelihood=lambda: geoml.likelihood.Gaussian(
+            geoml.warping.SinhArcsinh(1)))
+    return _warped(model), leaf
+
+
+def _realizations(model, leaf, x, var, n_real=4000, seed=21):
+    """Realizations at the uncertain locations, `[n, size, n_real]`: the
+    expected kernel's, `l (alpha + R eta_s) + b`, and at drawn inputs,
+    `k(x_s) (alpha + R eta_s) + b` with the same `eta_s` -- the exact
+    mixture's -- with the node's jitter `[n, size]` and, from the same
+    draws of the input, `tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ))` by
+    quadrature."""
+    rng = np.random.default_rng(seed)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        predicted = leaf.predict(tf.constant(x), x_var=tf.constant(var),
+                                 n_sim=1)
+        u, s = (np.asarray(t) for t in leaf.root.propagate(
+            tf.constant(x), tf.constant(var)))
+        z = leaf.parent.inducing_points[0]
+        alpha = np.asarray(leaf.alpha[0])[:, :, 0]
+        root_r = np.asarray(leaf.chol_r[0])
+        bias = float(leaf.parameters["bias_0"].get_value())
+        l = np.asarray(leaf.expected_covariance(
+            tf.constant(u), tf.constant(s), z, tf.zeros_like(z)))
+        nodes = norm.ppf(qmc.Sobol(2, scramble=True, seed=seed)
+                         .random(n_real))
+        draws = u[:, None, :] + np.sqrt(s)[:, None, :] * nodes[None]
+        k = np.asarray(leaf.covariance_matrix(
+            tf.constant(draws.reshape(-1, 2)), z)).reshape(len(u), n_real, -1)
+    eta = rng.normal(size=[alpha.shape[0], alpha.shape[1], n_real])
+    coef = alpha[:, :, None] + np.einsum("smj,sjr->smr", root_r, eta)
+    ek = np.einsum("nm,smr->nsr", l, coef) + bias
+    exact = np.einsum("nrm,smr->nsr", k, coef) + bias
+    # the jitter by quadrature over the same input draws
+    mean_k = k.mean(1)
+    cov_k = np.einsum("nri,nrj->nij", k, k) / n_real \
+        - mean_k[:, :, None] * mean_k[:, None, :]
+    weights = np.einsum("smj,slj->sml", root_r, root_r) \
+        + alpha[:, :, None] * alpha[:, None, :]
+    reference = np.einsum("sij,nij->ns", weights, cov_k)
+    return ek, exact, np.asarray(predicted.jitter).T, reference
+
+
+@pytest.mark.parametrize("name", ["Gaussian", "Matern52"])
+def test_the_jitter_is_what_the_realizations_leave_out(name):
+    model, leaf = _uncertain_model(KERNELS[name]())
+    for level in (0.05, 0.3, 1.0):
+        x, var = _queries(leaf, level)
+        _, _, jitter, reference = _realizations(model, leaf, x, var)
+        assert np.all(jitter >= 0.0)
+        error = np.mean(np.abs(jitter - reference)) / np.mean(reference)
+        assert error < 0.02, (level, error)
+
+
+def _quantiles(samples):
+    return np.quantile(samples, [0.05, 0.95], axis=-1)
+
+
+def test_the_prediction_and_its_quantiles_are_the_mixture_s():
+    # through a warping that bends, against realizations at drawn inputs:
+    # the value integrated over the jitter, and a measurement drawing it
+    model, leaf = _warped_model()
+    lik = model.likelihoods[0]
+    x, var = _queries(leaf, 0.5)
+    ek, exact, jitter, _ = _realizations(model, leaf, x, var)
+    ek, exact, jitter = (tf.constant(t[:, :1]) for t in (ek, exact, jitter))
+    rng = np.random.default_rng(4)
+    shift = tf.constant(rng.uniform(size=[len(x), 1, ek.shape[2]]))
+    jitter_shift = tf.constant(rng.uniform(size=[len(x), 1, ek.shape[2]]))
+
+    def prediction(sims, j=None):
+        return np.asarray(lik.integrated_backward(sims, j)[0]).mean(-1)
+
+    def measured(sims, j=None):
+        return _quantiles(np.asarray(lik.measurement_samples(
+            sims, 32, shift, j, None if j is None else jitter_shift)))
+
+    truth = prediction(exact)
+    width = np.mean(np.abs(truth))
+    with_jitter = np.mean(np.abs(prediction(ek, jitter) - truth)) / width
+    without = np.mean(np.abs(prediction(ek) - truth)) / width
+    # measured 0.011 against 0.26 without
+    assert with_jitter < 0.1 * without and with_jitter < 0.02, \
+        (with_jitter, without)
+
+    # the quantiles of a measurement, against the interval's width: 0.045
+    # against 0.32 without -- what is left is the mixture not being
+    # Gaussian, the jitter's variance being the mixture's to 0.3%
+    truth = measured(exact)
+    width = np.mean(truth[1] - truth[0])
+    with_jitter = np.mean(np.abs(measured(ek, jitter) - truth)) / width
+    without = np.mean(np.abs(measured(ek) - truth)) / width
+    assert with_jitter < 0.25 * without and with_jitter < 0.06, \
+        (with_jitter, without)
+
+
+def test_a_certain_input_carries_no_jitter():
+    model, leaf = _uncertain_model()
+    x, _ = _queries(leaf, 0.0)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        assert leaf.predict(tf.constant(x), n_sim=2).jitter is None
+        jitter = leaf.predict(tf.constant(x), x_var=tf.zeros([len(x), 2],
+                                                            tf.float64),
+                              n_sim=2).jitter
+    assert np.max(np.abs(np.asarray(jitter))) < 1e-10
+
+
+def test_the_operations_carry_the_jitter():
+    model, leaf = _uncertain_model()
+    x, var = _queries(leaf, 0.5)
+    nodes = {
+        "linear": geoml.latent.Linear(leaf, 2),
+        "select": geoml.latent.SelectInput(leaf, [1]),
+        "scale": geoml.latent.Scale(leaf),
+        "bias": geoml.latent.Bias(leaf),
+    }
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        base = np.asarray(leaf.predict(tf.constant(x), tf.constant(var),
+                                       n_sim=1).jitter)
+        for name, node in nodes.items():
+            got = np.asarray(node.predict(tf.constant(x), tf.constant(var),
+                                          n_sim=1).jitter)
+            if name == "linear":
+                w = np.asarray(node.parameters["weights"].get_value())
+                want = (w ** 2).T @ base
+            elif name == "select":
+                want = base[[1]]
+            elif name == "scale":
+                want = base * np.asarray(
+                    node.parameters["scale"].get_value())[:, None]
+            else:
+                want = base
+            np.testing.assert_allclose(got, want, rtol=1e-12, err_msg=name)
+
+
+def test_a_prediction_at_uncertain_locations_integrates_the_jitter():
+    model, _ = _warped_model()
+    exact, uncertain = _uncertain_targets(spread=0.0), _uncertain_targets()
+    model.predict(exact, n_sim=8)
+    model.predict(uncertain, n_sim=8)
+    # the spread of a measurement takes the jitter in
+    assert np.all(uncertain.values("v/noise_variance")
+                  >= exact.values("v/noise_variance") - 1e-9)
+    assert np.mean(uncertain.values("v/noise_variance")) \
+        > 1.5 * np.mean(exact.values("v/noise_variance"))
+    # one location's answer does not depend on its batch
+    again = _uncertain_targets()
+    model.options.prediction_batch_size = 7
+    model.predict(again, n_sim=8)
+    for path in ("v/prediction", "v/noise_variance"):
+        np.testing.assert_allclose(uncertain.values(path), again.values(path),
+                                   rtol=1e-9, atol=1e-12)
+    samples = model.predict_measurements(_uncertain_targets(), n_sim=4)
+    assert np.all(np.isfinite(samples["v"]))

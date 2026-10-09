@@ -1170,6 +1170,17 @@ class VGPNetwork(_GPModel):
         for leaf in self.leaves:
             leaf.refresh(jitter)
 
+    def _jitter_by_likelihood(self, per_leaf, like):
+        """`_by_likelihood` for the leaves' latent jitters, `[n, size]` or
+        None each: zeros shaped as `like` for a leaf with none, and None for
+        every likelihood where no leaf has any -- the path a model with
+        certain inputs has always taken."""
+        if all(j is None for j in per_leaf):
+            return [None] * len(self.likelihoods)
+        return self._by_likelihood(
+            [_tf.zeros_like(l) if j is None else j
+             for j, l in zip(per_leaf, like)])
+
     def _by_likelihood(self, per_leaf, axis=1):
         """Per-likelihood tensors from per-leaf ones, in likelihood order.
 
@@ -1663,29 +1674,37 @@ class VGPNetwork(_GPModel):
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
         with _tf.name_scope("Prediction"):
-            mus, vars_, sims, exp_vars = [], [], [], []
+            mus, vars_, sims, exp_vars, jitters = [], [], [], [], []
             for leaf in self.leaves:
-                mu, var, sim, exp_var = leaf.predict(
+                predicted = leaf.predict(
                     x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0])
+                mu, var, sim, exp_var = predicted
                 mus.append(_tf.transpose(mu[:, :, 0]))
                 vars_.append(_tf.transpose(var))
                 sims.append(_tf.transpose(sim, [1, 0, 2]))
                 exp_vars.append(_tf.transpose(exp_var))
+                jitters.append(None if predicted.jitter is None
+                               else _tf.transpose(predicted.jitter))
 
             pred_mu = self._by_likelihood(mus)
             pred_var = self._by_likelihood(vars_)
             pred_sim = self._by_likelihood(sims)
             pred_exp_var = self._by_likelihood(exp_vars)
+            # what the realizations leave out at an uncertain input, which
+            # a likelihood integrates beside its noise; a model with
+            # certain inputs passes nothing, as it always has
+            pred_jitter = self._jitter_by_likelihood(jitters, exp_vars)
 
             output = []
-            for mu, var, sim, exp_var, lik, v_inp in zip(
-                    pred_mu, pred_var, pred_sim, pred_exp_var,
+            for mu, var, sim, exp_var, jitter, lik, v_inp in zip(
+                    pred_mu, pred_var, pred_sim, pred_exp_var, pred_jitter,
                     self.likelihoods, variable_inputs):
+                extra = {} if jitter is None else {"jitter": jitter}
                 output.append(
                     lik.predict(
                         mu, var, sim, exp_var,
                         include_noise=include_noise,
-                        n_splits=n_splits, **v_inp
+                        n_splits=n_splits, **v_inp, **extra
                     )
                 )
             return output
@@ -3454,37 +3473,47 @@ class VGPNetwork(_GPModel):
         # every call, so two containers of one size get the same uniforms
         # row for row: nothing to a per-row score, and a caller reading
         # samples jointly across calls should know.
-        def rotation(k, size, rows):
+        def rotation(k, size, rows, stream=1):
             """The rows' slice of the k-th variable's `(n_data, size,
             n_sim)` stream, drawn without generating what comes before it:
             PCG64 spends exactly one 64-bit output per double, so advancing
-            by the rows' offset lands where a whole draw would."""
+            by the rows' offset lands where a whole draw would. Stream 1
+            rotates the noise, stream 2 the latent jitter."""
             first, last = int(rows[0]), int(rows[-1])
             # the generator `default_rng` would build, named so that its
             # `advance` is on the type
             bits = _np.random.PCG64(
-                _np.random.SeedSequence([self.options.seed, 1, k]))
+                _np.random.SeedSequence([self.options.seed, stream, k]))
             bits.advance(first * size * n_sim)
             block = _np.random.Generator(bits).random(
                 (last - first + 1, size, n_sim))
             return block[_np.asarray(rows) - first]
 
         def batch_measure(x, x_var, n_splits, rows):
-            per_leaf = []
+            per_leaf, jitters, like = [], [], []
             with _latent.simulation_rule(self.options.qmc_simulations):
                 for leaf in self.leaves:
-                    _, _, sims, _ = leaf.predict(
+                    predicted = leaf.predict(
                         x, x_var=x_var, n_sim=n_sim,
                         seed=[self.options.seed, 0])
-                    per_leaf.append(_tf.transpose(sims, [1, 0, 2]))
+                    per_leaf.append(_tf.transpose(predicted[2], [1, 0, 2]))
+                    like.append(_tf.transpose(predicted[3]))
+                    jitters.append(None if predicted.jitter is None
+                                   else _tf.transpose(predicted.jitter))
             sims = self._by_likelihood(per_leaf)
-            measured = [(sim, lik) for sim, lik in zip(sims, self.likelihoods)
-                        if lik.warped]
+            jitters = self._jitter_by_likelihood(jitters, like)
+            measured = [(sim, jitter, lik) for sim, jitter, lik
+                        in zip(sims, jitters, self.likelihoods) if lik.warped]
             return [lik.measurement_samples(
                         sim, n_nodes,
                         shift=_tf.constant(rotation(k, lik.size, rows),
-                                           _tf.float64))
-                    for k, (sim, lik) in enumerate(measured)]
+                                           _tf.float64),
+                        **({} if jitter is None else {
+                            "jitter": jitter,
+                            "jitter_shift": _tf.constant(
+                                rotation(k, 1, rows, stream=2),
+                                _tf.float64)}))
+                    for k, (sim, jitter, lik) in enumerate(measured)]
 
         for rows, output in self._over_batches(newdata, batch_measure,
                                                where=where, with_rows=True):

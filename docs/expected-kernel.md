@@ -301,6 +301,50 @@ overstates the variance by up to 130%: `tr((K + D)^-1 L)` exceeds `l (K +
 D)^-1 lᵀ`, and the spread of the mean is missing. For the Gaussian kernel
 the node is Girard's closed form to 1e-10 (`test_expected_kernel.py`).
 
+**The realizations stay the expected kernel's**, `l (alpha + R eps) + b`,
+and carry `l R Rᵀ lᵀ` where the mixture's -- each drawn at an input of its
+own -- carry `tr(R Rᵀ L)` and the spread of the mean. The difference,
+
+    jitter = tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ)) >= 0
+
+rides beside them as a per-location latent variance: a GP node stamps it
+(`_input_jitter`, blended over the experts as the variances are; nothing
+reads it in training, so the graph prunes its contraction), the nodes
+acting linearly carry it as a variance (`Linear`, `SelectInput`,
+`LinearCombination`, `Add`, `Concatenate`, `Bias`, `Scale`) and the others
+drop it, `predict` returns it on its tuple, and `_predict_raw` and
+`measurement_batches` hand it to the likelihood. A continuous likelihood
+integrates it beside its noise: a value is `E[g(z + sqrt(jitter) eta +
+eps)]` over eight Gauss-Hermite nodes of `eta` for each noise node, and a
+measurement sample draws it, paired node by node with the noise through a
+rank-1 lattice and rotated per location and realization from a stream of
+its own. One draw serves every component of a location, their jitters
+arising from one uncertain input. A categorical likelihood reads its
+probabilities off the moments, which already hold it. Chosen over
+realizations at drawn inputs, which turn spiky
+(`docs/benchmarks/uncertain_input_realizations.py`).
+
+Measured against realizations at drawn inputs with the same normals, on a
+synthetic field through a sinh-arcsinh warping that bends (skewness 0.8,
+tail weight 0.6), 15 locations, 4000 realizations: the jitter is the
+quadrature's `tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ))` within 2%, and the
+latent variance it restores is the mixture's to 0.3%.
+
+| Kernel | var / r² | Prediction, with | without | Measurement quantiles, with | without |
+|---|---|---|---|---|---|
+| Gaussian | 0.1 | 0.011 | 0.206 | 0.045 | 0.277 |
+| Gaussian | 0.5 | 0.011 | 0.265 | 0.045 | 0.319 |
+| Gaussian | 1 | 0.009 | 0.258 | 0.043 | 0.318 |
+| Matern52 | 0.1 | 0.011 | 0.191 | 0.040 | 0.271 |
+| Matern52 | 0.5 | 0.008 | 0.236 | 0.053 | 0.307 |
+| Matern52 | 1 | 0.007 | 0.227 | 0.043 | 0.301 |
+
+The prediction's error is relative to its mean, the quantiles' (5% and
+95%) to the interval's width. What is left in the quantiles is the mixture
+not being Gaussian: at the latent scale, with no warping and no noise,
+4 to 6% as well. A model whose inputs are certain passes no jitter and
+takes the code it always took.
+
 ## Gate 3: chapter 5
 
 Chapter 5's two-layer Walker Lake model (its outer kernel a Matern32 where

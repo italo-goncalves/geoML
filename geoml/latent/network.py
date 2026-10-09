@@ -357,6 +357,29 @@ class _Moments(tuple):
         return self[1]
 
 
+class _Predicted(tuple):
+    """What `predict` returns: ``(mu, var, sims, explained_var)``,
+    unpacking as the four it always was, and `jitter`, `[size, n]` or
+    None: the latent variance the realizations leave out because a GP
+    node's input is uncertain (see `BasicGP._mixture_moments`), which a
+    likelihood integrates out beside its noise."""
+
+    def __new__(cls, mu, var, sims, explained_var, jitter=None):
+        predicted = super().__new__(cls, (mu, var, sims, explained_var))
+        predicted.jitter = jitter
+        return predicted
+
+
+def _jitters(parents):
+    """The parents' latent jitters, `[size, n]` each, zeros for a parent
+    with none -- or None where no parent has any."""
+    held = [p._input_jitter for p in parents]
+    if all(j is None for j in held):
+        return None
+    return [_tf.zeros_like(p._explained_var) if j is None else j
+            for p, j in zip(parents, held)]
+
+
 def _feeds_gp(node):
     """Whether a GP node reads this node's output: directly, or through
     nodes that pass the inducing points on."""
@@ -757,7 +780,9 @@ def _second_moment(items, mean, var, points, weights):
     certain points `z`, the kernel given as `_kernel_items`.
 
     `mean` and `var` are `[..., n, d]`, `points` `[..., m, d]` and `weights`
-    `[..., k, m, m]`, symmetric. Returns `[..., k, n]`.
+    a list of stacks `[..., k, m, m]`, each matrix symmetric. Returns one
+    `[..., k, n]` per stack -- separate contractions sharing each pair's
+    exponential, so that a stack nothing reads costs nothing in a graph.
 
     Each pair of components `(a, b)` gives, per input dimension,
     `exp(-ab/(a+b) (z_i - z_j)²)` times the expectation of
@@ -772,7 +797,7 @@ def _second_moment(items, mean, var, points, weights):
         e = mean[..., :, None, :] - points[..., None, :, :]
         gaps = (points[..., :, None, :] - points[..., None, :, :]) ** 2
         ones = _tf.ones_like(e[..., :1])
-        total = None
+        totals = [None] * len(weights)
         for p in range(len(items)):
             for q in range(p, len(items)):
                 (wa, a), (wb, b) = items[p], items[q]
@@ -790,13 +815,16 @@ def _second_moment(items, mean, var, points, weights):
                 right = _tf.concat([e, ones, other], -1)
                 exponent = _tf.matmul(left, right, transpose_b=True) \
                     + _tf.reduce_sum(a * b / c * gaps, -1)[..., None, :, :]
-                term = _tf.einsum("...nij,...kij->...kn", _tf.exp(-exponent),
-                                  weights)
+                moment = _tf.exp(-exponent)
                 # the pair (b, a) is the transpose of (a, b), and the weights
                 # are symmetric
-                term = term * (wa * wb * (1.0 if p == q else 2.0))
-                total = term if total is None else total + term
-        return total
+                factor = wa * wb * (1.0 if p == q else 2.0)
+                for k, w in enumerate(weights):
+                    term = _tf.einsum("...nij,...kij->...kn", moment, w) \
+                        * factor
+                    totals[k] = term if totals[k] is None \
+                        else totals[k] + term
+        return totals
 
 
 def _graph_state(node):
@@ -954,6 +982,10 @@ class _LatentVariable(_gpr.Parametric):
         # other locations (`interpolate`, a refresh) must never stamp.
         self._sim_state = None
         self._explained_var = None
+        # the latent variance the realizations leave out where a GP node's
+        # input is uncertain, `[size, n]`, carried up by the nodes acting
+        # linearly and dropped by the others; None elsewhere
+        self._input_jitter = None
 
     # Whether the node's output is Gaussian: True, False, or "parents",
     # Gaussian exactly when every parent is. The training quadrature reads
@@ -1200,7 +1232,8 @@ class _LatentVariable(_gpr.Parametric):
         sims = self.simulate(n_sim, seed)
         mu = _tf.transpose(mu)[:, :, None]
         var = _tf.transpose(var)
-        return mu, var, sims, self._explained_var
+        return _Predicted(mu, var, sims, self._explained_var,
+                          self._input_jitter)
 
     def predict_directions(self, x, dir_x, step=1e-3):
         raise NotImplementedError
@@ -1420,6 +1453,7 @@ class _GPNode(_FunctionalLatentVariable):
         with _tf.name_scope("gp_prediction"):
             parent = self.parent.propagate(x, x_var)
             x, x_var = parent
+            jitter = None
             if not self._READS_CHAIN:
                 cov_cross, mu, weights, w_mu, w_var, w_exp_var = \
                     self._moments(x, x_var)
@@ -1437,8 +1471,16 @@ class _GPNode(_FunctionalLatentVariable):
                     None if second is None else second.left)
                 experts = self._chain(cov_cross, mu, var) \
                     if _wants_joint(self) else None
+                if second is not None:
+                    # blended as the variances are; nothing reads it in
+                    # training, so the graph there prunes it
+                    jitter = _tf.reduce_sum(
+                        (_tf.stack(second.jitter, axis=0)
+                         if isinstance(second.jitter, list)
+                         else second.jitter) * weights, axis=0)
             self._sim_state = (cov_cross, mu, weights)
             self._explained_var = w_exp_var
+            self._input_jitter = jitter
             return _Moments(_tf.transpose(w_mu[:, :, 0]),
                             _tf.transpose(w_var), experts)
 
@@ -1702,6 +1744,9 @@ class Stack(_Operation):
         mean = _tf.concat(means, axis=1)
         var = _tf.concat(variances, axis=1)
         self._explained_var = _tf.concat(exp_vars, axis=0)
+        jitters = _jitters(self.parents)
+        self._input_jitter = None if jitters is None \
+            else _tf.concat(jitters, axis=0)
         # a `Concatenate` hands its parents' chains on side by side
         experts = None
         if self.propagates_inducing_points and _wants_joint(self):
@@ -2252,11 +2297,12 @@ class BasicGP(_GPNode):
             # a padded point reaches nothing: its row and column of every
             # matrix the moments are read through are zero
             outer = pmask[:, None, :, None] * pmask[:, None, None, :]
-            var, explained_var = self._mixture_moments(
+            var, explained_var, jitter = self._mixture_moments(
                 chain[0], ips, self.slots_cov_smooth_inv * outer,
                 self.slots_alpha, mu[..., 0]
-                - self.slots_bias[:, None, None])
-            second = _Second(_tf.maximum(1.0 - explained_var, 0.0), None)
+                - self.slots_bias[:, None, None], cov_cross,
+                self.slots_chol_r * outer if with_second else None)
+            second = _Second(_tf.maximum(1.0 - explained_var, 0.0), jitter)
             return (cov_cross, mu, var, explained_var) \
                 + ((second,) if with_second else ())
         explained_var = _tf.reduce_sum(
@@ -2383,13 +2429,16 @@ class BasicGP(_GPNode):
             if chain is not None and self._takes_second_moment(
                     chain, _covariances_of(self.parent, ids)):
                 moments = [
-                    self._mixture_moments(e, ip, inv, a, m[..., 0] - b)
-                    for e, ip, inv, a, m, b in zip(
-                        chain, ips, self.cov_smooth_inv, self.alpha, mu, bias)]
-                var = _tf.stack([v for v, _ in moments], axis=0)
-                explained_var = [x for _, x in moments]
+                    self._mixture_moments(e, ip, inv, a, m[..., 0] - b, l,
+                                          r if with_second else None)
+                    for e, ip, inv, a, m, b, l, r in zip(
+                        chain, ips, self.cov_smooth_inv, self.alpha, mu, bias,
+                        cov_cross, self.chol_r)]
+                var = _tf.stack([v for v, _, _ in moments], axis=0)
+                explained_var = [x for _, x, _ in moments]
                 second = _Second(_tf.maximum(
-                    1.0 - _tf.stack(explained_var, axis=0), 0.0), None)
+                    1.0 - _tf.stack(explained_var, axis=0), 0.0),
+                    [j for _, _, j in moments] if with_second else None)
                 return (cov_cross, mu, var, explained_var) \
                     + ((second,) if with_second else ())
 
@@ -2447,29 +2496,43 @@ class BasicGP(_GPNode):
                              self.parameters["ranges"].get_value())
 
     def _second_moments(self, mean, var, points, weights):
-        """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]`, `[..., k, n]`: see
-        `_second_moment`."""
+        """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]`, `[..., k, n]`, for each
+        stack `W` in the list `weights`: see `_second_moment`."""
         return _second_moment(self._kernel_items(), mean, var, points,
                               weights)
 
-    def _mixture_moments(self, chain, points, smooth_inv, alpha, offset):
-        """One expert's variance and explained variance at an uncertain
-        input over certain inducing points: the mixture's, exactly.
+    def _mixture_moments(self, chain, points, smooth_inv, alpha, offset,
+                         cov_cross=None, root_r=None):
+        """One expert's variance, explained variance and latent jitter at
+        an uncertain input over certain inducing points: the mixture's,
+        exactly.
 
-        With `L = E[k(x, z) k(x, z)ᵀ]`, the posterior's variance averaged
-        over the input is `1 - tr((K + D)^-1 L)`, the variance of its mean
-        `alphaᵀ L alpha - (l alpha)²` (Girard's second moment), and the
-        variance explained is the first trace. `offset` is the expected
-        kernel's mean less the bias, `l alpha`, `[..., size, n]`."""
+        With `L = E[k(x, z) k(x, z)ᵀ]` and `l = E[k(x, z)]` (`cov_cross`),
+        the posterior's variance averaged over the input is
+        `1 - tr((K + D)^-1 L)`, the variance of its mean `alphaᵀ L alpha -
+        (l alpha)²` (Girard's second moment), and the variance explained is
+        the first trace. `offset` is the expected kernel's mean less the
+        bias, `l alpha`, `[..., size, n]`. The realizations, `l (alpha + R
+        eps)`, carry `l R Rᵀ lᵀ` where the mixture's carry `tr(R Rᵀ L)` and
+        the spread of the mean: the difference, `tr((R Rᵀ + alpha
+        alphaᵀ)(L - l lᵀ))`, never negative, is the jitter -- computed
+        where `root_r`, `R`, is given, and None otherwise."""
         var = chain.variance
         if var is None:
             var = _tf.zeros_like(chain.mean)
-        outer = alpha * _tf.linalg.matrix_transpose(alpha)
-        moments = self._second_moments(chain.mean, var, points,
-                                       _tf.concat([smooth_inv, outer], -3))
-        explained = moments[..., :self.size, :]
-        spread = _tf.maximum(moments[..., self.size:, :] - offset ** 2, 0.0)
-        return _tf.maximum(1.0 - explained, 0.0) + spread, explained
+        weights = [smooth_inv, alpha * _tf.linalg.matrix_transpose(alpha)]
+        if root_r is not None:
+            weights.append(_tf.matmul(root_r, root_r, transpose_b=True))
+        moments = self._second_moments(chain.mean, var, points, weights)
+        explained = moments[0]
+        spread = _tf.maximum(moments[1] - offset ** 2, 0.0)
+        jitter = None
+        if root_r is not None:
+            seen = _tf.reduce_sum(
+                _tf.einsum("...nm,...smj->...snj", cov_cross, root_r) ** 2,
+                axis=-1)
+            jitter = _tf.maximum(moments[2] - seen, 0.0) + spread
+        return _tf.maximum(1.0 - explained, 0.0) + spread, explained, jitter
 
     def _chain(self, cov_cross, mu, var):
         """What this node hands a GP node above it under the expected
@@ -2666,12 +2729,13 @@ class AdditiveGP(BasicGP):
                 self.kernel, ranges[..., column], mean[..., column],
                 var[..., column], points[..., column], None))
 
-        def form(first):                       # first [..., n, m]
-            return _tf.einsum("...ni,...kij,...nj->...kn", first, weights,
-                              first)
+        def form(first, w):                    # first [..., n, m]
+            return _tf.einsum("...ni,...kij,...nj->...kn", first, w, first)
 
-        return (form(_tf.add_n(firsts)) - _tf.add_n([form(f) for f in firsts])
-                + _tf.add_n(own)) / size ** 2
+        total = _tf.add_n(firsts)
+        return [(form(total, w) - _tf.add_n([form(f, w) for f in firsts])
+                 + _tf.add_n([o[k] for o in own])) / size ** 2
+                for k, w in enumerate(weights)]
 
 
 class UncertainInputGP(BasicGP):
@@ -2908,6 +2972,9 @@ class Linear(_FunctionalLatentVariable):
         var = _tf.einsum("xa,xy->ya", _tf.transpose(var), weights ** 2)
         self._explained_var = _tf.einsum(
             "xa,xy->ya", self.parent._explained_var, weights ** 2)
+        jitter = self.parent._input_jitter
+        self._input_jitter = None if jitter is None \
+            else _tf.einsum("xa,xy->ya", jitter, weights ** 2)
         experts = _map_chain(
             _chain_of(parent),
             lambda m: _tf.einsum("...s,st->...t", m, weights),
@@ -2963,6 +3030,9 @@ class SelectInput(_FunctionalLatentVariable):
         var = _tf.gather(var, self.columns, axis=1)
         self._explained_var = _tf.gather(
             self.parent._explained_var, self.columns, axis=0)
+        jitter = self.parent._input_jitter
+        self._input_jitter = None if jitter is None \
+            else _tf.gather(jitter, self.columns, axis=0)
 
         def pick(t):
             return _tf.gather(t, self.columns, axis=-1)
@@ -3147,6 +3217,13 @@ class LinearCombination(_Operation):
         self._explained_var = _tf.reduce_sum(
             all_explained_var * self._weights_for(all_explained_var) ** 2,
             axis=-1)
+        jitters = _jitters(self.parents)
+        if jitters is None:
+            self._input_jitter = None
+        else:
+            jitters = _tf.stack(jitters, axis=-1)
+            self._input_jitter = _tf.reduce_sum(
+                jitters * self._weights_for(jitters) ** 2, axis=-1)
 
         experts = _sum_chains(chains, self._parent_weights()) \
             if self.propagates_inducing_points and _wants_joint(self) \
@@ -3688,6 +3765,8 @@ class Add(_Operation):
         all_mu = _tf.reduce_sum(all_mu, axis=-1)
         all_var = _tf.reduce_sum(all_var, axis=-1)
         self._explained_var = _tf.reduce_sum(all_explained_var, axis=-1)
+        jitters = _jitters(self.parents)
+        self._input_jitter = None if jitters is None else _tf.add_n(jitters)
 
         experts = _sum_chains(chains) \
             if self.propagates_inducing_points and _wants_joint(self) \
@@ -3764,6 +3843,7 @@ class Bias(_FunctionalLatentVariable):
         parent = self.parent.propagate(x, x_var)
         mean, var = parent
         self._explained_var = self.parent._explained_var
+        self._input_jitter = self.parent._input_jitter
         experts = _map_chain(_chain_of(parent), lambda m: m + bias,
                              lambda v: v) if _wants_joint(self) else None
         return _Moments(mean + bias[None, :], var, experts)
@@ -3815,6 +3895,9 @@ class Scale(_FunctionalLatentVariable):
         parent = self.parent.propagate(x, x_var)
         mean, var = parent
         self._explained_var = self.parent._explained_var * scale[:, None]
+        jitter = self.parent._input_jitter
+        self._input_jitter = None if jitter is None \
+            else jitter * scale[:, None]
         experts = _map_chain(_chain_of(parent),
                              lambda m: m * _tf.sqrt(scale),
                              lambda v: v * scale) \
