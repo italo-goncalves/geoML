@@ -262,41 +262,63 @@ the posterior's variance averaged over the input plus the variance of its
 mean, which is the mixture's exactly; the explained variance is the trace,
 `tr((K + D)^-1 L)`, and an expert is weighted by what that leaves, since
 the spread of the mean says nothing of how well the expert knows the
-ground. Each pair of the kernel's Gaussians `(a, b)` gives, per input
-dimension, `exp(-ab/(a+b) (z_i - z_j)²)` times the expectation of
-`exp(-(a+b)(x - z_ij)²)` about their weighted midpoint -- one pair for the
-Gaussian kernel, 36 for a Matérn table (a pair and its transpose taken
-once), and for `MultiStructureGP` every pair across its structures' tables.
-The part tying `i`, `j` and the location together is a bilinear form in the
-offsets `x - z`, so the exponent of a pair is one product of matrices,
-`[n, m, m]`, never an array with the dimensions on it as well. An
-`AdditiveGP` reads its dimensions as independent: `L = (s sᵀ - sum_d l_d
-l_dᵀ + sum_d L_d) / D²`, `s = sum_d l_d`. The rational quadratic keeps the
-first moment alone: its 48 components would make 1176 pairs. Deep networks,
-whose inducing points are themselves uncertain, keep it too; that is its
-own roadmap item.
+ground.
+
+**For the Gaussian kernel `L` is closed.** Each pair of Gaussians `(a, b)`
+gives, per input dimension, `exp(-ab/(a+b) (z_i - z_j)²)` times the
+expectation of `exp(-(a+b)(x - z_ij)²)` about their weighted midpoint --
+one pair for the Gaussian kernel, and for a `MultiStructureGP` every pair
+of its structures. The part tying `i`, `j` and the location together is a
+bilinear form in the offsets `x - z`, so the exponent of a pair is one
+product of matrices, `[n, m, m]`, never an array with the dimensions on it
+as well. An `AdditiveGP` reads its dimensions as independent: `L = (s sᵀ -
+sum_d l_d l_dᵀ + sum_d L_d) / D²`, `s = sum_d l_d`.
+
+**For the scale mixtures it is a quadrature over the input.** Closed, a
+table of eight Gaussians pairs into 36 terms, each an `[n, m, m]` array,
+and a training iteration on 1000 uncertain locations with a `Matern32`
+cost 100 times the first moment's at 100 inducing points and ran out of
+45 GB at 300 (`second_moment.py cost`). So the node's own kernel is read
+at 64 points of each location's input -- 32 scrambled Sobol points and
+their negatives, whitened to unit covariance, so the rule is exact for a
+quadratic -- and `tr((K + D)^-1 L)` is `l (K + D)^-1 lᵀ` from the expected
+kernel plus the quadrature's covariance of `k`, the spread of the mean and
+the jitter variances over the points, never negative. The rational
+quadratic takes it the same way. Deep networks, whose inducing points are
+themselves uncertain, keep the first moment; that is its own roadmap item.
+
+| m | Kernel | First moment | Second moment | `UncertainInputGP`, 32 nodes |
+|---|---|---|---|---|
+| 100 | Gaussian | 0.010 s, 1.1 GB | 0.071 s, 1.4 GB (closed) | -- |
+| 300 | Gaussian | 0.024 s, 1.3 GB | 0.70 s, 3.4 GB (closed) | -- |
+| 100 | Matern32 | 0.021 s, 1.2 GB | 2.1 s, 8.9 GB (closed); 0.40 s, 2.9 GB (64 nodes) | 0.18 s, 2.1 GB |
+| 300 | Matern32 | 0.071 s, 1.5 GB | out of 45 GB (closed); 1.23 s, 6.4 GB (64 nodes) | 0.58 s, 3.5 GB |
+
+Seconds a training iteration and the process's peak, 1000 uncertain
+locations.
 
 Measured on Walker Lake (`docs/benchmarks/second_moment.py`, one
 `BasicGP`, 100 inducing points, 200 locations, input variance a multiple
 of the squared range), the error against the mixture by Monte Carlo (3000
-draws a location), relative to its mean; the Matérn kernels lie between
-these two:
+draws a location), relative to its mean -- for the exponential the
+quadrature at 64 nodes:
 
-| Kernel | var / r² | Variance, second moment | Variance, first alone | Paciorek | Quadrature, 32 nodes | Mean, second moment | Mean, Paciorek |
+| Kernel | var / r² | Variance, second moment | Variance, first alone | Paciorek | `UncertainInputGP`, 32 nodes | Mean, second moment | Mean, Paciorek |
 |---|---|---|---|---|---|---|---|
 | Gaussian | 0.01 | 0.007 | 0.627 | 0.281 | 0.009 | 0.007 | 0.112 |
 | Gaussian | 0.1 | 0.013 | 1.317 | 0.727 | 0.031 | 0.018 | 0.613 |
 | Gaussian | 1 | 0.009 | 0.468 | 0.899 | 0.019 | 0.015 | 0.602 |
 | Gaussian | 3 | 0.005 | 0.176 | 0.855 | 0.029 | 0.012 | 0.712 |
-| Exponential | 0.01 | 0.006 | 0.408 | 0.380 | 0.023 | 0.013 | 0.613 |
-| Exponential | 0.1 | 0.007 | 0.440 | 0.664 | 0.025 | 0.012 | 0.680 |
-| Exponential | 1 | 0.003 | 0.098 | 0.764 | 0.012 | 0.007 | 0.681 |
-| Exponential | 3 | 0.002 | 0.037 | 0.640 | 0.008 | 0.005 | 0.620 |
+| Exponential | 0.01 | 0.013 | 0.408 | 0.380 | 0.023 | 0.013 | 0.613 |
+| Exponential | 0.1 | 0.015 | 0.440 | 0.664 | 0.025 | 0.012 | 0.680 |
+| Exponential | 1 | 0.009 | 0.098 | 0.764 | 0.012 | 0.007 | 0.681 |
+| Exponential | 3 | 0.011 | 0.037 | 0.640 | 0.008 | 0.005 | 0.620 |
 
-The largest error of the second moment, mean or variance, is 0.018
-(Gaussian), 0.013 (exponential), 0.014 (Matern32) and 0.015 (Matern52),
-the Monte Carlo's own included -- within the 2% gate everywhere, and below
-the 32-node quadrature `UncertainInputGP` takes. The first moment alone
+The largest error of the second moment, mean or variance, is 0.018 for the
+Gaussian kernel in closed form, and at 64 nodes 0.015 for the exponential
+and 0.018 for the Matern32, the Monte Carlo's own included -- within the 2%
+gate everywhere. At 32 nodes the Matern32 reached 0.042; in closed form
+the tables gave 0.013 to 0.015. The first moment alone
 overstates the variance by up to 130%: `tr((K + D)^-1 L)` exceeds `l (K +
 D)^-1 lᵀ`, and the spread of the mean is missing. For the Gaussian kernel
 the node is Girard's closed form to 1e-10 (`test_expected_kernel.py`).
@@ -327,23 +349,43 @@ realizations at drawn inputs, which turn spiky
 Measured against realizations at drawn inputs with the same normals, on a
 synthetic field through a sinh-arcsinh warping that bends (skewness 0.8,
 tail weight 0.6), 15 locations, 4000 realizations: the jitter is the
-quadrature's `tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ))` within 2%, and the
-latent variance it restores is the mixture's to 0.3%.
+quadrature's `tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ))` over 4000 points of
+the input within 2% for the Gaussian kernel and 9% for the Matern52 at 64
+nodes, and the latent variance it restores is the mixture's to 0.3%
+(Gaussian).
 
 | Kernel | var / r² | Prediction, with | without | Measurement quantiles, with | without |
 |---|---|---|---|---|---|
 | Gaussian | 0.1 | 0.011 | 0.206 | 0.045 | 0.277 |
 | Gaussian | 0.5 | 0.011 | 0.265 | 0.045 | 0.319 |
 | Gaussian | 1 | 0.009 | 0.258 | 0.043 | 0.318 |
-| Matern52 | 0.1 | 0.011 | 0.191 | 0.040 | 0.271 |
-| Matern52 | 0.5 | 0.008 | 0.236 | 0.053 | 0.307 |
-| Matern52 | 1 | 0.007 | 0.227 | 0.043 | 0.301 |
+| Matern52 (64 nodes) | 0.1 | 0.009 | 0.191 | 0.035 | 0.271 |
+| Matern52 (64 nodes) | 0.5 | 0.014 | 0.236 | 0.047 | 0.307 |
+| Matern52 (64 nodes) | 1 | 0.025 | 0.227 | 0.054 | 0.301 |
 
 The prediction's error is relative to its mean, the quantiles' (5% and
 95%) to the interval's width. What is left in the quantiles is the mixture
 not being Gaussian: at the latent scale, with no warping and no noise,
 4 to 6% as well. A model whose inputs are certain passes no jitter and
 takes the code it always took.
+
+## Training on uncertain inputs
+
+The `GaussianInput` gate's two cases (`docs/benchmarks/gaussian_input.py`,
+run by `second_moment.py train`), the Gaussian kernel, three seeds, 250
+iterations; rmse, coverage of the central 90% of a measurement and CRPS on
+held-out data, and the seconds a model took:
+
+| Case | Told nothing | First moment | Second moment | `UncertainInputGP` |
+|---|---|---|---|---|
+| A: eight inputs, 30% of entries missing, given their conditional moments; test rows uncertain too; 100 inducing points | 1.701 / 0.877 / 0.894, 5 s (imputed) | 1.590 / 0.890 / 0.816, 4 s | 1.591 / 0.907 / 0.820, 11 s | 1.565 / 0.903 / 0.812, 49 s |
+| B: Walker Lake, reported locations off by sd 5, test locations exact; 255 inducing points | 176.9 / 0.927 / 99.2, 6 s | 184.1 / 0.928 / 103.5, 5 s | 180.3 / 0.933 / 101.5, 61 s | 178.0 / 0.938 / 100.3, 55 s |
+| B, sd 15 | 205.0 / 0.928 / 115.8, 6 s | 231.4 / 0.919 / 130.5, 5 s | 220.2 / 0.930 / 124.4, 61 s | 220.6 / 0.927 / 124.9, 55 s |
+
+The second moment improves on the first in every case -- the coverage in
+A to nominal, the rmse and CRPS in B -- and ties `UncertainInputGP` at a
+fraction of its time on eight inputs. A location error is still better
+left untold, as the `GaussianInput` gate found: a noise term absorbs it.
 
 ## Gate 3: chapter 5
 

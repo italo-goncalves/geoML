@@ -16,9 +16,9 @@
 
 """A GP at uncertain inputs under the expected kernel's second moment.
 
-Usage: python docs/benchmarks/second_moment.py walker
-       python docs/benchmarks/second_moment.py train
-       python docs/benchmarks/second_moment.py cost M [KERNEL [first]]
+Usage: python docs/benchmarks/second_moment.py walker [NODES [KERNEL...]]
+       python docs/benchmarks/second_moment.py train [A] [B5] [B15]
+       python docs/benchmarks/second_moment.py cost M [KERNEL [first|uigp]]
 
 train -- the `GaussianInput` gate's two cases (`gaussian_input.py`):
 eight inputs with 30% of their entries missing, given their conditional
@@ -31,7 +31,8 @@ the expected kernel's first moment alone, with the second moment, and
 
 cost -- seconds a training iteration and the process's peak memory on
 1000 uncertain locations with M inducing points (`first`: without the
-second moment), one setting a process.
+second moment; `uigp`: `UncertainInputGP`'s 32-node quadrature instead),
+one setting a process.
 
 walker -- the moments, against the exact mixture. On Walker Lake, a
 `GaussianInput` root and one `BasicGP` (100 inducing points, trained 150
@@ -119,7 +120,7 @@ def expected_kernel(gp, u, var):
     return mu[0].numpy()[0, :, 0], second[0].numpy()[0], first
 
 
-def walker():
+def walker(kernels=KERNELS):
     print("The moments at uncertain inputs on Walker Lake: error against "
           "the exact mixture (Monte Carlo, %d draws a location), relative "
           "to its mean" % N_MC)
@@ -127,7 +128,7 @@ def walker():
           % ("kernel", "var/r2", "MC mean", "MC var", "2nd var", "1st var",
              "marg var", "quad var", "2nd mean", "marg mean"))
     worst = {}
-    for name in KERNELS:
+    for name in kernels:
         model, root, gp = walker_model(name)
         rng = np.random.default_rng(SEED)
         with model._propagation():
@@ -183,10 +184,11 @@ def arms_on(train, test, root, seed, fit_and_score):
     return out
 
 
-def train_gate():
+def train_gate(parts=("A", "B5", "B15")):
     """The `GaussianInput` gate's two cases (`gaussian_input.py`), arms
     rearranged: told nothing (or imputed), the expected kernel's first
-    moment alone, with the second moment, and `UncertainInputGP`."""
+    moment alone, with the second moment, and `UncertainInputGP`. `parts`
+    picks case A and case B at either location error."""
     import os
     import time
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -213,7 +215,7 @@ def train_gate():
 
     # A. eight inputs, 30% of the entries missing, test rows uncertain too
     rows = []
-    for seed in gi.SEEDS:
+    for seed in (gi.SEEDS if "A" in parts else ()):
         rng = np.random.default_rng(seed)
         x_train = gi.correlated_inputs(rng, gi.N_TRAIN)
         x_test = gi.correlated_inputs(rng, gi.N_TEST)
@@ -254,11 +256,12 @@ def train_gate():
                 inducing, transform=geoml.transform.AnisotropyARD(gi.N_DIM)),
             seed, fit))
         rows.append(out)
-    report("A. 8-D inputs, 30% of entries missing, conditional moments; "
-           "100 inducing points", rows)
+    if rows:
+        report("A. 8-D inputs, 30% of entries missing, conditional "
+               "moments; 100 inducing points", rows)
 
     # B. jittered locations on Walker Lake
-    for sd in (5.0, 15.0):
+    for sd in [float(p[1:]) for p in parts if p.startswith("B")]:
         rows = []
         for seed in gi.SEEDS:
             rng = np.random.default_rng(seed)
@@ -295,7 +298,8 @@ def train_gate():
                "points" % sd, rows)
 
 
-def cost(m, kernel_name="Matern32", n=1000, iterations=20):
+def cost(m, kernel_name="Matern32", n=1000, iterations=20,
+         node=geoml.latent.BasicGP):
     """Seconds an iteration and the process's peak memory, training on `n`
     uncertain locations with `m` inducing points; run in a fresh process
     per setting, the peak being the process's."""
@@ -311,8 +315,7 @@ def cost(m, kernel_name="Matern32", n=1000, iterations=20):
     root = geoml.latent.GaussianInput(
         geoml.data.inducing.from_kmeans(data, m, seed=0),
         transform=geoml.transform.Isotropic(20.0))
-    gp = geoml.latent.BasicGP(root, size=1,
-                              kernel=getattr(geoml.kernels, kernel_name)())
+    gp = node(root, size=1, kernel=getattr(geoml.kernels, kernel_name)())
     model = geoml.models.VGPNetwork(
         data, "v", geoml.likelihood.Gaussian(geoml.warping.ZScore(1)), gp,
         options=geoml.models.GPOptions(verbose=False))
@@ -321,20 +324,26 @@ def cost(m, kernel_name="Matern32", n=1000, iterations=20):
     model.train_full(iterations)
     seconds = (time.perf_counter() - start) / iterations
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2
-    print("m %d, %s, n %d: %.3f s an iteration, peak %.2f GB"
-          % (m, kernel_name, n, seconds, peak))
+    print("m %d, %s, %s, n %d: %.3f s an iteration, peak %.2f GB"
+          % (m, kernel_name, type(gp).__name__, n, seconds, peak))
 
 
 def main(argv):
     command = argv[0] if argv else "walker"
     if command == "walker":
-        walker()
+        # walker [NODES [KERNEL ...]]: the quadrature's node count, and the
+        # kernels to measure
+        if len(argv) > 1:
+            _net._QUADRATURE_NODES = int(argv[1])
+        walker(tuple(argv[2:]) or KERNELS)
     elif command == "train":
-        train_gate()
+        train_gate(tuple(argv[1:]) or ("A", "B5", "B15"))
     elif command == "cost":
         if len(argv) > 3 and argv[3] == "first":
             with first_moment_only():
                 cost(int(argv[1]), argv[2])
+        elif len(argv) > 3 and argv[3] == "uigp":
+            cost(int(argv[1]), argv[2], node=geoml.latent.UncertainInputGP)
         else:
             cost(int(argv[1]), argv[2] if len(argv) > 2 else "Matern32")
     else:

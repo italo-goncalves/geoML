@@ -177,7 +177,9 @@ unchanged. Decided:
 2026-10-08**: kernel errors 5.1e-4, 9.8e-6 and 9.1e-6, gate 1 unchanged,
 chapter 5's deep model 262 s to 74 s at 100 iterations with the same
 scores; **step 2 built 2026-10-08**: Girard to 1e-10, Walker within 1.8%
-for all four kernels, `docs/benchmarks/second_moment.py`; **step 3 built
+for all four kernels, `docs/benchmarks/second_moment.py`; **reworked
+2026-10-09 after step 4's cost** to closed form for the Gaussian kernel and
+64 points of quadrature for the others, Walker still within 1.8%; **step 3 built
 2026-10-08**: the prediction within 1% of realizations at drawn inputs,
 measurement quantiles within 4-5% of the interval, the rest the mixture's
 shape). Plan of record:
@@ -223,7 +225,12 @@ shape). Plan of record:
 4. **Training gate** on the `GaussianInput` plan's jittered locations:
    held-out coverage and CRPS against the expected kernel alone and against
    `UncertainInputGP`; time and memory at m = 100 and 300 (`L` is `n m²` per
-   expert under a gradient).
+   expert under a gradient). **Done 2026-10-09**: the second moment beats
+   the first in every case and ties `UncertainInputGP`; a location error is
+   still better left untold. The closed form for a Matérn table cost 100x
+   a first-moment iteration at m = 100 and ran out of 45 GB at 300 -- the
+   user chose the hybrid (closed form for the Gaussian, quadrature for the
+   others): 19x and 17x, 2.9 and 6.4 GB.
 5. `UncertainInputGP` deprecated with a warning naming `BasicGP`, removed in
    the breaking version; changelog, design record, skill.
 

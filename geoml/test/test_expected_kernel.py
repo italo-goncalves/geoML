@@ -805,10 +805,13 @@ def test_the_second_moment_is_girard_s_for_the_gaussian_kernel():
                                        rtol=1e-10, atol=1e-12)
 
 
-@pytest.mark.parametrize("name", ["Gaussian", "Exponential", "Matern32",
-                                  "Matern52"])
+@pytest.mark.parametrize("name", list(KERNELS))
 @pytest.mark.parametrize("node", list(NODES))
 def test_the_moments_are_the_mixture_s(node, name):
+    # closed form for the Gaussian kernel (measured below 0.1%); 64 points
+    # of quadrature for the others, on a field rougher than a trained one
+    # (2-6% measured; Walker Lake within 1.8%, `second_moment.py walker`)
+    tolerance = 0.02 if name == "Gaussian" else 0.08
     model, leaf = _uncertain_model(KERNELS[name](), node)
     for level in (0.05, 0.3, 1.0):
         x, var = _queries(leaf, level)
@@ -816,7 +819,7 @@ def test_the_moments_are_the_mixture_s(node, name):
         exact_mean, exact_var = _mixture(model, leaf, u, s)
         for got, want in ((mean, exact_mean), (variance, exact_var)):
             error = np.mean(np.abs(got - want)) / np.mean(np.abs(want))
-            assert error < 0.02, (level, error)
+            assert error < tolerance, (level, error)
 
 
 def test_no_input_variance_takes_no_second_moment():
@@ -833,15 +836,18 @@ def test_no_input_variance_takes_no_second_moment():
                                atol=1e-12)
 
 
-def test_the_rational_quadratic_keeps_the_first_moment():
-    model, leaf = _uncertain_model(KERNELS["RationalQuadratic"]())
-    x, var = _queries(leaf, 1.0)
-    with model._propagation():
-        model._refresh(model.options.jitter)
-        parent = leaf.parent.propagate(tf.constant(x), tf.constant(var))
-        assert not leaf._takes_second_moment(parent.experts, [None])
-        _, variance = leaf.propagate(tf.constant(x), tf.constant(var))
-    assert np.all(np.isfinite(np.asarray(variance)))
+def test_only_the_gaussian_kernel_takes_it_in_closed_form():
+    # the scale mixtures by quadrature over the input: in closed form a
+    # table pairs into 36 arrays of [n, m, m]
+    for name, closed in (("Gaussian", True), ("Matern32", False),
+                         ("RationalQuadratic", False)):
+        model, leaf = _uncertain_model(KERNELS[name]())
+        x, var = _queries(leaf, 1.0)
+        with model._propagation():
+            model._refresh(model.options.jitter)
+            parent = leaf.parent.propagate(tf.constant(x), tf.constant(var))
+            assert leaf._takes_second_moment(parent.experts, [None])
+            assert leaf._closed_second_moment() == closed
 
 
 def _uncertain_targets(n=40, seed=12, spread=400.0):
@@ -932,13 +938,16 @@ def _realizations(model, leaf, x, var, n_real=4000, seed=21):
 
 @pytest.mark.parametrize("name", ["Gaussian", "Matern52"])
 def test_the_jitter_is_what_the_realizations_leave_out(name):
+    # by quadrature a variance over 64 points of the input, on a rough
+    # field: 9% at the widest input measured
+    tolerance = 0.02 if name == "Gaussian" else 0.12
     model, leaf = _uncertain_model(KERNELS[name]())
     for level in (0.05, 0.3, 1.0):
         x, var = _queries(leaf, level)
         _, _, jitter, reference = _realizations(model, leaf, x, var)
         assert np.all(jitter >= 0.0)
         error = np.mean(np.abs(jitter - reference)) / np.mean(reference)
-        assert error < 0.02, (level, error)
+        assert error < tolerance, (level, error)
 
 
 def _quantiles(samples):

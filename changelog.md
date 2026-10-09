@@ -29,14 +29,18 @@ root, through nodes acting row by row): the expected kernel alone averages
 the kernel before the posterior is formed and misses that the posterior's
 mean moves with the input, overstating the variance by up to 130% on
 Walker Lake; Girard's second moment completes it, `var = 1 - tr((K + D)^-1
-L) + alphaᵀ L alpha - (l alpha)²` with `L = E[k(x, z) k(x, z)ᵀ]` in closed
-form per pair of the kernel's Gaussians. Within 2% of the mixture by Monte
-Carlo in mean and variance at every input variance tried, for the
-Gaussian, exponential, Matern32 and Matern52 kernels, below the 32-node
-quadrature of `UncertainInputGP`; `BasicGP`, `MultiStructureGP` and
-`AdditiveGP`. The rational quadratic and deep networks keep the first
-moment. An expert is weighted by the variance its inducing points leave,
-which is the variance itself wherever the second moment is not taken.
+L) + alphaᵀ L alpha - (l alpha)²` with `L = E[k(x, z) k(x, z)ᵀ]` -- in
+closed form for the Gaussian kernel, and for the others over 64 points of
+the input (symmetric scrambled Sobol, whitened), since the closed form
+pairs a table into 36 arrays of `[n, m, m]`: 100 times a first-moment
+training iteration at 100 inducing points and out of 45 GB at 300, where
+the quadrature costs 19 and 17 times (2.9 and 6.4 GB). Within 1.8% of the
+mixture by Monte Carlo in mean and variance at every input variance tried
+on Walker Lake; `BasicGP`, `MultiStructureGP` and `AdditiveGP`; deep
+networks keep the first moment. Held out, it improves on the first moment
+in every case of the `GaussianInput` gate and ties `UncertainInputGP`. An
+expert is weighted by the variance its inducing points leave, which is the
+variance itself wherever the second moment is not taken.
 * **The realizations stay the expected kernel's, and what they leave out
 is integrated like noise.** At an uncertain input each realization is
 read at the input's mean, so it carries less than the mixture's spread:

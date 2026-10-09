@@ -770,9 +770,40 @@ def _kernel_items(kernel, ranges, weight=1.0):
 
 def _second_moment_supported(kernel):
     """Whether a GP node reading an uncertain input with `kernel` takes the
-    second moment: the Gaussian and the fitted tables -- not the rational
-    quadratic, whose 48 components make 1176 pairs."""
-    return type(kernel) is _kr.Gaussian or type(kernel) in _KERNEL_MIXTURES
+    second moment: every kernel the expected kernel takes -- in closed form
+    for the Gaussian, by quadrature over the input for the others."""
+    return _expected_kernel_supported(kernel)
+
+
+# the scale mixtures' second moment by quadrature over the input: in closed
+# form a table of eight Gaussians pairs into 36 terms, each an [n, m, m]
+# array, measured 100 times a first-moment training iteration at 100
+# inducing points and out of 45 GB at 300 (Matern32, 1000 locations). On
+# Walker Lake 32 nodes came within 4.2% of the mixture and 64 within 1.8%
+# for the exponential and the Matern32 at every input variance tried
+_QUADRATURE_NODES = 64
+_QUADRATURE_SEED = 20261009
+_QUADRATURE = {}
+
+
+def _input_nodes(dimension):
+    """Standard normal points for an input of `dimension` coordinates,
+    `[q, dimension]`: half of them scrambled Sobol through the normal
+    quantile, the other half their negatives, the set whitened to unit
+    covariance -- so that its first two moments are the Gaussian's exactly
+    and the rule is exact for a quadratic (raw Sobol missed by 4.5% at small
+    input variances, through a mean that is not quite zero); fixed by a
+    seed of their own, so that a moment depends on nothing else."""
+    if dimension not in _QUADRATURE:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            points = _rnd.sobol_engine(dimension, _QUADRATURE_SEED).random(
+                _QUADRATURE_NODES // 2)
+        half = _special.ndtri(_np.clip(points, 1e-6, 1 - 1e-6))
+        nodes = _np.concatenate([half, -half])
+        root = _np.linalg.cholesky(nodes.T @ nodes / len(nodes))
+        _QUADRATURE[dimension] = _np.linalg.solve(root, nodes.T).T
+    return _QUADRATURE[dimension]
 
 
 def _second_moment(items, mean, var, points, weights):
@@ -2495,6 +2526,29 @@ class BasicGP(_GPNode):
         return _kernel_items(self.kernel,
                              self.parameters["ranges"].get_value())
 
+    def _closed_second_moment(self):
+        """Whether the second moment is taken in closed form -- the Gaussian
+        kernel, one pair of components -- rather than by quadrature over
+        the input."""
+        return type(self.kernel) is _kr.Gaussian
+
+    def _at_input_nodes(self, mean, var, points):
+        """The node's own kernel between `points` and each location's input
+        at the quadrature nodes, `[..., n, q, m]`."""
+        nodes = _tf.constant(_input_nodes(int(mean.shape[-1])), _tf.float64)
+        # the standard deviation with a finite gradient at zero, both
+        # branches of a `where` being differentiated
+        positive = var > 0.0
+        sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, var, 1.0)),
+                       _tf.zeros_like(var))
+        draws = mean[..., :, None, :] + sd[..., :, None, :] * nodes
+        shape = _tf.shape(draws)
+        flat = _tf.reshape(draws, _tf.concat(
+            [shape[:-3], [shape[-3] * shape[-2]], shape[-1:]], 0))
+        k = self.covariance_matrix(flat, points)
+        return _tf.reshape(k, _tf.concat(
+            [_tf.shape(k)[:-2], shape[-3:-1], _tf.shape(k)[-1:]], 0))
+
     def _second_moments(self, mean, var, points, weights):
         """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]`, `[..., k, n]`, for each
         stack `W` in the list `weights`: see `_second_moment`."""
@@ -2516,10 +2570,37 @@ class BasicGP(_GPNode):
         eps)`, carry `l R Rᵀ lᵀ` where the mixture's carry `tr(R Rᵀ L)` and
         the spread of the mean: the difference, `tr((R Rᵀ + alpha
         alphaᵀ)(L - l lᵀ))`, never negative, is the jitter -- computed
-        where `root_r`, `R`, is given, and None otherwise."""
+        where `root_r`, `R`, is given, and None otherwise. In closed form
+        for the Gaussian kernel (`_second_moment`); for the others `L` and
+        `l` are averages of the node's own kernel over 64 scrambled Sobol
+        points of the input (`_input_nodes`), so that the spread and the
+        jitter are variances over them."""
         var = chain.variance
         if var is None:
             var = _tf.zeros_like(chain.mean)
+        if not self._closed_second_moment():
+            # the same quantities over the quadrature nodes, each a variance
+            # over them where it is one, so never negative
+            k = self._at_input_nodes(chain.mean, var, points)
+            # L = l lᵀ + Cov k: the first part from the expected kernel,
+            # exact, the quadrature asked only for the covariance, which is
+            # small where the input variance is
+            spread_k = k - _tf.reduce_mean(k, axis=-2, keepdims=True)
+            explained = _tf.einsum(
+                "...ni,...sij,...nj->...sn", cov_cross, smooth_inv, cov_cross)                 + _tf.reduce_mean(_tf.einsum(
+                    "...nqi,...sij,...nqj->...snq", spread_k, smooth_inv,
+                    spread_k), axis=-1)
+            f = _tf.einsum("...nqm,...sm->...snq", k, alpha[..., 0])
+            spread = _tf.reduce_mean(
+                (f - _tf.reduce_mean(f, -1, keepdims=True)) ** 2, axis=-1)
+            jitter = None
+            if root_r is not None:
+                g = _tf.einsum("...nqm,...smj->...snqj", k, root_r)
+                jitter = _tf.reduce_mean(_tf.reduce_sum(
+                    (g - _tf.reduce_mean(g, -2, keepdims=True)) ** 2, -1),
+                    -1) + spread
+            return _tf.maximum(1.0 - explained, 0.0) + spread, explained, \
+                jitter
         weights = [smooth_inv, alpha * _tf.linalg.matrix_transpose(alpha)]
         if root_r is not None:
             weights.append(_tf.matmul(root_r, root_r, transpose_b=True))
