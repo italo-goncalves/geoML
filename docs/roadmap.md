@@ -230,7 +230,11 @@ shape). Plan of record:
    still better left untold. The closed form for a Matérn table cost 100x
    a first-moment iteration at m = 100 and ran out of 45 GB at 300 -- the
    user chose the hybrid (closed form for the Gaussian, quadrature for the
-   others): 19x and 17x, 2.9 and 6.4 GB.
+   others): 8x at both sizes, 2.1 and 3.6 GB, once the kernel is read
+   through plain distances (2026-10-09). Measured and dropped the same day:
+   the Cholesky route (3% of a step), the input's linear part taken
+   analytically (no change: the whitened nodes integrate it already), and
+   experts for speed (none; `train_by_expert` saves memory).
 5. `UncertainInputGP` deprecated with a warning naming `BasicGP`, removed in
    the breaking version; changelog, design record, skill. **Done
    2026-10-09.**

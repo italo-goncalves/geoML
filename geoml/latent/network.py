@@ -786,6 +786,23 @@ _QUADRATURE_SEED = 20261009
 _QUADRATURE = {}
 
 
+def _plain_distance(x, y, ranges):
+    """The distance in ranges between certain points, `[..., n, m]`, through
+    the expansion `|x|² + |y|² - 2 x yᵀ` -- one product of matrices, where
+    the differences make an array with the dimensions on it, measured 3.7
+    times slower with its gradient. The points are taken about the mean of
+    `y`, so that coordinates far from the origin (a mine grid's) do not
+    cancel away the digits a short distance needs."""
+    scale = _tf.reshape(ranges, [-1])
+    ys = y / scale
+    origin = _tf.reduce_mean(ys, axis=-2, keepdims=True)
+    xs, ys = x / scale - origin, ys - origin
+    square = _tf.reduce_sum(xs ** 2, -1)[..., :, None] \
+        + _tf.reduce_sum(ys ** 2, -1)[..., None, :] \
+        - 2.0 * _tf.matmul(xs, ys, transpose_b=True)
+    return _tf.sqrt(_tf.maximum(square, 1e-30))
+
+
 def _input_nodes(dimension):
     """Standard normal points for an input of `dimension` coordinates,
     `[q, dimension]`: half of them scrambled Sobol through the normal
@@ -2532,6 +2549,13 @@ class BasicGP(_GPNode):
         the input."""
         return type(self.kernel) is _kr.Gaussian
 
+    def _plain_covariance(self, x, y):
+        """`covariance_matrix` between certain points, `[..., n, m]`: the
+        kernel at the plain distance, the uncertain-input normalization
+        being exactly one there (`_plain_distance`)."""
+        return self.kernel.kernelize(_plain_distance(
+            x, y, self.parameters["ranges"].get_value()))
+
     def _at_input_nodes(self, mean, var, points):
         """The node's own kernel between `points` and each location's input
         at the quadrature nodes, `[..., n, q, m]`."""
@@ -2545,7 +2569,7 @@ class BasicGP(_GPNode):
         shape = _tf.shape(draws)
         flat = _tf.reshape(draws, _tf.concat(
             [shape[:-3], [shape[-3] * shape[-2]], shape[-1:]], 0))
-        k = self.covariance_matrix(flat, points)
+        k = self._plain_covariance(flat, points)
         return _tf.reshape(k, _tf.concat(
             [_tf.shape(k)[:-2], shape[-3:-1], _tf.shape(k)[-1:]], 0))
 
@@ -2789,6 +2813,12 @@ class AdditiveGP(BasicGP):
         # each dimension's kernel moves with its own coordinate only
         return (_tf.reduce_mean(_tf.stack([p[0] for p in parts], -1), -1),
                 _tf.concat([p[1] for p in parts], axis=-1) / self.parent.size)
+
+    def _plain_covariance(self, x, y):
+        ranges = _tf.reshape(self.parameters["ranges"].get_value(), [-1]) \
+            * _tf.ones([self.parent.size], _tf.float64)
+        dist = _tf.abs(x[..., :, None, :] - y[..., None, :, :]) / ranges
+        return _tf.reduce_mean(self.kernel.kernelize(dist), axis=-1)
 
     def _second_moments(self, mean, var, points, weights):
         # the mean of one kernel per dimension: two dimensions' kernels are
@@ -4875,6 +4905,13 @@ class MultiStructureGP(BasicGP):
             return _tf.add_n([p * weights[n] for n, p in enumerate(parts)])
         return (_tf.add_n([p[0] * weights[n] for n, p in enumerate(parts)]),
                 _tf.add_n([p[1] * weights[n] for n, p in enumerate(parts)]))
+
+    def _plain_covariance(self, x, y):
+        weights = self.parameters["weights"].get_value()
+        return _tf.add_n([
+            self.kernel.kernelize(_plain_distance(
+                x, y, self.parameters[f"ranges_{n}"].get_value())) * weights[n]
+            for n in range(self.n_structures)])
 
     def _kernel_items(self):
         # every structure's components, each weighted by its structure: a

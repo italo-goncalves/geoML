@@ -30,7 +30,11 @@ row is used for what it says rather than dropped or imputed. Before 0.9.0
 understate the spread several times over, and `UncertainInputGP`, now
 deprecated, integrated over it by quadrature. For a location error a noise
 term already absorbs, telling the model nothing was measured the better
-choice.
+choice. The variance of the mean reads the kernel at 64 points of every
+uncertain input against every inducing point, so it costs time and memory
+in proportion; dividing the inducing points among experts does not shorten
+it, but training them one at a time (`train_by_expert`) holds a fraction of
+it in memory.
 
 **Workers.** `BasicGP(parent, size=k)` is the GP node of chapter 3. The
 `size` argument gives it $k$ latent columns that share one kernel and one

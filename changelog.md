@@ -34,7 +34,9 @@ closed form for the Gaussian kernel, and for the others over 64 points of
 the input (symmetric scrambled Sobol, whitened), since the closed form
 pairs a table into 36 arrays of `[n, m, m]`: 100 times a first-moment
 training iteration at 100 inducing points and out of 45 GB at 300, where
-the quadrature costs 19 and 17 times (2.9 and 6.4 GB). Within 1.8% of the
+the quadrature, reading the kernel through plain distances, costs 8 times
+(2.1 and 3.6 GB). Experts do not shorten it; `train_by_expert` holds less
+of it in memory (1.9 GB at six). Within 1.8% of the
 mixture by Monte Carlo in mean and variance at every input variance tried
 on Walker Lake; `BasicGP`, `MultiStructureGP` and `AdditiveGP`; deep
 networks keep the first moment. Held out, it improves on the first moment

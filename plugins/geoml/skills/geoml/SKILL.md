@@ -218,7 +218,9 @@ in the catalogue.
   takes the mixture's moments (the variance of the mean over the input
   included) and the likelihood integrates what its realizations leave
   out; `UncertainInputGP` is deprecated. A location error is still better
-  left untold: a noise term absorbs it.
+  left untold: a noise term absorbs it. That variance costs time and
+  memory in proportion to the inducing points; experts do not shorten it,
+  `train_by_expert` holds a fraction of it in memory.
 - **Training.** `GPOptions(training_tolerance=0.01)` stops once the bound
   has settled; the last few percent of the bound buys sharpness held-out
   data does not support.

@@ -294,11 +294,12 @@ the breaking version.
 |---|---|---|---|---|
 | 100 | Gaussian | 0.010 s, 1.1 GB | 0.071 s, 1.4 GB (closed) | -- |
 | 300 | Gaussian | 0.024 s, 1.3 GB | 0.70 s, 3.4 GB (closed) | -- |
-| 100 | Matern32 | 0.021 s, 1.2 GB | 2.1 s, 8.9 GB (closed); 0.40 s, 2.9 GB (64 nodes) | 0.18 s, 2.1 GB |
-| 300 | Matern32 | 0.071 s, 1.5 GB | out of 45 GB (closed); 1.23 s, 6.4 GB (64 nodes) | 0.58 s, 3.5 GB |
+| 100 | Matern32 | 0.021 s, 1.2 GB | 2.1 s, 8.9 GB (closed); 0.17 s, 2.1 GB (64 nodes) | 0.18 s, 2.1 GB |
+| 300 | Matern32 | 0.071 s, 1.5 GB | out of 45 GB (closed); 0.58 s, 3.6 GB (64 nodes) | 0.58 s, 3.5 GB |
 
 Seconds a training iteration and the process's peak, 1000 uncertain
-locations.
+locations; the 64-node figures with the kernel read through plain
+distances (below), 0.40 s and 1.23 s, 2.9 and 6.4 GB, before.
 
 Where the 1.24 s of a Matern32 step at 300 inducing points goes, gradient
 included: 0.90 s reading the kernel at the 64 points (0.42 s through plain
@@ -309,7 +310,10 @@ measured 2.3 to 3.9 times slower as a triangular solve, and 1.2 times
 faster as a product with the factor's inverse -- 3% of a step. Reading
 the kernel at the points through plain distances costs 0.405 s through the
 differences and 0.245 s through the expansion `|x|² + |z|² - 2 x zᵀ`
-(within 3e-13), against the node's covariance's 0.913 s.
+(within 3e-13), against the node's covariance's 0.913 s -- so the
+quadrature reads it that way (`_plain_covariance`, about the inducing
+points' mean so that a mine grid's coordinates keep their digits), and the
+step went from 1.23 s to 0.58 s.
 
 **Experts do not make it cheaper in time**, measured 2026-10-09
 (`second_moment.py cost 300 Matern32 experts=K [by]`): the kernel at the
@@ -324,7 +328,9 @@ and dominates; the trace, which experts do divide, is the smaller part.
 | 3 experts, `train_by_expert` | 1.52 | 3.6 GB |
 | 6 experts, `train_by_expert` | 1.54 | 2.5 GB |
 
-Training by expert buys memory instead: 2.4 times less at six experts.
+Training by expert buys memory instead: 2.4 times less at six experts
+(with the plain distances, 0.70 s and 1.9 GB against 0.58 s and 3.6 GB in
+one expert).
 
 **Taking the input's linear part analytically buys nothing**, measured
 2026-10-09 (`second_moment.py linear`): the node set is symmetric and

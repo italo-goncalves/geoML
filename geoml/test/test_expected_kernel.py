@@ -836,6 +836,24 @@ def test_no_input_variance_takes_no_second_moment():
                                atol=1e-12)
 
 
+@pytest.mark.parametrize("name", ["Exponential", "Matern32",
+                                  "RationalQuadratic"])
+@pytest.mark.parametrize("node", list(NODES))
+@pytest.mark.parametrize("offset", [0.0, 2.5e4])
+def test_the_plain_covariance_is_the_covariance(node, name, offset):
+    # what the quadrature reads its kernel through: the node's covariance
+    # between certain points, the distance by the expansion -- about a
+    # common origin, so a mine grid's coordinates (here 1e6 m at a range of
+    # 40 m) keep the digits a short distance needs
+    _, leaf = _uncertain_model(KERNELS[name](), node)
+    rng = np.random.default_rng(1)
+    x = tf.constant(offset + rng.uniform(0, 3, [50, 2]))
+    y = tf.constant(offset + rng.uniform(0, 3, [20, 2]))
+    np.testing.assert_allclose(np.asarray(leaf._plain_covariance(x, y)),
+                               np.asarray(leaf.covariance_matrix(x, y)),
+                               rtol=1e-9, atol=1e-11)
+
+
 def test_only_the_gaussian_kernel_takes_it_in_closed_form():
     # the scale mixtures by quadrature over the input: in closed form a
     # table pairs into 36 arrays of [n, m, m]
