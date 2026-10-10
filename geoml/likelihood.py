@@ -60,6 +60,21 @@ _WEIGHTS_8 = _tf.constant(dtype=_tf.float64, value=[
 _WEIGHTS_8 = _tf.concat([_WEIGHTS_8[::-1], _WEIGHTS_8], axis=0)
 _WEIGHTS_8 = _WEIGHTS_8 / _tf.reduce_sum(_WEIGHTS_8)
 
+# a standard normal at the eight Gauss-Hermite nodes, for the latent jitter
+# a GP node at an uncertain input leaves beside its realizations
+_JITTER_NODES = _ROOTS_8 * _np.sqrt(2.0)
+
+
+def _lattice_step(n):
+    """The generator of a rank-1 lattice of `n` points in the unit square
+    close to the golden-ratio one: an integer prime to `n` near
+    `0.618 n`."""
+    step = max(1, int(round(0.6180339887498949 * n)))
+    while _np.gcd(step, n) != 1:
+        step += 1
+    return step
+
+
 _ROOTS_64 = _tf.constant(dtype=_tf.float64, value=[
     1.383022449870097241150498e-1,
     4.149888241210786845769291e-1,
@@ -427,8 +442,32 @@ class _Likelihood(_gpr.Parametric):
         dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
         return dist.quantile(u)
 
+    def _jitter_draws(self, n_nodes, shift=None):
+        """Equal-share standard normals standing for the latent jitter in a
+        measurement sample, paired node by node with the noise's.
+
+        The jitter's strata are visited in the order of a rank-1 lattice
+        against the noise's (`_lattice_step`), so the pairs cover the
+        square of the two evenly rather than along its diagonal, and each
+        is rotated by `shift` -- `(n, 1, n_sim)`, one per location and
+        realization, shared by the components, whose jitters come from one
+        uncertain input. Returns `(n_nodes, 1, 1, 1)` without a shift and
+        `(n_nodes, n, 1, n_sim)` with one.
+        """
+        order = (_np.arange(n_nodes) * _lattice_step(n_nodes)) % n_nodes
+        u = _tf.constant((order + 0.5) / n_nodes, _tf.float64)
+        if shift is None:
+            u = u[:, None, None, None]
+        else:
+            u = _tf.math.floormod(
+                u[:, None, None, None]
+                + _tf.convert_to_tensor(shift, _tf.float64)[None], 1.0)
+        u = _tf.clip_by_value(u, 1e-6, 1 - 1e-6)
+        return _tfd.Normal(_tf.constant(0.0, _tf.float64),
+                           _tf.constant(1.0, _tf.float64)).quantile(u)
+
     def measurement_samples(self, sims, n_nodes=_MEASUREMENT_NODES,
-                            shift=None):
+                            shift=None, jitter=None, jitter_shift=None):
         """What a *measurement* at each location would read.
 
         A prediction reports the ground, the noise having been integrated out,
@@ -448,17 +487,28 @@ class _Likelihood(_gpr.Parametric):
         same noise value: fine for reading one location, wrong for anything
         read across several -- a variogram, a regional mean.
 
+        `jitter`, `(rows, variables)`, is the latent variance the
+        realizations leave out because a GP node's input is uncertain; each
+        node then carries a draw of it beside its noise value (see
+        `_jitter_draws`), rotated by `jitter_shift`, `(rows, 1, n_sim)`.
+
         Returns
         -------
         (rows, variables, n_sim * n_nodes)
         """
         self.warping.refresh()
         noise = self._measurement_values(n_nodes, shift)
+        if jitter is not None:
+            spread = _tf.sqrt(jitter)[:, :, None] \
+                * self._jitter_draws(n_nodes, jitter_shift)
+
+        def latent(i):
+            point = sims + (noise[i] if shift is not None else noise[i][None])
+            return point if jitter is None else point + spread[i]
 
         return _tf.concat(
-            [self._back_transform(
-                sims + (noise[i] if shift is not None else noise[i][None]))
-             for i in range(n_nodes)], axis=2)
+            [self._back_transform(latent(i)) for i in range(n_nodes)],
+            axis=2)
 
     def _back_transform(self, sims):
         """Simulations out of the latent space, all realizations at once.
@@ -485,22 +535,34 @@ class _Likelihood(_gpr.Parametric):
                              [shape[2], shape[0], self.warping.size_in])
         return _tf.transpose(values, [1, 2, 0])
 
-    def _values_and_noise(self, sims, include_noise):
+    def _values_and_noise(self, sims, include_noise, jitter=None):
         """What a prediction reports, and how far a sample of it would fall.
 
         Without the integration there is no noise variance to report: the
         answer is *missing* rather than zero, as it is for `_dispersion` where
         a location has no interior. Zero would claim that a measurement here
-        is exact, which is not something anyone said.
+        is exact, which is not something anyone said. A latent jitter is
+        integrated either way: it belongs to the ground, not to the
+        measurement.
         """
         if include_noise:
-            return self.integrated_backward(sims)
+            return self.integrated_backward(sims, jitter)
         self.warping.refresh()
-        values = self._back_transform(sims)
+        if jitter is None:
+            values = self._back_transform(sims)
+        else:
+            spread = _tf.sqrt(jitter)[:, :, None]
+            blank = _tf.zeros(
+                [_tf.shape(sims)[0], self.warping.size_in,
+                 _tf.shape(sims)[2]], dtype=sims.dtype)
+            values = _tf.foldl(
+                lambda carry, node: carry + node[1] * self._back_transform(
+                    sims + spread * node[0]),
+                (_JITTER_NODES, _WEIGHTS_8), initializer=blank)
         return values, _tf.fill(_tf.shape(values),
                                 _tf.constant(_np.nan, values.dtype))
 
-    def integrated_backward(self, sims):
+    def integrated_backward(self, sims, jitter=None):
         """Simulations out of the latent space, with the noise integrated out.
 
         Reports `E[g(z + eps)]` rather than `g(z + eps)` for some drawn `eps`:
@@ -521,6 +583,14 @@ class _Likelihood(_gpr.Parametric):
         The nodes are consumed one at a time, so the largest tensor in the
         pipeline is never copied: the cost is in time, not in memory.
 
+        `jitter`, `(rows, variables)`, is the latent variance the
+        realizations leave out because a GP node's input is uncertain. It is
+        integrated beside the noise -- every noise node with each of eight
+        Gauss-Hermite nodes of it, eight times the back-transforms -- so a
+        value is `E[g(z + sqrt(jitter) eta + eps)]` and the spread takes it
+        in; one draw serves every component of a location, their jitters
+        arising from one uncertain input.
+
         Returns
         -------
         mean : the integrated value, in the variable's own units
@@ -540,14 +610,33 @@ class _Likelihood(_gpr.Parametric):
                     carry[1] + spread * value,
                     carry[2] + spread * value ** 2)
 
+        nodes = (noise, value_weights, spread_weights)
+        if jitter is not None:
+            # every noise node with every jitter node, the weights multiplied
+            k = int(_JITTER_NODES.shape[0])
+            count = int(noise.shape[0])
+            nodes = (_tf.repeat(noise, k, axis=0),
+                     _tf.reshape(value_weights[:, None]
+                                 * _WEIGHTS_8[None, :], [-1]),
+                     _tf.reshape(spread_weights[:, None]
+                                 * _WEIGHTS_8[None, :], [-1]),
+                     _tf.tile(_JITTER_NODES, [count]))
+            root = _tf.sqrt(jitter)[:, :, None]
+
+            def accumulate(carry, node):
+                eps, weight, spread, eta = node
+                value = self._back_transform(sims + eps[None] + root * eta)
+                return (carry[0] + weight * value,
+                        carry[1] + spread * value,
+                        carry[2] + spread * value ** 2)
+
         # three sums, one pass: the reported value, and the first two moments
         # of a measurement. The spread is taken about the *reported* value --
         # `E[(v - mean)^2]` expanded -- which collapses to the familiar
         # `second - mean^2` whenever the two weightings agree, as they do
         # everywhere but a mixture declaring contamination
         mean, drawn, second = _tf.foldl(
-            accumulate, (noise, value_weights, spread_weights),
-            initializer=(blank, blank, blank))
+            accumulate, nodes, initializer=(blank, blank, blank))
         return mean, _tf.maximum(second - 2 * drawn * mean + mean ** 2, 0.0)
 
     def initialize(self, y, weights=None):
@@ -648,13 +737,13 @@ class _ContinuousLikelihood(_Likelihood):
         return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, *args, include_noise=True,
-                n_splits=None, cutoffs=None, **kwargs):
+                n_splits=None, cutoffs=None, jitter=None, **kwargs):
         # One field, and everything is read from it. The noise is integrated
         # out rather than drawn, so what comes back is already free of the
         # part of the spread that refining cannot resolve: a block's
         # dispersion is the ground's, and a block straddling a cut-off really
         # does straddle it.
-        values, noise = self._values_and_noise(sims, include_noise)
+        values, noise = self._values_and_noise(sims, include_noise, jitter)
 
         # taken from the sub-blocks, so before they are averaged away; one
         # value per realization, then the mean over them, which is the
@@ -1486,12 +1575,13 @@ class LikelihoodMixture(_Likelihood):
         return out
 
     def predict(self, mu, var, sims, explained_var, *args, include_noise=True,
-                n_splits=None, cutoffs=None, **kwargs):
+                n_splits=None, cutoffs=None, jitter=None, **kwargs):
         labels = self._location_labels(sims)
         values, noise, by_population = [], [], []
         for component, columns in self._slices():
-            v, e = component._values_and_noise(sims[:, columns, :],
-                                               include_noise)
+            v, e = component._values_and_noise(
+                sims[:, columns, :], include_noise,
+                None if jitter is None else jitter[:, columns])
             values.append(v)
             noise.append(e)
             by_population.append(
@@ -1527,13 +1617,15 @@ class LikelihoodMixture(_Likelihood):
         return out
 
     def measurement_samples(self, sims, n_nodes=_MEASUREMENT_NODES,
-                            shift=None):
+                            shift=None, jitter=None, jitter_shift=None):
         labels = self._location_labels(sims)
         samples = []
         for component, columns in self._slices():
             samples.append(component.measurement_samples(
                 sims[:, columns, :], n_nodes,
-                None if shift is None else shift[:, columns, :]))
+                None if shift is None else shift[:, columns, :],
+                None if jitter is None else jitter[:, columns],
+                jitter_shift))
         # `measurement_samples` lays the nodes out node by node
         return self._by_label(samples, labels, n_nodes)
 

@@ -20,13 +20,21 @@ ellipsoid, made composable.
 and a variance per coordinate, which is what a `GaussianData` container
 holds (chapter 10). It is built for a high-dimensional input with missing
 entries, each given the mean and variance it could have, and it serves an
-uncertain location the same way. The variance rides through the transform
-and `UncertainInputGP` integrates over it by quadrature, so such a row is
-used for what it says rather than dropped or imputed. `BasicGP` reads an
-uncertain input through an inflated kernel instead, which was measured
-to understate the resulting spread several times over: pair the two for
-missing entries. For a location error a noise term already absorbs,
-`BasicGP` was measured the better choice.
+uncertain location the same way. The variance rides through the transform,
+and a `BasicGP` above takes the moments of the mixture over it: the
+expected kernel (5.1, depth) for the mean, and for the variance the spread
+of the posterior's mean over the input as well, in closed form for the
+Gaussian kernel and over 64 points of the input for the others. So such a
+row is used for what it says rather than dropped or imputed. Before 0.9.0
+`BasicGP` read an uncertain input through an inflated kernel, measured to
+understate the spread several times over, and `UncertainInputGP`, now
+deprecated, integrated over it by quadrature. For a location error a noise
+term already absorbs, telling the model nothing was measured the better
+choice. The variance of the mean reads the kernel at 64 points of every
+uncertain input against every inducing point, so it costs time and memory
+in proportion; dividing the inducing points among experts does not shorten
+it, but training them one at a time (`train_by_expert`) holds a fraction of
+it in memory.
 
 **Workers.** `BasicGP(parent, size=k)` is the GP node of chapter 3. The
 `size` argument gives it $k$ latent columns that share one kernel and one
@@ -69,13 +77,27 @@ in one of two places:
 **Depth.** A `BasicGP` whose parent is another `BasicGP` receives a
 *distribution* rather than a point. The parent's uncertainty rides along,
 which is what makes the stack a deep GP instead of two models glued
-together. The enabling mathematics is the Paciorek non-stationary kernel,
-the one covariance that absorbs Gaussian input uncertainty analytically,
-derived for this setting in the 2025 deep-GP paper. The practical reading
-is simpler: **the inner layers warp space**. A stationary kernel in the
-warped space is non-stationary in the real one, so folded veins and curved
-orebodies stop being kernel problems and become network problems, and the
-network is trainable.
+together. The outer node averages its kernel over that uncertainty, the
+**expected kernel**, and what decides the average is how uncertain the
+inner layer is about the *difference* between two locations: two places
+whose warped positions move together stay correlated, two whose positions
+are uncertain independently lose correlation. So each node hands the next
+its covariance between locations along with its variances. The practical
+reading is simpler: **the inner layers warp space**. A stationary kernel
+in the warped space is non-stationary in the real one, so folded veins and
+curved orebodies stop being kernel problems and become network problems,
+and the network is trainable.
+
+How that uncertainty is carried is not a detail. Before 0.9.0 each
+location's variance travelled alone and widened the outer node's range by
+half of it, which barely registered: on a folded synthetic section a
+two-layer network's predictive variance came out at a few thousandths of
+what its own posterior implied, training bought a tiny noise variance with
+that confidence, and new drillholes scored 25 nats each where the expected
+kernel scores 9 (`GPOptions(propagation=...)`, whose `"marginal"` keeps the
+old rule for models saved under it). The outer node of a deep network
+takes the Gaussian, exponential, Matérn or rational quadratic kernel: the
+expected kernel needs a kernel that is a mixture of Gaussians.
 
 Depth comes with one habit that is close to mandatory. **Concatenate the
 inner node with the original coordinates before feeding the next layer.**
@@ -83,7 +105,8 @@ An inner GP is free to map two distant regions onto the same place, and
 if the outer layer sees only the inner node's output it has no way to tell
 them apart, so the space collapses and points that are far away become
 artificially correlated. Keeping the coordinates in the joint input costs
-a couple of columns and removes the failure mode.
+a couple of columns and removes the failure mode, and it is the
+recommended construction of every deep network in this manual.
 
 ## 5.2 Choosing a shape
 
@@ -134,10 +157,12 @@ inner = geoml.latent.BasicGP(
 # distant places cannot end up at the same address
 deep_input = geoml.latent.Concatenate(root, inner)
 
+# a GP reading an uncertain input takes a kernel that is a mixture of
+# Gaussians: the Matern32 for the spherical's roughness at the origin
 outer = geoml.latent.BasicGP(
     deep_input,
     size=1,
-    kernel=geoml.kernels.Spherical())
+    kernel=geoml.kernels.Matern32())
 
 warping = geoml.warping.ChainedWarping(
     geoml.warping.BoxCox(1, shift=1.0),
@@ -185,8 +210,9 @@ honest showcase.
 
 ## Further reading
 
-Damianou & Lawrence (2013) for deep GPs; Paciorek & Schervish (2003) for
-the non-stationary covariance that carries the input uncertainty; the 2025
+Damianou & Lawrence (2013) for deep GPs; Lu & Shafto (2021) for the
+expected kernel over correlated inputs; Paciorek & Schervish (2003) for
+the non-stationary covariance the propagation before 0.9.0 used; the 2025
 paper for the analytical propagation and the SDE node; the 2026
 scalable-VGP paper for a deposit-scale network combining most of this
 chapter.
@@ -196,6 +222,10 @@ chapter.
 Damianou, A., & Lawrence, N. D. (2013). Deep Gaussian processes.
 *Proceedings of the 16th International Conference on Artificial
 Intelligence and Statistics (AISTATS)*, 207–215.
+
+Lu, C.-K., & Shafto, P. (2021). Conditional deep Gaussian processes:
+empirical Bayes hyperdata learning. *Entropy*, 23(11), 1545.
+<https://doi.org/10.3390/e23111545>
 
 Gonçalves, Í. G. *et al.* (2025). Uncertainty propagation in deep Gaussian
 process networks. *Mathematical Geosciences*.

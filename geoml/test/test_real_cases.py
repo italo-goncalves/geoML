@@ -186,9 +186,14 @@ def test_jura_mixed_categorical_and_elements():
     inducing = geoml.data.Grid2D(start=[0, 0], n=[7, 7], end=[6, 6])
     net_input = gl.BasicInput(inducing, tr.Isotropic(0.5))
 
-    field = gl.MultiStructureGP(net_input, size=2, kernel=kr.Cubic())
+    # the walk reads the field where it has carried the walkers, so the
+    # field's kernel, too, is a mixture of Gaussians
+    field = gl.MultiStructureGP(net_input, size=2, kernel=kr.Matern52())
     coords = gl.GPWalk(field)
-    categorical = gl.MultiStructureGP(coords, size=n_rock, kernel=kr.Cubic())
+    # on the walked, uncertain coordinates a mixture of Gaussians: the
+    # Matern52 for the cubic's smoothness
+    categorical = gl.MultiStructureGP(coords, size=n_rock,
+                                      kernel=kr.Matern52())
 
     bottleneck = gl.Linear(categorical, size=2, unit_norm=False)
     trend = gl.Linear(bottleneck, size=n_el, unit_norm=False)

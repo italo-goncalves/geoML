@@ -1,3 +1,124 @@
+## version 0.9.0
+* **Deep networks read their inner layers through the expected kernel**
+(`GPOptions(propagation="joint")`, the default for a new model). A GP node
+whose input is another node's uncertain output now averages its kernel
+over that input's distribution, which needs the variance of the
+*difference* between two locations' inputs: so every node hands its
+children its covariance between the data and the inducing points, and
+among the inducing points, along with its variances. Before, each
+location's variance travelled alone and widened the child's range by half
+of it, which a short-range child barely registers: on a folded synthetic
+section a two-layer network's predictive variance was 0.002 of its own
+posterior's, training bought a tiny noise with that confidence, and new
+drillholes scored -25.4 nats each (calibration 5.3) where the expected
+kernel scores -9.0 (1.19) and a flat GP -12.2; beside the coordinates,
+-18.9 against -11.1. Gaussian kernel in closed form; the exponential, the
+Matérn kernels and the rational quadratic -- scale mixtures of Gaussians --
+over a fixed set of components with positive weights, so the inducing
+points' matrix stays positive definite: the Matérn family through eight
+Gaussians each, fitted once and kept as constants (within 5.1e-4 of the
+exponential, 1e-5 of the Matern32 and Matern52, at any range and any
+uncertainty), the rational quadratic through 48 that follow its `scale`
+(4e-5). On chapter 5's deep model a training iteration costs 0.7 times the
+old rule's. A single-layer model is unchanged to the
+bit. Design record and measurements: `docs/expected-kernel.md`,
+`docs/benchmarks/expected_kernel.py`; the research: Lu & Shafto (2021).
+* **A GP at an uncertain input takes the mixture's moments** under the
+expected kernel, where its inducing points are certain (a `GaussianInput`
+root, through nodes acting row by row): the expected kernel alone averages
+the kernel before the posterior is formed and misses that the posterior's
+mean moves with the input, overstating the variance by up to 130% on
+Walker Lake; Girard's second moment completes it, `var = 1 - tr((K + D)^-1
+L) + alphaᵀ L alpha - (l alpha)²` with `L = E[k(x, z) k(x, z)ᵀ]` -- in
+closed form for the Gaussian kernel, and for the others over 64 points of
+the input (symmetric scrambled Sobol, whitened), since the closed form
+pairs a table into 36 arrays of `[n, m, m]`: 100 times a first-moment
+training iteration at 100 inducing points and out of 45 GB at 300, where
+the quadrature, reading the kernel through plain distances, costs 8 times
+(2.1 and 3.6 GB). Experts do not shorten it; `train_by_expert` holds less
+of it in memory (1.9 GB at six). Within 1.8% of the
+mixture by Monte Carlo in mean and variance at every input variance tried
+on Walker Lake; `BasicGP`, `MultiStructureGP` and `AdditiveGP`; deep
+networks keep the first moment. Held out, it improves on the first moment
+in every case of the `GaussianInput` gate and ties `UncertainInputGP`. An
+expert is weighted by the variance its inducing points leave, which is the
+variance itself wherever the second moment is not taken.
+* **The realizations stay the expected kernel's, and what they leave out
+is integrated like noise.** At an uncertain input each realization is
+read at the input's mean, so it carries less than the mixture's spread:
+the difference, `tr((R Rᵀ + alpha alphaᵀ)(L - l lᵀ))`, travels beside the
+realizations as a latent jitter (`predict` returns it on its tuple; the
+nodes acting linearly carry it), and a continuous likelihood integrates it
+beside its noise -- the reported value over eight Gauss-Hermite nodes of
+it, a measurement sample drawing it. Through a bending warping the
+prediction comes within 1% of realizations at drawn inputs (20 to 26%
+without), and the 5% and 95% quantiles of a measurement within 4 to 5% of
+the interval's width (27 to 32% without). Categorical probabilities come
+from the moments and hold it already. Without input variance nothing is
+passed and nothing changes.
+* **`AdditiveGP` reads a distance as a distance**: its covariance handed the
+kernel the signed difference in each dimension, which the Matérn kernels
+read as a growing exponential on one side; the Gaussian, exponential and
+spherical kernels square or root it and are unchanged to the bit.
+* **`UncertainInputGP` is deprecated** (a `FutureWarning` at construction)
+and will be removed in the breaking version: `BasicGP` takes the
+mixture's moments under the expected kernel.
+* **Saved models keep the rule they were trained with.** An older save
+opens with `propagation="marginal"` and `expert_propagation="consensus"`,
+under which the code is the old code -- a deep network, three experts,
+training by expert and a tree of `Add`, `Linear`, `SelectInput` and
+`Scale` reproduce 0.8.8 bit for bit. `GPOptions(propagation="marginal")`
+keeps the old rule for a new model.
+* **`expert_propagation="independent"` is the default** for a new model:
+the expected kernel chains each expert to its parent's same expert, and is
+refused with the consensus.
+* **Under the expected kernel, refused at construction**: `Spherical` and
+`Cubic` on an uncertain input (they are no mixtures of Gaussians: a
+spherical Gram matrix in six dimensions has a negative eigenvalue), so
+chapter 5's deep model takes a `Matern32`; the same in a `GPWalk`'s
+field, which the walk reads at uncertain positions; `Cosine` in any GP node;
+`UncertainInputGP` on a GP or read by one; `RadialTrend` on an uncertain
+input; a GP node on a `GradientConstrainedInput`. Each is refused when the
+model is built, never when a node is, so a save naming one still opens.
+* **`GPWalk` walks one random field** under the expected kernel: points
+carry their covariance with each other along the walk, the field is read
+with the uncertainty accumulated so far (an uncertain walker slows down),
+the field's variance its inducing points leave unexplained moves each point
+on its own (so far from the data a walk is uncertain), and each realization
+walks a realization of the field, the field's slope read in closed form.
+The walk adds no KL of its own: the field's prices the deformation. **Build
+the GP that reads the walk with `isotropic=True`** (documented, not
+enforced): a range per dimension in the reader is a second description of
+the anisotropy the walk already bends, and training settled that trade on
+a stretched reader over a near-certain walk (calibration 1.97 to 2.74 on
+the folded section's three seeds). With an isotropic reader the walk
+network scores -6.1 a new hole on average over three seeds against -31.7
+under the old rule (a VGP -12.2), its intervals erring wide where they err
+(calibration 0.45-1.14); the anisotropy the model starts from belongs in
+the input's transform. Chapters 16 and 17 build their readers that way.
+Measured and dropped on the way: a displacement term (-10.7, calibration
+up to 2.24), a proper prior through the field's fixed scale (no scale
+works on every seed), a stronger prior on the reader's ranges (no effect
+once it is isotropic), an uncertain `amp` (its uncertainty collapsed), and
+the reader's ranges held where they start (-5.0, but a fixed scale the user
+did not choose). The marginal rule's displacement term and `precision` are
+ignored and deprecated. Without the unexplained variance chapter 16's rock model put a
+confident region over unsampled ground. Fixed draws of the field walked
+exactly were measured as an alternative and dropped: no better, at 3 to 6
+times the cost.
+* **Chapter 17 trains as a tested notebook does and predicts on a refined
+block set.** The training points are converted at 1 m (5,606, where 2 m
+gave 2,811), the stationary model takes 1000 full iterations at 2e-2 and
+the deep one minibatches of 500 rows, 20 epochs at 5e-2 then 60 at 1e-2;
+both predict into a `BlockSet3D` cut by `models.refine` and contour it.
+At 2 m the deep vein came out in patches whatever the schedule; at 1 m it
+is a coherent sheet with either reader. The deep model is reseeded before
+it is built, since drawn after the stationary model it settled on a
+fragmented vein, and the chapter says so.
+* **`propagate` returns a `_Moments`**, which still unpacks as the
+`(mean, variance)` pair and carries the experts' chains beside it; GP
+nodes keep `inducing_points_covariance` beside the variance.
+
 ## version 0.8.8
 * **`inducing.from_hull(data, step, distance)`: a lattice kept where the
 data reach.** The regular lattice of `from_grid`, grown by `distance`

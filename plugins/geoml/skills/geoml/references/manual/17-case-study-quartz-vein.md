@@ -90,7 +90,7 @@ merged = holes.merge_domains(("lito", "SIMPLE LITO"))
 holes.add_intervals("lito", merged)
 
 # two conversions from the same logs, at two spacings
-dense = holes.as_classification_input(("lito", "SIMPLE LITO"), length=2.0)
+dense = holes.as_classification_input(("lito", "SIMPLE LITO"), length=1.0)
 sparse = holes.as_classification_input(("lito", "SIMPLE LITO"), length=10.0)
 
 print(dense.tree())
@@ -136,23 +136,21 @@ single anisotropy ellipsoid can approximate but not follow.
 The model of chapter 6, in 3D. One latent field, turned into two category
 indicators by a `Linear` node, with an ellipsoid initialized from a look
 at the data and free to move during training. Both models in this chapter
-share that construction, so it is worth naming once.
+share that construction, so it is worth naming once. The stationary one
+trains on the whole dataset at every step, a thousand of them.
 
 ```python
-def implicit_model(root_node, data, iterations=120):
+def implicit_model(root_node, data, isotropic=False):
     """A one-field implicit model on the given input node."""
-    field = geoml.latent.BasicGP(root_node, size=1)
+    field = geoml.latent.BasicGP(root_node, size=1, isotropic=isotropic)
     indicators = geoml.latent.Linear(field, size=2)
 
-    model = geoml.models.VGPNetwork(
+    return geoml.models.VGPNetwork(
         data, "SIMPLE LITO",
         geoml.likelihood.CategoricalGaussianIndicator(2),
         indicators,
-        options=geoml.models.GPOptions(jitter=1e-6, verbose=False))
-
-    model.set_learning_rate(2e-2)
-    model.train_full(max_iter=iterations)
-    return model
+        options=geoml.models.GPOptions(jitter=1e-6, training_batch_size=500,
+                                       verbose=False))
 
 
 flat_input = geoml.latent.BasicInput(
@@ -162,6 +160,8 @@ flat_input = geoml.latent.BasicInput(
     center=True)
 
 flat_model = implicit_model(flat_input, dense)
+flat_model.set_learning_rate(2e-2)
+flat_model.train_full(max_iter=1000)
 ```
 
 ## 17.4 The deep model: moving the ground before modelling it
@@ -170,9 +170,26 @@ Chapter 5's argument, applied. Rather than asking one ellipsoid to
 describe a folded surface, let a *vector field* move the coordinates and
 model a stationary field in the moved space. `GPWalk` integrates the
 movement in a few steps, and everything downstream is unchanged: the same
-one-field implicit model, reading transformed coordinates.
+one-field implicit model, reading transformed coordinates -- with one range
+instead of three. The ellipsoid still carries the anisotropy the model
+starts from; the walk bends the space from there, and a range per
+direction in the field reading it would be a second way to say the same
+thing, which training resolves into a stretched, overconfident field.
+
+The deep model trains differently. It has more local optima than the
+stationary one, so it trains on minibatches of 500 rows (chapter 11's
+`train_svi`), whose noise helps it out of a poor start: twenty epochs at a
+high learning rate to find the shape, then sixty at a lower one to settle
+it. `set_learning_rate` restarts the optimizer, which is the point of
+calling it between the two. Where it starts still matters: built after the
+stationary model has drawn from the random stream, it settled on a
+fragmented vein, so it gets the chapter's seed again, which the figures
+below were drawn from. Trying a few seeds and keeping the one with the
+best held-out score (chapter 13) is the honest way to choose.
 
 ```python
+geoml.set_seed(1234)
+
 deep_input = geoml.latent.BasicInput(
     inducing_points=sparse,
     transform=geoml.transform.Anisotropy3D(
@@ -182,12 +199,16 @@ deep_input = geoml.latent.BasicInput(
 displacement = geoml.latent.BasicGP(deep_input, size=3)
 walked = geoml.latent.GPWalk(displacement, n_steps=5)
 
-deep_model = implicit_model(walked, dense)
+deep_model = implicit_model(walked, dense, isotropic=True)
+deep_model.set_learning_rate(5e-2)
+deep_model.train_svi(20)
+deep_model.set_learning_rate(1e-2)
+deep_model.train_svi(60)
 
 figure, axes = plt.subplots(figsize=(7, 4.2))
-axes.plot(flat_model.training_log, label="stationary")
-axes.plot(deep_model.training_log, label="deep (GPWalk)")
-axes.set_xlabel("iteration")
+axes.plot(flat_model.training_log, label="stationary (iterations)")
+axes.plot(deep_model.training_log, label="deep (GPWalk, minibatches)")
+axes.set_xlabel("step")
 axes.set_ylabel("ELBO")
 axes.legend()
 
@@ -196,32 +217,42 @@ figure.savefig("figures/17-elbo.png", dpi=150, bbox_inches="tight")
 
 ![What the walked input buys, in ELBO](https://italo-goncalves.github.io/geoML/_images/17-elbo.png)
 
-The deep model reaches a higher ELBO on the same data, so it fits a shape
-the ellipsoid could not. Whether that is skill or memory is precisely the
-question chapter 13 exists to answer, and the honest check is below.
+The stationary model ends at the higher bound, and that is not the verdict
+it looks like. A bound rewards fitting the training points, and a thousand
+full steps on one ellipsoid buy that hole by hole; the deep model's bound
+is a minibatch estimate, noisier and lower, and it spends part of what it
+has on a vector field. Which vein is the better one is a question about the
+ground between the holes, which neither bound sees -- the surfaces below
+are the first look at it, and chapter 13's held-out check the honest one.
 
 ## 17.5 The surfaces
 
 The deliverable is the zero level set of the vein's indicator. Contour it
-out of a grid, then predict *onto the resulting surface* so that every
-triangle carries the model's uncertainty there. Both models get the same
-treatment, on the same grid.
+out of a block model, then predict *onto the resulting surface* so that
+every triangle carries the model's uncertainty there. The blocks start at
+20 m and `refine` (chapter 8) cuts them down to 2.5 m wherever the
+vein's boundary runs through them, so the resolution goes to the contact
+and nowhere else. A regular grid at 2.5 m would hold two million points
+for the same surface, and a coarser one draws a walked surface in steps:
+the walk folds the space, which puts sharper features on the lattice than
+a stationary field does. Both models get the same treatment.
 
 ```python
-grid = geoml.data.Grid3D(start=[24850, 15700, 1300],
-                         end=[25150, 16050, 1600],
-                         n=[61, 71, 61])
-
 surfaces = {}
 
 for name, trained in [("stationary", flat_model), ("deep", deep_model)]:
-    trained.predict(grid)
-    surface = grid.get(
-        "SIMPLE LITO/Vein/indicator_predicted").get_contour(0.0)
+    blocks = geoml.data.BlockSet3D(
+        start=[24860, 15710, 1310],
+        n=[15, 18, 15],
+        step=[20.0, 20.0, 20.0],
+        discretization=(2, 2, 2),
+        max_levels=3)
+    blocks = geoml.models.refine(trained, blocks)
+    surface = blocks.get_contour("SIMPLE LITO/Vein/indicator_predicted", 0.0)
     trained.predict(surface)
     surfaces[name] = surface
-    print("%-11s %6d triangles, %8.0f m2"
-          % (name, len(surface.triangles), surface.area))
+    print("%-11s %6d blocks, %6d triangles, %8.0f m2"
+          % (name, blocks.n_data, len(surface.triangles), surface.area))
 ```
 
 The contour is taken at zero because the category indicators are log-odds.
@@ -271,7 +302,7 @@ the map of where the next hole is worth drilling.
 The difference between the two is the fold. One ellipsoid has to describe
 a surface whose attitude changes along strike, and it cannot: the
 stationary answer breaks into pieces, loses the vein between hole fences,
-and flares into high-uncertainty skirts at the edges of the grid. The
+and flares into high-uncertainty skirts at the edges of the model. The
 walked input lets the same kernel follow the roll, and the deep answer is
 a single coherent sheet that stays with the intersections and only opens
 up past the last hole. The uncertainty colouring is what makes the
@@ -355,18 +386,21 @@ for name, predicted in [("stationary", flat_predicted),
 ```
 
 These are in-sample numbers, printed with that label because the point of
-chapter 13 is that in-sample numbers flatter every model and flatter the
-flexible one most. A deep model has more ways to memorize 53 holes than a
-stationary one, so the honest comparison runs `cross_validate` with the
-folds cut on `HOLEID`, which every conversion in chapter 9 carried as
-metadata precisely for this. At the iteration counts this chapter runs at,
-the numbers above illustrate the machinery rather than settle the geology.
+chapter 13 is that in-sample numbers flatter every model. Here they flatter
+the stationary one: it agrees with every training point and draws the vein
+as tubes along the holes, where the deep model gives up a few points and
+draws one sheet between them. A model can memorize 53 holes in more than
+one way, so the honest comparison runs `cross_validate` with the folds cut
+on `HOLEID`, which every conversion in chapter 9 carried as metadata
+precisely for this. The numbers above illustrate the machinery rather than
+settle the geology.
 
 > **In the code.** `geoml.latent.GPWalk` is the SDE node, and
 > `geoml.transform.Anisotropy3D` the ellipsoid it takes the burden off.
 > `VGPNetwork.predict_node` writes any node's prediction as a
 > `geoml.data.LatentVariable`.
-> `Attribute.get_contour(value)` builds the `Surface3D`, meshes take
+> `models.refine` cuts a `data.BlockSet3D` where the contact runs and
+> `BlockSet3D.get_contour(path, value)` builds the surface; meshes take
 > predictions like any container, and `Mesh3D.simplify`, `.smooth` and the
 > booleans of chapter 12 apply to the result. `DrillholeData.merge_domains`
 > collapses the runs the log records, and `as_classification_input` puts

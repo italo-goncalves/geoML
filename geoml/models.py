@@ -27,6 +27,7 @@ from typing import Any as _Any, Literal as _Literal, cast as _cast
 import geoml._progress as _progress
 import geoml._types as _types
 import geoml.data as _data
+import geoml.kernels as _kr
 import geoml.parameter as _gpr
 import geoml.latent as _latent
 import geoml.likelihood as _lk
@@ -102,7 +103,10 @@ class GPOptions(_ModelOptions):
     # the lookup falls through to here.
     jit_predict = False
     qmc_simulations = False
+    # what a model saved before 0.9.0 was trained under; a new one takes the
+    # `__init__` defaults below
     expert_propagation = "consensus"
+    propagation = "marginal"
     training_tolerance = None
 
     def __init__(self, verbose: bool = True,
@@ -110,8 +114,9 @@ class GPOptions(_ModelOptions):
                  training_batch_size: int = 2000, training_samples: int = 20,
                  jit_predict: bool = False, qmc_simulations: bool = False,
                  expert_propagation: _Literal["consensus", "independent"]
-                 = "consensus",
-                 training_tolerance: float | None = None):
+                 = "independent",
+                 training_tolerance: float | None = None,
+                 propagation: _Literal["joint", "marginal"] = "joint"):
         """
         Configuration of Gaussian process models.
 
@@ -158,22 +163,23 @@ class GPOptions(_ModelOptions):
             the inducing points of a node), beyond which scipy refuses.
         expert_propagation : str
             How a deep network's experts see each other's inducing sets,
-            for every `BasicGP` in the network at once. `"consensus"` (the
-            default, and the historical behavior) predicts every expert's
-            set from every other and combines by precision weighting --
-            O(K^2) in the expert count. `"independent"` lets each expert
-            speak for its own set alone -- O(K) -- so duplicated points in
-            overlapping sets may disagree, and the data-side weighting
-            arbitrates. Measured (Walker deep model and a 3000-point
-            synthetic, K = 5-40): training 1.6x to 6.3x faster and
-            prediction up to 8x as K grows; quality within a few percent of
-            consensus and sometimes ahead, the consensus coupling appearing
-            to slow optimization at large K. Only deep (multi-layer)
-            networks are affected: below a terminal node the propagation
-            never runs. An operation over GP nodes -- `Add`,
-            `LinearCombination` -- still makes one layer: the answer and
-            the time are the same under both rules until a GP node sits on
-            top.
+            for every `BasicGP` in the network at once. `"independent"`
+            (the default since 0.9.0) lets each expert speak for its own
+            set alone -- O(K) in the expert count -- so duplicated points
+            in overlapping sets may disagree, and the data-side weighting
+            arbitrates. `"consensus"` (the default before, and what a model
+            saved before 0.9.0 keeps) predicts every expert's set from
+            every other and combines by precision weighting -- O(K^2).
+            Measured (Walker deep model and a 3000-point synthetic,
+            K = 5-40): training 1.6x to 6.3x faster and prediction up to 8x
+            as K grows; quality within a few percent of consensus and
+            sometimes ahead, the consensus coupling appearing to slow
+            optimization at large K. Only deep (multi-layer) networks are
+            affected: below a terminal node the propagation never runs. An
+            operation over GP nodes -- `Add`, `LinearCombination` -- still
+            makes one layer: the answer and the time are the same under
+            both rules until a GP node sits on top. The expected kernel
+            (`propagation="joint"`) takes the independent rule only.
         training_tolerance : float, optional
             When to stop training before its iteration count runs out, as a
             fraction. The bound is smoothed, and training stops once its
@@ -190,11 +196,36 @@ class GPOptions(_ModelOptions):
             the pattern this protects -- a smaller learning rate makes
             progress the previous phase could not, and each phase is judged
             against its own starting point.
+        propagation : str
+            How a GP node reads an input that is another node's uncertain
+            output. `"joint"` (the default since 0.9.0) averages the
+            node's kernel over its input's distribution -- the expected
+            kernel -- each node handing its children the covariance between
+            locations along with the variances, so two locations whose
+            inputs move together stay correlated. `"marginal"` (what a
+            model saved before 0.9.0 keeps) hands on each location's
+            variance alone and widens the range by half of it, which
+            understates a deep model's uncertainty by orders of magnitude
+            and lets training buy a small noise with it. Only a GP node
+            above another GP node, or above an uncertain input, is
+            affected. Under `"joint"` the expert propagation must be
+            `"independent"`, and a GP node reading an uncertain input takes
+            the Gaussian, exponential, Matérn or rational quadratic kernel.
         """
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
                 "expert_propagation must be 'consensus' or 'independent', "
                 "got %r" % (expert_propagation,))
+        if propagation not in ("joint", "marginal"):
+            raise ValueError(
+                "propagation must be 'joint' or 'marginal', got %r"
+                % (propagation,))
+        if propagation == "joint" and expert_propagation == "consensus":
+            raise ValueError(
+                "the expected kernel (propagation='joint') takes each "
+                "expert's own chain, which is the independent rule; pass "
+                "expert_propagation='independent', or propagation='marginal' "
+                "for the consensus")
         super().__init__(verbose, prediction_batch_size,
                          training_batch_size)
         self.jitter = jitter
@@ -203,6 +234,7 @@ class GPOptions(_ModelOptions):
         self.qmc_simulations = qmc_simulations
         self.expert_propagation = expert_propagation
         self.training_tolerance = training_tolerance
+        self.propagation = propagation
 
 
 class _Convergence:
@@ -912,6 +944,8 @@ class VGPNetwork(_GPModel):
         # the cached refresh trace lives on the model, there being no single
         # node to hang it on once there are several leaves
         self._refresh_graph = None
+        if getattr(self.options, "propagation", "marginal") == "joint":
+            self._check_expected_kernel()
 
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
@@ -1048,9 +1082,104 @@ class VGPNetwork(_GPModel):
                     nodes.append(node)
         return nodes
 
+    def _propagation(self):
+        """The context every training and prediction call runs under: how
+        the experts propagate, and whether uncertainty travels with its
+        covariance between locations (`GPOptions.propagation`). The network
+        is checked against the expected kernel's refusals each time, since
+        the options can be changed on a live model."""
+        joint = getattr(self.options, "propagation", "marginal") == "joint"
+        if joint:
+            self._check_expected_kernel()
+        return _latent.propagation_rule(self.options.expert_propagation,
+                                        joint=joint)
+
+    def _propagation_key(self):
+        """What the propagation adds to a cached trace's key."""
+        return (self.options.expert_propagation,
+                getattr(self.options, "propagation", "marginal"))
+
+    def _check_expected_kernel(self):
+        """Refuses, under `GPOptions(propagation="joint")`, what the expected
+        kernel cannot read: the consensus rule; a GP node on an uncertain
+        input whose kernel is no scale mixture of Gaussians; `Cosine` in any
+        GP node; and the nodes with no expected-kernel path where a random
+        input or a GP node above would need one."""
+        network = _latent.network
+        if self.options.expert_propagation != "independent":
+            raise ValueError(
+                "the expected kernel (propagation='joint') takes each "
+                "expert's own chain, which is the independent rule; set "
+                "expert_propagation='independent', or propagation='marginal' "
+                "for the consensus")
+        random = (network._GPNode, network.GPWalk,
+                  network.GradientConstrainedInput, network.GaussianInput)
+
+        def uncertain(node):
+            return any(isinstance(p, random)
+                       for p in node.get_unique_parents())
+
+        for node in self._nodes():
+            name = "%s (%s)" % (node.name, type(node).__name__)
+            if isinstance(node, network._GPNode):
+                kernel = node.kernel
+                if isinstance(kernel, _kr.Cosine):
+                    raise ValueError(
+                        "%s: a Cosine kernel is a covariance along one axis "
+                        "only, and is refused in a network under the "
+                        "expected kernel" % name)
+                if isinstance(node, network.UncertainInputGP):
+                    if any(isinstance(p, random[:3])
+                           for p in node.get_unique_parents()) \
+                            or network._feeds_gp(node):
+                        raise ValueError(
+                            "%s integrates over its own input's marginal; "
+                            "under the expected kernel it reads an input or "
+                            "a GaussianInput and no GP node reads it -- a "
+                            "BasicGP takes the rest" % name)
+                elif uncertain(node) \
+                        and not network._expected_kernel_supported(kernel):
+                    raise ValueError(
+                        "%s reads an uncertain input, and its %s kernel is "
+                        "no scale mixture of Gaussians, which the expected "
+                        "kernel needs: take Gaussian, Exponential, Matern32, "
+                        "Matern52 or RationalQuadratic"
+                        % (name, type(kernel).__name__))
+            elif isinstance(node, network.GPWalk) and not \
+                    network._expected_kernel_supported(node.field.kernel):
+                # the walk reads its field where the walkers have been
+                # carried, which is uncertain whatever the field's input
+                raise ValueError(
+                    "%s reads its field at uncertain positions, and the "
+                    "field's %s kernel is no scale mixture of Gaussians, "
+                    "which the expected kernel needs: take Gaussian, "
+                    "Exponential, Matern32, Matern52 or RationalQuadratic"
+                    % (name, type(node.field.kernel).__name__))
+            elif isinstance(node, network.RadialTrend) and uncertain(node):
+                raise ValueError(
+                    "%s drops its input's variance, and under the expected "
+                    "kernel takes a certain input only" % name)
+            elif isinstance(node, network.GradientConstrainedInput) \
+                    and network._feeds_gp(node):
+                raise ValueError(
+                    "%s is a random input whose covariance between "
+                    "locations the expected kernel does not carry; a GP "
+                    "node may not read it under propagation='joint'" % name)
+
     def _refresh(self, jitter):
         for leaf in self.leaves:
             leaf.refresh(jitter)
+
+    def _jitter_by_likelihood(self, per_leaf, like):
+        """`_by_likelihood` for the leaves' latent jitters, `[n, size]` or
+        None each: zeros shaped as `like` for a leaf with none, and None for
+        every likelihood where no leaf has any -- the path a model with
+        certain inputs has always taken."""
+        if all(j is None for j in per_leaf):
+            return [None] * len(self.likelihoods)
+        return self._by_likelihood(
+            [_tf.zeros_like(l) if j is None else j
+             for j, l in zip(per_leaf, like)])
 
     def _by_likelihood(self, per_leaf, axis=1):
         """Per-likelihood tensors from per-leaf ones, in likelihood order.
@@ -1302,8 +1431,8 @@ class VGPNetwork(_GPModel):
         """
         payload = any(len(inp) > 0 for inp in training_inputs)
         if self._step is not None and not payload:
-            cached_variables, optimizer, step = self._step
-            if optimizer is self.optimizer \
+            cached_variables, optimizer, rule, step = self._step
+            if optimizer is self.optimizer and rule == self._propagation_key() \
                     and len(cached_variables) == len(variables) \
                     and all(a is b for a, b in zip(cached_variables, variables)):
                 return step
@@ -1332,7 +1461,8 @@ class VGPNetwork(_GPModel):
                 zip(tape.gradient(loss, variables), variables))
 
         if not payload:
-            self._step = (tuple(variables), self.optimizer, step)
+            self._step = (tuple(variables), self.optimizer,
+                          self._propagation_key(), step)
         return step
 
     def train_full(self, max_iter: int = 1000) -> None:
@@ -1378,7 +1508,7 @@ class VGPNetwork(_GPModel):
 
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
-        with _latent.propagation_rule(self.options.expert_propagation), \
+        with self._propagation(), \
                 _progress.reporting("train", max_iter, "iteration") as report:
             for i in range(max_iter):
                 step(x, y, has_value, x_var)
@@ -1454,7 +1584,7 @@ class VGPNetwork(_GPModel):
         n_batches = len(self.options.batch_index(self.data.n_data))
         done = 0
 
-        with _latent.propagation_rule(self.options.expert_propagation), \
+        with self._propagation(), \
                 _progress.reporting(
                     "train", epochs * n_batches, "batch") as report:
             for i in range(epochs):
@@ -1515,7 +1645,7 @@ class VGPNetwork(_GPModel):
         """
         jit = bool(self.options.jit_predict)
         qmc = bool(self.options.qmc_simulations)
-        rule = self.options.expert_propagation
+        rule = self._propagation_key()
         # an expert subset is read at trace time too; `None` (every expert)
         # keeps the key every other caller has always used
         subset = _latent.network._subset_key()
@@ -1535,7 +1665,7 @@ class VGPNetwork(_GPModel):
             traced = _tf.function(self._predict_raw, jit_compile=jit or None,
                                   reduce_retracing=True)
             self._compiled[key] = traced
-        with _latent.simulation_rule(qmc), _latent.propagation_rule(rule):
+        with _latent.simulation_rule(qmc), self._propagation():
             return traced(*args, **kwargs)
 
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
@@ -1544,29 +1674,37 @@ class VGPNetwork(_GPModel):
         # Variables; this cached graph reads that state, so it is not recomputed
         # per batch.
         with _tf.name_scope("Prediction"):
-            mus, vars_, sims, exp_vars = [], [], [], []
+            mus, vars_, sims, exp_vars, jitters = [], [], [], [], []
             for leaf in self.leaves:
-                mu, var, sim, exp_var = leaf.predict(
+                predicted = leaf.predict(
                     x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0])
+                mu, var, sim, exp_var = predicted
                 mus.append(_tf.transpose(mu[:, :, 0]))
                 vars_.append(_tf.transpose(var))
                 sims.append(_tf.transpose(sim, [1, 0, 2]))
                 exp_vars.append(_tf.transpose(exp_var))
+                jitters.append(None if predicted.jitter is None
+                               else _tf.transpose(predicted.jitter))
 
             pred_mu = self._by_likelihood(mus)
             pred_var = self._by_likelihood(vars_)
             pred_sim = self._by_likelihood(sims)
             pred_exp_var = self._by_likelihood(exp_vars)
+            # what the realizations leave out at an uncertain input, which
+            # a likelihood integrates beside its noise; a model with
+            # certain inputs passes nothing, as it always has
+            pred_jitter = self._jitter_by_likelihood(jitters, exp_vars)
 
             output = []
-            for mu, var, sim, exp_var, lik, v_inp in zip(
-                    pred_mu, pred_var, pred_sim, pred_exp_var,
+            for mu, var, sim, exp_var, jitter, lik, v_inp in zip(
+                    pred_mu, pred_var, pred_sim, pred_exp_var, pred_jitter,
                     self.likelihoods, variable_inputs):
+                extra = {} if jitter is None else {"jitter": jitter}
                 output.append(
                     lik.predict(
                         mu, var, sim, exp_var,
                         include_noise=include_noise,
-                        n_splits=n_splits, **v_inp
+                        n_splits=n_splits, **v_inp, **extra
                     )
                 )
             return output
@@ -1740,7 +1878,7 @@ class VGPNetwork(_GPModel):
 
         def call(x, x_var, n_splits):
             with _latent.simulation_rule(bool(self.options.qmc_simulations)), \
-                    _latent.propagation_rule(self.options.expert_propagation):
+                    self._propagation():
                 return traced(x, x_var, n_sim, seed)
 
         for batch, (mean, variance, sims) in self._over_batches(
@@ -1755,7 +1893,7 @@ class VGPNetwork(_GPModel):
         `predict_raw` holds one for the leaves."""
         jit = bool(self.options.jit_predict)
         key = ("node", id(node), jit, bool(self.options.qmc_simulations),
-               self.options.expert_propagation)
+               self._propagation_key())
         traced = self._compiled.get(key)
         if traced is None:
             def body(x, x_var, n_sim, seed):
@@ -2568,7 +2706,7 @@ class VGPNetwork(_GPModel):
         try:
             if slots:
                 self._sync_expert_store(roots, gp, store)
-            with _latent.propagation_rule(self.options.expert_propagation), \
+            with self._propagation(), \
                     _progress.reporting(
                         "train", None if assignment else epochs * per_epoch,
                         "batch") as report:
@@ -3144,7 +3282,7 @@ class VGPNetwork(_GPModel):
         # cached `predict_raw` graph reads current values without recomputing the
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
-        with _latent.propagation_rule(self.options.expert_propagation):
+        with self._propagation():
             if all(hasattr(leaf, "cache_prediction_state")
                    for leaf in self.leaves):
                 _latent.refresh_cached(self.leaves, self.options.jitter,
@@ -3168,8 +3306,14 @@ class VGPNetwork(_GPModel):
 
             x = _tf.constant(data_coords, _tf.float64)
             x_var = _tf.constant(data_var, _tf.float64)
-            yield batch, (call(x, x_var, splits, batch) if with_rows
-                          else call(x, x_var, splits))
+            # under the rule the state was refreshed under: a caller that
+            # reads the leaves itself (`measurement_batches`,
+            # `responsibilities`) would otherwise run them under the module's
+            # default against a refresh made under the model's
+            with self._propagation():
+                out = call(x, x_var, splits, batch) if with_rows \
+                    else call(x, x_var, splits)
+            yield batch, out
 
         _progress.emit("predict", len(batch_id), len(batch_id), "batch")
 
@@ -3329,37 +3473,47 @@ class VGPNetwork(_GPModel):
         # every call, so two containers of one size get the same uniforms
         # row for row: nothing to a per-row score, and a caller reading
         # samples jointly across calls should know.
-        def rotation(k, size, rows):
+        def rotation(k, size, rows, stream=1):
             """The rows' slice of the k-th variable's `(n_data, size,
             n_sim)` stream, drawn without generating what comes before it:
             PCG64 spends exactly one 64-bit output per double, so advancing
-            by the rows' offset lands where a whole draw would."""
+            by the rows' offset lands where a whole draw would. Stream 1
+            rotates the noise, stream 2 the latent jitter."""
             first, last = int(rows[0]), int(rows[-1])
             # the generator `default_rng` would build, named so that its
             # `advance` is on the type
             bits = _np.random.PCG64(
-                _np.random.SeedSequence([self.options.seed, 1, k]))
+                _np.random.SeedSequence([self.options.seed, stream, k]))
             bits.advance(first * size * n_sim)
             block = _np.random.Generator(bits).random(
                 (last - first + 1, size, n_sim))
             return block[_np.asarray(rows) - first]
 
         def batch_measure(x, x_var, n_splits, rows):
-            per_leaf = []
+            per_leaf, jitters, like = [], [], []
             with _latent.simulation_rule(self.options.qmc_simulations):
                 for leaf in self.leaves:
-                    _, _, sims, _ = leaf.predict(
+                    predicted = leaf.predict(
                         x, x_var=x_var, n_sim=n_sim,
                         seed=[self.options.seed, 0])
-                    per_leaf.append(_tf.transpose(sims, [1, 0, 2]))
+                    per_leaf.append(_tf.transpose(predicted[2], [1, 0, 2]))
+                    like.append(_tf.transpose(predicted[3]))
+                    jitters.append(None if predicted.jitter is None
+                                   else _tf.transpose(predicted.jitter))
             sims = self._by_likelihood(per_leaf)
-            measured = [(sim, lik) for sim, lik in zip(sims, self.likelihoods)
-                        if lik.warped]
+            jitters = self._jitter_by_likelihood(jitters, like)
+            measured = [(sim, jitter, lik) for sim, jitter, lik
+                        in zip(sims, jitters, self.likelihoods) if lik.warped]
             return [lik.measurement_samples(
                         sim, n_nodes,
                         shift=_tf.constant(rotation(k, lik.size, rows),
-                                           _tf.float64))
-                    for k, (sim, lik) in enumerate(measured)]
+                                           _tf.float64),
+                        **({} if jitter is None else {
+                            "jitter": jitter,
+                            "jitter_shift": _tf.constant(
+                                rotation(k, 1, rows, stream=2),
+                                _tf.float64)}))
+                    for k, (sim, jitter, lik) in enumerate(measured)]
 
         for rows, output in self._over_batches(newdata, batch_measure,
                                                where=where, with_rows=True):

@@ -162,6 +162,21 @@ regime** — experts overlap deliberately, and no expert means anything
 geologically.
 _Avoid_: cluster, partition, local model
 
+**Expected kernel**:
+The covariance a GP node takes when its input is another node's uncertain
+output: the node's kernel averaged over that uncertainty, including how
+the input's values at two locations vary together. Two locations whose
+inputs move together stay correlated; two whose inputs are uncertain
+independently lose correlation.
+_Avoid_: inflated covariance, uncertain-input kernel
+
+**Marginal propagation**:
+The rule before the expected kernel: a node's uncertainty at each location
+handed to its children as if no two locations were related. Kept for
+models saved under it.
+_Avoid_: moment matching (it matches moments, but so does the expected
+kernel)
+
 **Variational state**:
 The parameters that encode the *data* in a trained model, as opposed to the
 hyperparameters that encode the structure. What cross-validation

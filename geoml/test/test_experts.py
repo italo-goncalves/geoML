@@ -528,16 +528,25 @@ def test_multi_expert_model_round_trips(tmp_path):
 # --------------------------------------------------------------------------- #
 # the propagation rule
 # --------------------------------------------------------------------------- #
-def test_the_default_propagation_is_consensus():
-    assert geoml.models.GPOptions().expert_propagation == "consensus"
+def test_the_default_propagation_is_independent_and_joint():
+    options = geoml.models.GPOptions()
+    assert options.expert_propagation == "independent"
+    assert options.propagation == "joint"
 
-    # options saved before the rule existed fall back to the class default
+    # options saved before 0.9.0 fall back to the class defaults, the rules
+    # they were trained under
     old = geoml.models.GPOptions.__new__(geoml.models.GPOptions)
     vars(old).update({"verbose": False})
     assert old.expert_propagation == "consensus"
+    assert old.propagation == "marginal"
 
     with pytest.raises(ValueError, match="expert_propagation"):
         geoml.models.GPOptions(expert_propagation="sideways")
+    with pytest.raises(ValueError, match="propagation"):
+        geoml.models.GPOptions(propagation="sideways")
+    # the expected kernel takes each expert's own chain
+    with pytest.raises(ValueError, match="independent"):
+        geoml.models.GPOptions(expert_propagation="consensus")
 
 
 def _small_grid():
@@ -550,6 +559,7 @@ def test_independent_experts_change_a_deep_network():
     outputs = {}
     for rule in ("consensus", "independent"):
         model, _, _, _ = build_model(n_experts=3, n_ip=10, depth=2)
+        model.options.propagation = "marginal"
         model.options.expert_propagation = rule
         model.train_full(3)
         grid = _small_grid()
@@ -566,6 +576,7 @@ def test_a_single_layer_network_is_untouched_by_the_rule():
     outputs = {}
     for rule in ("consensus", "independent"):
         model, _, _, _ = build_model(n_experts=3, n_ip=10, depth=1)
+        model.options.propagation = "marginal"
         model.options.expert_propagation = rule
         model.train_full(3)
         grid = _small_grid()
@@ -581,6 +592,8 @@ def test_the_rule_flips_on_a_live_model():
     trained model takes effect on the next predict -- and flipping it back
     reproduces the original numbers from the re-keyed caches."""
     model, _, _, _ = build_model(n_experts=3, n_ip=10, depth=2)
+    model.options.propagation = "marginal"
+    model.options.expert_propagation = "consensus"
     model.train_full(3)
 
     grid = _small_grid()

@@ -396,7 +396,7 @@ def test_one_fold_model_serves_every_fold(monkeypatch):
             optimizer=max([float(np.abs(v.numpy()).max())
                            for v in self.optimizer.variables] or [0.0]),
             traces=0 if self._step is None
-            else self._step[2].experimental_get_tracing_count()))
+            else self._step[3].experimental_get_tracing_count()))
         real_train(self, max_iter=max_iter)
     monkeypatch.setattr(geoml.models.VGPNetwork, "train_full", recording_train)
 
@@ -413,7 +413,7 @@ def test_one_fold_model_serves_every_fold(monkeypatch):
     # creates variables -- the optimizer's slots -- once more); the first
     # fold with a different row count adds one relaxed trace, and every
     # later one, whatever its count, rides that -- never one per fold
-    step = loads[0]._step[2]
+    step = loads[0]._step[3]
     assert starts[1]["traces"] <= 2
     assert step.experimental_get_tracing_count() <= 3
 

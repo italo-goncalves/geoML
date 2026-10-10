@@ -224,15 +224,23 @@ def test_training_prediction_and_reload_on_gaussian_data(tmp_path):
 
 
 def test_as_a_child_of_another_gp():
-    """A deep use: the parent's posterior variance is what is integrated."""
+    """A deep use under the marginal rule: the parent's posterior variance
+    is what is integrated. The expected kernel refuses it, the parent's
+    covariance between locations being what a `BasicGP` there reads."""
     point, inducing, labels = _training_data()
     geoml.set_seed(1234)
     root = geoml.latent.BasicInput(inducing, transform=tr.Isotropic(40.0))
     inner = geoml.latent.BasicGP(root, size=2, kernel=geoml.kernels.Gaussian())
     outer = geoml.latent.UncertainInputGP(inner, size=1, n_nodes=8)
+    with pytest.raises(ValueError, match="UncertainInputGP"):
+        geoml.models.VGPNetwork(
+            point, "v", geoml.likelihood.Gaussian(), outer,
+            options=geoml.models.GPOptions(verbose=False))
     model = geoml.models.VGPNetwork(
         point, "v", geoml.likelihood.Gaussian(), outer,
-        options=geoml.models.GPOptions(verbose=False, training_samples=8))
+        options=geoml.models.GPOptions(verbose=False, training_samples=8,
+                                       propagation="marginal",
+                                       expert_propagation="consensus"))
     model.train_full(max_iter=3)
     assert np.isfinite(model.training_log).all()
     query = geoml.data.PointData.from_array(_points(12, 2, seed=5), labels)
@@ -246,3 +254,10 @@ def test_the_diagram_names_the_node():
     model, _ = _model(point, geoml.latent.GaussianInput(
         inducing, transform=tr.Isotropic(40.0)), max_iter=0)
     assert "UncertainInputGP" in model.to_dot()
+
+
+def test_the_node_is_deprecated():
+    _, inducing, _ = _training_data()
+    root = geoml.latent.GaussianInput(inducing)
+    with pytest.warns(FutureWarning, match="BasicGP"):
+        geoml.latent.UncertainInputGP(root)
