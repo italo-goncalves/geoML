@@ -945,7 +945,10 @@ Open, in the order they matter:
 1. **A learning-rate schedule tied to progress**, for the experts and the
    shared parameters alike (item 3): counted per step, many visits freeze
    the experts while the shared parameters move on; on `train_svi`'s
-   clock, the shared parameters freeze before they converge.
+   clock, the shared parameters freeze before they converge. A
+   natural-gradient step held constant rises at 16 visits too (2026-10-09,
+   "Natural-gradient steps for the experts" under *Settled by
+   measurement*), so the decaying clocks are not the whole cause.
 2. **Slots sized to memory, not to the largest set**: prediction memory
    goes with slots times rows a batch, so choosing the batch from a memory
    budget would let the packed groups keep every location's 99%.
@@ -2372,6 +2375,41 @@ neither, Scripts being text and portal services not distribution.
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**Natural-gradient steps for the experts -- rejected** (2026-10-09; Level 2
+of `report/design_dual_parameter_geoml.md` in the research project
+`OneDrive\Claude\Research\Batched experts\`, record in its
+`report/results_2026-10-09_natural_gradient.md`, prototype in
+`experiments/natural_gradient/`). The idea: replace `train_by_expert`'s
+per-expert AMSGrad on `alpha_white` and `delta` with a natural-gradient
+step in the site natural parameters of the family `BasicGP` already uses
+(`S = (K^-1 + diag r)^-1`, `r = 1/delta`), taken on the stored
+coordinates, warmed up and then held as Salimbeni et al. (2018) do, in the
+hope that a step that never decays would end the late rise of item 1
+above. On the whole data the direction is right (the bound's slope along
+it 55 237 against 55 239 predicted) and gains 15 times the plain
+gradient's best step (90 nats against 6 after 10 epochs). But the bound
+takes steps up to rho = 0.03-0.1 only, whether one expert moves or all
+sixteen, and loses 850-25 000 nats at rho = 1, the conjugate case's
+one-step optimum: the blend is not conjugate. Batched, a step divides the
+batch's gradient by the expert's KL share (about 1/20 at 4 visits), so the
+stable rho is the whole-data limit times that share: 0.001 trained, 0.002
+and above diverged. At that step an expert moves about 2% of the way to
+what its batch implies and falls behind. J = 16 synthetic field, seed 1,
+60 epochs, rmse / CRPS: at 4 visits AMSGrad 0.088 / 0.128 against 0.134 /
+0.143; at 16 visits 0.096 / 0.130 against 0.132 / 0.142 (rho = 0.0005);
+19% more time per epoch. The late rise stayed: with no clock to decay,
+rmse rose from epoch 40 to 60 by 0.010 and 0.020 (rho = 0.0005, 0.001)
+against AMSGrad's 0.008, so the experts' decaying rates are not the whole
+of item 1 (one seed). Adam normalizes each coordinate's step, which keeps
+a batch's extrapolation to the whole epoch from compounding; a scale per
+inducing point rather than per expert would need per-datum sites, the
+note's Level 3, whose full-covariance family is the `FullGP` measured
+below as no gain held out. The note's Level 1 (storing a site mean in
+place of `alpha_white`) only changes the coordinates Adam sees, where
+whitening is the better-conditioned choice; it goes with Level 2. Stepped
+in `r` itself, `r` went negative from rho = 0.1; in `log r` it stays
+positive.
 
 **Experts that keep to their neighbours -- done** (raised 2026-10-02,
 measured and replaced 2026-10-08, 0.8.8). `inducing.experts` lent an

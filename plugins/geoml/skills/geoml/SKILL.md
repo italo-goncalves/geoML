@@ -70,7 +70,7 @@ computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` (half the disk, every read widened back to `float64`);
 `geoml.set_realization_dtype("float64")` keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.8.8.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.0.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,

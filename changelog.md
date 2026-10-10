@@ -106,6 +106,15 @@ ignored and deprecated. Without the unexplained variance chapter 16's rock model
 confident region over unsampled ground. Fixed draws of the field walked
 exactly were measured as an alternative and dropped: no better, at 3 to 6
 times the cost.
+* **Chapter 17 trains as a tested notebook does and predicts on a refined
+block set.** The training points are converted at 1 m (5,606, where 2 m
+gave 2,811), the stationary model takes 1000 full iterations at 2e-2 and
+the deep one minibatches of 500 rows, 20 epochs at 5e-2 then 60 at 1e-2;
+both predict into a `BlockSet3D` cut by `models.refine` and contour it.
+At 2 m the deep vein came out in patches whatever the schedule; at 1 m it
+is a coherent sheet with either reader. The deep model is reseeded before
+it is built, since drawn after the stationary model it settled on a
+fragmented vein, and the chapter says so.
 * **`propagate` returns a `_Moments`**, which still unpacks as the
 `(mean, variance)` pair and carries the experts' chains beside it; GP
 nodes keep `inducing_points_covariance` beside the variance.
