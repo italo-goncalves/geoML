@@ -1,3 +1,22 @@
+## version 0.9.1
+* **A `Concatenate` over a node that hands on no inducing points trains.**
+A `Concatenate` whose parent has none to give -- a `Multiply`, a
+`ProductOfExperts` -- knew it had none to hand on itself, but its
+`refresh` read its parents' anyway and failed on the first training step,
+with or without slots (`'NoneType' object is not subscriptable` under
+`train_by_expert`). It now stops where `Add` and `LinearCombination`
+stop. Found building a GeoScape network with such a leaf; the
+batched-experts tests run it through both training paths now.
+* **A composition keeps what a mixture of likelihoods adds to a prediction.**
+`CompositionalVariable.update` overrides the vector variable's and never
+filed the mixture's columns, so a `LikelihoodMixture` over a composition
+predicted every part and left out each realization's `population`, the
+`responsibilities` and each population's `population_prediction`, without a
+word. They are filed as a vector variable files them, each population's
+prediction in the part's own unit like the prediction itself: back in
+fractions, a population's parts close (`test_likelihood_mixture.py`).
+Found running a GeoScape network on the Macpass assays.
+
 ## version 0.9.0
 * **Deep networks read their inner layers through the expected kernel**
 (`GPOptions(propagation="joint")`, the default for a new model). A GP node

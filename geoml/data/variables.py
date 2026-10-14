@@ -1708,6 +1708,15 @@ class _Component(ContinuousVariable):
             self.noise_variance.values[idx] = \
                 kwargs["noise_variance"].numpy() * scale ** 2
 
+        if "population_prediction" in kwargs.keys():
+            # each population's prediction, a value like the prediction
+            values = _np.asarray(kwargs["population_prediction"]) * scale
+            for k in range(values.shape[1]):
+                if k not in self.population_prediction:
+                    self.population_prediction[k] = self._Attribute(
+                        self.coordinates)
+                self.population_prediction[k].values[idx] = values[:, k]
+
         for key, target in (("proportions", self.proportions),
                             ("divided", self.divided)):
             # a share is a share whatever the unit; the cut-offs they are
@@ -1840,7 +1849,13 @@ class CompositionalVariable(VectorVariable):
                     # built it; this one takes the cut-offs it declared
                     declared = len(self.components[lb].cutoffs or [])
                     values[key] = column[:, :declared]
+            if "population_prediction" in kwargs.keys():
+                values["population_prediction"] = _np.asarray(
+                    kwargs["population_prediction"])[:, i, :]
             self.components[lb].update(idx, **values)
+        # a mixture of likelihoods' populations and shares, as a vector
+        # variable files them: this override skipped them until 0.9.1
+        _write_mixture(self, idx, kwargs)
 
         self.uncertainty.values[idx] = kwargs["uncertainty"].numpy()
 

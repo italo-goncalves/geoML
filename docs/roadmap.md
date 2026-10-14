@@ -1501,6 +1501,28 @@ The theme is measured rather than assumed: **training does not leave the
 basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
+**M — Inducing points by cover tree** (requested 2026-10-10). Terenin,
+Burt, Artemev, Flaxman, van der Wilk, Rasmussen & Ge (2024), *Numerically
+stable sparse Gaussian processes via minimum separation using cover
+trees*, JMLR 25(26), arXiv 2210.07893 (in the Paper Library; read from the
+abstract so far): conditions on the inducing points -- a minimum
+separation -- under which the sparse computations are numerically stable,
+an automated way to place points satisfying them in low dimension through
+a modified cover tree, and an alternative sparse approximation for a
+Gaussian likelihood trading a little accuracy for more stability. Where it
+meets geoML: the inducing helpers place points by k-means, lattice or hull
+(`from_kmeans`/`from_grid`/`from_hull`) and nothing guarantees a
+separation beyond `combine(tolerance=)`'s greedy merge; stability rests on
+the 1e-6 jitter and the whitened root of 0.6.9, which was needed because a
+fault displacement put restored inducing points 0.03 apart and the
+Cholesky went NaN in graph mode. The candidate is an
+`inducing.from_cover_tree(data, separation)` beside the others, the
+separation in the input's transformed units, and a measurement of what the
+guarantee costs or buys against `from_kmeans` at equal counts (held-out
+scores, the conditioning of `K`, training stability) on Walker, Jura and a
+3-D case. Read the paper in full first; the alternative approximation is
+Gaussian-likelihood only, which most of geoML's models are not.
+
 **M — Gradient-free training experiments.** Closed against three conditions
 in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
