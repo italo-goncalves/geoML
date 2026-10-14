@@ -496,6 +496,16 @@ def _node_model(name):
             data, ["v", "w"], [lk.Gaussian(wp.ZScore(1)),
                                lk.Gaussian(wp.ZScore(1))],
             leaves, options=options)
+    if name == "concatenated_product":
+        # a Concatenate over a parent that hands on no inducing points, as
+        # a leaf serving both variables: it has none to hand on itself
+        root = _input(data, 4)
+        leaf = latent.Concatenate(latent.Multiply(_gp(root), _gp(root)),
+                                  _gp(root))
+        return geoml.models.VGPNetwork(
+            data, ["v", "w"], [lk.Gaussian(wp.ZScore(1)),
+                               lk.Gaussian(wp.ZScore(1))],
+            leaf, options=options)
     kind = latent.GaussianInput if name == "gaussian_input" \
         else latent.BasicInput
     root = _input(data, 4, kind)
@@ -504,7 +514,8 @@ def _node_model(name):
                                    leaf, options=options)
 
 
-ALL_NETWORKS = sorted(NETWORKS) + ["gaussian_input", "two_inputs", "stack"]
+ALL_NETWORKS = sorted(NETWORKS) + ["gaussian_input", "two_inputs", "stack",
+                                   "concatenated_product"]
 
 
 @pytest.mark.parametrize("name", ALL_NETWORKS)

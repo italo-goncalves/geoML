@@ -301,6 +301,53 @@ def test_a_prediction_stores_the_populations(tmp_path):
         labels[:10])
 
 
+def test_a_composition_stores_the_populations_in_its_parts_units():
+    """A composition files what a mixture adds as a vector variable does --
+    its `update` once skipped it -- and each population's prediction in the
+    part's own unit: back in fractions, a population's parts close."""
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(0)
+    n = 80
+    x = np.sort(rng.uniform(0, 10, n))
+    a = np.where(x < 5, 30.0, 10.0) + rng.uniform(-2, 2, n)
+    b = np.where(x < 5, 5.0, 20.0) + rng.uniform(-1, 1, n)
+    data = geoml.data.PointData.from_array(x[:, None], ["X"])
+    data.add_compositional_variable("assay", ["a", "b"],
+                                    np.stack([a, b], axis=1),
+                                    units=["%", "%"], rest=True)
+
+    def population():
+        return lk.Gaussian(wp.ChainedWarping(
+            wp.CenteredLogRatio(3), wp.PCA(3, n_components=1),
+            wp.ZScore(1)))
+
+    root = latent.BasicInput(geoml.data.Grid1D(start=0, n=21, step=0.5),
+                             transform=geoml.transform.Isotropic(2.0))
+    model = geoml.models.VGPNetwork(
+        data, "assay",
+        lk.LikelihoodMixture([population(), population()], shares="latent"),
+        latent.BasicGP(root, size=4),
+        options=geoml.models.GPOptions(verbose=False, training_samples=10))
+    model.train_full(20)
+    target = geoml.data.PointData.from_array(
+        np.linspace(0, 10, 30)[:, None], ["X"])
+    model.predict(target, n_sim=12)
+
+    variable = target.variables["assay"]
+    labels = np.asarray(variable.population)
+    assert labels.shape == (30, 12) and set(np.unique(labels)) <= {0, 1}
+    shares = np.stack([variable.responsibilities[k].values.to_numpy()
+                       for k in (0, 1)], axis=1)
+    np.testing.assert_allclose(shares.sum(axis=1), 1.0)
+    divisors = variable.divisors()
+    for k in (0, 1):
+        parts = np.stack(
+            [variable.components[lb].population_prediction[k].values
+             .to_numpy() for lb in variable.labels], axis=1)
+        np.testing.assert_allclose((parts / divisors[None, :]).sum(axis=1),
+                                   1.0, rtol=1e-6)
+
+
 def test_a_variable_no_mixture_models_has_no_population():
     point = geoml.data.PointData.from_array(np.arange(5.0)[:, None], ["X"])
     point.add_continuous_variable("v", np.arange(5.0))

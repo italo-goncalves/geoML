@@ -1830,6 +1830,10 @@ class Concatenate(Stack):
     def refresh(self, jitter=1e-6):
         for lat in self.parents:
             lat.refresh(jitter)
+        # a parent that hands on none (a `Multiply`) leaves none to join, as
+        # in `Add`: such a `Concatenate` can only be a leaf
+        if not self.propagates_inducing_points:
+            return
         # every expert, the active ones under a subset, or the slots as one
         rows = _aligned_points(self.parents, self.root)
         self.inducing_points = tuple(
