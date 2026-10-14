@@ -965,6 +965,80 @@ Open, in the order they matter:
    `GradientConstrainedInput` (and directional data), `RadialTrend`,
    `GaussianMixture`.
 
+**S–M — Network presets** (requested 2026-10-14). Common patterns that
+today take several nodes wired by hand, offered as one:
+- `ReduceSum(parent)`: the sum of a node's outputs into one, which today
+  is a `SelectInput` per column and an `Add` over them (the user's name for
+  the selector was `SelectVariable`; the node is `SelectInput`).
+- A linear combination with spatially varying weights: the outputs of
+  one node weighted, location by location, by the outputs of a weights
+  node and summed -- `ReduceSum(Multiply(values, weights))`, the GP-based
+  analogue of geographically weighted regression, where
+  `LinearCombination` has constant weights.
+The GeoScape network that found 0.9.1's `Concatenate` bug built exactly
+the second by hand (`Multiply`, eight `SelectInput`s, two `Add`s), so the
+hand-wired form is error-prone as well as long. Decide first whether a
+preset is a **function that returns ordinary nodes** -- nothing new in a
+save, which replays the underlying nodes, and nothing new to keep
+importable forever -- or a **class** (one node in the diagram and the
+catalogue, a cheaper single sum instead of k selections, but a new dotted
+path saves will record, a `_catalogue` declaration and a stand-in in
+`test_catalogue.py`, and its own `propagates_inducing` and `_GAUSSIAN`:
+a sum of Gaussian outputs is Gaussian, a product is not, so the weighted
+form trains on realizations like any `Multiply` leaf). Either way the
+catalogue must offer it, since GeoScape builds networks from it. Gate: the
+preset gives the hand-wired network's bound and prediction to the bit,
+and trains under `train_svi` and `train_by_expert`.
+
+**What the gridded-GP research gives geoML as it stands** (assessed
+2026-10-14 from the research project `OneDrive\Claude\Research\Kronecker
+GP\`, report `report/main.pdf`, which compared against `master` at 0.9.0).
+The project built a node whose inducing values sit on a regular grid --
+Kronecker prior written as a positive mixture of Gaussians, cubic
+interpolation to the data, one Gaussian site per datum, CG and Lanczos in
+place of dense algebra -- and measured it against an exact GP and SGPR,
+not against geoML's experts. What carries over:
+- **S — Correct the kernel-mixture error figures.** The comment above
+  `_KERNEL_MIXTURES` (`latent/network.py`), `docs/expected-kernel.md` and
+  the 0.9.0 changelog give the largest error over [0, 6] ranges as 5.1e-4,
+  9.8e-6 and 9.1e-6 (exponential, Matern32, Matern52); those are maxima
+  over `kernel_mixtures.py`'s own distances. Over 2.4 million distances the
+  supremum is 5.32e-4, 1.03e-5 and 9.15e-6 (the project's
+  `verification/matern_mixture.py`, which also confirms the tables are the
+  ones in the code, to the bit). The bound is per entry: as a matrix the
+  mixture differs from the closed form by about a nugget in 2-D and one to
+  two orders more in 3-D (its E1), which matters only if the mixtures are
+  ever used where the inputs are certain; today they serve the expected
+  kernel at uncertain inputs alone.
+- **The realizations' missing residual has a second consumer.** A
+  `BasicGP` draw is `mu + cov_cross·chol_r·normals` and carries only the
+  variance the inducing points explain -- known, and the subject of the
+  "Pathwise conditioning" research. Anything that reads realizations
+  through a GP node (the item below, a gridded child) inherits the
+  under-dispersion, so that fix comes before either.
+- **Not a replacement for the experts.** The gridded node is the exact GP
+  of its own interpolated model (posterior to 7e-12 standard deviations)
+  and on Walker Lake matches the exact GP (rmse 5.137 against 5.136),
+  1.5-6% ahead of SGPR at equal time -- but it has **no time advantage over
+  an exact dense GP below about 1.4e4 data in 2-D and none was reached in
+  3-D** (1.9-28x slower at 1e4), at N = 17 600 the exact GP was 9x faster,
+  and its advantage is memory alone (from about 3e4 data on this machine).
+  A 1% covariance error needs 15 grid nodes per range for the Matern 3/2,
+  2-6x more for predictions within 1% of the exact GP's, and the
+  exponential kernel cannot be gridded at any practical spacing -- in 3-D
+  that is the cost. It stays a candidate for one case: a dense 2-D (or
+  thin) field held in memory, the "gridded tree for geophysics" above.
+- **Consistent with decisions already taken, nothing to change:** a
+  coregionalized model did not help held-out Jura (equal on one triple,
+  worse on the other, with 132-154 nats more training evidence; the
+  isotopic case, where cokriging is known to gain little), as
+  `LinearCombination(per_component=True)` measured neutral; site updates
+  (CVI) work there because a single grid has no expert blend, the reason
+  the natural-gradient step for the experts was rejected (below); and a
+  hidden node trained well only from an informative start (its E11), as
+  chapter 17's deep model needed reseeding -- an observation, not a
+  measurement on geoML.
+
 **M–L — Propagate individual realizations through the tree** (requested
 2026-09-08). What happens today: moments at every node. `_GPNode.propagate`
 takes the parent's mean and variance and evaluates the expected kernel over
@@ -1451,25 +1525,6 @@ bound of 36.2 and 50 draws 26.7, the scores against the truth better at 50
 iteration (the phase's count), so a run split into chunks still replays
 one call bit for bit. Gate: the same two numbers, and the chunked-training
 test in `test_early_stopping.py` still exact.
-
-**XL — Change of support from the theory of sampling.** From the author's
-paper draft, which is the specification. A window of volume `v` has grade
-`g ~ Beta(μ s(v), (1−μ) s(v))`: the mean pinned to the block grade at every
-support, all support dependence in the concentration. What the package
-needs: the support must become model-visible (today the sample length is
-deliberately metadata); a `BetaSupport` likelihood, genuinely non-Gaussian
-with a link, whose noise is not additive and not integrated out by the
-existing machinery; and a decision on how it composes with the sub-block
-aggregation. It *is* an analytical change of support — predicting at block
-support means evaluating at `s(V_block)` rather than fanning out
-sub-blocks. A doctrine inversion worth flagging: compositing to equal length
-homogenizes support, which is exactly the signal the texture parameters
-need, so heterogeneous support stops being a nuisance and becomes data.
-
-Support and censoring want the same channel. **Decide once, for both**,
-whether they ride the data object (the `GaussianData` precedent, which also
-reaches prediction) or the variable channel (training-only, needs nothing
-new).
 
 **S — Directional data ignored under a variable named as a string**
 (found by reading, 2026-09-15, not run). `VGPNetwork.__init__` pairs the
@@ -2391,6 +2446,72 @@ no institutional claim, before any geoML code ships inside something
 RockAnalytica distributes -- the desktop helper (M7), a self-hosted tier,
 or a `geoscape-cli` that imports geoML. Version 1 and the cloud need
 neither, Scripts being text and portal services not distribution.
+
+---
+
+## 7. Geometallurgy
+
+Variables that describe how the ground will behave in the plant rather
+than what it contains: support, non-additivity and the rules that carry
+a sample's value to a block's.
+
+**XL — Change of support from the theory of sampling.** From the author's
+paper draft, which is the specification. A window of volume `v` has grade
+`g ~ Beta(μ s(v), (1−μ) s(v))`: the mean pinned to the block grade at every
+support, all support dependence in the concentration. What the package
+needs: the support must become model-visible (today the sample length is
+deliberately metadata); a `BetaSupport` likelihood, genuinely non-Gaussian
+with a link, whose noise is not additive and not integrated out by the
+existing machinery; and a decision on how it composes with the sub-block
+aggregation. It *is* an analytical change of support — predicting at block
+support means evaluating at `s(V_block)` rather than fanning out
+sub-blocks. A doctrine inversion worth flagging: compositing to equal length
+homogenizes support, which is exactly the signal the texture parameters
+need, so heterogeneous support stops being a nuisance and becomes data.
+
+Support and censoring want the same channel. **Decide once, for both**,
+whether they ride the data object (the `GaussianData` precedent, which also
+reaches prediction) or the variable channel (training-only, needs nothing
+new).
+
+**L–XL — Custom aggregation rules for variables that do not add up**
+(requested 2026-10-14). Every block value today is the volume-weighted
+mean of its sub-blocks (`_aggregate`), which is right for an additive
+variable -- a grade, a density -- and wrong for the geometallurgical ones:
+a hardness or work index, a recovery, a throughput, a comminution
+parameter, a ratio of two grades. A block's work index is not the mean of
+its parts' (energies add along the circuit, not the indices), a recovery is
+weighted by the metal it recovers, a ratio is the ratio of the sums. So a
+variable needs its own rule for going from points to a block: a declared
+aggregation (a weighted mean with a named weight -- the metal content, the
+tonnage --, a harmonic or power mean, a ratio of two additive variables, a
+user function applied realization by realization as `derive` does), read
+by `_aggregate`'s callers, `as_blocks3d`, `aggregate(data)` and the
+grade-tonnage curves, which all assume the mean today. Three problems, in
+order of difficulty:
+- **Prediction at the data's own support.** Interpolating a non-additive
+  variable from samples of one support to points of the same support
+  should be fine as it is -- the model never sums anything -- but that
+  must be verified, not assumed: a synthetic field built from additive
+  parts, the non-additive variable computed from them at the samples, and
+  the model's prediction of it against the truth at the same support,
+  beside predicting the parts and computing the variable from their
+  realizations (`derive`). If the second wins, the honest route is to model
+  the additive parts and derive.
+- **Blocks under a rule.** A block's value is the rule applied to its
+  sub-blocks realization by realization (never to the mean: the rule is
+  nonlinear), then summarized; the `dispersion`, the quantiles and the
+  cut-off shares follow from those realizations rather than from the mean's
+  formulas. Needs the rule to reach the sub-block fan-out, and the weights
+  of a weighted rule to be predicted alongside.
+- **Samples of different supports combined under the rule** -- the
+  hardest. A composite, a bulk sample and a plant reconciliation measure
+  the same variable over different volumes, and for a non-additive variable
+  a larger support is not the mean of the smaller ones, so the likelihood
+  has to aggregate the latent field to each sample's support under the rule
+  before comparing -- the change of support of the item above, made
+  nonlinear. It shares that item's prerequisite (the support visible to the
+  model) and should be designed with it.
 
 ---
 
