@@ -158,6 +158,33 @@ def test_from_cover_tree_drops_repeats_and_keeps_labels():
         ind.from_cover_tree(walker_point, 0.0)
 
 
+def test_from_cover_tree_measures_through_a_transform():
+    """The guarantees hold in the transformed units, the points come back in
+    the data's own, and a transform that only rescales is the separation
+    rescaled."""
+    walker_point, _ = _walker()
+    data = np.asarray(walker_point.coordinates)
+    stretch = geoml.transform.Anisotropy2DMath(range_x=10.0, range_y=40.0)
+    points = np.asarray(ind.from_cover_tree(
+        walker_point, 0.5, transform=stretch).coordinates)
+    assert np.all(cKDTree(data).query(points)[0] == 0.0)
+    measured = np.asarray(stretch(data))
+    chosen = np.asarray(stretch(points))
+    tree = cKDTree(chosen)
+    assert tree.query(chosen, k=2)[0][:, 1].min() >= 0.5
+    assert tree.query(measured)[0].max() < 0.5
+
+    # 20.5: Walker's coordinates are whole numbers, so many pairs lie
+    # exactly 20 apart, and at a tie rounding the scaled distance decides;
+    # equally far candidates tie too, so the order may differ, not the set
+    plain = np.asarray(ind.from_cover_tree(walker_point, 20.5).coordinates)
+    scaled = np.asarray(ind.from_cover_tree(
+        walker_point, 2.05,
+        transform=geoml.transform.Anisotropy2DMath(10.0, 10.0)).coordinates)
+    np.testing.assert_array_equal(np.unique(plain, axis=0),
+                                  np.unique(scaled, axis=0))
+
+
 def test_cover_tree_experts_balance_overlap_and_stay_separated():
     """Divided by `experts`, the points come out as the other helpers' do
     -- cores within the balance, neighbours sharing points -- and every

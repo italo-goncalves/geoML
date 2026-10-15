@@ -49,6 +49,7 @@ irregular network is to choose the points first and then divide them:
 __all__ = ["from_kmeans", "from_grid", "from_hull", "from_cover_tree",
            "combine", "grid_experts", "experts"]
 
+from typing import TYPE_CHECKING
 from typing import cast as _cast
 
 import numpy as _np
@@ -59,6 +60,9 @@ from sklearn.cluster import KMeans as _KMeans
 
 import geoml._types as _types
 import geoml.data.containers as _data
+
+if TYPE_CHECKING:
+    import geoml.transform as _tr
 
 
 def _coordinates(source):
@@ -244,7 +248,9 @@ def from_hull(data: "_data._SpatialData | _types.ArrayLike",
 
 
 def from_cover_tree(data: "_data._SpatialData | _types.ArrayLike",
-                    separation: float) -> "_data.PointData":
+                    separation: float,
+                    transform: "_tr._Transform | None" = None
+                    ) -> "_data.PointData":
     """
     Inducing points among the samples, at least `separation` apart.
 
@@ -256,22 +262,33 @@ def from_cover_tree(data: "_data._SpatialData | _types.ArrayLike",
     points are closer than `separation`, and every sample lies within
     `separation` of a point. Measured in the kernel's ranges, the first
     bounds the condition number of the inducing points' covariance and the
-    second the error of the approximation, so a separation of a fraction of
-    the shortest range trades one against the other.
+    second controls the error of the approximation, so a separation of a
+    fraction of the shortest range trades one against the other.
 
-    Taken farthest first, the points are the nested levels of a cover tree
-    at once: any first few of them are themselves well spread, at a coarser
-    separation. Each is a sample's own location, so the points follow the
-    data's footprint, though not its density.
+    These are the guarantees of the paper's cover tree, reached by a
+    simpler route: its breadth-first construction takes near-linear time,
+    farthest first takes one pass over the samples per point, which suits
+    a survey's samples but grows with both counts. Taken farthest first,
+    the points are nested -- any first few of them are themselves well
+    spread, at a coarser separation. Each is a sample's own location (the
+    paper's optional local averaging, which places points between samples
+    to need fewer, is not done), so the points follow the data's
+    footprint, though not its density.
 
     Parameters
     ----------
     data
         A spatial container, or an `(n_data, n_dim)` array of coordinates.
     separation
-        The least distance between two points, in the coordinates' units.
-        For an anisotropic kernel, pass coordinates already transformed so
-        that distance is measured in ranges.
+        The least distance between two points, in the coordinates' units,
+        or in the transformed units when `transform` is given.
+    transform
+        A spatial transform from `geoml.transform`, applied to the samples
+        before any distance is measured -- how the separation follows an
+        anisotropic kernel, an `Anisotropy3D` with its ranges making
+        `separation` a share of a range in every direction. The points
+        come back in the data's own coordinates. `None` measures in the
+        coordinates' own units.
 
     Returns
     -------
@@ -296,20 +313,24 @@ def from_cover_tree(data: "_data._SpatialData | _types.ArrayLike",
     coordinates = _coordinates(data)
     if not separation > 0:
         raise ValueError("separation must be positive, got %r" % separation)
+    measured = coordinates
+    if transform is not None:
+        transform.refresh()
+        measured = _np.asarray(transform(coordinates), dtype=float)
 
     # each sample's distance to the nearest point taken, updated as points
     # are added: one pass over the samples per point
     first = int(_np.argmin(_np.sum(
-        (coordinates - coordinates.mean(axis=0)) ** 2, axis=1)))
+        (measured - measured.mean(axis=0)) ** 2, axis=1)))
     taken = [first]
-    gap = _np.linalg.norm(coordinates - coordinates[first], axis=1)
+    gap = _np.linalg.norm(measured - measured[first], axis=1)
     while True:
         far = int(_np.argmax(gap))
         if gap[far] < separation:
             break
         taken.append(far)
-        _np.minimum(gap, _np.linalg.norm(coordinates - coordinates[far],
-                                         axis=1), out=gap)
+        _np.minimum(gap, _np.linalg.norm(measured - measured[far], axis=1),
+                    out=gap)
     return _as_points(coordinates[taken],
                       getattr(data, "coordinate_labels", None))
 

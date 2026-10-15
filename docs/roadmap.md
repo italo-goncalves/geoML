@@ -1487,12 +1487,17 @@ basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
 **M — Inducing points by cover tree** (requested 2026-10-10; **built
-2026-10-15, 0.9.2**: `inducing.from_cover_tree(data, separation)`, the
-samples farthest first, divided into experts by `experts`; written from
-the standard cover-tree nets with the paper unread -- arXiv and JMLR were
-out of reach from the session -- so whatever the paper's modification
-changes is not in it. What remains is the measurement below, and reading
-the paper against the code). Terenin,
+2026-10-15, 0.9.2**: `inducing.from_cover_tree(data, separation,
+transform=)`, the samples farthest first, divided into experts by
+`experts`; read against the paper since: the guarantees of its Algorithm
+12 (eq. 20, separation and spatial resolution both `separation`), but in
+O(N·M) where its breadth-first tree is O(N log N), and without its two
+optional steps -- the local averaging that places a node between samples
+when that keeps it a radius from the others, so fewer nodes are needed,
+and the Voronoi repartition that balances the tree. Either is the next
+step if the measurement below asks for it; the clustered-data
+approximation of its §3.3 is Gaussian-likelihood only. What remains is
+that measurement). Terenin,
 Burt, Artemev, Flaxman, van der Wilk, Rasmussen & Ge (2024), *Numerically
 stable sparse Gaussian processes via minimum separation using cover
 trees*, JMLR 25(26), arXiv 2210.07893 (in the Paper Library; read from the

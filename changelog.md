@@ -7,10 +7,17 @@ point -- the conditions under which a sparse GP's matrices stay well
 conditioned. Taken that way the points are a cover tree's nested levels,
 coarsest first, and `experts` divides them as it divides any set: cores
 within the balance, neighbours sharing points, and every expert still the
-separation apart. On Walker Lake at 105 points the nearest pair sits 20.0
-apart against k-means' 12.4, and the inducing covariance's condition
-number at a range of 30 is 2.4e3 against 1.0e5; at 389 points the two are
-alike. The held-out comparison the roadmap asks for is still to run.
+separation apart; `transform=` measures the separation through a spatial
+transform, an anisotropy making it a share of the range in every
+direction, and the points come back in the data's own coordinates. These
+are the guarantees of the paper's Algorithm 12, reached farthest first --
+one pass over the samples per point, where the paper's breadth-first
+construction is near-linear -- and without its optional steps (points
+averaged between samples, Voronoi rebalancing). On Walker Lake at 105
+points the nearest pair sits 20.0 apart against k-means' 12.4, and the
+inducing covariance's condition number at a range of 30 is 2.4e3 against
+1.0e5; at 389 points the two are alike. The held-out comparison the
+roadmap asks for is still to run.
 * **Directional data reach a variable named as a string.** `VGPNetwork`
 paired the directional measurements with the variables by iterating the
 `variables` argument as given, so `variables="Rock"` walked the letters,
