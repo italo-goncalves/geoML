@@ -1,3 +1,21 @@
+## version 0.9.2
+* **Directional data reach a variable named as a string.** `VGPNetwork`
+paired the directional measurements with the variables by iterating the
+`variables` argument as given, so `variables="Rock"` walked the letters,
+found no directional variable called `"R"` and trained on none. It reads
+the normalized names now, as a list or the mapping always did.
+* **`transform.ProjectionTo1D` points anywhere.** Its `directions` were a
+`PositiveParameter` in [0.001, 1], so the line could only point into the
+positive orthant -- in 2-D, north-east but never north-west. They are a
+signed unit vector now (`UnitColumnNormParameter`, as the dynamic
+anisotropies hold their weights), of shape `(n_dim, 1)`: a model saved
+with the old projection refuses to open on the shape rather than reading
+its log-scale values as directions.
+* **A GP node that fails to build leaves its parent as it was.** A `BasicGP`
+on a node that hands on no inducing points raised `BrokenPropagationError`
+after its parent had already listed it among its children, so a caller who
+caught the error kept a parent with a child that did not exist.
+
 ## version 0.9.1
 * **A `Concatenate` over a node that hands on no inducing points trains.**
 A `Concatenate` whose parent has none to give -- a `Multiply`, a

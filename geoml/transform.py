@@ -532,13 +532,15 @@ class ProjectionTo1D(_Transform):
             conjunction with a space-expanding transform.
         """
         super().__init__()
-        self._add_parameter("directions", _gpr.PositiveParameter(
-            _np.ones(n_dim), _np.ones(n_dim) * 0.001, _np.ones(n_dim)))
+        # a signed unit vector, so the line can point anywhere and not only
+        # into the positive orthant
+        start = _np.ones([n_dim, 1]) / _np.sqrt(n_dim)
+        self._add_parameter("directions", _gpr.UnitColumnNormParameter(
+            start, -_np.ones_like(start), _np.ones_like(start)))
 
     def __call__(self, x):
         with _tf.name_scope("ProjectionTo1D_transform"):
-            vector = _tf.expand_dims(self.parameters["directions"].get_value(),
-                                     axis=1)
+            vector = self.parameters["directions"].get_value()
             vector = vector / _tf.math.reduce_euclidean_norm(vector)
             x = _tf.matmul(x, vector)
         return x

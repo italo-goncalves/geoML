@@ -1471,27 +1471,12 @@ whether they ride the data object (the `GaussianData` precedent, which also
 reaches prediction) or the variable channel (training-only, needs nothing
 new).
 
-**S — Directional data ignored under a variable named as a string**
-(found by reading, 2026-09-15, not run). `VGPNetwork.__init__` pairs the
-directional measurements with the variables by iterating the raw
-`variables` argument, so `variables="Rock"` walks the letters, looks up
-`"R"`, finds nothing and trains on no directional measurement at all. A
-list or the mapping spelling is unaffected. Iterate the normalized names.
-
-**S — `ProjectionTo1D` projects onto positive directions only**
-(found 2026-09-25, reading why the catalogue should not offer it). Its
-`directions` is a `PositiveParameter` in [0.001, 1], so a projection can
-point into the positive orthant and nowhere else -- in 2-D, north-east but
-never north-west. A signed unit vector (a `UnitColumnNormParameter`, as the
-dynamic anisotropies hold their weights) would let it point anywhere; the
-catalogue marks it `experimental` until then, and `RandomProjections` with
-it, nothing in it training.
-
-**S — A GP node that fails to build is left among its parent's children**
-(found by reading, 2026-09-15). `_FunctionalLatentVariable.__init__`
-appends the node to `parent.children` before `_GPNode.__init__` can raise
-`BrokenPropagationError`, so a caller that catches the error and goes on
-holds a parent with a child that does not exist. Register the child last.
+(Three small bugs found by reading -- directional data ignored under a
+variable named as a string, `ProjectionTo1D` pointing into the positive
+orthant only, and a GP node that failed to build left among its parent's
+children: **fixed 2026-10-15, 0.9.2**, `test_small_fixes.py`. The
+catalogue still marks `ProjectionTo1D` and `RandomProjections`
+`experimental`; nothing in either has been trained in earnest.)
 
 ---
 

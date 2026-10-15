@@ -992,7 +992,7 @@ class VGPNetwork(_GPModel):
             self.var_lengths_dir = [1] * sum(self.var_lengths)
 
             y_dir, has_value_dir = [], []
-            for v, s in zip(variables, self.var_lengths):
+            for v, s in zip(self.variables, self.var_lengths):
                 if v in directional_data.variables.keys():
                     y_v, h_v = directional_data.variables[v].get_measurements()
                     y_dir.append(_np.tile(y_v, [1, s]))
