@@ -1,4 +1,16 @@
 ## version 0.9.2
+* **`inducing.from_cover_tree(data, separation)`: inducing points a least
+distance apart** (Terenin et al. 2024). The samples are taken farthest
+first until none is `separation` from the points already taken, so no two
+points are closer than `separation` and every sample lies within it of a
+point -- the conditions under which a sparse GP's matrices stay well
+conditioned. Taken that way the points are a cover tree's nested levels,
+coarsest first, and `experts` divides them as it divides any set: cores
+within the balance, neighbours sharing points, and every expert still the
+separation apart. On Walker Lake at 105 points the nearest pair sits 20.0
+apart against k-means' 12.4, and the inducing covariance's condition
+number at a range of 30 is 2.4e3 against 1.0e5; at 389 points the two are
+alike. The held-out comparison the roadmap asks for is still to run.
 * **Directional data reach a variable named as a string.** `VGPNetwork`
 paired the directional measurements with the variables by iterating the
 `variables` argument as given, so `variables="Rock"` walked the letters,

@@ -10,6 +10,7 @@ replaces running that loop in eager Python.
 """
 import numpy as np
 import pytest
+from scipy.spatial import cKDTree
 
 import geoml
 import geoml.data.inducing as ind
@@ -121,6 +122,58 @@ def test_from_hull_on_flat_data_keeps_what_is_near():
 def test_from_hull_refuses_a_negative_distance():
     with pytest.raises(ValueError, match="negative"):
         ind.from_hull(_l_shape(), 5.0, -1.0)
+
+
+def test_from_cover_tree_separates_and_covers():
+    """The two guarantees: no two points closer than the separation, and
+    every sample within it of a point -- on drillholes, whose samples are
+    far closer along a hole than across."""
+    data = _drillholes_samples()
+    points = np.asarray(ind.from_cover_tree(data, 8.0).coordinates)
+    tree = cKDTree(points)
+    assert tree.query(points, k=2)[0][:, 1].min() >= 8.0
+    assert tree.query(data)[0].max() < 8.0
+    # every point is a sample's own location
+    assert np.all(cKDTree(data).query(points)[0] == 0.0)
+
+
+def test_from_cover_tree_levels_are_nested():
+    """Taken farthest first, the points of a coarser separation are the
+    first points of a finer one."""
+    data = _drillholes_samples()
+    coarse = np.asarray(ind.from_cover_tree(data, 20.0).coordinates)
+    fine = np.asarray(ind.from_cover_tree(data, 5.0).coordinates)
+    assert len(fine) > len(coarse)
+    np.testing.assert_array_equal(fine[:len(coarse)], coarse)
+
+
+def test_from_cover_tree_drops_repeats_and_keeps_labels():
+    walker_point, _ = _walker()
+    doubled = np.vstack([np.asarray(walker_point.coordinates)] * 2)
+    once = ind.from_cover_tree(walker_point, 10.0)
+    assert once.coordinate_labels == walker_point.coordinate_labels
+    assert ind.from_cover_tree(doubled, 10.0).n_data == once.n_data
+    assert ind.from_cover_tree(walker_point, 1e6).n_data == 1
+    with pytest.raises(ValueError, match="positive"):
+        ind.from_cover_tree(walker_point, 0.0)
+
+
+def test_cover_tree_experts_balance_overlap_and_stay_separated():
+    """Divided by `experts`, the points come out as the other helpers' do
+    -- cores within the balance, neighbours sharing points -- and every
+    expert, a subset of the points, is still the separation apart."""
+    data = _drillholes_samples()
+    points = np.asarray(ind.from_cover_tree(data, 15.0).coordinates)
+    labels = _cores(points, 8)
+    sizes = np.bincount(labels, minlength=8)
+    mean = len(points) / 8
+    assert sizes.min() >= np.floor(0.9 * mean)
+    assert sizes.max() <= np.ceil(1.1 * mean)
+    sets = [np.asarray(s.coordinates)
+            for s in ind.experts(points, 8, overlap=0.2, seed=0)]
+    assert sum(len(s) for s in sets) > len(points)
+    for held in sets:
+        assert cKDTree(held).query(held, k=2)[0][:, 1].min() >= 15.0
 
 
 def test_combine_drops_duplicates():
@@ -264,6 +317,14 @@ def test_experts_survive_a_collinear_cluster():
 def _drillholes():
     """Holes dipping 60 degrees, samples every 2 m: a dense block 10 m
     apart beside a sparse spread 60 m apart, as 500 k-means points."""
+    data = geoml.data.PointData.from_array(_drillholes_samples(),
+                                           ["X", "Y", "Z"])
+    return np.asarray(ind.from_kmeans(data, 500, seed=0).coordinates)
+
+
+def _drillholes_samples():
+    """The samples `_drillholes` thins: 18 000 of them, 2 m apart down
+    the holes."""
     rng = np.random.default_rng(0)
     collars = np.vstack([
         np.column_stack([g.ravel() for g in np.meshgrid(
@@ -278,8 +339,7 @@ def _drillholes():
                                           np.full_like(down, c[1]),
                                           np.zeros_like(down)])
                          + down[:, None] * direction for c in collars])
-    data = geoml.data.PointData.from_array(samples, ["X", "Y", "Z"])
-    return np.asarray(ind.from_kmeans(data, 500, seed=0).coordinates)
+    return samples
 
 
 def _cores(points, n_experts, balance=0.1):

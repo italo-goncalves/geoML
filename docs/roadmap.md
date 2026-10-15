@@ -1486,7 +1486,13 @@ The theme is measured rather than assumed: **training does not leave the
 basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
-**M — Inducing points by cover tree** (requested 2026-10-10). Terenin,
+**M — Inducing points by cover tree** (requested 2026-10-10; **built
+2026-10-15, 0.9.2**: `inducing.from_cover_tree(data, separation)`, the
+samples farthest first, divided into experts by `experts`; written from
+the standard cover-tree nets with the paper unread -- arXiv and JMLR were
+out of reach from the session -- so whatever the paper's modification
+changes is not in it. What remains is the measurement below, and reading
+the paper against the code). Terenin,
 Burt, Artemev, Flaxman, van der Wilk, Rasmussen & Ge (2024), *Numerically
 stable sparse Gaussian processes via minimum separation using cover
 trees*, JMLR 25(26), arXiv 2210.07893 (in the Paper Library; read from the

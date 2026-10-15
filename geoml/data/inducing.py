@@ -24,6 +24,7 @@ functions here produce them:
     from_kmeans(data, n)          one set, at the k-means centroids of the data
     from_grid(data, step)         one set, on a regular lattice
     from_hull(data, step, d)      one set, on a lattice kept where the data reach
+    from_cover_tree(data, s)      one set, of samples at least `s` apart
     combine(a, b, ...)            one set out of several, duplicates dropped
     grid_experts(data, step)      a list of sets, laid out as overlapping blocks
     experts(points, n_experts)    a list of sets, from overlapping clusters
@@ -45,8 +46,8 @@ irregular network is to choose the points first and then divide them:
     sets = experts(from_kmeans(data, 1500), 12)
 """
 
-__all__ = ["from_kmeans", "from_grid", "from_hull", "combine", "grid_experts",
-           "experts"]
+__all__ = ["from_kmeans", "from_grid", "from_hull", "from_cover_tree",
+           "combine", "grid_experts", "experts"]
 
 from typing import cast as _cast
 
@@ -240,6 +241,78 @@ def from_hull(data: "_data._SpatialData | _types.ArrayLike",
         gap = _spatial.cKDTree(coordinates).query(nodes[outside])[0]
         keep[outside[gap <= distance]] = True
     return _as_points(nodes[keep], getattr(data, "coordinate_labels", None))
+
+
+def from_cover_tree(data: "_data._SpatialData | _types.ArrayLike",
+                    separation: float) -> "_data.PointData":
+    """
+    Inducing points among the samples, at least `separation` apart.
+
+    The samples are taken farthest first: the first is the sample nearest
+    the data's mean, and each one after it is the sample farthest from
+    every point taken so far, until no sample is `separation` or more from
+    them. Two guarantees follow, which are the conditions under which a
+    sparse GP's matrices stay well conditioned (Terenin et al. 2024): no two
+    points are closer than `separation`, and every sample lies within
+    `separation` of a point. Measured in the kernel's ranges, the first
+    bounds the condition number of the inducing points' covariance and the
+    second the error of the approximation, so a separation of a fraction of
+    the shortest range trades one against the other.
+
+    Taken farthest first, the points are the nested levels of a cover tree
+    at once: any first few of them are themselves well spread, at a coarser
+    separation. Each is a sample's own location, so the points follow the
+    data's footprint, though not its density.
+
+    Parameters
+    ----------
+    data
+        A spatial container, or an `(n_data, n_dim)` array of coordinates.
+    separation
+        The least distance between two points, in the coordinates' units.
+        For an anisotropic kernel, pass coordinates already transformed so
+        that distance is measured in ranges.
+
+    Returns
+    -------
+    geoml.data.PointData
+        The points in the order taken, coarsest first.
+
+    See Also
+    --------
+    experts : divides the points among overlapping experts; a subset of
+        points `separation` apart is still `separation` apart, so each
+        expert keeps the guarantee.
+    combine : with a tolerance, also keeps points a least distance apart,
+        taken in input order rather than farthest first.
+
+    References
+    ----------
+    Terenin, A., Burt, D. R., Artemev, A., Flaxman, S., van der Wilk, M.,
+    Rasmussen, C. E. and Ge, H. (2024). Numerically stable sparse Gaussian
+    processes via minimum separation using cover trees. *Journal of
+    Machine Learning Research* 25(26), 1-36.
+    """
+    coordinates = _coordinates(data)
+    if not separation > 0:
+        raise ValueError("separation must be positive, got %r" % separation)
+
+    # each sample's distance to the nearest point taken, updated as points
+    # are added: one pass over the samples per point
+    first = int(_np.argmin(_np.sum(
+        (coordinates - coordinates.mean(axis=0)) ** 2, axis=1)))
+    taken = [first]
+    gap = _np.linalg.norm(coordinates - coordinates[first], axis=1)
+    while True:
+        far = int(_np.argmax(gap))
+        if gap[far] < separation:
+            break
+        taken.append(far)
+        _np.minimum(gap, _np.linalg.norm(coordinates - coordinates[far],
+                                         axis=1), out=gap)
+    return _as_points(coordinates[taken],
+                      getattr(data, "coordinate_labels", None))
+
 
 def combine(*sources: "_data._SpatialData | _types.ArrayLike",
             tolerance: float = 0.0) -> "_data.PointData":
