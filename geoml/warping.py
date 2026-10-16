@@ -763,13 +763,22 @@ class BoxCox(_Warping):
         zero a logarithm. Where the data hold zeros it wants the order of
         their smallest positive value: a zero shifted by far less sits so
         far down the logarithm that the zeros alone pull the exponent
-        toward it, and the inverse steepens with it.
+        toward it, and the inverse steepens with it. `None` has
+        `initialize` find it, per component: the smallest positive value
+        of a column that holds zeros, and a negligible ``1e-6`` on one
+        that does not.
     exponent
         The starting exponent, one value or one per component;
         `initialize` replaces it.
 
     Notes
     -----
+    The shift is not profiled with the exponent, as the two-parameter
+    Box-Cox would: with zeros in the data the profile likelihood grows
+    without bound as the shift goes to zero, each zero adding
+    ``(λ - 1) log(shift)`` to the Jacobian, so it would always choose the
+    smallest shift on offer.
+
     The exponent is kept in ``[0, 2]``. A zero maps to
     ``(shift**λ - 1) / λ``, and a latent draw below that comes back as
     zero: its pre-image lies under zero, and past ``-1/λ`` there is none at
@@ -791,13 +800,24 @@ class BoxCox(_Warping):
         super().__init__()
         self._size_in = size
         self._size_out = size
-        if shift <= 0:
+        if shift is not None and shift <= 0:
             raise ValueError("shift must be positive")
-        self.shift = float(shift)
+        self.shift = None if shift is None else float(shift)
         low, high = self._EXPONENT_LIMITS
         self._add_parameter("exponent", _gpr.RealParameter(
             _np.broadcast_to(_np.asarray(exponent, dtype=float), [size]).copy(),
             _np.full([size], low), _np.full([size], high)))
+        if shift is None:
+            # found by `initialize`; a fixed parameter so a save records it,
+            # registered only here so the float path keeps its slots
+            self._add_parameter("shift", _gpr.RealParameter(
+                _np.full([size], 1e-6), _np.full([size], 1e-300),
+                _np.full([size], 1e300), fixed=True))
+
+    def _shift(self):
+        if self.shift is not None:
+            return self.shift
+        return self.parameters["shift"].get_value()[None, :]
 
     @staticmethod
     def _power(u, lam):
@@ -818,7 +838,7 @@ class BoxCox(_Warping):
 
     def forward(self, x):
         lam = self.parameters["exponent"].get_value()[None, :]
-        u = _tf.math.log(x + self.shift)
+        u = _tf.math.log(x + self._shift())
         log_det = _tf.reduce_sum((lam - 1.0) * u, axis=1)
         return self._power(u, lam), log_det
 
@@ -826,17 +846,26 @@ class BoxCox(_Warping):
         lam = self.parameters["exponent"].get_value()[None, :]
         # a draw under zero's own image has its pre-image under zero, down
         # to minus the shift: a zero grade, as the floor past -1/λ is
-        return _tf.maximum(_tf.exp(self._root(x, lam)) - self.shift, 0.0)
+        return _tf.maximum(_tf.exp(self._root(x, lam)) - self._shift(), 0.0)
 
     def initialize(self, x, weights=None):
         x = _np.asarray(x, dtype=float)
-        shift = self.shift
+        if self.shift is None:
+            shifts = []
+            for i in range(self.size_in):
+                column = x[:, i]
+                positive = column[column > 0]
+                shifts.append(positive.min() if _np.any(column == 0)
+                              and positive.size else 1e-6)
+            self.parameters["shift"].set_value(_np.array(shifts))
+        else:
+            shifts = [self.shift] * self.size_in
         starts = [
             _profile_start(
                 x[:, i], weights, self._GRID,
-                lambda v, c: _power_np(_np.log(v + shift), c),
-                lambda v, c: (c - 1.0) * _np.log(v + shift))
-            for i in range(self.size_in)]
+                lambda v, c, s=shift: _power_np(_np.log(v + s), c),
+                lambda v, c, s=shift: (c - 1.0) * _np.log(v + s))
+            for i, shift in enumerate(shifts)]
         if not self.parameters["exponent"].fixed:
             self.parameters["exponent"].set_value(_np.array(starts))
         return super().initialize(x, weights)
@@ -1909,7 +1938,8 @@ Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
 Scale._catalogue = _declared(_SIZED, size=_COUNT,
                              scale=dict(_GIVEN_SCALE, type="json"))
 BoxCox._catalogue = _declared(
-    _SIZED, label="Box-Cox", size=_COUNT, shift=_POSITIVE,
+    _SIZED, label="Box-Cox", size=_COUNT,
+    shift=dict(_POSITIVE, nullable=True),
     exponent=_EXPONENT)
 YeoJohnson._catalogue = _declared(
     _SIZED, label="Yeo-Johnson", size=_COUNT, exponent=_EXPONENT)

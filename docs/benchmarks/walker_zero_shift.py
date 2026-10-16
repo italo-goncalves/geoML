@@ -23,6 +23,8 @@ which is where the shortest, clustered pairs sit. A shift of one, the order
 of the smallest positive value (2.1), trains exactly as Yeo-Johnson does
 (the two maps agree on non-negative data) and puts the fan on the true
 variogram.
+`BoxCox(shift=None)` finds the shift from the data (the smallest positive
+value, 2.1 here): the `data` arm.
 
 Usage:  python docs/benchmarks/walker_zero_shift.py starts
         python docs/benchmarks/walker_zero_shift.py ARM
@@ -43,6 +45,7 @@ from geoml.plots import prepare  # noqa: E402
 ARMS = {
     "chapter": {},
     "shift1": {"shift": 1.0},
+    "data": {"shift": None},
     "yeojohnson": {"link": "YeoJohnson"},
     "dense": {"step": 5.0, "block": 16},
     "long": {"iters": 2000},
