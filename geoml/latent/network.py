@@ -1630,6 +1630,9 @@ class _GPNode(_FunctionalLatentVariable):
     def __init__(self, parent, name=None):
         super().__init__(parent, name=name)
         if not self.propagates_inducing_points:
+            # the parent took this node as a child on the way up; a node
+            # that never got built must not stay among its children
+            parent.children.remove(self)
             raise BrokenPropagationError(
                 '%s: GP nodes require their parent to propagate inducing '
                 'points, and %s does not.' % (self.name, parent.name))

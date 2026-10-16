@@ -1,3 +1,53 @@
+## version 0.9.3
+* **`GPOptions(fresh_training_draws=True)`, the default for a new model: a
+Monte Carlo bound drawn afresh at every step.** A model that trains on realizations -- a leaf that is not
+Gaussian, a warping that mixes -- averaged its bound over the same
+`training_samples` draws at every step, so the parameters could fit that
+sample: the training log sat 10-20 nats above the bound re-evaluated over
+independent draws, and moving only the draw seed moved the fitted model's
+predictions. Drawn afresh, the bound is unbiased and noisier, the
+predictions move 2.5-5x less with the draw seed, and on the folded
+section's doubly stochastic prototype the fresh draws are what find the
+better basin. The draws follow a step count on the model, so training in
+chunks replays one call. A model saved before keeps its fixed draws (the
+class default), so its training replays as it did; a model trained by
+quadrature reads no draws and is untouched (`docs/benchmarks/fresh_draws.py`).
+* **`inducing.from_cover_tree(data, separation)`: inducing points a least
+distance apart** (Terenin et al. 2024). The samples are taken farthest
+first until none is `separation` from the points already taken, so no two
+points are closer than `separation` and every sample lies within it of a
+point -- the conditions under which a sparse GP's matrices stay well
+conditioned. Taken that way the points are a cover tree's nested levels,
+coarsest first, and `experts` divides them as it divides any set: cores
+within the balance, neighbours sharing points, and every expert still the
+separation apart; `transform=` measures the separation through a spatial
+transform, an anisotropy making it a share of the range in every
+direction, and the points come back in the data's own coordinates. These
+are the guarantees of the paper's Algorithm 12, reached farthest first --
+one pass over the samples per point, where the paper's breadth-first
+construction is near-linear -- and without its optional steps (points
+averaged between samples, Voronoi rebalancing). On Walker Lake at 105
+points the nearest pair sits 20.0 apart against k-means' 12.4, and the
+inducing covariance's condition number at a range of 30 is 2.4e3 against
+1.0e5; at 389 points the two are alike. The held-out comparison the
+roadmap asks for is still to run.
+* **Directional data reach a variable named as a string.** `VGPNetwork`
+paired the directional measurements with the variables by iterating the
+`variables` argument as given, so `variables="Rock"` walked the letters,
+found no directional variable called `"R"` and trained on none. It reads
+the normalized names now, as a list or the mapping always did.
+* **`transform.ProjectionTo1D` points anywhere.** Its `directions` were a
+`PositiveParameter` in [0.001, 1], so the line could only point into the
+positive orthant -- in 2-D, north-east but never north-west. They are a
+signed unit vector now (`UnitColumnNormParameter`, as the dynamic
+anisotropies hold their weights), of shape `(n_dim, 1)`: a model saved
+with the old projection refuses to open on the shape rather than reading
+its log-scale values as directions.
+* **A GP node that fails to build leaves its parent as it was.** A `BasicGP`
+on a node that hands on no inducing points raised `BrokenPropagationError`
+after its parent had already listed it among its children, so a caller who
+caught the error kept a parent with a child that did not exist.
+
 ## version 0.9.2
 * **A parent several nodes share is refreshed and propagated once.** Every
 node's `refresh` refreshes its parents and every `propagate` propagates
