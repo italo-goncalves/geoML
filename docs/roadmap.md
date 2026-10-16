@@ -1063,7 +1063,9 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   -109). So 200 sampled steps, then the grid, reproduce the 64-draw runs
   seed by seed at 0.6 of the time; a one-draw warm-up does not (-9.2,
   -10.7). Why light noise picks the basin and none or heavy noise do not
-  is open.
+  is open -- though the noise must be fresh: the same draws kept for the
+  whole run land where the grid did (-9.99 at 16 draws, -7.85 at 64, under
+  "Fresh training draws").
 - **One draw a step** costs a moment step and is unbiased, but at a
   constant learning rate its bound stops rising early (table). A decaying
   rate, and one hidden realization shared by every point, are untried.
@@ -1544,6 +1546,52 @@ bound of 36.2 and 50 draws 26.7, the scores against the truth better at 50
 iteration (the phase's count), so a run split into chunks still replays
 one call bit for bit. Gate: the same two numbers, and the chunked-training
 test in `test_early_stopping.py` still exact.
+
+**Built 2026-10-16 as an option and measured** (`GPOptions(
+fresh_training_draws=False)`, 0.9.2; `docs/benchmarks/fresh_draws.py`,
+results in `docs/benchmarks/figures/fresh_draws/`). The seed moves by a
+step count kept on the model (`_training_seed`, `_draw_count`), read and
+stepped inside the traced step and reset with the phase, so chunks replay
+one call (`test_fresh_draws.py`) and nothing retraces; off is today's
+training to the bit. Three cases, the honest bound being the objective
+re-evaluated at the final parameters over 20 independent sets of 200
+draws, and the prediction shift what moving only the draw seed does to the
+predictions (initialization fixed, the prediction itself drawn under one
+seed):
+
+| Case | Draws | Own minus honest | Honest bound | Accuracy | Prediction shift |
+|---|---|---|---|---|---|
+| `GaussianMixture` gate 1 | fixed 20 | +20.3 | -45.3 | RMSE 0.204 (0.137-0.230) | 0.125 |
+| (3 inits x 2 draw seeds) | fresh 20 | -0.8 | -41.9 | 0.216 (0.186-0.234) | 0.049 |
+| | fixed 50 | +10.3 | 16.7 | 0.146 | 0.017 |
+| | fresh 50 | -1.4 | 12.1 | 0.140 | 0.032 |
+| Jura's metals, mixing chain | fixed 20 | +19.4 | -5444.1 | RMSE/sd 0.918 | 1.43 |
+| (2 inits x 2 draw seeds) | fresh 20 | -3.6 | -5440.6 | 0.920 | 0.28 |
+| | fixed 50 | +1.4 | -5437.4 | 0.920 | 0.79 |
+| | fresh 50 | -2.9 | -5437.7 | 0.921 | 0.31 |
+
+- **The bias goes**: fixed draws let the parameters fit their own sample
+  (the training log 10-20 nats above the honest bound); fresh ones leave
+  none.
+- **A fitted model depends less on its draws**: moving only the draw seed
+  moves the predictions 2.5x less on the mixture at 20 draws and 3-5x less
+  on Jura. At 50 fixed draws on the mixture the sample is already large
+  enough that fresh ones add their own step noise instead.
+- **Accuracy is unmoved where the bound was unbiased enough** (Jura, every
+  arm within 0.005 of 0.92), and on the mixture the count of draws matters
+  more than their freshness (50 against 20, either way).
+- **The basin** (the folded section's doubly stochastic training, 2000
+  steps, 3 seeds, new-hole score): 16 hidden draws fixed for the run
+  -9.99, fresh -6.12; 64 fixed -7.85, fresh -3.73, honest bound -157.7
+  against -119.9. Fixed draws land where the deterministic grid did; the
+  noise of fresh ones is what finds the better basin.
+- **Cost none**: the same time a step in every case. The bound is noisy
+  from step to step (2-15 nats), and `training_tolerance=0.01` stops
+  fixed and fresh at the same iteration on both cases (106-117), at the
+  same honest bound.
+
+Open: the default. Fresh for a new model, the class default keeping saved
+models as they were, as `propagation` did -- the user's call.
 
 **XL — Change of support from the theory of sampling.** From the author's
 paper draft, which is the specification. A window of volume `v` has grade
