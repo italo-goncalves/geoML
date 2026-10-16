@@ -2420,6 +2420,14 @@ refits):
   uncertain input (the item in section 1): measured 2026-10-08, the expected
   kernel alone misses the variance there by up to 133%, where
   `UncertainInputGP` is within 3%.
+- `BoxCox`'s default shift from the data (`shift=None`, built 0.9.3 as an
+  opt-in): the default stays `1e-6` today only because a save replays the
+  arguments it was given, so an old `BoxCox(1)` reloaded under a new
+  default would register the extra `shift` parameter and refuse its own
+  slots. Here the default becomes `None` and the float path's slot layout
+  stops mattering; the manual's chains drop their hand-set `shift=1.0`.
+  Measured already (Walker, 2026-10-16): the found shift trains as the
+  hand-set one does, and on a column with no zeros it is the old `1e-6`.
 - **Deprecated in 0.9.0** (ignored under `"joint"`, removed here):
   `GPWalk`'s `precision` parameter and the variance shrinking it drives,
   and the walk's displacement term, `1/2 sum (moved - start)² / spread²`
