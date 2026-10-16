@@ -167,6 +167,73 @@ def test_a_shared_parent_is_priced_once():
     assert sum(n is rock.parent for n in nodes) == 1
 
 
+class _Counted(gl.BasicGP):
+    """A hidden GP node that counts the refreshes and propagations that run;
+    its own methods take the once-a-pass guard as every node class's do."""
+    calls = {"refresh": 0, "propagate": 0}
+
+    def refresh(self, jitter=1e-6):
+        _Counted.calls["refresh"] += 1
+        return super().refresh(jitter)
+
+    def propagate(self, x, x_var=None):
+        _Counted.calls["propagate"] += 1
+        return super().propagate(x, x_var)
+
+
+def _hidden_shared(train, n_rock, n_el, seed=1234):
+    geoml.set_seed(seed)
+    root = gl.BasicInput(geoml.data.inducing.from_kmeans(train, 40, seed=0),
+                         transform=tr.Isotropic(1.0))
+    hidden = _Counted(root, size=2)
+    return (hidden, gl.BasicGP(hidden, size=n_rock),
+            gl.BasicGP(hidden, size=n_el))
+
+
+def test_a_shared_parent_is_refreshed_and_propagated_once_a_pass(
+        monkeypatch):
+    """Every path from a leaf to the root used to refresh and propagate a
+    parent the leaves share; within a pass it runs once, and the model
+    trains and predicts exactly as when it ran every time."""
+    import contextlib
+    import tensorflow as tf
+    train, held, n_rock, n_el = _jura()
+
+    def model():
+        hidden, rock, metal = _hidden_shared(train, n_rock, n_el)
+        return hidden, rock, metal, geoml.models.VGPNetwork(
+            train, ["Rock", "Elements"], _likelihoods(n_rock, n_el),
+            [rock, metal], options=_options())
+
+    hidden, rock, metal, m = model()
+    x = tf.constant(np.asarray(held.coordinates, dtype=float)[:30])
+    with m._propagation():
+        _Counted.calls.update(refresh=0, propagate=0)
+        m._refresh(m.options.jitter)
+        assert _Counted.calls["refresh"] == 1
+        with gl.once_per_pass():
+            rock.predict(x)
+            metal.predict(x)
+        assert _Counted.calls["propagate"] == 1
+        # outside a pass every call runs, as it always did
+        rock.predict(x)
+        metal.predict(x)
+        assert _Counted.calls["propagate"] == 3
+
+    once = _train_and_predict(m, held)
+    monkeypatch.setattr(gl, "once_per_pass", contextlib.nullcontext)
+    monkeypatch.setattr(gl.network, "once_per_pass", contextlib.nullcontext)
+    _Counted.calls.update(refresh=0, propagate=0)
+    _, _, _, every = model()
+    with every._propagation():
+        every._refresh(every.options.jitter)
+    assert _Counted.calls["refresh"] == 2
+    each = _train_and_predict(every, held)
+    np.testing.assert_allclose(once[0], each[0], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(once[1], each[1], rtol=1e-10, atol=1e-12)
+    assert np.array_equal(once[2], each[2])
+
+
 # --------------------------------------------------------------------------- #
 # persistence and the diagram
 # --------------------------------------------------------------------------- #

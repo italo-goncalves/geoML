@@ -301,6 +301,44 @@ the displacement term, calibration within 1-1.5 and a score at least the
 heuristic's (-10.46); chapter 16's rock maps no worse; the cost (one walk
 per node) against the term it replaces.
 
+**M — The walk's memory beyond 0.9.2** (measured 2026-10-16 on a GeoScape
+network: a size-3 field, a five-step walk, three readers, 32 experts of
+~200 inducing points, 17 active on a batch, a 16 GB card). 0.9.2 took one
+training epoch from ~26 GB (out of memory) to 3.7 GB, in 153 s an epoch:
+each walk step recomputed in the backward pass (10.1 GB), the expected
+kernel's sum over components given a gradient of its own (8.2 GB), and a
+parent several nodes share refreshed and propagated once a pass (3.7 GB,
+half the time) -- the walk sat under four paths and a step walked seven
+times. What is left at the 3.65 GB peak, read off the allocator's trace
+(`tf.profiler` events replayed, the walk's pieces in name scopes): 0.80 GB
+held before the step; ~1.0 GB in the per-expert Choleskys and solves of
+the refresh, forward and gradient (`[17, 3, 227, 227]` for the size-3
+GPs, `[17, 1, 227, 227]` for the size-1 one) -- the model's own size,
+where the peak sits; 0.6 GB in the walk's stored checkpoints, one `h`
+(`[17, n, 3, 3, 227]`) per step for each of the two walks; ~0.2 GB in the
+readers' expected kernel; the rest small or of unknown shape (~1 GB).
+Tried and dropped: recomputing the walked covariance (no gain); the slope
+given the expected kernel's own gradient (1 GB worse -- one Gaussian
+component, four accumulators); recomputing the readers' kernel with
+`tf.recompute_grad` instead (0.24 GB, the executor rebuilt every component
+at once); handing the field's matrices from step to step so their
+gradient comes back as one sum (no gain); TensorFlow's arithmetic
+optimizer switched off (no gain). Ideas that would change the method
+rather than squeeze it:
+- **Fewer, smaller experts.** The expert matrices and `h` grow with the
+  square of the points per expert, and the matrices are now the largest
+  item: the same inducing points in more experts should cost less per
+  batch. Measure memory and score together.
+- **A local `h`.** A walker's sensitivity to the field's normals reaches
+  all `m` inducing points of its expert, but the field it meets is the
+  kernel's reach around its path: keeping only the nearest few dozen
+  points per walker would cut `h`, its checkpoints and its products by
+  `m / k`. Needs a measure of what the truncated covariance loses against
+  the walk-along-draws test.
+- **Fewer checkpoints.** Storing every second step's `h` and recomputing
+  from it halves the 0.6 GB for one more step's work in the backward
+  pass; worth it only if the walk grows longer.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
@@ -967,6 +1005,80 @@ Open, in the order they matter:
    `GradientConstrainedInput` (and directional data), `RadialTrend`,
    `GaussianMixture`.
 
+**S–M — Network presets** (requested 2026-10-14). Common patterns that
+today take several nodes wired by hand, offered as one:
+- `ReduceSum(parent)`: the sum of a node's outputs into one, which today
+  is a `SelectInput` per column and an `Add` over them (the user's name for
+  the selector was `SelectVariable`; the node is `SelectInput`).
+- A linear combination with spatially varying weights: the outputs of
+  one node weighted, location by location, by the outputs of a weights
+  node and summed -- `ReduceSum(Multiply(values, weights))`, the GP-based
+  analogue of geographically weighted regression, where
+  `LinearCombination` has constant weights.
+The GeoScape network that found 0.9.1's `Concatenate` bug built exactly
+the second by hand (`Multiply`, eight `SelectInput`s, two `Add`s), so the
+hand-wired form is error-prone as well as long. Decide first whether a
+preset is a **function that returns ordinary nodes** -- nothing new in a
+save, which replays the underlying nodes, and nothing new to keep
+importable forever -- or a **class** (one node in the diagram and the
+catalogue, a cheaper single sum instead of k selections, but a new dotted
+path saves will record, a `_catalogue` declaration and a stand-in in
+`test_catalogue.py`, and its own `propagates_inducing` and `_GAUSSIAN`:
+a sum of Gaussian outputs is Gaussian, a product is not, so the weighted
+form trains on realizations like any `Multiply` leaf). Either way the
+catalogue must offer it, since GeoScape builds networks from it. Gate: the
+preset gives the hand-wired network's bound and prediction to the bit,
+and trains under `train_svi` and `train_by_expert`.
+
+**What the gridded-GP research gives geoML as it stands** (assessed
+2026-10-14 from the research project `OneDrive\Claude\Research\Kronecker
+GP\`, report `report/main.pdf`, which compared against `master` at 0.9.0).
+The project built a node whose inducing values sit on a regular grid --
+Kronecker prior written as a positive mixture of Gaussians, cubic
+interpolation to the data, one Gaussian site per datum, CG and Lanczos in
+place of dense algebra -- and measured it against an exact GP and SGPR,
+not against geoML's experts. What carries over:
+- **S — Correct the kernel-mixture error figures.** The comment above
+  `_KERNEL_MIXTURES` (`latent/network.py`), `docs/expected-kernel.md` and
+  the 0.9.0 changelog give the largest error over [0, 6] ranges as 5.1e-4,
+  9.8e-6 and 9.1e-6 (exponential, Matern32, Matern52); those are maxima
+  over `kernel_mixtures.py`'s own distances. Over 2.4 million distances the
+  supremum is 5.32e-4, 1.03e-5 and 9.15e-6 (the project's
+  `verification/matern_mixture.py`, which also confirms the tables are the
+  ones in the code, to the bit). The bound is per entry: as a matrix the
+  mixture differs from the closed form by about a nugget in 2-D and one to
+  two orders more in 3-D (its E1), which matters only if the mixtures are
+  ever used where the inputs are certain; today they serve the expected
+  kernel at uncertain inputs alone.
+- **The realizations' missing residual has a second consumer.** A
+  `BasicGP` draw is `mu + cov_cross·chol_r·normals` and carries only the
+  variance the inducing points explain -- known, and the subject of the
+  "Pathwise conditioning" research. Anything that reads realizations
+  through a GP node (the item below, a gridded child) inherits the
+  under-dispersion, so that fix comes before either.
+- **Not a replacement for the experts.** The gridded node is the exact GP
+  of its own interpolated model (posterior to 7e-12 standard deviations)
+  and on Walker Lake matches the exact GP (rmse 5.137 against 5.136),
+  1.5-6% ahead of SGPR at equal time -- but it has **no time advantage over
+  an exact dense GP below about 1.4e4 data in 2-D and none was reached in
+  3-D** (1.9-28x slower at 1e4), at N = 17 600 the exact GP was 9x faster,
+  and its advantage is memory alone (from about 3e4 data on this machine).
+  A 1% covariance error needs 15 grid nodes per range for the Matern 3/2,
+  2-6x more for predictions within 1% of the exact GP's, and the
+  exponential kernel cannot be gridded at any practical spacing -- in 3-D
+  that is the cost. It stays a candidate for one case: a dense 2-D (or
+  thin) field held in memory, the "gridded tree for geophysics" above.
+- **Consistent with decisions already taken, nothing to change:** a
+  coregionalized model did not help held-out Jura (equal on one triple,
+  worse on the other, with 132-154 nats more training evidence; the
+  isotopic case, where cokriging is known to gain little), as
+  `LinearCombination(per_component=True)` measured neutral; site updates
+  (CVI) work there because a single grid has no expert blend, the reason
+  the natural-gradient step for the experts was rejected (below); and a
+  hidden node trained well only from an informative start (its E11), as
+  chapter 17's deep model needed reseeding -- an observation, not a
+  measurement on geoML.
+
 **M–L — Propagate individual realizations through the tree** (requested
 2026-09-08). What happens today: moments at every node. `_GPNode.propagate`
 takes the parent's mean and variance and evaluates the expected kernel over
@@ -1523,6 +1635,51 @@ own 0.603 -- a near miss, which the anisotropy and the separate share GP
 closed; the plain chain was 58.6 / 5.58 / 8.46 there, so the configuration
 helped the single likelihood most.
 
+**S — Say when a heavy-tailed noise under a log-like warping has no
+finite mean** (requested 2026-10-15, after a GeoScape mixture that would
+not show its two populations). `EpsilonInsensitive` trains its epsilon to
+zero and is a Laplace; pushed back through a log-like link (`Log`,
+`CenteredLogRatio`, `BoxCox` near zero) its exponential has a finite mean
+only where the noise rate exceeds the spread it is scaled by, the pole the
+Jura metals sat at (`2·sigma_log/c = 1` for the second moment, half that
+for the first). Measured on the Macpass assays (record 6ba2eb70, a
+`LikelihoodMixture` of two `EpsilonInsensitive` populations over
+`CenteredLogRatio(4) → PCA(4, 3)`, 120 epochs of `train_by_expert`): the
+waste population's clr spread is 1.86 on its first axis and the rate
+starts at 1, so its integrated ground value read 1.67 % Zn against a
+centre of 0.04 %, came down only as the rate climbed (2.6 by epoch 120),
+and the ground simulations reached the data's low-Pb mode at 0.011 against
+the data's 0.100. The same network with Gaussian populations: 0.040, the
+measurement draws at exactly the data's 0.100, the waste population's Zn
+0.20 % against 0.33 % -- at a bound 345 nats lower, as on Jura. Two
+remedies, either or both:
+- **A warning** at construction (or at `initialize`, where the spread is
+  known) when a Laplace-type or other exponential-tailed noise sits under
+  a log-like warping, naming the pole and the Gaussian alternative --
+  cheap, and it reaches GeoScape through the log.
+- **A start on the safe side**: `initialize` setting the noise rate from
+  the spread the warping leaves (above `sigma` for a finite mean, `2·sigma`
+  for a finite variance), so training never passes through the explosive
+  region. Changes the starting point of every such model, so measure it on
+  Jura and the Macpass record before making it the default.
+Initialization of the mixture itself was ruled out on the way: its
+clustering put population 0 at waste (0.04 % Zn) and population 1 at ore
+(8.8 % Zn), and they stayed apart throughout.
+
+**S — The measured-against-simulated figure compares samples with the
+ground** (found 2026-10-15, same record; GeoScape's figure, with geoML's
+`simulation_pairs` to check for the same). The stored simulations are
+realizations of the ground, the noise integrated out (`integrated_backward`),
+so a sample histogram cannot be matched by them even under a perfect
+model: on the record above the Gaussian model's ground values reach the
+low-Pb mode at 0.040 where its measurement draws reach it at the data's
+0.100. The like-for-like comparison is `VGPNetwork.predict_measurements`
+(the accuracy and spread figures already use it); the pairs figure should
+draw from it, or at least label its simulated side as the ground. For
+GeoScape: a note in its requirements; for geoML: check
+`plots.simulation_pairs` and its interactive twin, and say in the
+docstring which of the two they show.
+
 **L — A likelihood subsystem** (raised 2026-10-01, deferred). Likelihoods
 composed as warpings are chained: a small protocol every component
 implements (the latent columns it reads, its log density in data space at
@@ -1548,7 +1705,7 @@ one call bit for bit. Gate: the same two numbers, and the chunked-training
 test in `test_early_stopping.py` still exact.
 
 **Built 2026-10-16 as an option and measured** (`GPOptions(
-fresh_training_draws=False)`, 0.9.2; `docs/benchmarks/fresh_draws.py`,
+fresh_training_draws=False)`, 0.9.3; `docs/benchmarks/fresh_draws.py`,
 results in `docs/benchmarks/figures/fresh_draws/`). The seed moves by a
 step count kept on the model (`_training_seed`, `_draw_count`), read and
 stepped inside the traced step and reset with the phase, so chunks replay
@@ -1593,29 +1750,10 @@ seed):
 Open: the default. Fresh for a new model, the class default keeping saved
 models as they were, as `propagation` did -- the user's call.
 
-**XL — Change of support from the theory of sampling.** From the author's
-paper draft, which is the specification. A window of volume `v` has grade
-`g ~ Beta(μ s(v), (1−μ) s(v))`: the mean pinned to the block grade at every
-support, all support dependence in the concentration. What the package
-needs: the support must become model-visible (today the sample length is
-deliberately metadata); a `BetaSupport` likelihood, genuinely non-Gaussian
-with a link, whose noise is not additive and not integrated out by the
-existing machinery; and a decision on how it composes with the sub-block
-aggregation. It *is* an analytical change of support — predicting at block
-support means evaluating at `s(V_block)` rather than fanning out
-sub-blocks. A doctrine inversion worth flagging: compositing to equal length
-homogenizes support, which is exactly the signal the texture parameters
-need, so heterogeneous support stops being a nuisance and becomes data.
-
-Support and censoring want the same channel. **Decide once, for both**,
-whether they ride the data object (the `GaussianData` precedent, which also
-reaches prediction) or the variable channel (training-only, needs nothing
-new).
-
 (Three small bugs found by reading -- directional data ignored under a
 variable named as a string, `ProjectionTo1D` pointing into the positive
 orthant only, and a GP node that failed to build left among its parent's
-children: **fixed 2026-10-15, 0.9.2**, `test_small_fixes.py`. The
+children: **fixed 2026-10-15, 0.9.3**, `test_small_fixes.py`. The
 catalogue still marks `ProjectionTo1D` and `RandomProjections`
 `experimental`; nothing in either has been trained in earnest.)
 
@@ -1628,7 +1766,7 @@ basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
 **M — Inducing points by cover tree** (requested 2026-10-10; **built
-2026-10-15, 0.9.2**: `inducing.from_cover_tree(data, separation,
+2026-10-15, 0.9.3**: `inducing.from_cover_tree(data, separation,
 transform=)`, the samples farthest first, divided into experts by
 `experts`; read against the paper since: the guarantees of its Algorithm
 12 (eq. 20, separation and spatial resolution both `separation`), but in
@@ -1664,6 +1802,53 @@ Gaussian-likelihood only, which most of geoML's models are not.
 in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
 tape cuts peak GPU memory 3–4× and the step 1.5×.
+
+**M — The optimizer's defaults, measured** (requested 2026-10-15). Every
+trainer builds the same optimizer -- Adam with AMSGrad at 1e-2, decaying
+0.999 a step (`ExponentialDecay(1e-2, 1, 0.999)`, written out in each
+model's constructor, `set_learning_rate` and the by-expert state in
+`models.py`) -- and none of those numbers was ever chosen by measurement.
+The decay is a clock: at 0.999 a step the rate is at 37% after 1 000 steps
+and 5% after 3 000, so how far a model can travel depends on how many steps
+its trainer takes, which `train_by_expert` already ran into (item 3 under
+the batched experts, the experts' clocks against the shared parameters').
+The experiments: the starting rate and the decay (including none, and a
+decay per epoch rather than per step), AMSGrad on and off, and other
+optimizers -- Nadam first, then plain Adam, AdamW and whatever else is
+cheap to try -- each on `train_full`, `train_svi` and `train_by_expert`,
+on Walker, Jura and a 3-D case at several seeds. Score on held-out data
+(rmse, CRPS, goodness) and on the bound reached for a given wall time,
+with `training_tolerance` stopping both arms, since a faster optimizer
+that stops earlier is the point. A new default changes how every re-run
+script trains, so it goes in the changelog, and the old settings should
+stay reachable: today `set_learning_rate` takes a rate only, so the
+outcome may also be an option for the decay and the optimizer.
+
+**S — `BoxCox`'s shift started from the data** (requested 2026-10-15).
+The shift is a constructor constant today, `1e-6` by default and one value
+for every component, and the docstring tells the user to set it to the
+order of the smallest positive value wherever the data hold zeros.
+`docs/benchmarks/walker_zero_shift.py` measured what forgetting costs: at
+the default, Walker's 22 zeros pulled the exponent's start from 0.60 to
+0.375, it trained to 0.42, and the variogram fan sat above the data at 10
+lags of 12; shifted by one, the fan landed on the true field's variogram.
+Advice in a docstring is the wrong place for a number the data already
+determine, so `initialize` should set it -- per component, from the
+column's smallest positive value (declustered, as the exponent's start
+is), and left alone on a column with no zeros, where the shift only has to
+be negligible. Two constraints:
+- **Persistence.** The shift is a plain attribute that a save gets back by
+  replaying the constructor's arguments, and `initialize` is not run on
+  load, so a value found from the data has to live somewhere the save
+  records. Making it a fixed `RealParameter` does that, but a save stores
+  parameters by position, and a new parameter on `BoxCox` would shift
+  every slot after it in every saved model holding one. The likely shape
+  is an opt-in (`shift="data"`, say) that registers the parameter only
+  then, with the old float path unchanged bit for bit.
+- **Whether the exponent's start should be profiled jointly over the
+  shift**, as the two-parameter Box-Cox does, or the shift fixed first
+  from the smallest value and the exponent profiled after. Measure both
+  on Walker and on a composition with zeros before choosing.
 
 ---
 
@@ -2528,6 +2713,72 @@ no institutional claim, before any geoML code ships inside something
 RockAnalytica distributes -- the desktop helper (M7), a self-hosted tier,
 or a `geoscape-cli` that imports geoML. Version 1 and the cloud need
 neither, Scripts being text and portal services not distribution.
+
+---
+
+## 7. Geometallurgy
+
+Variables that describe how the ground will behave in the plant rather
+than what it contains: support, non-additivity and the rules that carry
+a sample's value to a block's.
+
+**XL — Change of support from the theory of sampling.** From the author's
+paper draft, which is the specification. A window of volume `v` has grade
+`g ~ Beta(μ s(v), (1−μ) s(v))`: the mean pinned to the block grade at every
+support, all support dependence in the concentration. What the package
+needs: the support must become model-visible (today the sample length is
+deliberately metadata); a `BetaSupport` likelihood, genuinely non-Gaussian
+with a link, whose noise is not additive and not integrated out by the
+existing machinery; and a decision on how it composes with the sub-block
+aggregation. It *is* an analytical change of support — predicting at block
+support means evaluating at `s(V_block)` rather than fanning out
+sub-blocks. A doctrine inversion worth flagging: compositing to equal length
+homogenizes support, which is exactly the signal the texture parameters
+need, so heterogeneous support stops being a nuisance and becomes data.
+
+Support and censoring want the same channel. **Decide once, for both**,
+whether they ride the data object (the `GaussianData` precedent, which also
+reaches prediction) or the variable channel (training-only, needs nothing
+new).
+
+**L–XL — Custom aggregation rules for variables that do not add up**
+(requested 2026-10-14). Every block value today is the volume-weighted
+mean of its sub-blocks (`_aggregate`), which is right for an additive
+variable -- a grade, a density -- and wrong for the geometallurgical ones:
+a hardness or work index, a recovery, a throughput, a comminution
+parameter, a ratio of two grades. A block's work index is not the mean of
+its parts' (energies add along the circuit, not the indices), a recovery is
+weighted by the metal it recovers, a ratio is the ratio of the sums. So a
+variable needs its own rule for going from points to a block: a declared
+aggregation (a weighted mean with a named weight -- the metal content, the
+tonnage --, a harmonic or power mean, a ratio of two additive variables, a
+user function applied realization by realization as `derive` does), read
+by `_aggregate`'s callers, `as_blocks3d`, `aggregate(data)` and the
+grade-tonnage curves, which all assume the mean today. Three problems, in
+order of difficulty:
+- **Prediction at the data's own support.** Interpolating a non-additive
+  variable from samples of one support to points of the same support
+  should be fine as it is -- the model never sums anything -- but that
+  must be verified, not assumed: a synthetic field built from additive
+  parts, the non-additive variable computed from them at the samples, and
+  the model's prediction of it against the truth at the same support,
+  beside predicting the parts and computing the variable from their
+  realizations (`derive`). If the second wins, the honest route is to model
+  the additive parts and derive.
+- **Blocks under a rule.** A block's value is the rule applied to its
+  sub-blocks realization by realization (never to the mean: the rule is
+  nonlinear), then summarized; the `dispersion`, the quantiles and the
+  cut-off shares follow from those realizations rather than from the mean's
+  formulas. Needs the rule to reach the sub-block fan-out, and the weights
+  of a weighted rule to be predicted alongside.
+- **Samples of different supports combined under the rule** -- the
+  hardest. A composite, a bulk sample and a plant reconciliation measure
+  the same variable over different volumes, and for a non-additive variable
+  a larger support is not the mean of the smaller ones, so the likelihood
+  has to aggregate the latent field to each sample's support under the rule
+  before comparing -- the change of support of the item above, made
+  nonlinear. It shares that item's prerequisite (the support visible to the
+  model) and should be designed with it.
 
 ---
 

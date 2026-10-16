@@ -183,6 +183,40 @@ def test_gradients_are_finite_on_the_diagonal(name):
         assert np.all(np.isfinite(np.asarray(g)))
 
 
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_the_mixture_s_own_gradient_is_the_stored_one(name, monkeypatch):
+    # the sum over components keeps only its inputs and rebuilds each
+    # component's terms in the backward pass: the same value and the same
+    # derivatives as differentiating every term kept, in every input the
+    # kernel reads, the ranges included
+    kernel = KERNELS[name]()
+    mean, var, cov = _joint_inputs(n=8)
+    up = tf.constant(np.random.default_rng(4).normal(size=[8, 8]))
+
+    def run():
+        m, v, c = (tf.Variable(a) for a in (mean, var, cov))
+        r = tf.Variable(np.array([0.7, 1.1]))
+        with tf.GradientTape() as tape:
+            k = _net._expected_kernel(kernel, r, m, v, tf.constant(mean), v,
+                                      c)
+            loss = tf.reduce_sum(k * up)
+        grads = tape.gradient(loss, [m, v, c, r] + [
+            p.variable for p in kernel.all_parameters])
+        return [np.asarray(k)] + [np.asarray(g) for g in grads
+                                  if g is not None]
+
+    own = run()
+    monkeypatch.setattr(
+        _net, "_mixture_sum",
+        lambda omega, weights, constant, dif2, v: _net._mixture_terms(
+            omega, weights, constant, dif2, v, None, None, False)[0])
+    stored = run()
+    assert len(own) == len(stored) == 5 + len(kernel.all_parameters)
+    for a, b in zip(own, stored):
+        np.testing.assert_allclose(a, b, rtol=1e-11,
+                                   atol=1e-13 * np.abs(b).max())
+
+
 def _network(build, n_experts=1, kernel=None, seed=2, propagation="joint"):
     """An input, the nodes `build(root)` makes on it, and a leaf GP on top.
 
@@ -662,6 +696,35 @@ def test_a_model_on_a_walk_trains_and_predicts():
     for a, b in zip(whole, _predicted_v(model)):
         assert np.all(np.isfinite(a))
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-11)
+
+
+@pytest.mark.parametrize("trainer", ["full", "by_expert"])
+def test_recomputing_the_walk_s_steps_trains_as_keeping_them(trainer,
+                                                             monkeypatch):
+    # each step of the walk is recomputed in the backward pass: the same
+    # arithmetic, so the same training, the field's ranges and the walk's
+    # amplitude, read inside the recomputed step, included
+    def trained():
+        model, walk, _ = _walk_model(3, amp=1.0)
+        if trainer == "full":
+            model.train_full(3)
+        else:
+            model.train_by_expert(epochs=1)
+        return (np.array(model.training_log),
+                [np.array(v) for v in model.get_unfixed_variables()],
+                np.array(walk.field.parameters["ranges"].get_value()))
+
+    log, values, ranges = trained()
+    monkeypatch.setattr(tf, "recompute_grad", lambda f: f)
+    kept_log, kept_values, kept_ranges = trained()
+    assert np.all(np.isfinite(log))
+    np.testing.assert_allclose(log, kept_log, rtol=1e-10)
+    for a, b in zip(values, kept_values):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-12)
+    # the ranges moved, so their gradient reached them through the step
+    assert not np.allclose(ranges, np.array(
+        _walk_model(3, amp=1.0)[1].field.parameters["ranges"].get_value()))
+    np.testing.assert_allclose(ranges, kept_ranges, rtol=1e-9)
 
 
 def _walk_network(propagation):

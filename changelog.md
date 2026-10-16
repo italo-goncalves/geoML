@@ -1,4 +1,4 @@
-## version 0.9.2
+## version 0.9.3
 * **`GPOptions(fresh_training_draws=True)`: a Monte Carlo bound drawn afresh
 at every step.** A model that trains on realizations -- a leaf that is not
 Gaussian, a warping that mixes -- averaged its bound over the same
@@ -46,6 +46,48 @@ its log-scale values as directions.
 on a node that hands on no inducing points raised `BrokenPropagationError`
 after its parent had already listed it among its children, so a caller who
 caught the error kept a parent with a child that did not exist.
+
+## version 0.9.2
+* **A parent several nodes share is refreshed and propagated once.** Every
+node's `refresh` refreshes its parents and every `propagate` propagates
+them, so a node reached along several paths from the leaves -- a hidden
+layer two leaf GPs read, a `GPWalk` under three readers -- was refreshed
+and propagated once per path, in training and in prediction alike. Within
+one pass over a model's leaves (`latent.once_per_pass`, opened by the
+model's refresh and by each batch's propagation) each node's `refresh`,
+and its `propagate` from given inputs, now run once and hand the same
+result to every later caller; the base class installs the guard on every
+node class, and outside a pass every call runs as before. On the GeoScape
+network of the next entry, where the walk sat under four paths, a step walked
+seven times instead of two: with the guard one epoch peaks at 3.7 GB
+instead of 8.2 and takes half the time (153 s against 309), and trains to
+the same numbers (`test_leaves.py`).
+* **A `GPWalk` trains in a fraction of the memory.** Under the expected
+kernel each step of the walk kept everything it computed for the backward
+pass -- the field's expected kernel and slope at the walkers, and the
+walkers' sensitivities to the field, `[slots, n, d, d, m]` -- so a
+training step's memory grew by about 4 GB a step on a GeoScape network of
+32 experts of ~200 inducing points (17 active on a batch), and its five
+steps needed some 26 GB on a 16 GB card. Each step is now recomputed in
+the backward pass (`tf.recompute_grad`), storing only what it hands the
+next: on that network one epoch peaks at 10.1 GB, where it ran out of
+memory, and at `coverage=0.7` at 3.1 GB against 7.6, for about 15% more
+time. The arithmetic is unchanged, and training through the recomputed
+steps matches training through stored ones on both trainers
+(`test_expected_kernel.py`).
+* **The expected kernel keeps two arrays for its gradient, not every
+component's.** A GP node reading an uncertain input under an exponential
+or a Matern kernel averages eight Gaussian components, and automatic
+differentiation kept several `[..., n, m, d]` arrays of each until the
+backward pass -- whose unrolled loop then rebuilt every component at once.
+The sum now has a gradient of its own that keeps the squared offsets and
+the variances alone and walks the components one at a time
+(`_mixture_sum`); the value and every derivative are the stored ones to
+rounding, for every kernel (`test_expected_kernel.py`). The slope a
+`GPWalk` reads, and the rational quadratic, whose components move with a
+trained parameter, keep automatic differentiation. On the network above,
+with three such readers over the walk, one epoch peaks at 8.2 GB instead
+of 10.1, and runs 8% faster.
 
 ## version 0.9.1
 * **A `Concatenate` over a node that hands on no inducing points trains.**
