@@ -302,31 +302,40 @@ per node) against the term it replaces.
 **M — The walk's memory beyond 0.9.2** (measured 2026-10-16 on a GeoScape
 network: a size-3 field, a five-step walk, three readers, 32 experts of
 ~200 inducing points, 17 active on a batch, a 16 GB card). 0.9.2 took one
-training epoch from ~26 GB (out of memory) to 8.2 GB: each walk step
-recomputed in the backward pass, and the expected kernel's sum over
-components given a gradient of its own. What is left at the peak, read off
-the allocator's trace (`tf.profiler` events replayed): ~3 GB in the walk's
-backward pass -- gradients of the `einsum`s over the sensitivities `h`
-(`[slots, n, d, s, m]`, 50-60 MB each here) and reshaped copies of them --
-~1.6 GB in the per-expert Choleskys and solves (`[17, 3, 227, 227]`, the
-model's own size), ~0.6 GB in the gradient of the field's slope. Tried and
-dropped: recomputing the walked covariance (8.35 GB against 8.23); the
-slope given the same custom gradient (1 GB worse -- one Gaussian
-component, four accumulators); recomputing the readers' kernel by
-`tf.recompute_grad` instead (0.24 GB: the executor rebuilt every
-component at once). Ideas that change the method rather than squeeze it:
+training epoch from ~26 GB (out of memory) to 3.7 GB, in 153 s an epoch:
+each walk step recomputed in the backward pass (10.1 GB), the expected
+kernel's sum over components given a gradient of its own (8.2 GB), and a
+parent several nodes share refreshed and propagated once a pass (3.7 GB,
+half the time) -- the walk sat under four paths and a step walked seven
+times. What is left at the 3.65 GB peak, read off the allocator's trace
+(`tf.profiler` events replayed, the walk's pieces in name scopes): 0.80 GB
+held before the step; ~1.0 GB in the per-expert Choleskys and solves of
+the refresh, forward and gradient (`[17, 3, 227, 227]` for the size-3
+GPs, `[17, 1, 227, 227]` for the size-1 one) -- the model's own size,
+where the peak sits; 0.6 GB in the walk's stored checkpoints, one `h`
+(`[17, n, 3, 3, 227]`) per step for each of the two walks; ~0.2 GB in the
+readers' expected kernel; the rest small or of unknown shape (~1 GB).
+Tried and dropped: recomputing the walked covariance (no gain); the slope
+given the expected kernel's own gradient (1 GB worse -- one Gaussian
+component, four accumulators); recomputing the readers' kernel with
+`tf.recompute_grad` instead (0.24 GB, the executor rebuilt every component
+at once); handing the field's matrices from step to step so their
+gradient comes back as one sum (no gain); TensorFlow's arithmetic
+optimizer switched off (no gain). Ideas that would change the method
+rather than squeeze it:
+- **Fewer, smaller experts.** The expert matrices and `h` grow with the
+  square of the points per expert, and the matrices are now the largest
+  item: the same inducing points in more experts should cost less per
+  batch. Measure memory and score together.
 - **A local `h`.** A walker's sensitivity to the field's normals reaches
   all `m` inducing points of its expert, but the field it meets is the
   kernel's reach around its path: keeping only the nearest few dozen
-  points per walker would cut `h` by `m / k`. Needs a measure of what the
-  truncated covariance loses against the walk-along-draws test.
-- **Fewer, smaller experts.** `h` and the expert matrices grow with the
-  square of the points per expert; the same inducing points in more
-  experts should cost less per batch. Measure memory and score together.
-- **`h` stored for the products it feeds.** The walked covariance contracts
-  `h` over `(s, q)` with `d` a batch axis, so `einsum` copies it into a
-  `[.., d, n, s q]` layout; storing it that way from the start would drop
-  the copies, at the price of transposes inside the step.
+  points per walker would cut `h`, its checkpoints and its products by
+  `m / k`. Needs a measure of what the truncated covariance loses against
+  the walk-along-draws test.
+- **Fewer checkpoints.** Storing every second step's `h` and recomputing
+  from it halves the 0.6 GB for one more step's work in the backward
+  pass; worth it only if the walk grows longer.
 
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
