@@ -23,3 +23,6 @@
 # The manual, copied in from `docs/manual/` when the site builds so that its
 # figures resolve. One copy in git; this one is made and remade.
 /docs/source/manual/
+
+# The doubly stochastic benchmark's per-run maps (23 MB), remade by its runs.
+/docs/benchmarks/figures/doubly_stochastic/maps/

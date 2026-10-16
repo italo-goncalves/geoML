@@ -1009,8 +1009,10 @@ tonnage-above-cut-off distribution against the truth, versus today's
 unpaired ensemble and the hard-domained workflow. Both (1) and (2)
 presupposed the sibling-normals fix, done 2026-09-10 (settled below).
 
-**Want (1) measured 2026-10-16** (prototype kept outside the repository;
-the folded section of `docs/benchmarks/expected_kernel.py`, gate 2's two
+**Want (1) measured 2026-10-16** (prototype and every run in
+`docs/benchmarks/doubly_stochastic/`, `run_all.sh` remaking them, results
+and figures in `docs/benchmarks/figures/doubly_stochastic/`; the folded
+section of `docs/benchmarks/expected_kernel.py`, gate 2's two
 deep networks, Gaussian likelihood, 2000 Adam iterations, three seeds,
 scored a new hole as there). The leaf reads S draws of its parent instead
 of the expected kernel, each point from the parent's marginal, the last
