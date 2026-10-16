@@ -1824,7 +1824,8 @@ script trains, so it goes in the changelog, and the old settings should
 stay reachable: today `set_learning_rate` takes a rate only, so the
 outcome may also be an option for the decay and the optimizer.
 
-**S — `BoxCox`'s shift started from the data** (requested 2026-10-15).
+**S — `BoxCox`'s shift started from the data** (requested 2026-10-15;
+**built 2026-10-16, 0.9.3**: `BoxCox(size, shift=None)`, measured below).
 The shift is a constructor constant today, `1e-6` by default and one value
 for every component, and the docstring tells the user to set it to the
 order of the smallest positive value wherever the data hold zeros.
@@ -1849,6 +1850,26 @@ be negligible. Two constraints:
   shift**, as the two-parameter Box-Cox does, or the shift fixed first
   from the smallest value and the exponent profiled after. Measure both
   on Walker and on a composition with zeros before choosing.
+
+**Built and measured 2026-10-16.** `shift=None` is the opt-in (a nullable
+float in the catalogue, where a string could not keep the positive
+constraint); `initialize` sets a fixed `shift` parameter per column, the
+smallest positive value where the column holds zeros and 1e-6 where not,
+and profiles the exponent after. The joint profile was ruled out by
+measuring it: on Walker's V and U its value rises monotonically as the
+shift falls (V: -5.63 at 21, -5.59 at 2.1, -5.24 at 1e-6), each zero
+adding `(λ-1)·log(shift)` to the Jacobian faster than the variance term
+takes back, so it would pick the smallest shift on any grid -- the very
+failure. No composition with zeros is bundled (Jura's metals and the
+Arctic lake have none), so the second case is per-column logic pinned by
+`test_parametric_warpings.py` on synthetic columns, one with zeros and
+one without. Walker's chapter model, found shift (2.1) against the
+manual's 1: exponent 0.605 against 0.583, out-of-fold rmse 212.7/212.8,
+crps 119.6/119.9, goodness 0.922 both, noise and ground 0.97/0.99 of the
+data's declustered variance, the exhaustive fan 0.76-1.03 of the true
+variogram against 0.74-1.02 (`walker_zero_shift.py`, arms `data` and
+`shift1`). The default stays 1e-6 because a save replays only passed
+arguments; the manual's chains still pass `shift=1.0`.
 
 ---
 

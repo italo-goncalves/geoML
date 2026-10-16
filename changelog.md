@@ -1,4 +1,19 @@
 ## version 0.9.3
+* **`warping.BoxCox(size, shift=None)`: the shift found from the data.**
+`initialize` sets each column's shift to its smallest positive value
+where the column holds zeros, and to a negligible 1e-6 where it does not,
+and profiles the exponent with it -- the advice the docstring gave, now
+done. On Walker's V (22 zeros) the found shift (2.1) trains as the
+manual's hand-set shift of 1 does: out-of-fold rmse 212.7 against 212.8,
+crps 119.6 against 119.9, the variogram fan on the true field's to within
+2% (`docs/benchmarks/walker_zero_shift.py`, arm `data`). The shift is not
+profiled with the exponent: with zeros the profile likelihood rises
+without bound as the shift goes to zero, each zero adding
+`(λ-1)·log(shift)` to the Jacobian, so it would always take the smallest
+shift on offer. Opt-in: the default stays 1e-6, since a save replays only
+the arguments passed, and the found shift is a fixed parameter registered
+only on this path, so a save records it and a numeric shift keeps its
+parameter slots.
 * **`GPOptions(fresh_training_draws=True)`, the default for a new model: a
 Monte Carlo bound drawn afresh at every step.** A model that trains on realizations -- a leaf that is not
 Gaussian, a warping that mixes -- averaged its bound over the same
