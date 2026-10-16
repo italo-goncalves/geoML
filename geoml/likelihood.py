@@ -16,6 +16,7 @@
 
 from scipy.linalg import helmert as _helmert
 import copy as _copy
+import warnings as _warnings
 from collections.abc import Sequence
 from typing import Any as _Any
 
@@ -670,6 +671,12 @@ class _ContinuousLikelihood(_Likelihood):
     # does -- a family declaring none cannot be mixed.
     _WIDTH_PARAMETERS = {}
 
+    def _tail_rates(self):
+        """How fast the noise's tail decays, one exponential rate per
+        component in the warped units: None for a tail lighter than any
+        exponential, zero for one heavier than all of them."""
+        return None
+
     def __init__(self, warping: "_warp._Warping | None" = None,
                  sharpness: int = 1):
         """
@@ -689,6 +696,7 @@ class _ContinuousLikelihood(_Likelihood):
 
     def initialize(self, y, weights=None):
         self.warping.initialize(y, weights)
+        _warn_log_tail(self, y)
 
     def _column_quadrature(self):
         """Whether the latent expectation can be taken one column at a time.
@@ -777,6 +785,70 @@ class _ContinuousLikelihood(_Likelihood):
         raise NotImplementedError
 
 
+def _warn_log_tail(likelihood, y):
+    """Warn where an exponential or heavier noise tail sits under a
+    log-like link, naming the rate below which the value with the noise
+    integrated out has no finite mean or variance.
+
+    Pushed back through the link a noise value `z` multiplies the value by
+    `exp(s z)`, `s` the reach of one warped unit into the logarithm; against
+    a tail decaying as `exp(-c z)` that has a finite mean only while
+    `c > s` and a finite variance while `c > 2 s` -- the pole the Jura
+    metals were trained to (docs/cross-validation.md). `s` is read off the
+    data by least squares of the logarithm on the warped values, so it is
+    exact through an affine remainder of the chain (`ZScore`, `PCA`) and an
+    average slope through anything else; under `BoxCox` the bound is exact
+    at the exponent zero and conservative above it.
+    """
+    rates = likelihood._tail_rates()
+    if rates is None:
+        return
+    warping = likelihood.warping
+    links = list(warping.warpings) if isinstance(
+        warping, _warp.ChainedWarping) else [warping]
+    logs = [i for i, w in enumerate(links) if isinstance(
+        w, (_warp.Log, _warp.CenteredLogRatio, _warp.BoxCox))]
+    if not logs:
+        return
+    at = logs[-1]
+    y = _np.asarray(y, dtype=float)
+    if y.ndim == 1:
+        y = y[:, None]
+    x = _tf.constant(y[_np.all(_np.isfinite(y), axis=1)])
+    for w in links[:at]:
+        x = w.forward(x)[0]
+    link = links[at]
+    log = _tf.math.log(x + link._shift()) if isinstance(link, _warp.BoxCox) \
+        else link.forward(x)[0]
+    z = link.forward(x)[0]
+    for w in links[at + 1:]:
+        z = w.forward(z)[0]
+    log, z = _np.asarray(log), _np.asarray(z)
+    design = _np.column_stack([z, _np.ones(len(z))])
+    reach = _np.abs(_np.linalg.lstsq(design, log, rcond=None)[0][:-1])
+    rates = _np.broadcast_to(_np.asarray(rates, dtype=float), [z.shape[1]])
+    name, link_name = type(likelihood).__name__, type(link).__name__
+    if not _np.all(rates > 0):
+        _warnings.warn(
+            "%s's noise has a tail heavier than any exponential under the "
+            "log-like %s: pushed back through it, the value with the noise "
+            "integrated out has no finite mean at any scale. A Gaussian "
+            "noise has no such pole." % (name, link_name), stacklevel=3)
+        return
+    spread = reach.max(axis=1)          # one per noise component
+    k = int(_np.argmin(rates / _np.maximum(spread, 1e-300)))
+    _warnings.warn(
+        "%s's noise has an exponential tail under the log-like %s: a warped "
+        "unit reaches %.3g into the logarithm, so the value with the noise "
+        "integrated out has a finite mean only while the tail's rate stays "
+        "above %.3g and a finite variance above %.3g (component %d; the "
+        "rate starts at %.3g). Training can drive the rate to the pole -- "
+        "Jura's metals sat at 0.96 of the variance's. A Gaussian noise has "
+        "no pole." % (name, link_name, spread[k], spread[k], 2 * spread[k],
+                      k, rates[k]),
+        stacklevel=3)
+
+
 class Gaussian(_ContinuousLikelihood):
     """
     Gaussian likelihood.
@@ -825,6 +897,9 @@ class Laplace(_ContinuousLikelihood):
 
     def _make_distribution(self, loc):
         return _tfd.Laplace(loc, self.parameters["scale"].get_value())
+
+    def _tail_rates(self):
+        return 1 / _np.ravel(self.parameters["scale"].get_value())
 
 
 class Gamma(_ContinuousLikelihood):
@@ -888,6 +963,9 @@ class StudentT(_ContinuousLikelihood):
             loc=loc,
             scale=self.parameters["scale"].get_value())
 
+    def _tail_rates(self):
+        return _np.zeros(self.size)
+
 
 class EpsilonInsensitive(_ContinuousLikelihood):
     """
@@ -928,6 +1006,9 @@ class EpsilonInsensitive(_ContinuousLikelihood):
             epsilon=self.parameters["epsilon"].get_value()
         )
 
+    def _tail_rates(self):
+        return _np.ravel(self.parameters["c_rate"].get_value())
+
 
 class Huber(_ContinuousLikelihood):
     """
@@ -964,6 +1045,10 @@ class Huber(_ContinuousLikelihood):
             epsilon=self.parameters["threshold"].get_value()
         )
 
+    def _tail_rates(self):
+        return _np.ravel(self.parameters["threshold"].get_value()
+                         / self.parameters["std"].get_value())
+
 
 # The multivariate twins are the scalar likelihoods with a wider default
 # warping -- the machinery is one class since the scalar/multivariate split
@@ -999,6 +1084,9 @@ class MultivariateLaplace(_ContinuousLikelihood):
 
     def _make_distribution(self, loc):
         return _tfd.Laplace(loc, self.parameters["rate"].get_value())
+
+    def _tail_rates(self):
+        return 1 / _np.ravel(self.parameters["rate"].get_value())
 
 
 class MultivariateEpsilonInsensitive(EpsilonInsensitive):
@@ -1227,6 +1315,12 @@ class Mixture(_ContinuousLikelihood):
         # latent expectation runs over the joint samples; on one column the
         # two readings are the same and the quadrature is exact and cheaper
         return self.size == 1 and self.warping.elementwise
+
+    def _tail_rates(self):
+        # the widest component's tail is the one that reaches the pole
+        rates = [r for r in (c._tail_rates() for c in self.components)
+                 if r is not None]
+        return None if not rates else _np.min(rates, axis=0)
 
     def _component_distributions(self):
         zero = _tf.constant(0.0, _tf.float64)

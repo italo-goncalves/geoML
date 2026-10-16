@@ -623,9 +623,13 @@ def _simulation_normals(shape, seed, key=None):
 # exp(-r_q d^2) over the distance in ranges, the weights summing to one so
 # that a covariance's diagonal stays one: fitted by
 # `docs/benchmarks/kernel_mixtures.py`, the largest error over [0, 6] ranges
-# 5.1e-4 (exponential), 9.8e-6 (Matern32) and 9.1e-6 (Matern52) -- which
-# bounds the expected kernel's at any range and any uncertainty, the
-# expectation being linear in the mixture. Measured against the trapezoid
+# 5.32e-4 (exponential), 1.03e-5 (Matern32) and 9.15e-6 (Matern52), the
+# supremum over 2.6 million distances (the fit's own distances read 5.1e-4,
+# 9.8e-6 and 9.1e-6) -- which bounds the expected kernel's at any range and
+# any uncertainty, the expectation being linear in the mixture. The bound
+# is per entry: as a matrix over certain inputs the mixture differs from
+# the closed form by about a nugget in 2-D and more in 3-D, which is why
+# it serves uncertain inputs only. Measured against the trapezoid
 # over each kernel's own mixing measure they replace (52, 32 and 28
 # components, 1e-7): 3.5 to 6.5 times fewer evaluations
 _KERNEL_MIXTURES = {

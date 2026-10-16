@@ -1038,7 +1038,10 @@ Kronecker prior written as a positive mixture of Gaussians, cubic
 interpolation to the data, one Gaussian site per datum, CG and Lanczos in
 place of dense algebra -- and measured it against an exact GP and SGPR,
 not against geoML's experts. What carries over:
-- **S — Correct the kernel-mixture error figures.** The comment above
+- **S — Correct the kernel-mixture error figures** (**done 2026-10-16**,
+  0.9.3: recomputed over 2.6 million distances, 5.32e-4, 1.03e-5 and
+  9.15e-6, the comment, the design record and `CLAUDE.md` corrected and
+  the 0.9.0 figures noted in the 0.9.3 changelog). The comment above
   `_KERNEL_MIXTURES` (`latent/network.py`), `docs/expected-kernel.md` and
   the 0.9.0 changelog give the largest error over [0, 6] ranges as 5.1e-4,
   9.8e-6 and 9.1e-6 (exponential, Matern32, Matern52); those are maxima
@@ -1637,7 +1640,12 @@ helped the single likelihood most.
 
 **S — Say when a heavy-tailed noise under a log-like warping has no
 finite mean** (requested 2026-10-15, after a GeoScape mixture that would
-not show its two populations). `EpsilonInsensitive` trains its epsilon to
+not show its two populations; **the warning built 2026-10-16, 0.9.3**:
+`_ContinuousLikelihood.initialize` calls `_warn_log_tail`, each family
+declaring `_tail_rates`, the reach read off the data by least squares of
+the logarithm on the warped values -- on Jura's vector chain a variance
+pole at 1.28 against a start of 1; the safe start below stays open, its
+measurement needing the Macpass record). `EpsilonInsensitive` trains its epsilon to
 zero and is a Laplace; pushed back through a log-like link (`Log`,
 `CenteredLogRatio`, `BoxCox` near zero) its exponential has a finite mean
 only where the noise rate exceeds the spread it is scaled by, the pole the
@@ -1667,7 +1675,10 @@ clustering put population 0 at waste (0.04 % Zn) and population 1 at ore
 (8.8 % Zn), and they stayed apart throughout.
 
 **S — The measured-against-simulated figure compares samples with the
-ground** (found 2026-10-15, same record; GeoScape's figure, with geoML's
+ground** (found 2026-10-15, same record; **geoML's side done 2026-10-16,
+0.9.3**: both backends' docstrings and titles say the simulated half is
+the ground and point to `predict_measurements`; the GeoScape note is its
+repository's; GeoScape's figure, with geoML's
 `simulation_pairs` to check for the same). The stored simulations are
 realizations of the ground, the noise integrated out (`integrated_backward`),
 so a sample histogram cannot be matched by them even under a perfect

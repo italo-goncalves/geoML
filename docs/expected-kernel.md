@@ -62,10 +62,17 @@ such guarantee. The Matérn kernels are read through **eight Gaussians
 each**, fitted once and kept as constants (`_KERNEL_MIXTURES`, refitted by
 `docs/benchmarks/kernel_mixtures.py`): the positive mixture closest to the
 kernel in the largest error over [0, 6] ranges, its weights summing to one
-so that a covariance's diagonal stays one. They miss the kernel by 5.1e-4
-(exponential), 9.8e-6 (Matern32) and 9.1e-6 (Matern52), and the expected
-kernel by no more at any range and any uncertainty, the expectation being
-linear in the mixture. They replaced a trapezoid over each kernel's own
+so that a covariance's diagonal stays one. They miss the kernel by at most
+5.32e-4 (exponential), 1.03e-5 (Matern32) and 9.15e-6 (Matern52) -- the
+supremum over 2.6 million distances; the fit's own distances read 5.1e-4,
+9.8e-6 and 9.1e-6, the figures this record gave until 2026-10-16 -- and
+the expected kernel by no more at any range and any uncertainty, the
+expectation being linear in the mixture. The bound is per entry: as a
+matrix over certain inputs the mixture differs from the closed form by
+about a nugget in 2-D and one to two orders more in 3-D (the gridded-GP
+research's E1), which would matter only if the mixtures served certain
+inputs; they serve the expected kernel at uncertain ones alone. They
+replaced a trapezoid over each kernel's own
 mixing measure, accurate to 1e-7 at 52, 32 and 28 components: 3.5 to 6.5
 times the evaluations for an accuracy no gate asks for. The rational
 quadratic keeps a trapezoid of 48 placed about its mode, which moves with
