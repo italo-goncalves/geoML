@@ -1747,8 +1747,8 @@ seed):
   fixed and fresh at the same iteration on both cases (106-117), at the
   same honest bound.
 
-Open: the default. Fresh for a new model, the class default keeping saved
-models as they were, as `propagation` did -- the user's call.
+Decided 2026-10-16: fresh is the default for a new model, the class default
+keeping saved models on their fixed draws, as `propagation` did.
 
 (Three small bugs found by reading -- directional data ignored under a
 variable named as a string, `ProjectionTo1D` pointing into the positive

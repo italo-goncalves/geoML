@@ -1,6 +1,6 @@
 ## version 0.9.3
-* **`GPOptions(fresh_training_draws=True)`: a Monte Carlo bound drawn afresh
-at every step.** A model that trains on realizations -- a leaf that is not
+* **`GPOptions(fresh_training_draws=True)`, the default for a new model: a
+Monte Carlo bound drawn afresh at every step.** A model that trains on realizations -- a leaf that is not
 Gaussian, a warping that mixes -- averaged its bound over the same
 `training_samples` draws at every step, so the parameters could fit that
 sample: the training log sat 10-20 nats above the bound re-evaluated over
@@ -9,7 +9,8 @@ predictions. Drawn afresh, the bound is unbiased and noisier, the
 predictions move 2.5-5x less with the draw seed, and on the folded
 section's doubly stochastic prototype the fresh draws are what find the
 better basin. The draws follow a step count on the model, so training in
-chunks replays one call. Off by default for now; a model trained by
+chunks replays one call. A model saved before keeps its fixed draws (the
+class default), so its training replays as it did; a model trained by
 quadrature reads no draws and is untouched (`docs/benchmarks/fresh_draws.py`).
 * **`inducing.from_cover_tree(data, separation)`: inducing points a least
 distance apart** (Terenin et al. 2024). The samples are taken farthest
