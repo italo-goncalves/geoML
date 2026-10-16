@@ -1,3 +1,31 @@
+## version 0.9.2
+* **A `GPWalk` trains in a fraction of the memory.** Under the expected
+kernel each step of the walk kept everything it computed for the backward
+pass -- the field's expected kernel and slope at the walkers, and the
+walkers' sensitivities to the field, `[slots, n, d, d, m]` -- so a
+training step's memory grew by about 4 GB a step on a GeoScape network of
+32 experts of ~200 inducing points (17 active on a batch), and its five
+steps needed some 26 GB on a 16 GB card. Each step is now recomputed in
+the backward pass (`tf.recompute_grad`), storing only what it hands the
+next: on that network one epoch peaks at 10.1 GB, where it ran out of
+memory, and at `coverage=0.7` at 3.1 GB against 7.6, for about 15% more
+time. The arithmetic is unchanged, and training through the recomputed
+steps matches training through stored ones on both trainers
+(`test_expected_kernel.py`).
+* **The expected kernel keeps two arrays for its gradient, not every
+component's.** A GP node reading an uncertain input under an exponential
+or a Matern kernel averages eight Gaussian components, and automatic
+differentiation kept several `[..., n, m, d]` arrays of each until the
+backward pass -- whose unrolled loop then rebuilt every component at once.
+The sum now has a gradient of its own that keeps the squared offsets and
+the variances alone and walks the components one at a time
+(`_mixture_sum`); the value and every derivative are the stored ones to
+rounding, for every kernel (`test_expected_kernel.py`). The slope a
+`GPWalk` reads, and the rational quadratic, whose components move with a
+trained parameter, keep automatic differentiation. On the network above,
+with three such readers over the walk, one epoch peaks at 8.2 GB instead
+of 10.1, and runs 8% faster.
+
 ## version 0.9.1
 * **A `Concatenate` over a node that hands on no inducing points trains.**
 A `Concatenate` whose parent has none to give -- a `Multiply`, a

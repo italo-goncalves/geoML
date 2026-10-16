@@ -299,6 +299,35 @@ the displacement term, calibration within 1-1.5 and a score at least the
 heuristic's (-10.46); chapter 16's rock maps no worse; the cost (one walk
 per node) against the term it replaces.
 
+**M — The walk's memory beyond 0.9.2** (measured 2026-10-16 on a GeoScape
+network: a size-3 field, a five-step walk, three readers, 32 experts of
+~200 inducing points, 17 active on a batch, a 16 GB card). 0.9.2 took one
+training epoch from ~26 GB (out of memory) to 8.2 GB: each walk step
+recomputed in the backward pass, and the expected kernel's sum over
+components given a gradient of its own. What is left at the peak, read off
+the allocator's trace (`tf.profiler` events replayed): ~3 GB in the walk's
+backward pass -- gradients of the `einsum`s over the sensitivities `h`
+(`[slots, n, d, s, m]`, 50-60 MB each here) and reshaped copies of them --
+~1.6 GB in the per-expert Choleskys and solves (`[17, 3, 227, 227]`, the
+model's own size), ~0.6 GB in the gradient of the field's slope. Tried and
+dropped: recomputing the walked covariance (8.35 GB against 8.23); the
+slope given the same custom gradient (1 GB worse -- one Gaussian
+component, four accumulators); recomputing the readers' kernel by
+`tf.recompute_grad` instead (0.24 GB: the executor rebuilt every
+component at once). Ideas that change the method rather than squeeze it:
+- **A local `h`.** A walker's sensitivity to the field's normals reaches
+  all `m` inducing points of its expert, but the field it meets is the
+  kernel's reach around its path: keeping only the nearest few dozen
+  points per walker would cut `h` by `m / k`. Needs a measure of what the
+  truncated covariance loses against the walk-along-draws test.
+- **Fewer, smaller experts.** `h` and the expert matrices grow with the
+  square of the points per expert; the same inducing points in more
+  experts should cost less per batch. Measure memory and score together.
+- **`h` stored for the products it feeds.** The walked covariance contracts
+  `h` over `(s, q)` with `d` a batch axis, so `einsum` copies it into a
+  `[.., d, n, s q]` layout; storing it that way from the start would drop
+  the copies, at the price of transposes inside the step.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
@@ -1502,6 +1531,51 @@ own 0.603 -- a near miss, which the anisotropy and the separate share GP
 closed; the plain chain was 58.6 / 5.58 / 8.46 there, so the configuration
 helped the single likelihood most.
 
+**S — Say when a heavy-tailed noise under a log-like warping has no
+finite mean** (requested 2026-10-15, after a GeoScape mixture that would
+not show its two populations). `EpsilonInsensitive` trains its epsilon to
+zero and is a Laplace; pushed back through a log-like link (`Log`,
+`CenteredLogRatio`, `BoxCox` near zero) its exponential has a finite mean
+only where the noise rate exceeds the spread it is scaled by, the pole the
+Jura metals sat at (`2·sigma_log/c = 1` for the second moment, half that
+for the first). Measured on the Macpass assays (record 6ba2eb70, a
+`LikelihoodMixture` of two `EpsilonInsensitive` populations over
+`CenteredLogRatio(4) → PCA(4, 3)`, 120 epochs of `train_by_expert`): the
+waste population's clr spread is 1.86 on its first axis and the rate
+starts at 1, so its integrated ground value read 1.67 % Zn against a
+centre of 0.04 %, came down only as the rate climbed (2.6 by epoch 120),
+and the ground simulations reached the data's low-Pb mode at 0.011 against
+the data's 0.100. The same network with Gaussian populations: 0.040, the
+measurement draws at exactly the data's 0.100, the waste population's Zn
+0.20 % against 0.33 % -- at a bound 345 nats lower, as on Jura. Two
+remedies, either or both:
+- **A warning** at construction (or at `initialize`, where the spread is
+  known) when a Laplace-type or other exponential-tailed noise sits under
+  a log-like warping, naming the pole and the Gaussian alternative --
+  cheap, and it reaches GeoScape through the log.
+- **A start on the safe side**: `initialize` setting the noise rate from
+  the spread the warping leaves (above `sigma` for a finite mean, `2·sigma`
+  for a finite variance), so training never passes through the explosive
+  region. Changes the starting point of every such model, so measure it on
+  Jura and the Macpass record before making it the default.
+Initialization of the mixture itself was ruled out on the way: its
+clustering put population 0 at waste (0.04 % Zn) and population 1 at ore
+(8.8 % Zn), and they stayed apart throughout.
+
+**S — The measured-against-simulated figure compares samples with the
+ground** (found 2026-10-15, same record; GeoScape's figure, with geoML's
+`simulation_pairs` to check for the same). The stored simulations are
+realizations of the ground, the noise integrated out (`integrated_backward`),
+so a sample histogram cannot be matched by them even under a perfect
+model: on the record above the Gaussian model's ground values reach the
+low-Pb mode at 0.040 where its measurement draws reach it at the data's
+0.100. The like-for-like comparison is `VGPNetwork.predict_measurements`
+(the accuracy and spread figures already use it); the pairs figure should
+draw from it, or at least label its simulated side as the ground. For
+GeoScape: a note in its requirements; for geoML: check
+`plots.simulation_pairs` and its interactive twin, and say in the
+docstring which of the two they show.
+
 **L — A likelihood subsystem** (raised 2026-10-01, deferred). Likelihoods
 composed as warpings are chained: a small protocol every component
 implements (the latent columns it reads, its log density in data space at
@@ -1582,6 +1656,53 @@ Gaussian-likelihood only, which most of geoML's models are not.
 in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
 tape cuts peak GPU memory 3–4× and the step 1.5×.
+
+**M — The optimizer's defaults, measured** (requested 2026-10-15). Every
+trainer builds the same optimizer -- Adam with AMSGrad at 1e-2, decaying
+0.999 a step (`ExponentialDecay(1e-2, 1, 0.999)`, written out in each
+model's constructor, `set_learning_rate` and the by-expert state in
+`models.py`) -- and none of those numbers was ever chosen by measurement.
+The decay is a clock: at 0.999 a step the rate is at 37% after 1 000 steps
+and 5% after 3 000, so how far a model can travel depends on how many steps
+its trainer takes, which `train_by_expert` already ran into (item 3 under
+the batched experts, the experts' clocks against the shared parameters').
+The experiments: the starting rate and the decay (including none, and a
+decay per epoch rather than per step), AMSGrad on and off, and other
+optimizers -- Nadam first, then plain Adam, AdamW and whatever else is
+cheap to try -- each on `train_full`, `train_svi` and `train_by_expert`,
+on Walker, Jura and a 3-D case at several seeds. Score on held-out data
+(rmse, CRPS, goodness) and on the bound reached for a given wall time,
+with `training_tolerance` stopping both arms, since a faster optimizer
+that stops earlier is the point. A new default changes how every re-run
+script trains, so it goes in the changelog, and the old settings should
+stay reachable: today `set_learning_rate` takes a rate only, so the
+outcome may also be an option for the decay and the optimizer.
+
+**S — `BoxCox`'s shift started from the data** (requested 2026-10-15).
+The shift is a constructor constant today, `1e-6` by default and one value
+for every component, and the docstring tells the user to set it to the
+order of the smallest positive value wherever the data hold zeros.
+`docs/benchmarks/walker_zero_shift.py` measured what forgetting costs: at
+the default, Walker's 22 zeros pulled the exponent's start from 0.60 to
+0.375, it trained to 0.42, and the variogram fan sat above the data at 10
+lags of 12; shifted by one, the fan landed on the true field's variogram.
+Advice in a docstring is the wrong place for a number the data already
+determine, so `initialize` should set it -- per component, from the
+column's smallest positive value (declustered, as the exponent's start
+is), and left alone on a column with no zeros, where the shift only has to
+be negligible. Two constraints:
+- **Persistence.** The shift is a plain attribute that a save gets back by
+  replaying the constructor's arguments, and `initialize` is not run on
+  load, so a value found from the data has to live somewhere the save
+  records. Making it a fixed `RealParameter` does that, but a save stores
+  parameters by position, and a new parameter on `BoxCox` would shift
+  every slot after it in every saved model holding one. The likely shape
+  is an opt-in (`shift="data"`, say) that registers the parameter only
+  then, with the old float path unchanged bit for bit.
+- **Whether the exponent's start should be profiled jointly over the
+  shift**, as the two-parameter Box-Cox does, or the shift fixed first
+  from the smallest value and the exponent profiled after. Measure both
+  on Walker and on a composition with zeros before choosing.
 
 ---
 

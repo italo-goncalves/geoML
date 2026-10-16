@@ -706,6 +706,96 @@ def _rq_components(alpha):
     return 3.0 * _tf.exp(y) / alpha, weights, below, above
 
 
+def _recomputed(fn, *args):
+    """`fn(*args)`, its intermediates recomputed in the backward pass rather
+    than stored (`tf.recompute_grad`); the arguments that are not tensors --
+    None, numbers, flags -- are held aside, since only tensors may cross
+    into it. Variables `fn` reads are differentiated as usual."""
+    keep = [i for i, a in enumerate(args) if _tf.is_tensor(a)]
+
+    def inner(*tensors):
+        full = list(args)
+        for i, t in zip(keep, tensors):
+            full[i] = t
+        return fn(*full)
+
+    return _tf.recompute_grad(inner)(*[args[i] for i in keep])
+
+
+def _mixture_terms(omega, weights, constant, dif2, v, dif, r2, gradient):
+    """The expected kernel's sum over its Gaussian components, and with
+    `gradient` its slope, as `_expected_kernel` defines them; every
+    component's terms are kept for the backward pass."""
+    total = constant + _tf.zeros_like(dif2[..., 0])
+    slope = _tf.zeros_like(dif2) if gradient else None
+    for i in range(int(omega.shape[0])):
+        w = omega[i]
+        inflated = 1.0 + 2.0 * w * v
+        term = weights[i] * _tf.exp(
+            -0.5 * _tf.reduce_sum(_tf.math.log1p(2.0 * w * v), -1)
+            - w * _tf.reduce_sum(dif2 / inflated, -1))
+        total = total + term
+        if gradient:
+            slope = slope - term[..., None] * 2.0 * w * dif                 / (r2 * inflated)
+    return total, slope
+
+
+def _mixture_sum(omega, weights, constant, dif2, v):
+    """The total of `_mixture_terms`, the same arithmetic in the same order,
+    with a gradient of its own: the backward pass keeps only `dif2` and `v`
+    and rebuilds each component's terms from them, one at a time.
+
+    Kept by automatic differentiation, every component's intermediates --
+    several `[..., n, m, d]` arrays each, eight components for an
+    exponential or a Matern kernel -- stayed alive until the backward pass,
+    and an unrolled backward built every component's terms at once, since
+    each depends only on the inputs: on a GeoScape network of three such
+    readers over a `GPWalk` (17 experts of 227 points on a batch) that was
+    about 2 GB of a 10 GB step. In a `while_loop` one component's terms are
+    alive at a time. The slope (`gradient=True`, read by `GPWalk` at every
+    step) keeps automatic differentiation: given the same treatment it
+    needs four accumulators of that size, and measured 1 GB more on the
+    same network with its single Gaussian component.
+    """
+    n_q = int(omega.shape[0])
+
+    def component(q, a2, b):
+        w = _tf.gather(omega, q)
+        inflated = 1.0 + 2.0 * w * b
+        term = _tf.gather(weights, q) * _tf.exp(
+            -0.5 * _tf.reduce_sum(_tf.math.log1p(2.0 * w * b), -1)
+            - w * _tf.reduce_sum(a2 / inflated, -1))
+        return w, inflated, term
+
+    @_tf.custom_gradient
+    def mixture(a2, b):
+        def forward(q, total):
+            return q + 1, total + component(q, a2, b)[2]
+
+        _, total = _tf.while_loop(
+            lambda q, _: q < n_q, forward,
+            (_tf.constant(0), constant + _tf.zeros_like(a2[..., 0])),
+            parallel_iterations=1)
+
+        def backward(g):
+            def step(q, ga, gb):
+                w, inflated, term = component(q, a2, b)
+                t = (g * term)[..., None]
+                da = -w / inflated
+                return (q + 1, ga + t * da,
+                        gb + t * (da + 2.0 * w ** 2 * a2 / inflated ** 2))
+
+            zeros = _tf.zeros_like(a2)
+            _, ga, gb = _tf.while_loop(
+                lambda q, *_: q < n_q, step, (_tf.constant(0), zeros, zeros),
+                parallel_iterations=1)
+            return ga, gb
+
+        return total, backward
+
+    return mixture(dif2, v)
+
+
 def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None,
                      gradient=False):
     """E[k(h(x), h(y))] over jointly Gaussian inputs.
@@ -732,18 +822,14 @@ def _expected_kernel(kernel, ranges, mean_x, var_x, mean_y, var_y, cov=None,
         v = _tf.maximum(v / r2, 0.0)
 
         omega, weights, constant = _kernel_components(kernel)
-        total = constant + _tf.zeros_like(dif2[..., 0])
-        slope = _tf.zeros_like(dif2) if gradient else None
-        for i in range(int(omega.shape[0])):
-            w = omega[i]
-            inflated = 1.0 + 2.0 * w * v
-            term = weights[i] * _tf.exp(
-                -0.5 * _tf.reduce_sum(_tf.math.log1p(2.0 * w * v), -1)
-                - w * _tf.reduce_sum(dif2 / inflated, -1))
-            total = total + term
-            if gradient:
-                slope = slope - term[..., None] * 2.0 * w * dif \
-                    / (r2 * inflated)
+        if gradient or type(kernel) is _kr.RationalQuadratic:
+            # the rational quadratic's components move with a trained
+            # parameter, which `_mixture_sum`'s gradient does not carry
+            total, slope = _mixture_terms(omega, weights, constant, dif2, v,
+                                          dif, r2, gradient)
+        else:
+            total, slope = _mixture_sum(omega, weights, constant, dif2,
+                                        v), None
         # a pair at one place with nothing uncertain between them, where
         # every component reads one, is one exactly, as the diagonal of the
         # inducing points' matrix must be, rather than the weights' sum to
@@ -4356,50 +4442,74 @@ class GPWalk(_FunctionalLatentVariable):
         r = _tf.zeros(_tf.concat([lead, [size, size]], 0), _tf.float64)
         start_var = None
         for k in range(self.n_steps):
-            v = _tf.reduce_sum(h ** 2, axis=[-2, -1]) \
-                + _tf.reduce_sum(r ** 2, axis=-1)
-            if var0 is not None:
-                v = v + _tf.einsum("...de,...e->...d", a ** 2, var0)
-            c = None if cov0 is None else \
-                cov0 * _tf.linalg.diag_part(a)[..., :, None, :]
-            # the field at the walkers, and its expected slope there, the
-            # derivative in the walkers' mean in closed form
-            cov, grad = self.field.expected_covariance(
-                mean, v, u, u_var, c, gradient=True)
-            if mask is not None:
-                cov = cov * mask[..., None, :]
-                grad = grad * mask[..., None, :, None]
-            f = _tf.einsum("...nm,...smo->...ns", cov, alpha) + bias
-            jac = _tf.einsum("...nmd,...smo->...nsd", grad, alpha)
-            # a walker the field's uncertainty has pushed is correlated with
-            # the field it meets: E[k(w, U) R eta] = E[grad k] Cov(w, eta) R
-            # (Stein's lemma), zero at the first step
-            if k > 0:
-                f = f + _tf.einsum("...njd,...sjl,...ndsl->...ns",
-                                   grad, root_r, h)
+            # each step is recomputed in the backward pass rather than kept:
+            # the field's expected kernel, its slope and every product made
+            # of them are rebuilt from what one step hands the next, which
+            # is all a step stores. Kept, they grew a training step's memory
+            # by about 4 GB a step on a network of 32 experts of ~200
+            # points, and five steps needed 26 GB; recomputed, 60% less for
+            # 15% more time (the changelog, 0.9.2)
+            out = _recomputed(self._walk_step, k, size, step, u, u_var,
+                              alpha, root_r, smooth_inv, bias, mask, var0,
+                              cov0, mean, a, h, r)
+            mean, a, h, r = out[:4]
             if k == 0:
-                explained = _tf.reduce_sum(
-                    _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
-                    * cov[..., None, :, :], axis=-1)
-                start_var = _tf.maximum(1.0 - explained, 0.0)
-            g = _tf.einsum("...nm,...sml->...snl", cov, root_r)
-            mean = mean + step * f
-            a = a + step * _tf.einsum("...ij,...jk->...ik", jac, a)
-            h = h + step * (_tf.einsum("...ij,...jsq->...isq", jac, h)
-                            + _tf.einsum("...snq,ds->...ndsq", g, eye))
-            # (K + D)^-1 and R R^T = K^-1 - (K + D)^-1 together give
-            # k K^-1 k, and what is left of the prior is unexplained
-            smooth = _tf.reduce_sum(
+                start_var = out[4]
+        return mean, a, h, r, start_var
+
+    def _walk_step(self, k, size, step, u, u_var, alpha, root_r, smooth_inv,
+                   bias, mask, var0, cov0, mean, a, h, r):
+        """Step `k` of `_joint_walk`: the walkers' new `mean`, `a`, `h`
+        and `r`, and at the first step also the field's variance at the
+        start."""
+        eye = _tf.eye(size, dtype=_tf.float64)
+        start_var = None
+        v = _tf.reduce_sum(h ** 2, axis=[-2, -1]) \
+            + _tf.reduce_sum(r ** 2, axis=-1)
+        if var0 is not None:
+            v = v + _tf.einsum("...de,...e->...d", a ** 2, var0)
+        c = None if cov0 is None else \
+            cov0 * _tf.linalg.diag_part(a)[..., :, None, :]
+        # the field at the walkers, and its expected slope there, the
+        # derivative in the walkers' mean in closed form
+        cov, grad = self.field.expected_covariance(
+            mean, v, u, u_var, c, gradient=True)
+        if mask is not None:
+            cov = cov * mask[..., None, :]
+            grad = grad * mask[..., None, :, None]
+        f = _tf.einsum("...nm,...smo->...ns", cov, alpha) + bias
+        jac = _tf.einsum("...nmd,...smo->...nsd", grad, alpha)
+        # a walker the field's uncertainty has pushed is correlated with
+        # the field it meets: E[k(w, U) R eta] = E[grad k] Cov(w, eta) R
+        # (Stein's lemma), zero at the first step
+        if k > 0:
+            f = f + _tf.einsum("...njd,...sjl,...ndsl->...ns",
+                               grad, root_r, h)
+        if k == 0:
+            explained = _tf.reduce_sum(
                 _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
                 * cov[..., None, :, :], axis=-1)
-            left = _tf.maximum(
-                1.0 - smooth - _tf.reduce_sum(g ** 2, axis=-1), 0.0)
-            positive = left > 0.0
-            sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, left, 1.0)),
-                           _tf.zeros_like(left))
-            r = r + step * (_tf.einsum("...ij,...js->...is", jac, r)
-                            + _tf.einsum("...sn,ds->...nds", sd, eye))
-        return mean, a, h, r, start_var
+            start_var = _tf.maximum(1.0 - explained, 0.0)
+        g = _tf.einsum("...nm,...sml->...snl", cov, root_r)
+        mean = mean + step * f
+        a = a + step * _tf.einsum("...ij,...jk->...ik", jac, a)
+        h = h + step * (_tf.einsum("...ij,...jsq->...isq", jac, h)
+                        + _tf.einsum("...snq,ds->...ndsq", g, eye))
+        # (K + D)^-1 and R R^T = K^-1 - (K + D)^-1 together give
+        # k K^-1 k, and what is left of the prior is unexplained
+        smooth = _tf.reduce_sum(
+            _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
+            * cov[..., None, :, :], axis=-1)
+        left = _tf.maximum(
+            1.0 - smooth - _tf.reduce_sum(g ** 2, axis=-1), 0.0)
+        positive = left > 0.0
+        sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, left, 1.0)),
+                       _tf.zeros_like(left))
+        r = r + step * (_tf.einsum("...ij,...js->...is", jac, r)
+                        + _tf.einsum("...sn,ds->...nds", sd, eye))
+        if k == 0:
+            return mean, a, h, r, start_var
+        return mean, a, h, r
 
     @staticmethod
     def _walked_covariance(a_x, h_x, a_y, h_y, cov0):
