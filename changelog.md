@@ -1,4 +1,18 @@
 ## version 0.9.2
+* **A parent several nodes share is refreshed and propagated once.** Every
+node's `refresh` refreshes its parents and every `propagate` propagates
+them, so a node reached along several paths from the leaves -- a hidden
+layer two leaf GPs read, a `GPWalk` under three readers -- was refreshed
+and propagated once per path, in training and in prediction alike. Within
+one pass over a model's leaves (`latent.once_per_pass`, opened by the
+model's refresh and by each batch's propagation) each node's `refresh`,
+and its `propagate` from given inputs, now run once and hand the same
+result to every later caller; the base class installs the guard on every
+node class, and outside a pass every call runs as before. On the GeoScape
+network of the next entry, where the walk sat under four paths, a step walked
+seven times instead of two: with the guard one epoch peaks at 3.7 GB
+instead of 8.2 and takes half the time (153 s against 309), and trains to
+the same numbers (`test_leaves.py`).
 * **A `GPWalk` trains in a fraction of the memory.** Under the expected
 kernel each step of the walk kept everything it computed for the backward
 pass -- the field's expected kernel and slope at the walkers, and the

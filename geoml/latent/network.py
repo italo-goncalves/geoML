@@ -28,6 +28,7 @@ import tensorflow as _tf
 import tensorflow_probability as _tfp
 import collections as _collections
 import contextlib as _contextlib
+import functools as _functools
 import warnings as _warnings
 import zlib as _zlib
 from scipy import special as _special
@@ -1043,8 +1044,9 @@ def refresh_cached(network, jitter=1e-6, owner=None):
                     nodes.append(node)
 
         def traced():
-            for leaf in leaves:
-                leaf.refresh(jitter)
+            with once_per_pass():
+                for leaf in leaves:
+                    leaf.refresh(jitter)
             return [_graph_state(node) for node in nodes]
 
         cached = (key, _tf.function(traced), nodes)
@@ -1060,6 +1062,56 @@ def refresh_cached(network, jitter=1e-6, owner=None):
 
     for node in nodes:
         node.cache_prediction_state()
+
+
+# Within one pass over a model's leaves -- a refresh, or the propagation of
+# one batch -- a node that several children read is refreshed, and
+# propagated from given inputs, once: every path from a leaf down to the
+# root used to repeat it. On a GeoScape network of three GPs and a `Linear`
+# reading one `GPWalk`, a training step walked seven times where two walks
+# (the data and the inducing points) were needed. Outside a pass every call
+# runs, as it always did.
+_ONCE = None
+
+
+@_contextlib.contextmanager
+def once_per_pass():
+    """Refresh each node, and propagate it from given inputs, once in this
+    block (nested blocks share the outer one)."""
+    global _ONCE
+    previous = _ONCE
+    if previous is None:
+        _ONCE = {}
+    try:
+        yield
+    finally:
+        _ONCE = previous
+
+
+def _key_part(value):
+    """An argument as part of a call's key: tensors and arrays by identity
+    (the call's arguments are kept with its result, so no other object can
+    take their identity during the pass), anything else by value."""
+    if _tf.is_tensor(value) or isinstance(value, _np.ndarray):
+        return ("id", id(value))
+    try:
+        hash(value)
+    except TypeError:
+        return ("id", id(value))
+    return value
+
+
+def _once(method):
+    """`method` run once per node and arguments inside `once_per_pass`."""
+    @_functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        if _ONCE is None:
+            return method(self, *args, **kwargs)
+        key = (id(self), method) + tuple(_key_part(a) for a in args)             + tuple(sorted((k, _key_part(v)) for k, v in kwargs.items()))
+        if key not in _ONCE:
+            _ONCE[key] = (method(self, *args, **kwargs), args, kwargs)
+        return _ONCE[key][0]
+    return wrapped
 
 
 class NodeIncompatibilityError(Exception):
@@ -1078,6 +1130,15 @@ class SizeIncompatibilityError(NodeIncompatibilityError):
 
 
 class _LatentVariable(_gpr.Parametric):
+    def __init_subclass__(cls, **kwargs):
+        # each class's own `refresh` and `propagate`, run once a pass
+        # (`once_per_pass`); a `super()` call reaches the parent class's,
+        # which is a different method and runs
+        super().__init_subclass__(**kwargs)
+        for name in ("refresh", "propagate"):
+            if name in cls.__dict__:
+                setattr(cls, name, _once(cls.__dict__[name]))
+
     def __init__(self):
         super().__init__()
         self._size = 0
