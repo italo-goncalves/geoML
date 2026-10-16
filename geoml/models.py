@@ -108,6 +108,7 @@ class GPOptions(_ModelOptions):
     expert_propagation = "consensus"
     propagation = "marginal"
     training_tolerance = None
+    fresh_training_draws = False
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -116,7 +117,8 @@ class GPOptions(_ModelOptions):
                  expert_propagation: _Literal["consensus", "independent"]
                  = "independent",
                  training_tolerance: float | None = None,
-                 propagation: _Literal["joint", "marginal"] = "joint"):
+                 propagation: _Literal["joint", "marginal"] = "joint",
+                 fresh_training_draws: bool = False):
         """
         Configuration of Gaussian process models.
 
@@ -211,6 +213,20 @@ class GPOptions(_ModelOptions):
             affected. Under `"joint"` the expert propagation must be
             `"independent"`, and a GP node reading an uncertain input takes
             the Gaussian, exponential, Matérn or rational quadratic kernel.
+        fresh_training_draws : bool
+            Whether the `training_samples` realizations a Monte Carlo bound
+            averages over are drawn afresh at every training step, or the
+            same set at every step (the default, and what every version
+            before it did). Only a model that trains on realizations is
+            affected -- a leaf that is not Gaussian, such as a
+            `GaussianMixture`, or a warping that mixes components; a
+            Gaussian leaf under a likelihood that integrates by quadrature
+            reads none. With the same set, the bound is an average over
+            those draws, which the parameters can partly fit; drawn afresh
+            it is an unbiased, noisier estimate of the bound itself. The
+            draws follow the step count, so training split into chunks
+            replays one call exactly, and a new optimizer starts the count
+            again.
         """
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
@@ -235,6 +251,7 @@ class GPOptions(_ModelOptions):
         self.expert_propagation = expert_propagation
         self.training_tolerance = training_tolerance
         self.propagation = propagation
+        self.fresh_training_draws = fresh_training_draws
 
 
 class _Convergence:
@@ -957,6 +974,9 @@ class VGPNetwork(_GPModel):
         # the one traced training step this model reuses -- see
         # `_training_step`
         self._step = None
+        # the steps taken in the current phase, which fresh training draws
+        # are keyed by -- see `_training_seed`
+        self._draw_count = _tf.Variable(0, dtype=_tf.int64, trainable=False)
         # what the next training call goes on with -- see `_training_phase`
         self._phase = None
 
@@ -992,7 +1012,7 @@ class VGPNetwork(_GPModel):
             self.var_lengths_dir = [1] * sum(self.var_lengths)
 
             y_dir, has_value_dir = [], []
-            for v, s in zip(variables, self.var_lengths):
+            for v, s in zip(self.variables, self.var_lengths):
                 if v in directional_data.variables.keys():
                     y_v, h_v = directional_data.variables[v].get_measurements()
                     y_dir.append(_np.tile(y_v, [1, s]))
@@ -1098,6 +1118,28 @@ class VGPNetwork(_GPModel):
         """What the propagation adds to a cached trace's key."""
         return (self.options.expert_propagation,
                 getattr(self.options, "propagation", "marginal"))
+
+    def _step_rule(self):
+        """What a cached training step's trace depends on beyond its
+        variables: the propagation, and whether its draws are fresh."""
+        return self._propagation_key() + (
+            bool(getattr(self.options, "fresh_training_draws", False)),)
+
+    def _training_seed(self):
+        """The seed of one training step's draws, read inside the step.
+
+        The options' seed, the same at every step -- or, with
+        `fresh_training_draws`, that seed moved by the steps the phase has
+        taken, counted on the model so that a traced step reads a new value
+        every call without being traced again. Counting and reading happen
+        together here, once a step.
+        """
+        if not getattr(self.options, "fresh_training_draws", False):
+            return self.options.seed
+        count = self._draw_count.read_value()
+        with _tf.control_dependencies([count]):
+            self._draw_count.assign_add(1)
+        return self.options.seed + count
 
     def _check_expected_kernel(self):
         """Refuses, under `GPOptions(propagation="joint")`, what the expected
@@ -1382,6 +1424,9 @@ class VGPNetwork(_GPModel):
                 return converged, rng
 
         converged = _Convergence(self.options.training_tolerance)
+        # fresh training draws start their count again with the phase, so a
+        # run replays from its own start whatever came before it
+        self._draw_count.assign(0)
         # a generator of its own, so the batch order is reproducible from
         # options.seed without reaching any draw made outside training
         rng = _np.random.default_rng(self.options.seed)
@@ -1436,7 +1481,7 @@ class VGPNetwork(_GPModel):
         payload = any(len(inp) > 0 for inp in training_inputs)
         if self._step is not None and not payload:
             cached_variables, optimizer, rule, step = self._step
-            if optimizer is self.optimizer and rule == self._propagation_key() \
+            if optimizer is self.optimizer and rule == self._step_rule() \
                     and len(cached_variables) == len(variables) \
                     and all(a is b for a, b in zip(cached_variables, variables)):
                 return step
@@ -1459,14 +1504,14 @@ class VGPNetwork(_GPModel):
                     x, y, has_value, training_inputs, x_var=x_var,
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
-                    seed=self.options.seed,
+                    seed=self._training_seed(),
                     **directions)
             self.optimizer.apply_gradients(
                 zip(tape.gradient(loss, variables), variables))
 
         if not payload:
             self._step = (tuple(variables), self.optimizer,
-                          self._propagation_key(), step)
+                          self._step_rule(), step)
         return step
 
     def train_full(self, max_iter: int = 1000) -> None:
@@ -2611,7 +2656,7 @@ class VGPNetwork(_GPModel):
             data = self._data_log_lik(
                 x, y, has_value, [{} for _ in self.variables],
                 x_var=x_var, samples=self.options.training_samples,
-                seed=self.options.seed)
+                seed=self._training_seed())
             kl = _tf.constant(0.0, _tf.float64)
             for root, share in zip(roots, shares):
                 for node in per_expert[id(root)]:

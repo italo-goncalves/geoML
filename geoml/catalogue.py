@@ -54,6 +54,7 @@ FUNCTIONS = {
     "geoml.data.inducing.from_kmeans": "inducing",
     "geoml.data.inducing.from_grid": "inducing",
     "geoml.data.inducing.from_hull": "inducing",
+    "geoml.data.inducing.from_cover_tree": "inducing",
     "geoml.data.inducing.combine": "inducing",
     "geoml.data.inducing.grid_experts": "inducing",
     "geoml.data.inducing.experts": "inducing",

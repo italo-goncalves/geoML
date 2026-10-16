@@ -204,7 +204,9 @@ shape). Plan of record:
    36 for a table), `MultiStructureGP` over pairs of structures,
    `AdditiveGP` within and across dimensions; the explained variance
    `tr(C L)`. Deep networks (uncertain inducing inputs, the research's ~11%)
-   stay out -- their own item, later. Gate: against `girard()` to 1e-10
+   stay out -- their own item, later (measured 2026-10-16 under "Propagate
+   individual realizations": on the folded section the moment path reports
+   10-32% of such a model's variance). Gate: against `girard()` to 1e-10
    (Gaussian), against the exact mixture on Walker Lake mean and variance
    within 2% at every input variance for all four kernels; bit-identical
    with no input variance; slots as sets.
@@ -1119,6 +1121,97 @@ tonnage-above-cut-off distribution against the truth, versus today's
 unpaired ensemble and the hard-domained workflow. Both (1) and (2)
 presupposed the sibling-normals fix, done 2026-09-10 (settled below).
 
+**Want (1) measured 2026-10-16** (prototype and every run in
+`docs/benchmarks/doubly_stochastic/`, `run_all.sh` remaking them, results
+and figures in `docs/benchmarks/figures/doubly_stochastic/`; the folded
+section of `docs/benchmarks/expected_kernel.py`, gate 2's two
+deep networks, Gaussian likelihood, 2000 Adam iterations, three seeds,
+scored a new hole as there). The leaf reads S draws of its parent instead
+of the expected kernel, each point from the parent's marginal, the last
+layer's expectation kept closed. **The leaf's inducing inputs are
+conditioned on each draw** through the chain's covariance (`Z | h`: mean
+moved by `c/v (h - mu)`, variance cut by `c²/v`), so the model is the one
+the joint rule trains: averaged over 2e4 draws the conditioned kernel is
+the joint expected kernel to Monte Carlo error (0.004, against 0.42 from
+the uncoupled one), expert by expert too. Leaving them independent of the
+draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
+-- scored about a nat a hole worse on both networks.
+
+- **Why the analytic path did not match the draws: the second moment, left
+  out on purpose.** `_takes_second_moment` completes the moments only where
+  the inducing points are certain, and a GP reading a GP has uncertain ones
+  (step 2 of "Eight Gaussians and the second moment": deep networks "stay
+  out"). Trained on the moment bound, the moment path reports 10-14% of the
+  model's own predictive variance on the GP on a GP and 27-32% beside the
+  coordinates; nearly all the rest is the spread of the leaf's mean over
+  the hidden layer. A Gaussian with the exact two moments scores within 0.5
+  a hole of the full mixture on all 30 trained models: the variance is
+  everything, the shape nothing. With a Gaussian likelihood and an affine
+  warping the expected log-likelihood depends on the two moments alone, so
+  **the analytic bound with the full second moment is the doubly
+  stochastic bound at infinite S**.
+- **Training on the corrected bound** (new-hole log score, mean of three
+  seeds; the flat GP -12.2):
+
+  | Training | GP on a GP | Beside the coordinates | ms a step |
+  |---|---|---|---|
+  | moment bound (today) | -9.97 | -10.27 | 7.4 / 8.2 |
+  | 64 draws a step | -8.72 | -3.73 | 33 / 41 |
+  | second moment, 5x5 Hermite grid | -8.87 | -8.29 | 21 / 24 |
+  | 200 steps of 64 draws, then the grid | -8.81 | **-3.71** | 33-41, then 21-24 |
+  | one draw a step, 10 000 steps | -10.53 | -8.98 | 7.1 / 7.7 |
+
+  Beside the coordinates the 64-draw models recover the fold (field CRPS
+  against the truth 0.16, today's 0.37); the GP on a GP recovers it under
+  no training. The moment bound had converged: 10 000 steps move no seed
+  by more than 0.2.
+- **The grid is correct but starts in a worse basin.** A Gauss-Hermite
+  grid over the hidden outputs, the inducing inputs conditioned at each
+  node, matches 4000 draws to a standard error at 15 nodes a dimension, the
+  5x5 grid within 0.5-0.7 of a data term of -13. From scratch it trains to
+  -8.3 beside the coordinates (15x15 the same, so not its bias); continued
+  on 64 draws it stays there; the 64-draw model continued on the grid
+  improves to -1.5, and the grid rates it higher (bound -84 against its own
+  -109). So 200 sampled steps, then the grid, reproduce the 64-draw runs
+  seed by seed at 0.6 of the time; a one-draw warm-up does not (-9.2,
+  -10.7). Why light noise picks the basin and none or heavy noise do not
+  is open.
+- **One draw a step** costs a moment step and is unbiased, but at a
+  constant learning rate its bound stops rising early (table). A decaying
+  rate, and one hidden realization shared by every point, are untried.
+- **Reading a moment-trained model by draws makes it worse** (settled
+  below), so the prediction-only route planned above is dropped.
+- **Realizations**: today's leaf realizations cover the true field's 90%
+  band at 32-45% of the grid whatever the training; drawn through the
+  hidden realization with the variance the inducing points leave added as
+  independent noise, 69-87% at 16 draws a step.
+- **Cost** (the GP on a GP at 2 400 and 9 600 points, 100 and 300 inducing
+  points): each draw a step adds 18-27% of a moment step's time and holds
+  7-11 float64 `[n, m, d]` tensors for the gradient (35 MB at 2 400 x 100,
+  337 MB at 9 600 x 300) -- 16 draws are 4-5x the time and 1.4-3.4x the
+  memory, and 64 at 9 600 x 300 ran out of 15 GB. Prediction alike: a
+  256-draw mixture 1 s against the moments' 0.05 s at 2 400 points. A grid
+  of Q nodes costs Q draws, and Q is k to the power of the hidden width, so
+  past two or three hidden outputs a Sobol set (the 64 nodes `_input_nodes`
+  takes) is the rule. Draws chunked under the gradient would hold memory at
+  one chunk; not built.
+- **Experts**: the coupling carries -- each expert draws its own parent
+  expert's chain and conditions its own inducing inputs, blended draw by
+  draw by the package's weights; every expert's gate within 1.2e-3. The
+  gain did not: on 60 inducing points beside the coordinates, one expert
+  scores -6.62 on the moment bound (-2.3 to -9.2) and -5.34 on 64 draws
+  (-4.7 to -6.1); three experts of 24-28, -4.23 (-4.1 to -4.3) and -4.95,
+  the warm-up then the grid -5.08. With three experts the moment path
+  already reports 83% of the exact variance (hidden sd 0.51 at the new
+  holes), with one of the same 60 points 13% (0.71). The dense path reads
+  every expert at every point: 64 draws 77 ms a step against 15. Slots
+  untried.
+- **Next, if pursued**: the second moment at uncertain inducing inputs --
+  the existing quadrature with the inducing inputs conditioned at each
+  node -- with a short sampled warm-up as a training option; measured on
+  Walker or Jura and with experts before any default moves. Want (2) is
+  untouched.
+
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same
 elements unassayed in a large share of the samples, as a campaign that ran
@@ -1609,27 +1702,12 @@ iteration (the phase's count), so a run split into chunks still replays
 one call bit for bit. Gate: the same two numbers, and the chunked-training
 test in `test_early_stopping.py` still exact.
 
-**S — Directional data ignored under a variable named as a string**
-(found by reading, 2026-09-15, not run). `VGPNetwork.__init__` pairs the
-directional measurements with the variables by iterating the raw
-`variables` argument, so `variables="Rock"` walks the letters, looks up
-`"R"`, finds nothing and trains on no directional measurement at all. A
-list or the mapping spelling is unaffected. Iterate the normalized names.
-
-**S — `ProjectionTo1D` projects onto positive directions only**
-(found 2026-09-25, reading why the catalogue should not offer it). Its
-`directions` is a `PositiveParameter` in [0.001, 1], so a projection can
-point into the positive orthant and nowhere else -- in 2-D, north-east but
-never north-west. A signed unit vector (a `UnitColumnNormParameter`, as the
-dynamic anisotropies hold their weights) would let it point anywhere; the
-catalogue marks it `experimental` until then, and `RandomProjections` with
-it, nothing in it training.
-
-**S — A GP node that fails to build is left among its parent's children**
-(found by reading, 2026-09-15). `_FunctionalLatentVariable.__init__`
-appends the node to `parent.children` before `_GPNode.__init__` can raise
-`BrokenPropagationError`, so a caller that catches the error and goes on
-holds a parent with a child that does not exist. Register the child last.
+(Three small bugs found by reading -- directional data ignored under a
+variable named as a string, `ProjectionTo1D` pointing into the positive
+orthant only, and a GP node that failed to build left among its parent's
+children: **fixed 2026-10-15, 0.9.3**, `test_small_fixes.py`. The
+catalogue still marks `ProjectionTo1D` and `RandomProjections`
+`experimental`; nothing in either has been trained in earnest.)
 
 ---
 
@@ -1639,7 +1717,18 @@ The theme is measured rather than assumed: **training does not leave the
 basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
-**M — Inducing points by cover tree** (requested 2026-10-10). Terenin,
+**M — Inducing points by cover tree** (requested 2026-10-10; **built
+2026-10-15, 0.9.3**: `inducing.from_cover_tree(data, separation,
+transform=)`, the samples farthest first, divided into experts by
+`experts`; read against the paper since: the guarantees of its Algorithm
+12 (eq. 20, separation and spatial resolution both `separation`), but in
+O(N·M) where its breadth-first tree is O(N log N), and without its two
+optional steps -- the local averaging that places a node between samples
+when that keeps it a radius from the others, so fewer nodes are needed,
+and the Voronoi repartition that balances the tree. Either is the next
+step if the measurement below asks for it; the clustered-data
+approximation of its §3.3 is Gaussian-likelihood only. What remains is
+that measurement). Terenin,
 Burt, Artemev, Flaxman, van der Wilk, Rasmussen & Ge (2024), *Numerically
 stable sparse Gaussian processes via minimum separation using cover
 trees*, JMLR 25(26), arXiv 2210.07893 (in the Paper Library; read from the
@@ -2648,6 +2737,15 @@ order of difficulty:
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**Reading a moment-trained deep network by draws -- rejected**
+(2026-10-16; the first step "Propagate individual realizations" planned).
+The model trained on the moment bound, read through draws of its hidden
+layer instead of its moments: -12.62 a new hole against -8.99 on the folded
+section's GP on a GP, -11.46 against -11.12 beside the coordinates. The
+moment bound reports 10-32% of such a model's own variance, so training
+leaves the hidden layer uncertain at no cost and the exact read charges for
+it. A deep model is read the way it was trained.
 
 **Natural-gradient steps for the experts -- rejected** (2026-10-09; Level 2
 of `report/design_dual_parameter_geoml.md` in the research project
