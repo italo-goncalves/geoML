@@ -1167,8 +1167,10 @@ class VGPNetwork(_GPModel):
                     "node may not read it under propagation='joint'" % name)
 
     def _refresh(self, jitter):
-        for leaf in self.leaves:
-            leaf.refresh(jitter)
+        # a parent several leaves share is refreshed once
+        with _latent.once_per_pass():
+            for leaf in self.leaves:
+                leaf.refresh(jitter)
 
     def _jitter_by_likelihood(self, per_leaf, like):
         """`_by_likelihood` for the leaves' latent jitters, `[n, size]` or
@@ -1251,9 +1253,11 @@ class VGPNetwork(_GPModel):
             # prediction, one leaf at a time, then handed to the likelihoods
             # each leaf serves
             mus, vars_, simss = [], [], []
-            for leaf in self.leaves:
-                mu, var, sims, _ = leaf.predict(
-                    x, x_var=x_var, n_sim=samples, seed=[seed, 0])
+            with _latent.once_per_pass():
+                predicted = [leaf.predict(x, x_var=x_var, n_sim=samples,
+                                          seed=[seed, 0])
+                             for leaf in self.leaves]
+            for mu, var, sims, _ in predicted:
                 mus.append(_tf.transpose(mu[:, :, 0]))
                 vars_.append(_tf.transpose(var))
                 simss.append(_tf.transpose(sims, [1, 0, 2]))
@@ -1675,9 +1679,11 @@ class VGPNetwork(_GPModel):
         # per batch.
         with _tf.name_scope("Prediction"):
             mus, vars_, sims, exp_vars, jitters = [], [], [], [], []
-            for leaf in self.leaves:
-                predicted = leaf.predict(
-                    x_new, x_var=x_var, n_sim=n_sim, seed=[seed, 0])
+            with _latent.once_per_pass():
+                per_leaf = [leaf.predict(x_new, x_var=x_var, n_sim=n_sim,
+                                         seed=[seed, 0])
+                            for leaf in self.leaves]
+            for predicted in per_leaf:
                 mu, var, sim, exp_var = predicted
                 mus.append(_tf.transpose(mu[:, :, 0]))
                 vars_.append(_tf.transpose(var))
@@ -3491,7 +3497,8 @@ class VGPNetwork(_GPModel):
 
         def batch_measure(x, x_var, n_splits, rows):
             per_leaf, jitters, like = [], [], []
-            with _latent.simulation_rule(self.options.qmc_simulations):
+            with _latent.simulation_rule(self.options.qmc_simulations), \
+                    _latent.once_per_pass():
                 for leaf in self.leaves:
                     predicted = leaf.predict(
                         x, x_var=x_var, n_sim=n_sim,
@@ -3591,9 +3598,11 @@ class VGPNetwork(_GPModel):
 
         def batch_moments(x, x_var, n_splits):
             mus, vars_ = [], []
-            for leaf in self.leaves:
-                mu, var, _, _ = leaf.predict(
-                    x, x_var=x_var, n_sim=1, seed=[self.options.seed, 0])
+            with _latent.once_per_pass():
+                per_leaf = [leaf.predict(x, x_var=x_var, n_sim=1,
+                                         seed=[self.options.seed, 0])
+                            for leaf in self.leaves]
+            for mu, var, _, _ in per_leaf:
                 mus.append(_tf.transpose(mu[:, :, 0]))
                 vars_.append(_tf.transpose(var))
             mu = self._by_likelihood(mus)
