@@ -249,3 +249,63 @@ def test_a_model_trains_saves_and_reloads_with_the_links(tmp_path):
 def test_every_link_is_elementwise():
     for warping in (wp.BoxCox(3), wp.YeoJohnson(3), wp.Arcsinh(3), wp.SinhArcsinh(3)):
         assert warping.elementwise
+
+
+def _with_zeros(seed=3):
+    """Two lognormal columns, the first with zeros, the second without."""
+    x = _lognormal(n=300, seed=seed) * 10.0
+    x[:20, 0] = 0.0
+    return x
+
+
+def test_a_shift_from_the_data_is_the_smallest_positive_value_with_zeros():
+    x = _with_zeros()
+    warping = wp.BoxCox(2, shift=None)
+    warping.initialize(x)
+    shift = warping.parameters["shift"].get_value().numpy()
+    assert shift[0] == x[x[:, 0] > 0, 0].min()
+    assert shift[1] == 1e-6
+    assert warping.parameters["shift"].fixed
+
+    # the exponent starts where it would with the shift given by hand
+    for i in range(2):
+        by_hand = wp.BoxCox(1, shift=float(shift[i]))
+        by_hand.initialize(x[:, [i]])
+        assert warping.parameters["exponent"].get_value().numpy()[i] \
+            == by_hand.parameters["exponent"].get_value().numpy()[0]
+    _round_trip(warping, x[20:])
+    np.testing.assert_allclose(np.asarray(warping.backward(
+        warping.forward(tf.constant(x))[0]))[:20, 0], 0.0, atol=1e-9)
+
+
+def test_a_shift_given_registers_no_parameter():
+    assert list(wp.BoxCox(2).parameters) == ["exponent"]
+    assert list(wp.BoxCox(2, shift=1.0).parameters) == ["exponent"]
+
+
+def test_a_shift_from_the_data_survives_a_save(tmp_path):
+    rng = np.random.default_rng(5)
+    coords = rng.uniform(0.0, 100.0, (60, 2))
+    values = np.exp(np.sin(coords[:, 0] / 20.0) + 0.3 * rng.normal(size=60))
+    values[:6] = 0.0
+    point = geoml.data.PointData.from_array(coords, ["x", "y"])
+    point.add_continuous_variable("v", values)
+    inducing = geoml.data.PointData.from_array(
+        rng.uniform(0.0, 100.0, (12, 2)), ["x", "y"])
+    geoml.set_seed(1234)
+    link = wp.BoxCox(1, shift=None)
+    gp = geoml.latent.BasicGP(geoml.latent.BasicInput(
+        inducing, transform=geoml.transform.Isotropic(40.0)), size=1)
+    model = geoml.models.VGPNetwork(
+        point, "v", geoml.likelihood.Gaussian(
+            wp.ChainedWarping(link, wp.ZScore(1))), gp,
+        options=geoml.models.GPOptions(verbose=False))
+    model.train_full(max_iter=3)
+    found = link.parameters["shift"].get_value().numpy()
+    assert found[0] == values[values > 0].min()
+
+    persistence.save_model(model, tmp_path / "model")
+    restored = persistence.load_model(tmp_path / "model")
+    again = restored.likelihoods[0].warping.warpings[0]
+    np.testing.assert_array_equal(
+        again.parameters["shift"].get_value().numpy(), found)

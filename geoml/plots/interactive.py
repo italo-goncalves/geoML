@@ -698,6 +698,14 @@ class Interactive(_base.Selection):
         scatter of that many points is a filled rectangle whatever its
         transparency.
 
+        The simulations are the stored realizations, which are of the
+        ground: the likelihood's noise is integrated out of them, not drawn.
+        A measurement scatters about the ground by its `noise_variance`, so
+        even a perfect model shows a narrower upper half and diagonal curve
+        than the measured ones wherever the noise is not negligible. For
+        measurements against measurements use the model's
+        `predict_measurements`, which the `accuracy` figure reads.
+
         Parameters
         ----------
         kind : str
@@ -767,7 +775,7 @@ class Interactive(_base.Selection):
         self._label_edges(figure, labels, n)
         return self._finish(
             figure,
-            title="%s: measured below the diagonal, simulated above"
+            title="%s: measured below the diagonal, simulated ground above"
                   % var.name,
             height=height or 80 + 180 * n, width=width or 80 + 190 * n,
             barmode="overlay")

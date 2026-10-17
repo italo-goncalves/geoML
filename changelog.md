@@ -1,4 +1,43 @@
 ## version 0.9.3
+* **An exponential or heavier noise tail under a log-like link warns at
+`initialize`.** `EpsilonInsensitive`, `Laplace`, `Huber`,
+`MultivariateLaplace` and a `Mixture` of them under `Log`,
+`CenteredLogRatio` or `BoxCox` say how far one warped unit reaches into
+the logarithm, and so the rate below which the value with the noise
+integrated out has no finite mean (the reach) or variance (twice it), with
+the rate the model starts at; `StudentT` there has no finite mean at any
+scale. The reach is read off the data by least squares, exact through an
+affine remainder of the chain. On Jura's vector chain it reports a
+variance pole at 1.28 against a start of 1 -- the pole the metals were
+trained to. Each population of a `LikelihoodMixture` is checked on its own
+group. The other remedy, a noise rate started on the safe side, waits on
+the Macpass record it was found on (`test_log_tails.py`).
+* **`simulation_pairs` says it shows the ground.** Both backends' docstrings
+and titles now say the simulated half is the stored realizations, of the
+ground with the noise integrated out, so even a perfect model draws it
+narrower than the measurements; `predict_measurements` (the `accuracy`
+figure) is the like-for-like comparison.
+* **The kernel mixtures' error figures corrected**: the largest error over
+[0, 6] ranges is 5.32e-4, 1.03e-5 and 9.15e-6 (exponential, Matern32,
+Matern52) over 2.6 million distances, not the 5.1e-4, 9.8e-6 and 9.1e-6
+the 0.9.0 entry gave, which were maxima over the fit's own distances
+(`_KERNEL_MIXTURES`' comment and `docs/expected-kernel.md`). Nothing in the
+tables changed.
+* **`warping.BoxCox(size, shift=None)`: the shift found from the data.**
+`initialize` sets each column's shift to its smallest positive value
+where the column holds zeros, and to a negligible 1e-6 where it does not,
+and profiles the exponent with it -- the advice the docstring gave, now
+done. On Walker's V (22 zeros) the found shift (2.1) trains as the
+manual's hand-set shift of 1 does: out-of-fold rmse 212.7 against 212.8,
+crps 119.6 against 119.9, the variogram fan on the true field's to within
+2% (`docs/benchmarks/walker_zero_shift.py`, arm `data`). The shift is not
+profiled with the exponent: with zeros the profile likelihood rises
+without bound as the shift goes to zero, each zero adding
+`(λ-1)·log(shift)` to the Jacobian, so it would always take the smallest
+shift on offer. Opt-in: the default stays 1e-6, since a save replays only
+the arguments passed, and the found shift is a fixed parameter registered
+only on this path, so a save records it and a numeric shift keeps its
+parameter slots.
 * **`GPOptions(fresh_training_draws=True)`, the default for a new model: a
 Monte Carlo bound drawn afresh at every step.** A model that trains on realizations -- a leaf that is not
 Gaussian, a warping that mixes -- averaged its bound over the same

@@ -1038,7 +1038,10 @@ Kronecker prior written as a positive mixture of Gaussians, cubic
 interpolation to the data, one Gaussian site per datum, CG and Lanczos in
 place of dense algebra -- and measured it against an exact GP and SGPR,
 not against geoML's experts. What carries over:
-- **S — Correct the kernel-mixture error figures.** The comment above
+- **S — Correct the kernel-mixture error figures** (**done 2026-10-16**,
+  0.9.3: recomputed over 2.6 million distances, 5.32e-4, 1.03e-5 and
+  9.15e-6, the comment, the design record and `CLAUDE.md` corrected and
+  the 0.9.0 figures noted in the 0.9.3 changelog). The comment above
   `_KERNEL_MIXTURES` (`latent/network.py`), `docs/expected-kernel.md` and
   the 0.9.0 changelog give the largest error over [0, 6] ranges as 5.1e-4,
   9.8e-6 and 9.1e-6 (exponential, Matern32, Matern52); those are maxima
@@ -1637,7 +1640,12 @@ helped the single likelihood most.
 
 **S — Say when a heavy-tailed noise under a log-like warping has no
 finite mean** (requested 2026-10-15, after a GeoScape mixture that would
-not show its two populations). `EpsilonInsensitive` trains its epsilon to
+not show its two populations; **the warning built 2026-10-16, 0.9.3**:
+`_ContinuousLikelihood.initialize` calls `_warn_log_tail`, each family
+declaring `_tail_rates`, the reach read off the data by least squares of
+the logarithm on the warped values -- on Jura's vector chain a variance
+pole at 1.28 against a start of 1; the safe start below stays open, its
+measurement needing the Macpass record). `EpsilonInsensitive` trains its epsilon to
 zero and is a Laplace; pushed back through a log-like link (`Log`,
 `CenteredLogRatio`, `BoxCox` near zero) its exponential has a finite mean
 only where the noise rate exceeds the spread it is scaled by, the pole the
@@ -1667,7 +1675,10 @@ clustering put population 0 at waste (0.04 % Zn) and population 1 at ore
 (8.8 % Zn), and they stayed apart throughout.
 
 **S — The measured-against-simulated figure compares samples with the
-ground** (found 2026-10-15, same record; GeoScape's figure, with geoML's
+ground** (found 2026-10-15, same record; **geoML's side done 2026-10-16,
+0.9.3**: both backends' docstrings and titles say the simulated half is
+the ground and point to `predict_measurements`; the GeoScape note is its
+repository's; GeoScape's figure, with geoML's
 `simulation_pairs` to check for the same). The stored simulations are
 realizations of the ground, the noise integrated out (`integrated_backward`),
 so a sample histogram cannot be matched by them even under a perfect
@@ -1824,7 +1835,8 @@ script trains, so it goes in the changelog, and the old settings should
 stay reachable: today `set_learning_rate` takes a rate only, so the
 outcome may also be an option for the decay and the optimizer.
 
-**S — `BoxCox`'s shift started from the data** (requested 2026-10-15).
+**S — `BoxCox`'s shift started from the data** (requested 2026-10-15;
+**built 2026-10-16, 0.9.3**: `BoxCox(size, shift=None)`, measured below).
 The shift is a constructor constant today, `1e-6` by default and one value
 for every component, and the docstring tells the user to set it to the
 order of the smallest positive value wherever the data hold zeros.
@@ -1849,6 +1861,26 @@ be negligible. Two constraints:
   shift**, as the two-parameter Box-Cox does, or the shift fixed first
   from the smallest value and the exponent profiled after. Measure both
   on Walker and on a composition with zeros before choosing.
+
+**Built and measured 2026-10-16.** `shift=None` is the opt-in (a nullable
+float in the catalogue, where a string could not keep the positive
+constraint); `initialize` sets a fixed `shift` parameter per column, the
+smallest positive value where the column holds zeros and 1e-6 where not,
+and profiles the exponent after. The joint profile was ruled out by
+measuring it: on Walker's V and U its value rises monotonically as the
+shift falls (V: -5.63 at 21, -5.59 at 2.1, -5.24 at 1e-6), each zero
+adding `(λ-1)·log(shift)` to the Jacobian faster than the variance term
+takes back, so it would pick the smallest shift on any grid -- the very
+failure. No composition with zeros is bundled (Jura's metals and the
+Arctic lake have none), so the second case is per-column logic pinned by
+`test_parametric_warpings.py` on synthetic columns, one with zeros and
+one without. Walker's chapter model, found shift (2.1) against the
+manual's 1: exponent 0.605 against 0.583, out-of-fold rmse 212.7/212.8,
+crps 119.6/119.9, goodness 0.922 both, noise and ground 0.97/0.99 of the
+data's declustered variance, the exhaustive fan 0.76-1.03 of the true
+variogram against 0.74-1.02 (`walker_zero_shift.py`, arms `data` and
+`shift1`). The default stays 1e-6 because a save replays only passed
+arguments; the manual's chains still pass `shift=1.0`.
 
 ---
 
@@ -2399,6 +2431,14 @@ refits):
   uncertain input (the item in section 1): measured 2026-10-08, the expected
   kernel alone misses the variance there by up to 133%, where
   `UncertainInputGP` is within 3%.
+- `BoxCox`'s default shift from the data (`shift=None`, built 0.9.3 as an
+  opt-in): the default stays `1e-6` today only because a save replays the
+  arguments it was given, so an old `BoxCox(1)` reloaded under a new
+  default would register the extra `shift` parameter and refuse its own
+  slots. Here the default becomes `None` and the float path's slot layout
+  stops mattering; the manual's chains drop their hand-set `shift=1.0`.
+  Measured already (Walker, 2026-10-16): the found shift trains as the
+  hand-set one does, and on a column with no zeros it is the old `1e-6`.
 - **Deprecated in 0.9.0** (ignored under `"joint"`, removed here):
   `GPWalk`'s `precision` parameter and the variance shrinking it drives,
   and the walk's displacement term, `1/2 sum (moved - start)² / spread²`

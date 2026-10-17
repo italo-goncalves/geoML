@@ -483,6 +483,14 @@ class Explorer(_base.Selection):
         scatter of that many points is a filled rectangle whatever its
         transparency.
 
+        The simulations are the stored realizations, which are of the
+        ground: the likelihood's noise is integrated out of them, not drawn.
+        A measurement scatters about the ground by its `noise_variance`, so
+        even a perfect model shows a narrower upper half and diagonal curve
+        than the measured ones wherever the noise is not negligible. For
+        measurements against measurements use the model's
+        `predict_measurements`, which the `accuracy` figure reads.
+
         Parameters
         ----------
         kind : str
@@ -564,7 +572,8 @@ class Explorer(_base.Selection):
             figure.legend(handles, names, loc="center left",
                           bbox_to_anchor=(fraction + 0.02, 0.5))
             figure.suptitle(
-                "%s: measured below the diagonal, simulated above" % var.name)
+                "%s: measured below the diagonal, simulated ground above"
+                % var.name)
             figure.tight_layout(rect=(0, 0, fraction, 0.97))
         return figure
 

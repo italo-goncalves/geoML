@@ -70,7 +70,7 @@ computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` (half the disk, every read widened back to `float64`);
 `geoml.set_realization_dtype("float64")` keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.2.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.3.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -164,8 +164,10 @@ What was measured to work, as of this version. Arguments for each class are
 in the catalogue.
 
 - **Warpings.** A single positive grade: `BoxCox` then `ZScore`; where the
-  data hold zeros, give `BoxCox` a `shift` of the order of the smallest
-  positive value, not the default. A variable centred on zero:
+  data hold zeros, pass `BoxCox(..., shift=None)`, which sets each column's
+  shift to its smallest positive value at `initialize` -- the default
+  millionth sinks the zeros far down the logarithm and steepens the
+  inverse. A variable centred on zero:
   `YeoJohnson` then `ZScore`. A vector of grades: `BoxCox`, `RobustPCA`,
   `ZScore`, `SinhArcsinh`, `ZScore`, chained with `ChainedWarping`. These
   parametric links replaced `Spline`, which stays for saved models (with
@@ -175,7 +177,9 @@ in the catalogue.
 - **Noise law.** For a skewed grade under a log-like link, prefer a
   Gaussian likelihood: a heavy-tailed law (`Laplace`, `EpsilonInsensitive`)
   pushed back through the link can have an unbounded variance in data units
-  and over-wide intervals, though its bound may look better. For data with
+  and over-wide intervals, though its bound may look better. `initialize`
+  warns where that is the case and names the noise rate below which the
+  mean or the variance has no finite value; a Student's t there has none. For data with
   gross errors, `likelihood.Mixture` (experimental) names the bad readings,
   with its warping led by `ZScore(robust=True)`.
 - **Several populations.** Where one variable is drawn from populations that
@@ -192,7 +196,11 @@ in the catalogue.
   divided into overlapping experts: `data.inducing.experts` over
   `data.inducing.combine`. Where the survey does not fill its box -- a fan
   of drillholes -- take the backbone from `data.inducing.from_hull`, which
-  keeps the lattice inside the data's hull and a margin around it. Experts
+  keeps the lattice inside the data's hull and a margin around it.
+  `data.inducing.from_cover_tree` places points no closer than a given
+  separation (with `transform=` for anisotropy), the guarantee of
+  numerically stable sparse GPs; whether it scores better than k-means at
+  equal counts is not yet measured. Experts
   come out compact and share points with every neighbour once each borrows
   at least as many points as it has neighbours: keep experts large enough
   for their overlap (an overlap of 0.1 on 25-point experts cannot reach six
@@ -279,7 +287,11 @@ The papers and the code name the same things differently.
   generator, so two runs in a row differ; set the seed right before each
   run that must repeat. Under `GPOptions(jit_predict=True)` XLA draws other
   normals from the same seed: the latent moments agree, the realizations do
-  not.
+  not. A model that trains on realizations (a non-Gaussian leaf, a mixing
+  warping) draws them afresh every step (`fresh_training_draws`, the
+  default for a new model): its training log is a noisy estimate of the
+  bound, still exactly repeatable, and a model saved before 0.9.3 keeps
+  the fixed draws it was trained with.
 - **`values()` for what you compute with, `get()` for what you draw.**
   Never `values()` a bare `simulations` path: it reads every realization
   into memory at once, fatal on a block model. Read one realization
@@ -290,7 +302,9 @@ The papers and the code name the same things differently.
   never writes over the store a container reads from.
 - **The stored realizations are of the ground; a measurement scatters
   around it.** Comparing a prediction with an assay needs
-  `model.predict_measurements`, not the stored realizations.
+  `model.predict_measurements`, not the stored realizations -- and
+  `simulation_pairs` draws the stored ones, so even a perfect model shows
+  them narrower than the measured half.
 - **A node inside the tree is predicted with `model.predict_node`**, into
   a `LatentVariable` on the latent scale: what a `GPWalk` did to the
   coordinates, what a trend adds. Points only, never a block model; its
