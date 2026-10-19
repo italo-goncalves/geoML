@@ -1263,6 +1263,84 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
      save made before (a class default, as `propagation`); every deep
      model's realizations change -- changelog, chapters 16 and 17 rerun,
      the skill, one full run at the end.
+- **Steps 1-2 built 2026-10-19, branch `deep-second-moment`** (worktree
+  geoML-second; gates in `docs/benchmarks/deep_second_moment/`, figures in
+  `docs/benchmarks/figures/deep_second_moment/`). Step 1 as planned, the 64
+  nodes chunked four at a time; the conditional variance clamped node by
+  node, because conditioned on a node the inducing points sit closer than
+  the expected kernel among them allows and `k (K + D)^-1 kᵀ` passed one
+  at half the draws. Step 2 departed from the plan in three places, each
+  on a measurement:
+  - **Every GP node carries its residual, by random features** (the user's
+    1(b)), not independent noise: Wilson et al.'s `f(x) - k K^-1 f(Z)`,
+    whose correlation is the kernel's. Independent noise was the
+    0.9.3-shaped nugget; the nugget in the realizations turned out to be
+    mostly the model's own short-scale roughness, and more inducing points
+    made it worse (lag-1 semivariance over the sill 0.23 -> 0.66 -> 0.93
+    without noise), so correlated noise was not pursued. The prediction
+    integrates the residual analytically from the realizations without it
+    (`smooth_draws`, the user's 2(b)); the stored realizations keep it.
+  - **Training on samples draws each location's marginal**
+    (`marginal_draws`, the user's choice): the full variance, where the
+    realizations used to carry only what the inducing points explain. The
+    `GaussianMixture` regimes gate looked lost under it (seed 1234: RMSE
+    0.218 against the GP's 0.192); over seven seeds the true bound finds
+    the switch five times (RMSE 0.126-0.145), the explained-only bound
+    none -- the fit is bimodal by its start, and 1234 is a bad one.
+  - **The experts.** Each expert alone held its variance (1.00-1.03) and
+    its mean; the blend did not -- a certain-input GP's realizations held
+    0.51 of its variance where two experts carried weight, because the
+    experts' normals, shared by index, met at unrelated inducing points
+    and were independent in effect. A reader above it then read a parent
+    too narrow and its mean moved (half of a GP-on-a-GP's points outside
+    their interval; the user's diagnosis: experts too small to reach the
+    tails before the blend, not the blending of means). Fixed in two
+    steps: the blend rescaled to `sum w v` (`166ef0e`), then **every expert
+    drawing from one prior draw** (the user's three steps: each expert's
+    conditioned draw from its own `S`, blended, Matheron's residual added).
+    The coupling `u - mu = M f(Z)`, `M K Mᵀ = S`, measured on the hidden
+    layer at 1-3 shared points an expert, before any rescale (blend over
+    reported where two experts carry weight; step ratio overlap/elsewhere):
+    independent 0.47 / 0.98; `chol(S) L^-1` 0.84 / 1.20; `S^½ K^-½` 0.87 /
+    1.23; optimal transport 0.86 / 1.17; Matheron's own `D (K+D)^-1 f(Z) -
+    K (K+D)^-1 eps`, eps keyed by location, 0.70 / 1.16 (its pseudo-noise
+    dominates where the data are dense, and is independent but at shared
+    points); sequential conditioning on an earlier expert's values 0.72,
+    with 74% of the means pulled off. **Chosen: `chol(S) L^-1`**, which is
+    `k R G^-1 Phi(Z) w` in the realization and needs no inverse of K --
+    the symmetric and transport maps need `K^-½`, which a `SelectInput`
+    network's K (conditioned at 1e18) would not survive; the exact rescale
+    closes what the coupling leaves. `G` is the Cholesky of the features'
+    Gram matrix at the inducing points, so each expert's draw is exactly
+    standard and its posterior exact. Experts drawn alone with one seed
+    correlate at 0.72 where they meet.
+  - **Gates on the folded section** (2000 realizations; ratio of their
+    variance to the reported one, median): one expert, GP on a GP 1.00,
+    beside the coordinates 1.00, the walk 0.99 (0.9.3: 0.59, 0.35, 0.45);
+    three experts 0.93, 0.99, 0.99, means within their intervals (2-8%
+    outside). The 0.93 left is the experts' mean functions disagreeing
+    (their spread 28% of the variance on the GP on a GP), which a weighted
+    blend of means loses by convexity and no coupling recovers. A shallow
+    GP's realizations against its exact posterior covariance: variance
+    1.00, correlation error 0.023 median, 0.07 at the 95th percentile (the
+    Monte Carlo floor at 2000 realizations 0.022) -- the draw and the
+    residual share `w`, so the features' error adds a small
+    cross-covariance; 0.9.3 had 0.07 and 0.15 there. **The GeoScape
+    exchange network** (32 experts, three walk readers on Matern 3/2 and
+    exponential kernels, 600 conditioning points): every reader's
+    realizations at 0.994-1.006 of the reported variance (before: 0.82-0.91),
+    4-6.5% of the points outside the chi-square band, 5-7.5% of the means
+    outside theirs; an epoch 435 s (441 before), drawing a reader's
+    realizations 233 s at a GPU peak of 9.9-11 GB.
+  - **The features' random numbers are drawn on Philox by name**:
+    `auto_select` picks another generator under XLA, and a compiled
+    prediction drew another basis (realizations apart by their own size);
+    plain and compiled now agree to 1.4e-7 of the field's scale.
+  - **Training** (step 3, folded section only, three seeds, new-hole log
+    score): the second moment from scratch -2.04, -1.94, -2.42 beside the
+    coordinates (the moment bound -9.6 to -11.2), -10.2, -7.5, -8.4 on the
+    GP on a GP (-12.4 to -13.9); the sampled warm-up is not needed. Walker,
+    chapter 16 and the GeoScape network untried; step 4 not started.
 
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same
