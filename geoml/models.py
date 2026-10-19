@@ -1123,7 +1123,9 @@ class VGPNetwork(_GPModel):
     def _propagation_key(self):
         """What the propagation adds to a cached trace's key."""
         return (self.options.expert_propagation,
-                getattr(self.options, "propagation", "marginal"))
+                getattr(self.options, "propagation", "marginal"),
+                _latent.network._UNCERTAIN_POINTS_SECOND_MOMENT,
+                _latent.network._PATHWISE_REALIZATIONS)
 
     def _step_rule(self):
         """What a cached training step's trace depends on beyond its
@@ -1301,7 +1303,9 @@ class VGPNetwork(_GPModel):
             # prediction, one leaf at a time, then handed to the likelihoods
             # each leaf serves
             mus, vars_, simss = [], [], []
-            with _latent.once_per_pass():
+            # a bound summed over rows reads each row's realizations
+            # alone: drawn from the marginal (`marginal_draws`)
+            with _latent.once_per_pass(), _latent.marginal_draws():
                 predicted = [leaf.predict(x, x_var=x_var, n_sim=samples,
                                           seed=[seed, 0])
                              for leaf in self.leaves]
@@ -1734,6 +1738,16 @@ class VGPNetwork(_GPModel):
                 per_leaf = [leaf.predict(x_new, x_var=x_var, n_sim=n_sim,
                                          seed=[seed, 0])
                             for leaf in self.leaves]
+                # the realizations carry each node's own residual; the
+                # prediction integrates it analytically from the same draws
+                # without it (the user's choice 2(b))
+                owns = [leaf._own_noise for leaf in self.leaves]
+                smooth = None
+                if any(o is not None for o in owns):
+                    with _latent.network.smooth_draws():
+                        smooth = [_tf.transpose(leaf.simulate(
+                            n_sim, [seed, 0]), [1, 0, 2])
+                            for leaf in self.leaves]
             for predicted in per_leaf:
                 mu, var, sim, exp_var = predicted
                 mus.append(_tf.transpose(mu[:, :, 0]))
@@ -1751,12 +1765,22 @@ class VGPNetwork(_GPModel):
             # a likelihood integrates beside its noise; a model with
             # certain inputs passes nothing, as it always has
             pred_jitter = self._jitter_by_likelihood(jitters, exp_vars)
+            pred_smooth = [None] * len(self.likelihoods)
+            pred_own = [None] * len(self.likelihoods)
+            if smooth is not None:
+                pred_smooth = self._by_likelihood(smooth)
+                pred_own = self._jitter_by_likelihood(
+                    [None if o is None else _tf.transpose(o) for o in owns],
+                    exp_vars)
 
             output = []
-            for mu, var, sim, exp_var, jitter, lik, v_inp in zip(
-                    pred_mu, pred_var, pred_sim, pred_exp_var, pred_jitter,
-                    self.likelihoods, variable_inputs):
+            for mu, var, sim, exp_var, jitter, smooth_sim, own, lik, \
+                    v_inp in zip(pred_mu, pred_var, pred_sim, pred_exp_var,
+                                 pred_jitter, pred_smooth, pred_own,
+                                 self.likelihoods, variable_inputs):
                 extra = {} if jitter is None else {"jitter": jitter}
+                if smooth_sim is not None and own is not None:
+                    extra = {"smooth": smooth_sim, "own": own}
                 output.append(
                     lik.predict(
                         mu, var, sim, exp_var,

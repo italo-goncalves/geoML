@@ -745,13 +745,20 @@ class _ContinuousLikelihood(_Likelihood):
         return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, *args, include_noise=True,
-                n_splits=None, cutoffs=None, jitter=None, **kwargs):
+                n_splits=None, cutoffs=None, jitter=None, smooth=None,
+                own=None, **kwargs):
         # One field, and everything is read from it. The noise is integrated
         # out rather than drawn, so what comes back is already free of the
         # part of the spread that refining cannot resolve: a block's
         # dispersion is the ground's, and a block straddling a cut-off really
         # does straddle it.
         values, noise = self._values_and_noise(sims, include_noise, jitter)
+        # the prediction from the same realizations without the nodes' own
+        # residuals, that residual's variance integrated beside the noise:
+        # the realizations carry everything, the prediction takes the
+        # residual analytically rather than by Monte Carlo
+        smooth_values = None if smooth is None else \
+            self._values_and_noise(smooth, include_noise, own)[0]
 
         # taken from the sub-blocks, so before they are averaged away; one
         # value per realization, then the mean over them, which is the
@@ -765,7 +772,9 @@ class _ContinuousLikelihood(_Likelihood):
         mu = _aggregate(mu, n_splits=n_splits)
         var = _aggregate(var, n_splits=n_splits)
 
-        avg_sim = _tf.reduce_mean(sims, axis=2)
+        avg_sim = _tf.reduce_mean(sims, axis=2) if smooth_values is None \
+            else _tf.reduce_mean(_aggregate(smooth_values, n_splits=n_splits),
+                                 axis=2)
         out = {"mean": mu,
                "variance": var,
                "simulations": sims,

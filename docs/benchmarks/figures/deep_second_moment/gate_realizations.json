@@ -1,0 +1,47 @@
+[
+ {
+  "network": "dgp",
+  "iterations": 500,
+  "nodes": 64,
+  "0.9.3": {
+   "var_ratio_median": 0.594878651236557,
+   "var_outside_95": 0.9466666666666667,
+   "mean_outside_95": 0.0
+  },
+  "pathwise": {
+   "var_ratio_median": 0.9985840181702552,
+   "var_outside_95": 0.30333333333333334,
+   "mean_outside_95": 0.04666666666666667
+  }
+ },
+ {
+  "network": "concat",
+  "iterations": 500,
+  "nodes": 64,
+  "0.9.3": {
+   "var_ratio_median": 0.3451384203285357,
+   "var_outside_95": 0.9766666666666667,
+   "mean_outside_95": 0.0
+  },
+  "pathwise": {
+   "var_ratio_median": 0.9966139267786359,
+   "var_outside_95": 0.13666666666666666,
+   "mean_outside_95": 0.023333333333333334
+  }
+ },
+ {
+  "network": "walk",
+  "iterations": 500,
+  "nodes": 64,
+  "0.9.3": {
+   "var_ratio_median": 0.4513632352675888,
+   "var_outside_95": 0.9566666666666667,
+   "mean_outside_95": 0.0
+  },
+  "pathwise": {
+   "var_ratio_median": 1.003369435402078,
+   "var_outside_95": 0.10666666666666667,
+   "mean_outside_95": 0.09333333333333334
+  }
+ }
+]

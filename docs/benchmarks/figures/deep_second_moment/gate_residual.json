@@ -1,0 +1,30 @@
+[
+ {
+  "kernel": "Gaussian",
+  "iterations": 500,
+  "0.9.3": {
+   "var_ratio_median": 0.955008658527209,
+   "corr_error_median": 0.017530305013591346,
+   "corr_error_95": 0.06585953165343313
+  },
+  "residual": {
+   "var_ratio_median": 0.9988279992968914,
+   "corr_error_median": 0.014696928201757956,
+   "corr_error_95": 0.04485413648364417
+  }
+ },
+ {
+  "kernel": "Matern52",
+  "iterations": 500,
+  "0.9.3": {
+   "var_ratio_median": 0.7716008987094214,
+   "corr_error_median": 0.02089811565789501,
+   "corr_error_95": 0.1514688584416037
+  },
+  "residual": {
+   "var_ratio_median": 1.0062620780784597,
+   "corr_error_median": 0.017198088645565192,
+   "corr_error_95": 0.053385349472621094
+  }
+ }
+]

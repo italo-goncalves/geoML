@@ -95,7 +95,11 @@ def _transformed(model, container):
 
 
 # --------------------------------------------------------------------------- #
-def test_no_variance_is_basic_gp():
+def test_no_variance_is_basic_gp(monkeypatch):
+    # the deprecated node keeps the 0.9.3 realizations, which a BasicGP
+    # draws with the feature residual switched off
+    import geoml.latent.network as network
+    monkeypatch.setattr(network, "_PATHWISE_REALIZATIONS", False)
     point, inducing, labels = _training_data()
     query = geoml.data.PointData.from_array(_points(20, 2, seed=5), labels)
     results = []
