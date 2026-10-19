@@ -8,9 +8,9 @@
    "corr_error_95": 0.06585953165343313
   },
   "residual": {
-   "var_ratio_median": 0.9988279992968914,
-   "corr_error_median": 0.014696928201757956,
-   "corr_error_95": 0.04485413648364417
+   "var_ratio_median": 1.00126247955485,
+   "corr_error_median": 0.02284313690773343,
+   "corr_error_95": 0.06977014966900694
   }
  },
  {
@@ -22,9 +22,9 @@
    "corr_error_95": 0.1514688584416037
   },
   "residual": {
-   "var_ratio_median": 1.0062620780784597,
-   "corr_error_median": 0.017198088645565192,
-   "corr_error_95": 0.053385349472621094
+   "var_ratio_median": 1.0001267047620759,
+   "corr_error_median": 0.022542721186947667,
+   "corr_error_95": 0.07151531875377823
   }
  }
 ]

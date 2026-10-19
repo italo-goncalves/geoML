@@ -852,6 +852,54 @@ def test_the_realizations_hold_the_variance_the_moments_report():
     assert np.mean(np.abs(z) > 1.96) < 0.15
 
 
+@pytest.mark.parametrize("n_experts", [1, 3])
+def test_a_gp_holds_its_variance_drawn_from_one_prior(n_experts):
+    # at a certain input every expert draws from one prior draw; blended,
+    # rescaled to the variance the moments report
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=n_experts, kernel=geoml.kernels.Gaussian())
+    parts = [_leaf_realizations(model, hidden[0], x, 200, (11, c))
+             for c in range(10)]
+    mean, var = parts[0][0], parts[0][1]
+    sims = np.concatenate([p[2] for p in parts], axis=1)
+    ratio = sims.var(axis=1, ddof=1) / var
+    assert 0.97 < np.median(ratio) < 1.03, np.median(ratio)
+    z = (sims.mean(axis=1) - mean) / np.sqrt(var / sims.shape[1])
+    assert np.mean(np.abs(z) > 1.96) < 0.15
+
+
+# measured 0.72 (2026-10-19); drawn apart, the experts' draws of their
+# inducing values were independent
+CORRELATION_AT_OVERLAPS = 0.5
+
+
+def test_experts_drawing_one_prior_agree_where_they_meet():
+    # each expert alone, with the same seed: where two carry weight their
+    # realizations come from the same prior draw, so they are correlated
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=3, kernel=geoml.kernels.Gaussian())
+    gp, xt = hidden[0], tf.constant(x)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        with _net.once_per_pass():
+            gp.propagate(xt)
+            weights = np.asarray(gp._sim_state[2])[:, 0]           # [E, n]
+    alone = []
+    for e in range(3):
+        with _net.expert_subset([e]), model._propagation():
+            model._refresh(model.options.jitter)
+            with _net.once_per_pass():
+                _, _, sims, _ = gp.predict(xt, n_sim=400, seed=[5, 0])
+        alone.append(np.asarray(sims)[0])                           # [n, S]
+    corr = []
+    for e in range(3):
+        for f in range(e + 1, 3):
+            for i in np.flatnonzero((weights[e] > 0.2) & (weights[f] > 0.2)):
+                corr.append(np.corrcoef(alone[e][i], alone[f][i])[0, 1])
+    assert len(corr) > 0
+    assert np.median(corr) > CORRELATION_AT_OVERLAPS, np.median(corr)
+
+
 def test_the_realizations_are_paired_with_the_parent_s(monkeypatch):
     # realization s of the leaf reads realization s of the hidden layer:
     # the leaf's realizations follow the hidden layer's, not only its mean
@@ -881,10 +929,11 @@ def test_the_realizations_are_paired_with_the_parent_s(monkeypatch):
     assert np.median(explained) > 0.05, np.median(explained)
 
 
+@pytest.mark.parametrize("n_experts", [1, 3])
 def test_the_realizations_do_not_depend_on_the_batch_or_the_chunk(
-        monkeypatch):
+        n_experts, monkeypatch):
     model, leaf, hidden, mapping, x = _network(
-        _two_layers, kernel=geoml.kernels.Matern52())
+        _two_layers, n_experts=n_experts, kernel=geoml.kernels.Matern52())
     _, _, whole = _leaf_realizations(model, leaf, x[:30], 12)
     _, _, part = _leaf_realizations(model, leaf, x[10:20], 12)
     np.testing.assert_allclose(part, whole[10:20], rtol=1e-10, atol=1e-12)

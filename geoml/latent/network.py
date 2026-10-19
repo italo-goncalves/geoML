@@ -374,21 +374,6 @@ class _Predicted(tuple):
         return predicted
 
 
-def _fitted_draw(ksk, kr):
-    """At an uncertain input's realization: the factor fitting the draw
-    of the inducing values `k R eta` -- whose variance is `kr`, `|k R|²` --
-    to the conditional variance `max(1 - ksk, 0)`, and the variance left to
-    add as noise. Where the first carries more than the second (the
-    conditioned inducing points sitting closer than the expected kernel
-    among them allows) it is scaled down, so that every draw carries the
-    conditional variance exactly."""
-    conditional = _tf.maximum(1.0 - ksk, 0.0)
-    over = kr > conditional
-    fit = _tf.where(over, _tf.sqrt(_tf.math.divide_no_nan(
-        conditional, _tf.where(over, kr, 1.0))), _tf.ones_like(kr))
-    return fit, _tf.maximum(conditional - kr, 0.0)
-
-
 def _residual_scale(target, held):
     """The factor taking a residual of variance `held` to `target`, zero
     where the target is below 1e-10: at an inducing point both are
@@ -708,8 +693,10 @@ def _simulation_normals(shape, seed, key=None):
     """
     seed = _node_seed(seed, key)
     if not _QMC_SIMULATIONS:
+        # Philox named rather than left to `auto_select`, which picks
+        # another generator under XLA (`jit_predict`)
         return _tf.random.stateless_normal(
-            shape=shape, seed=seed, dtype=_tf.float64)
+            shape=shape, seed=seed, dtype=_tf.float64, alg="philox")
 
     size, n, n_sim = (int(s) for s in shape)
     rng = _np.random.default_rng([abs(int(s)) for s in seed])
@@ -2025,7 +2012,7 @@ class _GPNode(_FunctionalLatentVariable):
                     # the realizations carry what the inducing points leave
                     # out as a random-feature residual: smooth, the kernel's
                     # correlation, its variance exact at every point
-                    self._residual_state = (x, cov_cross, weights)
+                    self._residual_state = x
                     self._own_noise = gap
                 else:
                     self._realization_gap = gap
@@ -2054,6 +2041,8 @@ class _GPNode(_FunctionalLatentVariable):
                 * normals
         if getattr(self, "_path_state", None) is not None:
             return self._pathwise_simulate(n_sim, seed)
+        if getattr(self, "_residual_state", None) is not None:
+            return self._shared_prior_simulate(n_sim, seed)
         if _slots_of(self.root) is not None:
             sims = self._slot_simulate(n_sim, seed)
         else:
@@ -2077,9 +2066,6 @@ class _GPNode(_FunctionalLatentVariable):
                     _tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0) \
                     + scale[:, :, None] * _tf.reduce_sum(
                         draws * weights[:, :, :, None], axis=0)
-        if getattr(self, "_residual_state", None) is not None \
-                and not _SMOOTH_DRAWS:
-            sims = sims + self._feature_residual(n_sim, seed)
         return sims
 
     def interpolate(self, x, x_var=None):
@@ -3148,26 +3134,40 @@ class BasicGP(_GPNode):
             and type(self.kernel) in (
             _kr.Gaussian, _kr.RationalQuadratic) + tuple(_KERNEL_MIXTURES)
 
-    def _feature_basis(self, d, seed):
+    def _feature_count(self):
+        """The most inducing points any expert holds, active or not: the
+        basis must not change with the experts a call computes, or a
+        prediction by expert would draw from another prior."""
+        return max(int(n) for n in self.root.n_ip)
+
+    def _feature_basis(self, d, seed, count=0):
         """Random Fourier features of the node's kernel, as the expected
         kernel writes it -- `constant + sum_q w_q exp(-rate_q r²)` over the
         distance in ranges: each feature a component drawn by its weight
         and a frequency Gaussian at `2 rate_q`, the constant a feature of
         its own. Frequencies `[J, d]`, phases `[J]`, the constant's
-        variance, fixed by the seed and the node's name."""
+        variance, fixed by the seed and the node's name. `J` is at least
+        twice `count`, the most inducing points an expert holds, so that
+        their features' Gram matrix has full rank (`_whitened_prior`)."""
         omega, weights, constant = _kernel_components(self.kernel)
-        n_features = self._FEATURES
-        logits = _tf.math.log(_tf.maximum(weights, 1e-300))[None]
-        pick = _tf.random.stateless_categorical(
-            logits, n_features, _node_seed(seed, "%s/components" % self.name),
-            dtype=_tf.int32)[0]
+        n_features = max(self._FEATURES, 2 * int(count))
+        # every draw on Philox, named: `auto_select` picks another
+        # generator under XLA, and a compiled prediction drew another basis;
+        # the component by inverting the weights' CDF, the categorical op
+        # taking no algorithm
+        cumulative = _tf.cumsum(weights) / _tf.reduce_sum(weights)
+        pick = _tf.minimum(_tf.searchsorted(
+            cumulative, _tf.random.stateless_uniform(
+                [n_features], _node_seed(seed, "%s/components" % self.name),
+                dtype=_tf.float64, alg="philox"), side="right"),
+            _tf.size(weights) - 1)
         rates = _tf.gather(omega, pick)
         frequencies = _tf.random.stateless_normal(
             [n_features, d], _node_seed(seed, "%s/frequencies" % self.name),
-            dtype=_tf.float64) * _tf.sqrt(2.0 * rates)[:, None]
+            dtype=_tf.float64, alg="philox") * _tf.sqrt(2.0 * rates)[:, None]
         phases = _tf.random.stateless_uniform(
             [n_features], _node_seed(seed, "%s/phases" % self.name),
-            minval=0.0, maxval=2.0 * _np.pi, dtype=_tf.float64)
+            minval=0.0, maxval=2.0 * _np.pi, dtype=_tf.float64, alg="philox")
         total = _tf.reduce_sum(weights)
         return frequencies, phases, _tf.convert_to_tensor(constant,
                                                           _tf.float64), total
@@ -3184,64 +3184,103 @@ class BasicGP(_GPNode):
         flat = _tf.ones_like(cosines[..., :1]) * _tf.sqrt(constant)
         return _tf.concat([cosines, flat], axis=-1)
 
-    def _feature_residual(self, n_sim, seed):
-        """What the inducing points leave out, drawn: a prior draw of the
-        node by random features, less its projection on each expert's
-        inducing points -- `f(x) - k_x K^-1 f(Z)`, the residual of a
-        decoupled posterior draw (Wilson et al. 2020) -- rescaled at every
-        point to its exact variance `1 - k_x K^-1 k_xᵀ`, blended over the
-        experts as the realizations are. One prior draw serves every expert,
-        so overlapping experts agree where they meet. `[size, n, S]`."""
-        x, cov_cross, weights = self._residual_state
-        with _tf.name_scope("gp_feature_residual"):
-            basis = self._feature_basis(int(self.parent.size), seed)
-            n_features = int(basis[0].shape[0]) + 1
-            draws = _tf.random.stateless_normal(
-                [self.size, n_features, n_sim],
-                _node_seed(seed, "%s/feature_weights" % self.name),
-                dtype=_tf.float64)
-            phi_x = self._features(x, basis)                  # [n, J + 1]
+    def _shared_normals(self, points, n_sim, seed, mask=None):
+        """The standard normals the shared prior draw gives the inducing
+        values at `points` (`G^-1 Phi(Z) w`, as `_shared_prior_simulate`
+        draws them), `[..., size, m, S]`: what a walk riding this field's
+        realizations reads."""
+        basis = self._feature_basis(int(self.parent.size), seed,
+                                    self._feature_count())
+        draws = _simulation_normals(
+            [self.size, int(basis[0].shape[0]) + 1, n_sim], seed,
+            key="%s/feature_weights" % self.name)
+        prior = self._whitened_prior(self._features(points, basis), mask)
+        return _tf.einsum("...mj,sjS->...smS", prior, draws)
 
-            def residual(k, points, chol, mask=None):
-                phi_z = self._features(points, basis)         # [m, J + 1]
-                if mask is not None:
-                    phi_z = phi_z * mask[:, None]
-                # whitened by the Cholesky of K, never through its inverse:
-                # with a long range K^-1 holds entries of 1e6, `k K^-1` then
-                # rounds differently with the batch's shape, and the square
-                # root of a small target amplifies it (5e-8 measured)
-                white = _tf.linalg.triangular_solve(
-                    chol, _tf.transpose(k), lower=True)       # [m, n]
-                proj = _tf.matmul(white, _tf.linalg.triangular_solve(
-                    chol, phi_z, lower=True), transpose_a=True)
-                res = phi_x - proj                            # [n, J + 1]
-                target = _tf.maximum(
-                    1.0 - _tf.reduce_sum(white ** 2, 0), 0.0)
-                held = _tf.reduce_sum(res ** 2, -1)
-                scale = _residual_scale(target, held)
-                return res * scale[:, None], target           # [n, J + 1]
+    @staticmethod
+    def _whitened_prior(phi_z, mask=None):
+        """`G^-1 Phi(Z)`, `G` the Cholesky of the features' Gram matrix at
+        the inducing points, `[..., m, J + 1]`: with `w` the prior draw's
+        feature weights, `G^-1 Phi(Z) w` is exactly standard whatever the
+        features, and `L G^-1 Phi(Z) w` has covariance K exactly. A padded
+        point's row is zero."""
+        if mask is not None:
+            phi_z = phi_z * mask[..., None]
+        gram = _tf.matmul(phi_z, phi_z, transpose_b=True)
+        eye = _tf.eye(_tf.shape(phi_z)[-2], dtype=_tf.float64)
+        if mask is not None:
+            gram = gram + _tf.linalg.diag(1.0 - mask)
+        return _tf.linalg.triangular_solve(
+            _tf.linalg.cholesky(gram + 1e-9 * eye), phi_z, lower=True)
 
+    def _shared_prior_simulate(self, n_sim, seed):
+        """Realizations at a certain input, every expert's from one prior
+        draw `f = phi(·) w`.
+
+        Each expert's inducing values are drawn from its own posterior as
+        `u - mu = K R G^-1 Phi(Z) w` (`_whitened_prior`: standard, so the
+        expert's posterior is exact), its realization `k K^-1 u`; Matheron's
+        rule adds the prior draw's residual `f(x) - k K^-1 f(Z)`, `f(Z) = L
+        G^-1 Phi(Z) w`, orthogonal to it. Both are written through the
+        Cholesky of K, never its inverse. The experts are blended by their
+        weights, and the blend -- linear in `w`, so of a variance known
+        exactly -- rescaled to the variance the moments report. Experts
+        sharing the prior draw agree where the data leave it be, and nearly
+        where they meet: the blend kept 0.84 of the variance at the folded
+        section's overlaps before the rescale, against 0.47 drawn apart.
+        Under `smooth_draws` the realizations without the residual, scaled
+        alike. `[size, n, S]`."""
+        x = self._residual_state
+        cov_cross, mu, weights = self._swept()
+        w_var = self._moment_state[2]
+        with _tf.name_scope("gp_shared_prior_simulation"):
             slots = _slots_of(self.root)
             if slots is not None:
                 ips, _ = _slot_points(self.parent)
                 pmask = _slot_mask(self.root)
-                parts = [residual(cov_cross[p], ips[p],
-                                  self.slots_cov_chol[p], pmask[p])
-                         for p in range(slots.size)]
             else:
                 ids = _active_experts(self.root)
                 ips, _ = self._parent_points(ids)
-                parts = [residual(cov_cross[p], ips[p], self.cov_chol[p])
-                         for p in range(len(ids))]
-            # blended as features, as the readers blend theirs, and the
-            # blend rescaled to the variance the experts leave
-            vec = _tf.stack([v for v, _ in parts], 0)        # [E, n, J + 1]
-            target = _tf.stack([t for _, t in parts], 0)     # [E, n]
-            vec = _tf.einsum("esn,enj->snj", weights, vec)
-            left = _tf.einsum("esn,en->sn", weights, target)
-            factor = _residual_scale(left, _tf.reduce_sum(vec ** 2, -1))
-            return factor[:, :, None] * _tf.einsum("snj,sjS->snS", vec,
-                                                   draws)
+            basis = self._feature_basis(int(self.parent.size), seed,
+                                        self._feature_count())
+            n_features = int(basis[0].shape[0]) + 1
+            draws = _simulation_normals(
+                [self.size, n_features, n_sim], seed,
+                key="%s/feature_weights" % self.name)
+            phi_x = self._features(x, basis)                  # [n, J + 1]
+
+            def coefficients(k, points, chol, root_r, mask=None):
+                prior = self._whitened_prior(self._features(points, basis),
+                                             mask)            # [.., m, J+1]
+                white = _tf.linalg.triangular_solve(
+                    chol, _tf.linalg.matrix_transpose(k), lower=True)
+                residual = phi_x - _tf.matmul(white, prior, transpose_a=True)
+                drawn = _tf.einsum("...nm,...smj->...snj", k, _tf.matmul(
+                    root_r, prior[..., None, :, :]))
+                return drawn, residual   # [.., size, n, J+1], [.., n, J+1]
+
+            if slots is not None:
+                drawn, residual = coefficients(
+                    cov_cross, ips, self.slots_cov_chol, self.slots_chol_r,
+                    pmask)
+                mean = _tf.reduce_sum(mu[..., 0] * weights, 0)
+                smooth = _tf.einsum("psn,psnj->snj", weights, drawn)
+                total = smooth + _tf.einsum("psn,pnj->snj", weights,
+                                            residual)
+            else:
+                mean = smooth = total = 0.0
+                for p in range(len(ids)):
+                    drawn, residual = coefficients(
+                        cov_cross[p], ips[p], self.cov_chol[p],
+                        self.chol_r[p])
+                    w = weights[p][..., None]
+                    mean = mean + mu[p][..., 0] * weights[p]
+                    smooth = smooth + drawn * w
+                    total = total + (drawn + residual[None]) * w
+            factor = _residual_scale(w_var, _tf.reduce_sum(total ** 2, -1))
+            part = smooth if _SMOOTH_DRAWS else total
+            return mean[..., None] + factor[..., None] * _tf.einsum(
+                "snj,sjS->snS", part, draws)
 
     def _certain_gap(self, cov_cross, var, weights):
         if _slots_of(self.root) is not None:
@@ -3261,14 +3300,16 @@ class BasicGP(_GPNode):
         """Realizations through the parent's: realization `s` at the
         parent's realization `s` (paired with the parent's own), plus the
         variance those leave out as noise keyed by location; the inducing
-        inputs conditioned on the draw; `k (alpha + R eta) + bias` blended
-        over the experts, the draw of the inducing values fitted to the
-        conditional variance (`_fitted_draw`); plus what the conditional
-        variance leaves, the same way. The ensemble then carries the
-        variance the second moment reports. Every random number is drawn
-        first, as the other nodes draw them; the realizations are then
-        computed a chunk at a time in both passes (`_chunked_map`), memory
-        going with the chunk."""
+        inputs conditioned on the draw; each expert's realization `k alpha +
+        bias` plus its draw and residual from one shared prior draw, as
+        `_shared_prior_simulate` writes them (the damped features at
+        uncertain inducing points); blended over the experts and rescaled,
+        draw by draw, to the conditional variance `max(1 - k (K + D)^-1 kᵀ,
+        0)` blended alike. The ensemble then carries the variance the second
+        moment reports. Every random number is drawn first, as the other
+        nodes draw them; the realizations are then computed a chunk at a
+        time in both passes (`_chunked_map`), memory going with the
+        chunk."""
         coords, chain, weights, w_mu, w_var, x, x_var = self._path_state
         key = None
         if _ONCE is not None:
@@ -3302,15 +3343,16 @@ class BasicGP(_GPNode):
                                                            1.0)), 1.0)
             z = _tf.where(positive[:, None, :],
                           (h - x[:, None, :]) / scale[:, None, :], 0.0)
-            # the residual by random features: one basis for the node,
-            # weights per realization
-            basis = self._feature_basis(int(self.parent.size), seed)
+            # one prior draw for every expert: one basis for the node,
+            # feature weights per realization
+            slots = _slots_of(self.root)
+            basis = self._feature_basis(int(self.parent.size), seed,
+                                        self._feature_count())
             frequencies, phases, constant, total = basis
             n_features = int(frequencies.shape[0]) + 1
-            fweights = _tf.random.stateless_normal(
-                [self.size, n_features, n_sim],
-                _node_seed(seed, "%s/feature_weights" % self.name),
-                dtype=_tf.float64)
+            fweights = _simulation_normals(
+                [self.size, n_features, n_sim], seed,
+                key="%s/feature_weights" % self.name)
             ranges = _tf.reshape(self.parameters["ranges"].get_value(), [-1])
             fscale = _tf.sqrt(2.0 * total / (n_features - 1))
             omega, kweights, _ = _kernel_components(self.kernel)
@@ -3344,44 +3386,32 @@ class BasicGP(_GPNode):
                     * _tf.zeros_like(points)[..., None, :, :]
                 return [e.mean, var, cov, points, spread]
 
-            slots = _slots_of(self.root)
+            def prior_parts(points, points_var, root_r, mask=None):
+                prior = self._whitened_prior(
+                    damped_features(points, points_var), mask)
+                return [_tf.matmul(root_r, prior[..., None, :, :]), prior]
+
             if slots is not None:
                 ips, ipvs = _slot_points(self.parent)
                 pmask = _slot_mask(self.root)
-                m = pmask.shape[1]
-                drawn = [_tf.pad(_simulation_normals(
-                    [self.size, n, n_sim], seed,
-                    key=_expert_key(self.name, i)),
-                    [[0, 0], [0, m - n], [0, 0]])
-                    for i, n in enumerate(self.root.n_ip)]
-                drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
-                values = _tf.matmul(self.slots_chol_r, _tf.gather(
-                    _tf.stack(drawn), slots.ids))      # [P, size, m, S]
                 outer = pmask[:, None, :, None] * pmask[:, None, None, :]
                 groups = [chain_parts(chain[0], ips, ipvs) + [
-                    values, self.slots_cov_smooth_inv * outer,
-                    self.slots_chol_r * outer, self.slots_alpha[..., 0],
-                    self.slots_bias[:, None, None, None], pmask, weights,
-                    self.slots_cov_chol, _tf.linalg.triangular_solve(
-                        self.slots_cov_chol,
-                        damped_features(ips, ipvs) * pmask[..., None],
-                        lower=True)]]
+                    self.slots_cov_smooth_inv * outer]
+                    + prior_parts(ips, ipvs, self.slots_chol_r * outer, pmask)
+                    + [self.slots_alpha[..., 0],
+                       self.slots_bias[:, None, None, None], pmask, weights,
+                       self.slots_cov_chol]]
             else:
                 ids = _active_experts(self.root)
                 ips, ipvs = self._parent_points(ids)
                 groups = [chain_parts(chain[p], ips[p], ipvs[p]) + [
-                    _tf.matmul(self.chol_r[p], _simulation_normals(
-                        [self.size, self.root.n_ip[i], n_sim], seed,
-                        key=_expert_key(self.name, i))),
-                    self.cov_smooth_inv[p], self.chol_r[p],
-                    self.alpha[p][..., 0],
-                    _tf.reshape(self.parameters["bias_%d" % i].get_value(),
-                                [1, 1, 1]),
-                    _tf.ones([int(self.root.n_ip[i])], _tf.float64),
-                    weights[p], self.cov_chol[p],
-                    _tf.linalg.triangular_solve(
-                        self.cov_chol[p], damped_features(ips[p], ipvs[p]),
-                        lower=True)]
+                    self.cov_smooth_inv[p]]
+                    + prior_parts(ips[p], ipvs[p], self.chol_r[p])
+                    + [self.alpha[p][..., 0],
+                       _tf.reshape(self.parameters["bias_%d" % i].get_value(),
+                                   [1, 1, 1]),
+                       _tf.ones([int(self.root.n_ip[i])], _tf.float64),
+                       weights[p], self.cov_chol[p]]
                     for p, i in enumerate(ids)]
             per_group = len(groups[0])
             sliced = slots is not None
@@ -3396,11 +3426,11 @@ class BasicGP(_GPNode):
                 z_c = z[:, start:start + chunk, :]
                 if sliced:
                     z_c = z_c[None]
-                sims = resid = left = eta = agree = actual = 0.0
+                sims = smooth = resid = target = 0.0
                 w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
                 for g in range(len(groups)):
-                    (mean, var, cov, points, spread, values, smooth_inv,
-                     root_r, alpha, bias, mask, w, chol, phi_white) = \
+                    (mean, var, cov, points, spread, smooth_inv, root_prior,
+                     prior, alpha, bias, mask, w, chol) = \
                         flat[g * per_group:(g + 1) * per_group]
                     # the standard deviation with a finite gradient at zero
                     held = var > 0.0
@@ -3413,27 +3443,21 @@ class BasicGP(_GPNode):
                         * mask[..., None, None, :]          # [.., n, c, m]
                     ksk = _tf.einsum("...nSi,...sij,...nSj->...snS", k,
                                      smooth_inv, k)
-                    kr = _tf.reduce_sum(_tf.einsum(
-                        "...nSm,...smj->...snSj", k, root_r) ** 2, -1)
-                    fit, rest = _fitted_draw(ksk, kr)
+                    conditional = _tf.maximum(1.0 - ksk, 0.0)
                     part = _tf.einsum("...nSm,...sm->...snS", k, alpha) \
                         + bias
-                    # the inducing values' draw, independent between
-                    # experts: blended, then rescaled below
-                    drawn_eta = fit * _tf.einsum(
-                        "...nSm,...smS->...snS", k,
-                        values[..., start:start + chunk])
-                    seen = fit ** 2 * kr
-                    # the residual: features at the realized input less
-                    # their projection on the inducing points' damped ones,
-                    # rescaled at every draw to the variance left
+                    # the expert's draw of its inducing values from the
+                    # shared prior, `k R G^-1 Phi(Z) w` as coefficients of w
+                    drawn = _tf.einsum("...nSm,...smj->...snSj", k,
+                                       root_prior)  # [.., size, n, c, J + 1]
+                    # the residual: the prior draw at the realized input
+                    # less its projection on the inducing points, through
+                    # the Cholesky of K
                     cosines = fscale * _tf.cos(_tf.einsum(
                         "...nSd,jd->...nSj", h_e / ranges, frequencies)
                         + phases)
                     phi_h = _tf.concat([cosines, _tf.ones_like(
                         cosines[..., :1]) * _tf.sqrt(constant)], axis=-1)
-                    # projected through the Cholesky of K, as in
-                    # `_feature_residual`
                     shape = _tf.shape(k)
                     white = _tf.linalg.triangular_solve(
                         chol, _tf.linalg.matrix_transpose(_tf.reshape(
@@ -3442,40 +3466,30 @@ class BasicGP(_GPNode):
                     # shaped from `k`, which carries the slots where the
                     # input's mean (a `GaussianInput`'s) may not
                     res = phi_h - _tf.reshape(_tf.einsum(
-                        "...mN,...mj->...Nj", white, phi_white),
+                        "...mN,...mj->...Nj", white, prior),
                         _tf.concat([shape[:-1], _tf.shape(phi_h)[-1:]], 0))
-                    held = _tf.reduce_sum(res ** 2, -1)   # [.., n, c]
-                    scale = _residual_scale(
-                        rest, held[..., None, :, :])     # [.., size, n, c]
-                    # the experts' residuals blended as features: each
-                    # reads the parent in its own view, so their features
-                    # differ and a blend of drawn residuals would lose
-                    # variance; the blend is rescaled below
-                    vec = (scale * w[..., None])[..., None] \
-                        * res[..., None, :, :, :]   # [.., size, n, c, J + 1]
-                    part = part * w[..., None]
-                    rest = rest * w[..., None]
-                    drawn_eta = drawn_eta * w[..., None]
-                    seen_w = seen * w[..., None]
-                    seen_w2 = seen_w * w[..., None]
+                    wv = w[..., None]                     # [.., size, n, 1]
+                    part = part * wv
+                    conditional = conditional * wv
+                    drawn = drawn * wv[..., None]
+                    res = res[..., None, :, :, :] * wv[..., None]
                     if sliced:
                         part = _tf.reduce_sum(part, 0)
-                        vec = _tf.reduce_sum(vec, 0)
-                        rest = _tf.reduce_sum(rest, 0)
-                        drawn_eta = _tf.reduce_sum(drawn_eta, 0)
-                        seen_w = _tf.reduce_sum(seen_w, 0)
-                        seen_w2 = _tf.reduce_sum(seen_w2, 0)
-                    sims, resid, left = sims + part, resid + vec, left + rest
-                    eta = eta + drawn_eta
-                    agree, actual = agree + seen_w, actual + seen_w2
-                sims = sims + _blend_scale(agree, actual) * eta
-                # the blended residual drawn, rescaled at every draw to the
-                # blended variance left
-                factor = _residual_scale(left, _tf.reduce_sum(resid ** 2, -1))
-                drawn = factor * _tf.einsum("snSj,sjS->snS", resid, w_c)
+                        conditional = _tf.reduce_sum(conditional, 0)
+                        drawn = _tf.reduce_sum(drawn, 0)
+                        res = _tf.reduce_sum(res, 0)
+                    sims, target = sims + part, target + conditional
+                    smooth, resid = smooth + drawn, resid + res
+                # the blend, linear in w, rescaled draw by draw to the
+                # blended conditional variance
+                total = smooth + resid
+                factor = _residual_scale(target,
+                                         _tf.reduce_sum(total ** 2, -1))
+                full = sims + factor * _tf.einsum("snSj,sjS->snS", total, w_c)
+                smooth = sims + factor * _tf.einsum("snSj,sjS->snS", smooth,
+                                                    w_c)
                 # [c, 2, size, n]: the realization and its smooth part
-                return _tf.transpose(_tf.stack([sims + drawn, sims]),
-                                     [3, 0, 1, 2])
+                return _tf.transpose(_tf.stack([full, smooth]), [3, 0, 1, 2])
 
             flat = [x for group in groups for x in group]
             out = _chunked_map(
@@ -3550,8 +3564,8 @@ class BasicGP(_GPNode):
             kr = _tf.reduce_sum(g ** 2, -1)
             ksk = _tf.einsum("...nqi,...sij,...nqj->...snq", k, smooth_inv,
                              k)
-            # what each node's realization adds past `k R eta`, fitted as
-            # `_fitted_draw` fits it
+            # what each node's realization adds past its draw of the
+            # inducing values: the residual's variance, `own`
             rest = _tf.maximum(_tf.maximum(1.0 - ksk, 0.0) - kr, 0.0)
             return (_tf.reduce_sum(g, -2), _tf.reduce_sum(kr, -1),
                     _tf.reduce_sum(rest, -1))
@@ -5619,12 +5633,16 @@ class GPWalk(_FunctionalLatentVariable):
             u, _ = _slot_points(self.walker)
             mask = _slot_mask(self.root)
             m = u.shape[-2]
-            drawn = [_tf.pad(_simulation_normals(
-                [self.size, n, n_sim], seed, key=_expert_key(field.name, i)),
-                [[0, 0], [0, m - n], [0, 0]])
-                for i, n in enumerate(self.root.n_ip)]
-            drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
-            rnd = _tf.gather(_tf.stack(drawn), slots.ids)
+            if field._feature_kernel() and _PATHWISE_REALIZATIONS:
+                rnd = field._shared_normals(u, n_sim, seed, mask)
+            else:
+                drawn = [_tf.pad(_simulation_normals(
+                    [self.size, n, n_sim], seed,
+                    key=_expert_key(field.name, i)),
+                    [[0, 0], [0, m - n], [0, 0]])
+                    for i, n in enumerate(self.root.n_ip)]
+                drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
+                rnd = _tf.gather(_tf.stack(drawn), slots.ids)
             coef = field.slots_alpha + _tf.matmul(field.slots_chol_r, rnd)
             groups = [(u, _tf.transpose(coef, [3, 0, 1, 2]),
                        field.slots_bias[:, None, None], mask)]
@@ -5633,9 +5651,12 @@ class GPWalk(_FunctionalLatentVariable):
             us, _ = _points_of(self.walker, ids)
             groups = []
             for p, i in enumerate(ids):
-                rnd = _simulation_normals(
-                    [self.size, self.root.n_ip[i], n_sim], seed,
-                    key=_expert_key(field.name, i))
+                if field._feature_kernel() and _PATHWISE_REALIZATIONS:
+                    rnd = field._shared_normals(us[p], n_sim, seed)
+                else:
+                    rnd = _simulation_normals(
+                        [self.size, self.root.n_ip[i], n_sim], seed,
+                        key=_expert_key(field.name, i))
                 coef = field.alpha[p] + _tf.matmul(field.chol_r[p], rnd)
                 groups.append((us[p], _tf.transpose(coef, [2, 0, 1]),
                                field.parameters["bias_%d" % i].get_value(),
