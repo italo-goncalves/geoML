@@ -1211,11 +1211,58 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   holes), with one of the same 60 points 13% (0.71). The dense path reads
   every expert at every point: 64 draws 77 ms a step against 15. Slots
   untried.
-- **Next, if pursued**: the second moment at uncertain inducing inputs --
-  the existing quadrature with the inducing inputs conditioned at each
-  node -- with a short sampled warm-up as a training option; measured on
-  Walker or Jura and with experts before any default moves. Want (2) is
-  untouched.
+- **Next: the plan agreed 2026-10-18, being executed.** The goal: a GP
+  node reading another node's output -- a deep layer, a `GPWalk` -- reports
+  the full variance, and **its realizations carry that same variance**:
+  the per-point variance over the ensemble equals `latent_variance` to
+  Monte Carlo error, with the spatial structure of draws of the deep
+  model. Want (2) is untouched.
+  1. **The second moment at uncertain inducing inputs.**
+     `_takes_second_moment` stops requiring certain inducing points: the
+     moments take a quadrature over each point's input `h ~ N(mean, var)`
+     per expert chain, the inducing inputs conditioned on each node `h_q`
+     (`Z | h_q`: mean `u + (c/v)(h_q - mean)`, variance `u_var - c²/v`),
+     the cross-covariance `k(h_q, Z | h_q)` averaged over `Z`'s remaining
+     spread, and the mixture's moments (mean of `m_q`, mean of the node
+     variances plus the variance of `m_q`). A 5x5 Gauss-Hermite grid up to
+     two hidden dimensions, the 64 symmetric Sobol nodes of `_input_nodes`
+     from three. The nodes run in a `while_loop` under a gradient of their
+     own that accumulates, as `_mixture_sum` does, so one node's arrays are
+     alive at a time -- naively 64x the cross-kernel, ~1 GB a reader on the
+     GeoScape walk network. Gates: (1a) mean and variance against 4000
+     draws of the deep model on the folded section's two networks, one
+     and three experts, Gaussian and Matern kernels, to Monte Carlo error;
+     (1b) no chain covariance gives today's second moment exactly and no
+     input variance the plain path; (1c) peak memory and epoch time on the
+     GeoScape network against 3.7 GB and 153 s.
+  2. **Realizations with the same variance.** At an uncertain input,
+     realization `s` reads the parent's realization `s` (paired with the
+     parent's own, as the walk rides the field's), plus the variance the
+     parent's realizations leave out as independent noise per point; the
+     inducing inputs conditioned on it; `k(h_s, Z | h_s)(alpha + R eta_s)
+     + bias`, plus the reader's own unexplained variance as independent
+     noise per point -- **at uncertain inputs only** (the user's choice;
+     whether every GP node should add it is decided at step 4, once its
+     size on shallow models is measured). The location-uncertainty case
+     is folded in: a GP on a `GaussianInput` draws the same way and the
+     separate `_input_jitter` goes (the user's choice). Gates: (2a) at
+     2000 realizations the per-point variance against `latent_variance`
+     within chi-square bounds, the mean against the prediction within its
+     standard error, on the folded networks, a two-layer Jura or Walker
+     network, chapter 16's walk and the GeoScape network; (2b) the
+     realizations' variogram against draws of the deep model on the same
+     pairs; (2c) the folded section's true-field 90% band covered by more
+     than today's 32-45% (the prototype's 69-87%).
+  3. **Training.** Arms: today's moment bound; the second moment from
+     scratch; a sampled warm-up then the second moment; one draw a step
+     with a decaying rate -- three seeds, on the folded section, a
+     two-layer Walker network, chapter 16 and the GeoScape network; held-
+     out log score, CRPS, coverage and `spread_check`, time and memory.
+     Fresh training draws (0.9.3's default) bear on the warm-up.
+  4. **Defaults and saves.** An option on for new models and off for a
+     save made before (a class default, as `propagation`); every deep
+     model's realizations change -- changelog, chapters 16 and 17 rerun,
+     the skill, one full run at the end.
 
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same
