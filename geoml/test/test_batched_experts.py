@@ -532,13 +532,15 @@ def test_a_network_predicts_by_expert_as_the_model_does(name):
         # an absolute floor of 1e-7: experts of unequal size run padded,
         # which reorders the rounding, and `SelectInput` projects the
         # points onto one coordinate, leaving covariances conditioned at
-        # 1e18 that magnify it to 2e-8; a fault misses by tenths
+        # 1e18 that magnify it to 2e-8; a fault misses by tenths. The
+        # realizations' feature residual is whitened through the same K, so
+        # they take the same floor
         np.testing.assert_allclose(a.values(v + "/prediction"),
                                    b.values(v + "/prediction"),
                                    rtol=1e-7, atol=1e-7)
         np.testing.assert_allclose(a.variables[v].get_simulations(),
                                    b.variables[v].get_simulations(),
-                                   rtol=1e-6, atol=1e-8)
+                                   rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.parametrize("name", ALL_NETWORKS)

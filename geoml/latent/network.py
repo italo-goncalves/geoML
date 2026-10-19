@@ -400,6 +400,27 @@ def _residual_scale(target, held):
                      _tf.zeros_like(target))
 
 
+def _expert_key(name, expert):
+    """The key an expert's normals are drawn under: the node's name for the
+    first expert, as a single-expert model has always drawn them, and the
+    expert's own for the others -- so the experts' draws are independent and
+    their blend's variance known (`_blend_scale`)."""
+    return name if int(expert) == 0 else "%s/expert%d" % (name, int(expert))
+
+
+def _blend_scale(agree, actual):
+    """The factor taking a blend of the experts' independent draws, of
+    variance `actual` (`sum w_e² v_e`), to `agree` (`sum w_e v_e`), what
+    the moments report: experts drawn independently lose variance in the
+    blend wherever two carry weight (half of it on a folded section's three
+    experts). One where a single expert holds all the weight, exactly; the
+    gradient finite on both branches."""
+    kept = actual > 0.0
+    return _tf.where(kept, _tf.sqrt(_tf.where(kept, agree, 1.0)
+                                    / _tf.where(kept, actual, 1.0)),
+                     _tf.ones_like(actual))
+
+
 def _owns(parents):
     """The parents' own-residual variances, `[size, n]` each, zeros for a
     parent with none -- or None where no parent has any."""
@@ -2040,15 +2061,22 @@ class _GPNode(_FunctionalLatentVariable):
             with _tf.name_scope("gp_simulation"):
                 rnd = [
                     _simulation_normals([self.size, self.root.n_ip[i],
-                                         n_sim], seed, key=self.name)
+                                         n_sim], seed,
+                                        key=_expert_key(self.name, i))
                     for i in _active_experts(self.root)
                 ]
-                sims = [
-                    _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c)) + d
-                    for a, b, c, d in zip(cov_cross, self.chol_r, rnd, mu)
-                ]
+                draws = _tf.stack([
+                    _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c))
+                    for a, b, c in zip(cov_cross, self.chol_r, rnd)], 0)
+                held = _tf.stack([
+                    _tf.reduce_sum(_tf.einsum("nm,smj->snj", a, b) ** 2, -1)
+                    for a, b in zip(cov_cross, self.chol_r)], 0)
+                scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
+                                     _tf.reduce_sum(weights ** 2 * held, 0))
                 sims = _tf.reduce_sum(
-                    _tf.stack(sims, axis=0) * weights[:, :, :, None], axis=0)
+                    _tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0) \
+                    + scale[:, :, None] * _tf.reduce_sum(
+                        draws * weights[:, :, :, None], axis=0)
         if getattr(self, "_residual_state", None) is not None \
                 and not _SMOOTH_DRAWS:
             sims = sims + self._feature_residual(n_sim, seed)
@@ -2892,16 +2920,22 @@ class BasicGP(_GPNode):
             # one draw at the padded size gives a smaller expert's second
             # output other numbers. A padded point's normals reach nothing,
             # its covariance with every location being masked to zero
-            drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim], seed,
-                                                 key=self.name),
-                             [[0, 0], [0, m - n], [0, 0]])
-                     for n in self.root.n_ip]
+            drawn = [_tf.pad(_simulation_normals(
+                [self.size, n, n_sim], seed, key=_expert_key(self.name, i)),
+                [[0, 0], [0, m - n], [0, 0]])
+                for i, n in enumerate(self.root.n_ip)]
             drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
             rnd = _tf.gather(_tf.stack(drawn), slots.ids)
-            sims = _tf.einsum(
+            draws = _tf.einsum(
                 "pab,psbc->psac", cov_cross,
-                _tf.matmul(self.slots_chol_r, rnd)) + mu
-            return _tf.reduce_sum(sims * weights[:, :, :, None], axis=0)
+                _tf.matmul(self.slots_chol_r, rnd))
+            held = _tf.reduce_sum(_tf.einsum(
+                "pnm,psmj->psnj", cov_cross, self.slots_chol_r) ** 2, -1)
+            scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
+                                 _tf.reduce_sum(weights ** 2 * held, 0))
+            return _tf.reduce_sum(mu * weights[:, :, :, None], axis=0) \
+                + scale[:, :, None] * _tf.reduce_sum(
+                    draws * weights[:, :, :, None], axis=0)
 
     def cache_prediction_state(self):
         if _slots_of(self.root) is not None:
@@ -3084,7 +3118,7 @@ class BasicGP(_GPNode):
     def _at_input_nodes(self, mean, var, points):
         """The node's own kernel between `points` and each location's input
         at the quadrature nodes, `[..., n, q, m]`."""
-        nodes = _tf.constant(_input_nodes(int(mean.shape[-1])), _tf.float64)
+        nodes = _tf.constant(_input_nodes(int(self.parent.size)), _tf.float64)
         # the standard deviation with a finite gradient at zero, both
         # branches of a `where` being differentiated
         positive = var > 0.0
@@ -3160,7 +3194,7 @@ class BasicGP(_GPNode):
         so overlapping experts agree where they meet. `[size, n, S]`."""
         x, cov_cross, weights = self._residual_state
         with _tf.name_scope("gp_feature_residual"):
-            basis = self._feature_basis(int(x.shape[-1]), seed)
+            basis = self._feature_basis(int(self.parent.size), seed)
             n_features = int(basis[0].shape[0]) + 1
             draws = _tf.random.stateless_normal(
                 [self.size, n_features, n_sim],
@@ -3185,7 +3219,7 @@ class BasicGP(_GPNode):
                     1.0 - _tf.reduce_sum(white ** 2, 0), 0.0)
                 held = _tf.reduce_sum(res ** 2, -1)
                 scale = _residual_scale(target, held)
-                return _tf.einsum("nj,sjS->snS", res * scale[:, None], draws)
+                return res * scale[:, None], target           # [n, J + 1]
 
             slots = _slots_of(self.root)
             if slots is not None:
@@ -3199,8 +3233,15 @@ class BasicGP(_GPNode):
                 ips, _ = self._parent_points(ids)
                 parts = [residual(cov_cross[p], ips[p], self.cov_chol[p])
                          for p in range(len(ids))]
-            return _tf.reduce_sum(_tf.stack(parts, 0) * weights[..., None],
-                                  axis=0)
+            # blended as features, as the readers blend theirs, and the
+            # blend rescaled to the variance the experts leave
+            vec = _tf.stack([v for v, _ in parts], 0)        # [E, n, J + 1]
+            target = _tf.stack([t for _, t in parts], 0)     # [E, n]
+            vec = _tf.einsum("esn,enj->snj", weights, vec)
+            left = _tf.einsum("esn,en->sn", weights, target)
+            factor = _residual_scale(left, _tf.reduce_sum(vec ** 2, -1))
+            return factor[:, :, None] * _tf.einsum("snj,sjS->snS", vec,
+                                                   draws)
 
     def _certain_gap(self, cov_cross, var, weights):
         if _slots_of(self.root) is not None:
@@ -3244,7 +3285,7 @@ class BasicGP(_GPNode):
                               [1, 2, 0])                       # [n, S, d]
             gap = self.parent._realization_gap
             if gap is not None:
-                d = int(h.shape[-1])
+                d = int(self.parent.size)
                 noise = _tf.reshape(_location_normals(
                     coords, d * n_sim, seed, "%s/input" % self.name),
                     [-1, n_sim, d])
@@ -3263,7 +3304,7 @@ class BasicGP(_GPNode):
                           (h - x[:, None, :]) / scale[:, None, :], 0.0)
             # the residual by random features: one basis for the node,
             # weights per realization
-            basis = self._feature_basis(int(z.shape[-1]), seed)
+            basis = self._feature_basis(int(self.parent.size), seed)
             frequencies, phases, constant, total = basis
             n_features = int(frequencies.shape[0]) + 1
             fweights = _tf.random.stateless_normal(
@@ -3308,10 +3349,11 @@ class BasicGP(_GPNode):
                 ips, ipvs = _slot_points(self.parent)
                 pmask = _slot_mask(self.root)
                 m = pmask.shape[1]
-                drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim],
-                                                     seed, key=self.name),
-                                 [[0, 0], [0, m - n], [0, 0]])
-                         for n in self.root.n_ip]
+                drawn = [_tf.pad(_simulation_normals(
+                    [self.size, n, n_sim], seed,
+                    key=_expert_key(self.name, i)),
+                    [[0, 0], [0, m - n], [0, 0]])
+                    for i, n in enumerate(self.root.n_ip)]
                 drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
                 values = _tf.matmul(self.slots_chol_r, _tf.gather(
                     _tf.stack(drawn), slots.ids))      # [P, size, m, S]
@@ -3330,7 +3372,7 @@ class BasicGP(_GPNode):
                 groups = [chain_parts(chain[p], ips[p], ipvs[p]) + [
                     _tf.matmul(self.chol_r[p], _simulation_normals(
                         [self.size, self.root.n_ip[i], n_sim], seed,
-                        key=self.name)),
+                        key=_expert_key(self.name, i))),
                     self.cov_smooth_inv[p], self.chol_r[p],
                     self.alpha[p][..., 0],
                     _tf.reshape(self.parameters["bias_%d" % i].get_value(),
@@ -3354,7 +3396,7 @@ class BasicGP(_GPNode):
                 z_c = z[:, start:start + chunk, :]
                 if sliced:
                     z_c = z_c[None]
-                sims = resid = left = 0.0
+                sims = resid = left = eta = agree = actual = 0.0
                 w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
                 for g in range(len(groups)):
                     (mean, var, cov, points, spread, values, smooth_inv,
@@ -3375,9 +3417,13 @@ class BasicGP(_GPNode):
                         "...nSm,...smj->...snSj", k, root_r) ** 2, -1)
                     fit, rest = _fitted_draw(ksk, kr)
                     part = _tf.einsum("...nSm,...sm->...snS", k, alpha) \
-                        + fit * _tf.einsum("...nSm,...smS->...snS", k,
-                                           values[..., start:start + chunk]) \
                         + bias
+                    # the inducing values' draw, independent between
+                    # experts: blended, then rescaled below
+                    drawn_eta = fit * _tf.einsum(
+                        "...nSm,...smS->...snS", k,
+                        values[..., start:start + chunk])
+                    seen = fit ** 2 * kr
                     # the residual: features at the realized input less
                     # their projection on the inducing points' damped ones,
                     # rescaled at every draw to the variance left
@@ -3393,9 +3439,11 @@ class BasicGP(_GPNode):
                         chol, _tf.linalg.matrix_transpose(_tf.reshape(
                             k, _tf.concat([shape[:-3], [-1, shape[-1]]], 0))),
                         lower=True)                       # [.., m, n c]
+                    # shaped from `k`, which carries the slots where the
+                    # input's mean (a `GaussianInput`'s) may not
                     res = phi_h - _tf.reshape(_tf.einsum(
                         "...mN,...mj->...Nj", white, phi_white),
-                        _tf.shape(phi_h))                 # [.., n, c, J + 1]
+                        _tf.concat([shape[:-1], _tf.shape(phi_h)[-1:]], 0))
                     held = _tf.reduce_sum(res ** 2, -1)   # [.., n, c]
                     scale = _residual_scale(
                         rest, held[..., None, :, :])     # [.., size, n, c]
@@ -3407,11 +3455,20 @@ class BasicGP(_GPNode):
                         * res[..., None, :, :, :]   # [.., size, n, c, J + 1]
                     part = part * w[..., None]
                     rest = rest * w[..., None]
+                    drawn_eta = drawn_eta * w[..., None]
+                    seen_w = seen * w[..., None]
+                    seen_w2 = seen_w * w[..., None]
                     if sliced:
                         part = _tf.reduce_sum(part, 0)
                         vec = _tf.reduce_sum(vec, 0)
                         rest = _tf.reduce_sum(rest, 0)
+                        drawn_eta = _tf.reduce_sum(drawn_eta, 0)
+                        seen_w = _tf.reduce_sum(seen_w, 0)
+                        seen_w2 = _tf.reduce_sum(seen_w2, 0)
                     sims, resid, left = sims + part, resid + vec, left + rest
+                    eta = eta + drawn_eta
+                    agree, actual = agree + seen_w, actual + seen_w2
+                sims = sims + _blend_scale(agree, actual) * eta
                 # the blended residual drawn, rescaled at every draw to the
                 # blended variance left
                 factor = _residual_scale(left, _tf.reduce_sum(resid ** 2, -1))
@@ -3444,7 +3501,7 @@ class BasicGP(_GPNode):
         n]`; and with `root_r` of `g = k R`, `[..., size, n, m]`, and of
         `|g|²`. `k` is the kernel at each node, the points conditioned
         on it (`_at_input_nodes`)."""
-        nodes = _input_nodes(int(mean.shape[-1]))
+        nodes = _input_nodes(int(self.parent.size))
         chunk = min(self._NODES_PER_CHUNK, len(nodes))
         n_chunks = len(nodes) // chunk
         nodes = _tf.constant(nodes[:n_chunks * chunk].reshape(
@@ -5562,10 +5619,10 @@ class GPWalk(_FunctionalLatentVariable):
             u, _ = _slot_points(self.walker)
             mask = _slot_mask(self.root)
             m = u.shape[-2]
-            drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim], seed,
-                                                 key=field.name),
-                             [[0, 0], [0, m - n], [0, 0]])
-                     for n in self.root.n_ip]
+            drawn = [_tf.pad(_simulation_normals(
+                [self.size, n, n_sim], seed, key=_expert_key(field.name, i)),
+                [[0, 0], [0, m - n], [0, 0]])
+                for i, n in enumerate(self.root.n_ip)]
             drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
             rnd = _tf.gather(_tf.stack(drawn), slots.ids)
             coef = field.slots_alpha + _tf.matmul(field.slots_chol_r, rnd)
@@ -5578,7 +5635,7 @@ class GPWalk(_FunctionalLatentVariable):
             for p, i in enumerate(ids):
                 rnd = _simulation_normals(
                     [self.size, self.root.n_ip[i], n_sim], seed,
-                    key=field.name)
+                    key=_expert_key(field.name, i))
                 coef = field.alpha[p] + _tf.matmul(field.chol_r[p], rnd)
                 groups.append((us[p], _tf.transpose(coef, [2, 0, 1]),
                                field.parameters["bias_%d" % i].get_value(),
