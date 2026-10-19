@@ -1336,11 +1336,35 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
     `auto_select` picks another generator under XLA, and a compiled
     prediction drew another basis (realizations apart by their own size);
     plain and compiled now agree to 1.4e-7 of the field's scale.
-  - **Training** (step 3, folded section only, three seeds, new-hole log
-    score): the second moment from scratch -2.04, -1.94, -2.42 beside the
-    coordinates (the moment bound -9.6 to -11.2), -10.2, -7.5, -8.4 on the
-    GP on a GP (-12.4 to -13.9); the sampled warm-up is not needed. Walker,
-    chapter 16 and the GeoScape network untried; step 4 not started.
+  - **Training** (step 3, three seeds each, `1b84ed5`). The folded
+    section, new-hole log score: the second moment from scratch -2.04,
+    -1.94, -2.42 beside the coordinates (the moment bound -9.6 to -11.2),
+    -10.2, -7.5, -8.4 on the GP on a GP (-12.4 to -13.9). **Walker Lake**,
+    the same two networks on the 470 samples (120 inducing points, one
+    expert, chapter 15's warping, 2000 steps), scored against the
+    exhaustive field at every sixth row and column: the second moment
+    beats the moment bound on every seed and network -- RMSE 174-188 ->
+    160-161, CRPS of measurement samples 92-103 -> 85, their 90% coverage
+    0.96-0.99 -> 0.89-0.90, log score -6.30/-6.52 -> -6.20 -- and both
+    networks converge to one model, where the moment bound leaves the GP
+    on a GP far behind; its maps are scattered high-grade blobs, a
+    different set in every realization, the second moment's the field's
+    belt, arc and hole. 13-17x the training time (500-700 s against 40).
+    Against an exhaustive truth the realizations of the *ground* cover only
+    ~35%: the model puts Walker's fine texture in the noise, so the fair
+    check is samples of a measurement (`predict_measurements`). **Chapter
+    16** (250 steps): the rock's log score 0.3224 -> 0.3204 and Brier
+    0.0971 -> 0.0966 on every seed, the metals unchanged (RMSE/sd 0.912,
+    CRPS/sd 0.512), 3.7x the time (1342 s against 360); the maps alike,
+    the rock's realizations equally fragmented under both bounds -- five
+    latent draws of full variance on a rough Matern 3/2, a property of the
+    realizations rather than of the training. **The sampled warm-up adds
+    nothing** on any case (Walker within 0.003 of a log score). Reading for
+    step 4: the second moment pays where a hidden layer carries the model
+    and buys little where one reader sits on a walk beside a stationary
+    tree -- an argument for a default that depends on the network, or for
+    a cheaper quadrature, before a blanket default. The GeoScape network
+    untried; step 4 not started.
 
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same
