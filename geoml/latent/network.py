@@ -1137,10 +1137,11 @@ def _plain_distance(x, y, ranges):
 
 def _input_rule(dimension):
     """The conditioned quadrature's nodes `[q, dimension]` and weights
-    `[q]` (summing to one), or None for equal weights: the 64 symmetric
-    Sobol points of `_input_nodes`, or, under the Gauss-Hermite experiment
-    (`_QUADRATURE_RULE`) and up to two dimensions, the tensor grid of
-    `_HERMITE_POINTS` probabilists' Gauss-Hermite points a dimension."""
+    `[q]` (summing to one), or None for equal weights: up to two
+    dimensions under the Gauss-Hermite rule (`_QUADRATURE_RULE`, the
+    default), the tensor grid of `_HERMITE_POINTS` probabilists'
+    Gauss-Hermite points a dimension; else the 64 symmetric Sobol points of
+    `_input_nodes`."""
     if _QUADRATURE_RULE == "hermite" and dimension <= 2:
         x, w = _np.polynomial.hermite_e.hermegauss(_HERMITE_POINTS)
         w = w / w.sum()
@@ -1395,11 +1396,12 @@ _QUADRATURE_ROWS = 20000
 # a hundred realizations on GeoScape's 32 experts ran out of the device)
 _NODE_BYTES = 48
 _REALIZATION_BYTES = 48
-# experiments, never set by a model: the quadrature's rule ("sobol", or
-# "hermite" -- a Gauss-Hermite tensor grid of `_HERMITE_POINTS` a dimension
-# up to two dimensions, Sobol beyond) and XLA on a chunk's body
-_QUADRATURE_RULE = "sobol"
-_HERMITE_POINTS = 5
+# the quadrature's rule: "hermite", a Gauss-Hermite tensor grid of
+# `_HERMITE_POINTS` a dimension up to two dimensions and Sobol beyond (7x7
+# measured as close as 1024 Sobol points, `gate_nodes.py`), or "sobol"
+# everywhere; and XLA on a chunk's body, an experiment never set by a model
+_QUADRATURE_RULE = "hermite"
+_HERMITE_POINTS = 7
 _QUADRATURE_XLA = False
 
 

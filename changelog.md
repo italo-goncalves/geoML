@@ -38,15 +38,18 @@ quadrature beside two sibling readers take 32 nodes and run out too. The
 `expand_dims`, whose gradient is a reshape rather than a full-size
 `StridedSliceGrad` on every chunk (`docs/benchmarks/deep_second_moment/
 chunk_memory.py`, `chunk_predict.py`).
-* **Two experiments, measured and left off by default.** A Gauss–Hermite
-tensor grid for inputs of up to two dimensions (`_QUADRATURE_RULE =
-"hermite"`): against 16000 coupled draws on the folded section's GP on a
-GP, 5×5 points match 256 Sobol points (median error of the variance 1.0%
-against 2.3% at today's 64) and 7×7 match 1024 (0.65-0.77%), for 25 and
-49 nodes against 64 -- a step at 5×5 1.5x faster than all 64 Sobol nodes
-on the GPU and 2.3x on the CPU (`gate_nodes.py`, `chunk_memory.py`). XLA on the chunk's body (`_QUADRATURE_XLA`):
-1.1x on the GPU at a third more memory, 1.3x on the CPU. The first changes
-the numbers of every model it reaches, which is a decision to make.
+* **An input of up to two dimensions is read on a 7×7 Gauss–Hermite
+grid.** The second moment's quadrature took 64 symmetric Sobol points
+whatever the input's dimension; up to two it now takes the tensor grid of
+seven probabilists' Gauss–Hermite points a dimension, 49 nodes, and Sobol
+beyond (`_QUADRATURE_RULE`, `_HERMITE_POINTS`). Against 16000 coupled
+draws on the folded section's GP on a GP, 7×7 matches 1024 Sobol points
+(median error of the variance 0.65-0.77% against 2.3% at the old 64), and
+5×5 matches 256 (1.0%) -- a step at 5×5 1.5x faster than all 64 Sobol
+nodes on the GPU and 2.3x on the CPU (`gate_nodes.py`,
+`chunk_memory.py`). The numbers of every such model move with it. XLA on
+the chunk's body (`_QUADRATURE_XLA`) was measured and left off: 1.1x on
+the GPU at a third more memory, 1.3x on the CPU.
 
 ## version 0.9.3
 * **An exponential or heavier noise tail under a log-like link warns at
