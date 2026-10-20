@@ -1365,6 +1365,36 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
     tree -- an argument for a default that depends on the network, or for
     a cheaper quadrature, before a blanket default. The GeoScape network
     untried; step 4 not started.
+  - **The quadrature made cheaper** (2026-10-20, `d6998c6`, `d6e6f19`).
+    Profiled on Walker's GP on a GP: 88% of a training step is the
+    conditioned quadrature's loop, 72% of that its backward pass -- the 64
+    nodes four at a time, recomputed under the gradient. **Chunks sized by
+    a memory budget**, `GPOptions(quadrature_memory=2e9)`: every node at
+    once, differentiated plainly, where the estimated arrays fit it, else
+    the largest chunk that does and never fewer than four; the realizations
+    the same way. A fixed number rather than the memory free, so a model
+    chunks and rounds alike in every process. A step 136 -> 60 ms on the
+    GPU and 234 -> 147 on the CPU, the bound the same to 1e-9; the exchange
+    network unchanged (447 s an epoch against 435, a reader's realizations
+    229-234 s, 0.99-1.01 of the variance, GPU peak 11.5-12.8 GB against
+    9.9-11.1). What a per-call estimate cannot see, measured on that
+    network, each run out of the 24 GB device: rows hinted at the whole
+    data set (a chunk of one, 510 s an epoch) -- every call now states the
+    rows it carries; 32 experts' quadratures run together, each inside the
+    budget -- they share it now; the kernel components' loop unrolled, its
+    eight Gaussians run together -- reverted; a 6e9 budget giving 32 nodes
+    beside two sibling readers -- 2e9 and the floor of four; a reader's
+    realizations at 16 bytes an element -- 48, times its experts.
+    `[..., None]` on the large arrays became `expand_dims`, whose gradient
+    is a reshape and not a full-size `StridedSliceGrad` a chunk.
+    **Gauss-Hermite up to two dimensions** (`gate_nodes.py`, against 16000
+    coupled draws on the folded section's GP on a GP, median error of the
+    variance): Sobol 64 2.3%, 256 ~1.0%, 1024 0.65-0.77%; Hermite 5x5 1.0%,
+    7x7 matching Sobol 1024. A step at 5x5 1.5x faster than 64 Sobol nodes
+    on the GPU, 2.3x on the CPU. **7x7 is the default** (the user's choice,
+    2026-10-20): more accurate than the 64 Sobol points and cheaper; Sobol
+    stays beyond two dimensions. **XLA on the chunk's body** 1.1x on the GPU
+    at a third more memory, 1.3x on the CPU: left an experiment, off.
 
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same
