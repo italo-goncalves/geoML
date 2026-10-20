@@ -54,13 +54,15 @@ def _split_data(n=120, seed=0):
 
 def _mixture(k=2, size=1, seed=1234):
     """Components smoother than the jump, and weights of a longer range
-    still: the configuration the gate found to switch."""
+    still: the configuration the gate found to switch. Every GP trains its
+    bias: a component's level is what tells one regime from the other, and
+    at zero mean no seed of seven found the switch (five did with it)."""
     geoml.set_seed(seed)
     weights_root = latent.BasicInput(_grid(), transform=tr.Isotropic(6.0))
     component_root = latent.BasicInput(_grid(), transform=tr.Isotropic(4.0))
-    weights = latent.BasicGP(weights_root, size=k)
+    weights = latent.BasicGP(weights_root, size=k, bias=True)
     return latent.GaussianMixture(
-        weights, [latent.BasicGP(component_root, size=size)
+        weights, [latent.BasicGP(component_root, size=size, bias=True)
                   for _ in range(k)])
 
 
@@ -273,7 +275,7 @@ def test_the_mixture_finds_the_regimes():
     geoml.set_seed(1234)
     root = latent.BasicInput(_grid(), transform=tr.Isotropic(2.0))
     scores = {}
-    for name, leaf in (("gp", latent.BasicGP(root, size=1)),
+    for name, leaf in (("gp", latent.BasicGP(root, size=1, bias=True)),
                        ("mixture", _mixture(seed=1))):
         model = _model(data, leaf)
         model.train_full(max_iter=1000)

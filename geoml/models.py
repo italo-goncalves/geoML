@@ -3582,6 +3582,20 @@ class VGPNetwork(_GPModel):
                     like.append(_tf.transpose(predicted[3]))
                     jitters.append(None if predicted.jitter is None
                                    else _tf.transpose(predicted.jitter))
+                # as the prediction takes them (`_predict_raw`): the same
+                # draws without the nodes' own residual, its variance drawn
+                # by the jitter's nodes, so that the samples average back to
+                # the prediction rather than to `n_sim` draws of it
+                owns = [leaf._own_noise for leaf in self.leaves]
+                if any(o is not None for o in owns):
+                    with _latent.network.smooth_draws():
+                        per_leaf = [_tf.transpose(leaf.simulate(
+                            n_sim, [self.options.seed, 0]), [1, 0, 2])
+                            for leaf in self.leaves]
+                    jitters = [j if o is None else
+                               _tf.transpose(o) if j is None
+                               else j + _tf.transpose(o)
+                               for j, o in zip(jitters, owns)]
             sims = self._by_likelihood(per_leaf)
             jitters = self._jitter_by_likelihood(jitters, like)
             measured = [(sim, jitter, lik) for sim, jitter, lik

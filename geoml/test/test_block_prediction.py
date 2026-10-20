@@ -262,18 +262,23 @@ def test_the_measurement_set_averages_back_to_the_prediction():
 
 
 def test_a_measurement_scatters_more_than_the_ground():
-    """By its noise variance, which is what the accuracy plot was missing."""
+    """By its noise variance, which is what the accuracy plot was missing.
+    The samples are drawn as the prediction is taken (0.9.4): the smooth
+    realizations, with the nodes' own residual drawn beside the noise
+    rather than read off the stored realizations, so the two variances
+    carry Monte Carlo errors of their own -- 400 realizations bring them
+    within 7% (40 left 30%)."""
     model = _model()
     points = _measurement_points()
-    model.predict(points, n_sim=40)
-    samples = model.predict_measurements(points, n_sim=40)["v"]
+    model.predict(points, n_sim=400)
+    samples = model.predict_measurements(points, n_sim=400)["v"]
 
     ground = np.var(np.asarray(points.variables["v"].simulations), axis=1)
     measured = samples[:, 0, :].var(axis=1)
     noise = points.variables["v"].noise_variance.values.to_numpy()
 
     assert np.all(measured > ground)
-    assert np.allclose(measured, ground + noise, rtol=0.05)
+    assert np.allclose(measured, ground + noise, rtol=0.1)
 
 
 def _mixed_model(seed=1234):

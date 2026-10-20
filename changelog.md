@@ -1,3 +1,22 @@
+## version 0.9.4 (in progress)
+* **GP nodes take `bias=False`: the prior mean is zero unless asked for.**
+Since v0.3.5 every GP node trained a constant per expert and output, in
+[-5, 5]. A field then returns to that constant away from its data, which
+for an indicator is the majority category, and the model can explain the
+data with blobs around the samples where at zero mean it has to connect
+them: the folded-ore example of the 2022 VGP article (three drillholes, a
+walked field at transform range 2) folds in the 2025-09-08 copy and gives
+five blobs in every release from v0.3.5 on, the blobs at a better bound
+(-48.3 against -51.4); fixed at zero, every version folds again, on three
+seeds each (`docs/benchmarks/fold_regression`). `BasicGP`,
+`MultiStructureGP` and `UncertainInputGP` take the argument (last, after
+`name`); `bias=True` frees the constant. The parameters stay registered
+either way, and a save restores the fixed flag it was made with, so a
+model saved before keeps its trained bias, free, on reload. New models
+train without one: their numbers move wherever the constant did work, the
+manual's chapters included. `GradientConstrainedInput` and the `Bias` node
+keep theirs.
+
 ## version 0.9.3
 * **An exponential or heavier noise tail under a log-like link warns at
 `initialize`.** `EpsilonInsensitive`, `Laplace`, `Huber`,

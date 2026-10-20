@@ -2383,7 +2383,7 @@ class BasicGP(_GPNode):
     """
     def __init__(self, parent, size=1, kernel=None,
                  fix_range=False, isotropic=False, range_prior=2.0,
-                 name=None):
+                 name=None, bias=False):
         """
         Initializer for BasicGP.
 
@@ -2411,9 +2411,18 @@ class BasicGP(_GPNode):
         name : str
             A name for this node, shown in the printed network and accepted by
             `get_node`. Numbered automatically if omitted.
+        bias : bool
+            Whether the node's prior mean -- one constant per expert and
+            output -- is trained. Off by default: the mean is zero, so a
+            field returns to zero away from its data. A trained constant
+            lets it return to any level instead, which for an indicator is
+            the majority category, and the model can then explain the data
+            with blobs around the samples where it would otherwise have to
+            connect them.
         """
         super().__init__(parent, name=name)
         self._size = size
+        self.trains_bias = bool(bias)
         # each node gets its own kernel object -- a shared default would
         # couple every node built without one the day a kernel gains a
         # trainable parameter
@@ -2464,8 +2473,14 @@ class BasicGP(_GPNode):
                 # A point estimate, deliberately: no KL prices it and none is
                 # needed -- one bounded scalar per expert, the level the data
                 # sets. `cross_validate` still re-initializes it along with
-                # the variational state, because it encodes the data.
-                _gpr.RealParameter(0, -5, 5))
+                # the variational state, because it encodes the data. Fixed
+                # at zero unless `bias=True` (0.9.4): free since v0.3.5, it
+                # returned the folded-ore example's indicator to "waste"
+                # away from the drillholes, and the fold the walk found at
+                # zero mean became five blobs at a better bound. Registered
+                # either way, so a save's parameters keep their places; a
+                # save restores the flag it was made with
+                _gpr.RealParameter(0, -5, 5, fixed=not self.trains_bias))
 
         if self.isotropic:
             self._add_parameter(
@@ -3277,8 +3292,20 @@ class BasicGP(_GPNode):
                     mean = mean + mu[p][..., 0] * weights[p]
                     smooth = smooth + drawn * w
                     total = total + (drawn + residual[None]) * w
-            factor = _residual_scale(w_var, _tf.reduce_sum(total ** 2, -1))
-            part = smooth if _SMOOTH_DRAWS else total
+            # each part rescaled to its own variance: the whole to what the
+            # moments report, the smooth part to that less the residual's
+            # (`_own_noise`), so that the smooth realizations and the
+            # residual integrated beside them add up to the whole exactly
+            if _SMOOTH_DRAWS:
+                own = self._own_noise if self._own_noise is not None \
+                    else _tf.zeros_like(w_var)
+                factor = _residual_scale(_tf.maximum(w_var - own, 0.0),
+                                         _tf.reduce_sum(smooth ** 2, -1))
+                part = smooth
+            else:
+                factor = _residual_scale(w_var,
+                                         _tf.reduce_sum(total ** 2, -1))
+                part = total
             return mean[..., None] + factor[..., None] * _tf.einsum(
                 "snj,sjS->snS", part, draws)
 
@@ -3426,7 +3453,7 @@ class BasicGP(_GPNode):
                 z_c = z[:, start:start + chunk, :]
                 if sliced:
                     z_c = z_c[None]
-                sims = smooth = resid = target = 0.0
+                sims = smooth = resid = target = smooth_target = 0.0
                 w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
                 for g in range(len(groups)):
                     (mean, var, cov, points, spread, smooth_inv, root_prior,
@@ -3468,24 +3495,37 @@ class BasicGP(_GPNode):
                     res = phi_h - _tf.reshape(_tf.einsum(
                         "...mN,...mj->...Nj", white, prior),
                         _tf.concat([shape[:-1], _tf.shape(phi_h)[-1:]], 0))
+                    # the smooth part's own variance: the conditional less
+                    # the residual's, `max(conditional - |k R|², 0)`; the
+                    # rows of `G^-1 Phi` are orthonormal, so `|k R|²` is the
+                    # drawn coefficients' squared norm
+                    seen = _tf.minimum(conditional,
+                                       _tf.reduce_sum(drawn ** 2, -1))
                     wv = w[..., None]                     # [.., size, n, 1]
                     part = part * wv
                     conditional = conditional * wv
+                    seen = seen * wv
                     drawn = drawn * wv[..., None]
                     res = res[..., None, :, :, :] * wv[..., None]
                     if sliced:
                         part = _tf.reduce_sum(part, 0)
                         conditional = _tf.reduce_sum(conditional, 0)
+                        seen = _tf.reduce_sum(seen, 0)
                         drawn = _tf.reduce_sum(drawn, 0)
                         res = _tf.reduce_sum(res, 0)
                     sims, target = sims + part, target + conditional
+                    smooth_target = smooth_target + seen
                     smooth, resid = smooth + drawn, resid + res
                 # the blend, linear in w, rescaled draw by draw to the
-                # blended conditional variance
+                # blended conditional variance, and its smooth part to that
+                # less the residual's, so the two differ by what the
+                # prediction integrates (`own`)
                 total = smooth + resid
                 factor = _residual_scale(target,
                                          _tf.reduce_sum(total ** 2, -1))
                 full = sims + factor * _tf.einsum("snSj,sjS->snS", total, w_c)
+                factor = _residual_scale(smooth_target,
+                                         _tf.reduce_sum(smooth ** 2, -1))
                 smooth = sims + factor * _tf.einsum("snSj,sjS->snS", smooth,
                                                     w_c)
                 # [c, 2, size, n]: the realization and its smooth part
@@ -3929,6 +3969,8 @@ class UncertainInputGP(BasicGP):
     name
         A name for this node, shown in the printed network and accepted by
         `get_node`. Numbered automatically if omitted.
+    bias
+        Whether the prior mean is trained, as in `BasicGP`. Off by default.
 
     See Also
     --------
@@ -3947,7 +3989,8 @@ class UncertainInputGP(BasicGP):
     _CONDITIONED_SECOND_MOMENT = False
 
     def __init__(self, parent, size=1, kernel=None, fix_range=False,
-                 isotropic=False, range_prior=2.0, n_nodes=32, name=None):
+                 isotropic=False, range_prior=2.0, n_nodes=32, name=None,
+                 bias=False):
         _warnings.warn(
             "UncertainInputGP is deprecated since 0.9.0 and will be removed: "
             "a BasicGP takes the mixture's moments at an uncertain input in "
@@ -3956,7 +3999,7 @@ class UncertainInputGP(BasicGP):
             stacklevel=2)
         super().__init__(parent, size=size, kernel=kernel,
                          fix_range=fix_range, isotropic=isotropic,
-                         range_prior=range_prior, name=name)
+                         range_prior=range_prior, name=name, bias=bias)
         self.n_nodes = int(n_nodes)
         # the input's Gaussian sampled once: scrambled Sobol through the
         # normal quantile, the scramble drawn from the package RNG so that
@@ -4751,6 +4794,11 @@ class GaussianMixture(_Operation):
     whatever those share through common parents. The output is not
     Gaussian: a model trains the likelihood of a leaf above this node on
     its realizations, and no inducing points pass through it.
+
+    Build the GP nodes of the weights and of the components with
+    `bias=True`: a component's level is what tells one regime from another,
+    and a weight's level is a component's share away from the data. At
+    zero mean the regimes gate of the tests finds no switch in seven seeds.
 
     Parameters
     ----------
@@ -5882,7 +5930,7 @@ class MultiStructureGP(BasicGP):
 
     def __init__(self, parent, size=1, kernel=None, fix_range=False,
                  n_structures=2, weight_concentration="staircase",
-                 range_prior=2.0, name=None):
+                 range_prior=2.0, name=None, bias=False):
         """
         Initializer for MultiStructureGP.
 
@@ -5919,6 +5967,9 @@ class MultiStructureGP(BasicGP):
             structures exist for. `None` removes them.
         name : str
             A name for this node.
+        bias : bool
+            Whether the prior mean is trained, as in `BasicGP`. Off by
+            default.
         """
         if n_structures < 2:
             raise ValueError("a MultiStructureGP combines at least 2 "
@@ -5926,7 +5977,7 @@ class MultiStructureGP(BasicGP):
         self.n_structures = n_structures
         self.weight_concentration = weight_concentration
         super().__init__(parent, size, kernel, fix_range,
-                         range_prior=range_prior, name=name)
+                         range_prior=range_prior, name=name, bias=bias)
 
     def _set_parameters(self):
         for i, n in enumerate(self.root.n_ip):
@@ -5949,7 +6000,7 @@ class MultiStructureGP(BasicGP):
                 ))
             self._add_parameter(
                 f"bias_{i}",
-                _gpr.RealParameter(0, -5, 5))
+                _gpr.RealParameter(0, -5, 5, fixed=not self.trains_bias))
 
         concentration = self.weight_concentration
         if concentration == "staircase":
@@ -6422,7 +6473,7 @@ _PRIOR = {"type": "float", "nullable": True,
           "constraints": {"exclusive_min": 0}}
 _GP = dict(parent={"type": "node"}, size=_SIZE, kernel={"type": "ref:kernel"},
            fix_range={"type": "bool"}, isotropic={"type": "bool"},
-           range_prior=_PRIOR)
+           range_prior=_PRIOR, bias={"type": "bool"})
 _INPUT = dict(inducing_points={"type": "data:PointData"},
               transform={"type": "ref:transform"},
               fix_transform={"type": "bool"}, center={"type": "bool"})
