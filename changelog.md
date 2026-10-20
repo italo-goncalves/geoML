@@ -16,6 +16,37 @@ model saved before keeps its trained bias, free, on reload. New models
 train without one: their numbers move wherever the constant did work, the
 manual's chapters included. `GradientConstrainedInput` and the `Bias` node
 keep theirs.
+* **The second moment's quadrature is chunked by a memory budget,
+`GPOptions(quadrature_memory=2e9)`.** A GP node reading an uncertain input
+took its 64 quadrature nodes four at a time, a loop recomputed in the
+backward pass; it now takes every node at once, differentiated plainly,
+wherever their estimated arrays fit the budget, else the largest chunk
+that does and never fewer than the old four. On Walker's GP on a GP a
+training step goes from 136 to 60 ms on the GPU and from 234 to 147 on the
+CPU, the bound the same to 1e-9; GeoScape's 32-expert network keeps its
+four (447 s an epoch against 435) and its realizations hold their variance
+(0.99-1.01). The budget is a fixed number, not the memory free at the
+time, so a model chunks, and rounds, the same way in every process; each
+training or prediction call states the rows it carries
+(`_propagation(rows=)`), and the experts of a per-expert pass share it,
+since TensorFlow may run their branches together. Two things measured on
+the way and left as they were: unrolling the kernel components' loop
+(eight for a Matérn or exponential kernel) ran them concurrently and out
+of a 24 GB device, and a budget without the four-node floor let a
+quadrature beside two sibling readers take 32 nodes and run out too. The
+`[..., None, ...]` slices on the quadrature's large arrays became
+`expand_dims`, whose gradient is a reshape rather than a full-size
+`StridedSliceGrad` on every chunk (`docs/benchmarks/deep_second_moment/
+chunk_memory.py`, `chunk_predict.py`).
+* **Two experiments, measured and left off by default.** A Gauss–Hermite
+tensor grid for inputs of up to two dimensions (`_QUADRATURE_RULE =
+"hermite"`): against 16000 coupled draws on the folded section's GP on a
+GP, 5×5 points match 256 Sobol points (median error of the variance 1.0%
+against 2.3% at today's 64) and 7×7 match 1024 (0.65-0.77%), for 25 and
+49 nodes against 64 -- a step at 5×5 1.5x faster than all 64 Sobol nodes
+on the GPU and 2.3x on the CPU (`gate_nodes.py`, `chunk_memory.py`). XLA on the chunk's body (`_QUADRATURE_XLA`):
+1.1x on the GPU at a third more memory, 1.3x on the CPU. The first changes
+the numbers of every model it reaches, which is a decision to make.
 
 ## version 0.9.3
 * **An exponential or heavier noise tail under a log-like link warns at

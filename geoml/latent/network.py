@@ -870,6 +870,12 @@ def _chunked_sums(fn, inputs, n_chunks):
     `fn` must read no variable -- whatever it differentiates arrives in
     `inputs`, all tensors."""
     inputs = tuple(inputs)
+    if _QUADRATURE_XLA:
+        fn = _tf.function(fn, jit_compile=True)
+    if n_chunks == 1:
+        # one chunk holds everything: no loop, no recomputation, and
+        # TensorFlow's own gradient
+        return tuple(fn(_tf.constant(0), *inputs))
 
     @_tf.custom_gradient
     def run(*xs):
@@ -914,6 +920,10 @@ def _chunked_map(fn, inputs, n_chunks):
     must read no variable; whatever it differentiates arrives in
     `inputs`, all tensors."""
     inputs = tuple(inputs)
+    if _QUADRATURE_XLA:
+        fn = _tf.function(fn, jit_compile=True)
+    if n_chunks == 1:
+        return fn(_tf.constant(0), *inputs)
 
     @_tf.custom_gradient
     def run(*xs):
@@ -1123,6 +1133,23 @@ def _plain_distance(x, y, ranges):
         + _tf.reduce_sum(ys ** 2, -1)[..., None, :] \
         - 2.0 * _tf.matmul(xs, ys, transpose_b=True)
     return _tf.sqrt(_tf.maximum(square, 1e-30))
+
+
+def _input_rule(dimension):
+    """The conditioned quadrature's nodes `[q, dimension]` and weights
+    `[q]` (summing to one), or None for equal weights: the 64 symmetric
+    Sobol points of `_input_nodes`, or, under the Gauss-Hermite experiment
+    (`_QUADRATURE_RULE`) and up to two dimensions, the tensor grid of
+    `_HERMITE_POINTS` probabilists' Gauss-Hermite points a dimension."""
+    if _QUADRATURE_RULE == "hermite" and dimension <= 2:
+        x, w = _np.polynomial.hermite_e.hermegauss(_HERMITE_POINTS)
+        w = w / w.sum()
+        grids = _np.meshgrid(*([x] * dimension), indexing="ij")
+        weights = _np.prod(_np.meshgrid(*([w] * dimension), indexing="ij"),
+                           axis=0)
+        return (_np.stack([g.ravel() for g in grids], axis=-1),
+                weights.ravel())
+    return _input_nodes(dimension), None
 
 
 def _input_nodes(dimension):
@@ -1341,6 +1368,79 @@ _MARGINAL_DRAWS = False
 # realizations carry everything, the prediction stays free of Monte Carlo
 # noise in that part).
 _SMOOTH_DRAWS = False
+
+# How much memory the conditioned quadrature and the pathwise draws may
+# hold at once, in bytes (`GPOptions.quadrature_memory`), and the most rows
+# a call carries where the traced shape does not say. Set through
+# `quadrature_rule` by the model, read at trace time and keyed like the
+# propagation rule. Within the budget a chunk is every node at once,
+# differentiated plainly; past it, the largest chunk the budget holds, in a
+# loop recomputed in the backward pass. Measured on Walker's GP on a GP
+# (`chunk_memory.py`): four nodes a chunk 245 ms a step on the CPU and 130
+# on the GPU, all 64 plainly 147 and 60, the bound the same to 1e-8.
+_QUADRATURE_MEMORY = 2e9
+# the fewest units a looped chunk takes: the four nodes every model ran at
+# before the budget, which a network the estimate calls large keeps --
+# what else is resident beside a quadrature (sibling readers, a walk) is
+# invisible to the estimate, and on GeoScape's network a chunk of 32 it
+# allowed ran out of a 24 GB device
+_FEWEST_PER_CHUNK = 4
+_QUADRATURE_ROWS = 20000
+# bytes a node of the quadrature holds per element of its `[n, m, d]`
+# arrays, both passes, plainly differentiated (43 measured on Walker's GP
+# on a GP on the GPU, `chunk_memory.py`), and a realization of a reader's
+# draw per element of its `[n, m, d]` and `[n, size (J + 1)]` arrays, for
+# every expert: the experts' arrays are made in one function, branches
+# TensorFlow may run together (taken as the quadrature's: at 16 a chunk of
+# a hundred realizations on GeoScape's 32 experts ran out of the device)
+_NODE_BYTES = 48
+_REALIZATION_BYTES = 48
+# experiments, never set by a model: the quadrature's rule ("sobol", or
+# "hermite" -- a Gauss-Hermite tensor grid of `_HERMITE_POINTS` a dimension
+# up to two dimensions, Sobol beyond) and XLA on a chunk's body
+_QUADRATURE_RULE = "sobol"
+_HERMITE_POINTS = 5
+_QUADRATURE_XLA = False
+
+
+@_contextlib.contextmanager
+def quadrature_rule(memory=None, rows=None):
+    """The quadrature's memory budget, in bytes, and the most rows a call
+    carries, while active (None keeps what is set)."""
+    global _QUADRATURE_MEMORY, _QUADRATURE_ROWS
+    previous = _QUADRATURE_MEMORY, _QUADRATURE_ROWS
+    if memory is not None:
+        _QUADRATURE_MEMORY = float(memory)
+    if rows is not None:
+        _QUADRATURE_ROWS = int(rows)
+    try:
+        yield
+    finally:
+        _QUADRATURE_MEMORY, _QUADRATURE_ROWS = previous
+
+
+def _static(value, fallback):
+    """A traced dimension where the shape says it, `fallback` where not."""
+    return int(value) if value is not None else int(fallback)
+
+
+def _chunk_of(units, unit_bytes, override=None):
+    """How many of `units` (nodes, realizations) a chunk takes: all of them
+    where their `unit_bytes` fit the budget -- one chunk, differentiated
+    plainly -- else the largest divisor of `units` the budget holds, and
+    never fewer than the four a chunk took before the budget. `override` (a class's `_NODES_PER_CHUNK`, set by a benchmark)
+    takes the largest divisor at most that."""
+    units = int(units)
+    if override is not None:
+        cap = min(int(override), units)
+    elif units * unit_bytes <= _QUADRATURE_MEMORY:
+        return units
+    else:
+        # the loop holds about what the plain path holds a node (47 bytes
+        # an element against 43, measured): no allowance for its backward
+        cap = max(min(_FEWEST_PER_CHUNK, units),
+                  min(units, int(_QUADRATURE_MEMORY // unit_bytes)))
+    return max(c for c in range(1, cap + 1) if units % c == 0)
 
 
 @_contextlib.contextmanager
@@ -3319,9 +3419,10 @@ class BasicGP(_GPNode):
             for k, r in zip(cov_cross, self.chol_r)], axis=0)
         return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
 
-    # realizations drawn at a time by `_pathwise_simulate`: its arrays are
-    # `[..., n, chunk, m, d]`, so memory goes with the chunk
-    _REALIZATIONS_PER_CHUNK = 4
+    # realizations a chunk of `_pathwise_simulate` draws: None for the
+    # memory budget's choice (`_chunk_of`), a number to force it; its
+    # arrays are `[..., n, chunk, m, d]` and `[..., size, n, chunk, J + 1]`
+    _REALIZATIONS_PER_CHUNK = None
 
     def _pathwise_simulate(self, n_sim, seed):
         """Realizations through the parent's: realization `s` at the
@@ -3443,8 +3544,16 @@ class BasicGP(_GPNode):
             per_group = len(groups[0])
             sliced = slots is not None
 
-            chunk = max(c for c in range(1, self._REALIZATIONS_PER_CHUNK + 1)
-                        if n_sim % c == 0)
+            lead = 1
+            for dim in z.shape[:-3] if sliced else ():
+                lead *= _static(dim, 1)
+            if sliced:
+                lead *= int(_slot_mask(self.root).shape[0])
+            per_draw = _REALIZATION_BYTES * lead * len(groups) * _static(
+                z.shape[0], _QUADRATURE_ROWS) * (
+                max(int(m) for m in self.root.n_ip) * int(self.parent.size)
+                + self.size * n_features)
+            chunk = _chunk_of(n_sim, per_draw, self._REALIZATIONS_PER_CHUNK)
             n_chunks = n_sim // chunk
 
             def draw(c, z, fweights, frequencies, phases, fscale, ranges,
@@ -3541,10 +3650,9 @@ class BasicGP(_GPNode):
                 _ONCE[key] = ((full, smooth), (), {})
             return smooth if _SMOOTH_DRAWS else full
 
-    # nodes of the input taken at a time by the conditioned quadrature:
-    # its arrays are `[..., n, chunk, m, d]`, so memory goes with the chunk
-    # and time with the nodes
-    _NODES_PER_CHUNK = 4
+    # nodes of the input a chunk of the conditioned quadrature takes: None
+    # for the memory budget's choice (`_chunk_of`), a number to force it
+    _NODES_PER_CHUNK = None
 
     def _conditioned_sums(self, mean, var, cov, points, points_var,
                           smooth_inv, alpha, root_r=None):
@@ -3555,11 +3663,28 @@ class BasicGP(_GPNode):
         n]`; and with `root_r` of `g = k R`, `[..., size, n, m]`, and of
         `|g|²`. `k` is the kernel at each node, the points conditioned
         on it (`_at_input_nodes`)."""
-        nodes = _input_nodes(int(self.parent.size))
-        chunk = min(self._NODES_PER_CHUNK, len(nodes))
+        d = int(self.parent.size)
+        nodes, node_weights = _input_rule(d)
+        # a chunk as large as the memory budget holds: every array a node
+        # makes is `[..., n, m, d]`
+        lead = 1
+        for dim in mean.shape[:-2]:
+            lead *= _static(dim, 1)
+        per_node = _NODE_BYTES * lead * _static(
+            mean.shape[-2], _QUADRATURE_ROWS) * _static(
+            points.shape[-2], 1) * d
+        if len(mean.shape) == 2:
+            # one call per expert, independent branches of one graph that
+            # TensorFlow may run together: the budget is theirs to share (a
+            # slot axis counts its experts in `lead`); on GeoScape's network
+            # 32 experts' quadratures, each within the budget, ran out of a
+            # 24 GB device together
+            per_node *= len(_active_experts(self.root))
+        chunk = _chunk_of(len(nodes), per_node, self._NODES_PER_CHUNK)
         n_chunks = len(nodes) // chunk
-        nodes = _tf.constant(nodes[:n_chunks * chunk].reshape(
-            n_chunks, chunk, -1), _tf.float64)
+        nodes = _tf.constant(nodes.reshape(n_chunks, chunk, -1), _tf.float64)
+        node_weights = None if node_weights is None else _tf.constant(
+            node_weights.reshape(n_chunks, chunk), _tf.float64)
         omega, weights, constant = _kernel_components(self.kernel)
         rational = type(self.kernel) is _kr.RationalQuadratic
         if points_var is None:
@@ -3571,19 +3696,30 @@ class BasicGP(_GPNode):
             positive = var > 0.0
             sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, var, 1.0)),
                            _tf.zeros_like(var))
-            gain = _tf.math.divide_no_nan(cov, var[..., :, None, :])
-            step = sd[..., :, None, :] * _tf.gather(nodes, c)  # [.., n, q, d]
-            offset = mean[..., :, None, :] - points[..., None, :, :]
-            dif = offset[..., :, None, :, :] + step[..., :, :, None, :] \
-                * (1.0 - gain[..., :, None, :, :])
-            left = _tf.maximum(points_var[..., None, :, :] - gain * cov,
-                               0.0)[..., :, None, :, :]
+            # new axes by `expand_dims`, whose gradient is a reshape: a
+            # `[..., None, ...]` slice is a strided slice, whose gradient
+            # writes a tensor of the whole shape on every chunk
+            gain = _tf.math.divide_no_nan(cov, _tf.expand_dims(var, -2))
+            step = _tf.expand_dims(sd, -2) * _tf.gather(nodes, c)  # [.., n, q, d]
+            offset = _tf.expand_dims(mean, -2) - _tf.expand_dims(points, -3)
+            dif = _tf.expand_dims(offset, -3) + _tf.expand_dims(step, -2) \
+                * (1.0 - _tf.expand_dims(gain, -3))
+            left = _tf.expand_dims(_tf.maximum(
+                _tf.expand_dims(points_var, -3) - gain * cov, 0.0), -3)
             dif2 = dif ** 2 / r2
             v = left / r2
             if rational:
                 return _mixture_terms(omega, weights, constant, dif2, v,
                                       None, None, False)[0]
             return _mixture_sum(omega, weights, constant, dif2, v)
+
+        def weighted(c, x, axis):
+            """The sum over a chunk's nodes, each by its weight."""
+            if node_weights is None:
+                return _tf.reduce_sum(x, axis)
+            w = _tf.gather(node_weights, c)
+            shape = [-1] + [1] * (-axis - 1)
+            return _tf.reduce_sum(x * _tf.reshape(w, shape), axis)
 
         def sums(c, mean, var, cov, points, points_var, smooth_inv, alpha,
                  r2, omega, weights):
@@ -3592,9 +3728,9 @@ class BasicGP(_GPNode):
             ksk = _tf.einsum("...nqi,...sij,...nqj->...snq", k, smooth_inv,
                              k)
             f = _tf.einsum("...nqm,...sm->...snq", k, alpha[..., 0])
-            return (_tf.reduce_sum(k, -2), _tf.reduce_sum(ksk, -1),
-                    _tf.reduce_sum(f, -1), _tf.reduce_sum(f ** 2, -1),
-                    _tf.reduce_sum(_tf.maximum(1.0 - ksk, 0.0), -1))
+            return (weighted(c, k, -2), weighted(c, ksk, -1),
+                    weighted(c, f, -1), weighted(c, f ** 2, -1),
+                    weighted(c, _tf.maximum(1.0 - ksk, 0.0), -1))
 
         def root_sums(c, mean, var, cov, points, points_var, r2, omega,
                       weights, root_r, smooth_inv):
@@ -3607,8 +3743,8 @@ class BasicGP(_GPNode):
             # what each node's realization adds past its draw of the
             # inducing values: the residual's variance, `own`
             rest = _tf.maximum(_tf.maximum(1.0 - ksk, 0.0) - kr, 0.0)
-            return (_tf.reduce_sum(g, -2), _tf.reduce_sum(kr, -1),
-                    _tf.reduce_sum(rest, -1))
+            return (weighted(c, g, -2), weighted(c, kr, -1),
+                    weighted(c, rest, -1))
 
         r2 = self.parameters["ranges"].get_value() ** 2
         out = _chunked_sums(sums, [mean, var, cov, points, points_var,
@@ -3620,7 +3756,9 @@ class BasicGP(_GPNode):
             out = out + _chunked_sums(
                 root_sums, [mean, var, cov, points, points_var, r2, omega,
                             weights, root_r, smooth_inv], n_chunks)
-        return out, n_chunks * chunk
+        # the sums divide by the count of equal-weight nodes; weighted
+        # nodes sum to one already
+        return out, (n_chunks * chunk if node_weights is None else 1.0)
 
     def _second_moments(self, mean, var, points, weights):
         """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]`, `[..., k, n]`, for each

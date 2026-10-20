@@ -16,9 +16,11 @@
 
 """Gate 1a's residual on the GP on a GP: is it the quadrature?
 
-The conditioned second moment at 64, 256 and 1024 symmetric Sobol nodes
-against 16000 coupled draws, on the GP on a GP with a Gaussian leaf.
-Writes `gate_nodes.json`.
+The conditioned second moment at 64, 256 and 1024 symmetric Sobol nodes,
+and on a Gauss-Hermite grid of 3, 4, 5 and 7 points a dimension (the
+hidden layer has two outputs, so 9 to 49 nodes), against 16000 coupled
+draws, on the GP on a GP with a Gaussian and a Matern 5/2 leaf. Writes
+`gate_nodes.json`.
 
 Usage: python gate_nodes.py [ITERATIONS]
 """
@@ -41,24 +43,35 @@ def main(iterations):
     pick = np.random.default_rng(3).choice(new.n_data, gm.N_POINTS,
                                            replace=False)
     x = np.asarray(new.coordinates, dtype=float)[pick]
-    model = gm.build(data, "dgp", kr.Gaussian)
-    net._UNCERTAIN_POINTS_SECOND_MOMENT = False
-    model.train_full(iterations)
-    net._UNCERTAIN_POINTS_SECOND_MOMENT = True
-    ex_mean, ex_evar, ex_vmu = gm.rf.exact_moments(model, x, 16000)
-    ex_var = ex_evar + ex_vmu
+    rules = [("sobol", n) for n in (64, 256, 1024)]         + [("hermite", p) for p in (3, 4, 5, 7)]
     rows = []
-    for nodes in (64, 256, 1024):
-        net._QUADRATURE_NODES = nodes
-        net._QUADRATURE.clear()
-        _, var = gm.analytic(model, x, True)
-        ratio = var / ex_var
-        row = dict(nodes=nodes, var_ratio_median=float(np.median(ratio)),
-                   var_ratio_mean=float(np.mean(ratio)),
-                   var_ratio_5=float(np.percentile(ratio, 5)),
-                   var_ratio_95=float(np.percentile(ratio, 95)))
-        print(json.dumps(row), flush=True)
-        rows.append(row)
+    for name, kernel in (("Gaussian", kr.Gaussian),
+                         ("Matern52", kr.Matern52)):
+        model = gm.build(data, "dgp", kernel)
+        net._UNCERTAIN_POINTS_SECOND_MOMENT = False
+        model.train_full(iterations)
+        net._UNCERTAIN_POINTS_SECOND_MOMENT = True
+        ex_mean, ex_evar, ex_vmu = gm.rf.exact_moments(model, x, 16000)
+        ex_var = ex_evar + ex_vmu
+        for rule, count in rules:
+            net._QUADRATURE_RULE = rule
+            net._HERMITE_POINTS = count if rule == "hermite" else 5
+            net._QUADRATURE_NODES = count if rule == "sobol" else 64
+            net._QUADRATURE.clear()
+            mean, var = gm.analytic(model, x, True)
+            ratio = var / ex_var
+            row = dict(kernel=name, rule=rule,
+                       nodes=count if rule == "sobol" else count ** 2,
+                       var_ratio_median=float(np.median(ratio)),
+                       var_ratio_mean=float(np.mean(ratio)),
+                       var_error_median=float(np.median(np.abs(ratio - 1))),
+                       var_ratio_5=float(np.percentile(ratio, 5)),
+                       var_ratio_95=float(np.percentile(ratio, 95)),
+                       mean_error_sd=float(np.max(np.abs(mean - ex_mean)
+                                                  / np.sqrt(ex_var))))
+            print(json.dumps(row), flush=True)
+            rows.append(row)
+    net._QUADRATURE_RULE = "sobol"
     net._QUADRATURE_NODES = 64
     net._QUADRATURE.clear()
     with open(os.path.join(gm.FIGURES, "gate_nodes.json"), "w") as f:

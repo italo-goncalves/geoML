@@ -38,6 +38,7 @@ import geoml.persistence as _persistence
 import geoml.stats.random as _srandom
 import geoml
 
+import contextlib as _contextlib
 import numpy as _np
 import pandas as _pd
 import scipy.spatial as _spatial
@@ -110,6 +111,9 @@ class GPOptions(_ModelOptions):
     training_tolerance = None
     # a model saved before 0.9.3 trained on one fixed set of draws
     fresh_training_draws = False
+    # the conditioned quadrature's memory budget, new in 0.9.4, the same for
+    # a model saved before
+    quadrature_memory = 2e9
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -119,7 +123,8 @@ class GPOptions(_ModelOptions):
                  = "independent",
                  training_tolerance: float | None = None,
                  propagation: _Literal["joint", "marginal"] = "joint",
-                 fresh_training_draws: bool = True):
+                 fresh_training_draws: bool = True,
+                 quadrature_memory: float = 2e9):
         """
         Configuration of Gaussian process models.
 
@@ -233,6 +238,16 @@ class GPOptions(_ModelOptions):
             move 2.5-5x more with the draw seed, and a sampled deep bound
             settles in the worse basin; drawn afresh, none of that, at no
             cost per step.
+        quadrature_memory : float
+            The memory, in bytes, a GP node reading an uncertain input may
+            hold at once for its quadrature over the input and for its
+            realizations. Within it every node of the quadrature is taken
+            at once and differentiated plainly, which is fastest; past it,
+            the largest chunk it holds, in a loop recomputed in the
+            backward pass, which keeps one chunk alive at a time. Lower it
+            for a large network on a small device. A fixed number rather
+            than the memory free at the time, so that a model chunks, and
+            so rounds, the same way in every process.
         """
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
@@ -258,6 +273,7 @@ class GPOptions(_ModelOptions):
         self.training_tolerance = training_tolerance
         self.propagation = propagation
         self.fresh_training_draws = fresh_training_draws
+        self.quadrature_memory = quadrature_memory
 
 
 class _Convergence:
@@ -1108,7 +1124,7 @@ class VGPNetwork(_GPModel):
                     nodes.append(node)
         return nodes
 
-    def _propagation(self):
+    def _propagation(self, rows=None):
         """The context every training and prediction call runs under: how
         the experts propagate, and whether uncertainty travels with its
         covariance between locations (`GPOptions.propagation`). The network
@@ -1117,15 +1133,32 @@ class VGPNetwork(_GPModel):
         joint = getattr(self.options, "propagation", "marginal") == "joint"
         if joint:
             self._check_expected_kernel()
-        return _latent.propagation_rule(self.options.expert_propagation,
-                                        joint=joint)
+        stack = _contextlib.ExitStack()
+        stack.enter_context(_latent.propagation_rule(
+            self.options.expert_propagation, joint=joint))
+        stack.enter_context(_latent.network.quadrature_rule(
+            self._quadrature_memory(), rows))
+        return stack
+
+    def _quadrature_memory(self):
+        """The quadrature's memory budget, in bytes. With it, each call
+        says the most rows it carries (`_propagation(rows=)`), which sizes
+        the quadrature's chunks where the traced shape does not: the
+        training data for `train_full`, a batch for `train_svi` and
+        `train_by_expert`, a prediction batch for a prediction; a call
+        nested in another keeps the outer one's (`rows=None`). The rows
+        steer the chunking only, never the answer."""
+        return float(getattr(self.options, "quadrature_memory", 2e9))
 
     def _propagation_key(self):
         """What the propagation adds to a cached trace's key."""
         return (self.options.expert_propagation,
                 getattr(self.options, "propagation", "marginal"),
                 _latent.network._UNCERTAIN_POINTS_SECOND_MOMENT,
-                _latent.network._PATHWISE_REALIZATIONS)
+                _latent.network._PATHWISE_REALIZATIONS,
+                self._quadrature_memory(),
+                _latent.network._QUADRATURE_RULE,
+                _latent.network._QUADRATURE_XLA)
 
     def _step_rule(self):
         """What a cached training step's trace depends on beyond its
@@ -1567,7 +1600,7 @@ class VGPNetwork(_GPModel):
 
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
-        with self._propagation(), \
+        with self._propagation(rows=self.data.n_data), \
                 _progress.reporting("train", max_iter, "iteration") as report:
             for i in range(max_iter):
                 step(x, y, has_value, x_var)
@@ -1643,7 +1676,7 @@ class VGPNetwork(_GPModel):
         n_batches = len(self.options.batch_index(self.data.n_data))
         done = 0
 
-        with self._propagation(), \
+        with self._propagation(rows=self.options.training_batch_size), \
                 _progress.reporting(
                     "train", epochs * n_batches, "batch") as report:
             for i in range(epochs):
@@ -2787,7 +2820,7 @@ class VGPNetwork(_GPModel):
         try:
             if slots:
                 self._sync_expert_store(roots, gp, store)
-            with self._propagation(), \
+            with self._propagation(rows=batch_size), \
                     _progress.reporting(
                         "train", None if assignment else epochs * per_epoch,
                         "batch") as report:
@@ -3363,7 +3396,7 @@ class VGPNetwork(_GPModel):
         # cached `predict_raw` graph reads current values without recomputing the
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
-        with self._propagation():
+        with self._propagation(rows=self.options.prediction_batch_size):
             if all(hasattr(leaf, "cache_prediction_state")
                    for leaf in self.leaves):
                 _latent.refresh_cached(self.leaves, self.options.jitter,
@@ -3391,7 +3424,7 @@ class VGPNetwork(_GPModel):
             # reads the leaves itself (`measurement_batches`,
             # `responsibilities`) would otherwise run them under the module's
             # default against a refresh made under the model's
-            with self._propagation():
+            with self._propagation(rows=self.options.prediction_batch_size):
                 out = call(x, x_var, splits, batch) if with_rows \
                     else call(x, x_var, splits)
             yield batch, out
