@@ -217,6 +217,37 @@ def test_the_mixture_s_own_gradient_is_the_stored_one(name, monkeypatch):
                                    atol=1e-13 * np.abs(b).max())
 
 
+@pytest.mark.parametrize("name", list(KERNELS))
+def test_the_mixture_s_own_gradient_takes_broadcast_inputs(name):
+    # the conditioned second moment hands over offsets with a node axis and
+    # variances without one: the value and the derivatives, each in its
+    # input's own shape, are the stored ones
+    kernel = KERNELS[name]()
+    if type(kernel) is geoml.kernels.RationalQuadratic:
+        pytest.skip("the rational quadratic keeps the stored path")
+    rng = np.random.default_rng(5)
+    dif2 = tf.constant(rng.uniform(0, 2, [3, 4, 5, 2]))
+    v = tf.constant(rng.uniform(0, 0.5, [3, 1, 5, 2]))
+    up = tf.constant(rng.normal(size=[3, 4, 5]))
+    omega, weights, constant = _net._kernel_components(kernel)
+    out = []
+    for own in (True, False):
+        a, b = tf.Variable(dif2), tf.Variable(v)
+        with tf.GradientTape() as tape:
+            if own:
+                k = _net._mixture_sum(omega, weights, constant, a, b)
+            else:
+                k = _net._mixture_terms(omega, weights, constant, a, b,
+                                        None, None, False)[0]
+            loss = tf.reduce_sum(k * up)
+        ga, gb = tape.gradient(loss, [a, b])
+        out.append([np.asarray(k), np.asarray(ga), np.asarray(gb)])
+    assert out[0][2].shape == (3, 1, 5, 2)
+    for a, b in zip(*out):
+        np.testing.assert_allclose(a, b, rtol=1e-11,
+                                   atol=1e-13 * np.abs(b).max())
+
+
 def _network(build, n_experts=1, kernel=None, seed=2, propagation="joint"):
     """An input, the nodes `build(root)` makes on it, and a leaf GP on top.
 
@@ -373,9 +404,14 @@ def _three_layers(root):
 
 
 @pytest.mark.parametrize("n_experts", [1, 3])
-def test_three_layers_chain_the_posteriors(n_experts):
+def test_three_layers_chain_the_posteriors(n_experts, monkeypatch):
     """A GP on a GP on a GP: the middle one's posterior, rebuilt here from
     the first one's under the expected kernel, is what the leaf reads."""
+    # rebuilt under the first moment alone: with the conditioned second
+    # moment the middle layer reports a fuller variance, which the gates of
+    # `test_a_gp_on_a_gp_takes_the_second_moment_over_its_inducing_inputs`
+    # check against draws
+    monkeypatch.setattr(_net, "_UNCERTAIN_POINTS_SECOND_MOMENT", False)
     model, leaf, (first,), _, x = _network(_three_layers, n_experts)
     second, root = leaf.parent, leaf.root
     rng = np.random.default_rng(3)
@@ -685,6 +721,273 @@ def test_the_walk_against_walks_along_sampled_fields(n_experts):
     assert worst_mean < 0.2
     assert 0.8 < low and high < 1.25
     assert worst_cov < 0.05
+
+
+# --------------------------------------------------------------------------- #
+# the second moment at uncertain inducing inputs
+# --------------------------------------------------------------------------- #
+def _conditioned_draws(model, leaf, x, draws=40_000, seed=13):
+    """The leaf's mean and variance at `x` over draws of its input, each
+    point's input from its own marginal and the leaf's inducing inputs
+    conditioned on it dimension by dimension -- the model the joint rule
+    trains, computed in numpy from the chain alone (Gaussian kernel)."""
+    rng = np.random.default_rng(seed)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        chain = leaf.parent.propagate(tf.constant(x)).experts[0]
+        mean, var = np.asarray(chain.mean), np.asarray(chain.variance)
+        cov = np.asarray(chain.covariance)
+        z = np.asarray(leaf.parent.inducing_points[0])
+        z_var = np.asarray(leaf.parent.inducing_points_variance[0])
+        r2 = np.asarray(leaf.parameters["ranges"].get_value())[0, 0] ** 2
+        alpha = np.asarray(leaf.alpha[0])[0, :, 0]
+        inv = np.asarray(leaf.cov_smooth_inv[0])[0]
+        bias = float(leaf.parameters["bias_0"].get_value())
+    gain = cov / var[:, None, :]
+    left = np.maximum(z_var[None] - gain * cov, 0.0)          # [n, m, d]
+    s1 = s2 = sv = 0.0
+    chunk = 2000
+    for _ in range(draws // chunk):
+        eps = rng.normal(size=(chunk,) + mean.shape)
+        h = mean[None] + np.sqrt(var)[None] * eps               # [c, n, d]
+        mz = z[None, None] + gain[None] * (h - mean[None])[:, :, None, :]
+        den = r2 + 6.0 * left[None]
+        k = np.prod(np.sqrt(r2 / den), -1) * np.exp(
+            -3.0 * np.sum((h[:, :, None, :] - mz) ** 2 / den, -1))
+        mu = k @ alpha + bias
+        v = np.maximum(1.0 - np.einsum("cnm,mk,cnk->cn", k, inv, k), 0.0)
+        s1, s2, sv = s1 + mu.sum(0), s2 + (mu ** 2).sum(0), sv + v.sum(0)
+    m = s1 / draws
+    return m, sv / draws + s2 / draws - m ** 2
+
+
+def test_a_gp_on_a_gp_takes_the_second_moment_over_its_inducing_inputs(
+        monkeypatch):
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, kernel=geoml.kernels.Gaussian())
+    x = x[:25]
+    mean_ref, var_ref = _conditioned_draws(model, leaf, x)
+    out = {}
+    for on in (True, False):
+        monkeypatch.setattr(_net, "_UNCERTAIN_POINTS_SECOND_MOMENT", on)
+        with model._propagation():
+            model._refresh(model.options.jitter)
+            mean, var = leaf.propagate(tf.constant(x))
+        out[on] = (np.asarray(mean)[:, 0], np.asarray(var)[:, 0])
+    # the mean is the expected kernel's either way; the variance is the
+    # draws' with the second moment, and off without it -- either way:
+    # `1 - l (K + D)^-1 l` overstates the average conditional variance
+    # (the kernel is averaged before the quadratic form) and the spread of
+    # the mean is missing, and here the first wins (0.9.3 reads 1.10)
+    np.testing.assert_allclose(out[True][0], out[False][0], rtol=1e-12)
+    assert np.max(np.abs(out[True][0] - mean_ref) / np.sqrt(var_ref)) < 0.05
+    ratio = out[True][1] / var_ref
+    assert 0.93 < np.median(ratio) < 1.03, np.median(ratio)
+    assert abs(np.log(np.median(out[False][1] / var_ref))) \
+        > 3 * abs(np.log(np.median(ratio)))
+
+
+@pytest.mark.parametrize("name", ["Gaussian", "Matern52"])
+def test_the_chunked_quadrature_s_gradient_is_the_unrolled_one(name,
+                                                               monkeypatch):
+    # the nodes are summed a chunk at a time under a gradient of its own:
+    # every trained parameter's derivative of the leaf's moments, and of
+    # the jitter, is what automatic differentiation of the plain sum gives
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, kernel=KERNELS[name]())
+    x = tf.constant(x[:15])
+    up = np.random.default_rng(2).normal(size=[15])
+    # the jitter's sums are only taken where the realizations leave it out
+    monkeypatch.setattr(_net, "_PATHWISE_REALIZATIONS", False)
+
+    def gradients():
+        variables = model.get_unfixed_variables()
+        with model._propagation():
+            with tf.GradientTape() as tape:
+                model._refresh(model.options.jitter)
+                moments = leaf.propagate(x)
+                loss = tf.reduce_sum((moments[0][:, 0] + moments[1][:, 0]
+                                      + leaf._input_jitter[:, 0]) * up)
+        return [np.asarray(g) for g in tape.gradient(loss, variables)
+                if g is not None]
+
+    chunked = gradients()
+
+    def unrolled(fn, inputs, n_chunks):
+        parts = [fn(tf.constant(c), *inputs) for c in range(n_chunks)]
+        return tuple(tf.add_n(list(p)) for p in zip(*parts))
+
+    monkeypatch.setattr(_net, "_chunked_sums", unrolled)
+    plain = gradients()
+    assert len(chunked) == len(plain) > 0
+    for a, b in zip(chunked, plain):
+        np.testing.assert_allclose(a, b, rtol=1e-9,
+                                   atol=1e-12 * max(np.abs(b).max(), 1.0))
+
+
+def _leaf_realizations(model, leaf, x, n_sim, seed=(11, 0)):
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        with _net.once_per_pass():
+            mean, var, sims, _ = leaf.predict(tf.constant(x), n_sim=n_sim,
+                                              seed=list(seed))
+    return (np.asarray(mean)[0, :, 0], np.asarray(var)[0],
+            np.asarray(sims)[0])
+
+
+def test_the_realizations_hold_the_variance_the_moments_report():
+    # drawn through the hidden layer's realizations, the variance those
+    # leave out added as noise keyed by location, and the leaf's own
+    # unexplained variance the same way
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, kernel=geoml.kernels.Gaussian())
+    x = x[:30]
+    parts = [_leaf_realizations(model, leaf, x, 200, (11, c))
+             for c in range(10)]
+    mean, var = parts[0][0], parts[0][1]
+    sims = np.concatenate([p[2] for p in parts], axis=1)
+    ratio = sims.var(axis=1, ddof=1) / var
+    assert 0.97 < np.median(ratio) < 1.03, np.median(ratio)
+    z = (sims.mean(axis=1) - mean) / np.sqrt(var / sims.shape[1])
+    assert np.mean(np.abs(z) > 1.96) < 0.15
+
+
+@pytest.mark.parametrize("n_experts", [1, 3])
+def test_a_gp_holds_its_variance_drawn_from_one_prior(n_experts):
+    # at a certain input every expert draws from one prior draw; blended,
+    # rescaled to the variance the moments report
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=n_experts, kernel=geoml.kernels.Gaussian())
+    parts = [_leaf_realizations(model, hidden[0], x, 200, (11, c))
+             for c in range(10)]
+    mean, var = parts[0][0], parts[0][1]
+    sims = np.concatenate([p[2] for p in parts], axis=1)
+    ratio = sims.var(axis=1, ddof=1) / var
+    assert 0.97 < np.median(ratio) < 1.03, np.median(ratio)
+    z = (sims.mean(axis=1) - mean) / np.sqrt(var / sims.shape[1])
+    assert np.mean(np.abs(z) > 1.96) < 0.15
+
+
+# measured 0.72 (2026-10-19); drawn apart, the experts' draws of their
+# inducing values were independent
+CORRELATION_AT_OVERLAPS = 0.5
+
+
+def test_experts_drawing_one_prior_agree_where_they_meet():
+    # each expert alone, with the same seed: where two carry weight their
+    # realizations come from the same prior draw, so they are correlated
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=3, kernel=geoml.kernels.Gaussian())
+    gp, xt = hidden[0], tf.constant(x)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        with _net.once_per_pass():
+            gp.propagate(xt)
+            weights = np.asarray(gp._sim_state[2])[:, 0]           # [E, n]
+    alone = []
+    for e in range(3):
+        with _net.expert_subset([e]), model._propagation():
+            model._refresh(model.options.jitter)
+            with _net.once_per_pass():
+                _, _, sims, _ = gp.predict(xt, n_sim=400, seed=[5, 0])
+        alone.append(np.asarray(sims)[0])                           # [n, S]
+    corr = []
+    for e in range(3):
+        for f in range(e + 1, 3):
+            for i in np.flatnonzero((weights[e] > 0.2) & (weights[f] > 0.2)):
+                corr.append(np.corrcoef(alone[e][i], alone[f][i])[0, 1])
+    assert len(corr) > 0
+    assert np.median(corr) > CORRELATION_AT_OVERLAPS, np.median(corr)
+
+
+def test_the_realizations_are_paired_with_the_parent_s(monkeypatch):
+    # realization s of the leaf reads realization s of the hidden layer:
+    # the leaf's realizations follow the hidden layer's, not only its mean
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, kernel=geoml.kernels.Gaussian())
+    # a leaf whose mean depends on its input (`_network` sets the hidden
+    # layer's posterior only)
+    leaf.parameters["alpha_white_0"].set_value(
+        np.random.default_rng(1).normal(size=[1, leaf.root.n_ip[0], 1]))
+    x = tf.constant(x[:30])
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        with _net.once_per_pass():
+            leaf.propagate(x)
+            sims = np.asarray(leaf.simulate(400, [3, 1]))[0]   # [n, S]
+            h = np.asarray(hidden[0].simulate(400, [3, 1]))    # [2, n, S]
+    # a quadratic regression of the leaf's realizations on the hidden
+    # layer's at each point explains part of their spread (measured 0.14;
+    # under the 0.9.3 rule, realizations at the hidden layer's mean, none)
+    explained = []
+    for i in range(sims.shape[0]):
+        design = np.column_stack([np.ones(400), h[:, i, :].T,
+                                  h[:, i, :].T ** 2])
+        coef, res, *_ = np.linalg.lstsq(design, sims[i], rcond=None)
+        explained.append(1.0 - res[0] / np.sum((sims[i] - sims[i].mean())
+                                                ** 2))
+    assert np.median(explained) > 0.05, np.median(explained)
+
+
+@pytest.mark.parametrize("n_experts", [1, 3])
+def test_the_realizations_do_not_depend_on_the_batch_or_the_chunk(
+        n_experts, monkeypatch):
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=n_experts, kernel=geoml.kernels.Matern52())
+    _, _, whole = _leaf_realizations(model, leaf, x[:30], 12)
+    _, _, part = _leaf_realizations(model, leaf, x[10:20], 12)
+    np.testing.assert_allclose(part, whole[10:20], rtol=1e-10, atol=1e-12)
+    monkeypatch.setattr(_net.BasicGP, "_REALIZATIONS_PER_CHUNK", 12)
+    _, _, one_chunk = _leaf_realizations(model, leaf, x[:30], 12)
+    np.testing.assert_allclose(one_chunk, whole, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("n_experts", [1, 3])
+def test_the_realizations_gradient_is_the_unrolled_one(n_experts,
+                                                       monkeypatch):
+    # a likelihood trained on realizations differentiates them: drawn a
+    # chunk at a time under a gradient of its own, every trained
+    # parameter's derivative is what automatic differentiation of the plain
+    # concatenation gives
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=n_experts, kernel=geoml.kernels.Matern52())
+    x = tf.constant(x[:15])
+    up = tf.constant(np.random.default_rng(4).normal(size=[1, 15, 8]))
+
+    def gradients():
+        variables = model.get_unfixed_variables()
+        with model._propagation():
+            with tf.GradientTape() as tape:
+                model._refresh(model.options.jitter)
+                with _net.once_per_pass():
+                    leaf.propagate(x)
+                    loss = tf.reduce_sum(leaf.simulate(8, [5, 2]) * up)
+        return [np.asarray(g) for g in tape.gradient(loss, variables)
+                if g is not None]
+
+    chunked = gradients()
+
+    def unrolled(fn, inputs, n_chunks):
+        return tf.concat([fn(tf.constant(c), *inputs)
+                          for c in range(n_chunks)], axis=0)
+
+    monkeypatch.setattr(_net, "_chunked_map", unrolled)
+    plain = gradients()
+    assert len(chunked) == len(plain) > 0
+    for a, b in zip(chunked, plain):
+        np.testing.assert_allclose(a, b, rtol=1e-9,
+                                   atol=1e-12 * max(np.abs(b).max(), 1.0))
+
+
+def test_a_gp_on_a_gp_trains_with_the_second_moment():
+    # through the gradient of the conditioned quadrature, by both trainers
+    # (the slots broadcast a variance without a node axis against offsets
+    # with one)
+    model, leaf, hidden, mapping, x = _network(
+        _two_layers, n_experts=3, kernel=geoml.kernels.Matern52())
+    model.train_full(3)
+    model.train_by_expert(epochs=1)
+    assert np.all(np.isfinite(model.training_log))
 
 
 def test_a_model_on_a_walk_trains_and_predicts():
@@ -1047,7 +1350,11 @@ def _realizations(model, leaf, x, var, n_real=4000, seed=21):
 
 
 @pytest.mark.parametrize("name", ["Gaussian", "Matern52"])
-def test_the_jitter_is_what_the_realizations_leave_out(name):
+def test_the_jitter_is_what_the_realizations_leave_out(name, monkeypatch):
+    # the separate latent jitter is the 0.9.3 mechanism, kept behind
+    # the switch while the realizations drawn through the parent's
+    # are measured (deep second moment, step 2)
+    monkeypatch.setattr(_net, "_PATHWISE_REALIZATIONS", False)
     # by quadrature a variance over 64 points of the input, on a rough
     # field: 9% at the widest input measured
     tolerance = 0.02 if name == "Gaussian" else 0.12
@@ -1064,7 +1371,11 @@ def _quantiles(samples):
     return np.quantile(samples, [0.05, 0.95], axis=-1)
 
 
-def test_the_prediction_and_its_quantiles_are_the_mixture_s():
+def test_the_prediction_and_its_quantiles_are_the_mixture_s(monkeypatch):
+    # the separate latent jitter is the 0.9.3 mechanism, kept behind
+    # the switch while the realizations drawn through the parent's
+    # are measured (deep second moment, step 2)
+    monkeypatch.setattr(_net, "_PATHWISE_REALIZATIONS", False)
     # through a warping that bends, against realizations at drawn inputs:
     # the value integrated over the jitter, and a measurement drawing it
     model, leaf = _warped_model()
@@ -1102,7 +1413,11 @@ def test_the_prediction_and_its_quantiles_are_the_mixture_s():
         (with_jitter, without)
 
 
-def test_a_certain_input_carries_no_jitter():
+def test_a_certain_input_carries_no_jitter(monkeypatch):
+    # the separate latent jitter is the 0.9.3 mechanism, kept behind
+    # the switch while the realizations drawn through the parent's
+    # are measured (deep second moment, step 2)
+    monkeypatch.setattr(_net, "_PATHWISE_REALIZATIONS", False)
     model, leaf = _uncertain_model()
     x, _ = _queries(leaf, 0.0)
     with model._propagation():
@@ -1114,7 +1429,11 @@ def test_a_certain_input_carries_no_jitter():
     assert np.max(np.abs(np.asarray(jitter))) < 1e-10
 
 
-def test_the_operations_carry_the_jitter():
+def test_the_operations_carry_the_jitter(monkeypatch):
+    # the separate latent jitter is the 0.9.3 mechanism, kept behind
+    # the switch while the realizations drawn through the parent's
+    # are measured (deep second moment, step 2)
+    monkeypatch.setattr(_net, "_PATHWISE_REALIZATIONS", False)
     model, leaf = _uncertain_model()
     x, var = _queries(leaf, 0.5)
     nodes = {
@@ -1143,7 +1462,11 @@ def test_the_operations_carry_the_jitter():
             np.testing.assert_allclose(got, want, rtol=1e-12, err_msg=name)
 
 
-def test_a_prediction_at_uncertain_locations_integrates_the_jitter():
+def test_a_prediction_at_uncertain_locations_integrates_the_jitter(monkeypatch):
+    # the separate latent jitter is the 0.9.3 mechanism, kept behind
+    # the switch while the realizations drawn through the parent's
+    # are measured (deep second moment, step 2)
+    monkeypatch.setattr(_net, "_PATHWISE_REALIZATIONS", False)
     model, _ = _warped_model()
     exact, uncertain = _uncertain_targets(spread=0.0), _uncertain_targets()
     model.predict(exact, n_sim=8)

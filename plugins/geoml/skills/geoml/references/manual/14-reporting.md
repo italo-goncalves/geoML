@@ -30,7 +30,7 @@ root = geoml.latent.BasicInput(
 gp = geoml.latent.BasicGP(
     root,
     size=n_el,
-    kernel=geoml.kernels.Spherical())
+    kernel=geoml.kernels.Exponential())
 
 # one likelihood serves any number of columns; the warping's size is what
 # says how many there are

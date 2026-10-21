@@ -1,3 +1,127 @@
+## version 0.9.4
+* **A deep model's realizations carry the variance it reports,
+`GPOptions(full_variance=True)`.** Until now a GP node reading another
+node's output took the second moment only where its inducing points were
+certain, and every GP node's realizations carried only the variance its
+inducing points explain: on the folded section the realizations held 0.59
+of the reported variance on a GP on a GP, 0.35 beside the coordinates and
+0.45 on a walk. Under the new option, the default for a new model:
+  - a GP node reading an uncertain input takes the second moment with its
+  own inducing inputs uncertain too, its quadrature over the input run with
+  the inducing inputs conditioned on each node;
+  - its realizations are drawn through its parent's, so realization `s`
+  reads the parent's realization `s`;
+  - every GP node's realizations carry what its inducing points leave out,
+  as a residual drawn by random features (Wilson et al.'s pathwise
+  conditioning: smooth, with the kernel's correlation and the exact
+  variance at every point) -- every node whose kernel has them, the
+  Gaussian, rational quadratic, exponential and Matérn; a spherical or
+  cubic node carries the explained part only, and the model warns at
+  construction -- and every expert of a node draws from one prior
+  draw, so experts agree where they meet: before any rescale their blend
+  held 0.84 of the reported variance where two carry weight, independent
+  draws 0.47, and an exact rescale closes the rest;
+  - the prediction integrates that residual analytically, rather than
+  averaging it over the realizations, and a bound trained on realizations
+  draws each location's marginal.
+
+  Measured with 2000 realizations against the reported variance: 1.00,
+  1.00 and 0.99 on the three folded networks with one expert, 0.93-0.99
+  with three, 0.994-1.006 on GeoScape's 32-expert exchange network. Trained
+  under it, Walker Lake's two-layer networks score an RMSE of 160 against
+  174-188 on the exhaustive field and a measurement CRPS of 85 against
+  92-103, and chapter 16's rock a log score of 0.3204 against 0.3224;
+  training cost 13-17x and 3.7x the time before the quadrature was chunked
+  and moved to Gauss–Hermite (`docs/benchmarks/deep_second_moment/`).
+  Every model's realizations change, shallow ones included; a model saved
+  before keeps the option off, and off is 0.9.3 to the bit -- predictions,
+  realizations, measurement samples and training log, rebuilt or reopened
+  (`gate_off.py`).
+* **GP nodes take `bias=False`: the prior mean is zero unless asked for.**
+Since v0.3.5 every GP node trained a constant per expert and output, in
+[-5, 5]. A field then returns to that constant away from its data, which
+for an indicator is the majority category, and the model can explain the
+data with blobs around the samples where at zero mean it has to connect
+them: the folded-ore example of the 2022 VGP article (three drillholes, a
+walked field at transform range 2) folds in the 2025-09-08 copy and gives
+five blobs in every release from v0.3.5 on, the blobs at a better bound
+(-48.3 against -51.4); fixed at zero, every version folds again, on three
+seeds each (`docs/benchmarks/fold_regression`). `BasicGP`,
+`MultiStructureGP` and `UncertainInputGP` take the argument (last, after
+`name`); `bias=True` frees the constant. The parameters stay registered
+either way, and a save restores the fixed flag it was made with, so a
+model saved before keeps its trained bias, free, on reload. New models
+train without one: their numbers move wherever the constant did work, the
+manual's chapters included. `GradientConstrainedInput` and the `Bias` node
+keep theirs. **A categorical model's class prior moves to the likelihood**:
+with the field at zero away from the data every category's log-odds sit on
+the contour level there, and chapter 17's stationary vein spread fully
+uncertain sheets over unsampled ground; chapters 6, 16 and 17 now build
+`CategoricalGaussianIndicator(..., bias=True)`, which trains a constant per
+category, and the vein, the Jura rock maps and chapter 6's map come back as
+they were.
+* **The manual's VGP models take the exponential kernel instead of the
+spherical** (chapters 3, 4, 7, 10, 11, 13, 14, 15 and 16; chapter 2's
+closed-form `GP` keeps the spherical of its kriging comparison), so that
+their realizations carry the whole variance the model reports: the
+spherical has no random-feature form and carries the explained part only.
+Chapter 13 shows what that costs on a coarse lattice, and why. The
+residual a sparse GP reports at a location is the variance its inducing
+points cannot reach there, `1 - k K^-1 kᵀ`; a rough kernel leaves a lot of
+it between lattice nodes, and on Walker Lake's 10-unit lattice it is
+two-thirds of the reported variance at the samples, whatever the kernel,
+and still 0.60 on a 5-unit lattice (training shortens the range). Drawn,
+it puts the variogram fan 20-70% above the data and the intervals over
+their promise (`nominal(0.9)` 0.85, goodness 0.95); adding the samples'
+locations to the inducing points before dividing them into experts brings
+it to a tenth, the fan onto the data and `nominal(0.9)` to 0.93
+(`walker_gap.py`). The ideal is an inducing point at every location the
+model will be asked about -- for rough kernels, a lattice as fine as the
+data -- and where that is out of reach the gap is a foreseeable price,
+which the chapter now names.
+* **The second moment's quadrature is chunked by a memory budget,
+`GPOptions(quadrature_memory=2e9)`.** A GP node reading an uncertain input
+took its 64 quadrature nodes four at a time, a loop recomputed in the
+backward pass; it now takes every node at once, differentiated plainly,
+wherever their estimated arrays fit the budget, else the largest chunk
+that does and never fewer than the old four. On Walker's GP on a GP a
+training step goes from 136 to 60 ms on the GPU and from 234 to 147 on the
+CPU, the bound the same to 1e-9; GeoScape's 32-expert network keeps its
+four (447 s an epoch against 435) and its realizations hold their variance
+(0.99-1.01). The budget is a fixed number, not the memory free at the
+time, so a model chunks, and rounds, the same way in every process; each
+training or prediction call states the rows it carries
+(`_propagation(rows=)`), and the experts of a per-expert pass share it,
+since TensorFlow may run their branches together. Two things measured on
+the way and left as they were: unrolling the kernel components' loop
+(eight for a Matérn or exponential kernel) ran them concurrently and out
+of a 24 GB device, and a budget without the four-node floor let a
+quadrature beside two sibling readers take 32 nodes and run out too. The
+`[..., None, ...]` slices on the quadrature's large arrays became
+`expand_dims`, whose gradient is a reshape rather than a full-size
+`StridedSliceGrad` on every chunk (`docs/benchmarks/deep_second_moment/
+chunk_memory.py`, `chunk_predict.py`). **A prediction batch is sized by the
+same budget**: each GP node reading an uncertain input reports what a row
+costs it at its smallest chunk, and a batch carries at most as many rows as
+the budget holds at the costliest node, `prediction_batch_size` remaining
+the cap. At 20000 rows the floor overruled the budget: on chapter 17's
+walked model one realization of the reader's pathwise draw held 3-4 GB, and
+a batch 24 GB, its 4050-block refinement pass 37 GB against 0.9.3's 10.5;
+sized by the model (3375 rows there), 9.6 GB in 84 s against 91
+(`ch17_memory.py`, `ch17_memory_parts.py`).
+* **An input of up to two dimensions is read on a 7×7 Gauss–Hermite
+grid.** The second moment's quadrature took 64 symmetric Sobol points
+whatever the input's dimension; up to two it now takes the tensor grid of
+seven probabilists' Gauss–Hermite points a dimension, 49 nodes, and Sobol
+beyond (`_QUADRATURE_RULE`, `_HERMITE_POINTS`). Against 16000 coupled
+draws on the folded section's GP on a GP, 7×7 matches 1024 Sobol points
+(median error of the variance 0.65-0.77% against 2.3% at the old 64), and
+5×5 matches 256 (1.0%) -- a step at 5×5 1.5x faster than all 64 Sobol
+nodes on the GPU and 2.3x on the CPU (`gate_nodes.py`,
+`chunk_memory.py`). The numbers of every such model move with it. XLA on
+the chunk's body (`_QUADRATURE_XLA`) was measured and left off: 1.1x on
+the GPU at a third more memory, 1.3x on the CPU.
+
 ## version 0.9.3
 * **An exponential or heavier noise tail under a log-like link warns at
 `initialize`.** `EpsilonInsensitive`, `Laplace`, `Huber`,

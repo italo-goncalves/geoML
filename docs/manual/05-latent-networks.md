@@ -158,7 +158,7 @@ inner = geoml.latent.BasicGP(
 deep_input = geoml.latent.Concatenate(root, inner)
 
 # a GP reading an uncertain input takes a kernel that is a mixture of
-# Gaussians: the Matern32 for the spherical's roughness at the origin
+# Gaussians, as the Matern32 and the exponential both are
 outer = geoml.latent.BasicGP(
     deep_input,
     size=1,

@@ -250,7 +250,7 @@ root = geoml.latent.BasicInput(
 gp = geoml.latent.BasicGP(
     root,
     size=1,
-    kernel=geoml.kernels.Spherical())
+    kernel=geoml.kernels.Exponential())
 
 model = geoml.models.VGPNetwork(
     walker, "V",

@@ -95,7 +95,8 @@ gp = geoml.latent.BasicGP(
 
 model = geoml.models.VGPNetwork(
     jura_train, "Landuse",
-    geoml.likelihood.CategoricalGaussianIndicator(n_components=len(labels)),
+    geoml.likelihood.CategoricalGaussianIndicator(n_components=len(labels),
+                                                  bias=True),
     gp,
     options=geoml.models.GPOptions(verbose=False))
 

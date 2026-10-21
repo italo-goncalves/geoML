@@ -102,20 +102,29 @@ _EXPERT_PROPAGATION = "consensus"
 # `GPOptions.propagation`, and read at trace time like it.
 _JOINT_PROPAGATION = False
 
+# Whether the moments and the realizations carry the full variance
+# (`GPOptions.full_variance`, new in 0.9.4): a GP node reading another
+# node's output takes the second moment with its inducing inputs uncertain
+# too, and every GP node's realizations carry what its inducing points
+# leave out. Off, the moments and realizations of 0.9.3. Set with the rule
+# above and read at trace time like it; on outside a model's context.
+_FULL_VARIANCE = True
+
 
 @_contextlib.contextmanager
-def propagation_rule(rule, joint=False):
-    """Chooses how experts propagate their inducing sets, and whether
-    uncertainty travels with its covariance between locations, while
-    active."""
-    global _EXPERT_PROPAGATION, _JOINT_PROPAGATION
-    previous = _EXPERT_PROPAGATION, _JOINT_PROPAGATION
+def propagation_rule(rule, joint=False, full=True):
+    """Chooses how experts propagate their inducing sets, whether
+    uncertainty travels with its covariance between locations, and whether
+    the moments and realizations carry the full variance, while active."""
+    global _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE
+    previous = _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE
     _EXPERT_PROPAGATION = rule
     _JOINT_PROPAGATION = bool(joint)
+    _FULL_VARIANCE = bool(full)
     try:
         yield
     finally:
-        _EXPERT_PROPAGATION, _JOINT_PROPAGATION = previous
+        _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE = previous
 
 
 # Which experts the GP nodes compute, or None for all of them. Set through
@@ -329,12 +338,15 @@ class _Joint(_collections.namedtuple("_Joint", "mean variance covariance")):
     """
 
 
-class _Second(_collections.namedtuple("_Second", "left jitter")):
+class _Second(_collections.namedtuple("_Second", "left jitter own",
+                                       defaults=(None,))):
     """What the second moment adds to an expert's moments: `left`, the
     variance its inducing points leave, `1 - explained` -- what the experts
-    are weighted by, the variance less the spread of the mean -- and
-    `jitter`, the latent variance its realizations leave out, or None where
-    it is not asked for."""
+    are weighted by, the variance less the spread of the mean -- `jitter`,
+    the latent variance the 0.9.3 realizations leave out, and `own`, the
+    variance of the residual the pathwise realizations draw (each node's
+    unexplained part past the draw of its inducing values); None where not
+    asked for."""
 
 
 class _Moments(tuple):
@@ -369,6 +381,61 @@ class _Predicted(tuple):
         predicted = super().__new__(cls, (mu, var, sims, explained_var))
         predicted.jitter = jitter
         return predicted
+
+
+def _residual_scale(target, held):
+    """The factor taking a residual of variance `held` to `target`, zero
+    where the target is below 1e-10: at an inducing point both are
+    rounding, and their ratio an arbitrary number that changes with the
+    batch. The gradient finite on both branches."""
+    kept = (target > 1e-10) & (held > 0.0)
+    return _tf.where(kept, _tf.sqrt(_tf.where(kept, target, 1.0)
+                                    / _tf.where(kept, held, 1.0)),
+                     _tf.zeros_like(target))
+
+
+def _expert_key(name, expert):
+    """The key an expert's normals are drawn under: the node's name for the
+    first expert, as a single-expert model has always drawn them, and the
+    expert's own for the others -- so the experts' draws are independent and
+    their blend's variance known (`_blend_scale`). Without the full
+    variance every expert draws under the node's name, as in 0.9.3."""
+    if int(expert) == 0 or not _FULL_VARIANCE:
+        return name
+    return "%s/expert%d" % (name, int(expert))
+
+
+def _blend_scale(agree, actual):
+    """The factor taking a blend of the experts' independent draws, of
+    variance `actual` (`sum w_e² v_e`), to `agree` (`sum w_e v_e`), what
+    the moments report: experts drawn independently lose variance in the
+    blend wherever two carry weight (half of it on a folded section's three
+    experts). One where a single expert holds all the weight, exactly; the
+    gradient finite on both branches."""
+    kept = actual > 0.0
+    return _tf.where(kept, _tf.sqrt(_tf.where(kept, agree, 1.0)
+                                    / _tf.where(kept, actual, 1.0)),
+                     _tf.ones_like(actual))
+
+
+def _owns(parents):
+    """The parents' own-residual variances, `[size, n]` each, zeros for a
+    parent with none -- or None where no parent has any."""
+    held = [p._own_noise for p in parents]
+    if all(g is None for g in held):
+        return None
+    return [_tf.zeros_like(p._explained_var) if g is None else g
+            for p, g in zip(parents, held)]
+
+
+def _gaps(parents):
+    """The parents' realization gaps, `[size, n]` each, zeros for a parent
+    with none -- or None where no parent has any."""
+    held = [p._realization_gap for p in parents]
+    if all(g is None for g in held):
+        return None
+    return [_tf.zeros_like(p._explained_var) if g is None else g
+            for p, g in zip(parents, held)]
 
 
 def _jitters(parents):
@@ -563,6 +630,58 @@ def _node_seed(seed, key):
     return [seed[0], seed[1] + digest]
 
 
+def _pcg32(x):
+    """The PCG hash (Jarzynski & Olano 2020) on 32-bit words held in
+    int64, masked so that no product overflows."""
+    mask = _tf.constant(0xFFFFFFFF, _tf.int64)
+    state = _tf.bitwise.bitwise_and(x * 747796405 + 2891336453, mask)
+    word = _tf.bitwise.bitwise_and(_tf.bitwise.bitwise_xor(
+        _tf.bitwise.right_shift(state, _tf.bitwise.right_shift(state, 28)
+                                + 4), state) * 277803737, mask)
+    return _tf.bitwise.bitwise_and(_tf.bitwise.bitwise_xor(
+        _tf.bitwise.right_shift(word, 22), word), mask)
+
+
+def _location_normals(coords, count, seed, key):
+    """Standard normals `[n, count]`, row `r` a function of the location
+    `coords[r]` alone, with the seed, `key` (a node's name and purpose) and
+    the column: the same at a location whatever batch holds it, which is
+    what keeps a realization independent of the batching.
+
+    Two 32-bit states hashed over the coordinates' bits (two locations
+    share their draws only where both collide), then each column's pair of
+    uniforms hashed from both and turned normal by Box and Muller. Checked
+    2026-10-18 on 640 000 draws (mean, variance, a Kolmogorov-Smirnov test,
+    the largest correlation between columns, neighbouring rows) and on
+    grids of steps from 1e-9 to 1e6 at a northing of 2.8e6, each variance
+    within about one standard error of one."""
+    mask = _tf.constant(0xFFFFFFFF, _tf.int64)
+    bits = _tf.bitcast(_tf.cast(coords, _tf.float64), _tf.int64)
+    lo = _tf.bitwise.bitwise_and(bits, mask)
+    hi = _tf.bitwise.bitwise_and(_tf.bitwise.right_shift(bits, 32), mask)
+    digest = _zlib.crc32(str(key).encode("utf-8")) & 0x7FFFFFFF
+    s0 = _tf.bitwise.bitwise_and(_tf.cast(seed[0], _tf.int64), mask)
+    s1 = _tf.bitwise.bitwise_and(_tf.cast(seed[1], _tf.int64) + digest, mask)
+    start = _tf.fill(_tf.shape(coords)[:1],
+                     _pcg32(_tf.bitwise.bitwise_xor(_pcg32(s0), s1)))
+    h1, h2 = start, _pcg32(start + 0x5BD1E995)
+    for j in range(int(coords.shape[-1])):
+        h1 = _pcg32(_tf.bitwise.bitwise_xor(h1, lo[:, j]))
+        h1 = _pcg32(_tf.bitwise.bitwise_xor(h1, hi[:, j]))
+        h2 = _pcg32(_tf.bitwise.bitwise_xor(h2, hi[:, j]))
+        h2 = _pcg32(_tf.bitwise.bitwise_xor(h2, lo[:, j]))
+    pairs = (count + 1) // 2
+    idx = _pcg32(_tf.range(2 * pairs, dtype=_tf.int64))
+    word = _pcg32(_tf.bitwise.bitwise_xor(
+        _pcg32(_tf.bitwise.bitwise_xor(h1[:, None], idx[None])),
+        h2[:, None]))
+    u = (_tf.cast(word, _tf.float64) + 0.5) / 4294967296.0
+    radius = _tf.sqrt(-2.0 * _tf.math.log(u[:, 0::2]))
+    angle = 2.0 * _np.pi * u[:, 1::2]
+    return _tf.concat([radius * _tf.cos(angle), radius * _tf.sin(angle)],
+                      axis=1)[:, :count]
+
+
 def _simulation_normals(shape, seed, key=None):
     """Standard normals shaped `[size, n, n_sim]` for the posterior draws.
 
@@ -586,8 +705,10 @@ def _simulation_normals(shape, seed, key=None):
     """
     seed = _node_seed(seed, key)
     if not _QMC_SIMULATIONS:
+        # Philox named rather than left to `auto_select`, which picks
+        # another generator under XLA (`jit_predict`)
         return _tf.random.stateless_normal(
-            shape=shape, seed=seed, dtype=_tf.float64)
+            shape=shape, seed=seed, dtype=_tf.float64, alg="philox")
 
     size, n, n_sim = (int(s) for s in shape)
     rng = _np.random.default_rng([abs(int(s)) for s in seed])
@@ -745,6 +866,133 @@ def _mixture_terms(omega, weights, constant, dif2, v, dif, r2, gradient):
     return total, slope
 
 
+def _summed_to(g, shape):
+    """`g` summed over the axes along which `shape` was broadcast to it."""
+    _, axes = _tf.raw_ops.BroadcastGradientArgs(s0=_tf.shape(g), s1=shape)
+    return _tf.reshape(_tf.reduce_sum(g, axes), shape)
+
+
+def _chunked_sums(fn, inputs, n_chunks):
+    """`sum_c fn(c, *inputs)` for `c` in `range(n_chunks)`, a tuple of
+    tensors, with one chunk's intermediates alive at a time in both passes.
+
+    A `while_loop` alone keeps every iteration's intermediates for the
+    backward pass, so the gradient is a loop of its own: each chunk
+    recomputed under a local tape, its vector-Jacobian product added in.
+    `fn` must read no variable -- whatever it differentiates arrives in
+    `inputs`, all tensors."""
+    inputs = tuple(inputs)
+    if _QUADRATURE_XLA:
+        fn = _tf.function(fn, jit_compile=True)
+    if n_chunks == 1:
+        # one chunk holds everything: no loop, no recomputation, and
+        # TensorFlow's own gradient
+        return tuple(fn(_tf.constant(0), *inputs))
+
+    @_tf.custom_gradient
+    def run(*xs):
+        first = fn(_tf.constant(0), *xs)
+
+        def forward(c, *acc):
+            return (c + 1,) + tuple(a + y for a, y in zip(acc, fn(c, *xs)))
+
+        out = _tf.while_loop(lambda c, *_: c < n_chunks, forward,
+                             (_tf.constant(1),) + tuple(first),
+                             parallel_iterations=1)[1:]
+
+        def backward(*upstream):
+            upstream = [_tf.zeros_like(o) if g is None else g
+                        for g, o in zip(upstream, out)]
+
+            def step(c, *acc):
+                with _tf.GradientTape() as tape:
+                    tape.watch(xs)
+                    ys = fn(c, *xs)
+                gs = tape.gradient(
+                    ys, xs, output_gradients=upstream,
+                    unconnected_gradients=_tf.UnconnectedGradients.ZERO)
+                return (c + 1,) + tuple(a + g for a, g in zip(acc, gs))
+
+            return _tf.while_loop(
+                lambda c, *_: c < n_chunks, step,
+                (_tf.constant(0),) + tuple(_tf.zeros_like(x) for x in xs),
+                parallel_iterations=1)[1:]
+
+        return out, backward
+
+    return run(*inputs)
+
+
+def _chunked_map(fn, inputs, n_chunks):
+    """`fn(c, *inputs)` for `c` in `range(n_chunks)`, each `[chunk, ...]`,
+    stacked along the first axis, with one chunk's intermediates alive at a
+    time in both passes: the forward pass a `while_loop` writing a
+    `TensorArray`, the backward pass a loop of its own recomputing each
+    chunk under a local tape (`_chunked_sums` is the same for a sum). `fn`
+    must read no variable; whatever it differentiates arrives in
+    `inputs`, all tensors."""
+    inputs = tuple(inputs)
+    if _QUADRATURE_XLA:
+        fn = _tf.function(fn, jit_compile=True)
+    if n_chunks == 1:
+        return fn(_tf.constant(0), *inputs)
+
+    @_tf.custom_gradient
+    def run(*xs):
+        def forward(c, out):
+            return c + 1, out.write(c, fn(c, *xs))
+
+        _, out = _tf.while_loop(
+            lambda c, _: c < n_chunks, forward,
+            (_tf.constant(0), _tf.TensorArray(_tf.float64, n_chunks)),
+            parallel_iterations=1)
+        result = out.concat()
+
+        def backward(upstream):
+            chunk = _tf.shape(upstream)[0] // n_chunks
+
+            def step(c, *acc):
+                with _tf.GradientTape() as tape:
+                    tape.watch(xs)
+                    y = fn(c, *xs)
+                gs = tape.gradient(
+                    y, xs, output_gradients=upstream[c * chunk:
+                                                     (c + 1) * chunk],
+                    unconnected_gradients=_tf.UnconnectedGradients.ZERO)
+                return (c + 1,) + tuple(a + g for a, g in zip(acc, gs))
+
+            return _tf.while_loop(
+                lambda c, *_: c < n_chunks, step,
+                (_tf.constant(0),) + tuple(_tf.zeros_like(x) for x in xs),
+                parallel_iterations=1)[1:]
+
+        return result, backward
+
+    return run(*inputs)
+
+
+def _conditioned_kernel(h, mean, var, cov, points, points_var, r2, omega,
+                        weights, constant, rational):
+    """The kernel between realizations of an input, `h` `[..., n, S, d]`,
+    and inducing points conditioned on each through the input's chain --
+    mean `[..., n, d]`, variance, covariance with the points `[..., n, m,
+    d]` -- averaged over what is left of the points' spread: `[..., n, S,
+    m]`. The ranges squared and the kernel's components are arguments, so
+    that a chunked map can differentiate them."""
+    gain = _tf.math.divide_no_nan(cov, var[..., :, None, :])
+    dev = h - mean[..., :, None, :]
+    dif = h[..., :, :, None, :] - points[..., None, None, :, :] \
+        - gain[..., :, None, :, :] * dev[..., :, :, None, :]
+    left = _tf.maximum(points_var[..., None, :, :] - gain * cov,
+                       0.0)[..., :, None, :, :]
+    dif2 = dif ** 2 / r2
+    v = left / r2
+    if rational:
+        return _mixture_terms(omega, weights, constant, dif2, v, None, None,
+                              False)[0]
+    return _mixture_sum(omega, weights, constant, dif2, v)
+
+
 def _mixture_sum(omega, weights, constant, dif2, v):
     """The total of `_mixture_terms`, the same arithmetic in the same order,
     with a gradient of its own: the backward pass keeps only `dif2` and `v`
@@ -779,7 +1027,8 @@ def _mixture_sum(omega, weights, constant, dif2, v):
 
         _, total = _tf.while_loop(
             lambda q, _: q < n_q, forward,
-            (_tf.constant(0), constant + _tf.zeros_like(a2[..., 0])),
+            (_tf.constant(0), constant + _tf.zeros(_tf.broadcast_dynamic_shape(
+                _tf.shape(a2), _tf.shape(b))[:-1], _tf.float64)),
             parallel_iterations=1)
 
         def backward(g):
@@ -790,11 +1039,15 @@ def _mixture_sum(omega, weights, constant, dif2, v):
                 return (q + 1, ga + t * da,
                         gb + t * (da + 2.0 * w ** 2 * a2 / inflated ** 2))
 
-            zeros = _tf.zeros_like(a2)
+            # the two may broadcast against each other -- a node's offsets
+            # against variances that do not depend on the node -- so the
+            # sums run in the shape they make and return to each input's
+            zeros = _tf.zeros(_tf.broadcast_dynamic_shape(
+                _tf.shape(a2), _tf.shape(b)), _tf.float64)
             _, ga, gb = _tf.while_loop(
                 lambda q, *_: q < n_q, step, (_tf.constant(0), zeros, zeros),
                 parallel_iterations=1)
-            return ga, gb
+            return _summed_to(ga, _tf.shape(a2)), _summed_to(gb, _tf.shape(b))
 
         return total, backward
 
@@ -892,6 +1145,24 @@ def _plain_distance(x, y, ranges):
         + _tf.reduce_sum(ys ** 2, -1)[..., None, :] \
         - 2.0 * _tf.matmul(xs, ys, transpose_b=True)
     return _tf.sqrt(_tf.maximum(square, 1e-30))
+
+
+def _input_rule(dimension):
+    """The conditioned quadrature's nodes `[q, dimension]` and weights
+    `[q]` (summing to one), or None for equal weights: up to two
+    dimensions under the Gauss-Hermite rule (`_QUADRATURE_RULE`, the
+    default), the tensor grid of `_HERMITE_POINTS` probabilists'
+    Gauss-Hermite points a dimension; else the 64 symmetric Sobol points of
+    `_input_nodes`."""
+    if _QUADRATURE_RULE == "hermite" and dimension <= 2:
+        x, w = _np.polynomial.hermite_e.hermegauss(_HERMITE_POINTS)
+        w = w / w.sum()
+        grids = _np.meshgrid(*([x] * dimension), indexing="ij")
+        weights = _np.prod(_np.meshgrid(*([w] * dimension), indexing="ij"),
+                           axis=0)
+        return (_np.stack([g.ravel() for g in grids], axis=-1),
+                weights.ravel())
+    return _input_nodes(dimension), None
 
 
 def _input_nodes(dimension):
@@ -1077,6 +1348,145 @@ def refresh_cached(network, jitter=1e-6, owner=None):
 # runs, as it always did.
 _ONCE = None
 
+# Whether a GP node reading another node's output -- a deep layer, a
+# `GPWalk` -- takes the second moment, its inducing inputs conditioned on
+# each quadrature node of the input (the roadmap's plan of 2026-10-18,
+# step 1). Off gives the 0.9.3 moments; kept switchable while measured.
+_UNCERTAIN_POINTS_SECOND_MOMENT = True
+
+# Whether a GP node that takes the second moment at an uncertain input
+# draws its realizations through its parent's (step 2 of the same plan):
+# each realization at the parent's realization, the variance those leave
+# out added as noise keyed by location, the inducing inputs conditioned on
+# the draw, and the node's own unexplained variance added the same way --
+# so the ensemble carries the variance the moments report, and the latent
+# jitter the likelihood integrated separately is folded in.
+_PATHWISE_REALIZATIONS = True
+
+
+def _pathwise():
+    """Whether realizations are drawn pathwise, carrying the full variance:
+    under `GPOptions.full_variance`, unless a test has switched it off."""
+    return _FULL_VARIANCE and _PATHWISE_REALIZATIONS
+
+# Inside the training data term (`marginal_draws`): a node drawing its
+# realizations through its parent's draws them from each location's own
+# marginal instead -- its mean plus its standard deviation times normals
+# keyed by location. A bound summed over rows reads each row's realizations
+# alone, so the marginal is all it needs, and it costs neither the parent's
+# realizations nor their gradient: a `LikelihoodMixture`'s latent shares,
+# trained on realizations of a reader on a `GPWalk`, walked the field at
+# every realization with its gradient and ran a 16 GB card out of memory.
+_MARGINAL_DRAWS = False
+
+
+# Inside `smooth_draws`: realizations leave out each GP node's own residual
+# -- the part its inducing points do not explain, drawn by random features
+# or as noise -- which the prediction then integrates analytically from the
+# variance the nodes report as `_own_noise` (the user's choice 2(b): the
+# realizations carry everything, the prediction stays free of Monte Carlo
+# noise in that part).
+_SMOOTH_DRAWS = False
+
+# How much memory the conditioned quadrature and the pathwise draws may
+# hold at once, in bytes (`GPOptions.quadrature_memory`), and the most rows
+# a call carries where the traced shape does not say. Set through
+# `quadrature_rule` by the model, read at trace time and keyed like the
+# propagation rule. Within the budget a chunk is every node at once,
+# differentiated plainly; past it, the largest chunk the budget holds, in a
+# loop recomputed in the backward pass. Measured on Walker's GP on a GP
+# (`chunk_memory.py`): four nodes a chunk 245 ms a step on the CPU and 130
+# on the GPU, all 64 plainly 147 and 60, the bound the same to 1e-8.
+_QUADRATURE_MEMORY = 2e9
+# the fewest units a looped chunk takes: the four nodes every model ran at
+# before the budget, which a network the estimate calls large keeps --
+# what else is resident beside a quadrature (sibling readers, a walk) is
+# invisible to the estimate, and on GeoScape's network a chunk of 32 it
+# allowed ran out of a 24 GB device
+_FEWEST_PER_CHUNK = 4
+_QUADRATURE_ROWS = 20000
+# bytes a node of the quadrature holds per element of its `[n, m, d]`
+# arrays, both passes, plainly differentiated (43 measured on Walker's GP
+# on a GP on the GPU, `chunk_memory.py`), and a realization of a reader's
+# draw per element of its `[n, m, d]` and `[n, size (J + 1)]` arrays, for
+# every expert: the experts' arrays are made in one function, branches
+# TensorFlow may run together (taken as the quadrature's: at 16 a chunk of
+# a hundred realizations on GeoScape's 32 experts ran out of the device)
+_NODE_BYTES = 48
+_REALIZATION_BYTES = 48
+# the quadrature's rule: "hermite", a Gauss-Hermite tensor grid of
+# `_HERMITE_POINTS` a dimension up to two dimensions and Sobol beyond (7x7
+# measured as close as 1024 Sobol points, `gate_nodes.py`), or "sobol"
+# everywhere; and XLA on a chunk's body, an experiment never set by a model
+_QUADRATURE_RULE = "hermite"
+_HERMITE_POINTS = 7
+_QUADRATURE_XLA = False
+
+
+@_contextlib.contextmanager
+def quadrature_rule(memory=None, rows=None):
+    """The quadrature's memory budget, in bytes, and the most rows a call
+    carries, while active (None keeps what is set)."""
+    global _QUADRATURE_MEMORY, _QUADRATURE_ROWS
+    previous = _QUADRATURE_MEMORY, _QUADRATURE_ROWS
+    if memory is not None:
+        _QUADRATURE_MEMORY = float(memory)
+    if rows is not None:
+        _QUADRATURE_ROWS = int(rows)
+    try:
+        yield
+    finally:
+        _QUADRATURE_MEMORY, _QUADRATURE_ROWS = previous
+
+
+def _static(value, fallback):
+    """A traced dimension where the shape says it, `fallback` where not."""
+    return int(value) if value is not None else int(fallback)
+
+
+def _chunk_of(units, unit_bytes, override=None):
+    """How many of `units` (nodes, realizations) a chunk takes: all of them
+    where their `unit_bytes` fit the budget -- one chunk, differentiated
+    plainly -- else the largest divisor of `units` the budget holds, and
+    never fewer than the four a chunk took before the budget. `override` (a class's `_NODES_PER_CHUNK`, set by a benchmark)
+    takes the largest divisor at most that."""
+    units = int(units)
+    if override is not None:
+        cap = min(int(override), units)
+    elif units * unit_bytes <= _QUADRATURE_MEMORY:
+        return units
+    else:
+        # the loop holds about what the plain path holds a node (47 bytes
+        # an element against 43, measured): no allowance for its backward
+        cap = max(min(_FEWEST_PER_CHUNK, units),
+                  min(units, int(_QUADRATURE_MEMORY // unit_bytes)))
+    return max(c for c in range(1, cap + 1) if units % c == 0)
+
+
+@_contextlib.contextmanager
+def smooth_draws():
+    """Draw realizations without the nodes' own residuals in this block."""
+    global _SMOOTH_DRAWS
+    previous = _SMOOTH_DRAWS
+    _SMOOTH_DRAWS = True
+    try:
+        yield
+    finally:
+        _SMOOTH_DRAWS = previous
+
+
+@_contextlib.contextmanager
+def marginal_draws():
+    """Draw pathwise realizations from each location's marginal in this
+    block (see `_MARGINAL_DRAWS`)."""
+    global _MARGINAL_DRAWS
+    previous = _MARGINAL_DRAWS
+    _MARGINAL_DRAWS = True
+    try:
+        yield
+    finally:
+        _MARGINAL_DRAWS = previous
+
 
 @_contextlib.contextmanager
 def once_per_pass():
@@ -1185,6 +1595,16 @@ class _LatentVariable(_gpr.Parametric):
         # input is uncertain, `[size, n]`, carried up by the nodes acting
         # linearly and dropped by the others; None elsewhere
         self._input_jitter = None
+        # the variance of the node's own residual in its realizations,
+        # `[size, n]`, carried up as the jitter is: what the prediction
+        # integrates analytically from realizations drawn without it
+        # (`smooth_draws`); None where there is none
+        self._own_noise = None
+        # the variance the node's realizations leave out, `[size, n]`, read
+        # by a GP node drawing its realizations through this node's (the
+        # pathwise realizations); None where they leave out nothing, or
+        # where the node does not say
+        self._realization_gap = None
 
     # Whether the node's output is Gaussian: True, False, or "parents",
     # Gaussian exactly when every parent is. The training quadrature reads
@@ -1653,6 +2073,7 @@ class _GPNode(_FunctionalLatentVariable):
 
     def propagate(self, x, x_var=None):
         with _tf.name_scope("gp_prediction"):
+            coords = x
             parent = self.parent.propagate(x, x_var)
             x, x_var = parent
             jitter = None
@@ -1683,25 +2104,96 @@ class _GPNode(_FunctionalLatentVariable):
             self._sim_state = (cov_cross, mu, weights)
             self._explained_var = w_exp_var
             self._input_jitter = jitter
+            self._path_state = None
+            self._realization_gap = None
+            self._own_noise = None
+            self._residual_state = None
+            # what a draw from each location's marginal needs (training's
+            # draws, `marginal_draws`)
+            self._moment_state = (coords, w_mu, w_var)
+            if self._READS_CHAIN and second is not None \
+                    and _pathwise():
+                # the realizations are drawn through the parent's and carry
+                # the whole variance: no gap, and no jitter left to add
+                self._path_state = (coords, chain, weights, w_mu, w_var,
+                                    x, x_var)
+                self._input_jitter = None
+                # the variance of the residual the realizations draw, for
+                # the prediction to integrate (`smooth_draws`)
+                own = second.own
+                if isinstance(own, list):
+                    own = None if any(o is None for o in own) \
+                        else _tf.stack(own, axis=0)
+                self._own_noise = None if own is None \
+                    else _tf.reduce_sum(own * weights, axis=0)
+            elif self._READS_CHAIN and chain is None:
+                gap = self._certain_gap(cov_cross, var, weights)
+                if _pathwise() and self._feature_kernel():
+                    # the realizations carry what the inducing points leave
+                    # out as a random-feature residual: smooth, the kernel's
+                    # correlation, its variance exact at every point
+                    self._residual_state = x
+                    self._own_noise = gap
+                else:
+                    self._realization_gap = gap
             return _Moments(_tf.transpose(w_mu[:, :, 0]),
                             _tf.transpose(w_var), experts)
 
+    def _certain_gap(self, cov_cross, var, weights):
+        """The variance the realizations leave out at a certain input,
+        blended as the variances are: each expert's variance less the
+        variance its draws `k R eta` carry, `1 - k K^-1 kᵀ`."""
+        return None
+
+    def _feature_kernel(self):
+        """Whether the node draws its residual by random features."""
+        return False
+
     def simulate(self, n_sim, seed=(0, 0)):
+        state = getattr(self, "_moment_state", None)
+        if _MARGINAL_DRAWS and state is not None:
+            # a bound summed over rows reads each row alone: its marginal
+            coords, w_mu, w_var = state
+            normals = _tf.transpose(_tf.reshape(_location_normals(
+                coords, self.size * n_sim, seed, "%s/marginal" % self.name),
+                [-1, self.size, n_sim]), [1, 0, 2])
+            return w_mu + _tf.sqrt(_tf.maximum(w_var, 0.0))[:, :, None] \
+                * normals
+        if getattr(self, "_path_state", None) is not None:
+            return self._pathwise_simulate(n_sim, seed)
+        if getattr(self, "_residual_state", None) is not None:
+            return self._shared_prior_simulate(n_sim, seed)
         if _slots_of(self.root) is not None:
-            return self._slot_simulate(n_sim, seed)
-        cov_cross, mu, weights = self._swept()
-        with _tf.name_scope("gp_simulation"):
-            rnd = [
-                _simulation_normals([self.size, self.root.n_ip[i], n_sim],
-                                    seed, key=self.name)
-                for i in _active_experts(self.root)
-            ]
-            sims = [
-                _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c)) + d
-                for a, b, c, d in zip(cov_cross, self.chol_r, rnd, mu)
-            ]
-            return _tf.reduce_sum(
-                _tf.stack(sims, axis=0) * weights[:, :, :, None], axis=0)
+            sims = self._slot_simulate(n_sim, seed)
+        else:
+            cov_cross, mu, weights = self._swept()
+            with _tf.name_scope("gp_simulation"):
+                rnd = [
+                    _simulation_normals([self.size, self.root.n_ip[i],
+                                         n_sim], seed,
+                                        key=_expert_key(self.name, i))
+                    for i in _active_experts(self.root)
+                ]
+                if not _FULL_VARIANCE:
+                    # 0.9.3's blend, the experts sharing their normals
+                    return _tf.reduce_sum(_tf.stack([
+                        _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c)) + d
+                        for a, b, c, d in zip(cov_cross, self.chol_r, rnd,
+                                              mu)], axis=0)
+                        * weights[:, :, :, None], axis=0)
+                draws = _tf.stack([
+                    _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c))
+                    for a, b, c in zip(cov_cross, self.chol_r, rnd)], 0)
+                held = _tf.stack([
+                    _tf.reduce_sum(_tf.einsum("nm,smj->snj", a, b) ** 2, -1)
+                    for a, b in zip(cov_cross, self.chol_r)], 0)
+                scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
+                                     _tf.reduce_sum(weights ** 2 * held, 0))
+                sims = _tf.reduce_sum(
+                    _tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0) \
+                    + scale[:, :, None] * _tf.reduce_sum(
+                        draws * weights[:, :, :, None], axis=0)
+        return sims
 
     def interpolate(self, x, x_var=None):
         """Stash-free moments at arbitrary already-propagated locations.
@@ -1914,6 +2406,9 @@ class GaussianInput(BasicInput):
                 * x_var[:, :, None], axis=1)
         self._sim_state = (x_tr,)
         self._explained_var = _tf.zeros_like(_tf.transpose(x_tr))
+        # the realizations are the mean: they leave out the whole variance
+        self._realization_gap = None if x_var is None \
+            else _tf.transpose(var_tr)
         experts = None
         if _wants_joint(self):
             # each location's own uncertainty, unrelated to any other's
@@ -1949,6 +2444,11 @@ class Stack(_Operation):
         jitters = _jitters(self.parents)
         self._input_jitter = None if jitters is None \
             else _tf.concat(jitters, axis=0)
+        gaps = _gaps(self.parents)
+        self._realization_gap = None if gaps is None \
+            else _tf.concat(gaps, axis=0)
+        owns = _owns(self.parents)
+        self._own_noise = None if owns is None else _tf.concat(owns, axis=0)
         # a `Concatenate` hands its parents' chains on side by side
         experts = None
         if self.propagates_inducing_points and _wants_joint(self):
@@ -2010,7 +2510,7 @@ class BasicGP(_GPNode):
     """
     def __init__(self, parent, size=1, kernel=None,
                  fix_range=False, isotropic=False, range_prior=2.0,
-                 name=None):
+                 name=None, bias=False):
         """
         Initializer for BasicGP.
 
@@ -2038,9 +2538,18 @@ class BasicGP(_GPNode):
         name : str
             A name for this node, shown in the printed network and accepted by
             `get_node`. Numbered automatically if omitted.
+        bias : bool
+            Whether the node's prior mean -- one constant per expert and
+            output -- is trained. Off by default: the mean is zero, so a
+            field returns to zero away from its data. A trained constant
+            lets it return to any level instead, which for an indicator is
+            the majority category, and the model can then explain the data
+            with blobs around the samples where it would otherwise have to
+            connect them.
         """
         super().__init__(parent, name=name)
         self._size = size
+        self.trains_bias = bool(bias)
         # each node gets its own kernel object -- a shared default would
         # couple every node built without one the day a kernel gains a
         # trainable parameter
@@ -2091,8 +2600,14 @@ class BasicGP(_GPNode):
                 # A point estimate, deliberately: no KL prices it and none is
                 # needed -- one bounded scalar per expert, the level the data
                 # sets. `cross_validate` still re-initializes it along with
-                # the variational state, because it encodes the data.
-                _gpr.RealParameter(0, -5, 5))
+                # the variational state, because it encodes the data. Fixed
+                # at zero unless `bias=True` (0.9.4): free since v0.3.5, it
+                # returned the folded-ore example's indicator to "waste"
+                # away from the drillholes, and the fold the walk found at
+                # zero mean became five blobs at a better bound. Registered
+                # either way, so a save's parameters keep their places; a
+                # save restores the flag it was made with
+                _gpr.RealParameter(0, -5, 5, fixed=not self.trains_bias))
 
         if self.isotropic:
             self._add_parameter(
@@ -2418,6 +2933,8 @@ class BasicGP(_GPNode):
         alpha = _tf.einsum("pab,psbc->psac", cov_inv, means)
 
         self.slots_cov = cov
+        self.slots_cov_chol = chol
+        self.slots_cov_inv = cov_inv
         self.slots_cov_smooth_chol = smooth_chol
         self.slots_cov_smooth_inv = smooth_inv
         self.slots_chol_r = chol_r
@@ -2503,12 +3020,13 @@ class BasicGP(_GPNode):
             # a padded point reaches nothing: its row and column of every
             # matrix the moments are read through are zero
             outer = pmask[:, None, :, None] * pmask[:, None, None, :]
-            var, explained_var, jitter = self._mixture_moments(
+            var, explained_var, jitter, own = self._mixture_moments(
                 chain[0], ips, self.slots_cov_smooth_inv * outer,
                 self.slots_alpha, mu[..., 0]
                 - self.slots_bias[:, None, None], cov_cross,
-                self.slots_chol_r * outer if with_second else None)
-            second = _Second(_tf.maximum(1.0 - explained_var, 0.0), jitter)
+                self.slots_chol_r * outer if with_second else None, ipvs)
+            second = _Second(_tf.maximum(1.0 - explained_var, 0.0), jitter,
+                             own)
             return (cov_cross, mu, var, explained_var) \
                 + ((second,) if with_second else ())
         explained_var = _tf.reduce_sum(
@@ -2530,16 +3048,26 @@ class BasicGP(_GPNode):
             # one draw at the padded size gives a smaller expert's second
             # output other numbers. A padded point's normals reach nothing,
             # its covariance with every location being masked to zero
-            drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim], seed,
-                                                 key=self.name),
-                             [[0, 0], [0, m - n], [0, 0]])
-                     for n in self.root.n_ip]
+            drawn = [_tf.pad(_simulation_normals(
+                [self.size, n, n_sim], seed, key=_expert_key(self.name, i)),
+                [[0, 0], [0, m - n], [0, 0]])
+                for i, n in enumerate(self.root.n_ip)]
             drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
             rnd = _tf.gather(_tf.stack(drawn), slots.ids)
-            sims = _tf.einsum(
+            draws = _tf.einsum(
                 "pab,psbc->psac", cov_cross,
-                _tf.matmul(self.slots_chol_r, rnd)) + mu
-            return _tf.reduce_sum(sims * weights[:, :, :, None], axis=0)
+                _tf.matmul(self.slots_chol_r, rnd))
+            if not _FULL_VARIANCE:
+                # 0.9.3's blend, the experts sharing their normals
+                return _tf.reduce_sum((draws + mu) * weights[:, :, :, None],
+                                      axis=0)
+            held = _tf.reduce_sum(_tf.einsum(
+                "pnm,psmj->psnj", cov_cross, self.slots_chol_r) ** 2, -1)
+            scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
+                                 _tf.reduce_sum(weights ** 2 * held, 0))
+            return _tf.reduce_sum(mu * weights[:, :, :, None], axis=0) \
+                + scale[:, :, None] * _tf.reduce_sum(
+                    draws * weights[:, :, :, None], axis=0)
 
     def cache_prediction_state(self):
         if _slots_of(self.root) is not None:
@@ -2549,6 +3077,7 @@ class BasicGP(_GPNode):
             super().cache_prediction_state()
             self.alpha = self._cache_tuple("alpha", self.alpha)
             self.cov_inv = self._cache_tuple("cov_inv", self.cov_inv)
+            self.cov_chol = self._cache_tuple("cov_chol", self.cov_chol)
             self.cov_smooth_inv = self._cache_tuple(
                 "cov_smooth_inv", self.cov_smooth_inv)
             self.chol_r = self._cache_tuple("chol_r", self.chol_r)
@@ -2578,6 +3107,7 @@ class BasicGP(_GPNode):
             self.joint_gain = by_expert("joint_gain", self.joint_gain)
         self.alpha = by_expert("alpha", self.alpha)
         self.cov_inv = by_expert("cov_inv", self.cov_inv)
+        self.cov_chol = by_expert("cov_chol", self.cov_chol)
         self.cov_smooth_inv = by_expert("cov_smooth_inv", self.cov_smooth_inv)
         self.chol_r = by_expert("chol_r", self.chol_r)
 
@@ -2636,15 +3166,16 @@ class BasicGP(_GPNode):
                     chain, _covariances_of(self.parent, ids)):
                 moments = [
                     self._mixture_moments(e, ip, inv, a, m[..., 0] - b, l,
-                                          r if with_second else None)
-                    for e, ip, inv, a, m, b, l, r in zip(
-                        chain, ips, self.cov_smooth_inv, self.alpha, mu, bias,
-                        cov_cross, self.chol_r)]
-                var = _tf.stack([v for v, _, _ in moments], axis=0)
-                explained_var = [x for _, x, _ in moments]
+                                          r if with_second else None, ipv)
+                    for e, ip, ipv, inv, a, m, b, l, r in zip(
+                        chain, ips, ipvs, self.cov_smooth_inv, self.alpha, mu,
+                        bias, cov_cross, self.chol_r)]
+                var = _tf.stack([v for v, _, _, _ in moments], axis=0)
+                explained_var = [x for _, x, _, _ in moments]
                 second = _Second(_tf.maximum(
                     1.0 - _tf.stack(explained_var, axis=0), 0.0),
-                    [j for _, _, j in moments] if with_second else None)
+                    [j for _, _, j, _ in moments] if with_second else None,
+                    [o for _, _, _, o in moments] if with_second else None)
                 return (cov_cross, mu, var, explained_var) \
                     + ((second,) if with_second else ())
 
@@ -2691,9 +3222,12 @@ class BasicGP(_GPNode):
         uncertain and its inducing points are not -- an input's own output,
         through nodes acting row by row -- and the kernel is one the second
         moment takes."""
+        certain = all(e.covariance is None for e in chain) \
+            and all(c is None for c in covariances)
         return (self._READS_CHAIN
-                and all(e.covariance is None for e in chain)
-                and all(c is None for c in covariances)
+                and (certain or (_FULL_VARIANCE
+                                 and _UNCERTAIN_POINTS_SECOND_MOMENT
+                                 and self._CONDITIONED_SECOND_MOMENT))
                 and _second_moment_supported(self.kernel))
 
     def _kernel_items(self):
@@ -2717,7 +3251,7 @@ class BasicGP(_GPNode):
     def _at_input_nodes(self, mean, var, points):
         """The node's own kernel between `points` and each location's input
         at the quadrature nodes, `[..., n, q, m]`."""
-        nodes = _tf.constant(_input_nodes(int(mean.shape[-1])), _tf.float64)
+        nodes = _tf.constant(_input_nodes(int(self.parent.size)), _tf.float64)
         # the standard deviation with a finite gradient at zero, both
         # branches of a `where` being differentiated
         positive = var > 0.0
@@ -2731,6 +3265,554 @@ class BasicGP(_GPNode):
         return _tf.reshape(k, _tf.concat(
             [_tf.shape(k)[:-2], shape[-3:-1], _tf.shape(k)[-1:]], 0))
 
+    # whether the node's kernel is its one kernel, which the conditioned
+    # second moment reads (`_conditioned_sums`, `_conditioned_kernel`); a
+    # node combining kernels of its own does not say yet
+    _CONDITIONED_SECOND_MOMENT = True
+
+    # random features per node for the residual: the error of a residual's
+    # covariance falls as one over their square root
+    _FEATURES = 1024
+
+    def _feature_kernel(self):
+        # a node combining kernels of its own (`AdditiveGP`,
+        # `MultiStructureGP`) keeps the gap, as the second moment does
+        return self._READS_CHAIN and self._CONDITIONED_SECOND_MOMENT \
+            and type(self.kernel) in (
+            _kr.Gaussian, _kr.RationalQuadratic) + tuple(_KERNEL_MIXTURES)
+
+    def _feature_count(self):
+        """The most inducing points any expert holds, active or not: the
+        basis must not change with the experts a call computes, or a
+        prediction by expert would draw from another prior."""
+        return max(int(n) for n in self.root.n_ip)
+
+    def _row_bytes(self):
+        """The bytes a row of a prediction batch costs the node at its
+        smallest chunk -- `_FEWEST_PER_CHUNK` nodes of the conditioned
+        quadrature, or as many pathwise realizations, every expert at once
+        as `_conditioned_sums` and `_pathwise_simulate` count them -- or 0
+        where it reads a certain input and takes neither. What sizes a
+        model's prediction batches (`VGPNetwork._prediction_rows`): a
+        budget the floor overrules no longer bounds anything."""
+        if not (_FULL_VARIANCE and self._READS_CHAIN
+                and self._CONDITIONED_SECOND_MOMENT
+                and self.parent is not self.root):
+            return 0
+        m, d = self._feature_count(), int(self.parent.size)
+        experts = len(self.root.n_ip)
+        cost = _NODE_BYTES * m * d
+        if _pathwise() and self._feature_kernel():
+            features = max(self._FEATURES, 2 * m) + 1
+            cost = max(cost, _REALIZATION_BYTES * (m * d + self.size
+                                                   * features))
+        return _FEWEST_PER_CHUNK * experts * cost
+
+    def _feature_basis(self, d, seed, count=0):
+        """Random Fourier features of the node's kernel, as the expected
+        kernel writes it -- `constant + sum_q w_q exp(-rate_q r²)` over the
+        distance in ranges: each feature a component drawn by its weight
+        and a frequency Gaussian at `2 rate_q`, the constant a feature of
+        its own. Frequencies `[J, d]`, phases `[J]`, the constant's
+        variance, fixed by the seed and the node's name. `J` is at least
+        twice `count`, the most inducing points an expert holds, so that
+        their features' Gram matrix has full rank (`_whitened_prior`)."""
+        omega, weights, constant = _kernel_components(self.kernel)
+        n_features = max(self._FEATURES, 2 * int(count))
+        # every draw on Philox, named: `auto_select` picks another
+        # generator under XLA, and a compiled prediction drew another basis;
+        # the component by inverting the weights' CDF, the categorical op
+        # taking no algorithm
+        cumulative = _tf.cumsum(weights) / _tf.reduce_sum(weights)
+        pick = _tf.minimum(_tf.searchsorted(
+            cumulative, _tf.random.stateless_uniform(
+                [n_features], _node_seed(seed, "%s/components" % self.name),
+                dtype=_tf.float64, alg="philox"), side="right"),
+            _tf.size(weights) - 1)
+        rates = _tf.gather(omega, pick)
+        frequencies = _tf.random.stateless_normal(
+            [n_features, d], _node_seed(seed, "%s/frequencies" % self.name),
+            dtype=_tf.float64, alg="philox") * _tf.sqrt(2.0 * rates)[:, None]
+        phases = _tf.random.stateless_uniform(
+            [n_features], _node_seed(seed, "%s/phases" % self.name),
+            minval=0.0, maxval=2.0 * _np.pi, dtype=_tf.float64, alg="philox")
+        total = _tf.reduce_sum(weights)
+        return frequencies, phases, _tf.convert_to_tensor(constant,
+                                                          _tf.float64), total
+
+    def _features(self, points, basis):
+        """The features at `points` `[..., p, d]`, scaled by the ranges:
+        `[..., p, J + 1]`, the last column the constant's."""
+        frequencies, phases, constant, total = basis
+        scaled = points / _tf.reshape(
+            self.parameters["ranges"].get_value(), [-1])
+        n_features = int(frequencies.shape[0])
+        cosines = _tf.sqrt(2.0 * total / n_features) * _tf.cos(
+            _tf.einsum("...pd,jd->...pj", scaled, frequencies) + phases)
+        flat = _tf.ones_like(cosines[..., :1]) * _tf.sqrt(constant)
+        return _tf.concat([cosines, flat], axis=-1)
+
+    def _shared_normals(self, points, n_sim, seed, mask=None):
+        """The standard normals the shared prior draw gives the inducing
+        values at `points` (`G^-1 Phi(Z) w`, as `_shared_prior_simulate`
+        draws them), `[..., size, m, S]`: what a walk riding this field's
+        realizations reads."""
+        basis = self._feature_basis(int(self.parent.size), seed,
+                                    self._feature_count())
+        draws = _simulation_normals(
+            [self.size, int(basis[0].shape[0]) + 1, n_sim], seed,
+            key="%s/feature_weights" % self.name)
+        prior = self._whitened_prior(self._features(points, basis), mask)
+        return _tf.einsum("...mj,sjS->...smS", prior, draws)
+
+    @staticmethod
+    def _whitened_prior(phi_z, mask=None):
+        """`G^-1 Phi(Z)`, `G` the Cholesky of the features' Gram matrix at
+        the inducing points, `[..., m, J + 1]`: with `w` the prior draw's
+        feature weights, `G^-1 Phi(Z) w` is exactly standard whatever the
+        features, and `L G^-1 Phi(Z) w` has covariance K exactly. A padded
+        point's row is zero."""
+        if mask is not None:
+            phi_z = phi_z * mask[..., None]
+        gram = _tf.matmul(phi_z, phi_z, transpose_b=True)
+        eye = _tf.eye(_tf.shape(phi_z)[-2], dtype=_tf.float64)
+        if mask is not None:
+            gram = gram + _tf.linalg.diag(1.0 - mask)
+        return _tf.linalg.triangular_solve(
+            _tf.linalg.cholesky(gram + 1e-9 * eye), phi_z, lower=True)
+
+    def _shared_prior_simulate(self, n_sim, seed):
+        """Realizations at a certain input, every expert's from one prior
+        draw `f = phi(·) w`.
+
+        Each expert's inducing values are drawn from its own posterior as
+        `u - mu = K R G^-1 Phi(Z) w` (`_whitened_prior`: standard, so the
+        expert's posterior is exact), its realization `k K^-1 u`; Matheron's
+        rule adds the prior draw's residual `f(x) - k K^-1 f(Z)`, `f(Z) = L
+        G^-1 Phi(Z) w`, orthogonal to it. Both are written through the
+        Cholesky of K, never its inverse. The experts are blended by their
+        weights, and the blend -- linear in `w`, so of a variance known
+        exactly -- rescaled to the variance the moments report. Experts
+        sharing the prior draw agree where the data leave it be, and nearly
+        where they meet: the blend kept 0.84 of the variance at the folded
+        section's overlaps before the rescale, against 0.47 drawn apart.
+        Under `smooth_draws` the realizations without the residual, scaled
+        alike. `[size, n, S]`."""
+        x = self._residual_state
+        cov_cross, mu, weights = self._swept()
+        w_var = self._moment_state[2]
+        with _tf.name_scope("gp_shared_prior_simulation"):
+            slots = _slots_of(self.root)
+            if slots is not None:
+                ips, _ = _slot_points(self.parent)
+                pmask = _slot_mask(self.root)
+            else:
+                ids = _active_experts(self.root)
+                ips, _ = self._parent_points(ids)
+            basis = self._feature_basis(int(self.parent.size), seed,
+                                        self._feature_count())
+            n_features = int(basis[0].shape[0]) + 1
+            draws = _simulation_normals(
+                [self.size, n_features, n_sim], seed,
+                key="%s/feature_weights" % self.name)
+            phi_x = self._features(x, basis)                  # [n, J + 1]
+
+            def coefficients(k, points, chol, root_r, mask=None):
+                prior = self._whitened_prior(self._features(points, basis),
+                                             mask)            # [.., m, J+1]
+                white = _tf.linalg.triangular_solve(
+                    chol, _tf.linalg.matrix_transpose(k), lower=True)
+                residual = phi_x - _tf.matmul(white, prior, transpose_a=True)
+                drawn = _tf.einsum("...nm,...smj->...snj", k, _tf.matmul(
+                    root_r, prior[..., None, :, :]))
+                return drawn, residual   # [.., size, n, J+1], [.., n, J+1]
+
+            if slots is not None:
+                drawn, residual = coefficients(
+                    cov_cross, ips, self.slots_cov_chol, self.slots_chol_r,
+                    pmask)
+                mean = _tf.reduce_sum(mu[..., 0] * weights, 0)
+                smooth = _tf.einsum("psn,psnj->snj", weights, drawn)
+                total = smooth + _tf.einsum("psn,pnj->snj", weights,
+                                            residual)
+            else:
+                mean = smooth = total = 0.0
+                for p in range(len(ids)):
+                    drawn, residual = coefficients(
+                        cov_cross[p], ips[p], self.cov_chol[p],
+                        self.chol_r[p])
+                    w = weights[p][..., None]
+                    mean = mean + mu[p][..., 0] * weights[p]
+                    smooth = smooth + drawn * w
+                    total = total + (drawn + residual[None]) * w
+            # each part rescaled to its own variance: the whole to what the
+            # moments report, the smooth part to that less the residual's
+            # (`_own_noise`), so that the smooth realizations and the
+            # residual integrated beside them add up to the whole exactly
+            if _SMOOTH_DRAWS:
+                own = self._own_noise if self._own_noise is not None \
+                    else _tf.zeros_like(w_var)
+                factor = _residual_scale(_tf.maximum(w_var - own, 0.0),
+                                         _tf.reduce_sum(smooth ** 2, -1))
+                part = smooth
+            else:
+                factor = _residual_scale(w_var,
+                                         _tf.reduce_sum(total ** 2, -1))
+                part = total
+            return mean[..., None] + factor[..., None] * _tf.einsum(
+                "snj,sjS->snS", part, draws)
+
+    def _certain_gap(self, cov_cross, var, weights):
+        if _slots_of(self.root) is not None:
+            seen = _tf.reduce_sum(_tf.einsum(
+                "pnm,psmj->psnj", cov_cross, self.slots_chol_r) ** 2, -1)
+            return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
+        seen = _tf.stack([
+            _tf.reduce_sum(_tf.einsum("nm,smj->snj", k, r) ** 2, -1)
+            for k, r in zip(cov_cross, self.chol_r)], axis=0)
+        return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
+
+    # realizations a chunk of `_pathwise_simulate` draws: None for the
+    # memory budget's choice (`_chunk_of`), a number to force it; its
+    # arrays are `[..., n, chunk, m, d]` and `[..., size, n, chunk, J + 1]`
+    _REALIZATIONS_PER_CHUNK = None
+
+    def _pathwise_simulate(self, n_sim, seed):
+        """Realizations through the parent's: realization `s` at the
+        parent's realization `s` (paired with the parent's own), plus the
+        variance those leave out as noise keyed by location; the inducing
+        inputs conditioned on the draw; each expert's realization `k alpha +
+        bias` plus its draw and residual from one shared prior draw, as
+        `_shared_prior_simulate` writes them (the damped features at
+        uncertain inducing points); blended over the experts and rescaled,
+        draw by draw, to the conditional variance `max(1 - k (K + D)^-1 kᵀ,
+        0)` blended alike. The ensemble then carries the variance the second
+        moment reports. Every random number is drawn first, as the other
+        nodes draw them; the realizations are then computed a chunk at a
+        time in both passes (`_chunked_map`), memory going with the
+        chunk."""
+        coords, chain, weights, w_mu, w_var, x, x_var = self._path_state
+        key = None
+        if _ONCE is not None:
+            # one draw serves the realizations and the prediction's smooth
+            # pass: the smooth realizations are this draw less its residual,
+            # never a fresh draw at the parent's smooth realizations
+            key = (id(self), "pathwise", n_sim) + tuple(
+                _key_part(v) for v in seed)
+            if key in _ONCE:
+                full, smooth = _ONCE[key][0]
+                return smooth if _SMOOTH_DRAWS else full
+        with _tf.name_scope("gp_pathwise_simulation"):
+            h = _tf.transpose(self.parent.simulate(n_sim, seed),
+                              [1, 2, 0])                       # [n, S, d]
+            gap = self.parent._realization_gap
+            if gap is not None:
+                d = int(self.parent.size)
+                noise = _tf.reshape(_location_normals(
+                    coords, d * n_sim, seed, "%s/input" % self.name),
+                    [-1, n_sim, d])
+                h = h + _tf.sqrt(_tf.maximum(_tf.transpose(gap), 0.0)
+                                 )[:, None, :] * noise
+            # the parent's realization standardized against its blended
+            # moments: each expert reads it rescaled to its own view of the
+            # parent (its chain's mean and variance), so that every expert's
+            # input has the marginal its moments were taken over -- read
+            # whole by every expert, the blended realization put the experts'
+            # means off on three experts of the folded section
+            positive = x_var > 0.0
+            scale = _tf.where(positive, _tf.sqrt(_tf.where(positive, x_var,
+                                                           1.0)), 1.0)
+            z = _tf.where(positive[:, None, :],
+                          (h - x[:, None, :]) / scale[:, None, :], 0.0)
+            # one prior draw for every expert: one basis for the node,
+            # feature weights per realization
+            slots = _slots_of(self.root)
+            basis = self._feature_basis(int(self.parent.size), seed,
+                                        self._feature_count())
+            frequencies, phases, constant, total = basis
+            n_features = int(frequencies.shape[0]) + 1
+            fweights = _simulation_normals(
+                [self.size, n_features, n_sim], seed,
+                key="%s/feature_weights" % self.name)
+            ranges = _tf.reshape(self.parameters["ranges"].get_value(), [-1])
+            fscale = _tf.sqrt(2.0 * total / (n_features - 1))
+            omega, kweights, _ = _kernel_components(self.kernel)
+            rational = type(self.kernel) is _kr.RationalQuadratic
+            r2 = self.parameters["ranges"].get_value() ** 2
+
+            def damped_features(points, points_var):
+                """The features at uncertain inducing points, each averaged
+                over the point's own spread: `exp(-½ ωᵀ diag(v / r²) ω)`
+                times the feature at its mean; `[..., m, J + 1]`."""
+                spread = points_var if points_var is not None \
+                    else _tf.zeros_like(points)
+                damp = _tf.exp(-0.5 * _tf.einsum(
+                    "...md,jd->...mj", spread / ranges ** 2,
+                    frequencies ** 2))
+                cosines = fscale * damp * _tf.cos(_tf.einsum(
+                    "...md,jd->...mj", points / ranges, frequencies)
+                    + phases)
+                flat = _tf.ones_like(cosines[..., :1]) * _tf.sqrt(constant)
+                return _tf.concat([cosines, flat], axis=-1)
+
+            def chain_parts(e, points, points_var):
+                var = e.variance if e.variance is not None \
+                    else _tf.zeros_like(e.mean)
+                spread = points_var if points_var is not None \
+                    else _tf.zeros_like(points)
+                # certain inducing points (a `GaussianInput`'s) are
+                # uncorrelated with the input: no conditioning
+                cov = e.covariance if e.covariance is not None \
+                    else _tf.zeros_like(e.mean)[..., :, None, :] \
+                    * _tf.zeros_like(points)[..., None, :, :]
+                return [e.mean, var, cov, points, spread]
+
+            def prior_parts(points, points_var, root_r, mask=None):
+                prior = self._whitened_prior(
+                    damped_features(points, points_var), mask)
+                return [_tf.matmul(root_r, prior[..., None, :, :]), prior]
+
+            if slots is not None:
+                ips, ipvs = _slot_points(self.parent)
+                pmask = _slot_mask(self.root)
+                outer = pmask[:, None, :, None] * pmask[:, None, None, :]
+                groups = [chain_parts(chain[0], ips, ipvs) + [
+                    self.slots_cov_smooth_inv * outer]
+                    + prior_parts(ips, ipvs, self.slots_chol_r * outer, pmask)
+                    + [self.slots_alpha[..., 0],
+                       self.slots_bias[:, None, None, None], pmask, weights,
+                       self.slots_cov_chol]]
+            else:
+                ids = _active_experts(self.root)
+                ips, ipvs = self._parent_points(ids)
+                groups = [chain_parts(chain[p], ips[p], ipvs[p]) + [
+                    self.cov_smooth_inv[p]]
+                    + prior_parts(ips[p], ipvs[p], self.chol_r[p])
+                    + [self.alpha[p][..., 0],
+                       _tf.reshape(self.parameters["bias_%d" % i].get_value(),
+                                   [1, 1, 1]),
+                       _tf.ones([int(self.root.n_ip[i])], _tf.float64),
+                       weights[p], self.cov_chol[p]]
+                    for p, i in enumerate(ids)]
+            per_group = len(groups[0])
+            sliced = slots is not None
+
+            lead = 1
+            for dim in z.shape[:-3] if sliced else ():
+                lead *= _static(dim, 1)
+            if sliced:
+                lead *= int(_slot_mask(self.root).shape[0])
+            per_draw = _REALIZATION_BYTES * lead * len(groups) * _static(
+                z.shape[0], _QUADRATURE_ROWS) * (
+                max(int(m) for m in self.root.n_ip) * int(self.parent.size)
+                + self.size * n_features)
+            chunk = _chunk_of(n_sim, per_draw, self._REALIZATIONS_PER_CHUNK)
+            n_chunks = n_sim // chunk
+
+            def draw(c, z, fweights, frequencies, phases, fscale, ranges,
+                     constant, r2, omega, kweights, *flat):
+                start = c * chunk
+                z_c = z[:, start:start + chunk, :]
+                if sliced:
+                    z_c = z_c[None]
+                sims = smooth = resid = target = smooth_target = 0.0
+                w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
+                for g in range(len(groups)):
+                    (mean, var, cov, points, spread, smooth_inv, root_prior,
+                     prior, alpha, bias, mask, w, chol) = \
+                        flat[g * per_group:(g + 1) * per_group]
+                    # the standard deviation with a finite gradient at zero
+                    held = var > 0.0
+                    sd = _tf.where(held, _tf.sqrt(_tf.where(held, var, 1.0)),
+                                   _tf.zeros_like(var))
+                    h_e = mean[..., :, None, :] + sd[..., :, None, :] * z_c
+                    k = _conditioned_kernel(
+                        h_e, mean, var, cov, points,
+                        spread, r2, omega, kweights, constant, rational) \
+                        * mask[..., None, None, :]          # [.., n, c, m]
+                    ksk = _tf.einsum("...nSi,...sij,...nSj->...snS", k,
+                                     smooth_inv, k)
+                    conditional = _tf.maximum(1.0 - ksk, 0.0)
+                    part = _tf.einsum("...nSm,...sm->...snS", k, alpha) \
+                        + bias
+                    # the expert's draw of its inducing values from the
+                    # shared prior, `k R G^-1 Phi(Z) w` as coefficients of w
+                    drawn = _tf.einsum("...nSm,...smj->...snSj", k,
+                                       root_prior)  # [.., size, n, c, J + 1]
+                    # the residual: the prior draw at the realized input
+                    # less its projection on the inducing points, through
+                    # the Cholesky of K
+                    cosines = fscale * _tf.cos(_tf.einsum(
+                        "...nSd,jd->...nSj", h_e / ranges, frequencies)
+                        + phases)
+                    phi_h = _tf.concat([cosines, _tf.ones_like(
+                        cosines[..., :1]) * _tf.sqrt(constant)], axis=-1)
+                    shape = _tf.shape(k)
+                    white = _tf.linalg.triangular_solve(
+                        chol, _tf.linalg.matrix_transpose(_tf.reshape(
+                            k, _tf.concat([shape[:-3], [-1, shape[-1]]], 0))),
+                        lower=True)                       # [.., m, n c]
+                    # shaped from `k`, which carries the slots where the
+                    # input's mean (a `GaussianInput`'s) may not
+                    res = phi_h - _tf.reshape(_tf.einsum(
+                        "...mN,...mj->...Nj", white, prior),
+                        _tf.concat([shape[:-1], _tf.shape(phi_h)[-1:]], 0))
+                    # the smooth part's own variance: the conditional less
+                    # the residual's, `max(conditional - |k R|², 0)`; the
+                    # rows of `G^-1 Phi` are orthonormal, so `|k R|²` is the
+                    # drawn coefficients' squared norm
+                    seen = _tf.minimum(conditional,
+                                       _tf.reduce_sum(drawn ** 2, -1))
+                    wv = w[..., None]                     # [.., size, n, 1]
+                    part = part * wv
+                    conditional = conditional * wv
+                    seen = seen * wv
+                    drawn = drawn * wv[..., None]
+                    res = res[..., None, :, :, :] * wv[..., None]
+                    if sliced:
+                        part = _tf.reduce_sum(part, 0)
+                        conditional = _tf.reduce_sum(conditional, 0)
+                        seen = _tf.reduce_sum(seen, 0)
+                        drawn = _tf.reduce_sum(drawn, 0)
+                        res = _tf.reduce_sum(res, 0)
+                    sims, target = sims + part, target + conditional
+                    smooth_target = smooth_target + seen
+                    smooth, resid = smooth + drawn, resid + res
+                # the blend, linear in w, rescaled draw by draw to the
+                # blended conditional variance, and its smooth part to that
+                # less the residual's, so the two differ by what the
+                # prediction integrates (`own`)
+                total = smooth + resid
+                factor = _residual_scale(target,
+                                         _tf.reduce_sum(total ** 2, -1))
+                full = sims + factor * _tf.einsum("snSj,sjS->snS", total, w_c)
+                factor = _residual_scale(smooth_target,
+                                         _tf.reduce_sum(smooth ** 2, -1))
+                smooth = sims + factor * _tf.einsum("snSj,sjS->snS", smooth,
+                                                    w_c)
+                # [c, 2, size, n]: the realization and its smooth part
+                return _tf.transpose(_tf.stack([full, smooth]), [3, 0, 1, 2])
+
+            flat = [x for group in groups for x in group]
+            out = _chunked_map(
+                draw, [z, fweights, frequencies, phases, fscale, ranges,
+                       constant, r2, omega, kweights] + flat, n_chunks)
+            full = _tf.transpose(out[:, 0], [1, 2, 0])
+            smooth = _tf.transpose(out[:, 1], [1, 2, 0])
+            if key is not None:
+                _ONCE[key] = ((full, smooth), (), {})
+            return smooth if _SMOOTH_DRAWS else full
+
+    # nodes of the input a chunk of the conditioned quadrature takes: None
+    # for the memory budget's choice (`_chunk_of`), a number to force it
+    _NODES_PER_CHUNK = None
+
+    def _conditioned_sums(self, mean, var, cov, points, points_var,
+                          smooth_inv, alpha, root_r=None):
+        """The conditioned quadrature's sums over the nodes of the input,
+        a chunk of nodes at a time (`_chunked_sums`): of `k`, `[..., n,
+        m]`; of `k (K + D)^-1 kᵀ`, of `f = k alpha`, of `f²` and of the
+        conditional variance `max(1 - k (K + D)^-1 kᵀ, 0)`, `[..., size,
+        n]`; and with `root_r` of `g = k R`, `[..., size, n, m]`, and of
+        `|g|²`. `k` is the kernel at each node, the points conditioned
+        on it (`_at_input_nodes`)."""
+        d = int(self.parent.size)
+        nodes, node_weights = _input_rule(d)
+        # a chunk as large as the memory budget holds: every array a node
+        # makes is `[..., n, m, d]`
+        lead = 1
+        for dim in mean.shape[:-2]:
+            lead *= _static(dim, 1)
+        per_node = _NODE_BYTES * lead * _static(
+            mean.shape[-2], _QUADRATURE_ROWS) * _static(
+            points.shape[-2], 1) * d
+        if len(mean.shape) == 2:
+            # one call per expert, independent branches of one graph that
+            # TensorFlow may run together: the budget is theirs to share (a
+            # slot axis counts its experts in `lead`); on GeoScape's network
+            # 32 experts' quadratures, each within the budget, ran out of a
+            # 24 GB device together
+            per_node *= len(_active_experts(self.root))
+        chunk = _chunk_of(len(nodes), per_node, self._NODES_PER_CHUNK)
+        n_chunks = len(nodes) // chunk
+        nodes = _tf.constant(nodes.reshape(n_chunks, chunk, -1), _tf.float64)
+        node_weights = None if node_weights is None else _tf.constant(
+            node_weights.reshape(n_chunks, chunk), _tf.float64)
+        omega, weights, constant = _kernel_components(self.kernel)
+        rational = type(self.kernel) is _kr.RationalQuadratic
+        if points_var is None:
+            points_var = _tf.zeros_like(points)
+        with_root = root_r is not None
+
+        def kernel_at(c, mean, var, cov, points, points_var, r2, omega,
+                      weights):
+            positive = var > 0.0
+            sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, var, 1.0)),
+                           _tf.zeros_like(var))
+            # new axes by `expand_dims`, whose gradient is a reshape: a
+            # `[..., None, ...]` slice is a strided slice, whose gradient
+            # writes a tensor of the whole shape on every chunk
+            gain = _tf.math.divide_no_nan(cov, _tf.expand_dims(var, -2))
+            step = _tf.expand_dims(sd, -2) * _tf.gather(nodes, c)  # [.., n, q, d]
+            offset = _tf.expand_dims(mean, -2) - _tf.expand_dims(points, -3)
+            dif = _tf.expand_dims(offset, -3) + _tf.expand_dims(step, -2) \
+                * (1.0 - _tf.expand_dims(gain, -3))
+            left = _tf.expand_dims(_tf.maximum(
+                _tf.expand_dims(points_var, -3) - gain * cov, 0.0), -3)
+            dif2 = dif ** 2 / r2
+            v = left / r2
+            if rational:
+                return _mixture_terms(omega, weights, constant, dif2, v,
+                                      None, None, False)[0]
+            return _mixture_sum(omega, weights, constant, dif2, v)
+
+        def weighted(c, x, axis):
+            """The sum over a chunk's nodes, each by its weight."""
+            if node_weights is None:
+                return _tf.reduce_sum(x, axis)
+            w = _tf.gather(node_weights, c)
+            shape = [-1] + [1] * (-axis - 1)
+            return _tf.reduce_sum(x * _tf.reshape(w, shape), axis)
+
+        def sums(c, mean, var, cov, points, points_var, smooth_inv, alpha,
+                 r2, omega, weights):
+            k = kernel_at(c, mean, var, cov, points, points_var, r2, omega,
+                          weights)                          # [..., n, q, m]
+            ksk = _tf.einsum("...nqi,...sij,...nqj->...snq", k, smooth_inv,
+                             k)
+            f = _tf.einsum("...nqm,...sm->...snq", k, alpha[..., 0])
+            return (weighted(c, k, -2), weighted(c, ksk, -1),
+                    weighted(c, f, -1), weighted(c, f ** 2, -1),
+                    weighted(c, _tf.maximum(1.0 - ksk, 0.0), -1))
+
+        def root_sums(c, mean, var, cov, points, points_var, r2, omega,
+                      weights, root_r, smooth_inv):
+            k = kernel_at(c, mean, var, cov, points, points_var, r2, omega,
+                          weights)
+            g = _tf.einsum("...nqm,...smj->...snqj", k, root_r)
+            kr = _tf.reduce_sum(g ** 2, -1)
+            ksk = _tf.einsum("...nqi,...sij,...nqj->...snq", k, smooth_inv,
+                             k)
+            # what each node's realization adds past its draw of the
+            # inducing values: the residual's variance, `own`
+            rest = _tf.maximum(_tf.maximum(1.0 - ksk, 0.0) - kr, 0.0)
+            return (weighted(c, g, -2), weighted(c, kr, -1),
+                    weighted(c, rest, -1))
+
+        r2 = self.parameters["ranges"].get_value() ** 2
+        out = _chunked_sums(sums, [mean, var, cov, points, points_var,
+                                   smooth_inv, alpha, r2, omega, weights],
+                            n_chunks)
+        if with_root:
+            # a call of its own, so that training, which never reads the
+            # jitter, leaves it out of the graph
+            out = out + _chunked_sums(
+                root_sums, [mean, var, cov, points, points_var, r2, omega,
+                            weights, root_r, smooth_inv], n_chunks)
+        # the sums divide by the count of equal-weight nodes; weighted
+        # nodes sum to one already
+        return out, (n_chunks * chunk if node_weights is None else 1.0)
+
     def _second_moments(self, mean, var, points, weights):
         """`sum_ij W_kij E[k(x, z_i) k(x, z_j)]`, `[..., k, n]`, for each
         stack `W` in the list `weights`: see `_second_moment`."""
@@ -2738,7 +3820,7 @@ class BasicGP(_GPNode):
                               weights)
 
     def _mixture_moments(self, chain, points, smooth_inv, alpha, offset,
-                         cov_cross=None, root_r=None):
+                         cov_cross=None, root_r=None, points_var=None):
         """One expert's variance, explained variance and latent jitter at
         an uncertain input over certain inducing points: the mixture's,
         exactly.
@@ -2760,6 +3842,28 @@ class BasicGP(_GPNode):
         var = chain.variance
         if var is None:
             var = _tf.zeros_like(chain.mean)
+        if chain.covariance is not None:
+            # over uncertain inducing points, conditioned on each node of
+            # the input, the nodes summed a chunk at a time: the same
+            # quantities as below, each variance over the nodes written as
+            # a mean of squares less the square of the mean
+            sums, q = self._conditioned_sums(
+                chain.mean, var, chain.covariance, points, points_var,
+                smooth_inv, alpha, root_r)
+            # the conditional variance clamped node by node, as each
+            # realization carries it (`_pathwise_simulate`): conditioned on
+            # a node the inducing points sit closer than the expected kernel
+            # among them allows for, and `k (K + D)^-1 kᵀ` can pass one --
+            # at half the draws of a folded-section model after 500 steps
+            conditional = sums[4] / q
+            explained = 1.0 - conditional
+            spread = _tf.maximum(sums[3] / q - (sums[2] / q) ** 2, 0.0)
+            jitter = own = None
+            if root_r is not None:
+                jitter = _tf.maximum(sums[6] / q - _tf.reduce_sum(
+                    (sums[5] / q) ** 2, -1), 0.0) + spread
+                own = sums[7] / q
+            return conditional + spread, explained, jitter, own
         if not self._closed_second_moment():
             # the same quantities over the quadrature nodes, each a variance
             # over them where it is one, so never negative
@@ -2775,27 +3879,33 @@ class BasicGP(_GPNode):
             f = _tf.einsum("...nqm,...sm->...snq", k, alpha[..., 0])
             spread = _tf.reduce_mean(
                 (f - _tf.reduce_mean(f, -1, keepdims=True)) ** 2, axis=-1)
-            jitter = None
+            jitter = own = None
             if root_r is not None:
                 g = _tf.einsum("...nqm,...smj->...snqj", k, root_r)
                 jitter = _tf.reduce_mean(_tf.reduce_sum(
                     (g - _tf.reduce_mean(g, -2, keepdims=True)) ** 2, -1),
                     -1) + spread
+                # the residual's variance: `1 - k K^-1 kᵀ` over the input
+                own = _tf.maximum(1.0 - explained - _tf.reduce_mean(
+                    _tf.reduce_sum(g ** 2, -1), -1), 0.0)
             return _tf.maximum(1.0 - explained, 0.0) + spread, explained, \
-                jitter
+                jitter, own
         weights = [smooth_inv, alpha * _tf.linalg.matrix_transpose(alpha)]
         if root_r is not None:
             weights.append(_tf.matmul(root_r, root_r, transpose_b=True))
         moments = self._second_moments(chain.mean, var, points, weights)
         explained = moments[0]
         spread = _tf.maximum(moments[1] - offset ** 2, 0.0)
-        jitter = None
+        jitter = own = None
         if root_r is not None:
             seen = _tf.reduce_sum(
                 _tf.einsum("...nm,...smj->...snj", cov_cross, root_r) ** 2,
                 axis=-1)
             jitter = _tf.maximum(moments[2] - seen, 0.0) + spread
-        return _tf.maximum(1.0 - explained, 0.0) + spread, explained, jitter
+            # the residual's variance: `1 - k K^-1 kᵀ` over the input
+            own = _tf.maximum(1.0 - explained - moments[2], 0.0)
+        return _tf.maximum(1.0 - explained, 0.0) + spread, explained, \
+            jitter, own
 
     def _chain(self, cov_cross, mu, var):
         """What this node hands a GP node above it under the expected
@@ -3050,6 +4160,8 @@ class UncertainInputGP(BasicGP):
     name
         A name for this node, shown in the printed network and accepted by
         `get_node`. Numbered automatically if omitted.
+    bias
+        Whether the prior mean is trained, as in `BasicGP`. Off by default.
 
     See Also
     --------
@@ -3064,8 +4176,12 @@ class UncertainInputGP(BasicGP):
     """
     _READS_CHAIN = False
 
+    # its kernels are combined: no conditioned second moment yet
+    _CONDITIONED_SECOND_MOMENT = False
+
     def __init__(self, parent, size=1, kernel=None, fix_range=False,
-                 isotropic=False, range_prior=2.0, n_nodes=32, name=None):
+                 isotropic=False, range_prior=2.0, n_nodes=32, name=None,
+                 bias=False):
         _warnings.warn(
             "UncertainInputGP is deprecated since 0.9.0 and will be removed: "
             "a BasicGP takes the mixture's moments at an uncertain input in "
@@ -3074,7 +4190,7 @@ class UncertainInputGP(BasicGP):
             stacklevel=2)
         super().__init__(parent, size=size, kernel=kernel,
                          fix_range=fix_range, isotropic=isotropic,
-                         range_prior=range_prior, name=name)
+                         range_prior=range_prior, name=name, bias=bias)
         self.n_nodes = int(n_nodes)
         # the input's Gaussian sampled once: scrambled Sobol through the
         # normal quantile, the scramble drawn from the package RNG so that
@@ -3088,6 +4204,10 @@ class UncertainInputGP(BasicGP):
         self._add_parameter("nodes", _gpr.RealParameter(
             nodes, _np.full_like(nodes, -10.0), _np.full_like(nodes, 10.0),
             fixed=True))
+
+    def _feature_kernel(self):
+        # deprecated, and its `simulate` is its own: the 0.9.3 realizations
+        return False
 
     def _moments(self, x, x_var=None):
         with _tf.name_scope("uncertain_input_moments"):
@@ -3255,6 +4375,12 @@ class Linear(_FunctionalLatentVariable):
         jitter = self.parent._input_jitter
         self._input_jitter = None if jitter is None \
             else _tf.einsum("xa,xy->ya", jitter, weights ** 2)
+        gap = self.parent._realization_gap
+        self._realization_gap = None if gap is None \
+            else _tf.einsum("xa,xy->ya", gap, weights ** 2)
+        own = self.parent._own_noise
+        self._own_noise = None if own is None \
+            else _tf.einsum("xa,xy->ya", own, weights ** 2)
         experts = _map_chain(
             _chain_of(parent),
             lambda m: _tf.einsum("...s,st->...t", m, weights),
@@ -3313,6 +4439,12 @@ class SelectInput(_FunctionalLatentVariable):
         jitter = self.parent._input_jitter
         self._input_jitter = None if jitter is None \
             else _tf.gather(jitter, self.columns, axis=0)
+        gap = self.parent._realization_gap
+        self._realization_gap = None if gap is None \
+            else _tf.gather(gap, self.columns, axis=0)
+        own = self.parent._own_noise
+        self._own_noise = None if own is None \
+            else _tf.gather(own, self.columns, axis=0)
 
         def pick(t):
             return _tf.gather(t, self.columns, axis=-1)
@@ -3504,6 +4636,20 @@ class LinearCombination(_Operation):
             jitters = _tf.stack(jitters, axis=-1)
             self._input_jitter = _tf.reduce_sum(
                 jitters * self._weights_for(jitters) ** 2, axis=-1)
+        gaps = _gaps(self.parents)
+        if gaps is None:
+            self._realization_gap = None
+        else:
+            gaps = _tf.stack(gaps, axis=-1)
+            self._realization_gap = _tf.reduce_sum(
+                gaps * self._weights_for(gaps) ** 2, axis=-1)
+        owns = _owns(self.parents)
+        if owns is None:
+            self._own_noise = None
+        else:
+            owns = _tf.stack(owns, axis=-1)
+            self._own_noise = _tf.reduce_sum(
+                owns * self._weights_for(owns) ** 2, axis=-1)
 
         experts = _sum_chains(chains, self._parent_weights()) \
             if self.propagates_inducing_points and _wants_joint(self) \
@@ -3840,6 +4986,11 @@ class GaussianMixture(_Operation):
     Gaussian: a model trains the likelihood of a leaf above this node on
     its realizations, and no inducing points pass through it.
 
+    Build the GP nodes of the weights and of the components with
+    `bias=True`: a component's level is what tells one regime from another,
+    and a weight's level is a component's share away from the data. At
+    zero mean the regimes gate of the tests finds no switch in seven seeds.
+
     Parameters
     ----------
     weights
@@ -4047,6 +5198,10 @@ class Add(_Operation):
         self._explained_var = _tf.reduce_sum(all_explained_var, axis=-1)
         jitters = _jitters(self.parents)
         self._input_jitter = None if jitters is None else _tf.add_n(jitters)
+        gaps = _gaps(self.parents)
+        self._realization_gap = None if gaps is None else _tf.add_n(gaps)
+        owns = _owns(self.parents)
+        self._own_noise = None if owns is None else _tf.add_n(owns)
 
         experts = _sum_chains(chains) \
             if self.propagates_inducing_points and _wants_joint(self) \
@@ -4124,6 +5279,8 @@ class Bias(_FunctionalLatentVariable):
         mean, var = parent
         self._explained_var = self.parent._explained_var
         self._input_jitter = self.parent._input_jitter
+        self._realization_gap = self.parent._realization_gap
+        self._own_noise = self.parent._own_noise
         experts = _map_chain(_chain_of(parent), lambda m: m + bias,
                              lambda v: v) if _wants_joint(self) else None
         return _Moments(mean + bias[None, :], var, experts)
@@ -4178,6 +5335,11 @@ class Scale(_FunctionalLatentVariable):
         jitter = self.parent._input_jitter
         self._input_jitter = None if jitter is None \
             else jitter * scale[:, None]
+        gap = self.parent._realization_gap
+        self._realization_gap = None if gap is None \
+            else gap * scale[:, None]
+        own = self.parent._own_noise
+        self._own_noise = None if own is None else own * scale[:, None]
         experts = _map_chain(_chain_of(parent),
                              lambda m: m * _tf.sqrt(scale),
                              lambda v: v * scale) \
@@ -4608,11 +5770,21 @@ class GPWalk(_FunctionalLatentVariable):
         held_a = (self.slots_walk_a,) if slots is not None else self.walk_a
         held_h = (self.slots_walk_h,) if slots is not None else self.walk_h
         means, variances, covariances, start = [], [], [], []
+        gaps = []
+        walker_gap = self.walker._realization_gap
         for e, field, a_z, h_z in zip(chain, fields, held_a, held_h):
             mean, a, h, r, start_var = self._joint_walk(
                 e.mean, e.variance, e.covariance, field)
             means.append(mean)
             variances.append(self._walked_variance(a, h, r, e.variance))
+            # the realizations walk the field's explained part from the
+            # walker's realization: they leave out each point's own
+            # normals and what the walker's realizations left out
+            gap = _tf.reduce_sum(r ** 2, axis=-1)
+            if walker_gap is not None:
+                gap = gap + _tf.einsum("...de,...e->...d", a ** 2,
+                                       _tf.transpose(walker_gap))
+            gaps.append(gap)
             if _wants_joint(self):
                 covariances.append(self._walked_covariance(
                     a, h, a_z, h_z, e.covariance))
@@ -4623,12 +5795,15 @@ class GPWalk(_FunctionalLatentVariable):
             weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
             stacked_mean = _tf.transpose(means[0], [0, 2, 1])
             stacked_var = _tf.transpose(variances[0], [0, 2, 1])
+            stacked_gap = _tf.transpose(gaps[0], [0, 2, 1])
         else:
             weights = _GPNode.get_expert_weights(_tf.stack(start, axis=0))
             stacked_mean = _tf.stack([_tf.transpose(m) for m in means], 0)
             stacked_var = _tf.stack([_tf.transpose(v) for v in variances], 0)
+            stacked_gap = _tf.stack([_tf.transpose(g) for g in gaps], 0)
         w_mean = _tf.reduce_sum(stacked_mean * weights, axis=0)
         w_var = _tf.reduce_sum(stacked_var * weights, axis=0)
+        self._realization_gap = _tf.reduce_sum(stacked_gap * weights, axis=0)
         experts = tuple(_Joint(m, v, c) for m, v, c in
                         zip(means, variances, covariances)) \
             if _wants_joint(self) else None
@@ -4697,12 +5872,16 @@ class GPWalk(_FunctionalLatentVariable):
             u, _ = _slot_points(self.walker)
             mask = _slot_mask(self.root)
             m = u.shape[-2]
-            drawn = [_tf.pad(_simulation_normals([self.size, n, n_sim], seed,
-                                                 key=field.name),
-                             [[0, 0], [0, m - n], [0, 0]])
-                     for n in self.root.n_ip]
-            drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
-            rnd = _tf.gather(_tf.stack(drawn), slots.ids)
+            if field._feature_kernel() and _pathwise():
+                rnd = field._shared_normals(u, n_sim, seed, mask)
+            else:
+                drawn = [_tf.pad(_simulation_normals(
+                    [self.size, n, n_sim], seed,
+                    key=_expert_key(field.name, i)),
+                    [[0, 0], [0, m - n], [0, 0]])
+                    for i, n in enumerate(self.root.n_ip)]
+                drawn.append(_tf.zeros([self.size, m, n_sim], _tf.float64))
+                rnd = _tf.gather(_tf.stack(drawn), slots.ids)
             coef = field.slots_alpha + _tf.matmul(field.slots_chol_r, rnd)
             groups = [(u, _tf.transpose(coef, [3, 0, 1, 2]),
                        field.slots_bias[:, None, None], mask)]
@@ -4711,9 +5890,12 @@ class GPWalk(_FunctionalLatentVariable):
             us, _ = _points_of(self.walker, ids)
             groups = []
             for p, i in enumerate(ids):
-                rnd = _simulation_normals(
-                    [self.size, self.root.n_ip[i], n_sim], seed,
-                    key=field.name)
+                if field._feature_kernel() and _pathwise():
+                    rnd = field._shared_normals(us[p], n_sim, seed)
+                else:
+                    rnd = _simulation_normals(
+                        [self.size, self.root.n_ip[i], n_sim], seed,
+                        key=_expert_key(field.name, i))
                 coef = field.alpha[p] + _tf.matmul(field.chol_r[p], rnd)
                 groups.append((us[p], _tf.transpose(coef, [2, 0, 1]),
                                field.parameters["bias_%d" % i].get_value(),
@@ -4934,9 +6116,12 @@ class MultiStructureGP(BasicGP):
     and applying a linear combination externally is that here the combination is at the kernel level instead of the
     latent variable level.
     """
+    # its kernels are combined: no conditioned second moment yet
+    _CONDITIONED_SECOND_MOMENT = False
+
     def __init__(self, parent, size=1, kernel=None, fix_range=False,
                  n_structures=2, weight_concentration="staircase",
-                 range_prior=2.0, name=None):
+                 range_prior=2.0, name=None, bias=False):
         """
         Initializer for MultiStructureGP.
 
@@ -4973,6 +6158,9 @@ class MultiStructureGP(BasicGP):
             structures exist for. `None` removes them.
         name : str
             A name for this node.
+        bias : bool
+            Whether the prior mean is trained, as in `BasicGP`. Off by
+            default.
         """
         if n_structures < 2:
             raise ValueError("a MultiStructureGP combines at least 2 "
@@ -4980,7 +6168,7 @@ class MultiStructureGP(BasicGP):
         self.n_structures = n_structures
         self.weight_concentration = weight_concentration
         super().__init__(parent, size, kernel, fix_range,
-                         range_prior=range_prior, name=name)
+                         range_prior=range_prior, name=name, bias=bias)
 
     def _set_parameters(self):
         for i, n in enumerate(self.root.n_ip):
@@ -5003,7 +6191,7 @@ class MultiStructureGP(BasicGP):
                 ))
             self._add_parameter(
                 f"bias_{i}",
-                _gpr.RealParameter(0, -5, 5))
+                _gpr.RealParameter(0, -5, 5, fixed=not self.trains_bias))
 
         concentration = self.weight_concentration
         if concentration == "staircase":
@@ -5476,7 +6664,7 @@ _PRIOR = {"type": "float", "nullable": True,
           "constraints": {"exclusive_min": 0}}
 _GP = dict(parent={"type": "node"}, size=_SIZE, kernel={"type": "ref:kernel"},
            fix_range={"type": "bool"}, isotropic={"type": "bool"},
-           range_prior=_PRIOR)
+           range_prior=_PRIOR, bias={"type": "bool"})
 _INPUT = dict(inducing_points={"type": "data:PointData"},
               transform={"type": "ref:transform"},
               fix_transform={"type": "bool"}, center={"type": "bool"})
