@@ -1395,6 +1395,63 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
     2026-10-20): more accurate than the 64 Sobol points and cheaper; Sobol
     stays beyond two dimensions. **XLA on the chunk's body** 1.1x on the GPU
     at a third more memory, 1.3x on the CPU: left an experiment, off.
+  - **Step 4 built 2026-10-20, released in 0.9.4.** `GPOptions(full_variance=
+    True)` for a new model, the class default off for a save; off is 0.9.3
+    to the bit on four models (shallow over two experts, a GP on a GP over
+    two, a walk reader, a `GaussianMixture`), predictions, realizations,
+    measurement samples and training log, rebuilt and reopened
+    (`gate_off.py`) -- which took putting back 0.9.3's expert draw: every
+    expert under the node's name and the old summation order, the new blend
+    having moved a mixture's log by 6e-12. **Memory, found by chapter 17**:
+    its walk reader's refinement held 37 GB per pass against 0.9.3's 10.5;
+    profiled one process a setting (a second prediction in one process
+    reuses the allocator's pages and reads zero), the conditioned
+    quadrature costs no memory beyond 0.9.3's 7.9 GB at 20000 rows and the
+    pathwise realizations 16 GB -- one realization 3-4 GB there, the
+    four-a-chunk floor overruling the 2 GB budget. Each model now sizes its
+    own prediction batch (`_prediction_rows`, 3375 rows on chapter 17):
+    9.6 GB and no slower. **A latent bug the smaller batches exposed**: the
+    four block reductions divided rows by blocks as a float and cast, and in
+    a trace with the rows unknown the division became a multiplication by
+    the reciprocal -- 1496 / 187 truncated to 7, chapter 17's refinement
+    failing on a short last batch; integer division now. **Chapters**: 16's
+    metals' goodness rose (Ni 0.81 -> 0.86, Zn 0.86 -> 0.90); 17 ran 89
+    min against 48, peak 14.8 GB. With `bias=False` the stationary vein of
+    17 spread fully uncertain sheets over unsampled ground (the field
+    returns to zero, both log-odds on the contour level), and chapters 6, 16
+    and 17 now give the indicator `bias=True` -- the class prior belongs to
+    the likelihood, not to a field's mean.
+  - **The resolution gap, found by chapter 13** (2026-10-21,
+    `walker_gap.py`, `walker_fan.py`). Under the full variance Walker's
+    shallow model drew a variogram fan above the data: about 10% with the
+    spherical, 20-70% with the exponential, and the exponential's intervals
+    over their promise (`nominal(0.9)` 0.847, goodness 0.95). Training and
+    the moments are identical on and off; what differs is the realizations,
+    which with it on draw the gap `1 - k K^-1 kᵀ` (random-feature kernels
+    only; the spherical and cubic have no random features and carry the
+    explained part, independent experts rescaled). At the 470 samples the
+    gap was 0.67 of the reported variance on the 10-unit lattice (0.59 for
+    the spherical), and 0.60 on a 5-unit lattice -- training shortened the
+    range from 122 to 77 -- so not a shortage of points as usually counted:
+    a sample informs the field only through the inducing values and never
+    reduces the gap at its own location. Adding the samples to the lattice
+    before cutting the experts: gap 0.08 at the samples, bound -3199 against
+    -3292, fan on the data, `nominal(0.9)` 0.925 (exponential) and 0.909
+    with RMSE 207 (spherical). The user's reading: rough kernels need
+    infinite resolution, the ideal is an inducing point at every test
+    location -- a lattice as fine as the data -- and where that is out of
+    reach the gap is foreseeable. Released so: the manual's VGP models take
+    the exponential (honesty: its realizations carry everything), chapter 13
+    names the gap and the cure, spherical and cubic GP nodes warn.
+- **Open: the gap where resolution is out of reach** (S-M). A block model
+  of millions of cells cannot hold an inducing point per cell, so its
+  realizations carry the gap of a rough kernel between lattice nodes. To
+  measure: how large it is on Tom East and Assen at their usual lattices,
+  and whether a likelihood-side correction (the data's own conditional
+  given the inducing values) is worth its cost. Also open: random features
+  for the spherical and cubic (their spectral densities are known in
+  closed form, though not as mixtures of Gaussians), which would let them
+  carry the gap too.
 
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same
