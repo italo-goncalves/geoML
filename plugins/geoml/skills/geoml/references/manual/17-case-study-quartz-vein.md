@@ -147,7 +147,7 @@ def implicit_model(root_node, data, isotropic=False):
 
     return geoml.models.VGPNetwork(
         data, "SIMPLE LITO",
-        geoml.likelihood.CategoricalGaussianIndicator(2),
+        geoml.likelihood.CategoricalGaussianIndicator(2, bias=True),
         indicators,
         options=geoml.models.GPOptions(jitter=1e-6, training_batch_size=500,
                                        verbose=False))

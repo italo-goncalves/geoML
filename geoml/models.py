@@ -268,7 +268,14 @@ class GPOptions(_ModelOptions):
             realizations used to carry the explained part alone. The
             prediction integrates that residual analytically, and a bound
             trained on realizations draws each location's marginal. Off,
-            the moments and realizations of 0.9.3. Measured: a deep model's
+            the moments and realizations of 0.9.3. The residual is drawn by
+            random features of the node's kernel, which the Gaussian,
+            rational quadratic, exponential and Matérn kernels have; the
+            spherical and cubic have none, so their realizations carry
+            only the explained part, and the model warns. The residual is
+            large where a rough kernel meets a coarse set of inducing
+            points: put inducing points where the model will be asked,
+            the data's own locations among them. Measured: a deep model's
             realizations at 1.00 of the reported variance against 0.35-0.59
             before; on Walker Lake's GP on a GP a held-out RMSE of 160
             against 174-188, at 13-17x the training time with the old
@@ -1011,6 +1018,8 @@ class VGPNetwork(_GPModel):
         self._refresh_graph = None
         if getattr(self.options, "propagation", "marginal") == "joint":
             self._check_expected_kernel()
+        if self._full_variance():
+            self._warn_explained_only()
 
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
@@ -1231,6 +1240,26 @@ class VGPNetwork(_GPModel):
         with _tf.control_dependencies([count]):
             self._draw_count.assign_add(1)
         return self.options.seed + count
+
+    def _warn_explained_only(self):
+        """Warns, under `GPOptions(full_variance=True)`, of every GP node
+        whose kernel is the spherical or the cubic: neither has a
+        random-feature form, so its realizations carry only the variance
+        its inducing points explain, never the gap `1 - k K^-1 kᵀ` the
+        moments also report, and its ensemble is narrower than the variance
+        the model states."""
+        for node in self._nodes():
+            kernel = getattr(node, "kernel", None)
+            if type(kernel) in (_kr.Spherical, _kr.Cubic):
+                warnings.warn(
+                    "%s uses the %s kernel, which has no random-feature "
+                    "form: its realizations carry only the variance its "
+                    "inducing points explain, not the rest of the variance "
+                    "the model reports, so they are narrower than the "
+                    "prediction says. The exponential kernel is as rough "
+                    "at the origin and its realizations carry it all."
+                    % (node.name, type(kernel).__name__.lower()),
+                    stacklevel=3)
 
     def _check_expected_kernel(self):
         """Refuses, under `GPOptions(propagation="joint")`, what the expected

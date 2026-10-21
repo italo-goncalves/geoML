@@ -213,7 +213,7 @@ inducing_points = geoml.data.inducing.experts(
 
 ```python
 net_input = gl.BasicInput(inducing_points, tr.Isotropic(1))
-net_output = gl.BasicGP(net_input, size=7, kernel=kr.Spherical())
+net_output = gl.BasicGP(net_input, size=7, kernel=kr.Exponential())
 ```
 
 For a categorical variable the output is linear, sized to the categories:

@@ -118,7 +118,7 @@ trend = geoml.latent.Linear(
     rock_gp, size=len(elements), unit_norm=False)
 
 metal_gp = geoml.latent.BasicGP(
-    root, size=len(elements), kernel=geoml.kernels.Spherical())
+    root, size=len(elements), kernel=geoml.kernels.Exponential())
 
 # the tree's two leaves: the rock indicators, and the metals with their
 # geological trend added. Each is read by its own likelihood below

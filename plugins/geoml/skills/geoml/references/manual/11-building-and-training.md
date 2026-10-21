@@ -41,7 +41,7 @@ root = geoml.latent.BasicInput(
 gp = geoml.latent.BasicGP(
     root,
     size=1,
-    kernel=geoml.kernels.Spherical())
+    kernel=geoml.kernels.Exponential())
 
 warping = geoml.warping.ChainedWarping(
     geoml.warping.BoxCox(1, shift=1.0),

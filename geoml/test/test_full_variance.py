@@ -22,7 +22,10 @@ under the node's own name. Bit-for-bit agreement with 0.9.3 itself needs
 the 0.9.3 tree beside this one and is checked by
 `docs/benchmarks/deep_second_moment/gate_off.py`.
 """
+import warnings
+
 import numpy as np
+import pytest
 
 import geoml
 import geoml.latent.network as _net
@@ -106,3 +109,28 @@ def test_a_deep_model_sizes_its_prediction_batches_to_the_budget():
     np.testing.assert_allclose(
         small.variables["v"].get_simulations(),
         whole.variables["v"].get_simulations(), rtol=1e-8, atol=1e-10)
+
+
+def _shallow_model(kernel, full_variance=True):
+    x = np.random.default_rng(3).uniform(0, 100, [40, 2])
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable("v", np.sin(x[:, 0] / 20))
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(data, 12, seed=0),
+        geoml.transform.Isotropic(40))
+    gp = geoml.latent.BasicGP(root, size=1,
+                              kernel=getattr(geoml.kernels, kernel)())
+    return geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(), gp,
+        options=geoml.models.GPOptions(verbose=False,
+                                       full_variance=full_variance))
+
+
+@pytest.mark.parametrize("kernel", ["Spherical", "Cubic"])
+def test_a_kernel_without_random_features_is_warned_of(kernel):
+    with pytest.warns(UserWarning, match="only the variance its inducing"):
+        _shallow_model(kernel)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _shallow_model(kernel, full_variance=False)
+        _shallow_model("Exponential")

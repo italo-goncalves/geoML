@@ -1,4 +1,4 @@
-## version 0.9.4 (in progress)
+## version 0.9.4
 * **A deep model's realizations carry the variance it reports,
 `GPOptions(full_variance=True)`.** Until now a GP node reading another
 node's output took the second moment only where its inducing points were
@@ -14,7 +14,10 @@ of the reported variance on a GP on a GP, 0.35 beside the coordinates and
   - every GP node's realizations carry what its inducing points leave out,
   as a residual drawn by random features (Wilson et al.'s pathwise
   conditioning: smooth, with the kernel's correlation and the exact
-  variance at every point), and every expert of a node draws from one prior
+  variance at every point) -- every node whose kernel has them, the
+  Gaussian, rational quadratic, exponential and Matérn; a spherical or
+  cubic node carries the explained part only, and the model warns at
+  construction -- and every expert of a node draws from one prior
   draw, so experts agree where they meet: before any rescale their blend
   held 0.84 of the reported variance where two carry weight, independent
   draws 0.47, and an exact rescale closes the rest;
@@ -50,7 +53,32 @@ either way, and a save restores the fixed flag it was made with, so a
 model saved before keeps its trained bias, free, on reload. New models
 train without one: their numbers move wherever the constant did work, the
 manual's chapters included. `GradientConstrainedInput` and the `Bias` node
-keep theirs.
+keep theirs. **A categorical model's class prior moves to the likelihood**:
+with the field at zero away from the data every category's log-odds sit on
+the contour level there, and chapter 17's stationary vein spread fully
+uncertain sheets over unsampled ground; chapters 6, 16 and 17 now build
+`CategoricalGaussianIndicator(..., bias=True)`, which trains a constant per
+category, and the vein, the Jura rock maps and chapter 6's map come back as
+they were.
+* **The manual's VGP models take the exponential kernel instead of the
+spherical** (chapters 3, 4, 7, 10, 11, 13, 14, 15 and 16; chapter 2's
+closed-form `GP` keeps the spherical of its kriging comparison), so that
+their realizations carry the whole variance the model reports: the
+spherical has no random-feature form and carries the explained part only.
+Chapter 13 shows what that costs on a coarse lattice, and why. The
+residual a sparse GP reports at a location is the variance its inducing
+points cannot reach there, `1 - k K^-1 kᵀ`; a rough kernel leaves a lot of
+it between lattice nodes, and on Walker Lake's 10-unit lattice it is
+two-thirds of the reported variance at the samples, whatever the kernel,
+and still 0.60 on a 5-unit lattice (training shortens the range). Drawn,
+it puts the variogram fan 20-70% above the data and the intervals over
+their promise (`nominal(0.9)` 0.85, goodness 0.95); adding the samples'
+locations to the inducing points before dividing them into experts brings
+it to a tenth, the fan onto the data and `nominal(0.9)` to 0.93
+(`walker_gap.py`). The ideal is an inducing point at every location the
+model will be asked about -- for rough kernels, a lattice as fine as the
+data -- and where that is out of reach the gap is a foreseeable price,
+which the chapter now names.
 * **The second moment's quadrature is chunked by a memory budget,
 `GPOptions(quadrature_memory=2e9)`.** A GP node reading an uncertain input
 took its 64 quadrature nodes four at a time, a loop recomputed in the

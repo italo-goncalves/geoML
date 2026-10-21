@@ -40,7 +40,7 @@ geoml.set_seed(1234)
 walker, walker_grid = geoml.datasets.walker()
 
 covariance = geoml.kernels.Covariance(
-    kernel=geoml.kernels.Spherical(),
+    kernel=geoml.kernels.Exponential(),
     transform=geoml.transform.Isotropic(100.0))
 
 model = geoml.models.GP(
