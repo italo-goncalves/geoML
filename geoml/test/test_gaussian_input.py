@@ -184,7 +184,8 @@ def test_forward_mode_survives_a_fault_transform():
     assert np.allclose(var_tr.numpy(), var, rtol=1e-2)
 
 
-def test_a_wide_input_variance_returns_the_prediction_to_the_prior():
+def test_a_wide_input_variance_returns_the_prediction_to_the_prior(
+        monkeypatch):
     """The expected kernel's normalization shrinks the cross-covariance as
     the input variance grows, so a location known only to within a wide
     error is predicted as the prior: the mean at the bias, the latent

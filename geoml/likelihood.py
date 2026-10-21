@@ -155,7 +155,10 @@ def _aggregate(x, n_splits=None, fun=_tf.reduce_mean):
         return x
 
     # agg = _tf.stack([fun(y, axis=0) for y in _tf.split(x, n_splits, axis=0)], axis=0)
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    # integer division: inside a graph with the rows unknown, `rows /
+    # n_splits` became a multiplication by the reciprocal, 1496 / 187 came to
+    # 7.99... and the cast to 7
+    n = _tf.shape(x)[0] // n_splits
     agg = _tf.reshape(x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     agg = fun(agg, axis=1)
     return agg
@@ -184,7 +187,7 @@ def _dispersion(x, n_splits=None):
     if n_splits is None:
         return _tf.fill(_tf.shape(x), _tf.constant(_np.nan, dtype=x.dtype))
 
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     return _tf.math.reduce_variance(grouped, axis=1)
@@ -235,7 +238,7 @@ def _proportions(x, cutoffs, n_splits=None):
         below = _tf.cast(x[..., None] <= cuts[:, None, :], x.dtype)
         return _tf.reduce_mean(below, axis=2)
 
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     below = _tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
@@ -266,7 +269,7 @@ def _divided(x, cutoffs, n_splits=None):
             _tf.concat([_tf.shape(x)[:2], [_tf.shape(cuts)[-1]]], axis=0),
             dtype=x.dtype)
 
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     # the prediction at each sub-block, a realization axis of one
@@ -745,13 +748,20 @@ class _ContinuousLikelihood(_Likelihood):
         return lik * self.sharpness
 
     def predict(self, mu, var, sims, explained_var, *args, include_noise=True,
-                n_splits=None, cutoffs=None, jitter=None, **kwargs):
+                n_splits=None, cutoffs=None, jitter=None, smooth=None,
+                own=None, **kwargs):
         # One field, and everything is read from it. The noise is integrated
         # out rather than drawn, so what comes back is already free of the
         # part of the spread that refining cannot resolve: a block's
         # dispersion is the ground's, and a block straddling a cut-off really
         # does straddle it.
         values, noise = self._values_and_noise(sims, include_noise, jitter)
+        # the prediction from the same realizations without the nodes' own
+        # residuals, that residual's variance integrated beside the noise:
+        # the realizations carry everything, the prediction takes the
+        # residual analytically rather than by Monte Carlo
+        smooth_values = None if smooth is None else \
+            self._values_and_noise(smooth, include_noise, own)[0]
 
         # taken from the sub-blocks, so before they are averaged away; one
         # value per realization, then the mean over them, which is the
@@ -765,7 +775,9 @@ class _ContinuousLikelihood(_Likelihood):
         mu = _aggregate(mu, n_splits=n_splits)
         var = _aggregate(var, n_splits=n_splits)
 
-        avg_sim = _tf.reduce_mean(sims, axis=2)
+        avg_sim = _tf.reduce_mean(sims, axis=2) if smooth_values is None \
+            else _tf.reduce_mean(_aggregate(smooth_values, n_splits=n_splits),
+                                 axis=2)
         out = {"mean": mu,
                "variance": var,
                "simulations": sims,

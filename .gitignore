@@ -26,3 +26,6 @@
 
 # The doubly stochastic benchmark's per-run maps (23 MB), remade by its runs.
 /docs/benchmarks/figures/doubly_stochastic/maps/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

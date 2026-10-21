@@ -38,6 +38,7 @@ import geoml.persistence as _persistence
 import geoml.stats.random as _srandom
 import geoml
 
+import contextlib as _contextlib
 import numpy as _np
 import pandas as _pd
 import scipy.spatial as _spatial
@@ -110,6 +111,11 @@ class GPOptions(_ModelOptions):
     training_tolerance = None
     # a model saved before 0.9.3 trained on one fixed set of draws
     fresh_training_draws = False
+    # the conditioned quadrature's memory budget, new in 0.9.4, the same for
+    # a model saved before
+    quadrature_memory = 2e9
+    # a model saved before 0.9.4 keeps the moments and realizations of 0.9.3
+    full_variance = False
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -119,7 +125,9 @@ class GPOptions(_ModelOptions):
                  = "independent",
                  training_tolerance: float | None = None,
                  propagation: _Literal["joint", "marginal"] = "joint",
-                 fresh_training_draws: bool = True):
+                 fresh_training_draws: bool = True,
+                 quadrature_memory: float = 2e9,
+                 full_variance: bool = True):
         """
         Configuration of Gaussian process models.
 
@@ -137,7 +145,11 @@ class GPOptions(_ModelOptions):
         verbose
             Whether to show the training process on screen.
         prediction_batch_size : int
-            Batch size for prediction/inference.
+            The most rows a prediction batch carries. Under `full_variance`
+            a network with a GP node reading an uncertain input takes fewer
+            where its quadrature and realizations would not fit
+            `quadrature_memory` otherwise; the batching never changes the
+            answer.
         jitter : float
             Small value added to covariance matrices for numerical stability.
         training_batch_size : int
@@ -233,6 +245,41 @@ class GPOptions(_ModelOptions):
             move 2.5-5x more with the draw seed, and a sampled deep bound
             settles in the worse basin; drawn afresh, none of that, at no
             cost per step.
+        quadrature_memory : float
+            The memory, in bytes, a GP node reading an uncertain input may
+            hold at once for its quadrature over the input and for its
+            realizations. Within it every node of the quadrature is taken
+            at once and differentiated plainly, which is fastest; past it,
+            the largest chunk it holds, in a loop recomputed in the
+            backward pass, which keeps one chunk alive at a time. Lower it
+            for a large network on a small device. A fixed number rather
+            than the memory free at the time, so that a model chunks, and
+            so rounds, the same way in every process.
+        full_variance : bool
+            Whether the moments and the realizations carry the full variance
+            (the default since 0.9.4; a model saved before it keeps what it
+            was trained under). A GP node reading another node's output --
+            a deep layer, a `GPWalk` -- takes the second moment of its input
+            with its own inducing inputs uncertain too, and draws its
+            realizations through its parent's; every GP node's realizations
+            carry the variance its inducing points leave out, by random
+            features, and every expert of a node draws from one prior draw,
+            so the ensemble's variance is the reported one where the
+            realizations used to carry the explained part alone. The
+            prediction integrates that residual analytically, and a bound
+            trained on realizations draws each location's marginal. Off,
+            the moments and realizations of 0.9.3. The residual is drawn by
+            random features of the node's kernel, which the Gaussian,
+            rational quadratic, exponential and Matérn kernels have; the
+            spherical and cubic have none, so their realizations carry
+            only the explained part, and the model warns. The residual is
+            large where a rough kernel meets a coarse set of inducing
+            points: put inducing points where the model will be asked,
+            the data's own locations among them. Measured: a deep model's
+            realizations at 1.00 of the reported variance against 0.35-0.59
+            before; on Walker Lake's GP on a GP a held-out RMSE of 160
+            against 174-188, at 13-17x the training time with the old
+            quadrature.
         """
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
@@ -258,6 +305,8 @@ class GPOptions(_ModelOptions):
         self.training_tolerance = training_tolerance
         self.propagation = propagation
         self.fresh_training_draws = fresh_training_draws
+        self.quadrature_memory = quadrature_memory
+        self.full_variance = full_variance
 
 
 class _Convergence:
@@ -969,6 +1018,8 @@ class VGPNetwork(_GPModel):
         self._refresh_graph = None
         if getattr(self.options, "propagation", "marginal") == "joint":
             self._check_expected_kernel()
+        if self._full_variance():
+            self._warn_explained_only()
 
         self.var_lengths = [data.variables[v].length for v in self.variables]
 
@@ -1108,7 +1159,7 @@ class VGPNetwork(_GPModel):
                     nodes.append(node)
         return nodes
 
-    def _propagation(self):
+    def _propagation(self, rows=None):
         """The context every training and prediction call runs under: how
         the experts propagate, and whether uncertainty travels with its
         covariance between locations (`GPOptions.propagation`). The network
@@ -1117,13 +1168,56 @@ class VGPNetwork(_GPModel):
         joint = getattr(self.options, "propagation", "marginal") == "joint"
         if joint:
             self._check_expected_kernel()
-        return _latent.propagation_rule(self.options.expert_propagation,
-                                        joint=joint)
+        stack = _contextlib.ExitStack()
+        stack.enter_context(_latent.propagation_rule(
+            self.options.expert_propagation, joint=joint,
+            full=self._full_variance()))
+        stack.enter_context(_latent.network.quadrature_rule(
+            self._quadrature_memory(), rows))
+        return stack
+
+    def _full_variance(self):
+        """Whether the moments and realizations carry the full variance
+        (`GPOptions.full_variance`; off for a model saved before 0.9.4)."""
+        return bool(getattr(self.options, "full_variance", False))
+
+    def _quadrature_memory(self):
+        """The quadrature's memory budget, in bytes. With it, each call
+        says the most rows it carries (`_propagation(rows=)`), which sizes
+        the quadrature's chunks where the traced shape does not: the
+        training data for `train_full`, a batch for `train_svi` and
+        `train_by_expert`, a prediction batch for a prediction; a call
+        nested in another keeps the outer one's (`rows=None`). The rows
+        steer the chunking only, never the answer."""
+        return float(getattr(self.options, "quadrature_memory", 2e9))
+
+    def _prediction_rows(self):
+        """How many rows a prediction batch carries: the options'
+        `prediction_batch_size`, or fewer where a GP node reading an
+        uncertain input would exceed the quadrature's memory budget at its
+        smallest chunk (`BasicGP._row_bytes`) -- each model its own batch,
+        bounded by the budget whatever its size. Measured on chapter 17's
+        walked model: at 20000 rows a batch held 24 GB, four realizations
+        of the reader's pathwise draw at 3-4 GB each. The batching never
+        changes the answer."""
+        rows = int(self.options.prediction_batch_size)
+        with self._propagation():
+            cost = max([node._row_bytes() for node in self._nodes()
+                        if hasattr(node, "_row_bytes")] + [0])
+        if cost > 0:
+            rows = max(1, min(rows, int(self._quadrature_memory() // cost)))
+        return rows
 
     def _propagation_key(self):
         """What the propagation adds to a cached trace's key."""
         return (self.options.expert_propagation,
-                getattr(self.options, "propagation", "marginal"))
+                getattr(self.options, "propagation", "marginal"),
+                self._full_variance(),
+                _latent.network._UNCERTAIN_POINTS_SECOND_MOMENT,
+                _latent.network._PATHWISE_REALIZATIONS,
+                self._quadrature_memory(),
+                _latent.network._QUADRATURE_RULE,
+                _latent.network._QUADRATURE_XLA)
 
     def _step_rule(self):
         """What a cached training step's trace depends on beyond its
@@ -1146,6 +1240,26 @@ class VGPNetwork(_GPModel):
         with _tf.control_dependencies([count]):
             self._draw_count.assign_add(1)
         return self.options.seed + count
+
+    def _warn_explained_only(self):
+        """Warns, under `GPOptions(full_variance=True)`, of every GP node
+        whose kernel is the spherical or the cubic: neither has a
+        random-feature form, so its realizations carry only the variance
+        its inducing points explain, never the gap `1 - k K^-1 kᵀ` the
+        moments also report, and its ensemble is narrower than the variance
+        the model states."""
+        for node in self._nodes():
+            kernel = getattr(node, "kernel", None)
+            if type(kernel) in (_kr.Spherical, _kr.Cubic):
+                warnings.warn(
+                    "%s uses the %s kernel, which has no random-feature "
+                    "form: its realizations carry only the variance its "
+                    "inducing points explain, not the rest of the variance "
+                    "the model reports, so they are narrower than the "
+                    "prediction says. The exponential kernel is as rough "
+                    "at the origin and its realizations carry it all."
+                    % (node.name, type(kernel).__name__.lower()),
+                    stacklevel=3)
 
     def _check_expected_kernel(self):
         """Refuses, under `GPOptions(propagation="joint")`, what the expected
@@ -1301,7 +1415,11 @@ class VGPNetwork(_GPModel):
             # prediction, one leaf at a time, then handed to the likelihoods
             # each leaf serves
             mus, vars_, simss = [], [], []
-            with _latent.once_per_pass():
+            # a bound summed over rows reads each row's realizations
+            # alone: drawn from the marginal (`marginal_draws`), where they
+            # carry the full variance
+            with _latent.once_per_pass(),                     (_latent.marginal_draws() if self._full_variance()
+                     else _contextlib.nullcontext()):
                 predicted = [leaf.predict(x, x_var=x_var, n_sim=samples,
                                           seed=[seed, 0])
                              for leaf in self.leaves]
@@ -1563,7 +1681,7 @@ class VGPNetwork(_GPModel):
 
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
-        with self._propagation(), \
+        with self._propagation(rows=self.data.n_data), \
                 _progress.reporting("train", max_iter, "iteration") as report:
             for i in range(max_iter):
                 step(x, y, has_value, x_var)
@@ -1639,7 +1757,7 @@ class VGPNetwork(_GPModel):
         n_batches = len(self.options.batch_index(self.data.n_data))
         done = 0
 
-        with self._propagation(), \
+        with self._propagation(rows=self.options.training_batch_size), \
                 _progress.reporting(
                     "train", epochs * n_batches, "batch") as report:
             for i in range(epochs):
@@ -1734,6 +1852,16 @@ class VGPNetwork(_GPModel):
                 per_leaf = [leaf.predict(x_new, x_var=x_var, n_sim=n_sim,
                                          seed=[seed, 0])
                             for leaf in self.leaves]
+                # the realizations carry each node's own residual; the
+                # prediction integrates it analytically from the same draws
+                # without it (the user's choice 2(b))
+                owns = [leaf._own_noise for leaf in self.leaves]
+                smooth = None
+                if any(o is not None for o in owns):
+                    with _latent.network.smooth_draws():
+                        smooth = [_tf.transpose(leaf.simulate(
+                            n_sim, [seed, 0]), [1, 0, 2])
+                            for leaf in self.leaves]
             for predicted in per_leaf:
                 mu, var, sim, exp_var = predicted
                 mus.append(_tf.transpose(mu[:, :, 0]))
@@ -1751,12 +1879,22 @@ class VGPNetwork(_GPModel):
             # a likelihood integrates beside its noise; a model with
             # certain inputs passes nothing, as it always has
             pred_jitter = self._jitter_by_likelihood(jitters, exp_vars)
+            pred_smooth = [None] * len(self.likelihoods)
+            pred_own = [None] * len(self.likelihoods)
+            if smooth is not None:
+                pred_smooth = self._by_likelihood(smooth)
+                pred_own = self._jitter_by_likelihood(
+                    [None if o is None else _tf.transpose(o) for o in owns],
+                    exp_vars)
 
             output = []
-            for mu, var, sim, exp_var, jitter, lik, v_inp in zip(
-                    pred_mu, pred_var, pred_sim, pred_exp_var, pred_jitter,
-                    self.likelihoods, variable_inputs):
+            for mu, var, sim, exp_var, jitter, smooth_sim, own, lik, \
+                    v_inp in zip(pred_mu, pred_var, pred_sim, pred_exp_var,
+                                 pred_jitter, pred_smooth, pred_own,
+                                 self.likelihoods, variable_inputs):
                 extra = {} if jitter is None else {"jitter": jitter}
+                if smooth_sim is not None and own is not None:
+                    extra = {"smooth": smooth_sim, "own": own}
                 output.append(
                     lik.predict(
                         mu, var, sim, exp_var,
@@ -2081,7 +2219,7 @@ class VGPNetwork(_GPModel):
                      self.data if container is None else container)
         n_rows = data.n_data
         bands = self.options.batch_index(
-            n_rows, batch_size=self.options.prediction_batch_size)
+            n_rows, batch_size=self._prediction_rows())
         blocks = []
         for root, _, count in self._expert_blocks():
             nodes = gp[id(root)]
@@ -2763,7 +2901,7 @@ class VGPNetwork(_GPModel):
         try:
             if slots:
                 self._sync_expert_store(roots, gp, store)
-            with self._propagation(), \
+            with self._propagation(rows=batch_size), \
                     _progress.reporting(
                         "train", None if assignment else epochs * per_epoch,
                         "batch") as report:
@@ -3325,8 +3463,8 @@ class VGPNetwork(_GPModel):
         Yields `(rows, result)`, the rows being indices into `newdata` so that
         a caller can write each result back to the location it came from.
         """
-        batch_size = max(1, self.options.prediction_batch_size
-                         // newdata.rows_per_location)
+        prediction_rows = self._prediction_rows()
+        batch_size = max(1, prediction_rows // newdata.rows_per_location)
         rows = _np.arange(newdata.n_data)
         if where is not None:
             where = _np.asarray(where)
@@ -3339,7 +3477,7 @@ class VGPNetwork(_GPModel):
         # cached `predict_raw` graph reads current values without recomputing the
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
-        with self._propagation():
+        with self._propagation(rows=prediction_rows):
             if all(hasattr(leaf, "cache_prediction_state")
                    for leaf in self.leaves):
                 _latent.refresh_cached(self.leaves, self.options.jitter,
@@ -3367,7 +3505,7 @@ class VGPNetwork(_GPModel):
             # reads the leaves itself (`measurement_batches`,
             # `responsibilities`) would otherwise run them under the module's
             # default against a refresh made under the model's
-            with self._propagation():
+            with self._propagation(rows=prediction_rows):
                 out = call(x, x_var, splits, batch) if with_rows \
                     else call(x, x_var, splits)
             yield batch, out
@@ -3558,6 +3696,20 @@ class VGPNetwork(_GPModel):
                     like.append(_tf.transpose(predicted[3]))
                     jitters.append(None if predicted.jitter is None
                                    else _tf.transpose(predicted.jitter))
+                # as the prediction takes them (`_predict_raw`): the same
+                # draws without the nodes' own residual, its variance drawn
+                # by the jitter's nodes, so that the samples average back to
+                # the prediction rather than to `n_sim` draws of it
+                owns = [leaf._own_noise for leaf in self.leaves]
+                if any(o is not None for o in owns):
+                    with _latent.network.smooth_draws():
+                        per_leaf = [_tf.transpose(leaf.simulate(
+                            n_sim, [self.options.seed, 0]), [1, 0, 2])
+                            for leaf in self.leaves]
+                    jitters = [j if o is None else
+                               _tf.transpose(o) if j is None
+                               else j + _tf.transpose(o)
+                               for j, o in zip(jitters, owns)]
             sims = self._by_likelihood(per_leaf)
             jitters = self._jitter_by_likelihood(jitters, like)
             measured = [(sim, jitter, lik) for sim, jitter, lik

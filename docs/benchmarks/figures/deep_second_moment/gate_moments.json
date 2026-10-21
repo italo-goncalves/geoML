@@ -1,0 +1,78 @@
+[
+ {
+  "network": "dgp",
+  "kernel": "Gaussian",
+  "iterations": 500,
+  "exact_var_median": 1.0901912858003424,
+  "spread_share": 0.968712977537072,
+  "0.9.3": {
+   "mean_error_sd": 0.04555468081542955,
+   "var_ratio_median": 0.16463980890932606,
+   "var_ratio_5": 0.09928420465533325,
+   "var_ratio_95": 0.4036429020997231
+  },
+  "conditioned": {
+   "mean_error_sd": 0.04555468081542955,
+   "var_ratio_median": 0.9827375277426247,
+   "var_ratio_5": 0.9432581593199698,
+   "var_ratio_95": 1.0755217142255158
+  }
+ },
+ {
+  "network": "dgp",
+  "kernel": "Matern52",
+  "iterations": 500,
+  "exact_var_median": 1.0490925336896357,
+  "spread_share": 0.9520259109902512,
+  "0.9.3": {
+   "mean_error_sd": 0.04714365543797881,
+   "var_ratio_median": 0.17302153714229684,
+   "var_ratio_5": 0.10755002248348888,
+   "var_ratio_95": 0.41320016932686715
+  },
+  "conditioned": {
+   "mean_error_sd": 0.04714365543797881,
+   "var_ratio_median": 0.982490879108851,
+   "var_ratio_5": 0.9429451911898864,
+   "var_ratio_95": 1.0702292537381806
+  }
+ },
+ {
+  "network": "concat",
+  "kernel": "Gaussian",
+  "iterations": 500,
+  "exact_var_median": 0.43989128604507277,
+  "spread_share": 0.7725751192806813,
+  "0.9.3": {
+   "mean_error_sd": 0.04282759473576752,
+   "var_ratio_median": 0.4353549601026203,
+   "var_ratio_5": 0.18770250337890307,
+   "var_ratio_95": 0.8684406070264078
+  },
+  "conditioned": {
+   "mean_error_sd": 0.04282759473576752,
+   "var_ratio_median": 1.0153416026237307,
+   "var_ratio_5": 0.9467303088806385,
+   "var_ratio_95": 1.0622761109838221
+  }
+ },
+ {
+  "network": "concat",
+  "kernel": "Matern52",
+  "iterations": 500,
+  "exact_var_median": 0.35363089179451407,
+  "spread_share": 0.6162729151955748,
+  "0.9.3": {
+   "mean_error_sd": 0.04200128620261208,
+   "var_ratio_median": 0.60678678420237,
+   "var_ratio_5": 0.22913421401509063,
+   "var_ratio_95": 1.015872056863092
+  },
+  "conditioned": {
+   "mean_error_sd": 0.04200128620261208,
+   "var_ratio_median": 1.0068689941170712,
+   "var_ratio_5": 0.9490297555089029,
+   "var_ratio_95": 1.039515843896094
+  }
+ }
+]

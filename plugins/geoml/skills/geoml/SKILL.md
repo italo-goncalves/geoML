@@ -70,7 +70,7 @@ computation is in `float64`: geostatistical matrices are ill-conditioned and
 `float32` (half the disk, every read widened back to `float64`);
 `geoml.set_realization_dtype("float64")` keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.3.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.4.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -200,7 +200,14 @@ in the catalogue.
   `data.inducing.from_cover_tree` places points no closer than a given
   separation (with `transform=` for anisotropy), the guarantee of
   numerically stable sparse GPs; whether it scores better than k-means at
-  equal counts is not yet measured. Experts
+  equal counts is not yet measured. A rough kernel (exponential,
+  spherical, Matérn 3/2) needs inducing points close to every location the
+  model will be asked about -- a lattice as fine as the data, the data's own
+  locations among the points: elsewhere the variance the points cannot
+  reach, `1 - k K⁻¹ kᵀ`, stays in the prediction and the realizations, and
+  on a 10-unit lattice over Walker Lake it was two-thirds of the reported
+  variance at the samples, the intervals hedging and the variogram fan well
+  above the data. Experts
   come out compact and share points with every neighbour once each borrows
   at least as many points as it has neighbours: keep experts large enough
   for their overlap (an overlap of 0.1 on 25-point experts cannot reach six
@@ -228,10 +235,19 @@ in the catalogue.
   coordinates concatenated beside the inner GP (`Concatenate(root,
   inner)`). A GP on an uncertain input takes the Gaussian, exponential,
   Matérn or rational quadratic kernel; spherical and cubic are refused
-  there, and the error message says so. On a `GaussianInput` a `BasicGP`
-  takes the mixture's moments (the variance of the mean over the input
-  included) and the likelihood integrates what its realizations leave
-  out; `UncertainInputGP` is deprecated. A location error is still better
+  there, and the error message says so. Since 0.9.4 the realizations
+  carry the variance the prediction reports (`GPOptions(full_variance=True)`,
+  the default for a new model): a GP reading an uncertain input takes its
+  second moment with its own inducing inputs uncertain too and draws
+  through its parent's realizations, and every GP node's realizations carry
+  what its inducing points leave out, shallow models included -- except a
+  spherical or cubic node, whose kernel has no random-feature form: it
+  carries the explained part only, and the model warns. A model
+  saved before keeps 0.9.3's realizations, which held only the explained
+  part -- a third to three fifths of a deep model's variance. On a
+  `GaussianInput` a `BasicGP` takes the mixture's moments (the variance of
+  the mean over the input included); `UncertainInputGP` is deprecated. A
+  location error is still better
   left untold: a noise term absorbs it. That variance costs time and
   memory in proportion to the inducing points; experts do not shorten it,
   `train_by_expert` holds a fraction of it in memory.
@@ -292,6 +308,14 @@ The papers and the code name the same things differently.
   default for a new model): its training log is a noisy estimate of the
   bound, still exactly repeatable, and a model saved before 0.9.3 keeps
   the fixed draws it was trained with.
+- **A GP node's prior mean is zero** since 0.9.4 (`bias=False`): away from
+  its data a field returns to zero, so an indicator connects its samples
+  where a trained constant let it ring each with a blob. A categorical
+  likelihood's class prior belongs on the likelihood:
+  `CategoricalGaussianIndicator(bias=True)` gives the majority category the
+  ground away from the data. `bias=True` on a GP node trains a constant per
+  expert and output, for a field whose level carries meaning. A model saved
+  before keeps its trained bias.
 - **`values()` for what you compute with, `get()` for what you draw.**
   Never `values()` a bare `simulations` path: it reads every realization
   into memory at once, fatal on a block model. Read one realization

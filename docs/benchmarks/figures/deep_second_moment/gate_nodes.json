@@ -1,0 +1,156 @@
+[
+ {
+  "kernel": "Gaussian",
+  "rule": "sobol",
+  "nodes": 64,
+  "var_ratio_median": 1.0176315494700003,
+  "var_ratio_mean": 1.0106336663705289,
+  "var_error_median": 0.022767879648097122,
+  "var_ratio_5": 0.954314304028738,
+  "var_ratio_95": 1.0404259069431545,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Gaussian",
+  "rule": "sobol",
+  "nodes": 256,
+  "var_ratio_median": 1.0078808348002526,
+  "var_ratio_mean": 1.0066922550080968,
+  "var_error_median": 0.009879525440061876,
+  "var_ratio_5": 0.9834829698932804,
+  "var_ratio_95": 1.02567254847227,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Gaussian",
+  "rule": "sobol",
+  "nodes": 1024,
+  "var_ratio_median": 1.0034840851887474,
+  "var_ratio_mean": 1.0044985860315216,
+  "var_error_median": 0.006975618160862229,
+  "var_ratio_5": 0.9889301719807415,
+  "var_ratio_95": 1.0212687554173812,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Gaussian",
+  "rule": "hermite",
+  "nodes": 9,
+  "var_ratio_median": 0.9664352453694223,
+  "var_ratio_mean": 0.9561969146894126,
+  "var_error_median": 0.043650433090150265,
+  "var_ratio_5": 0.7854882214527716,
+  "var_ratio_95": 1.0909123834388954,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Gaussian",
+  "rule": "hermite",
+  "nodes": 16,
+  "var_ratio_median": 1.0082920978396421,
+  "var_ratio_mean": 1.0134362492693594,
+  "var_error_median": 0.013078188367168564,
+  "var_ratio_5": 0.9730584342977197,
+  "var_ratio_95": 1.0901858430065512,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Gaussian",
+  "rule": "hermite",
+  "nodes": 25,
+  "var_ratio_median": 0.9989233155031636,
+  "var_ratio_mean": 0.9977937454260064,
+  "var_error_median": 0.009629490352788594,
+  "var_ratio_5": 0.9645698493768698,
+  "var_ratio_95": 1.0220606472672382,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Gaussian",
+  "rule": "hermite",
+  "nodes": 49,
+  "var_ratio_median": 1.0007324250535543,
+  "var_ratio_mean": 1.0010296951272606,
+  "var_error_median": 0.006520683508867253,
+  "var_ratio_5": 0.9854940078933797,
+  "var_ratio_95": 1.018059888671515,
+  "mean_error_sd": 0.020364789119925928
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "sobol",
+  "nodes": 64,
+  "var_ratio_median": 1.0124154378661316,
+  "var_ratio_mean": 1.0053046001576766,
+  "var_error_median": 0.016972542353740516,
+  "var_ratio_5": 0.9471837485738519,
+  "var_ratio_95": 1.035623256177767,
+  "mean_error_sd": 0.019641115420214413
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "sobol",
+  "nodes": 256,
+  "var_ratio_median": 1.0068909306488996,
+  "var_ratio_mean": 1.0060471044667678,
+  "var_error_median": 0.010036181916084685,
+  "var_ratio_5": 0.9833904608017292,
+  "var_ratio_95": 1.0246322240996257,
+  "mean_error_sd": 0.019641115420214413
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "sobol",
+  "nodes": 1024,
+  "var_ratio_median": 1.0038639791655104,
+  "var_ratio_mean": 1.004474252043123,
+  "var_error_median": 0.006566593863405412,
+  "var_ratio_5": 0.9892173729321139,
+  "var_ratio_95": 1.020046938638714,
+  "mean_error_sd": 0.019641115420214413
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "hermite",
+  "nodes": 9,
+  "var_ratio_median": 0.9513740809928455,
+  "var_ratio_mean": 0.9400327740856482,
+  "var_error_median": 0.0666829348705526,
+  "var_ratio_5": 0.6985039177005291,
+  "var_ratio_95": 1.1266271705612658,
+  "mean_error_sd": 0.019641115420214413
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "hermite",
+  "nodes": 16,
+  "var_ratio_median": 1.0162048590135584,
+  "var_ratio_mean": 1.0224264673200472,
+  "var_error_median": 0.021487660221479743,
+  "var_ratio_5": 0.9477509566109843,
+  "var_ratio_95": 1.144470966172172,
+  "mean_error_sd": 0.019641115420214413
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "hermite",
+  "nodes": 25,
+  "var_ratio_median": 0.9973956041371337,
+  "var_ratio_mean": 0.9917997697902073,
+  "var_error_median": 0.010262257676531661,
+  "var_ratio_5": 0.9120694600444114,
+  "var_ratio_95": 1.026873164754353,
+  "mean_error_sd": 0.019641115420214413
+ },
+ {
+  "kernel": "Matern52",
+  "rule": "hermite",
+  "nodes": 49,
+  "var_ratio_median": 1.0000745733361351,
+  "var_ratio_mean": 0.9990667483640356,
+  "var_error_median": 0.00769777151542711,
+  "var_ratio_5": 0.9730598196018323,
+  "var_ratio_95": 1.0188128727853671,
+  "mean_error_sd": 0.019641115420214413
+ }
+]

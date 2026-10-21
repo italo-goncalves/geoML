@@ -1211,11 +1211,247 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   holes), with one of the same 60 points 13% (0.71). The dense path reads
   every expert at every point: 64 draws 77 ms a step against 15. Slots
   untried.
-- **Next, if pursued**: the second moment at uncertain inducing inputs --
-  the existing quadrature with the inducing inputs conditioned at each
-  node -- with a short sampled warm-up as a training option; measured on
-  Walker or Jura and with experts before any default moves. Want (2) is
-  untouched.
+- **Next: the plan agreed 2026-10-18, being executed.** The goal: a GP
+  node reading another node's output -- a deep layer, a `GPWalk` -- reports
+  the full variance, and **its realizations carry that same variance**:
+  the per-point variance over the ensemble equals `latent_variance` to
+  Monte Carlo error, with the spatial structure of draws of the deep
+  model. Want (2) is untouched.
+  1. **The second moment at uncertain inducing inputs.**
+     `_takes_second_moment` stops requiring certain inducing points: the
+     moments take a quadrature over each point's input `h ~ N(mean, var)`
+     per expert chain, the inducing inputs conditioned on each node `h_q`
+     (`Z | h_q`: mean `u + (c/v)(h_q - mean)`, variance `u_var - c²/v`),
+     the cross-covariance `k(h_q, Z | h_q)` averaged over `Z`'s remaining
+     spread, and the mixture's moments (mean of `m_q`, mean of the node
+     variances plus the variance of `m_q`). A 5x5 Gauss-Hermite grid up to
+     two hidden dimensions, the 64 symmetric Sobol nodes of `_input_nodes`
+     from three. The nodes run in a `while_loop` under a gradient of their
+     own that accumulates, as `_mixture_sum` does, so one node's arrays are
+     alive at a time -- naively 64x the cross-kernel, ~1 GB a reader on the
+     GeoScape walk network. Gates: (1a) mean and variance against 4000
+     draws of the deep model on the folded section's two networks, one
+     and three experts, Gaussian and Matern kernels, to Monte Carlo error;
+     (1b) no chain covariance gives today's second moment exactly and no
+     input variance the plain path; (1c) peak memory and epoch time on the
+     GeoScape network against 3.7 GB and 153 s.
+  2. **Realizations with the same variance.** At an uncertain input,
+     realization `s` reads the parent's realization `s` (paired with the
+     parent's own, as the walk rides the field's), plus the variance the
+     parent's realizations leave out as independent noise per point; the
+     inducing inputs conditioned on it; `k(h_s, Z | h_s)(alpha + R eta_s)
+     + bias`, plus the reader's own unexplained variance as independent
+     noise per point -- **at uncertain inputs only** (the user's choice;
+     whether every GP node should add it is decided at step 4, once its
+     size on shallow models is measured). The location-uncertainty case
+     is folded in: a GP on a `GaussianInput` draws the same way and the
+     separate `_input_jitter` goes (the user's choice). Gates: (2a) at
+     2000 realizations the per-point variance against `latent_variance`
+     within chi-square bounds, the mean against the prediction within its
+     standard error, on the folded networks, a two-layer Jura or Walker
+     network, chapter 16's walk and the GeoScape network; (2b) the
+     realizations' variogram against draws of the deep model on the same
+     pairs; (2c) the folded section's true-field 90% band covered by more
+     than today's 32-45% (the prototype's 69-87%).
+  3. **Training.** Arms: today's moment bound; the second moment from
+     scratch; a sampled warm-up then the second moment; one draw a step
+     with a decaying rate -- three seeds, on the folded section, a
+     two-layer Walker network, chapter 16 and the GeoScape network; held-
+     out log score, CRPS, coverage and `spread_check`, time and memory.
+     Fresh training draws (0.9.3's default) bear on the warm-up.
+  4. **Defaults and saves.** An option on for new models and off for a
+     save made before (a class default, as `propagation`); every deep
+     model's realizations change -- changelog, chapters 16 and 17 rerun,
+     the skill, one full run at the end.
+- **Steps 1-2 built 2026-10-19, branch `deep-second-moment`** (worktree
+  geoML-second; gates in `docs/benchmarks/deep_second_moment/`, figures in
+  `docs/benchmarks/figures/deep_second_moment/`). Step 1 as planned, the 64
+  nodes chunked four at a time; the conditional variance clamped node by
+  node, because conditioned on a node the inducing points sit closer than
+  the expected kernel among them allows and `k (K + D)^-1 kᵀ` passed one
+  at half the draws. Step 2 departed from the plan in three places, each
+  on a measurement:
+  - **Every GP node carries its residual, by random features** (the user's
+    1(b)), not independent noise: Wilson et al.'s `f(x) - k K^-1 f(Z)`,
+    whose correlation is the kernel's. Independent noise was the
+    0.9.3-shaped nugget; the nugget in the realizations turned out to be
+    mostly the model's own short-scale roughness, and more inducing points
+    made it worse (lag-1 semivariance over the sill 0.23 -> 0.66 -> 0.93
+    without noise), so correlated noise was not pursued. The prediction
+    integrates the residual analytically from the realizations without it
+    (`smooth_draws`, the user's 2(b)); the stored realizations keep it.
+  - **Training on samples draws each location's marginal**
+    (`marginal_draws`, the user's choice): the full variance, where the
+    realizations used to carry only what the inducing points explain. The
+    `GaussianMixture` regimes gate looked lost under it (seed 1234: RMSE
+    0.218 against the GP's 0.192); over seven seeds the true bound finds
+    the switch five times (RMSE 0.126-0.145), the explained-only bound
+    none -- the fit is bimodal by its start, and 1234 is a bad one.
+  - **The experts.** Each expert alone held its variance (1.00-1.03) and
+    its mean; the blend did not -- a certain-input GP's realizations held
+    0.51 of its variance where two experts carried weight, because the
+    experts' normals, shared by index, met at unrelated inducing points
+    and were independent in effect. A reader above it then read a parent
+    too narrow and its mean moved (half of a GP-on-a-GP's points outside
+    their interval; the user's diagnosis: experts too small to reach the
+    tails before the blend, not the blending of means). Fixed in two
+    steps: the blend rescaled to `sum w v` (`166ef0e`), then **every expert
+    drawing from one prior draw** (the user's three steps: each expert's
+    conditioned draw from its own `S`, blended, Matheron's residual added).
+    The coupling `u - mu = M f(Z)`, `M K Mᵀ = S`, measured on the hidden
+    layer at 1-3 shared points an expert, before any rescale (blend over
+    reported where two experts carry weight; step ratio overlap/elsewhere):
+    independent 0.47 / 0.98; `chol(S) L^-1` 0.84 / 1.20; `S^½ K^-½` 0.87 /
+    1.23; optimal transport 0.86 / 1.17; Matheron's own `D (K+D)^-1 f(Z) -
+    K (K+D)^-1 eps`, eps keyed by location, 0.70 / 1.16 (its pseudo-noise
+    dominates where the data are dense, and is independent but at shared
+    points); sequential conditioning on an earlier expert's values 0.72,
+    with 74% of the means pulled off. **Chosen: `chol(S) L^-1`**, which is
+    `k R G^-1 Phi(Z) w` in the realization and needs no inverse of K --
+    the symmetric and transport maps need `K^-½`, which a `SelectInput`
+    network's K (conditioned at 1e18) would not survive; the exact rescale
+    closes what the coupling leaves. `G` is the Cholesky of the features'
+    Gram matrix at the inducing points, so each expert's draw is exactly
+    standard and its posterior exact. Experts drawn alone with one seed
+    correlate at 0.72 where they meet.
+  - **Gates on the folded section** (2000 realizations; ratio of their
+    variance to the reported one, median): one expert, GP on a GP 1.00,
+    beside the coordinates 1.00, the walk 0.99 (0.9.3: 0.59, 0.35, 0.45);
+    three experts 0.93, 0.99, 0.99, means within their intervals (2-8%
+    outside). The 0.93 left is the experts' mean functions disagreeing
+    (their spread 28% of the variance on the GP on a GP), which a weighted
+    blend of means loses by convexity and no coupling recovers. A shallow
+    GP's realizations against its exact posterior covariance: variance
+    1.00, correlation error 0.023 median, 0.07 at the 95th percentile (the
+    Monte Carlo floor at 2000 realizations 0.022) -- the draw and the
+    residual share `w`, so the features' error adds a small
+    cross-covariance; 0.9.3 had 0.07 and 0.15 there. **The GeoScape
+    exchange network** (32 experts, three walk readers on Matern 3/2 and
+    exponential kernels, 600 conditioning points): every reader's
+    realizations at 0.994-1.006 of the reported variance (before: 0.82-0.91),
+    4-6.5% of the points outside the chi-square band, 5-7.5% of the means
+    outside theirs; an epoch 435 s (441 before), drawing a reader's
+    realizations 233 s at a GPU peak of 9.9-11 GB.
+  - **The features' random numbers are drawn on Philox by name**:
+    `auto_select` picks another generator under XLA, and a compiled
+    prediction drew another basis (realizations apart by their own size);
+    plain and compiled now agree to 1.4e-7 of the field's scale.
+  - **Training** (step 3, three seeds each, `1b84ed5`). The folded
+    section, new-hole log score: the second moment from scratch -2.04,
+    -1.94, -2.42 beside the coordinates (the moment bound -9.6 to -11.2),
+    -10.2, -7.5, -8.4 on the GP on a GP (-12.4 to -13.9). **Walker Lake**,
+    the same two networks on the 470 samples (120 inducing points, one
+    expert, chapter 15's warping, 2000 steps), scored against the
+    exhaustive field at every sixth row and column: the second moment
+    beats the moment bound on every seed and network -- RMSE 174-188 ->
+    160-161, CRPS of measurement samples 92-103 -> 85, their 90% coverage
+    0.96-0.99 -> 0.89-0.90, log score -6.30/-6.52 -> -6.20 -- and both
+    networks converge to one model, where the moment bound leaves the GP
+    on a GP far behind; its maps are scattered high-grade blobs, a
+    different set in every realization, the second moment's the field's
+    belt, arc and hole. 13-17x the training time (500-700 s against 40).
+    Against an exhaustive truth the realizations of the *ground* cover only
+    ~35%: the model puts Walker's fine texture in the noise, so the fair
+    check is samples of a measurement (`predict_measurements`). **Chapter
+    16** (250 steps): the rock's log score 0.3224 -> 0.3204 and Brier
+    0.0971 -> 0.0966 on every seed, the metals unchanged (RMSE/sd 0.912,
+    CRPS/sd 0.512), 3.7x the time (1342 s against 360); the maps alike,
+    the rock's realizations equally fragmented under both bounds -- five
+    latent draws of full variance on a rough Matern 3/2, a property of the
+    realizations rather than of the training. **The sampled warm-up adds
+    nothing** on any case (Walker within 0.003 of a log score). Reading for
+    step 4: the second moment pays where a hidden layer carries the model
+    and buys little where one reader sits on a walk beside a stationary
+    tree -- an argument for a default that depends on the network, or for
+    a cheaper quadrature, before a blanket default. The GeoScape network
+    untried; step 4 not started.
+  - **The quadrature made cheaper** (2026-10-20, `d6998c6`, `d6e6f19`).
+    Profiled on Walker's GP on a GP: 88% of a training step is the
+    conditioned quadrature's loop, 72% of that its backward pass -- the 64
+    nodes four at a time, recomputed under the gradient. **Chunks sized by
+    a memory budget**, `GPOptions(quadrature_memory=2e9)`: every node at
+    once, differentiated plainly, where the estimated arrays fit it, else
+    the largest chunk that does and never fewer than four; the realizations
+    the same way. A fixed number rather than the memory free, so a model
+    chunks and rounds alike in every process. A step 136 -> 60 ms on the
+    GPU and 234 -> 147 on the CPU, the bound the same to 1e-9; the exchange
+    network unchanged (447 s an epoch against 435, a reader's realizations
+    229-234 s, 0.99-1.01 of the variance, GPU peak 11.5-12.8 GB against
+    9.9-11.1). What a per-call estimate cannot see, measured on that
+    network, each run out of the 24 GB device: rows hinted at the whole
+    data set (a chunk of one, 510 s an epoch) -- every call now states the
+    rows it carries; 32 experts' quadratures run together, each inside the
+    budget -- they share it now; the kernel components' loop unrolled, its
+    eight Gaussians run together -- reverted; a 6e9 budget giving 32 nodes
+    beside two sibling readers -- 2e9 and the floor of four; a reader's
+    realizations at 16 bytes an element -- 48, times its experts.
+    `[..., None]` on the large arrays became `expand_dims`, whose gradient
+    is a reshape and not a full-size `StridedSliceGrad` a chunk.
+    **Gauss-Hermite up to two dimensions** (`gate_nodes.py`, against 16000
+    coupled draws on the folded section's GP on a GP, median error of the
+    variance): Sobol 64 2.3%, 256 ~1.0%, 1024 0.65-0.77%; Hermite 5x5 1.0%,
+    7x7 matching Sobol 1024. A step at 5x5 1.5x faster than 64 Sobol nodes
+    on the GPU, 2.3x on the CPU. **7x7 is the default** (the user's choice,
+    2026-10-20): more accurate than the 64 Sobol points and cheaper; Sobol
+    stays beyond two dimensions. **XLA on the chunk's body** 1.1x on the GPU
+    at a third more memory, 1.3x on the CPU: left an experiment, off.
+  - **Step 4 built 2026-10-20, released in 0.9.4.** `GPOptions(full_variance=
+    True)` for a new model, the class default off for a save; off is 0.9.3
+    to the bit on four models (shallow over two experts, a GP on a GP over
+    two, a walk reader, a `GaussianMixture`), predictions, realizations,
+    measurement samples and training log, rebuilt and reopened
+    (`gate_off.py`) -- which took putting back 0.9.3's expert draw: every
+    expert under the node's name and the old summation order, the new blend
+    having moved a mixture's log by 6e-12. **Memory, found by chapter 17**:
+    its walk reader's refinement held 37 GB per pass against 0.9.3's 10.5;
+    profiled one process a setting (a second prediction in one process
+    reuses the allocator's pages and reads zero), the conditioned
+    quadrature costs no memory beyond 0.9.3's 7.9 GB at 20000 rows and the
+    pathwise realizations 16 GB -- one realization 3-4 GB there, the
+    four-a-chunk floor overruling the 2 GB budget. Each model now sizes its
+    own prediction batch (`_prediction_rows`, 3375 rows on chapter 17):
+    9.6 GB and no slower. **A latent bug the smaller batches exposed**: the
+    four block reductions divided rows by blocks as a float and cast, and in
+    a trace with the rows unknown the division became a multiplication by
+    the reciprocal -- 1496 / 187 truncated to 7, chapter 17's refinement
+    failing on a short last batch; integer division now. **Chapters**: 16's
+    metals' goodness rose (Ni 0.81 -> 0.86, Zn 0.86 -> 0.90); 17 ran 89
+    min against 48, peak 14.8 GB. With `bias=False` the stationary vein of
+    17 spread fully uncertain sheets over unsampled ground (the field
+    returns to zero, both log-odds on the contour level), and chapters 6, 16
+    and 17 now give the indicator `bias=True` -- the class prior belongs to
+    the likelihood, not to a field's mean.
+  - **The resolution gap, found by chapter 13** (2026-10-21,
+    `walker_gap.py`, `walker_fan.py`). Under the full variance Walker's
+    shallow model drew a variogram fan above the data: about 10% with the
+    spherical, 20-70% with the exponential, and the exponential's intervals
+    over their promise (`nominal(0.9)` 0.847, goodness 0.95). Training and
+    the moments are identical on and off; what differs is the realizations,
+    which with it on draw the gap `1 - k K^-1 kᵀ` (random-feature kernels
+    only; the spherical and cubic have no random features and carry the
+    explained part, independent experts rescaled). At the 470 samples the
+    gap was 0.67 of the reported variance on the 10-unit lattice (0.59 for
+    the spherical), and 0.60 on a 5-unit lattice -- training shortened the
+    range from 122 to 77 -- so not a shortage of points as usually counted:
+    a sample informs the field only through the inducing values and never
+    reduces the gap at its own location. Adding the samples to the lattice
+    before cutting the experts: gap 0.08 at the samples, bound -3199 against
+    -3292, fan on the data, `nominal(0.9)` 0.925 (exponential) and 0.909
+    with RMSE 207 (spherical). The user's reading: rough kernels need
+    infinite resolution, the ideal is an inducing point at every test
+    location -- a lattice as fine as the data -- and where that is out of
+    reach the gap is foreseeable. Released so: the manual's VGP models take
+    the exponential (honesty: its realizations carry everything), chapter 13
+    names the gap and the cure, spherical and cubic GP nodes warn.
+- **Open: the gap where resolution is out of reach** (S-M). A block model
+  of millions of cells cannot hold an inducing point per cell, so its
+  realizations carry the gap of a rough kernel between lattice nodes. To
+  measure: how large it is on Tom East and Assen at their usual lattices,
+  and whether a likelihood-side correction (the data's own conditional
+  given the inducing values) is worth its cost. Also open: random features
+  for the spherical and cubic (their spectral densities are known in
+  closed form, though not as mixtures of Gaussians), which would let them
+  carry the gap too.
 
 **M–L — Merging subcompositions** (requested 2026-09-10). Some
 compositional data sets are missing data in a structured way: the same

@@ -46,7 +46,7 @@ banded, uneven sampling means a random validation split would lie
 
 The model of chapter 11, assembled one named piece at a time: inducing
 points on a 10-unit lattice over the prediction grid, cut into experts; a
-spherical kernel; and the chain that keeps a grade positive, shifted by
+exponential kernel; and the chain that keeps a grade positive, shifted by
 one for the zeros.
 
 ```python
@@ -59,7 +59,7 @@ root = geoml.latent.BasicInput(
 gp = geoml.latent.BasicGP(
     root,
     size=1,
-    kernel=geoml.kernels.Spherical())
+    kernel=geoml.kernels.Exponential())
 
 warping = geoml.warping.ChainedWarping(
     geoml.warping.BoxCox(1, shift=1.0),
@@ -107,12 +107,19 @@ figure.savefig("figures/15-variogram.png", dpi=150, bbox_inches="tight")
 Three things to sign against. The pooled scores are the map's expected
 error, measured where the model never looked. The calibration verdict says
 how wide a "90%" interval really has to be cut. And the variogram fan is
-the spatial check the other two cannot make: the realizations follow the
-data's curve across the range and hold it at eight lags of the twelve, so
-the model walks like the ground rather than merely landing in the right
-place on average. That matters to a
-resource estimate, because a field fitted too smooth understates how often
-neighbouring blocks differ.
+the spatial check the other two cannot make: whether the model walks like
+the ground rather than merely landing in the right place on average. That
+matters to a resource estimate, because a field fitted too smooth
+understates how often neighbouring blocks differ, and one too rough
+overstates it.
+
+Here the two checks agree on a model that hedges. The "90%" interval is cut
+at 0.85, and the fan has the data's shape but sits above it at every lag.
+Both are the resolution gap of chapter 13 (§13.3): this exponential kernel
+is rough, the 10-unit lattice of inducing points leaves the samples between
+its nodes, and the realizations carry the variance the lattice cannot reach
+there. Adding the samples' own locations to the inducing points before
+dividing them into experts closes most of it.
 
 Both sides of that figure are corrected before they meet, and chapter 13
 explains why at length. The fan is raised by the fitted noise, since the

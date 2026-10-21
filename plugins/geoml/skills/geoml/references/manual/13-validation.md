@@ -39,7 +39,7 @@ root = geoml.latent.BasicInput(
 gp = geoml.latent.BasicGP(
     root,
     size=1,
-    kernel=geoml.kernels.Spherical())
+    kernel=geoml.kernels.Exponential())
 
 # shifted by one, the order of the smallest grade, so the zeros have a
 # logarithm near the rest of the data rather than far below it
@@ -230,8 +230,11 @@ figure.savefig("figures/13-spread-check.png", dpi=150,
 `spread_check` compares the spread the model claimed against the spread
 the errors actually had, laid out along the predicted value, and the level
 axis says *which* term is at fault. A shortfall that widens with the grade
-points at the noise model, and a flat one at the posterior. Here the claim
-and the errors agree in every bin, within the error bars.
+points at the noise model, and a flat one at the posterior. Here the
+measurement noise alone matches the errors in every bin, and the posterior's
+share on top of it is the excess: from a predicted value of 250 up, the
+model claims 40 to 80 more spread than its errors had. The fan below says
+where that excess comes from.
 
 ```python
 figure = explore.variogram(n_lags=12)
@@ -270,12 +273,30 @@ the average departure from the true variogram from 56% down to 12%, and the
 sill from 89 700 to 64 400 against a truth of 61 800.
 
 Only now can the two curves be laid against each other, and the answer is
-that this model passes. The fan follows the data's shape across the whole
-range, rising where it rises and levelling where it levels, and holds the
-data inside it at eight lags of the twelve. The data run 2 000 to 4 000
-above it between 40 and 70 units, where their curve overshoots its own
-sill, and below it at the shortest lag, which the caution below is about.
-The realizations walk like the data.
+that the realizations vary more than the data do. The fan has the data's
+shape, rising where it rises and levelling where it levels, but it sits
+above the data at every lag: 55 000 to 75 000 against 43 000 to 47 000 at
+the two shortest, and 80 000 to 120 000 against 62 000 to 71 000 beyond
+50 units. The intervals agree, from their own side: they cover more than
+they promise, and §13.4 will cut a "90%" interval at 0.85.
+
+The cause is resolution, and it is foreseeable. A sparse GP knows the
+field only through its inducing points, so at any location it reports, on
+top of what the data told it, the variance the inducing points cannot
+reach there -- the gap `1 - k K^-1 kᵀ`, `k` the kernel between the location
+and the inducing points and `K` among them -- and the realizations
+carry that gap, as they carry everything the model reports. A rough kernel
+such as this exponential, linear at the origin, varies a lot between two
+neighbouring inducing points, so the gap is large wherever the lattice does
+not sit: at the samples, between its 10-unit nodes, it is two-thirds of the
+variance the model reports. The ideal is an inducing point at every location
+the model will be asked about, which on spatial data means a lattice with a
+spacing comparable to or smaller than the data's, and the samples' own
+locations among the points. Adding the 470 samples to this lattice before
+dividing it into experts brings the gap at the samples down to a tenth, the
+fan onto the data, and the "90%" cut to 0.93. Where that resolution is out
+of reach -- a block model of millions of cells -- the gap remains, and the
+figure says how much.
 
 That verdict is worth pausing on, because it is the opposite of what the
 same figure said before the two corrections were applied. Uncorrected, the
@@ -288,7 +309,9 @@ model**, and it will do so with an air of authority, because a fan far
 below a curve looks like evidence.
 
 Scrupulous, it convicts a guilty one too, and this model was one until
-its Box-Cox was shifted. With the default shift of a millionth, the same
+its Box-Cox was shifted. (The numbers in the next three paragraphs were
+measured when this chapter's model used the spherical kernel, before 0.9.4;
+the lesson does not depend on the kernel.) With the default shift of a millionth, the same
 figure put the data under the fan's lowest realization at ten lags of the
 twelve: by more than 20 000 at the shortest, and the fan about a sixth
 above the data at long range. The model's variance was too big, and the
@@ -337,8 +360,9 @@ Here it is flat at its sill from the second lag on, with only the shortest
 bin riding high — the same crowded, high-value bin the caution above named
 as the least trustworthy point in either figure. Flat at the sill is what
 "nothing left" looks like: the residuals are noise with no spatial
-organization worth naming. That agrees with the fan above, and the two agreeing is
-worth more than either alone, because they fail in different ways. The fan
+organization worth naming. So the fan's excess is variance in the
+realizations, not structure the mean missed, and the two figures together
+say more than either alone, because they fail in different ways. The fan
 would miss a model that got the structure right and the level wrong; the
 residual variogram would miss one whose realizations were individually too
 smooth while the mean was right.
@@ -403,7 +427,8 @@ print(round(calibration.nominal(0.9), 3))
 interval be cut so that it *actually* covers 90% of fresh measurements?
 For a calibrated model the answer is 0.9 and nothing changes. Above it,
 the model claimed more precision than it delivered, and the returned level
-is exactly how much wider to cut. The finite-sample guarantee of split
+is exactly how much wider to cut; below it, as here, the model hedged, and
+the level is how much narrower. The finite-sample guarantee of split
 conformal prediction rides on the folds, since exchangeability fails point
 by point on spatial data, and folds that mimic deployment (§13.1) are what
 makes the out-of-fold PITs stand for the prediction task.

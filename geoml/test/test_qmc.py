@@ -99,7 +99,11 @@ def test_qmc_is_unchanged_by_xla():
 
     assert (False, True, model._propagation_key()) in model._compiled
     assert (True, True, model._propagation_key()) in model._compiled
-    assert np.allclose(plain, compiled, atol=1e-8)
+    # the realizations' random features go through a Cholesky and a cosine
+    # XLA fuses in its own order: 1.4e-7 of the field's scale apart,
+    # measured, at values near zero as anywhere
+    assert np.allclose(plain, compiled, rtol=0.0,
+                       atol=1e-6 * np.abs(plain).max())
 
 
 def test_qmc_lands_closer_to_the_posterior():
