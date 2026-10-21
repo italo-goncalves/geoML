@@ -102,20 +102,29 @@ _EXPERT_PROPAGATION = "consensus"
 # `GPOptions.propagation`, and read at trace time like it.
 _JOINT_PROPAGATION = False
 
+# Whether the moments and the realizations carry the full variance
+# (`GPOptions.full_variance`, new in 0.9.4): a GP node reading another
+# node's output takes the second moment with its inducing inputs uncertain
+# too, and every GP node's realizations carry what its inducing points
+# leave out. Off, the moments and realizations of 0.9.3. Set with the rule
+# above and read at trace time like it; on outside a model's context.
+_FULL_VARIANCE = True
+
 
 @_contextlib.contextmanager
-def propagation_rule(rule, joint=False):
-    """Chooses how experts propagate their inducing sets, and whether
-    uncertainty travels with its covariance between locations, while
-    active."""
-    global _EXPERT_PROPAGATION, _JOINT_PROPAGATION
-    previous = _EXPERT_PROPAGATION, _JOINT_PROPAGATION
+def propagation_rule(rule, joint=False, full=True):
+    """Chooses how experts propagate their inducing sets, whether
+    uncertainty travels with its covariance between locations, and whether
+    the moments and realizations carry the full variance, while active."""
+    global _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE
+    previous = _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE
     _EXPERT_PROPAGATION = rule
     _JOINT_PROPAGATION = bool(joint)
+    _FULL_VARIANCE = bool(full)
     try:
         yield
     finally:
-        _EXPERT_PROPAGATION, _JOINT_PROPAGATION = previous
+        _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE = previous
 
 
 # Which experts the GP nodes compute, or None for all of them. Set through
@@ -389,8 +398,11 @@ def _expert_key(name, expert):
     """The key an expert's normals are drawn under: the node's name for the
     first expert, as a single-expert model has always drawn them, and the
     expert's own for the others -- so the experts' draws are independent and
-    their blend's variance known (`_blend_scale`)."""
-    return name if int(expert) == 0 else "%s/expert%d" % (name, int(expert))
+    their blend's variance known (`_blend_scale`). Without the full
+    variance every expert draws under the node's name, as in 0.9.3."""
+    if int(expert) == 0 or not _FULL_VARIANCE:
+        return name
+    return "%s/expert%d" % (name, int(expert))
 
 
 def _blend_scale(agree, actual):
@@ -1351,6 +1363,12 @@ _UNCERTAIN_POINTS_SECOND_MOMENT = True
 # jitter the likelihood integrated separately is folded in.
 _PATHWISE_REALIZATIONS = True
 
+
+def _pathwise():
+    """Whether realizations are drawn pathwise, carrying the full variance:
+    under `GPOptions.full_variance`, unless a test has switched it off."""
+    return _FULL_VARIANCE and _PATHWISE_REALIZATIONS
+
 # Inside the training data term (`marginal_draws`): a node drawing its
 # realizations through its parent's draws them from each location's own
 # marginal instead -- its mean plus its standard deviation times normals
@@ -2094,7 +2112,7 @@ class _GPNode(_FunctionalLatentVariable):
             # draws, `marginal_draws`)
             self._moment_state = (coords, w_mu, w_var)
             if self._READS_CHAIN and second is not None \
-                    and _PATHWISE_REALIZATIONS:
+                    and _pathwise():
                 # the realizations are drawn through the parent's and carry
                 # the whole variance: no gap, and no jitter left to add
                 self._path_state = (coords, chain, weights, w_mu, w_var,
@@ -2110,7 +2128,7 @@ class _GPNode(_FunctionalLatentVariable):
                     else _tf.reduce_sum(own * weights, axis=0)
             elif self._READS_CHAIN and chain is None:
                 gap = self._certain_gap(cov_cross, var, weights)
-                if _PATHWISE_REALIZATIONS and self._feature_kernel():
+                if _pathwise() and self._feature_kernel():
                     # the realizations carry what the inducing points leave
                     # out as a random-feature residual: smooth, the kernel's
                     # correlation, its variance exact at every point
@@ -2156,6 +2174,13 @@ class _GPNode(_FunctionalLatentVariable):
                                         key=_expert_key(self.name, i))
                     for i in _active_experts(self.root)
                 ]
+                if not _FULL_VARIANCE:
+                    # 0.9.3's blend, the experts sharing their normals
+                    return _tf.reduce_sum(_tf.stack([
+                        _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c)) + d
+                        for a, b, c, d in zip(cov_cross, self.chol_r, rnd,
+                                              mu)], axis=0)
+                        * weights[:, :, :, None], axis=0)
                 draws = _tf.stack([
                     _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c))
                     for a, b, c in zip(cov_cross, self.chol_r, rnd)], 0)
@@ -3032,6 +3057,10 @@ class BasicGP(_GPNode):
             draws = _tf.einsum(
                 "pab,psbc->psac", cov_cross,
                 _tf.matmul(self.slots_chol_r, rnd))
+            if not _FULL_VARIANCE:
+                # 0.9.3's blend, the experts sharing their normals
+                return _tf.reduce_sum((draws + mu) * weights[:, :, :, None],
+                                      axis=0)
             held = _tf.reduce_sum(_tf.einsum(
                 "pnm,psmj->psnj", cov_cross, self.slots_chol_r) ** 2, -1)
             scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
@@ -3196,7 +3225,8 @@ class BasicGP(_GPNode):
         certain = all(e.covariance is None for e in chain) \
             and all(c is None for c in covariances)
         return (self._READS_CHAIN
-                and (certain or (_UNCERTAIN_POINTS_SECOND_MOMENT
+                and (certain or (_FULL_VARIANCE
+                                 and _UNCERTAIN_POINTS_SECOND_MOMENT
                                  and self._CONDITIONED_SECOND_MOMENT))
                 and _second_moment_supported(self.kernel))
 
@@ -3256,6 +3286,27 @@ class BasicGP(_GPNode):
         basis must not change with the experts a call computes, or a
         prediction by expert would draw from another prior."""
         return max(int(n) for n in self.root.n_ip)
+
+    def _row_bytes(self):
+        """The bytes a row of a prediction batch costs the node at its
+        smallest chunk -- `_FEWEST_PER_CHUNK` nodes of the conditioned
+        quadrature, or as many pathwise realizations, every expert at once
+        as `_conditioned_sums` and `_pathwise_simulate` count them -- or 0
+        where it reads a certain input and takes neither. What sizes a
+        model's prediction batches (`VGPNetwork._prediction_rows`): a
+        budget the floor overrules no longer bounds anything."""
+        if not (_FULL_VARIANCE and self._READS_CHAIN
+                and self._CONDITIONED_SECOND_MOMENT
+                and self.parent is not self.root):
+            return 0
+        m, d = self._feature_count(), int(self.parent.size)
+        experts = len(self.root.n_ip)
+        cost = _NODE_BYTES * m * d
+        if _pathwise() and self._feature_kernel():
+            features = max(self._FEATURES, 2 * m) + 1
+            cost = max(cost, _REALIZATION_BYTES * (m * d + self.size
+                                                   * features))
+        return _FEWEST_PER_CHUNK * experts * cost
 
     def _feature_basis(self, d, seed, count=0):
         """Random Fourier features of the node's kernel, as the expected
@@ -5821,7 +5872,7 @@ class GPWalk(_FunctionalLatentVariable):
             u, _ = _slot_points(self.walker)
             mask = _slot_mask(self.root)
             m = u.shape[-2]
-            if field._feature_kernel() and _PATHWISE_REALIZATIONS:
+            if field._feature_kernel() and _pathwise():
                 rnd = field._shared_normals(u, n_sim, seed, mask)
             else:
                 drawn = [_tf.pad(_simulation_normals(
@@ -5839,7 +5890,7 @@ class GPWalk(_FunctionalLatentVariable):
             us, _ = _points_of(self.walker, ids)
             groups = []
             for p, i in enumerate(ids):
-                if field._feature_kernel() and _PATHWISE_REALIZATIONS:
+                if field._feature_kernel() and _pathwise():
                     rnd = field._shared_normals(us[p], n_sim, seed)
                 else:
                     rnd = _simulation_normals(

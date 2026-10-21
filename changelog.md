@@ -1,4 +1,39 @@
 ## version 0.9.4 (in progress)
+* **A deep model's realizations carry the variance it reports,
+`GPOptions(full_variance=True)`.** Until now a GP node reading another
+node's output took the second moment only where its inducing points were
+certain, and every GP node's realizations carried only the variance its
+inducing points explain: on the folded section the realizations held 0.59
+of the reported variance on a GP on a GP, 0.35 beside the coordinates and
+0.45 on a walk. Under the new option, the default for a new model:
+  - a GP node reading an uncertain input takes the second moment with its
+  own inducing inputs uncertain too, its quadrature over the input run with
+  the inducing inputs conditioned on each node;
+  - its realizations are drawn through its parent's, so realization `s`
+  reads the parent's realization `s`;
+  - every GP node's realizations carry what its inducing points leave out,
+  as a residual drawn by random features (Wilson et al.'s pathwise
+  conditioning: smooth, with the kernel's correlation and the exact
+  variance at every point), and every expert of a node draws from one prior
+  draw, so experts agree where they meet: before any rescale their blend
+  held 0.84 of the reported variance where two carry weight, independent
+  draws 0.47, and an exact rescale closes the rest;
+  - the prediction integrates that residual analytically, rather than
+  averaging it over the realizations, and a bound trained on realizations
+  draws each location's marginal.
+
+  Measured with 2000 realizations against the reported variance: 1.00,
+  1.00 and 0.99 on the three folded networks with one expert, 0.93-0.99
+  with three, 0.994-1.006 on GeoScape's 32-expert exchange network. Trained
+  under it, Walker Lake's two-layer networks score an RMSE of 160 against
+  174-188 on the exhaustive field and a measurement CRPS of 85 against
+  92-103, and chapter 16's rock a log score of 0.3204 against 0.3224;
+  training cost 13-17x and 3.7x the time before the quadrature was chunked
+  and moved to Gauss–Hermite (`docs/benchmarks/deep_second_moment/`).
+  Every model's realizations change, shallow ones included; a model saved
+  before keeps the option off, and off is 0.9.3 to the bit -- predictions,
+  realizations, measurement samples and training log, rebuilt or reopened
+  (`gate_off.py`).
 * **GP nodes take `bias=False`: the prior mean is zero unless asked for.**
 Since v0.3.5 every GP node trained a constant per expert and output, in
 [-5, 5]. A field then returns to that constant away from its data, which
@@ -37,7 +72,15 @@ quadrature beside two sibling readers take 32 nodes and run out too. The
 `[..., None, ...]` slices on the quadrature's large arrays became
 `expand_dims`, whose gradient is a reshape rather than a full-size
 `StridedSliceGrad` on every chunk (`docs/benchmarks/deep_second_moment/
-chunk_memory.py`, `chunk_predict.py`).
+chunk_memory.py`, `chunk_predict.py`). **A prediction batch is sized by the
+same budget**: each GP node reading an uncertain input reports what a row
+costs it at its smallest chunk, and a batch carries at most as many rows as
+the budget holds at the costliest node, `prediction_batch_size` remaining
+the cap. At 20000 rows the floor overruled the budget: on chapter 17's
+walked model one realization of the reader's pathwise draw held 3-4 GB, and
+a batch 24 GB, its 4050-block refinement pass 37 GB against 0.9.3's 10.5;
+sized by the model (3375 rows there), 9.6 GB in 84 s against 91
+(`ch17_memory.py`, `ch17_memory_parts.py`).
 * **An input of up to two dimensions is read on a 7×7 Gauss–Hermite
 grid.** The second moment's quadrature took 64 symmetric Sobol points
 whatever the input's dimension; up to two it now takes the tensor grid of

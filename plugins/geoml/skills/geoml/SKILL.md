@@ -228,10 +228,17 @@ in the catalogue.
   coordinates concatenated beside the inner GP (`Concatenate(root,
   inner)`). A GP on an uncertain input takes the Gaussian, exponential,
   Matérn or rational quadratic kernel; spherical and cubic are refused
-  there, and the error message says so. On a `GaussianInput` a `BasicGP`
-  takes the mixture's moments (the variance of the mean over the input
-  included) and the likelihood integrates what its realizations leave
-  out; `UncertainInputGP` is deprecated. A location error is still better
+  there, and the error message says so. Since 0.9.4 the realizations
+  carry the variance the prediction reports (`GPOptions(full_variance=True)`,
+  the default for a new model): a GP reading an uncertain input takes its
+  second moment with its own inducing inputs uncertain too and draws
+  through its parent's realizations, and every GP node's realizations carry
+  what its inducing points leave out, shallow models included. A model
+  saved before keeps 0.9.3's realizations, which held only the explained
+  part -- a third to three fifths of a deep model's variance. On a
+  `GaussianInput` a `BasicGP` takes the mixture's moments (the variance of
+  the mean over the input included); `UncertainInputGP` is deprecated. A
+  location error is still better
   left untold: a noise term absorbs it. That variance costs time and
   memory in proportion to the inducing points; experts do not shorten it,
   `train_by_expert` holds a fraction of it in memory.
@@ -292,6 +299,12 @@ The papers and the code name the same things differently.
   default for a new model): its training log is a noisy estimate of the
   bound, still exactly repeatable, and a model saved before 0.9.3 keeps
   the fixed draws it was trained with.
+- **A GP node's prior mean is zero** since 0.9.4 (`bias=False`): away from
+  its data a field returns to zero, so an indicator connects its samples
+  where a trained constant let it ring each with a blob. `bias=True` trains
+  a constant per expert and output; a `GaussianMixture`'s components need
+  it to tell one regime from another. A model saved before keeps its
+  trained bias.
 - **`values()` for what you compute with, `get()` for what you draw.**
   Never `values()` a bare `simulations` path: it reads every realization
   into memory at once, fatal on a block model. Read one realization

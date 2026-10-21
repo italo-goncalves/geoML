@@ -153,7 +153,8 @@ warping = geoml.warping.ChainedWarping(
 model = geoml.models.VGPNetwork(
     data=jura_train,
     variables={
-        "Rock": geoml.likelihood.CategoricalGaussianIndicator(len(rocks)),
+        "Rock": geoml.likelihood.CategoricalGaussianIndicator(
+            len(rocks), bias=True),
         "Elements": geoml.likelihood.Laplace(warping=warping)},
     latent_network=leaves,
     options=geoml.models.GPOptions(prediction_batch_size=1000,

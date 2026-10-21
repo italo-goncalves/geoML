@@ -384,3 +384,29 @@ def test_the_dispersion_is_carried_around_like_any_other_column(tmp_path):
     reopened = geoml.data.Blocks2D.open(str(tmp_path / "b.zarr"))
     assert np.allclose(
         reopened.variables["v"].dispersion.values.to_numpy(), stored)
+
+
+@pytest.mark.parametrize("blocks", [187, 78, 421, 1309])
+def test_the_block_reductions_split_exactly_inside_a_graph(blocks):
+    """Inside a graph the sub-blocks per block were `rows / n_splits` cast
+    to an integer, and the division by a constant block count became a
+    multiplication by its reciprocal: 1496 rows over 187 blocks gave 7.99...
+    and a reshape to 7, which failed chapter 17's refinement. It shows only
+    where the rows are unknown at trace time."""
+    import tensorflow as tf
+    lk = geoml.likelihood
+    # rows, variables, realizations
+    x = tf.reshape(tf.range(blocks * 8 * 3 * 2, dtype=tf.float64) % 50.0,
+                   [blocks * 8, 3, 2])
+    reductions = [
+        lambda v: lk._aggregate(v, blocks),
+        lambda v: lk._dispersion(v, blocks),
+        lambda v: lk._proportions(v, [10.0], blocks),
+        lambda v: lk._divided(v, [10.0], blocks)]
+    for reduce in reductions:
+        # the rows unknown when traced, as in a prediction's relaxed trace:
+        # with them known the division is folded exactly at trace time
+        traced = tf.function(reduce, input_signature=[
+            tf.TensorSpec([None, 3, 2], tf.float64)])(x)
+        assert traced.shape[0] == blocks
+        np.testing.assert_allclose(traced, reduce(x))

@@ -155,7 +155,10 @@ def _aggregate(x, n_splits=None, fun=_tf.reduce_mean):
         return x
 
     # agg = _tf.stack([fun(y, axis=0) for y in _tf.split(x, n_splits, axis=0)], axis=0)
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    # integer division: inside a graph with the rows unknown, `rows /
+    # n_splits` became a multiplication by the reciprocal, 1496 / 187 came to
+    # 7.99... and the cast to 7
+    n = _tf.shape(x)[0] // n_splits
     agg = _tf.reshape(x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     agg = fun(agg, axis=1)
     return agg
@@ -184,7 +187,7 @@ def _dispersion(x, n_splits=None):
     if n_splits is None:
         return _tf.fill(_tf.shape(x), _tf.constant(_np.nan, dtype=x.dtype))
 
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     return _tf.math.reduce_variance(grouped, axis=1)
@@ -235,7 +238,7 @@ def _proportions(x, cutoffs, n_splits=None):
         below = _tf.cast(x[..., None] <= cuts[:, None, :], x.dtype)
         return _tf.reduce_mean(below, axis=2)
 
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     below = _tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
@@ -266,7 +269,7 @@ def _divided(x, cutoffs, n_splits=None):
             _tf.concat([_tf.shape(x)[:2], [_tf.shape(cuts)[-1]]], axis=0),
             dtype=x.dtype)
 
-    n = _tf.cast(_tf.shape(x)[0] / n_splits, dtype=_tf.int32)
+    n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
     # the prediction at each sub-block, a realization axis of one

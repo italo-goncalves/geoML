@@ -114,6 +114,8 @@ class GPOptions(_ModelOptions):
     # the conditioned quadrature's memory budget, new in 0.9.4, the same for
     # a model saved before
     quadrature_memory = 2e9
+    # a model saved before 0.9.4 keeps the moments and realizations of 0.9.3
+    full_variance = False
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -124,7 +126,8 @@ class GPOptions(_ModelOptions):
                  training_tolerance: float | None = None,
                  propagation: _Literal["joint", "marginal"] = "joint",
                  fresh_training_draws: bool = True,
-                 quadrature_memory: float = 2e9):
+                 quadrature_memory: float = 2e9,
+                 full_variance: bool = True):
         """
         Configuration of Gaussian process models.
 
@@ -142,7 +145,11 @@ class GPOptions(_ModelOptions):
         verbose
             Whether to show the training process on screen.
         prediction_batch_size : int
-            Batch size for prediction/inference.
+            The most rows a prediction batch carries. Under `full_variance`
+            a network with a GP node reading an uncertain input takes fewer
+            where its quadrature and realizations would not fit
+            `quadrature_memory` otherwise; the batching never changes the
+            answer.
         jitter : float
             Small value added to covariance matrices for numerical stability.
         training_batch_size : int
@@ -248,6 +255,24 @@ class GPOptions(_ModelOptions):
             for a large network on a small device. A fixed number rather
             than the memory free at the time, so that a model chunks, and
             so rounds, the same way in every process.
+        full_variance : bool
+            Whether the moments and the realizations carry the full variance
+            (the default since 0.9.4; a model saved before it keeps what it
+            was trained under). A GP node reading another node's output --
+            a deep layer, a `GPWalk` -- takes the second moment of its input
+            with its own inducing inputs uncertain too, and draws its
+            realizations through its parent's; every GP node's realizations
+            carry the variance its inducing points leave out, by random
+            features, and every expert of a node draws from one prior draw,
+            so the ensemble's variance is the reported one where the
+            realizations used to carry the explained part alone. The
+            prediction integrates that residual analytically, and a bound
+            trained on realizations draws each location's marginal. Off,
+            the moments and realizations of 0.9.3. Measured: a deep model's
+            realizations at 1.00 of the reported variance against 0.35-0.59
+            before; on Walker Lake's GP on a GP a held-out RMSE of 160
+            against 174-188, at 13-17x the training time with the old
+            quadrature.
         """
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
@@ -274,6 +299,7 @@ class GPOptions(_ModelOptions):
         self.propagation = propagation
         self.fresh_training_draws = fresh_training_draws
         self.quadrature_memory = quadrature_memory
+        self.full_variance = full_variance
 
 
 class _Convergence:
@@ -1135,10 +1161,16 @@ class VGPNetwork(_GPModel):
             self._check_expected_kernel()
         stack = _contextlib.ExitStack()
         stack.enter_context(_latent.propagation_rule(
-            self.options.expert_propagation, joint=joint))
+            self.options.expert_propagation, joint=joint,
+            full=self._full_variance()))
         stack.enter_context(_latent.network.quadrature_rule(
             self._quadrature_memory(), rows))
         return stack
+
+    def _full_variance(self):
+        """Whether the moments and realizations carry the full variance
+        (`GPOptions.full_variance`; off for a model saved before 0.9.4)."""
+        return bool(getattr(self.options, "full_variance", False))
 
     def _quadrature_memory(self):
         """The quadrature's memory budget, in bytes. With it, each call
@@ -1150,10 +1182,28 @@ class VGPNetwork(_GPModel):
         steer the chunking only, never the answer."""
         return float(getattr(self.options, "quadrature_memory", 2e9))
 
+    def _prediction_rows(self):
+        """How many rows a prediction batch carries: the options'
+        `prediction_batch_size`, or fewer where a GP node reading an
+        uncertain input would exceed the quadrature's memory budget at its
+        smallest chunk (`BasicGP._row_bytes`) -- each model its own batch,
+        bounded by the budget whatever its size. Measured on chapter 17's
+        walked model: at 20000 rows a batch held 24 GB, four realizations
+        of the reader's pathwise draw at 3-4 GB each. The batching never
+        changes the answer."""
+        rows = int(self.options.prediction_batch_size)
+        with self._propagation():
+            cost = max([node._row_bytes() for node in self._nodes()
+                        if hasattr(node, "_row_bytes")] + [0])
+        if cost > 0:
+            rows = max(1, min(rows, int(self._quadrature_memory() // cost)))
+        return rows
+
     def _propagation_key(self):
         """What the propagation adds to a cached trace's key."""
         return (self.options.expert_propagation,
                 getattr(self.options, "propagation", "marginal"),
+                self._full_variance(),
                 _latent.network._UNCERTAIN_POINTS_SECOND_MOMENT,
                 _latent.network._PATHWISE_REALIZATIONS,
                 self._quadrature_memory(),
@@ -1337,8 +1387,10 @@ class VGPNetwork(_GPModel):
             # each leaf serves
             mus, vars_, simss = [], [], []
             # a bound summed over rows reads each row's realizations
-            # alone: drawn from the marginal (`marginal_draws`)
-            with _latent.once_per_pass(), _latent.marginal_draws():
+            # alone: drawn from the marginal (`marginal_draws`), where they
+            # carry the full variance
+            with _latent.once_per_pass(),                     (_latent.marginal_draws() if self._full_variance()
+                     else _contextlib.nullcontext()):
                 predicted = [leaf.predict(x, x_var=x_var, n_sim=samples,
                                           seed=[seed, 0])
                              for leaf in self.leaves]
@@ -2138,7 +2190,7 @@ class VGPNetwork(_GPModel):
                      self.data if container is None else container)
         n_rows = data.n_data
         bands = self.options.batch_index(
-            n_rows, batch_size=self.options.prediction_batch_size)
+            n_rows, batch_size=self._prediction_rows())
         blocks = []
         for root, _, count in self._expert_blocks():
             nodes = gp[id(root)]
@@ -3382,8 +3434,8 @@ class VGPNetwork(_GPModel):
         Yields `(rows, result)`, the rows being indices into `newdata` so that
         a caller can write each result back to the location it came from.
         """
-        batch_size = max(1, self.options.prediction_batch_size
-                         // newdata.rows_per_location)
+        prediction_rows = self._prediction_rows()
+        batch_size = max(1, prediction_rows // newdata.rows_per_location)
         rows = _np.arange(newdata.n_data)
         if where is not None:
             where = _np.asarray(where)
@@ -3396,7 +3448,7 @@ class VGPNetwork(_GPModel):
         # cached `predict_raw` graph reads current values without recomputing the
         # posterior (Cholesky factorizations, etc.) on every batch. The refresh
         # itself is traced -- see `latent.refresh_cached`.
-        with self._propagation(rows=self.options.prediction_batch_size):
+        with self._propagation(rows=prediction_rows):
             if all(hasattr(leaf, "cache_prediction_state")
                    for leaf in self.leaves):
                 _latent.refresh_cached(self.leaves, self.options.jitter,
@@ -3424,7 +3476,7 @@ class VGPNetwork(_GPModel):
             # reads the leaves itself (`measurement_batches`,
             # `responsibilities`) would otherwise run them under the module's
             # default against a refresh made under the model's
-            with self._propagation(rows=self.options.prediction_batch_size):
+            with self._propagation(rows=prediction_rows):
                 out = call(x, x_var, splits, batch) if with_rows \
                     else call(x, x_var, splits)
             yield batch, out
