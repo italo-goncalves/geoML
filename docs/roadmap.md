@@ -3062,6 +3062,29 @@ order of difficulty:
 
 These were tried. The numbers are why they are, or are not, in the package.
 
+**A confident variational start (`delta` 0.01) as the default -- rejected**
+(2026-10-21; the folded-ore ablation's finding carried to the manual). On
+the folded section under the joint rule a small starting `delta` selects
+the fold (one body, limbs 1.00) where the default start settles on five
+blobs at a better bound, so every chapter of the manual was run with every
+variational node's `delta` starting at 0.01 (`BasicGP`, `MultiStructureGP`,
+`GradientConstrainedInput`, and `cross_validate`'s fresh state with them;
+worktree `geoML-confident`). All green, and worse where it was scored:
+Walker's out-of-fold rmse 220.8 -> 267.1 and CRPS 125.9 -> 152.1 (both
++21%; the folds started confident too, so this mixes the training start
+with the short fold refit -- but the trained model's own maps changed,
+smoother and striped, the median's top 1200 -> 950); Jura's held-out
+metals 1-6% worse in rmse on five of seven, CRPS a draw, rock kappa mixed
+(Argovian 0.79 -> 0.73, Sequanian 0.62 -> 0.69). Goodness rose everywhere
+(Jura 0.61-0.75 -> 0.68-0.82, Walker's conformal cut 0.847 -> 0.903): the
+confident start buys calibration with wider intervals, not better
+predictions. Chapter 17 is the decisive one: the deep model's walk moved
+points 0.09 ranges at most against 0.38, and its contact came back as the
+stationary model's tubes along the holes (113 755 m2 against the default's
+one sheet, 193 518 m2), its first bound near -35 000 against -9 000. The
+fold the small start finds on three holes is a basin of that section, not
+a better start in general; `delta` keeps starting at 1.
+
 **Reading a moment-trained deep network by draws -- rejected**
 (2026-10-16; the first step "Propagate individual realizations" planned).
 The model trained on the moment bound, read through draws of its hidden
