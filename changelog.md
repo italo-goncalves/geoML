@@ -1,4 +1,4 @@
-## version 0.9.5 (in progress)
+## version 0.9.5
 * **XLA compiles the conditioned quadrature and the pathwise draws.** The
 body of a quadrature or pathwise chunk (`_chunked_sums`, `_chunked_map`)
 is compiled by default (`_QUADRATURE_XLA`), its elementwise chains over
