@@ -1,3 +1,19 @@
+## version 0.9.5 (in progress)
+* **XLA compiles the conditioned quadrature and the pathwise draws.** The
+body of a quadrature or pathwise chunk (`_chunked_sums`, `_chunked_map`)
+is compiled by default (`_QUADRATURE_XLA`), its elementwise chains over
+the `[n, m, d]` arrays fused. On the folded-ore model (a GP reading a
+`GPWalk`, the joint rule) a training step goes from 1.53 to 1.15 s and a
+prediction of a 161 x 201 grid from 69 to 46 s, the bound and the
+predicted moments the same (`docs/benchmarks/fold_regression/
+fold_cost.py`, `fold_quad_accuracy.py`); it was 1.1-1.3x on Walker's GP on
+a GP, where the quadrature is a smaller share. Only the full variance
+reaches it, so a model saved before 0.9.4 is unaffected. Each new batch
+shape compiles once. A 5 x 5 Gauss-Hermite grid was measured beside it
+and left out: 14-22% faster again, at twice the error of the predicted
+variance (median 0.8% against 0.4%, worst 49% against 19%, against 1024
+Sobol points).
+
 ## version 0.9.4
 * **A deep model's realizations carry the variance it reports,
 `GPOptions(full_variance=True)`.** Until now a GP node reading another

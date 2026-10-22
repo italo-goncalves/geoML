@@ -1417,10 +1417,14 @@ _REALIZATION_BYTES = 48
 # the quadrature's rule: "hermite", a Gauss-Hermite tensor grid of
 # `_HERMITE_POINTS` a dimension up to two dimensions and Sobol beyond (7x7
 # measured as close as 1024 Sobol points, `gate_nodes.py`), or "sobol"
-# everywhere; and XLA on a chunk's body, an experiment never set by a model
+# everywhere. And XLA on the body of a quadrature or pathwise chunk: its
+# elementwise chains fused, the numbers the same -- on the folded-ore model
+# a training step 1.53 -> 1.15 s and a grid prediction 69 -> 46 s
+# (`fold_regression/fold_cost.py`); 1.1-1.3x on Walker's GP on a GP. It
+# compiles once per batch shape
 _QUADRATURE_RULE = "hermite"
 _HERMITE_POINTS = 7
-_QUADRATURE_XLA = False
+_QUADRATURE_XLA = True
 
 
 @_contextlib.contextmanager
