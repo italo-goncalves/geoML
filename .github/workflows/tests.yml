@@ -23,6 +23,19 @@
 # (test_uncertain_input_gp.py, measured 2026-09-15). Since 0.8.0 the files
 # go through `geoml/test/run_parallel.py`, two at a time, and the manual is
 # one test per chapter.
+#
+# From 0.8.7 to 0.9.5 every job failed this way again, no test failing
+# (2026-10-22). The structural job, still one pytest process, lost its
+# runner at 40% once `test_batched_experts.py` joined it and at 3% by
+# 0.9.5, with `test_expected_kernel.py` and `test_full_variance.py`
+# (models trained, 15-20 minutes each locally) on the path. The full job's
+# two processes outgrew the 16 GB the runner has ("lost communication with
+# the server"), and chapter 17 alone takes an hour on four cores, past the
+# manual job's 90 minutes. So the structural job runs one process per file
+# too, with the three training files on its ignore list. The full job runs
+# one file at a time on all four of the runner's CPUs (by default the
+# runner takes half the machine's cores, which gave each of two processes
+# one). Both release jobs have six hours, the most a hosted runner allows.
 
 name: tests
 
@@ -39,7 +52,7 @@ concurrency:
 jobs:
   structural:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -51,30 +64,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
         run: pip install -e .[geoh5] pytest
-      - name: Structural tests
-        run: >-
-          python -m pytest -q geoml/test
-          --ignore=geoml/test/test_real_cases.py
-          --ignore=geoml/test/test_vgp.py
-          --ignore=geoml/test/test_experts.py
-          --ignore=geoml/test/test_qmc.py
-          --ignore=geoml/test/test_mixture.py
-          --ignore=geoml/test/test_model_persistence.py
-          --ignore=geoml/test/test_noise_integration.py
-          --ignore=geoml/test/test_early_stopping.py
-          --ignore=geoml/test/test_progress.py
-          --ignore=geoml/test/test_priors.py
-          --ignore=geoml/test/test_manual.py
-          --ignore=geoml/test/test_plots.py
-          --ignore=geoml/test/test_interactive.py
-          --ignore=geoml/test/test_block_prediction.py
-          --ignore=geoml/test/test_gaussian_mixture.py
-          --ignore=geoml/test/test_skill_release.py
+      # one process per file, two at a time: as one process the structural
+      # files outgrew the runner's 16 GB from 0.8.7 on
+      - name: Structural tests, one process per file
+        run: |
+          ignored="test_real_cases.py test_vgp.py test_experts.py test_qmc.py
+            test_mixture.py test_model_persistence.py test_noise_integration.py
+            test_early_stopping.py test_progress.py test_priors.py
+            test_manual.py test_plots.py test_interactive.py
+            test_block_prediction.py test_gaussian_mixture.py
+            test_skill_release.py test_batched_experts.py
+            test_expected_kernel.py test_full_variance.py"
+          files=""
+          for f in geoml/test/test_*.py; do
+            case " $(echo $ignored) " in
+              *" $(basename $f) "*) ;;
+              *) files="$files $f" ;;
+            esac
+          done
+          python geoml/test/run_parallel.py --no-manual --cpus 4 -j 2 $files
 
   full:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -86,14 +99,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
         run: pip install -e .[geoh5] pytest
-      # two at a time: the heaviest file peaks at 6.1 GB, the runner has 16
+      # one at a time on all four CPUs: two at a time outgrew the runner's
+      # 16 GB once the expected-kernel and full-variance files arrived
       - name: Full suite, one process per file, the manual aside
-        run: python geoml/test/run_parallel.py --no-manual -j 2
+        run: python geoml/test/run_parallel.py --no-manual --cpus 4 -j 1
 
   manual:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # chapter 17 alone takes an hour on four cores
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
