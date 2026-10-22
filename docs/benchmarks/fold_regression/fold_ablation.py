@@ -104,12 +104,27 @@ model = geoml.models.VGPNetwork(
     options=geoml.models.GPOptions(**options))
 
 start = time.perf_counter()
+os.makedirs(out, exist_ok=True)
+# with `checkpoint=N`, each phase trains N steps at a time and the model and
+# the log so far are saved after each: a phase split into chunks replays one
+# call to the bit, and a run killed late keeps what it had
+every = int(opt.get("checkpoint", "0"))
 for rate, steps in zip((5e-2, 1e-2), opt["iterations"].split("+")):
     model.set_learning_rate(rate)
-    model.train_full(int(steps))
+    left = int(steps)
+    while left > 0:
+        now = min(left, every) if every else left
+        model.train_full(now)
+        left -= now
+        if every:
+            model.save(os.path.join(out, "%s_s%d_model" % (name, seed)))
+            np.save(os.path.join(out, "%s_s%d_log.npy" % (name, seed)),
+                    np.asarray(model.training_log, dtype=float))
+            print("checkpoint: step %d, bound %.2f, %.0f s"
+                  % (len(model.training_log), model.training_log[-1],
+                     time.perf_counter() - start), flush=True)
 seconds = time.perf_counter() - start
 log = np.asarray(model.training_log, dtype=float)
-os.makedirs(out, exist_ok=True)
 model.save(os.path.join(out, "%s_s%d_model" % (name, seed)))
 model.predict(grid)
 

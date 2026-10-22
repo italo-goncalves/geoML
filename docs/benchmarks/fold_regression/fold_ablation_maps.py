@@ -47,6 +47,9 @@ LABELS = {
     "m32_joint_dall001": "joint, delta 0.01 on every GP",
     "m32_joint_dall01": "joint, delta 0.1 on every GP",
     "m32_joint_dall001_long": "joint, delta 0.01 on every GP, 1000 it",
+    "long_default_r1": "joint, default delta, tolerance 0.01",
+    "long_conf_r1": "joint, delta 0.01, tolerance 0.01",
+    "conf_r1_3000": "joint, delta 0.01, 3000 steps",
 }
 
 

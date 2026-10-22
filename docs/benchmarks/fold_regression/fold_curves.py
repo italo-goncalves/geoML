@@ -35,8 +35,10 @@ LABELS = {
     "long_default_r3": "default delta, field range 3",
     "long_conf_r1": "delta 0.01 on every GP, field range 1",
     "long_conf_r3": "delta 0.01 on every GP, field range 3",
+    "conf_r1_3000": "delta 0.01 on every GP, 3000 steps, no tolerance",
 }
 STYLES = {"long_default_r1": ("#2a6fdb", "-"), "long_default_r3": ("#2a6fdb", "--"),
+          "conf_r1_3000": ("#8b1a1a", "-"),
           "long_conf_r1": ("#d2691e", "-"), "long_conf_r3": ("#d2691e", "--")}
 
 
@@ -59,8 +61,9 @@ def main(maps, out, names):
     near.set_ylim(-150, -40)
     near.set_title("from -150 up")
     near.legend(fontsize=8.5, loc="lower right")
-    figure.suptitle("Folded ore, joint rule: training stopped by "
-                    "training_tolerance=0.01 (the rate drops at step 100)")
+    figure.suptitle(os.environ.get(
+        "FOLD_TITLE", "Folded ore, joint rule: training stopped by "
+        "training_tolerance=0.01 (the rate drops at step 100)"))
     figure.tight_layout()
     figure.savefig(out, dpi=120)
 
