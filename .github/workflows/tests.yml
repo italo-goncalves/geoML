@@ -33,9 +33,13 @@
 # the server"), and chapter 17 alone takes an hour on four cores, past the
 # manual job's 90 minutes. So the structural job runs one process per file
 # too, with the three training files on its ignore list. The full job runs
-# one file at a time on all four of the runner's CPUs (by default the
+# one process at a time on all four of the runner's CPUs (by default the
 # runner takes half the machine's cores, which gave each of two processes
-# one). Both release jobs have six hours, the most a hosted runner allows.
+# one), and even one process was too many for two files: in one process
+# test_batched_experts.py peaked at 28.1 GB and test_expected_kernel.py at
+# 16.0, each model a test trains leaving its TensorFlow graphs resident.
+# The runner runs those two a slice of their tests a process (`SPLIT`).
+# Both release jobs have six hours, the most a hosted runner allows.
 
 name: tests
 
@@ -99,8 +103,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libxrender1
       - name: Install the package
         run: pip install -e .[geoh5] pytest
-      # one at a time on all four CPUs: two at a time outgrew the runner's
-      # 16 GB once the expected-kernel and full-variance files arrived
+      # one at a time on all four CPUs, the two heaviest files a slice of
+      # their tests a process (run_parallel.py's SPLIT): alone in one
+      # process they peaked at 28.1 and 16.0 GB, the runner has 16
       - name: Full suite, one process per file, the manual aside
         run: python geoml/test/run_parallel.py --no-manual --cpus 4 -j 1
 

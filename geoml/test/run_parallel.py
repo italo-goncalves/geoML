@@ -22,7 +22,8 @@ As one process the suite peaks at 23 GB, every file's TensorFlow graphs,
 matplotlib figures and pyvista scenes piling up in it, and takes over half
 an hour. One process per file bounds the memory at the heaviest file's peak,
 as CI has done since 0.6.11, and running several at a time bounds the wall
-time at the slowest one. The manual runs one process per chapter, so its
+time at the slowest one. A file too heavy for one process (`SPLIT`) runs a
+slice of its tests a process. The manual runs one process per chapter, so its
 slowest chapter rather than all seventeen is on the critical path. **The
 longest units start first**, by the time each took last on this machine
 (kept in `~/.cache/geoml/test-durations.json`, written after every run) or,
@@ -93,6 +94,13 @@ MEASURED = {
 DURATIONS = pathlib.Path.home() / ".cache" / "geoml" / "test-durations.json"
 # a process's peak, with room: the heaviest file measured 6.1 GB
 GB_PER_JOB = 8
+# files run a slice of their tests a process, this many tests each: every
+# model a test builds and trains leaves its TensorFlow graph machinery
+# resident (see `cross_validate`): in one process test_batched_experts.py
+# peaked at 28.1 GB over its 92 tests and test_expected_kernel.py at 16.0
+# GB over its 123 (measured 2026-10-22), which the 16 GB CI runner cannot
+# hold
+SPLIT = {"test_batched_experts.py": 15, "test_expected_kernel.py": 30}
 # the physical cores a process is pinned to
 CPUS_PER_JOB = 4
 
@@ -177,11 +185,37 @@ def _units(files, manual):
         units.append(("manual/count", [
             "geoml/test/test_manual.py::test_the_manual_has_every_chapter"],
             0))
-    units += [(f.name, [str(f.relative_to(ROOT))], f.stat().st_size)
-              for f in files if f.name != "test_manual.py"]
     known = dict(MEASURED, **_recorded())
+    for f in files:
+        if f.name == "test_manual.py":
+            continue
+        if f.name not in SPLIT:
+            units.append((f.name, [str(f.relative_to(ROOT))],
+                          f.stat().st_size))
+            continue
+        ids = _collected(f)
+        size = SPLIT[f.name]
+        slices = [ids[i:i + size] for i in range(0, len(ids), size)]
+        for k, tests in enumerate(slices, 1):
+            name = "%s[%d/%d]" % (f.name, k, len(slices))
+            # a slice never timed takes its share of the whole file's time
+            known.setdefault(name, known.get(f.name, 0) / len(slices))
+            units.append((name, tests, f.stat().st_size))
     units.sort(key=lambda u: (u[0] not in known, -known.get(u[0], 0), -u[2]))
     return [(name, args) for name, args, _ in units]
+
+
+def _collected(path):
+    """The ids of the tests pytest collects from `path`, in file order."""
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", TF_CPP_MIN_LOG_LEVEL="3",
+               PYTHONPATH=os.pathsep.join(
+                   [str(ROOT)] + [p for p in [os.environ.get("PYTHONPATH")]
+                                  if p]))
+    listed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider", str(path.relative_to(ROOT))],
+        cwd=ROOT, env=env, capture_output=True, text=True).stdout
+    return [line for line in listed.splitlines() if "::" in line]
 
 
 def _run(unit, slots, logs):
