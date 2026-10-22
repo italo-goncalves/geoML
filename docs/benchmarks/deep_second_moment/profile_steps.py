@@ -58,7 +58,22 @@ def summarize(logdir, title):
         names = {k: v.name for k, v in plane.event_metadata.items()}
         stat_names = {k: v.name for k, v in plane.stat_metadata.items()}
         for line in plane.lines:
-            for ev in line.events:
+            # each event's self time: its duration less the events nested
+            # directly inside it on this thread -- a function call or a
+            # while loop's event spans its children, and counting both
+            # summed one op's time two and three times over
+            order = sorted(range(len(line.events)), key=lambda i: (
+                line.events[i].offset_ps, -line.events[i].duration_ps))
+            inner = [0] * len(line.events)
+            stack = []
+            for i in order:
+                ev = line.events[i]
+                while stack and stack[-1][0] <= ev.offset_ps:
+                    stack.pop()
+                if stack:
+                    inner[stack[-1][1]] += ev.duration_ps
+                stack.append((ev.offset_ps + ev.duration_ps, i))
+            for index, ev in enumerate(line.events):
                 op = None
                 for st in ev.stats:
                     if stat_names.get(st.metadata_id) == "tf_op":
@@ -72,7 +87,7 @@ def summarize(logdir, title):
                     if ":" not in event or "::" in event:
                         continue
                     op = event
-                ms = ev.duration_ps / 1e9
+                ms = max(ev.duration_ps - inner[index], 0) / 1e9
                 name, _, kind = op.partition(":")
                 kind = kind or names.get(ev.metadata_id, "?")
                 scope = re.sub(r"_\d+(?=/|$)", "", name)

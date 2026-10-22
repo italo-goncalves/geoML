@@ -1,3 +1,45 @@
+## version 0.9.5
+* **XLA compiles the conditioned quadrature and the pathwise draws.** The
+body of a quadrature or pathwise chunk (`_chunked_sums`, `_chunked_map`)
+is compiled by default (`_QUADRATURE_XLA`), its elementwise chains over
+the `[n, m, d]` arrays fused. On the folded-ore model (a GP reading a
+`GPWalk`, the joint rule) a training step goes from 1.53 to 1.15 s and a
+prediction of a 161 x 201 grid from 69 to 46 s, the bound and the
+predicted moments the same (`docs/benchmarks/fold_regression/
+fold_cost.py`, `fold_quad_accuracy.py`); it was 1.1-1.3x on Walker's GP on
+a GP, where the quadrature is a smaller share. Only the full variance
+reaches it, so a model saved before 0.9.4 is unaffected. Each new batch
+shape compiles once. A 5 x 5 Gauss-Hermite grid was measured beside it
+and left out: 14-22% faster again, at twice the error of the predicted
+variance (median 0.8% against 0.4%, worst 49% against 19%, against 1024
+Sobol points).
+* **A `GPWalk` walks its realizations together.** Under the full variance
+the walk's realizations (`_joint_simulate`) are walked all at once, a
+chunk under the memory budget, the field read through the plain kernel's
+distance expansion (`_walk_realizations`, compiled with the quadrature),
+where `tf.map_fn` walked them one at a time through the node's general
+kernel. On the folded-ore model a grid prediction goes from 46 to 30 s,
+the realizations the same to 3.5e-13 on draws of scale 1.2 -- the profile
+had put nearly half of the prediction inside that loop. A field combining
+kernels, or one whose kernel trains a parameter of its own (the rational
+quadratic), keeps the old walk, and so does every model without the full
+variance, so a model saved before 0.9.4 still reproduces 0.9.3.
+* **`GPWalk(reach=)` holds the field's strength.** The walk's reach,
+`step * n_steps * amp`, is how far the field can carry a point. Given,
+the amplitude is set to `reach / (step * n_steps)` and fixed; left out,
+it trains from 1 as before, so nothing changes for a model that does not
+pass it. The bound chooses the strength poorly under the joint rule. On
+the folded vein drilled by three holes
+(`docs/benchmarks/fold_regression/fold_drillholes.py`) it settled on a
+reach of 0.14-0.21 whatever it was offered: a step three times longer
+trained the amplitude to 0.46, an amplitude started at 5 trained to 1.52.
+A walk that short bends the space without folding it. Held at 0.5, the
+walk bends the holes and gathers their intercepts, as the walks of the
+releases before 0.9.0 did, at a bound 28 nats lower; held at 1.0, the
+field turns into sinks that pull each ore interval to a point, and the
+vein breaks into three bodies. The argument comes after `name`, because a
+save records positional arguments as they were given.
+
 ## version 0.9.4
 * **A deep model's realizations carry the variance it reports,
 `GPOptions(full_variance=True)`.** Until now a GP node reading another

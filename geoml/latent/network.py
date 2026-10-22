@@ -1417,10 +1417,14 @@ _REALIZATION_BYTES = 48
 # the quadrature's rule: "hermite", a Gauss-Hermite tensor grid of
 # `_HERMITE_POINTS` a dimension up to two dimensions and Sobol beyond (7x7
 # measured as close as 1024 Sobol points, `gate_nodes.py`), or "sobol"
-# everywhere; and XLA on a chunk's body, an experiment never set by a model
+# everywhere. And XLA on the body of a quadrature or pathwise chunk: its
+# elementwise chains fused, the numbers the same -- on the folded-ore model
+# a training step 1.53 -> 1.15 s and a grid prediction 69 -> 46 s
+# (`fold_regression/fold_cost.py`); 1.1-1.3x on Walker's GP on a GP. It
+# compiles once per batch shape
 _QUADRATURE_RULE = "hermite"
 _HERMITE_POINTS = 7
-_QUADRATURE_XLA = False
+_QUADRATURE_XLA = True
 
 
 @_contextlib.contextmanager
@@ -5512,7 +5516,8 @@ class GPWalk(_FunctionalLatentVariable):
     along, the field is read under the expected kernel with the uncertainty
     accumulated so far -- so an uncertain walker reads a weaker field and
     slows down -- and more steps refine the path rather than adding noise.
-    `step * n_steps * amp` is the walk's reach. The field's variance that
+    `step * n_steps * amp` is the walk's reach, the field's strength: the
+    amplitude trains unless `reach` holds it. The field's variance that
     its inducing points leave unexplained -- the whole prior far from them --
     moves each point on its own, so far from the data a walk is uncertain.
     Each realization walks a realization of the field. The walk adds no
@@ -5530,7 +5535,8 @@ class GPWalk(_FunctionalLatentVariable):
     the input's transform, where it carries what is known beforehand, and
     the reader's one range is relative to it.
     """
-    def __init__(self, parent, step=0.01, n_steps=10, name=None):
+    def __init__(self, parent, step=0.01, n_steps=10, name=None,
+                 reach=None):
         """
         Initializer for GPWalk.
 
@@ -5549,6 +5555,14 @@ class GPWalk(_FunctionalLatentVariable):
             Number of steps.
         name : str
             A name for this node.
+        reach : float, optional
+            The field's strength: how far the walk can carry a point, in
+            the coordinates it walks, `step * n_steps * amp`. Given, the
+            amplitude is set to `reach / (step * n_steps)` and held there;
+            left out, it trains from 1 and the bound chooses the strength.
+            Under the joint rule the bound settles on a short walk, which
+            bends the space rather than folding it; a longer reach held
+            fixed lets the walk fold it further, at a lower bound.
         """
         super().__init__(parent, name=name)
 
@@ -5572,9 +5586,14 @@ class GPWalk(_FunctionalLatentVariable):
         self.step = step
         self.n_steps = n_steps
 
+        # a reach outside what the amplitude's bounds allow is clipped,
+        # with the warning every constructor value outside its bounds gets
+        self.reach = reach
         self._add_parameter(
             "amp",
-            _gpr.PositiveParameter(1, 0.01, 100)
+            _gpr.PositiveParameter(
+                1 if reach is None else reach / (step * n_steps), 0.01, 100,
+                fixed=reach is not None)
         )
         self._add_parameter(
             "precision",
@@ -5901,7 +5920,17 @@ class GPWalk(_FunctionalLatentVariable):
                                field.parameters["bias_%d" % i].get_value(),
                                None))
         ends = []
+        # under the full variance, every realization at once through the
+        # plain kernel (`_walk_realizations`); the field must read one
+        # kernel with nothing trained in it, which the plain kernel takes
+        batched = _FULL_VARIANCE and field._CONDITIONED_SECOND_MOMENT \
+            and not field.kernel.parameters
         for u, coef, bias, mask in groups:
+            if batched:
+                ends.append(self._walk_realizations(n_sim, starts, coef, u,
+                                                    bias, mask, step))
+                continue
+
             def walk(args, u=u, bias=bias, mask=mask):
                 position, c = args
                 if mask is not None:
@@ -5924,6 +5953,50 @@ class GPWalk(_FunctionalLatentVariable):
             stacked = _tf.stack([_tf.transpose(e, [2, 1, 0]) for e in ends],
                                 axis=0)
         return _tf.reduce_sum(stacked * weights[..., None], axis=0)
+
+    # bytes a realization of the walk holds per element of its `[n, m]`
+    # kernel: the kernel, the distances and the expansion's terms
+    _WALK_BYTES = 48
+
+    def _walk_realizations(self, n_sim, starts, coef, u, bias, mask, step):
+        """`_joint_simulate`'s walk for one group, every realization at once
+        rather than one by one (`tf.map_fn`): `starts` `[S, n, d]`, `coef`
+        `[S, ..., size, m]`, the field read through `_plain_covariance`'s
+        distance expansion, a chunk of realizations at a time under the
+        memory budget (`_chunked_map`, compiled under `_QUADRATURE_XLA`).
+        Returns `[S, ..., n, d]`. On the folded-ore model the realizations
+        walked one at a time were nearly half of a grid prediction."""
+        field = self.field
+        lead = int(mask.shape[0]) if mask is not None else 1
+        per_draw = self._WALK_BYTES * lead * _static(
+            starts.shape[-2], _QUADRATURE_ROWS) * _static(u.shape[-2], 1)
+        chunk = _chunk_of(n_sim, per_draw)
+        n_chunks = n_sim // chunk
+        ranges = field.parameters["ranges"].get_value()
+        masked = mask is not None
+        if not masked:
+            mask = _tf.ones([1], _tf.float64)
+
+        def walk(c, starts, coef, u, bias, mask, step, ranges):
+            position = starts[c * chunk:(c + 1) * chunk]       # [c, n, d]
+            c_coef = coef[c * chunk:(c + 1) * chunk]
+            if masked:
+                # every slot walks the realization from the same start
+                position = _tf.broadcast_to(
+                    position[:, None], _tf.concat(
+                        [_tf.shape(position)[:1], _tf.shape(u)[:1],
+                         _tf.shape(position)[1:]], 0))
+            for _ in range(self.n_steps):
+                k = field.kernel.kernelize(_plain_distance(position, u,
+                                                           ranges))
+                if masked:
+                    k = k * mask[:, None, :]
+                position = position + step * (
+                    _tf.einsum("...nm,...sm->...ns", k, c_coef) + bias)
+            return position
+
+        return _chunked_map(walk, [starts, coef, u, _tf.convert_to_tensor(
+            bias, _tf.float64), mask, step, ranges], n_chunks)
 
     def propagate(self, x, x_var=None):
         if _JOINT_PROPAGATION:
@@ -6722,7 +6795,9 @@ GPWalk._catalogue = _declared(
     {"rule": "same_as_parent"}, "parents", label="GP walk",
     parent={"type": "node"},
     step={"type": "float", "constraints": {"exclusive_min": 0}},
-    n_steps={"type": "int", "constraints": {"min": 1}})
+    n_steps={"type": "int", "constraints": {"min": 1}},
+    reach={"type": "float", "nullable": True,
+           "constraints": {"exclusive_min": 0}})
 Exponentiation._catalogue = _declared(
     "function", _ONE_PARENT, {"rule": "same_as_parent"}, False,
     label="Exp", parent={"type": "node"})
