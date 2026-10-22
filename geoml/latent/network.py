@@ -5905,7 +5905,17 @@ class GPWalk(_FunctionalLatentVariable):
                                field.parameters["bias_%d" % i].get_value(),
                                None))
         ends = []
+        # under the full variance, every realization at once through the
+        # plain kernel (`_walk_realizations`); the field must read one
+        # kernel with nothing trained in it, which the plain kernel takes
+        batched = _FULL_VARIANCE and field._CONDITIONED_SECOND_MOMENT \
+            and not field.kernel.parameters
         for u, coef, bias, mask in groups:
+            if batched:
+                ends.append(self._walk_realizations(n_sim, starts, coef, u,
+                                                    bias, mask, step))
+                continue
+
             def walk(args, u=u, bias=bias, mask=mask):
                 position, c = args
                 if mask is not None:
@@ -5928,6 +5938,50 @@ class GPWalk(_FunctionalLatentVariable):
             stacked = _tf.stack([_tf.transpose(e, [2, 1, 0]) for e in ends],
                                 axis=0)
         return _tf.reduce_sum(stacked * weights[..., None], axis=0)
+
+    # bytes a realization of the walk holds per element of its `[n, m]`
+    # kernel: the kernel, the distances and the expansion's terms
+    _WALK_BYTES = 48
+
+    def _walk_realizations(self, n_sim, starts, coef, u, bias, mask, step):
+        """`_joint_simulate`'s walk for one group, every realization at once
+        rather than one by one (`tf.map_fn`): `starts` `[S, n, d]`, `coef`
+        `[S, ..., size, m]`, the field read through `_plain_covariance`'s
+        distance expansion, a chunk of realizations at a time under the
+        memory budget (`_chunked_map`, compiled under `_QUADRATURE_XLA`).
+        Returns `[S, ..., n, d]`. On the folded-ore model the realizations
+        walked one at a time were nearly half of a grid prediction."""
+        field = self.field
+        lead = int(mask.shape[0]) if mask is not None else 1
+        per_draw = self._WALK_BYTES * lead * _static(
+            starts.shape[-2], _QUADRATURE_ROWS) * _static(u.shape[-2], 1)
+        chunk = _chunk_of(n_sim, per_draw)
+        n_chunks = n_sim // chunk
+        ranges = field.parameters["ranges"].get_value()
+        masked = mask is not None
+        if not masked:
+            mask = _tf.ones([1], _tf.float64)
+
+        def walk(c, starts, coef, u, bias, mask, step, ranges):
+            position = starts[c * chunk:(c + 1) * chunk]       # [c, n, d]
+            c_coef = coef[c * chunk:(c + 1) * chunk]
+            if masked:
+                # every slot walks the realization from the same start
+                position = _tf.broadcast_to(
+                    position[:, None], _tf.concat(
+                        [_tf.shape(position)[:1], _tf.shape(u)[:1],
+                         _tf.shape(position)[1:]], 0))
+            for _ in range(self.n_steps):
+                k = field.kernel.kernelize(_plain_distance(position, u,
+                                                           ranges))
+                if masked:
+                    k = k * mask[:, None, :]
+                position = position + step * (
+                    _tf.einsum("...nm,...sm->...ns", k, c_coef) + bias)
+            return position
+
+        return _chunked_map(walk, [starts, coef, u, _tf.convert_to_tensor(
+            bias, _tf.float64), mask, step, ranges], n_chunks)
 
     def propagate(self, x, x_var=None):
         if _JOINT_PROPAGATION:

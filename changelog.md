@@ -13,6 +13,17 @@ shape compiles once. A 5 x 5 Gauss-Hermite grid was measured beside it
 and left out: 14-22% faster again, at twice the error of the predicted
 variance (median 0.8% against 0.4%, worst 49% against 19%, against 1024
 Sobol points).
+* **A `GPWalk` walks its realizations together.** Under the full variance
+the walk's realizations (`_joint_simulate`) are walked all at once, a
+chunk under the memory budget, the field read through the plain kernel's
+distance expansion (`_walk_realizations`, compiled with the quadrature),
+where `tf.map_fn` walked them one at a time through the node's general
+kernel. On the folded-ore model a grid prediction goes from 46 to 30 s,
+the realizations the same to 3.5e-13 on draws of scale 1.2 -- the profile
+had put nearly half of the prediction inside that loop. A field combining
+kernels, or one whose kernel trains a parameter of its own (the rational
+quadratic), keeps the old walk, and so does every model without the full
+variance, so a model saved before 0.9.4 still reproduces 0.9.3.
 
 ## version 0.9.4
 * **A deep model's realizations carry the variance it reports,
