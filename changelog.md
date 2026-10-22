@@ -24,6 +24,21 @@ had put nearly half of the prediction inside that loop. A field combining
 kernels, or one whose kernel trains a parameter of its own (the rational
 quadratic), keeps the old walk, and so does every model without the full
 variance, so a model saved before 0.9.4 still reproduces 0.9.3.
+* **`GPWalk(reach=)` holds the field's strength.** The walk's reach,
+`step * n_steps * amp`, is how far the field can carry a point. Given,
+the amplitude is set to `reach / (step * n_steps)` and fixed; left out,
+it trains from 1 as before, so nothing changes for a model that does not
+pass it. The bound chooses the strength poorly under the joint rule. On
+the folded vein drilled by three holes
+(`docs/benchmarks/fold_regression/fold_drillholes.py`) it settled on a
+reach of 0.14-0.21 whatever it was offered: a step three times longer
+trained the amplitude to 0.46, an amplitude started at 5 trained to 1.52.
+A walk that short bends the space without folding it. Held at 0.5, the
+walk bends the holes and gathers their intercepts, as the walks of the
+releases before 0.9.0 did, at a bound 28 nats lower; held at 1.0, the
+field turns into sinks that pull each ore interval to a point, and the
+vein breaks into three bodies. The argument comes after `name`, because a
+save records positional arguments as they were given.
 
 ## version 0.9.4
 * **A deep model's realizations carry the variance it reports,

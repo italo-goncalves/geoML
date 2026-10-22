@@ -24,7 +24,7 @@ from the truth's nearest cell; every hole cuts the vein at least twice.
 Two models, the same but for the walk: a base GP at range 20 beside a
 Matern32 GP at range 2 that reads the coordinates (stationary, its ranges
 per axis) or a walk over them (deep: a field of two outputs walked ten
-steps of 0.01, read by an isotropic GP, as `GPWalk`'s docstring advises),
+steps of 0.01 by default, read by an isotropic GP, as `GPWalk`'s docstring advises),
 under the hierarchical indicator. Each trains `iterations` steps with the
 model's own optimizer, predicts the grid and is scored against the truth:
 cell accuracy, the ore's intersection over union, the Brier and log
@@ -34,6 +34,8 @@ log and the trained model.
 
 Usage: python fold_drillholes.py NAME SEED stationary|deep [iterations=500]
                                  [holes=X/ANGLE_X/ANGLE_...]
+                                 [step=0.01] [n_steps=10] [amp=1.0]
+                                 [reach=none]
 """
 import json
 import os
@@ -51,7 +53,8 @@ import geoml.likelihood as lk
 import geoml.transform as tr
 
 name, seed, kind = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-opt = dict(iterations="500")
+opt = dict(iterations="500", step="0.01", n_steps="10", amp="1.0",
+           reach="none")
 opt.update(dict(a.split("=", 1) for a in sys.argv[4:]))
 out = os.environ.get("FOLD_OUT", ".")
 here = os.path.dirname(os.path.abspath(__file__))
@@ -92,7 +95,14 @@ root = gl.BasicInput(ip, tr.Concatenate(tr.Isotropic(20), tr.Isotropic(2)),
 base_gp = gl.BasicGP(gl.SelectInput(root, [0, 1]), 1, fix_range=True)
 if kind == "deep":
     field = gl.BasicGP(gl.SelectInput(root, [2, 3]), size=2, fix_range=True)
-    walk = gl.GPWalk(field, step=0.01, n_steps=10)
+    # the walk's reach is step * n_steps * amp: `reach=` holds it, or amp
+    # trains from `amp=` (step 0.03 trained amp to 0.46, the reach of step
+    # 0.01 at amp 1.39)
+    reach = None if opt["reach"] == "none" else float(opt["reach"])
+    walk = gl.GPWalk(field, step=float(opt["step"]),
+                     n_steps=int(opt["n_steps"]), reach=reach)
+    if reach is None:
+        walk.parameters["amp"].set_value(float(opt["amp"]))
     reader = gl.BasicGP(walk, kernel=kr.Matern32(), isotropic=True)
 else:
     walk = None

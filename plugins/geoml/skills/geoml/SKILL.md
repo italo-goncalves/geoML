@@ -220,7 +220,11 @@ in the catalogue.
   not stationary: `GPWalk` moves the coordinates and a stationary kernel
   reads the moved space. Build the GP reading the walk with
   `isotropic=True`: a range per direction there is a second description
-  of the anisotropy, which belongs in the input's transform. A walk's
+  of the anisotropy, which belongs in the input's transform. Left to
+  train, the walk's strength stays short under the joint rule and bends
+  the space without folding it; `reach=` holds it (half a transformed unit
+  folded a drilled vein the way the releases before 0.9.0 did, a full unit
+  tore it into pieces), so choose it on held-out data. A walk's
   memory grows with its steps and with the square of the points per
   expert; where `train_by_expert` still runs out of device memory,
   `coverage` below its default computes fewer experts a batch.

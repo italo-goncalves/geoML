@@ -1030,7 +1030,7 @@ def test_recomputing_the_walk_s_steps_trains_as_keeping_them(trainer,
     np.testing.assert_allclose(ranges, kept_ranges, rtol=1e-9)
 
 
-def _walk_network(propagation):
+def _walk_network(propagation, reach=None):
     geoml.set_seed(3)
     x = np.random.default_rng(3).uniform(0, 100, [60, 2])
     data = geoml.data.PointData.from_array(x, ["X", "Y"])
@@ -1038,7 +1038,8 @@ def _walk_network(propagation):
     root = geoml.latent.BasicInput(
         geoml.data.inducing.from_kmeans(data, 30, seed=0),
         geoml.transform.Isotropic(40))
-    walk = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2))
+    walk = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2),
+                               reach=reach)
     leaf = geoml.latent.BasicGP(walk, size=1, isotropic=True)
     model = geoml.models.VGPNetwork(
         data, "v", geoml.likelihood.Gaussian(), leaf,
@@ -1057,6 +1058,32 @@ def test_the_walk_adds_no_kl_under_the_expected_kernel():
             model._refresh(model.options.jitter)
             kl = float(walk.kl_divergence())
         assert (kl == 0.0) == nothing, (propagation, kl)
+
+
+def test_a_reach_holds_the_field_s_strength(tmp_path):
+    # left out, the amplitude trains from 1; given, it is reach / (step *
+    # n_steps) and stays there through training and a save
+    model, walk, _ = _walk_network("joint")
+    model.train_full(3)
+    assert float(walk.parameters["amp"].get_value()) != 1.0
+
+    model, walk, _ = _walk_network("joint", reach=0.5)
+    model.train_full(3)
+    assert float(walk.parameters["amp"].get_value()) == pytest.approx(5.0)
+    assert np.all(np.isfinite(model.training_log))
+    model.save(str(tmp_path / "walk"))
+    loaded = geoml.persistence.load_model(str(tmp_path / "walk"))
+    walk = next(n for n in loaded._nodes()
+                if isinstance(n, geoml.latent.GPWalk))
+    assert walk.reach == 0.5 and walk.parameters["amp"].fixed
+    assert float(walk.parameters["amp"].get_value()) == pytest.approx(5.0)
+
+    # a reach the amplitude's bounds cannot hold is clipped, and says so
+    root = walk.walker.root
+    with pytest.warns(UserWarning, match="amp"):
+        clipped = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2),
+                                      reach=20.0)
+    assert float(clipped.parameters["amp"].get_value()) == pytest.approx(100)
 
 
 def _predicted_v(model):

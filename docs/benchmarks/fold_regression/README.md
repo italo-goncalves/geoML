@@ -78,3 +78,49 @@ so each column is one result.
   0.17 at most and 0.05 on average, barely bending the holes. The deep
   model's gain is a local change of spacing, a non-stationary range, not
   a restoration of the fold.
+
+### The walk's reach (2026-10-22)
+
+The reach, `step * n_steps * amp`, is how far the field can carry a point:
+its strength. On the three holes, seed 1 (which has matched seeds 2 and 3
+every time), five deep arms vary it:
+
+| 3 holes | reach | accuracy | IoU | Brier | log score | bound | bodies |
+|---|---|---|---|---|---|---|---|
+| stationary | - | 0.912 | 0.701 | 0.068 | 0.306 | -66.7 | 1 |
+| deep, default | 0.14 (trained) | 0.929 | 0.733 | **0.054** | **0.239** | -69.0 | 1 |
+| deep, `step=0.03` | 0.14 (trained, amp 0.46) | 0.924 | 0.714 | 0.058 | 0.257 | -67.9 | 1 |
+| deep, `step=0.1` | 0.21 (trained, amp 0.21) | **0.931** | **0.740** | 0.057 | 0.282 | -72.7 | 1 |
+| deep, `amp=5` | 0.15 (trained, amp 1.52) | 0.927 | 0.723 | 0.056 | 0.259 | **-66.5** | 1 |
+| deep, held at 0.5 | 0.5 | 0.924 | 0.718 | 0.059 | 0.299 | -94.7 | 1 |
+| deep, held at 1.0 | 1.0 | 0.860 | 0.518 | 0.127 | 0.680 | -103.6 | 3 |
+
+The two held arms ran as `amp=5,fix_amp=1` and `amp=10,fix_amp=1`, before
+`GPWalk(reach=)` existed; they are `reach=0.5` and `reach=1.0` now.
+
+- **The bound chooses a short walk.** Offered a longer step or a larger
+  starting amplitude, training takes it back: the reach lands between
+  0.14 and 0.21. The input's range trains with it, so the section is
+  about 2.8 transformed units wide in the default model and about 4 in
+  the others, and a walk's moves relative to the section's width stay
+  about the same.
+- **The best bound is almost stationary** (`figures/drillholes_best_maps.png`,
+  `drillholes_best_walk.png`). The `amp=5` arm moves points by 0.17 at
+  most and 0.04 on average. Its map is the stationary model's with sharper
+  edges.
+- **Held at 0.5** (`figures/drillholes_reach_walk.png`, third row;
+  `drillholes_reach_maps.png`), the walk bends the holes into S-shapes and
+  gathers the middle hole's intercepts at the hinge, as the walks of the
+  releases before 0.9.0 did. The map is one connected fold. The truth in
+  the walked coordinates is crumpled rather than flattened, and the bound
+  is 28 nats lower.
+- **Held at 1.0**, the field turns into sinks. Each ore interval is pulled
+  to a point and the waste is stretched over the rest of the space, so
+  the reader sees three dots and the vein breaks into three bodies. A
+  free field can converge, and a long reach lets it contract a region
+  instead of moving it. Unfolding the layer would take a field that
+  cannot, such as a divergence-free one built from a stream function,
+  and a reader longer along the layering than across it.
+
+Hence `GPWalk(reach=)`: the strength is a modelling choice the bound does
+not make well under the joint rule, to be chosen on held-out data.

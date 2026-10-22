@@ -5516,7 +5516,8 @@ class GPWalk(_FunctionalLatentVariable):
     along, the field is read under the expected kernel with the uncertainty
     accumulated so far -- so an uncertain walker reads a weaker field and
     slows down -- and more steps refine the path rather than adding noise.
-    `step * n_steps * amp` is the walk's reach. The field's variance that
+    `step * n_steps * amp` is the walk's reach, the field's strength: the
+    amplitude trains unless `reach` holds it. The field's variance that
     its inducing points leave unexplained -- the whole prior far from them --
     moves each point on its own, so far from the data a walk is uncertain.
     Each realization walks a realization of the field. The walk adds no
@@ -5534,7 +5535,8 @@ class GPWalk(_FunctionalLatentVariable):
     the input's transform, where it carries what is known beforehand, and
     the reader's one range is relative to it.
     """
-    def __init__(self, parent, step=0.01, n_steps=10, name=None):
+    def __init__(self, parent, step=0.01, n_steps=10, name=None,
+                 reach=None):
         """
         Initializer for GPWalk.
 
@@ -5553,6 +5555,14 @@ class GPWalk(_FunctionalLatentVariable):
             Number of steps.
         name : str
             A name for this node.
+        reach : float, optional
+            The field's strength: how far the walk can carry a point, in
+            the coordinates it walks, `step * n_steps * amp`. Given, the
+            amplitude is set to `reach / (step * n_steps)` and held there;
+            left out, it trains from 1 and the bound chooses the strength.
+            Under the joint rule the bound settles on a short walk, which
+            bends the space rather than folding it; a longer reach held
+            fixed lets the walk fold it further, at a lower bound.
         """
         super().__init__(parent, name=name)
 
@@ -5576,9 +5586,14 @@ class GPWalk(_FunctionalLatentVariable):
         self.step = step
         self.n_steps = n_steps
 
+        # a reach outside what the amplitude's bounds allow is clipped,
+        # with the warning every constructor value outside its bounds gets
+        self.reach = reach
         self._add_parameter(
             "amp",
-            _gpr.PositiveParameter(1, 0.01, 100)
+            _gpr.PositiveParameter(
+                1 if reach is None else reach / (step * n_steps), 0.01, 100,
+                fixed=reach is not None)
         )
         self._add_parameter(
             "precision",
@@ -6780,7 +6795,9 @@ GPWalk._catalogue = _declared(
     {"rule": "same_as_parent"}, "parents", label="GP walk",
     parent={"type": "node"},
     step={"type": "float", "constraints": {"exclusive_min": 0}},
-    n_steps={"type": "int", "constraints": {"min": 1}})
+    n_steps={"type": "int", "constraints": {"min": 1}},
+    reach={"type": "float", "nullable": True,
+           "constraints": {"exclusive_min": 0}})
 Exponentiation._catalogue = _declared(
     "function", _ONE_PARENT, {"rule": "same_as_parent"}, False,
     label="Exp", parent={"type": "node"})
