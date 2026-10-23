@@ -1217,7 +1217,7 @@ class VGPNetwork(_GPModel):
                 _latent.network._PATHWISE_REALIZATIONS,
                 self._quadrature_memory(),
                 _latent.network._QUADRATURE_RULE,
-                _latent.network._QUADRATURE_XLA)
+                _latent.network._quadrature_xla())
 
     def _step_rule(self):
         """What a cached training step's trace depends on beyond its

@@ -1,3 +1,31 @@
+## version 0.9.6
+* **XLA compiles the quadrature on the CPU only.** Under 0.9.5 a GeoScape
+network (three GP readers on a `GPWalk`, a likelihood mixture,
+`train_by_expert`) died on the GPU with a segmentation fault: a null
+pointer read inside the CUDA driver (`libcuda`, WSL, driver 610.88,
+TensorFlow 2.21), on the 19th expert batch every time and at the same
+instruction. The same network trained past it with the chunks compiled
+for the CPU, or with XLA off on the GPU, the bounds the same to the last
+digit printed, and on the GPU XLA had bought nothing (both runs reached
+batch 16 in about 8 minutes). A quadrature or pathwise chunk is now
+compiled only where TensorFlow sees no GPU (`_quadrature_xla`), which
+keeps the CPU's gain (a folded-ore training step 1.53 to 1.15 s).
+* **CI runs again.** Every test job had failed since 0.8.7, none of them
+on a failing test: the 16 GB GitHub runner was killed for memory, or a
+job ran out of time.
+  - The structural job, one pytest process, now runs one process per file,
+  two at a time, with `test_batched_experts.py`, `test_expected_kernel.py`
+  and `test_full_variance.py`, which train models, on its ignore list.
+  - The full job runs one file at a time on all four of the runner's CPUs.
+  Even then it was killed, because two files outgrow the runner on their
+  own: in one process `test_batched_experts.py` peaked at 28.1 GB over its
+  92 tests and `test_expected_kernel.py` at 16.0 GB over its 123, each
+  model a test trains leaving its TensorFlow graphs resident.
+  `run_parallel.py` now runs those two a slice of their tests a process
+  (`SPLIT`, 15 and 30 tests), about 4 GB each.
+  - The full and manual jobs have six hours, the most a hosted runner
+  allows; chapter 17 alone takes an hour on four cores.
+
 ## version 0.9.5
 * **XLA compiles the conditioned quadrature and the pathwise draws.** The
 body of a quadrature or pathwise chunk (`_chunked_sums`, `_chunked_map`)

@@ -134,3 +134,30 @@ def test_a_kernel_without_random_features_is_warned_of(kernel):
         warnings.simplefilter("error")
         _shallow_model(kernel, full_variance=False)
         _shallow_model("Exponential")
+
+
+def test_the_quadrature_compiles_with_xla_on_the_cpu_only(monkeypatch):
+    # an XLA-compiled chunk crashed the CUDA driver on the GPU: a GPU in
+    # sight turns the compilation off, and the sums stay the same
+    import tensorflow as tf
+    compiled = []
+    function = tf.function
+
+    def spy(fn=None, **kwargs):
+        compiled.append(kwargs.get("jit_compile"))
+        return function(fn, **kwargs)
+
+    def chunk(c, x):
+        return (tf.reduce_sum(x * tf.cast(c + 1, tf.float64)),)
+
+    x = tf.constant(np.arange(6.0))
+    sums = {}
+    for gpu in (False, True):
+        monkeypatch.setattr(_net, "_gpu_visible", lambda gpu=gpu: gpu)
+        monkeypatch.setattr(tf, "function", spy)
+        compiled.clear()
+        sums[gpu] = float(_net._chunked_sums(chunk, [x], 3)[0])
+        monkeypatch.setattr(tf, "function", function)
+        assert _net._quadrature_xla() is (not gpu)
+        assert compiled == ([] if gpu else [True])
+    assert sums[False] == sums[True] == 15.0 * 6

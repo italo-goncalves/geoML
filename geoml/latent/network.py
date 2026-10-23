@@ -882,7 +882,7 @@ def _chunked_sums(fn, inputs, n_chunks):
     `fn` must read no variable -- whatever it differentiates arrives in
     `inputs`, all tensors."""
     inputs = tuple(inputs)
-    if _QUADRATURE_XLA:
+    if _quadrature_xla():
         fn = _tf.function(fn, jit_compile=True)
     if n_chunks == 1:
         # one chunk holds everything: no loop, no recomputation, and
@@ -932,7 +932,7 @@ def _chunked_map(fn, inputs, n_chunks):
     must read no variable; whatever it differentiates arrives in
     `inputs`, all tensors."""
     inputs = tuple(inputs)
-    if _QUADRATURE_XLA:
+    if _quadrature_xla():
         fn = _tf.function(fn, jit_compile=True)
     if n_chunks == 1:
         return fn(_tf.constant(0), *inputs)
@@ -1425,6 +1425,24 @@ _REALIZATION_BYTES = 48
 _QUADRATURE_RULE = "hermite"
 _HERMITE_POINTS = 7
 _QUADRATURE_XLA = True
+
+
+@_functools.lru_cache(maxsize=None)
+def _gpu_visible():
+    """Whether TensorFlow sees a GPU, which a process does not change."""
+    return bool(_tf.config.list_logical_devices("GPU"))
+
+
+def _quadrature_xla():
+    """Whether a quadrature or pathwise chunk is compiled with XLA."""
+    # On the CPU only. On the GPU an XLA-compiled chunk read a null pointer
+    # inside the CUDA driver (libcuda, WSL, driver 610.88, TensorFlow 2.21)
+    # on the 19th expert batch of a GeoScape network's `train_by_expert`
+    # and took the process down, at the same instruction every time, where
+    # the same chunk compiled for the CPU, or left to TensorFlow on the GPU,
+    # trained on with the same bounds (2026-10-22); and on the GPU it bought
+    # nothing, the uncompiled run reaching batch 16 as fast
+    return _QUADRATURE_XLA and not _gpu_visible()
 
 
 @_contextlib.contextmanager
@@ -5963,7 +5981,7 @@ class GPWalk(_FunctionalLatentVariable):
         rather than one by one (`tf.map_fn`): `starts` `[S, n, d]`, `coef`
         `[S, ..., size, m]`, the field read through `_plain_covariance`'s
         distance expansion, a chunk of realizations at a time under the
-        memory budget (`_chunked_map`, compiled under `_QUADRATURE_XLA`).
+        memory budget (`_chunked_map`, compiled under `_quadrature_xla`).
         Returns `[S, ..., n, d]`. On the folded-ore model the realizations
         walked one at a time were nearly half of a grid prediction."""
         field = self.field
