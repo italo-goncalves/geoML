@@ -1,3 +1,24 @@
+## version 0.9.7
+* **The quadrature's memory budget follows the device.**
+`GPOptions(quadrature_memory=None)`, the default for a new model, takes a
+fifth of the device's memory, divided among the GP nodes that take the
+quadrature, and never more than the fixed 2e9 of 0.9.4-0.9.6. The device
+is the GPU where TensorFlow sees one, else the host, read as a power of
+two. A number in the options still wins, and a saved model keeps 2e9. A
+GeoScape network with three GP nodes reading a `GPWalk`, on a 16 GB GPU,
+ran out of memory on an ordinary batch after hours of training:
+  - each step peaked at 4.5-7.6 GB, following its rows to within 0.2 GB
+  over 465 batches;
+  - then one step, of 177 rows, peaked at 14.3 GB;
+  - nothing leaked, nothing retraced and the slots never widened, and two
+  runs with identical bounds failed at different batches (467 and 728).
+The step runs the three nodes' chunked loops as independent branches,
+which TensorFlow may run together, and the budget was per node. That
+network now gets 1.15e9 per node (2^34 bytes / 5 / 3). The capacity is
+read rather than what is free at the time, so a model chunks, and so
+rounds, the same way in every process on one machine. On a 64 GiB host
+the cap keeps 2e9 for up to six such nodes.
+
 ## version 0.9.6
 * **XLA compiles the quadrature on the CPU only.** Under 0.9.5 a GeoScape
 network (three GP readers on a `GPWalk`, a likelihood mixture,

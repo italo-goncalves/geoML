@@ -422,13 +422,17 @@ def test_an_expert_borrows_evenly_from_its_neighbours():
 def test_cores_stay_compact_along_uneven_drillholes():
     """The case 0.8.7 failed: capped clusters filled from leftovers had
     members 3.4 median radii out and lent points two spacings away."""
+    # the points are scikit-learn's k-means thinning, which moves with its
+    # version: worst core 2.18 radii and gap 1.40 spacings under 1.6, 2.86
+    # and 1.84 under 1.9 on up to four threads (CI's runner, 2026-10-23).
+    # The limits keep below the 0.8.7 bug's 3.4 radii and two spacings
     points = _drillholes()
     labels = _cores(points, 20)
     sets = ind.experts(points, 20, overlap=0.1, seed=0)
     for j, s in enumerate(sets):
         own = points[labels == j]
         radius = np.linalg.norm(own - own.mean(axis=0), axis=1)
-        assert radius.max() / np.median(radius) < 2.5
+        assert radius.max() / np.median(radius) < 3.0
         spacing = np.median(np.sort(np.linalg.norm(
             own[:, None] - own[None], axis=2), axis=1)[:, 1])
         held = np.asarray(s.coordinates)
@@ -436,7 +440,7 @@ def test_cores_stay_compact_along_uneven_drillholes():
         if len(lent):
             gap = np.min(np.linalg.norm(lent[:, None] - own[None], axis=2),
                          axis=1)
-            assert gap.max() / spacing < 1.5
+            assert gap.max() / spacing < 2.0
 
 
 @pytest.mark.parametrize("overlap", [0.1, 0.3])
