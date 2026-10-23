@@ -126,7 +126,7 @@ class GPOptions(_ModelOptions):
                  training_tolerance: float | None = None,
                  propagation: _Literal["joint", "marginal"] = "joint",
                  fresh_training_draws: bool = True,
-                 quadrature_memory: float = 2e9,
+                 quadrature_memory: float | None = None,
                  full_variance: bool = True):
         """
         Configuration of Gaussian process models.
@@ -251,10 +251,14 @@ class GPOptions(_ModelOptions):
             realizations. Within it every node of the quadrature is taken
             at once and differentiated plainly, which is fastest; past it,
             the largest chunk it holds, in a loop recomputed in the
-            backward pass, which keeps one chunk alive at a time. Lower it
-            for a large network on a small device. A fixed number rather
-            than the memory free at the time, so that a model chunks, and
-            so rounds, the same way in every process.
+            backward pass, which keeps one chunk alive at a time. `None`
+            (the default for a new model) takes a fifth of the device's
+            memory -- the GPU's where TensorFlow sees one, else the host's,
+            rounded to a power of two -- divided among the GP nodes that
+            take the quadrature, and never more than 2e9; a model saved
+            before 0.9.7 keeps 2e9. The capacity rather than the memory
+            free at the time, so that a model chunks, and so rounds, the
+            same way in every process on one machine.
         full_variance : bool
             Whether the moments and the realizations carry the full variance
             (the default since 0.9.4; a model saved before it keeps what it
@@ -1188,8 +1192,20 @@ class VGPNetwork(_GPModel):
         training data for `train_full`, a batch for `train_svi` and
         `train_by_expert`, a prediction batch for a prediction; a call
         nested in another keeps the outer one's (`rows=None`). The rows
-        steer the chunking only, never the answer."""
-        return float(getattr(self.options, "quadrature_memory", 2e9))
+        steer the chunking only, never the answer. `None` in the options
+        is computed once, from the device's memory and the GP nodes that
+        take the quadrature (`network._automatic_budget`)."""
+        budget = getattr(self.options, "quadrature_memory", 2e9)
+        if budget is None:
+            budget = self.__dict__.get("_automatic_quadrature_memory")
+            if budget is None:
+                nodes = [n for n in self._nodes()
+                         if getattr(n, "_takes_quadrature", None) is not None
+                         and n._takes_quadrature()]
+                budget = _latent.network._automatic_budget(
+                    len(nodes) if self._full_variance() else 0)
+                self._automatic_quadrature_memory = budget
+        return float(budget)
 
     def _prediction_rows(self):
         """How many rows a prediction batch carries: the options'

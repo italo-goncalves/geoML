@@ -1433,6 +1433,51 @@ def _gpu_visible():
     return bool(_tf.config.list_logical_devices("GPU"))
 
 
+# the quadrature's budget where a model sets none (`GPOptions(
+# quadrature_memory=None)`): this share of the device's memory, divided among
+# the GP nodes that take the quadrature, and never more than the fixed 2e9 of
+# 0.9.4-0.9.6. A step runs those nodes' loops as independent branches, which
+# TensorFlow may run together: on a GeoScape network of three such nodes on
+# a 16 GB GPU a step peaked at 4.5-7.6 GB for 465 batches and then, on an
+# ordinary batch, at 14.3 GB, out of memory (2026-10-23)
+_BUDGET_SHARE = 0.2
+_FIXED_BUDGET = 2e9
+
+
+@_functools.lru_cache(maxsize=None)
+def _device_bytes():
+    """The memory TensorFlow can use on the device a model runs on -- the
+    GPU's where one is visible, else the host's -- rounded to the nearest
+    power of two, or None where it cannot be read."""
+    # the capacity, never what is free at the time, and rounded: a few
+    # hundred MB more or less free when the process started must not move
+    # the budget, which sets the chunks and so the rounding
+    size = None
+    if _gpu_visible():
+        from tensorflow.python.client import device_lib
+        limits = [d.memory_limit for d in device_lib.list_local_devices()
+                  if d.device_type == "GPU"]
+        size = limits[0] if limits else None
+    else:
+        try:
+            import os
+            size = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (AttributeError, ValueError, OSError):
+            size = None
+    if not size:
+        return None
+    return float(2 ** round(_np.log2(size)))
+
+
+def _automatic_budget(n_nodes):
+    """The quadrature's memory budget for a model with `n_nodes` GP nodes
+    taking it, from the device's memory."""
+    device = _device_bytes()
+    if device is None:
+        return _FIXED_BUDGET
+    return min(_FIXED_BUDGET, _BUDGET_SHARE * device / max(1, n_nodes))
+
+
 def _quadrature_xla():
     """Whether a quadrature or pathwise chunk is compiled with XLA."""
     # On the CPU only. On the GPU an XLA-compiled chunk read a null pointer
@@ -3309,6 +3354,12 @@ class BasicGP(_GPNode):
         prediction by expert would draw from another prior."""
         return max(int(n) for n in self.root.n_ip)
 
+    def _takes_quadrature(self):
+        """Whether the node reads an uncertain input through the
+        conditioned quadrature, under the full variance."""
+        return bool(self._READS_CHAIN and self._CONDITIONED_SECOND_MOMENT
+                    and self.parent is not self.root)
+
     def _row_bytes(self):
         """The bytes a row of a prediction batch costs the node at its
         smallest chunk -- `_FEWEST_PER_CHUNK` nodes of the conditioned
@@ -3317,9 +3368,7 @@ class BasicGP(_GPNode):
         where it reads a certain input and takes neither. What sizes a
         model's prediction batches (`VGPNetwork._prediction_rows`): a
         budget the floor overrules no longer bounds anything."""
-        if not (_FULL_VARIANCE and self._READS_CHAIN
-                and self._CONDITIONED_SECOND_MOMENT
-                and self.parent is not self.root):
+        if not (_FULL_VARIANCE and self._takes_quadrature()):
             return 0
         m, d = self._feature_count(), int(self.parent.size)
         experts = len(self.root.n_ip)

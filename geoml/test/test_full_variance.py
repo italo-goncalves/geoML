@@ -161,3 +161,29 @@ def test_the_quadrature_compiles_with_xla_on_the_cpu_only(monkeypatch):
         assert _net._quadrature_xla() is (not gpu)
         assert compiled == ([] if gpu else [True])
     assert sums[False] == sums[True] == 15.0 * 6
+
+
+def test_the_default_budget_comes_from_the_device_s_memory(monkeypatch):
+    # a new model's budget: a fifth of the device's memory, read as a
+    # power of two, shared among the GP nodes taking the quadrature, never
+    # more than the fixed 2e9; a number in the options wins, and an older
+    # save, whose options lack the attribute, keeps 2e9
+    assert geoml.models.GPOptions().quadrature_memory is None
+    device = _net._device_bytes()
+    assert device is None or float(np.log2(device)).is_integer()
+
+    model = _deep_model(True)
+    model.options.quadrature_memory = None
+    assert sum(1 for n in model._nodes() if hasattr(n, "_takes_quadrature")
+               and n._takes_quadrature()) == 1
+    for size, budget in ((2.0 ** 34, 2e9), (2.0 ** 33, 0.2 * 2.0 ** 33),
+                         (None, 2e9)):
+        monkeypatch.setattr(_net, "_device_bytes", lambda size=size: size)
+        model.__dict__.pop("_automatic_quadrature_memory", None)
+        assert model._quadrature_memory() == budget
+    monkeypatch.setattr(_net, "_device_bytes", lambda: 2.0 ** 34)
+    assert _net._automatic_budget(3) == 0.2 * 2.0 ** 34 / 3
+    model.options.quadrature_memory = 5e8
+    assert model._quadrature_memory() == 5e8
+    del model.options.quadrature_memory
+    assert model._quadrature_memory() == 2e9
