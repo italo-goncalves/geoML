@@ -116,6 +116,8 @@ class GPOptions(_ModelOptions):
     quadrature_memory = 2e9
     # a model saved before 0.9.4 keeps the moments and realizations of 0.9.3
     full_variance = False
+    # a model saved before 0.9.8 computes its quadrature in double precision
+    quadrature_precision = "float64"
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -127,7 +129,9 @@ class GPOptions(_ModelOptions):
                  propagation: _Literal["joint", "marginal"] = "joint",
                  fresh_training_draws: bool = True,
                  quadrature_memory: float | None = None,
-                 full_variance: bool = True):
+                 full_variance: bool = True,
+                 quadrature_precision: _Literal["float64", "float32"]
+                 | None = None):
         """
         Configuration of Gaussian process models.
 
@@ -284,7 +288,23 @@ class GPOptions(_ModelOptions):
             before; on Walker Lake's GP on a GP a held-out RMSE of 160
             against 174-188, at 13-17x the training time with the old
             quadrature.
+        quadrature_precision : {"float64", "float32"} or None
+            The precision of the large arrays in the quadrature a GP node
+            takes over an uncertain input and in its realizations' kernel:
+            `"float32"` computes them in single precision, from offsets,
+            gains and conditional variances taken in double, and returns
+            the kernel in double, every product and sum after it in double
+            too. Faster where single precision is, on a GPU above all, at a
+            relative error of about single precision in the kernel. The
+            rational quadratic kernel's quadrature stays in double. `None`
+            takes `"float32"` where TensorFlow sees a GPU and `"float64"`
+            elsewhere, decided where the model runs.
         """
+        if quadrature_precision not in (None, "float64", "float32"):
+            raise ValueError(
+                "quadrature_precision must be 'float64', 'float32' or None, "
+                "got %r"
+                % (quadrature_precision,))
         if expert_propagation not in ("consensus", "independent"):
             raise ValueError(
                 "expert_propagation must be 'consensus' or 'independent', "
@@ -311,6 +331,7 @@ class GPOptions(_ModelOptions):
         self.fresh_training_draws = fresh_training_draws
         self.quadrature_memory = quadrature_memory
         self.full_variance = full_variance
+        self.quadrature_precision = quadrature_precision
 
 
 class _Convergence:
@@ -1177,13 +1198,23 @@ class VGPNetwork(_GPModel):
             self.options.expert_propagation, joint=joint,
             full=self._full_variance()))
         stack.enter_context(_latent.network.quadrature_rule(
-            self._quadrature_memory(), rows))
+            self._quadrature_memory(), rows, self._quadrature_precision()))
         return stack
 
     def _full_variance(self):
         """Whether the moments and realizations carry the full variance
         (`GPOptions.full_variance`; off for a model saved before 0.9.4)."""
         return bool(getattr(self.options, "full_variance", False))
+
+    def _quadrature_precision(self):
+        """The quadrature's precision (`GPOptions.quadrature_precision`):
+        `None` is float32 where TensorFlow sees a GPU, whose float64 is the
+        slow kind, and float64 elsewhere; a model saved before 0.9.8 takes
+        float64."""
+        precision = getattr(self.options, "quadrature_precision", "float64")
+        if precision is None:
+            precision = "float32" if _latent.network._gpu_visible()                 else "float64"
+        return precision
 
     def _quadrature_memory(self):
         """The quadrature's memory budget, in bytes. With it, each call
@@ -1236,7 +1267,8 @@ class VGPNetwork(_GPModel):
                 _latent.network._PATHWISE_REALIZATIONS,
                 self._quadrature_memory(),
                 _latent.network._QUADRATURE_RULE,
-                _latent.network._quadrature_xla())
+                _latent.network._quadrature_xla(),
+                self._quadrature_precision())
 
     def _step_rule(self):
         """What a cached training step's trace depends on beyond its
@@ -2280,6 +2312,7 @@ class VGPNetwork(_GPModel):
                network._UNCERTAIN_POINTS_SECOND_MOMENT,
                network._PATHWISE_REALIZATIONS, network._QUADRATURE_MEMORY,
                network._QUADRATURE_ROWS, network._QUADRATURE_RULE,
+               network._QUADRATURE_DTYPE,
                network._quadrature_xla(), self.options.jitter)
         sweeps = self.__dict__.setdefault("_weight_sweeps", {})
         if key in sweeps:

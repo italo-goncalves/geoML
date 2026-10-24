@@ -2004,6 +2004,53 @@ children: **fixed 2026-10-15, 0.9.3**, `test_small_fixes.py`. The
 catalogue still marks `ProjectionTo1D` and `RandomProjections`
 `experimental`; nothing in either has been trained in earnest.)
 
+**M — Mixed precision for the conditioned quadrature** (agreed 2026-10-24,
+the user's go-ahead for every step). On a GeoScape network of three GP
+nodes reading a `GPWalk` the conditioned quadrature is 83% of a training
+step's op time, and a consumer GPU (the RTX 4060 Ti) runs float32 64 times
+faster than float64 and moves half the bytes. Treating the inducing points
+as certain to avoid that work was measured and rejected (Settled by
+measurement); this keeps the work and makes it cheaper.
+- **float32**: the `[..., n, nodes, m, d]` arrays of the readers'
+  quadrature (`_conditioned_sums`'s `kernel_at`), of the realizations'
+  conditioned kernel (`_conditioned_kernel`) and the mixture's component
+  terms (`_mixture_sum`): the offsets' squares, the inflated variances,
+  `log1p`, `exp`.
+- **float64**: the offsets `mean - points`, the gains and conditional
+  variances (`points_var - gain cov`), `[n, m, d]` or smaller, computed
+  and then cast, so that coordinates far from the origin and small
+  differences keep their digits; `k` cast back before the products with
+  `(K + D)^-1` and `alpha`, `1 - k (K + D)^-1 kᵀ` cancelling near the data;
+  parameters, refreshes, KL, likelihoods, warpings, every reduction.
+- **The option**: `GPOptions(quadrature_precision="float64" | "float32")`,
+  float64 by default and for a saved model (the class attribute), read at
+  trace time through `quadrature_rule` and keyed in the traces; a node of
+  the quadrature costs half the bytes under float32 (`_NODE_BYTES`), so
+  chunks double.
+- **Steps and gates**: (1) float64 baselines -- the network's step on GPU
+  and CPU, the folded section's new holes (three seeds, walk and GP on a
+  GP); (2) the quadrature's outputs and gradients against float64,
+  relative error about 1e-5 and 1e-4, no NaN, mine-grid coordinates
+  included; (3) the bound after 200 steps within about 1e-4 and the
+  parameters close; (4) held-out: score a new hole within about 0.05,
+  calibration and the realizations' variance ratio unchanged, every seed;
+  (5) speed on GPU and CPU, chapter 17 under the option; (6) the default
+  decided from the numbers -- perhaps float32 where a GPU is visible, as
+  XLA is ruled -- and the reproducibility contract updated if it moves.
+- **Expected** (not measured): 2-4x on the quadrature's elementwise work on
+  that GPU, 1.5-2.5x a step; 1.5-2x on the CPU.
+- **Built 2026-10-24 for 0.9.8, every gate passed** (changelog): moments
+  within 2e-7 and gradients within 2e-8 at fixed parameters, the folded
+  section's bound within 7e-7 and its new holes' score within 0.001 on
+  all six pairs, a GeoScape step 1.44x faster on the GPU and 1.06x on the
+  CPU, chapter 17 1.11x on the GPU with the same numbers -- the low end of the guess, because the readers' inputs are
+  two-dimensional and the `[n, nodes, m]` kernel values and their products
+  with `(K + D)^-1`, kept in double, are most of what is left. The default
+  is `None`: float32 where a GPU is visible, float64 elsewhere. **Not
+  done, and the next lever if one is wanted**: those products in single
+  precision, which is where `1 - k (K + D)^-1 kᵀ` cancels, so it needs
+  its own gate.
+
 ---
 
 ## 2. Fitting and initialization
