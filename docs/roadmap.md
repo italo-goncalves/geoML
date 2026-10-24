@@ -3062,6 +3062,46 @@ order of difficulty:
 
 These were tried. The numbers are why they are, or are not, in the package.
 
+**The second moment over certain inducing points (the "middle ground") --
+rejected** (2026-10-24). On a GeoScape network of three GP nodes reading a
+`GPWalk` (4429 rows, 32 experts, a likelihood mixture) the profile put 83%
+of a training step's op time in the conditioned quadrature
+(`_conditioned_sums`): the inducing inputs conditioned on each quadrature
+node of the input, `[n, nodes, m, d]` arrays a reader. The middle ground
+kept the joint first moment and took the second moment, and the pathwise
+realizations, with the inducing points at their means -- the certain-points
+route, a plain kernel at the realizations (a switch, since removed). It is
+fast and looks harmless in-sample:
+- a training step 6.09 s against 2.60 (mean 7.72 against 2.98), the bound
+  over the same eleven batches within 0.01-0.18%, the middle ground's
+  always higher;
+- at fixed parameters, predictions at 500 data locations moved a median
+  0.0003 sd, 0.015-0.022 sd at the 99th percentile, 0.4-0.9 sd at worst on
+  a few grades; probabilities 0.9 points at most.
+Scored on the folded section's 200 new holes (`expected_kernel.py`, seeds
+2026, 1 and 2, 2000 iterations, the walk network and the GP on a GP) it is
+worse on five cases of six, a log score of -3.4 a hole on average, and its
+intervals too narrow:
+
+| seed | network | score a hole | calibration (1 right) | realizations/variance | bound |
+|---|---|---|---|---|---|
+| 2026 | walk | -9.16 / -10.17 | 1.43 / 1.50 | 1.00 / 1.00 | -102.0 / -119.1 |
+| 1 | walk | -11.74 / -11.25 | 2.23 / 2.12 | 0.99 / 1.00 | -68.2 / -73.4 |
+| 2 | walk | -2.46 / -8.47 | 0.69 / 1.79 | 1.00 / 1.40 | -63.2 / -82.5 |
+| 2026 | GP on a GP | -7.03 / -12.56 | 0.76 / 1.96 | 0.98 / 384 | -150.5 / -138.3 |
+| 1 | GP on a GP | -11.99 / -13.14 | 1.62 / 2.26 | 0.97 / 72 | -168.0 / -121.4 |
+| 2 | GP on a GP | -9.55 / -15.88 | 1.35 / 3.24 | 1.01 / 18 | -143.7 / -63.5 |
+
+(conditioned / middle ground). On the GP on a GP the bound rises by up to
+80 while the held-out score falls: the inducing points' spread dropped from
+the second moment makes the model tighter than its data allow, and the
+bound rewards it -- a check on the training data alone would have taken
+it. Its realizations lose the moments (18-384 times the variance), the
+refresh still sizing `alpha` and the solves for uncertain inducing inputs;
+consistent, the refresh would treat them as certain too, which is the
+marginal rule's position the joint rule was built to leave. The step's cost
+is the conditioned quadrature's work, and it is worth what it costs.
+
 **A confident variational start (`delta` 0.01) as the default -- rejected**
 (2026-10-21; the folded-ore ablation's finding carried to the manual). On
 the folded section under the joint rule a small starting `delta` selects
