@@ -942,11 +942,19 @@ def _chunked_map(fn, inputs, n_chunks):
         def forward(c, out):
             return c + 1, out.write(c, fn(c, *xs))
 
+        # the first chunk outside the loop, for its static shape: a
+        # TensorArray filled in a while_loop concatenates to an unknown
+        # leading size, and a LikelihoodMixture places each realization by
+        # their count, which it reads off the shape
+        first = fn(_tf.constant(0), *xs)
         _, out = _tf.while_loop(
             lambda c, _: c < n_chunks, forward,
-            (_tf.constant(0), _tf.TensorArray(_tf.float64, n_chunks)),
+            (_tf.constant(1),
+             _tf.TensorArray(_tf.float64, n_chunks).write(0, first)),
             parallel_iterations=1)
         result = out.concat()
+        if first.shape.rank is not None and first.shape[0] is not None:
+            result.set_shape([n_chunks * first.shape[0]] + first.shape[1:])
 
         def backward(upstream):
             chunk = _tf.shape(upstream)[0] // n_chunks

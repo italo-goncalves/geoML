@@ -11,6 +11,17 @@ once, 32 times too small on that network, and each band refreshed the
 expert's nodes again. The sweep takes 28.7 s (42.3 s with its trace),
 the table the same to 2.5e-15. Over 120 epochs, about an hour of sweeps
 instead of 13-15.
+* **A `LikelihoodMixture` on a deep network predicts again.** Under the
+full variance a GP node reading an uncertain input draws its realizations
+a chunk at a time where the memory budget is short (`_chunked_map`), and
+the chunks, gathered in a `TensorArray` inside a `while_loop`,
+concatenated to an unknown leading size. A `LikelihoodMixture` places each
+realization among its shares by their count, read off that shape, and
+failed with `TypeError: 'NoneType' object cannot be interpreted as an
+integer` -- on the GeoScape walk network after ten epochs of training.
+`_chunked_map` now computes its first chunk before the loop, as
+`_chunked_sums` does, and gives the result its static shape; the chunks
+and their numbers are the same.
 
 ## version 0.9.7
 * **The quadrature's memory budget follows the device.**
