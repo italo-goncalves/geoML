@@ -1,3 +1,17 @@
+## version 0.9.8 (in progress)
+* **The expert weight sweep is traced.** `expert_weights`, which
+`train_by_expert` runs every `weights_every` epochs and `predict_by_expert`
+reads, computed each expert's weights eagerly: on a GeoScape network of
+three GP nodes reading a `GPWalk` it issued 6.2 million small ops one at a
+time, 405-448 s a sweep, a third of every epoch. It now runs one traced
+function per input, the expert held in the input's single slot
+(`_slot_variables(root, 1)`), so one trace serves every expert. Its bands
+are sized for one expert's memory: they were sized for every expert at
+once, 32 times too small on that network, and each band refreshed the
+expert's nodes again. The sweep takes 28.7 s (42.3 s with its trace),
+the table the same to 2.5e-15. Over 120 epochs, about an hour of sweeps
+instead of 13-15.
+
 ## version 0.9.7
 * **The quadrature's memory budget follows the device.**
 `GPOptions(quadrature_memory=None)`, the default for a new model, takes a
