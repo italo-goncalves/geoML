@@ -30,7 +30,7 @@ import geoml
 import geoml.latent.network as _net
 
 
-def _model(network, kernel, shift=0.0):
+def _model(network, kernel, shift=0.0, center=True):
     geoml.set_seed(7)
     x = np.random.default_rng(3).uniform(0, 100, [60, 2])
     data = geoml.data.PointData.from_array(x + shift, ["X", "Y"])
@@ -38,7 +38,7 @@ def _model(network, kernel, shift=0.0):
         "v", np.sin(x[:, 0] / 20) + 0.3 * np.cos(x[:, 1] / 15))
     root = geoml.latent.BasicInput(
         geoml.data.inducing.from_kmeans(data, 16, seed=0),
-        geoml.transform.Isotropic(40), center=True)
+        geoml.transform.Isotropic(40), center=center)
     hidden = geoml.latent.BasicGP(root, size=2)
     below = geoml.latent.GPWalk(hidden, n_steps=3) if network == "walk" \
         else hidden
@@ -106,18 +106,45 @@ def test_single_precision_moves_the_moments_by_its_rounding(network, kernel,
     assert np.abs(g32 - g64).max() < 1e-4 * np.abs(g64).max()
 
 
-def test_single_precision_moves_the_realizations_by_its_rounding():
-    model, _ = _model("walk", "Exponential")
-    x = np.random.default_rng(5).uniform(0, 100, [30, 2])
+def _realizations(model, x, n_sim=20):
+    target = geoml.data.PointData.from_array(x, ["X", "Y"])
+    model.predict(target, n_sim=n_sim)
+    return (np.asarray(target.variables["v"].get_simulations(), float),
+            np.asarray(target.values("v/latent_variance"), float).ravel())
+
+
+@pytest.mark.parametrize("shift, center", [(0.0, True), (1e6, False)])
+@pytest.mark.parametrize("network", ["walk", "dgp"])
+def test_single_precision_moves_the_realizations_by_its_rounding(
+        network, shift, center):
+    # the quadrature's kernel and the realizations' features in float32;
+    # at 1e6 with an uncentred input the walked coordinates are far from
+    # the origin, where the features' phase would lose its digits
+    model, _ = _model(network, "Exponential", shift, center)
+    x = shift + np.random.default_rng(5).uniform(0, 100, [30, 2])
     sims = {}
     for precision in ("float64", "float32"):
         model.options.quadrature_precision = precision
-        target = geoml.data.PointData.from_array(x, ["X", "Y"])
-        model.predict(target, n_sim=20)
-        sims[precision] = np.asarray(
-            target.variables["v"].get_simulations(), float)
-    spread = sims["float64"].std()
-    assert np.abs(sims["float32"] - sims["float64"]).max() < 1e-4 * spread
+        sims[precision] = _realizations(model, x)[0]
+    assert np.all(np.isfinite(sims["float32"]))
+    spread = sims["float64"].std(axis=1).mean()
+    assert np.abs(sims["float32"] - sims["float64"]).max() < 1e-5 * spread
+
+
+def test_single_precision_keeps_the_variance_and_the_batching():
+    # the realizations' variance over the reported latent variance (not one
+    # here: the realizations come back through the warping), as in float64
+    model, _ = _model("walk", "Exponential")
+    x = np.random.default_rng(5).uniform(0, 100, [120, 2])
+    ratio = {}
+    for precision in ("float64", "float32"):
+        model.options.quadrature_precision = precision
+        sims, reported = _realizations(model, x, n_sim=400)
+        ratio[precision] = np.median(np.var(sims, axis=1) / reported)
+    assert abs(ratio["float32"] / ratio["float64"] - 1.0) < 1e-4
+    model.options.prediction_batch_size = 25
+    batched, _ = _realizations(model, x, n_sim=400)
+    assert np.abs(batched - sims).max() < 1e-5 * sims.std(axis=1).mean()
 
 
 def test_the_rational_quadratic_stays_in_double():

@@ -1547,7 +1547,8 @@ def _node_bytes(kernel):
     """The bytes an element of a quadrature node's `[..., n, m, d]` arrays
     holds, both passes: half under float32, which the rational quadratic
     does not take."""
-    single = _QUADRATURE_DTYPE == _tf.float32         and type(kernel) is not _kr.RationalQuadratic
+    single = _QUADRATURE_DTYPE == _tf.float32 \
+        and type(kernel) is not _kr.RationalQuadratic
     return _NODE_BYTES * (0.5 if single else 1.0)
 
 

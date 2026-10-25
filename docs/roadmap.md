@@ -339,6 +339,30 @@ rather than squeeze it:
   from it halves the 0.6 GB for one more step's work in the backward
   pass; worth it only if the walk grows longer.
 
+**S — A CPU prediction of the GeoScape walk network runs out of memory**
+(found 2026-10-24, not investigated). The model of the coverage experiments
+(three GP nodes reading a `GPWalk`, 32 experts, trained by expert),
+predicted at its own 4429 data locations with 10 realizations and the GPU
+hidden, was killed by a 28 GB cap three times out of three -- float64
+included, so not the quadrature's precision -- while the same call on the
+GPU finishes in 1238 s. All 52 prediction batches (86 rows each) complete;
+the kill comes in the pass after them, batch 4-5 of 10: `predict`'s
+`_check_measurements`, which writes the `pit_*` and `warped_*` columns over
+the measured rows through `measurement_batches`, at the same batch size.
+- **First hypothesis**: retracing under XLA. In that pass the realizations'
+  `draw` chunk retraced on every batch (TensorFlow's "5 out of the last 5
+  calls ... triggered tf.function retracing"), and on the CPU every
+  quadrature and pathwise chunk is compiled with XLA (`_quadrature_xla`),
+  so each retrace is a compilation kept alive; the GPU, without XLA, does
+  not grow. Test: the same call with `network._QUADRATURE_XLA = False`,
+  and with the memory logged per batch.
+- **Then**: why the measurement pass retraces where the prediction does
+  not -- a shape that changes per batch (the last batch's rows, the
+  measured rows' count) or a function rebuilt per call.
+- Harness: `C:\Users\Public\segv\predict_variants.py` (variant `f64`,
+  `cpu-` prefix in `predict_run.sh`), the model in
+  `/home/italo/coverage_runs/A_model`.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
@@ -2047,99 +2071,10 @@ measurement); this keeps the work and makes it cheaper.
   of the guess, because the readers' inputs are two-dimensional and the
   `[n, nodes, m]` kernel values and their products with `(K + D)^-1`,
   kept in double, are most of what is left. The default is `None`:
-  float32 where a GPU is visible, float64 elsewhere. The next levers are
-  the item below.
-
-**M — Single precision past the quadrature: the pathwise features and
-`k (K + D)^-1 kᵀ`** (planned 2026-10-24, not started). Two more places
-where the work is large and float32 could carry it, under the same option
-(`GPOptions(quadrature_precision=)`, so `None` and saved models need no new
-rule). A third candidate raised with them, storing the realizations as
-float32, was done in 0.8.7 (GeoScape's item 40,
-`storage.set_realization_dtype`). **Not the idea rejected in 0.6.x**
-(`docs/mixed-precision.md`): that put the covariance matrices handed to
-the Cholesky in float32, needed the jitter at 1e-5, and bought 1.1-1.2x.
-Here no matrix that is factored or inverted is formed in float32, and the
-jitter stays.
-- **Two traps found 2026-10-23, both gated before anything else.**
-  - On the GPU, TensorFlow runs float32 matmuls and einsums in TF32 (a
-    10-bit mantissa, about 1e-3) unless
-    `tf.config.experimental.enable_tensor_float_32_execution(False)`. That
-    switch is process-wide: geoML setting it changes the user's own code,
-    which is a decision for the user, not the plan. The shipped float32
-    quadrature has no matmul, so TF32 never reached it.
-  - On the CPU, oneDNN's float32 batched matmul is silently wrong past a
-    contraction of about 20 000 (TensorFlow issue 129498). Every
-    contraction here is over `m` or the features, far shorter, but each
-    site asserts the length at trace time and falls back to float64 past
-    8192.
-- **Part A, the pathwise features** (`_pathwise_simulate`'s `draw`). The
-  `[size, n, chunk, J + 1]` arrays of a realization, `J` about 1024:
-  - **float32**: `cosines` and `phi_h`; `drawn = k · root_prior`; the
-    projection `whiteᵀ · prior` and the residual `res = phi_h -
-    projection`; `total ** 2` summed over the features; the closing
-    contraction with the feature weights `w_c`.
-  - **float64**: `k` (already the quadrature's), `part = k alpha + bias`
-    (the mean), `conditional` (Part B's), the triangular solve through
-    `chol` (`K`'s Cholesky, conditioned up to 1e9 -- `white` is cast after
-    it), `_residual_scale`, and the sum `sims + factor * ...`.
-  - **The phase**: `cos(h · ω / r + phase)` loses its digits in float32
-    when `h` is a walked coordinate far from the origin (a reader of a
-    `GPWalk` built without `center=True`). The inducing points' mean
-    `c` is taken out in float64 -- `ω · (h - c) / r` in float32, `ω · c /
-    r + phase` once per feature in float64, reduced modulo 2π -- an exact
-    identity.
-  - **Why it is safe**: a realization's random-feature error is about
-    `1/sqrt(J)`, 3%, five orders above float32's rounding; the realization
-    is rescaled to the conditional variance in float64 afterwards. TF32
-    may even be tolerable here; measured, not assumed.
-  - **What it speeds**: prediction of every deep model under the full
-    variance, and training of models whose leaf is not Gaussian (Monte
-    Carlo over the realizations). Not the Gaussian bound.
-- **Part B, `ksk = k (K + D)^-1 kᵀ`**. It is computed in three places: the
-  readers' `sums`, `root_sums` (with `g = k R`), and `draw`. It costs `O(n
-  · q · m² · s)`, most of the 23% Einsum share of the GeoScape profile.
-  - **The danger is not only `1 - ksk`.** `(K + D)^-1` has large entries
-    of both signs wherever the inducing set is ill-conditioned, so the
-    float32 error of `k A kᵀ` is about `eps · |k| ‖A‖ |k|`, which can
-    exceed `ksk` itself. In the whitened form `|L⁻¹ kᵀ|²` (`L` the
-    Cholesky of `K + D`, already kept as `cov_smooth_chol`) the error is
-    the same once the solve is float32, and a float64 solve costs what the
-    einsum does.
-  - **The design**: a guard per expert. `‖A‖₂` (its largest eigenvalue,
-    read once per refresh in float64) times `max |k|²` times float32's
-    epsilon bounds the error. Where that bound is under `1e-4` of the
-    conditional variance's floor, the float32 einsum runs; elsewhere the
-    float64 one does, chosen by `tf.cond`, both branches traced.
-    `f = k alpha` and its square stay in float64: the spread of the mean
-    is `E[f²] - E[f]²`.
-  - **Go/no-go first**: the guard's bound on real models -- the GeoScape
-    network, chapter 17, Tom East. If most experts fail it, Part B stops
-    there and the measurement is recorded under Settled by measurement.
-- **Steps and gates** (A before B, each its own commit):
-  1. TF32 and the oneDNN guard. Measure the float32 einsums of both parts
-     with TF32 on and off on the RTX 4060 Ti, against float64. Agree with
-     the user what geoML does about the switch: leave it, document it, or
-     turn it off when the precision is float32.
-  2. Part A: realizations at a fixed seed against float64, at the origin
-     and at 1e6 with an uncentred walk. The largest change under 1e-5 of
-     the spread between realizations, the variance ratio unchanged, batch
-     invariance kept, no NaN.
-  3. Part A: speed of a prediction (the GeoScape network, chapter 17's
-     walked model) on GPU and CPU, and a non-Gaussian-leaf model's
-     training step.
-  4. Part B go/no-go: the guard's pass rate per expert on the three
-     models.
-  5. Part B, if it goes: the conditional variance at the data locations
-     (where it is smallest) within 1e-4 relative, the moments and
-     gradients at fixed parameters, the folded section's held-out scores
-     (three seeds, walk and GP on a GP) within 0.05, the GeoScape step's
-     bound within 1e-6.
-  6. Chapter 17 under both precisions, the default unchanged unless the
-     numbers say otherwise; changelog and the reproducibility page.
-- **Expected** (a guess): Part A 1.5-3x a prediction's realization stage
-  on the GPU, little on the CPU. Part B up to 1.3x a GeoScape step, where
-  the guard passes.
+  float32 where a GPU is visible, float64 elsewhere. The two further
+  levers planned after it -- the realizations' feature products and
+  `k (K + D)^-1 kᵀ` in float32 -- were measured and rejected (Settled by
+  measurement).
 
 ---
 
@@ -3238,6 +3173,45 @@ refresh still sizing `alpha` and the solves for uncertain inducing inputs;
 consistent, the refresh would treat them as certain too, which is the
 marginal rule's position the joint rule was built to leave. The step's cost
 is the conditioned quadrature's work, and it is worth what it costs.
+
+**Single precision past the quadrature -- rejected** (2026-10-24, planned
+and run the same day). After the conditioned quadrature's arrays went to
+float32 (0.9.8), two more places looked large enough to follow, under the
+same option:
+- **The realizations' feature products** (`_pathwise_simulate`'s `draw`:
+  `k · root_prior`, the residual, the closing sum over the ~1025
+  features). In float32 the residual `phi_h - projection`, a difference of
+  two terms of the features' own size, moved a realization by 5e-5-9e-5 of
+  the spread between realizations, against a gate of 1e-5 (the quadrature
+  alone: 3.7e-7); kept in float64, the rest passed at 1.4e-6 -- and bought
+  nothing. A prediction of the GeoScape walk network at its 4429
+  locations, 10 realizations, on the RTX 4060 Ti: 1238 s in float64, 972 s
+  with the quadrature in float32, 975 s with the features too.
+- **`ksk = k (K + D)^-1 kᵀ`**, the `O(n · nodes · m² · size)` einsum the
+  conditional variance `1 - ksk` comes from, behind a per-expert guard
+  (`eps · ‖(K + D)^-1‖₂ · |k|²` under 1e-4 of each row's conditional
+  variance). Measured at eight draws of the input on 400 of each model's
+  own locations, TF32 off:
+
+  | model | m | `‖(K + D)^-1‖₂` | guard clears | worst change where cond > 1e-3 |
+  |---|---|---|---|---|
+  | GeoScape walk network, 128 expert calls | 185-227 | 0.47-2.5 | 100% | 8e-6 |
+  | folded section, GP on a GP | 30 | 6.3 | 21% | 6.7e-4 |
+  | folded section, walk | 30 | 14 | 6% | 1.4e-3 |
+  | chapter 17's walked model | 617 | 61 | 0.7% | 1.8e-2 |
+
+  The gate was 1e-4: wherever data sit near a reader's inducing points the
+  inverse grows and float32 loses the conditional variance, and that is the
+  case a model is built for.
+
+**Two traps on the way, both measured**: on the GPU
+TensorFlow runs float32 matmuls in TF32 by default -- `k · root_prior` 2.9e-4
+from float64 with it, 7.5e-7 without; the switch is read when a kernel runs,
+so turning it off for the length of a call works on traced functions. On the
+CPU oneDNN's batched float32 matmul is wrong past a contraction of about
+20 000 (tensorflow/tensorflow#129498). The shipped float32 quadrature is
+elementwise with reductions and meets neither; anything that adds a float32
+matmul must handle both.
 
 **A confident variational start (`delta` 0.01) as the default -- rejected**
 (2026-10-21; the folded-ore ablation's finding carried to the manual). On
