@@ -1,4 +1,4 @@
-## version 0.9.8 (in progress)
+## version 0.9.8
 * **The quadrature over uncertain inputs runs in single precision on a
 GPU.** `GPOptions(quadrature_precision=)`: under `"float32"` the
 `[..., n, nodes, m, d]` arrays of the conditioned quadrature a GP node
