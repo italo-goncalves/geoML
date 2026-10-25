@@ -52,7 +52,11 @@ device, and `set_seed` before anything is built:
   TensorFlow kernels accumulate in an order that depends on how the device
   schedules the work, so two runs on one machine can differ.
   `tf.config.experimental.enable_op_determinism()` is TensorFlow's own
-  switch for that, at a cost in speed this package has not measured. To
+  switch for that, at a cost in speed this package has not measured. A
+  deep model also takes its quadrature over uncertain inputs in single
+  precision where it sees a GPU (`GPOptions(quadrature_precision=None)`,
+  the default), so the same model reopened on a CPU moves in about the
+  eighth digit; pass `"float64"` to keep one precision everywhere. To
   hold a run to the CPU, set `CUDA_VISIBLE_DEVICES=""` in the environment.
 - **Another release of geoML.** A fix that changes a number changes it; the
   changelog says which.

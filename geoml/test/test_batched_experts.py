@@ -746,3 +746,58 @@ def test_a_partition_trains_in_slots_as_by_set(sampling, stepping):
                            sampling=sampling, stepping=stepping)
     np.testing.assert_allclose(ra["bound"], rb["bound"], rtol=1e-8)
     assert rb["partition"][0]["cover_mean"] > 0.95
+
+
+def _eager_weights(m):
+    """The weight table as `expert_weights` computed it before 0.9.8: an
+    expert at a time under `expert_subset`, every op run eagerly."""
+    _, gp = m._expert_structure()
+    n_rows = m.data.n_data
+    bands = m.options.batch_index(n_rows, batch_size=m._prediction_rows(
+        one_expert=True))
+    blocks = []
+    for root, _, count in m._expert_blocks():
+        nodes = gp[id(root)]
+        raw = np.zeros([n_rows, count, sum(n.size for n in nodes)])
+        for j in range(count):
+            with latent.expert_subset({root: (j,)}):
+                for node in nodes:
+                    node.refresh(m.options.jitter)
+                for band in bands:
+                    rows = np.arange(n_rows)[band]
+                    x = tf.constant(m.data.get_batched_coordinates(rows)[0],
+                                    tf.float64)
+                    x_var = tf.constant(m.data.get_batched_variance(rows)[0],
+                                        tf.float64)
+                    column = 0
+                    for node in nodes:
+                        _, var = node.interpolate(
+                            *node.parent.propagate(x, x_var))
+                        var = np.asarray(var).T
+                        raw[band, j, column:column + node.size] = \
+                            (1 - var) / (var + 1e-6) + 1e-6
+                        column += node.size
+        weights = raw / raw.sum(axis=1, keepdims=True)
+        blocks.append(weights.mean(axis=2))
+    return np.concatenate(blocks, axis=1)
+
+
+@pytest.mark.parametrize("name", ["walk", "add", "multi_structure",
+                                  "gaussian_input", "two_inputs", "deep"])
+def test_the_traced_weight_sweep_is_the_eager_one(name):
+    # one trace serves every expert, the expert in a single slot, and
+    # gives the weights the eager sweep gave, under the model's own rule
+    m = _model(deep=True) if name == "deep" else _node_model(name)
+    m.options.prediction_batch_size = 70
+    with m._propagation():
+        expected = _eager_weights(m)
+        table = m.expert_weights()
+        traces = sum(s.experimental_get_tracing_count()
+                     for s in m._weight_sweeps.values())
+        again = m.expert_weights()
+    np.testing.assert_allclose(table, expected, rtol=1e-9, atol=1e-12)
+    np.testing.assert_array_equal(again, table)
+    # a trace per band shape, the last band shorter, whatever the experts
+    assert traces <= 2 * len(m._expert_blocks())
+    assert sum(s.experimental_get_tracing_count()
+               for s in m._weight_sweeps.values()) == traces

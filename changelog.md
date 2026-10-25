@@ -1,3 +1,62 @@
+## version 0.9.8
+* **The quadrature over uncertain inputs runs in single precision on a
+GPU.** `GPOptions(quadrature_precision=)`: under `"float32"` the
+`[..., n, nodes, m, d]` arrays of the conditioned quadrature a GP node
+takes over an uncertain input, and of its realizations' conditioned
+kernel, are computed in single precision -- the offsets' squares, the
+inflated variances, `log1p` and `exp` of every mixture component -- from
+offsets, gains and conditional variances taken in double and scaled by the
+ranges first, so mine-grid coordinates keep their digits; the kernel
+returns in double, and every product and sum after it is double too. The
+rational quadratic, whose components are a grid placed about its trained
+scale, stays in double. `None`, the default for a new model, is float32
+where TensorFlow sees a GPU (whose float64 runs at a sixty-fourth of its
+float32 on a consumer card) and float64 elsewhere, decided where the model
+runs, as the quadrature's XLA is; a saved model keeps float64. A node of
+the quadrature costs half the bytes, so chunks double. Measured:
+  - at fixed parameters, on a walk and a GP on a GP with four reader
+  kernels, at the origin and at 1e6: the leaf's variance within 2e-7
+  relative, the gradient within 2e-8 of its largest entry;
+  - on the folded section (three seeds, walk and GP on a GP, 2000
+  iterations): the bound after 200 iterations within 3e-8 relative and
+  after 2000 within 7e-7, the new holes' score within 0.001, calibration
+  and the realizations' variance ratio unchanged to the third decimal;
+  - a training step of the GeoScape walk network (three GP nodes reading a
+  `GPWalk`): 6.07 s to 4.21 s on an RTX 4060 Ti (1.44x), 10.91 s to
+  10.27 s on the CPU (1.06x), its bounds within 1e-9 relative. The readers'
+  inputs are two-dimensional, so the single-precision arrays are only twice
+  the size of the kernel values they make, and the products of those with
+  `(K + D)^-1`, kept in double, are most of what remains;
+  - chapter 17 on the GPU: every printed number the same but the deep
+  vein's area (122 887 m2 against 122 888), 2337 s against 2602 (1.11x).
+* `_rq_components` built `maximum(4.0, width)` with the Python number
+first, which a traced function reads as float32 and refused against the
+float64 width: a GP node with the rational quadratic kernel reading an
+uncertain input failed to train. The arguments are swapped.
+* **The expert weight sweep is traced.** `expert_weights`, which
+`train_by_expert` runs every `weights_every` epochs and `predict_by_expert`
+reads, computed each expert's weights eagerly: on a GeoScape network of
+three GP nodes reading a `GPWalk` it issued 6.2 million small ops one at a
+time, 405-448 s a sweep, a third of every epoch. It now runs one traced
+function per input, the expert held in the input's single slot
+(`_slot_variables(root, 1)`), so one trace serves every expert. Its bands
+are sized for one expert's memory: they were sized for every expert at
+once, 32 times too small on that network, and each band refreshed the
+expert's nodes again. The sweep takes 28.7 s (42.3 s with its trace),
+the table the same to 2.5e-15. Over 120 epochs, about an hour of sweeps
+instead of 13-15.
+* **A `LikelihoodMixture` on a deep network predicts again.** Under the
+full variance a GP node reading an uncertain input draws its realizations
+a chunk at a time where the memory budget is short (`_chunked_map`), and
+the chunks, gathered in a `TensorArray` inside a `while_loop`,
+concatenated to an unknown leading size. A `LikelihoodMixture` places each
+realization among its shares by their count, read off that shape, and
+failed with `TypeError: 'NoneType' object cannot be interpreted as an
+integer` -- on the GeoScape walk network after ten epochs of training.
+`_chunked_map` now computes its first chunk before the loop, as
+`_chunked_sums` does, and gives the result its static shape; the chunks
+and their numbers are the same.
+
 ## version 0.9.7
 * **The quadrature's memory budget follows the device.**
 `GPOptions(quadrature_memory=None)`, the default for a new model, takes a

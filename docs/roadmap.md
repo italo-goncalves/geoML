@@ -339,6 +339,30 @@ rather than squeeze it:
   from it halves the 0.6 GB for one more step's work in the backward
   pass; worth it only if the walk grows longer.
 
+**S — A CPU prediction of the GeoScape walk network runs out of memory**
+(found 2026-10-24, not investigated). The model of the coverage experiments
+(three GP nodes reading a `GPWalk`, 32 experts, trained by expert),
+predicted at its own 4429 data locations with 10 realizations and the GPU
+hidden, was killed by a 28 GB cap three times out of three -- float64
+included, so not the quadrature's precision -- while the same call on the
+GPU finishes in 1238 s. All 52 prediction batches (86 rows each) complete;
+the kill comes in the pass after them, batch 4-5 of 10: `predict`'s
+`_check_measurements`, which writes the `pit_*` and `warped_*` columns over
+the measured rows through `measurement_batches`, at the same batch size.
+- **First hypothesis**: retracing under XLA. In that pass the realizations'
+  `draw` chunk retraced on every batch (TensorFlow's "5 out of the last 5
+  calls ... triggered tf.function retracing"), and on the CPU every
+  quadrature and pathwise chunk is compiled with XLA (`_quadrature_xla`),
+  so each retrace is a compilation kept alive; the GPU, without XLA, does
+  not grow. Test: the same call with `network._QUADRATURE_XLA = False`,
+  and with the memory logged per batch.
+- **Then**: why the measurement pass retraces where the prediction does
+  not -- a shape that changes per batch (the last batch's rows, the
+  measured rows' count) or a function rebuilt per call.
+- Harness: `C:\Users\Public\segv\predict_variants.py` (variant `f64`,
+  `cpu-` prefix in `predict_run.sh`), the model in
+  `/home/italo/coverage_runs/A_model`.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
@@ -2004,6 +2028,54 @@ children: **fixed 2026-10-15, 0.9.3**, `test_small_fixes.py`. The
 catalogue still marks `ProjectionTo1D` and `RandomProjections`
 `experimental`; nothing in either has been trained in earnest.)
 
+**M — Mixed precision for the conditioned quadrature** (agreed 2026-10-24,
+the user's go-ahead for every step). On a GeoScape network of three GP
+nodes reading a `GPWalk` the conditioned quadrature is 83% of a training
+step's op time, and a consumer GPU (the RTX 4060 Ti) runs float32 64 times
+faster than float64 and moves half the bytes. Treating the inducing points
+as certain to avoid that work was measured and rejected (Settled by
+measurement); this keeps the work and makes it cheaper.
+- **float32**: the `[..., n, nodes, m, d]` arrays of the readers'
+  quadrature (`_conditioned_sums`'s `kernel_at`), of the realizations'
+  conditioned kernel (`_conditioned_kernel`) and the mixture's component
+  terms (`_mixture_sum`): the offsets' squares, the inflated variances,
+  `log1p`, `exp`.
+- **float64**: the offsets `mean - points`, the gains and conditional
+  variances (`points_var - gain cov`), `[n, m, d]` or smaller, computed
+  and then cast, so that coordinates far from the origin and small
+  differences keep their digits; `k` cast back before the products with
+  `(K + D)^-1` and `alpha`, `1 - k (K + D)^-1 kᵀ` cancelling near the data;
+  parameters, refreshes, KL, likelihoods, warpings, every reduction.
+- **The option**: `GPOptions(quadrature_precision="float64" | "float32")`,
+  float64 by default and for a saved model (the class attribute), read at
+  trace time through `quadrature_rule` and keyed in the traces; a node of
+  the quadrature costs half the bytes under float32 (`_NODE_BYTES`), so
+  chunks double.
+- **Steps and gates**: (1) float64 baselines -- the network's step on GPU
+  and CPU, the folded section's new holes (three seeds, walk and GP on a
+  GP); (2) the quadrature's outputs and gradients against float64,
+  relative error about 1e-5 and 1e-4, no NaN, mine-grid coordinates
+  included; (3) the bound after 200 steps within about 1e-4 and the
+  parameters close; (4) held-out: score a new hole within about 0.05,
+  calibration and the realizations' variance ratio unchanged, every seed;
+  (5) speed on GPU and CPU, chapter 17 under the option; (6) the default
+  decided from the numbers -- perhaps float32 where a GPU is visible, as
+  XLA is ruled -- and the reproducibility contract updated if it moves.
+- **Expected** (not measured): 2-4x on the quadrature's elementwise work on
+  that GPU, 1.5-2.5x a step; 1.5-2x on the CPU.
+- **Built 2026-10-24 for 0.9.8, every gate passed** (changelog): moments
+  within 2e-7 and gradients within 2e-8 at fixed parameters, the folded
+  section's bound within 7e-7 and its new holes' score within 0.001 on
+  all six pairs, a GeoScape step 1.44x faster on the GPU and 1.06x on the
+  CPU, chapter 17 1.11x on the GPU with the same numbers -- the low end
+  of the guess, because the readers' inputs are two-dimensional and the
+  `[n, nodes, m]` kernel values and their products with `(K + D)^-1`,
+  kept in double, are most of what is left. The default is `None`:
+  float32 where a GPU is visible, float64 elsewhere. The two further
+  levers planned after it -- the realizations' feature products and
+  `k (K + D)^-1 kᵀ` in float32 -- were measured and rejected (Settled by
+  measurement).
+
 ---
 
 ## 2. Fitting and initialization
@@ -3061,6 +3133,85 @@ order of difficulty:
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**The second moment over certain inducing points (the "middle ground") --
+rejected** (2026-10-24). On a GeoScape network of three GP nodes reading a
+`GPWalk` (4429 rows, 32 experts, a likelihood mixture) the profile put 83%
+of a training step's op time in the conditioned quadrature
+(`_conditioned_sums`): the inducing inputs conditioned on each quadrature
+node of the input, `[n, nodes, m, d]` arrays a reader. The middle ground
+kept the joint first moment and took the second moment, and the pathwise
+realizations, with the inducing points at their means -- the certain-points
+route, a plain kernel at the realizations (a switch, since removed). It is
+fast and looks harmless in-sample:
+- a training step 6.09 s against 2.60 (mean 7.72 against 2.98), the bound
+  over the same eleven batches within 0.01-0.18%, the middle ground's
+  always higher;
+- at fixed parameters, predictions at 500 data locations moved a median
+  0.0003 sd, 0.015-0.022 sd at the 99th percentile, 0.4-0.9 sd at worst on
+  a few grades; probabilities 0.9 points at most.
+Scored on the folded section's 200 new holes (`expected_kernel.py`, seeds
+2026, 1 and 2, 2000 iterations, the walk network and the GP on a GP) it is
+worse on five cases of six, a log score of -3.4 a hole on average, and its
+intervals too narrow:
+
+| seed | network | score a hole | calibration (1 right) | realizations/variance | bound |
+|---|---|---|---|---|---|
+| 2026 | walk | -9.16 / -10.17 | 1.43 / 1.50 | 1.00 / 1.00 | -102.0 / -119.1 |
+| 1 | walk | -11.74 / -11.25 | 2.23 / 2.12 | 0.99 / 1.00 | -68.2 / -73.4 |
+| 2 | walk | -2.46 / -8.47 | 0.69 / 1.79 | 1.00 / 1.40 | -63.2 / -82.5 |
+| 2026 | GP on a GP | -7.03 / -12.56 | 0.76 / 1.96 | 0.98 / 384 | -150.5 / -138.3 |
+| 1 | GP on a GP | -11.99 / -13.14 | 1.62 / 2.26 | 0.97 / 72 | -168.0 / -121.4 |
+| 2 | GP on a GP | -9.55 / -15.88 | 1.35 / 3.24 | 1.01 / 18 | -143.7 / -63.5 |
+
+(conditioned / middle ground). On the GP on a GP the bound rises by up to
+80 while the held-out score falls: the inducing points' spread dropped from
+the second moment makes the model tighter than its data allow, and the
+bound rewards it -- a check on the training data alone would have taken
+it. Its realizations lose the moments (18-384 times the variance), the
+refresh still sizing `alpha` and the solves for uncertain inducing inputs;
+consistent, the refresh would treat them as certain too, which is the
+marginal rule's position the joint rule was built to leave. The step's cost
+is the conditioned quadrature's work, and it is worth what it costs.
+
+**Single precision past the quadrature -- rejected** (2026-10-24, planned
+and run the same day). After the conditioned quadrature's arrays went to
+float32 (0.9.8), two more places looked large enough to follow, under the
+same option:
+- **The realizations' feature products** (`_pathwise_simulate`'s `draw`:
+  `k · root_prior`, the residual, the closing sum over the ~1025
+  features). In float32 the residual `phi_h - projection`, a difference of
+  two terms of the features' own size, moved a realization by 5e-5-9e-5 of
+  the spread between realizations, against a gate of 1e-5 (the quadrature
+  alone: 3.7e-7); kept in float64, the rest passed at 1.4e-6 -- and bought
+  nothing. A prediction of the GeoScape walk network at its 4429
+  locations, 10 realizations, on the RTX 4060 Ti: 1238 s in float64, 972 s
+  with the quadrature in float32, 975 s with the features too.
+- **`ksk = k (K + D)^-1 kᵀ`**, the `O(n · nodes · m² · size)` einsum the
+  conditional variance `1 - ksk` comes from, behind a per-expert guard
+  (`eps · ‖(K + D)^-1‖₂ · |k|²` under 1e-4 of each row's conditional
+  variance). Measured at eight draws of the input on 400 of each model's
+  own locations, TF32 off:
+
+  | model | m | `‖(K + D)^-1‖₂` | guard clears | worst change where cond > 1e-3 |
+  |---|---|---|---|---|
+  | GeoScape walk network, 128 expert calls | 185-227 | 0.47-2.5 | 100% | 8e-6 |
+  | folded section, GP on a GP | 30 | 6.3 | 21% | 6.7e-4 |
+  | folded section, walk | 30 | 14 | 6% | 1.4e-3 |
+  | chapter 17's walked model | 617 | 61 | 0.7% | 1.8e-2 |
+
+  The gate was 1e-4: wherever data sit near a reader's inducing points the
+  inverse grows and float32 loses the conditional variance, and that is the
+  case a model is built for.
+
+**Two traps on the way, both measured**: on the GPU
+TensorFlow runs float32 matmuls in TF32 by default -- `k · root_prior` 2.9e-4
+from float64 with it, 7.5e-7 without; the switch is read when a kernel runs,
+so turning it off for the length of a call works on traced functions. On the
+CPU oneDNN's batched float32 matmul is wrong past a contraction of about
+20 000 (tensorflow/tensorflow#129498). The shipped float32 quadrature is
+elementwise with reductions and meets neither; anything that adds a float32
+matmul must handle both.
 
 **A confident variational start (`delta` 0.01) as the default -- rejected**
 (2026-10-21; the folded-ore ablation's finding carried to the manual). On

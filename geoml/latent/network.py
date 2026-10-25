@@ -820,7 +820,7 @@ def _rq_components(alpha):
     width = 8.0 / _tf.sqrt(alpha)
     lo = _tf.maximum(_tf.math.log(1e-7 * alpha / 3.0), centre - width)
     hi = _tf.minimum(_tf.math.log(1e9 * alpha / 3.0),
-                     centre + _tf.maximum(4.0, width))
+                     centre + _tf.maximum(width, 4.0))
     step = (hi - lo) / (q - 1)
     y = lo + step * _tf.range(q, dtype=_tf.float64)
     ends = _tf.constant([0.5] + [1.0] * (q - 2) + [0.5], _tf.float64)
@@ -942,11 +942,19 @@ def _chunked_map(fn, inputs, n_chunks):
         def forward(c, out):
             return c + 1, out.write(c, fn(c, *xs))
 
+        # the first chunk outside the loop, for its static shape: a
+        # TensorArray filled in a while_loop concatenates to an unknown
+        # leading size, and a LikelihoodMixture places each realization by
+        # their count, which it reads off the shape
+        first = fn(_tf.constant(0), *xs)
         _, out = _tf.while_loop(
             lambda c, _: c < n_chunks, forward,
-            (_tf.constant(0), _tf.TensorArray(_tf.float64, n_chunks)),
+            (_tf.constant(1),
+             _tf.TensorArray(_tf.float64, n_chunks).write(0, first)),
             parallel_iterations=1)
         result = out.concat()
+        if first.shape.rank is not None and first.shape[0] is not None:
+            result.set_shape([n_chunks * first.shape[0]] + first.shape[1:])
 
         def backward(upstream):
             chunk = _tf.shape(upstream)[0] // n_chunks
@@ -981,10 +989,25 @@ def _conditioned_kernel(h, mean, var, cov, points, points_var, r2, omega,
     that a chunked map can differentiate them."""
     gain = _tf.math.divide_no_nan(cov, var[..., :, None, :])
     dev = h - mean[..., :, None, :]
-    dif = h[..., :, :, None, :] - points[..., None, None, :, :] \
-        - gain[..., :, None, :, :] * dev[..., :, :, None, :]
     left = _tf.maximum(points_var[..., None, :, :] - gain * cov,
                        0.0)[..., :, None, :, :]
+    if _QUADRATURE_DTYPE != _tf.float64 and not rational:
+        # as in `_conditioned_sums`: `h - points - gain dev` written as the
+        # offset of the means plus the deviation's share, each part in
+        # double and scaled by the ranges before the `[.., n, S, m, d]`
+        # arrays are made in single precision
+        ranges = _tf.sqrt(r2)
+        offset_s, dev_s, gain_s, v, omega_s, weights_s = _lowered(
+            ((mean[..., :, None, :] - points[..., None, :, :]) / ranges)[
+                ..., :, None, :, :],
+            (dev / ranges)[..., :, :, None, :], gain[..., :, None, :, :],
+            left / r2, omega, weights)
+        dif = offset_s + dev_s * (1.0 - gain_s)
+        return _tf.cast(_mixture_sum(omega_s, weights_s,
+                                     _tf.cast(constant, _QUADRATURE_DTYPE),
+                                     dif ** 2, v), _tf.float64)
+    dif = h[..., :, :, None, :] - points[..., None, None, :, :] \
+        - gain[..., :, None, :, :] * dev[..., :, :, None, :]
     dif2 = dif ** 2 / r2
     v = left / r2
     if rational:
@@ -1028,7 +1051,7 @@ def _mixture_sum(omega, weights, constant, dif2, v):
         _, total = _tf.while_loop(
             lambda q, _: q < n_q, forward,
             (_tf.constant(0), constant + _tf.zeros(_tf.broadcast_dynamic_shape(
-                _tf.shape(a2), _tf.shape(b))[:-1], _tf.float64)),
+                _tf.shape(a2), _tf.shape(b))[:-1], a2.dtype)),
             parallel_iterations=1)
 
         def backward(g):
@@ -1043,7 +1066,7 @@ def _mixture_sum(omega, weights, constant, dif2, v):
             # against variances that do not depend on the node -- so the
             # sums run in the shape they make and return to each input's
             zeros = _tf.zeros(_tf.broadcast_dynamic_shape(
-                _tf.shape(a2), _tf.shape(b)), _tf.float64)
+                _tf.shape(a2), _tf.shape(b)), a2.dtype)
             _, ga, gb = _tf.while_loop(
                 lambda q, *_: q < n_q, step, (_tf.constant(0), zeros, zeros),
                 parallel_iterations=1)
@@ -1413,6 +1436,13 @@ _QUADRATURE_ROWS = 20000
 # TensorFlow may run together (taken as the quadrature's: at 16 a chunk of
 # a hundred realizations on GeoScape's 32 experts ran out of the device)
 _NODE_BYTES = 48
+# the precision of the conditioned quadrature's large arrays
+# (`GPOptions.quadrature_precision`): float32 for the `[..., n, nodes, m, d]`
+# arrays and the mixture's components, the offsets, gains and conditional
+# variances computed in float64 first and the kernel returned in float64,
+# every product and reduction after it in float64. Set through
+# `quadrature_rule` by the model, read at trace time
+_QUADRATURE_DTYPE = _tf.float64
 _REALIZATION_BYTES = 48
 # the quadrature's rule: "hermite", a Gauss-Hermite tensor grid of
 # `_HERMITE_POINTS` a dimension up to two dimensions and Sobol beyond (7x7
@@ -1491,19 +1521,40 @@ def _quadrature_xla():
 
 
 @_contextlib.contextmanager
-def quadrature_rule(memory=None, rows=None):
-    """The quadrature's memory budget, in bytes, and the most rows a call
-    carries, while active (None keeps what is set)."""
-    global _QUADRATURE_MEMORY, _QUADRATURE_ROWS
-    previous = _QUADRATURE_MEMORY, _QUADRATURE_ROWS
+def quadrature_rule(memory=None, rows=None, precision=None):
+    """The quadrature's memory budget, in bytes, the most rows a call
+    carries, and the precision of its large arrays (`"float64"` or
+    `"float32"`), while active (None keeps what is set)."""
+    global _QUADRATURE_MEMORY, _QUADRATURE_ROWS, _QUADRATURE_DTYPE
+    previous = _QUADRATURE_MEMORY, _QUADRATURE_ROWS, _QUADRATURE_DTYPE
     if memory is not None:
         _QUADRATURE_MEMORY = float(memory)
     if rows is not None:
         _QUADRATURE_ROWS = int(rows)
+    if precision is not None:
+        if precision not in ("float64", "float32"):
+            raise ValueError("the quadrature's precision is 'float64' or "
+                             "'float32', got %r" % (precision,))
+        _QUADRATURE_DTYPE = _tf.float32 if precision == "float32" \
+            else _tf.float64
     try:
         yield
     finally:
-        _QUADRATURE_MEMORY, _QUADRATURE_ROWS = previous
+        _QUADRATURE_MEMORY, _QUADRATURE_ROWS, _QUADRATURE_DTYPE = previous
+
+
+def _node_bytes(kernel):
+    """The bytes an element of a quadrature node's `[..., n, m, d]` arrays
+    holds, both passes: half under float32, which the rational quadratic
+    does not take."""
+    single = _QUADRATURE_DTYPE == _tf.float32 \
+        and type(kernel) is not _kr.RationalQuadratic
+    return _NODE_BYTES * (0.5 if single else 1.0)
+
+
+def _lowered(*tensors):
+    """`tensors` in the quadrature's precision (`_QUADRATURE_DTYPE`)."""
+    return [_tf.cast(t, _QUADRATURE_DTYPE) for t in tensors]
 
 
 def _static(value, fallback):
@@ -3372,7 +3423,7 @@ class BasicGP(_GPNode):
             return 0
         m, d = self._feature_count(), int(self.parent.size)
         experts = len(self.root.n_ip)
-        cost = _NODE_BYTES * m * d
+        cost = _node_bytes(self.kernel) * m * d
         if _pathwise() and self._feature_kernel():
             features = max(self._FEATURES, 2 * m) + 1
             cost = max(cost, _REALIZATION_BYTES * (m * d + self.size
@@ -3794,7 +3845,7 @@ class BasicGP(_GPNode):
         lead = 1
         for dim in mean.shape[:-2]:
             lead *= _static(dim, 1)
-        per_node = _NODE_BYTES * lead * _static(
+        per_node = _node_bytes(self.kernel) * lead * _static(
             mean.shape[-2], _QUADRATURE_ROWS) * _static(
             points.shape[-2], 1) * d
         if len(mean.shape) == 2:
@@ -3826,10 +3877,22 @@ class BasicGP(_GPNode):
             gain = _tf.math.divide_no_nan(cov, _tf.expand_dims(var, -2))
             step = _tf.expand_dims(sd, -2) * _tf.gather(nodes, c)  # [.., n, q, d]
             offset = _tf.expand_dims(mean, -2) - _tf.expand_dims(points, -3)
-            dif = _tf.expand_dims(offset, -3) + _tf.expand_dims(step, -2) \
-                * (1.0 - _tf.expand_dims(gain, -3))
             left = _tf.expand_dims(_tf.maximum(
                 _tf.expand_dims(points_var, -3) - gain * cov, 0.0), -3)
+            if _QUADRATURE_DTYPE != _tf.float64 and not rational:
+                # the `[.., n, q, m, d]` arrays in single precision, from
+                # parts taken in double and scaled by the ranges first
+                ranges = _tf.sqrt(r2)
+                offset_s, step_s, gain_s, v, omega_s, weights_s = _lowered(
+                    _tf.expand_dims(offset / ranges, -3),
+                    _tf.expand_dims(step / ranges, -2),
+                    _tf.expand_dims(gain, -3), left / r2, omega, weights)
+                dif = offset_s + step_s * (1.0 - gain_s)
+                return _tf.cast(_mixture_sum(
+                    omega_s, weights_s, _tf.cast(constant, _QUADRATURE_DTYPE),
+                    dif ** 2, v), _tf.float64)
+            dif = _tf.expand_dims(offset, -3) + _tf.expand_dims(step, -2) \
+                * (1.0 - _tf.expand_dims(gain, -3))
             dif2 = dif ** 2 / r2
             v = left / r2
             if rational:

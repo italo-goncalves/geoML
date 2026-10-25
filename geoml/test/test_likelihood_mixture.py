@@ -301,6 +301,33 @@ def test_a_prediction_stores_the_populations(tmp_path):
         labels[:10])
 
 
+def test_a_deep_mixture_predicts_its_populations_in_chunks():
+    # a GP reading a GP draws its realizations a chunk at a time where the
+    # budget is short (`_chunked_map`), and the realizations' count must
+    # still be known to the mixture, which places each one among its shares
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(0)
+    x = np.sort(rng.uniform(0, 10, 60))
+    data = geoml.data.PointData.from_array(x[:, None], ["X"])
+    data.add_continuous_variable("v", np.where(x < 5, np.sin(x),
+                                               3 + np.sin(x)))
+    root = latent.BasicInput(geoml.data.Grid1D(start=0, n=21, step=0.5),
+                             transform=geoml.transform.Isotropic(2.0))
+    model = geoml.models.VGPNetwork(
+        data, "v", lk.LikelihoodMixture([lk.Gaussian(wp.ZScore(1)),
+                                         lk.Gaussian(wp.ZScore(1))],
+                                        shares="latent"),
+        latent.BasicGP(latent.BasicGP(root, size=1), size=4),
+        options=geoml.models.GPOptions(verbose=False, training_samples=10,
+                                       quadrature_memory=2e5))
+    model.train_full(3)
+    target = geoml.data.PointData.from_array(
+        np.linspace(0, 10, 25)[:, None], ["X"])
+    model.predict(target, n_sim=12)
+    labels = np.asarray(target.variables["v"].population)
+    assert labels.shape == (25, 12) and set(np.unique(labels)) <= {0, 1}
+
+
 def test_a_composition_stores_the_populations_in_its_parts_units():
     """A composition files what a mixture adds as a vector variable does --
     its `update` once skipped it -- and each population's prediction in the
