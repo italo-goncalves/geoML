@@ -1508,6 +1508,30 @@ def _automatic_budget(n_nodes):
     return min(_FIXED_BUDGET, _BUDGET_SHARE * device / max(1, n_nodes))
 
 
+# what a GP node holds for each row of a prediction batch outside the
+# quadrature: `covariance_matrix`'s distance arrays and the products made
+# of them, `[width, rows, m, d]` and `[width, rows, m, size]`, for every
+# expert it computes at once -- the slots of `predict_by_expert`, every
+# active expert otherwise. Nothing counted them, so a network of GP nodes
+# reading the input took `prediction_batch_size` rows a batch whatever its
+# experts. Measured on a stand-in for a GeoScape Run that ran out of a 16 GB
+# GPU by expert (four GP nodes over 32 experts of 209-257 points in 3-D):
+# 23-26 bytes an element by expert in 13 slots and with every expert, over
+# about 1 GB held throughout; out of memory at 10000 rows by expert and
+# 5000 with every expert (GeoScape's item 44, 2026-10-26). The constant
+# keeps a margin, and the share is for every GP node together
+_EXPERT_ELEMENT_BYTES = 32
+_EXPERT_SHARE = 0.4
+
+
+def _expert_budget():
+    """The bytes a prediction batch's expert arrays may take, every GP node
+    together: a share of the device's memory (16 GiB where it cannot be
+    read)."""
+    device = _device_bytes()
+    return _EXPERT_SHARE * (device if device is not None else 2.0 ** 34)
+
+
 def _quadrature_xla():
     """Whether a quadrature or pathwise chunk is compiled with XLA."""
     # On the CPU only. On the GPU an XLA-compiled chunk read a null pointer
@@ -3429,6 +3453,23 @@ class BasicGP(_GPNode):
             cost = max(cost, _REALIZATION_BYTES * (m * d + self.size
                                                    * features))
         return _FEWEST_PER_CHUNK * experts * cost
+
+    def _expert_row_bytes(self, one_expert=False):
+        """The bytes a row of a prediction batch costs the node outside the
+        quadrature (`_EXPERT_ELEMENT_BYTES`): its inducing points, times
+        the width of its input and its own, for every expert it computes
+        at once -- the slots, padded to the largest set, or every active
+        expert; with `one_expert`, the largest one alone."""
+        slots = _slots_of(self.root)
+        if one_expert:
+            points = max(int(m) for m in self.root.n_ip)
+        elif slots is not None:
+            points = slots.size * max(int(m) for m in self.root.n_ip)
+        else:
+            points = sum(int(self.root.n_ip[e])
+                         for e in _active_experts(self.root))
+        return _EXPERT_ELEMENT_BYTES * points * (int(self.parent.size)
+                                                 + self.size)
 
     def _feature_basis(self, d, seed, count=0):
         """Random Fourier features of the node's kernel, as the expected
@@ -5688,8 +5729,10 @@ class GPWalk(_FunctionalLatentVariable):
         reach : float, optional
             The field's strength: how far the walk can carry a point, in
             the coordinates it walks, `step * n_steps * amp`. Given, the
-            amplitude is set to `reach / (step * n_steps)` and held there;
-            left out, it trains from 1 and the bound chooses the strength.
+            amplitude is set to `reach / (step * n_steps)` and held there,
+            whatever its size -- the bounds a trained amplitude keeps to,
+            0.01 to 100, do not apply to a held one; left out, it trains
+            from 1 and the bound chooses the strength.
             Under the joint rule the bound settles on a short walk, which
             bends the space rather than folding it; a longer reach held
             fixed lets the walk fold it further, at a lower bound.
@@ -5716,14 +5759,16 @@ class GPWalk(_FunctionalLatentVariable):
         self.step = step
         self.n_steps = n_steps
 
-        # a reach outside what the amplitude's bounds allow is clipped,
-        # with the warning every constructor value outside its bounds gets
+        # the amplitude's bounds keep training sane, and a held one is
+        # never trained: they widen to take a given reach as it is, which
+        # was clipped to them before (GeoScape's item 43)
         self.reach = reach
+        held = None if reach is None else reach / (step * n_steps)
         self._add_parameter(
             "amp",
-            _gpr.PositiveParameter(
-                1 if reach is None else reach / (step * n_steps), 0.01, 100,
-                fixed=reach is not None)
+            _gpr.PositiveParameter(1, 0.01, 100) if held is None else
+            _gpr.PositiveParameter(held, min(0.01, held), max(100, held),
+                                   fixed=True)
         )
         self._add_parameter(
             "precision",

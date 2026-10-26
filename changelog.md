@@ -1,3 +1,41 @@
+## version 0.9.9 (in progress)
+* **A prediction batch is sized by what every GP node holds for its
+experts** (GeoScape's item 44). Since 0.9.4 a batch has been sized by the
+quadrature's memory -- what a GP node reading an uncertain input holds --
+and nothing counted the `[width, rows, m, d + size]` arrays every GP node
+builds for the experts it computes at once: the slots of
+`predict_by_expert`, every active expert of a plain `predict`. A network of
+GP nodes reading the input took `prediction_batch_size` (20000) rows a
+batch whatever its experts, and a GeoScape Run -- four GP nodes over 32
+experts in 3-D, predicted by expert into a refined block set -- ran out of
+a 16 GB GPU on the first batch. Each GP node now says what a row costs it
+(`BasicGP._expert_row_bytes`, 32 bytes an element, measured 23-26), and
+`_prediction_rows` takes as many rows as fit 0.4 of the device's memory,
+every node together. On a stand-in at that Run's sizes, out of memory at
+10000 rows by expert and 5000 with every expert before, both now finish
+(6.7 GB peak by expert in 163 s; 6.6 GB with every expert). It reaches
+`refine(by_expert=True)` and `cross_validate(method="by_expert")`, which
+predict through it; the batching never changes the answer.
+* **`GPWalk(reach=)` is held as given** (GeoScape's item 43). The amplitude
+a reach sets, `reach / (step * n_steps)`, was clipped to the bounds a
+trained amplitude keeps to, 0.01 to 100, with a warning in the
+amplitude's terms. A held amplitude is never trained, so its bounds now
+widen to take the value, and the catalogue's `exclusive_min: 0` is the
+whole truth.
+* **Progress events carry counts** (GeoScape's item 42). `Progress` has a
+`detail` mapping: each `refine` pass reports what it cut -- `cut`, split
+into `undecided`, `crossed` and `levelled`, which add up to it -- and the
+`blocks` there are after it, the numbers its `verbose` line prints, now
+counted only among the blocks it may cut. `train_by_expert` under
+`sampling="assignment"`, whose batches each epoch are drawn, reports a
+`total` from the first epoch on: the batches done plus this epoch's count
+over the epochs left, revised every epoch.
+* **Training and predicting by expert, and measurement draws, in the
+catalogue's workflow** (GeoScape's item 41): `train_by_expert` in
+`fit.train`, `predict_by_expert` as `predict.by_expert` and
+`predict_measurements` as `predict.measurements`, with their parameters
+and defaults.
+
 ## version 0.9.8
 * **The quadrature over uncertain inputs runs in single precision on a
 GPU.** `GPOptions(quadrature_precision=)`: under `"float32"` the

@@ -32,6 +32,7 @@ import contextvars as _contextvars
 import dataclasses as _dataclasses
 
 from collections.abc import Callable as _Callable
+from collections.abc import Mapping as _Mapping
 
 __all__ = ["Cancelled", "Progress", "progress"]
 
@@ -65,7 +66,9 @@ class Progress:
         within one task.
     total
         Units expected, or `None` where the count is not known in advance.
-        A cap rather than a promise wherever training may stop early.
+        A cap rather than a promise wherever training may stop early, and
+        an estimate revised each epoch where an epoch's count is drawn
+        (`train_by_expert` under `sampling="assignment"`).
     unit
         What `done` counts: `"iteration"`, `"epoch"`, `"batch"`, `"pass"`,
         `"fold"`, `"body"` or `"realization"`.
@@ -74,6 +77,14 @@ class Progress:
     within
         The enclosing tasks, outermost first -- `("refine",)` for the
         predictions a refinement makes, `()` at the top.
+    detail
+        Counts the unit finished with, by name, on the tasks that have
+        them, else `None`: a refinement's pass gives `blocks`, the blocks
+        there are after it, and from the first pass on `cut`, how many it
+        split, as `undecided` (a cut-off or contact passes through them),
+        `crossed` (by a mesh, and not undecided) and `levelled` (beside a
+        block cut twice over, and neither of the others), which add up to
+        `cut`.
     """
     task: str
     done: int
@@ -81,6 +92,7 @@ class Progress:
     unit: str = "step"
     bound: "float | None" = None
     within: "tuple[str, ...]" = ()
+    detail: "_Mapping[str, int] | None" = None
 
 
 @_contextlib.contextmanager
@@ -147,7 +159,8 @@ def progress(callback: "_Callable[[Progress], None] | None"):
 def reporting(task, total=None, unit="step"):
     """Marks a task, and hands back the function its body reports through.
 
-    `report(done, bound=None)` emits one event. The task's own name is not
+    `report(done, bound=None, total=..., detail=None)` emits one event,
+    `total` the task's unless given. The task's own name is not
     in its events' `within`: that names what encloses it, which is what a
     caller needs to tell a refinement's predictions from a bare one.
 
@@ -157,11 +170,11 @@ def reporting(task, total=None, unit="step"):
     within = _WITHIN.get()
     token = _WITHIN.set(within + (task,))
 
-    def report(done, bound=None, total=total):
+    def report(done, bound=None, total=total, detail=None):
         callback = _CALLBACK.get()
         if callback is not None:
             callback(Progress(task=task, done=done, total=total, unit=unit,
-                              bound=bound, within=within))
+                              bound=bound, within=within, detail=detail))
 
     try:
         yield report

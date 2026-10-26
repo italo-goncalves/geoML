@@ -125,6 +125,27 @@ def test_the_workflow_names_the_folds_cross_validation_reads(built):
     assert params[:5] == ["test_data", "k", "groups", "seed", "name"]
 
 
+def test_the_workflow_names_training_and_predicting_by_expert(built):
+    """GeoScape's item 41: a network divided among experts trains and
+    predicts by expert, and measured points take measurement draws; each
+    call is in the workflow with its parameters and their defaults."""
+    workflow = built["workflow"]
+    trainer = "geoml.models.VGPNetwork.train_by_expert"
+    assert trainer in workflow["fit"]["train"]
+    assert workflow["predict"]["by_expert"] == \
+        "geoml.models.VGPNetwork.predict_by_expert"
+    assert workflow["predict"]["measurements"] == \
+        "geoml.models.VGPNetwork.predict_measurements"
+    params = {p["name"]: p for p in built["functions"][trainer]["params"]}
+    assert params["epochs"]["default"] == 10
+    params = {p["name"]: p for p in built["functions"][
+        workflow["predict"]["measurements"]]["params"]}
+    assert params["n_nodes"]["default"] == 32
+    for name in (trainer, workflow["predict"]["by_expert"],
+                 workflow["predict"]["measurements"]):
+        assert built["functions"][name]["description"]
+
+
 @pytest.mark.parametrize("name", ["geoml.data.blocks.BlockSet3D",
                                   "geoml.data.blocks.RotatedBlockSet3D"])
 def test_a_block_set_lists_how_it_is_split(built, name):

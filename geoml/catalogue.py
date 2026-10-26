@@ -63,7 +63,10 @@ FUNCTIONS = {
     "geoml.models.VGPNetwork": "workflow",
     "geoml.models.VGPNetwork.train_full": "workflow",
     "geoml.models.VGPNetwork.train_svi": "workflow",
+    "geoml.models.VGPNetwork.train_by_expert": "workflow",
     "geoml.models.VGPNetwork.predict": "workflow",
+    "geoml.models.VGPNetwork.predict_by_expert": "workflow",
+    "geoml.models.VGPNetwork.predict_measurements": "workflow",
     "geoml.models.VGPNetwork.predict_node": "workflow",
     "geoml.models.VGPNetwork.save": "workflow",
     "geoml.models.VGPNetwork.open": "workflow",
@@ -87,7 +90,8 @@ WORKFLOW = {
         "options": "geoml.models.GPOptions",
         "seed": "geoml.stats.random.set_seed",
         "train": ["geoml.models.VGPNetwork.train_full",
-                  "geoml.models.VGPNetwork.train_svi"],
+                  "geoml.models.VGPNetwork.train_svi",
+                  "geoml.models.VGPNetwork.train_by_expert"],
         # the folds `validate` reads, written into the data first
         "folds": "geoml.data.containers.PointData.spatial_k_fold",
         "validate": "geoml.models.cross_validate",
@@ -97,6 +101,12 @@ WORKFLOW = {
     },
     "predict": {
         "predict": "geoml.models.VGPNetwork.predict",
+        # with only the experts active at each location, for a network
+        # trained by expert
+        "by_expert": "geoml.models.VGPNetwork.predict_by_expert",
+        # samples of a measurement, the noise drawn, for comparing with
+        # assays
+        "measurements": "geoml.models.VGPNetwork.predict_measurements",
         # what a node inside the tree says, as a latent variable
         "node": "geoml.models.VGPNetwork.predict_node",
         "refine": "geoml.models.refine",

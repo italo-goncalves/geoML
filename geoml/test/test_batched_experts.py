@@ -292,6 +292,43 @@ def test_prediction_in_slots_is_prediction_by_set():
     assert np.max(diff) < 0.05
 
 
+def test_a_prediction_by_expert_sizes_its_batches_to_the_device(
+        monkeypatch):
+    """GeoScape's item 44: every GP node holds `[width, rows, m, d + size]`
+    arrays for the experts it computes at once -- the slots by expert,
+    every expert otherwise -- which nothing counted, so a batch took
+    `prediction_batch_size` rows and ran out of a GPU. A small device makes
+    small batches, and the answer is the same."""
+    from geoml.latent import network as _net
+    m = _model()
+    m.train_full(5)
+    leaf = m.leaves[0]
+    n_ip = [int(n) for n in leaf.root.n_ip]
+    with m._propagation():
+        assert leaf._expert_row_bytes() == 32 * sum(n_ip) * (2 + 1)
+        assert leaf._expert_row_bytes(one_expert=True) == \
+            32 * max(n_ip) * (2 + 1)
+    whole = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
+    m.predict_by_expert(whole, n_sim=5)
+
+    monkeypatch.setattr(_net, "_device_bytes", lambda: 1e7)
+    rows = []
+    sized = m._prediction_rows
+    monkeypatch.setattr(m, "_prediction_rows", lambda one_expert=False: (
+        rows.append(sized(one_expert)) or rows[-1]))
+    small = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
+    info = m.predict_by_expert(small, n_sim=5)
+    # under the slots the call entered, padded to the largest set
+    assert int(0.4 * 1e7 // (32 * info["slots"] * max(n_ip) * 3)) in rows
+    assert max(rows) < len(_targets())
+    np.testing.assert_allclose(small.values("v/prediction"),
+                               whole.values("v/prediction"),
+                               rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(small.variables["v"].get_simulations(),
+                               whole.variables["v"].get_simulations(),
+                               rtol=1e-12, atol=1e-14)
+
+
 def test_prediction_by_expert_takes_where_and_resumes():
     m = _model()
     m.train_full(10)
@@ -317,11 +354,17 @@ def test_training_by_expert_reports_and_can_be_cancelled(sampling):
         m.train_by_expert(2, batch_size=50, visits=2, sampling=sampling)
     batches = [e for e in seen if e.task == "train"]
     assert [e.done for e in batches] == list(range(1, len(batches) + 1))
-    # an assignment's epochs hold as many batches as the experts' rows
-    # make, so it reports no total
-    total = 16 if sampling == "replacement" else None
-    assert total is None or len(batches) == total
-    assert all(e.total == total and e.unit == "batch" for e in batches)
+    assert all(e.unit == "batch" for e in batches)
+    if sampling == "replacement":
+        assert len(batches) == 16
+        assert all(e.total == 16 for e in batches)
+    else:
+        # an assignment's epochs hold as many batches as the experts' rows
+        # make, drawn each epoch: the total is an estimate revised every
+        # epoch, and the last report says it all (GeoScape's item 42)
+        assert all(e.total is not None and e.total >= e.done
+                   for e in batches)
+        assert batches[-1].total == batches[-1].done
     assert all(np.isfinite(e.bound) for e in batches)
 
     class Stop(Exception):

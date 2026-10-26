@@ -2929,6 +2929,21 @@ the same time -- so the docstring now says an operation over GP nodes is
 still one layer. The done-notes below hold what each cost and what it taught; GeoScape's
 requirements document is marked item by item since 0.8.0.
 
+(Items 41-44, asked 2026-10-10 to 2026-10-25: **done 2026-10-26, for
+0.9.9.** 41: `train_by_expert`, `predict_by_expert` and
+`predict_measurements` in the catalogue's workflow. 42: `Progress.detail`,
+a refinement pass's cut by reason and its block count, and
+`train_by_expert`'s total under an assignment revised each epoch, since an
+epoch's batches are drawn. 43: a given `GPWalk` reach held as it is, its
+amplitude's training bounds widening to take it -- a held amplitude is
+never trained. 44, the one GeoScape's M4 needed: the batch sized by what
+every GP node holds for the experts it computes at once, `[width, rows, m,
+d + size]`, which nothing counted -- reproduced on a stand-in at the failed
+Run's sizes (four GP nodes, 32 experts of 209-257 points in 3-D): out of a
+16 GB GPU at 10000 rows by expert and 5000 with every expert, 23-26 bytes
+an element over about 1 GB held throughout; sized to 0.4 of the device,
+both finish at about 6.7 GB. The changelog has the rest.)
+
 (Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
 `description` on every entry, read off the docstring between its summary
 and its first section, and forty docstrings written to have one; every

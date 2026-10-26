@@ -1242,8 +1242,11 @@ class VGPNetwork(_GPModel):
         """How many rows a prediction batch carries: the options'
         `prediction_batch_size`, or fewer where a GP node reading an
         uncertain input would exceed the quadrature's memory budget at its
-        smallest chunk (`BasicGP._row_bytes`) -- each model its own batch,
-        bounded by the budget whatever its size. Measured on chapter 17's
+        smallest chunk (`BasicGP._row_bytes`), or where the GP nodes'
+        arrays for the experts they compute at once -- the slots under
+        `predict_by_expert` -- would exceed a share of the device's
+        (`BasicGP._expert_row_bytes`, `network._expert_budget`) -- each
+        model its own batch, bounded by the budget whatever its size. Measured on chapter 17's
         walked model: at 20000 rows a batch held 24 GB, four realizations
         of the reader's pathwise draw at 3-4 GB each. The batching never
         changes the answer. With `one_expert`, the rows a pass computing a
@@ -1254,8 +1257,17 @@ class VGPNetwork(_GPModel):
                         / (len(node.root.n_ip) if one_expert else 1)
                         for node in self._nodes()
                         if hasattr(node, "_row_bytes")] + [0])
+            # what every GP node holds per row for the experts it computes
+            # at once, read under the slots a call by expert has entered
+            # (GeoScape's item 44)
+            spread = sum(node._expert_row_bytes(one_expert)
+                         for node in self._nodes()
+                         if hasattr(node, "_expert_row_bytes"))
         if cost > 0:
             rows = max(1, min(rows, int(self._quadrature_memory() // cost)))
+        if spread > 0:
+            rows = max(1, min(
+                rows, int(_latent.network._expert_budget() // spread)))
         return rows
 
     def _propagation_key(self):
@@ -3037,6 +3049,11 @@ class VGPNetwork(_GPModel):
                             plan["blocks"], quotas)
                     n_batches = _tf.constant(float(len(order)),
                                              _tf.float64)
+                    # an assignment draws each epoch's count, so the total
+                    # is this epoch's count over the epochs left, revised
+                    # every epoch (GeoScape's item 42)
+                    counted = {"total": done + len(order) * (epochs - epoch)} \
+                        if assignment else {}
                     if partition:
                         widest = [max(len(b["sets"][r]) for b in batches)
                                   for r in range(n_inputs)]
@@ -3166,7 +3183,7 @@ class VGPNetwork(_GPModel):
                             summed = None
                         done += 1
                         state["batches"] += 1
-                        report(done, bound=float(bound))
+                        report(done, bound=float(bound), **counted)
                     record["bound"].append(total)
                     record["seconds"].append(_time.perf_counter() - start_time)
                     self.training_log.append(total)
@@ -4093,7 +4110,7 @@ def _refine_passes(model, blocks, n_sim, split_on, include_noise,
             return model.predict_by_expert(*args, **kwargs,
                                            **(expert_options or {}))
     predict(blocks, n_sim=n_sim, include_noise=include_noise, where=keep)
-    report(0)
+    report(0, detail={"blocks": blocks.n_data})
 
     step = 0
     while True:
@@ -4111,6 +4128,14 @@ def _refine_passes(model, blocks, n_sim, split_on, include_noise,
             return blocks
 
         step += 1
+        # what the pass cuts, each block under the first reason that holds
+        # (the reasons overlap), so the three add up to the cut
+        detail = {"cut": int(_np.count_nonzero(mask)),
+                  "undecided": int(_np.count_nonzero(mask & undecided)),
+                  "crossed": int(_np.count_nonzero(
+                      mask & crossed & ~undecided)),
+                  "levelled": int(_np.count_nonzero(
+                      mask & uneven & ~undecided & ~crossed))}
         # `split` keeps the unsplit blocks first, then each parent's children
         # in sub-block order, which is how the mask follows them across
         children = blocks.rows_per_location
@@ -4122,15 +4147,14 @@ def _refine_passes(model, blocks, n_sim, split_on, include_noise,
             visit = visit & keep
         predict(blocks, n_sim=n_sim, include_noise=include_noise,
                 where=visit)
-        report(step)
+        detail["blocks"] = blocks.n_data
+        report(step, detail=detail)
         if verbose:
             print("pass %d: cut %d block(s) (%d undecided, %d crossed by a "
                   "mesh, %d to level a jump), %d now"
-                  % (step, int(_np.count_nonzero(mask)),
-                     int(_np.count_nonzero(undecided)),
-                     int(_np.count_nonzero(crossed & ~undecided)),
-                     int(_np.count_nonzero(uneven & ~undecided & ~crossed)),
-                     blocks.n_data))
+                  % (step, detail["cut"], detail["undecided"],
+                     detail["crossed"], detail["levelled"],
+                     detail["blocks"]))
 
 
 # What encodes the data in a trained VGP, and how each piece starts over.
