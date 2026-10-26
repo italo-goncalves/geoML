@@ -1,4 +1,4 @@
-## version 0.9.9 (in progress)
+## version 0.9.9
 * **A prediction batch is sized by what every GP node holds for its
 experts** (GeoScape's item 44). Since 0.9.4 a batch has been sized by the
 quadrature's memory -- what a GP node reading an uncertain input holds --

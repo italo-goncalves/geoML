@@ -76,7 +76,7 @@ precision everywhere. Realizations are *stored* as `float32` (half the disk,
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.8.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.9.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -113,7 +113,8 @@ why those modules never move.
 - **Long calls report and can be cancelled.** Inside
   `with geoml.progress(callback):` training, prediction, refinement,
   cross-validation and mesh sets report each unit they finish; the callback
-  raising cancels the call.
+  raising cancels the call. A refinement's events carry what each pass cut
+  in `detail`.
 - **Everything trainable is a `Parametric`** holding `RealParameter`s,
   constrained through their transforms and trained by Adam. Bounds a
   constructor clips to are in the catalogue.
@@ -266,7 +267,9 @@ in the catalogue.
   data does not support.
 - **Many experts.** When memory grows with their number, train and predict
   an expert at a time: `model.train_by_expert`, `model.predict_by_expert`,
-  and `refine(..., by_expert=True)` for a block model. It matched or beat
+  and `refine(..., by_expert=True)` for a block model; a prediction's
+  batches are sized to the device for the experts it computes at once, so
+  `prediction_batch_size` is a cap, not a size to tune. It matched or beat
   `train_svi` on CRPS and on a deposit's rock types in a third to a half of
   the device memory, a little behind on rmse on a smooth synthetic field.
   Fewer, larger experts scored better than many small ones at a fixed
