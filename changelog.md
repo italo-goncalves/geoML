@@ -1,4 +1,4 @@
-## version 0.9.10 (in progress)
+## version 0.9.10
 * **A prediction on a GPU measures its batches** (GeoScape's item 45).
 0.9.9 sized a batch from an estimate of what the GP nodes hold for their
 experts, and nothing else a batch holds is counted: the realizations drawn
