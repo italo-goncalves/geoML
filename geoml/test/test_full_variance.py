@@ -187,3 +187,69 @@ def test_the_default_budget_comes_from_the_device_s_memory(monkeypatch):
     assert model._quadrature_memory() == 5e8
     del model.options.quadrature_memory
     assert model._quadrature_memory() == 2e9
+
+
+def _batches_seen(model, monkeypatch, n=100):
+    """The locations of every batch a prediction of `n` points makes, and the
+    prediction."""
+    x = np.random.default_rng(5).uniform(0, 100, [n, 2])
+    target = geoml.data.PointData.from_array(x, ["X", "Y"])
+    sizes = []
+    batched = target.get_batched_coordinates
+
+    def recorded(rows):
+        sizes.append(len(rows))
+        return batched(rows)
+
+    monkeypatch.setattr(target, "get_batched_coordinates", recorded)
+    model.predict(target, n_sim=4)
+    return sizes, target
+
+
+def test_a_prediction_on_a_gpu_measures_its_batches(monkeypatch):
+    # GeoScape's item 45: the estimate counts what the GP nodes hold and
+    # nothing else, so on a GPU the first batches take a quarter of it, the
+    # second is measured, and the rest take the rows that fit 0.7 of the
+    # device's limit -- never more than the estimate; the answer is the
+    # same as with batches of any other size
+    import tensorflow as tf
+    model = _deep_model(True)
+    model.train_full(5)
+    model.options.prediction_batch_size = 40
+    plain, reference = _batches_seen(model, monkeypatch)
+    assert plain == [40, 40, 20]
+
+    # a row measured at 1 MB, and room for 25 of them
+    monkeypatch.setattr(_net, "_device_limit", lambda: 25e6 / 0.7)
+    monkeypatch.setattr(tf.config.experimental, "reset_memory_stats",
+                        lambda device: None)
+    monkeypatch.setattr(tf.config.experimental, "get_memory_info",
+                        lambda device: {"current": 0, "peak": 1e7})
+    sizes, measured = _batches_seen(model, monkeypatch)
+    assert sizes == [10, 10, 25, 25, 25, 5]
+    for path in ("v/prediction", "v/latent_variance"):
+        np.testing.assert_allclose(measured.values(path),
+                                   reference.values(path),
+                                   rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(measured.variables["v"].get_simulations(),
+                               reference.variables["v"].get_simulations(),
+                               rtol=1e-12, atol=1e-14)
+
+    # a measurement that leaves more room keeps the estimate
+    monkeypatch.setattr(_net, "_device_limit", lambda: 1e12)
+    sizes, _ = _batches_seen(model, monkeypatch)
+    assert sizes == [10, 10, 40, 40]
+
+
+def test_a_batch_out_of_memory_raises_with_its_size(monkeypatch):
+    import tensorflow as tf
+    model = _deep_model(True)
+
+    def exhausted(*args, **kwargs):
+        raise tf.errors.ResourceExhaustedError(None, None, "OOM")
+
+    monkeypatch.setattr(model, "predict_raw", exhausted)
+    x = np.random.default_rng(5).uniform(0, 100, [30, 2])
+    with pytest.raises(MemoryError, match="30 locations"):
+        model.predict(geoml.data.PointData.from_array(x, ["X", "Y"]),
+                      n_sim=4)

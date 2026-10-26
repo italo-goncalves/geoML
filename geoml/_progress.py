@@ -68,7 +68,8 @@ class Progress:
         Units expected, or `None` where the count is not known in advance.
         A cap rather than a promise wherever training may stop early, and
         an estimate revised each epoch where an epoch's count is drawn
-        (`train_by_expert` under `sampling="assignment"`).
+        (`train_by_expert` under `sampling="assignment"`), or once a
+        prediction on a GPU has measured what a batch holds.
     unit
         What `done` counts: `"iteration"`, `"epoch"`, `"batch"`, `"pass"`,
         `"fold"`, `"body"` or `"realization"`.
