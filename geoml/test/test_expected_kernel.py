@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """The expected kernel, E[k(h(x), h(y))] over jointly Gaussian inputs."""
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1078,12 +1080,24 @@ def test_a_reach_holds_the_field_s_strength(tmp_path):
     assert walk.reach == 0.5 and walk.parameters["amp"].fixed
     assert float(walk.parameters["amp"].get_value()) == pytest.approx(5.0)
 
-    # a reach the amplitude's bounds cannot hold is clipped, and says so
+    # a reach past the amplitude's training bounds is held as given, in
+    # silence, and the bounds of a trained amplitude stay where they were
     root = walk.walker.root
-    with pytest.warns(UserWarning, match="amp"):
-        clipped = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2),
-                                      reach=20.0)
-    assert float(clipped.parameters["amp"].get_value()) == pytest.approx(100)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        long = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2),
+                                   reach=20.0)
+        short = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2),
+                                    reach=1e-4)
+    assert float(long.parameters["amp"].get_value()) == pytest.approx(200)
+    assert float(short.parameters["amp"].get_value()) == pytest.approx(1e-3)
+    trained = geoml.latent.GPWalk(geoml.latent.BasicGP(root, size=2))
+    amp = trained.parameters["amp"]
+    assert not amp.fixed
+    assert float(amp._back_transform(amp.min_transformed)) == \
+        pytest.approx(0.01)
+    assert float(amp._back_transform(amp.max_transformed)) == \
+        pytest.approx(100)
 
 
 def _predicted_v(model):

@@ -121,6 +121,44 @@ def test_a_refinement_names_itself_over_the_predictions_it_makes():
     # marked by any later pass, as the field sharpens around its neighbours
     assert all(e.total is None for e in passes)
     assert len(passes) - 1 > blocks.max_levels
+    # GeoScape's item 42: each pass says what it split, the three reasons
+    # adding up to the cut, and how many blocks there are after it
+    assert passes[0].detail == {"blocks": 64}
+    count = 64
+    for e in passes[1:]:
+        d = e.detail
+        assert d["cut"] > 0
+        assert d["undecided"] + d["crossed"] + d["levelled"] == d["cut"]
+        count += d["cut"] * (8 - 1)
+        assert d["blocks"] == count
+
+
+def test_training_by_expert_counts_the_batches_it_draws():
+    """GeoScape's item 42: under an assignment each row draws its expert, so
+    an epoch's batch count is known only once drawn; the total is that
+    count over the epochs left, revised every epoch, and the last report
+    says it all."""
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 100, (400, 2))
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable("v", np.sin(x[:, 0] / 15))
+    ip = geoml.data.inducing.from_kmeans(data, 120, seed=0)
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.experts(ip, 3, seed=0),
+        transform=geoml.transform.Isotropic(20.0))
+    model = geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(),
+        geoml.latent.BasicGP(root, size=1),
+        options=geoml.models.GPOptions(verbose=False))
+    seen = []
+    with geoml.progress(seen.append):
+        model.train_by_expert(3)
+
+    assert all(e.task == "train" and e.unit == "batch" for e in seen)
+    assert [e.done for e in seen] == list(range(1, len(seen) + 1))
+    assert all(e.total is not None and e.total >= e.done for e in seen)
+    assert seen[-1].total == seen[-1].done
 
 
 def test_cross_validation_reports_folds_and_names_itself():
