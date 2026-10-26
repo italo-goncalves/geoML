@@ -1532,6 +1532,35 @@ def _expert_budget():
     return _EXPERT_SHARE * (device if device is not None else 2.0 ** 34)
 
 
+# A prediction on a GPU measures what a batch holds rather than trusting
+# the estimate (`_expert_budget`, the quadrature's): the estimate counts
+# the GP nodes' covariances and chunks, and nothing else a batch holds --
+# the realizations drawn at certain inputs (`_shared_prior_simulate`, a
+# `[rows, size * (J + 1)]` array per expert and per draw), the operation
+# nodes, a likelihood mixture's populations. On a GeoScape network (four GP
+# nodes, `Multiply`, a `LikelihoodMixture`, 32 experts) a row held 15.5 MB
+# where the estimate said 4.6, and a batch of 1477 rows ran a 16 GB GPU
+# out of memory (GeoScape's item 45, 2026-10-26). The first batches take
+# `1 / _PROBE_FRACTION` of the estimate -- it was a third of the truth
+# there -- the second of them is measured, the first carrying the call's
+# setup, and the rest take the rows that fit `_MEASURED_SHARE` of the
+# device's limit beside what it holds, never more than the estimate
+_PROBE_FRACTION = 4
+_MEASURED_SHARE = 0.7
+
+
+@_functools.lru_cache(maxsize=None)
+def _device_limit():
+    """The memory TensorFlow can use on the GPU, as it reports it, or None
+    where no GPU is visible."""
+    if not _gpu_visible():
+        return None
+    from tensorflow.python.client import device_lib
+    limits = [d.memory_limit for d in device_lib.list_local_devices()
+              if d.device_type == "GPU"]
+    return float(limits[0]) if limits else None
+
+
 def _quadrature_xla():
     """Whether a quadrature or pathwise chunk is compiled with XLA."""
     # On the CPU only. On the GPU an XLA-compiled chunk read a null pointer

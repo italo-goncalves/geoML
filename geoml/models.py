@@ -3570,13 +3570,19 @@ class VGPNetwork(_GPModel):
         a caller can write each result back to the location it came from.
         """
         prediction_rows = self._prediction_rows()
-        batch_size = max(1, prediction_rows // newdata.rows_per_location)
+        per_location = newdata.rows_per_location
+        batch_size = max(1, prediction_rows // per_location)
         rows = _np.arange(newdata.n_data)
         if where is not None:
             where = _np.asarray(where)
             rows = _np.flatnonzero(where) if where.dtype == bool else where
-        batch_id = [rows[batch] for batch in
-                    self.options.batch_index(len(rows), batch_size=batch_size)]
+        # on a GPU, where more than one batch is needed, the estimate is
+        # checked against what a batch holds (`network._PROBE_FRACTION`)
+        network = _latent.network
+        measure = network._device_limit() is not None \
+            and len(rows) > batch_size
+        size = max(1, batch_size // network._PROBE_FRACTION) if measure \
+            else batch_size
 
         # Refresh the posterior once (the parameters are fixed during
         # prediction) and snapshot each node's state into Variables, so the
@@ -3591,35 +3597,75 @@ class VGPNetwork(_GPModel):
             else:
                 self._refresh(self.options.jitter)
 
-        for i, batch in enumerate(batch_id):
+        start, i = 0, 0
+        while start < len(rows):
+            batch = rows[start:start + size]
+            # revised once the batches are measured
+            total = i + int(_np.ceil((len(rows) - start) / size))
             if self.options.verbose:
                 print("\rProcessing batch %s of %s       "
-                      % (str(i + 1), str(len(batch_id))), end="")
+                      % (str(i + 1), str(total)), end="")
 
             # `i` batches are done, and what `done` counts is what a cancel
             # here would leave written: the consumer writes each batch back
             # before asking for the next, so the report for batch `i` is made
             # once batch `i - 1` has landed in the container.
-            _progress.emit("predict", i, len(batch_id), "batch")
+            _progress.emit("predict", i, total, "batch")
 
             data_coords, splits = newdata.get_batched_coordinates(batch)
             data_var, _ = newdata.get_batched_variance(batch)
 
             x = _tf.constant(data_coords, _tf.float64)
             x_var = _tf.constant(data_var, _tf.float64)
+            probe = measure and i == 1
+            if probe:
+                _tf.config.experimental.reset_memory_stats("GPU:0")
+                base = _tf.config.experimental.get_memory_info(
+                    "GPU:0")["current"]
             # under the rule the state was refreshed under: a caller that
             # reads the leaves itself (`measurement_batches`,
             # `responsibilities`) would otherwise run them under the module's
             # default against a refresh made under the model's
-            with self._propagation(rows=prediction_rows):
-                out = call(x, x_var, splits, batch) if with_rows \
-                    else call(x, x_var, splits)
+            try:
+                with self._propagation(rows=prediction_rows):
+                    out = call(x, x_var, splits, batch) if with_rows \
+                        else call(x, x_var, splits)
+            except _tf.errors.ResourceExhaustedError as error:
+                # TensorFlow has retried each allocation before failing, which
+                # on a graph of many branches can take minutes; what the
+                # caller needs is the size that failed
+                raise MemoryError(
+                    "a prediction batch of %d locations (%d rows) ran out of "
+                    "the device's memory; set a smaller "
+                    "GPOptions(prediction_batch_size=...), or predict by "
+                    "expert" % (len(batch), len(data_coords))) from error
+            if probe:
+                size = self._measured_batch(base, len(data_coords),
+                                            batch_size, per_location)
+                measure = False
             yield batch, out
+            start += len(batch)
+            i += 1
 
-        _progress.emit("predict", len(batch_id), len(batch_id), "batch")
+        _progress.emit("predict", i, i, "batch")
 
         if self.options.verbose:
             print("\n")
+
+    @staticmethod
+    def _measured_batch(base, n_rows, cap, per_location):
+        """The locations a prediction batch takes once one batch of `n_rows`
+        rows has been measured on the GPU from `base` bytes held: as many as
+        fit `network._MEASURED_SHARE` of the device's limit beside what it
+        holds now, never more than `cap`, the estimate."""
+        info = _tf.config.experimental.get_memory_info("GPU:0")
+        per_row = (info["peak"] - base) / max(1, n_rows)
+        if per_row <= 0:
+            return cap
+        network = _latent.network
+        room = network._MEASURED_SHARE * network._device_limit() \
+            - info["current"]
+        return max(1, min(cap, int(room // per_row) // per_location))
 
     def predict_measurements(self, newdata: "_data._SpatialData",
                              n_sim: int = 20,

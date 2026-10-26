@@ -1,3 +1,27 @@
+## version 0.9.10
+* **A prediction on a GPU measures its batches** (GeoScape's item 45).
+0.9.9 sized a batch from an estimate of what the GP nodes hold for their
+experts, and nothing else a batch holds is counted: the realizations drawn
+at certain inputs (`_shared_prior_simulate`, a `[rows, size * (J + 1)]`
+array per expert and per draw, every expert's a branch of one graph), the
+operation nodes, a likelihood mixture's populations. On a GeoScape network
+-- four GP nodes, `Linear`, two `Multiply`, a `LikelihoodMixture` over a
+composition beside a rock type, 32 experts -- a row held 15.5 MB where the
+estimate said 4.6, and a plain `predict` onto its 4585 data took batches of
+1477 rows, about 23 GB on a 16 GB GPU. Now, where a prediction needs more
+than one batch and a GPU is visible, its first two batches take a quarter
+of the estimate, the second is measured (`get_memory_info`'s peak), and
+the rest take the rows that fit 0.7 of the device's limit beside what it
+holds, never more than the estimate. That Run now predicts in 9 batches,
+two of 369 locations and seven of about 550, at a 9.5 GB peak, in 132 s
+against 141 s at a hand-picked 300 rows; the batching never changes the
+answer. On the CPU the estimate stands. And the failure that looked like a
+hang, 37 minutes on "batch 1 of 4": TensorFlow retries every allocation
+for a while before failing it, and on a graph of 32 experts' branches the
+failures took minutes each to come back, the GPU idle meanwhile. A batch
+that does run out now raises a `MemoryError` naming its size, once
+TensorFlow gives up.
+
 ## version 0.9.9
 * **A prediction batch is sized by what every GP node holds for its
 experts** (GeoScape's item 44). Since 0.9.4 a batch has been sized by the

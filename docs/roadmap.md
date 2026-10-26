@@ -1052,7 +1052,81 @@ a sum of Gaussian outputs is Gaussian, a product is not, so the weighted
 form trains on realizations like any `Multiply` leaf). Either way the
 catalogue must offer it, since GeoScape builds networks from it. Gate: the
 preset gives the hand-wired network's bound and prediction to the bit,
-and trains under `train_svi` and `train_by_expert`.
+and trains under `train_svi` and `train_by_expert`. The weighted form
+may be better served by the Gaussian node of the next item, which would
+make that half of this preset unnecessary.
+
+**M–L — Spatially varying weights as a Gaussian node (the offset taper)**
+(requested 2026-10-26, from the research project `OneDrive\Claude\Research\
+Deep taper\`, report `report/main.pdf`, run against 0.9.8 at `f83603e`).
+Today a combination whose weights vary in space is a `Multiply` of a
+weights node and the values -- a product, not Gaussian, so a leaf like it
+trains on `training_samples` realizations, passes no inducing points on,
+and nothing can sit on it.
+- **The model**: for output m, `z_m = sum_j a_mj g_mj f_j`, with shared
+  basis GPs `f_j` (covariance `k_j`), an LMC matrix `a`, and an
+  *offset-normalized* weight `g_mj = (sqrt(kappa_j) xi_j + w_mj) / d_mj`
+  -- a random global intercept `xi_j` shared by the outputs of basis j, the
+  weight GP `w_mj` (mean `mu`, covariance `C`), `d_mj` making the weight's
+  second moment one everywhere. Its covariance is closed:
+  `sum_j a_mj a_m'j k_j T_j`, `T_j = (kappa_j + mu_mj mu_m'j + [m = m']
+  C_mj) / (d_mj d_m'j)` (the report's Proposition 7, checked against 1e6
+  Monte Carlo draws, PSD in 100 random configurations), and with `w = 0`
+  or `kappa -> infinity` it is exactly the LMC. Proposition 8 builds a
+  Gaussian process with that covariance from ordinary GPs, so the node is
+  a GP node: inducing points pass through, nodes stack on it, and no
+  Monte Carlo is needed. It matches the product model's first two moments
+  jointly, so its mean is the product model's best linear predictor; it
+  drops the product's heavy tails where the weights are uncertain
+  (excess kurtosis up to 6). Uncertain weights shrink the outputs'
+  cross-correlation toward `kappa / (kappa + 1)` instead of inventing it.
+- **Measured in the report**, on Jura's seven metals (one split, three
+  seeds; the research's own exact models, so not yet under geoML's
+  likelihoods and warpings):
+  - **RMSE/sd** at J = 3, 5 and 7 bases: the offset taper 0.975, 0.966
+    and 0.960; the exact LMC 0.991, 0.992 and 0.989; geoML's
+    `Multiply` network 0.969 at J = 3 and 1.037 at J = 7 (56 GP nodes,
+    worse than kriging).
+  - **CRPS/sd** for the offset taper: 0.471, 0.462 and 0.460. At J = 7 it
+    is the best exact model on all three scores.
+  - **Against the LMC with the same bases**, both tapers win on squared
+    error and CRPS, the bootstrap intervals excluding zero.
+  - **Against seven independent GPs**, nothing wins decisively.
+  - **The unnormalized (linear) weight** has the highest objective and the
+    worst NLPD: it overfits the variance, which the normalization stops.
+  - **On the folded-vein benchmark**, a bank of four fixed orientations
+    selected by such weights, its range cap at 30 m, beat the stationary
+    model with 5 holes (IoU 0.842 against 0.816). The offset taper scored
+    0.849 and `GPWalk` 0.859. With 3 near-vertical holes only `GPWalk`
+    beat the stationary model, narrowly.
+- **What to settle in geoML**:
+  - **Where the inducing points go.** The report's option A puts them on
+    the outputs, evaluating the covariance with the weights' moments at
+    the inducing points and the data, which needs the weights node's
+    inducing points propagated to it. Option B puts them on the shared
+    bases, which is cheaper when there are many outputs, the weights'
+    uncertainty carried by residuals with a non-stationary covariance.
+  - **The predictive variance's second moment**: by Isserlis for these
+    forms.
+  - **The parents taken as independent**, as `Multiply` takes them,
+    stated as the approximation it is.
+  - **The weights enter through the moments of `q(w)`**, as every
+    expected-kernel node's input does, so the bound is not comparable with
+    a `Multiply` network's. The report's tapered models reached much
+    higher objectives without better maps: choose on held-out data.
+  - **The catalogue's declaration**: `_GAUSSIAN` true, its
+    `propagates_inducing`, and a stand-in in `test_catalogue.py`.
+- **Steps and gates**:
+  1. The report's Propositions 7 and 8 as unit tests: the covariance
+     against draws of the generative model, positive definiteness, and
+     the LMC limit to 1e-11 (its scripts are
+     `verification/prop7_svc_taper.py` and `prop8_gaussian_construction.py`).
+  2. The node, option A first.
+  3. Jura at J = 3, 5 and 7 under geoML's own likelihood and warping,
+     against the `Multiply` network and the LMC, scored on the validation
+     set: the report's ordering holds, or the item stops there.
+  4. The folded-vein benchmark, and a training time against `Multiply`'s.
+  5. The catalogue and the skill.
 
 **What the gridded-GP research gives geoML as it stands** (assessed
 2026-10-14 from the research project `OneDrive\Claude\Research\Kronecker
@@ -2122,6 +2196,74 @@ in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
 tape cuts peak GPU memory 3–4× and the step 1.5×.
 
+**L — A conjugate trainer for shallow single-expert networks** (requested
+2026-10-26). One expert, and the variational parameters leave training:
+what made the natural-gradient step fail for the experts (Settled by
+measurement, 2026-10-09) was the blend, which is not conjugate, and a
+single expert has none. The user's proposal: site updates, conjugate
+gradients and gradient-free training together; the parts, as assessed:
+- **q eliminated.** Under a Gaussian likelihood (its warping fixed for the
+  solve) the optimal q(u) is closed form -- Titsias's collapsed bound --
+  and nothing is trained but the hyperparameters. Under any other
+  likelihood with a per-datum expected log-likelihood (the indicators,
+  Laplace, Huber, the mixtures), CVI site updates, conjugate-shaped once
+  there is no blend: tens of iterations at steps near 1 where the
+  likelihood is log-concave, damped where it is not (`LikelihoodMixture`).
+  Their per-datum derivatives in the marginal mean and variance come from
+  autodiff of `log_lik`, with no tape through a Cholesky.
+- **Operation nodes stay conjugate.** `Add`, `Linear` and
+  `LinearCombination` over GP nodes keep the model jointly Gaussian, so q
+  is joint over every node's inducing values -- a block system, still
+  closed -- which covers LMC-style models.
+- **Out of reach.** Deep networks: a GP reading another's uncertain output
+  (`GPWalk`, concatenation) has no conjugate update for the hidden layer,
+  the expected kernel coupling it nonlinearly; `Multiply` and
+  `GaussianMixture` leaves are not Gaussian. They keep the current
+  machinery, so this is a second trainer, not a replacement.
+- **Size.** Dense Cholesky takes one expert to about 1-2e4 inducing
+  points: GeoScape's 6605 points in seconds, 2e4 in tens of seconds and
+  3.2 GB; the data side, `sum K_uf D^-1 K_fu`, accumulates over row
+  batches, so N is not the limit. Conjugate gradients only help past that,
+  and only matrix-free (the kernel recomputed per product, memory O(m)),
+  since an unstructured K has no fast product the way a grid has; its
+  conditioning (up to 1e9 recorded) calls for a preconditioner (pivoted
+  Cholesky), and the bound's log-determinant then comes from stochastic
+  Lanczos, a noisy objective that also weakens the reproducibility
+  contract. Cholesky first.
+- **The hyperparameters.** Once q is eliminated the bound is a
+  deterministic, smooth function of them, whose gradient through a
+  Cholesky is cheap and holds no variational parameters on the tape:
+  L-BFGS first, as SGPR does. Bayesian optimization earns its place where
+  gradients are gone (with CG) or the objective is multimodal, and scales
+  poorly past about 20 dimensions -- a shallow Jura LMC already has 30+
+  (ranges per node and dimension, warping links, noise, `Linear`
+  weights). It will not find better optima: the bound was measured
+  unimodal along the range on Jura and flat on Walker (Settled by
+  measurement, 2026-09-03), so its value is speed and robustness. The MAP
+  priors join either objective as they are.
+- **What it ends, if it holds:** the experts' slots, weight sweeps and
+  late rise, and the optimizer's decaying clock (the next item), for every
+  model it covers. It agrees with the measurement that fewer, larger
+  experts scored better than many small ones at a fixed total of inducing
+  points.
+- **Steps and gates**:
+  1. A prototype `train_conjugate` for shallow single-expert networks:
+     the collapsed q under Gaussian likelihoods, CVI otherwise, L-BFGS on
+     the hyperparameters; BO as a second arm on the same objective.
+  2. Against `train_full` and `train_by_expert` on Walker, Jura, Tom East
+     and GeoScape's shallow Macpass network (the 2026-10-25 Run's, one
+     expert of its 6605 points): wall time to equal held-out scores
+     (rmse, CRPS, goodness), peak memory, the spread over seeds. It goes
+     on only if it wins time or memory at equal scores.
+  3. Only if the single expert holds at Macpass's size: matrix-free CG for
+     larger m, with BO there, since CG takes the gradients away.
+  4. A deep node met by the trainer refuses with a message, or falls back
+     to the gradient path for the non-conjugate part -- decided at step 1.
+  5. The catalogue (`fit.train` lists the trainers GeoScape offers),
+     persistence (nothing new in a save if q is recomputed from the data
+     and the hyperparameters on load -- decide), progress (an evaluation
+     or an iteration as the unit) and the reproducibility page.
+
 **M — The optimizer's defaults, measured** (requested 2026-10-15). Every
 trainer builds the same optimizer -- Adam with AMSGrad at 1e-2, decaying
 0.999 a step (`ExponentialDecay(1e-2, 1, 0.999)`, written out in each
@@ -2943,6 +3085,20 @@ Run's sizes (four GP nodes, 32 experts of 209-257 points in 3-D): out of a
 16 GB GPU at 10000 rows by expert and 5000 with every expert, 23-26 bytes
 an element over about 1 GB held throughout; sized to 0.4 of the device,
 both finish at about 6.7 GB. The changelog has the rest.)
+
+(Item 45, asked 2026-10-26: **done the same day, for 0.9.10.** Item 44's
+estimate counted only the GP nodes' covariances; reproduced with the Run's
+own fitted model, a row held 15.5 MB against 4.6 estimated, almost all of
+it the realizations drawn at certain inputs (`_shared_prior_simulate`,
+32 experts' draws as branches of one graph). Rather than a cost for every
+node, a prediction on a GPU now measures its second batch and sizes the
+rest to 0.7 of the device's limit, never above the estimate: the Run
+finishes in 132 s at a 9.5 GB peak. The "hang" was TensorFlow retrying
+each failed allocation, minutes across the branches, the GPU idle; a batch
+that still runs out raises a `MemoryError` naming its size. Not done: the
+CPU keeps the estimate -- the resident high-water mark counts the first
+batch's tracing -- which leaves the CPU item filed 2026-10-24 under
+section 1 open.)
 
 (Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
 `description` on every entry, read off the docstring between its summary
