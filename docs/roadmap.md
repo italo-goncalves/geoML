@@ -1029,6 +1029,97 @@ Open, in the order they matter:
    `GradientConstrainedInput` (and directional data), `RadialTrend`,
    `GaussianMixture`.
 
+**L–XL — Experts as blocks of one GP, conditioned in sequence** (requested
+2026-10-26; theory only, nothing measured). The user's proposal: with the
+Fourier-feature prior draw and pathwise conditioning, condition the
+experts one at a time in a random order -- the first conditions the prior
+draws, its conditioned realizations are the prior for the next -- as
+sequential Gaussian simulation does, a whole expert at a time; no blend,
+and experts that are not neighbours treated as independent, a Vecchia
+approximation in blocks. The assessment:
+- **The sequence is sound, but not over today's experts.** An expert's
+  posterior is a GP conditioned on m pseudo-observations at its inducing
+  points with noise D (`k (K + D)^-1`, the sites), so the sequence is the
+  chain rule `p(f_1..f_J | sites) = prod_j p(f_j | f_<j, sites)`, and done
+  in full it draws from the GP conditioned on every expert's sites
+  jointly. The sites as trained explain the data through the *blend*, each
+  expert seeing its data alone; conditioning on all of them counts the
+  data twice where experts overlap and partly along every edge. The 0.9.4
+  coupling measurement says so: sequential conditioning on an earlier
+  expert's values kept 0.72 of the variance and pulled 74% of the means
+  off (the expert-coupling list under "Propagate individual realizations"
+  below). So it is a model change -- the experts become blocks of one GP,
+  trained as such -- not a new way to draw the realizations of the
+  present one.
+- **Two corrections to the sequence as proposed.** (1) A block
+  conditioned on the earlier draws and on its *own* sites only moves
+  information forward: an earlier block never sees a later one's data a
+  metre past its edge, and every edge is informed from whichever side the
+  order put first -- a seam. Sequential simulation avoids it by
+  conditioning each node on all the data in its neighbourhood, whatever
+  the path; in blocks, `f_j` given the earlier neighbours' drawn values
+  *and* every neighbour's sites. (2) The non-neighbours are conditionally
+  independent given the blocks between them (the screening effect), not
+  independent; where the range spans several expert widths the
+  neighbourhood does not screen and the long lags come out too smooth, as
+  sequential simulation does with too small a search -- a coarse-to-fine
+  order, or the long structure in a single-expert node of its own.
+- **An exact version, independent of the order.** The pathwise draw from
+  the joint posterior is `f_0 + K_xZ (K_ZZ + D)^-1 (y_sites - f_0(Z) -
+  eps)`, `Z` every expert's inducing points. Solving that system an expert
+  block at a time -- each block's Cholesky already cached, the kernel to
+  its neighbours computed on the fly -- is block Gauss-Seidel, and one
+  sweep in a random order is exactly the proposed sequence with the prior
+  kernel. More sweeps, or conjugate gradients with the experts as a block
+  preconditioner, converge to the exact joint draw; what is stored is one
+  weight vector per expert and realization (`[m, S]`), and any location
+  is `phi(x) w + sum_near k(x, Z_j) v_j` -- batch-invariant, the features'
+  residual included. One sweep then serves as the cheap approximation,
+  several as the exact answer.
+- **Memory is not the argument.** Item 45's realization memory is how the
+  blend is written (`_shared_prior_simulate` builds `[rows, features]`
+  per expert, 32 branches at once), not blending: the weight form above
+  with the experts' terms accumulated one at a time -- already "kept in
+  reserve" under the batched experts -- would save most of it with no
+  change of model; the rescale's per-row norm over the features is what
+  forces the large arrays and would have to be had another way.
+- **What the model change would buy.** No blend: the 0.93 variance ratio
+  the experts' disagreeing means leave goes, and with it the rescale. The
+  bound splits by expert under a local (Vecchia) data term, each row
+  depending on its block and the neighbours only, so Proposition 1 holds
+  and `train_by_expert`'s expert sampling is unbiased, which the blend
+  prevents today. And conjugacy returns: the conjugate trainer (section
+  2) is single-expert because the blend is not conjugate, and block site
+  updates become possible.
+- **What it costs.** A new model: an option or a new submodule, every
+  expert retrained, old saves keeping the blend -- **if the gains are
+  significant, worth a breaking change or a submodule of its own** (the
+  user, 2026-10-26). The inducing sets a partition rather than overlapping
+  (`grid_experts`, `experts(overlap=)`). Training needs every data point's
+  variance under the joint posterior, which must be local (the
+  neighbourhood's sites) or it is the whole M-point problem. In 3-D,
+  conditioning on whole neighbouring experts is about `(27 m)^3` a block,
+  worse than the blend, unless the conditioning sets are cut to the
+  nearest points. The moment path the deep networks train on needs the
+  same local treatment, and the order (random, or maxmin) is a new source
+  of approximation error in the one-sweep version.
+- **Prior art** (cited from memory, to be checked): Vecchia (1988);
+  Guinness (2018, Technometrics), grouping and orderings for Vecchia, a
+  random or maxmin order beating a coordinate one; Katzfuss & Guinness
+  (2021, Statistical Science), the general Vecchia framework; Dimitrakopoulos
+  & Luo (2004, Mathematical Geology), generalized sequential Gaussian
+  simulation of groups of nodes; Wu, Pleiss & Cunningham (2022), the
+  variational nearest-neighbour GP, the same idea inside a sparse
+  variational GP; Wilson et al. (2020, 2021), pathwise conditioning; Lin
+  et al. (NeurIPS 2023), pathwise posterior samples by iterative solvers.
+- **Gates, if pursued**, on Walker in 2-D first: the blend; one block
+  sweep in a random order; k sweeps and CG; the exact joint GP on the
+  same sites -- every arm but the blend retrained under the joint model.
+  The realizations' variance against the reported one, seams at the block
+  edges, the long-lag variogram against the exhaustive field, held-out
+  rmse/CRPS/goodness, memory and time per realization. It goes on only if
+  it beats the blend on scores or memory at equal time.
+
 **S–M — Network presets** (requested 2026-10-14). Common patterns that
 today take several nodes wired by hand, offered as one:
 - `ReduceSum(parent)`: the sum of a node's outputs into one, which today
