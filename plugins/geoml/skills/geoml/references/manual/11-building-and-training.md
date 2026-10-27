@@ -103,10 +103,11 @@ The second is to train in *rounds*. Another `train_full` call continues
 where the last one stopped, so predict, look and resume is the intended
 rhythm rather than a trick.
 
-Two `GPOptions` are worth knowing beyond the defaults. `jit_predict=True`
-compiles prediction with XLA, measured at 3–5× on big grids, and is off by
-default because XLA refuses what it cannot compile instead of falling
-back. `training_samples` sets the Monte Carlo width of the ELBO estimate,
+Two `GPOptions` are worth knowing beyond the defaults. `jit_predict`
+compiles prediction with XLA, measured at 3–5× on big grids, and is on for
+a new model: a graph XLA refuses is predicted without it, with a warning,
+and on a GPU a network reading an uncertain input predicts without it
+whatever the option says. `training_samples` sets the Monte Carlo width of the ELBO estimate,
 and the default serves. Raise it only when the curve is too noisy to read.
 
 ## 11.3 Saving, loading, resuming
