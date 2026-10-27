@@ -141,6 +141,12 @@ def test_the_workflow_names_training_and_predicting_by_expert(built):
     params = {p["name"]: p for p in built["functions"][
         workflow["predict"]["measurements"]]["params"]}
     assert params["n_nodes"]["default"] == 32
+    # item 46: measurement draws and a node's prediction by expert
+    for name in (workflow["predict"]["measurements"],
+                 workflow["predict"]["node"]):
+        params = {p["name"]: p for p in built["functions"][name]["params"]}
+        assert params["by_expert"]["default"] is False
+        assert params["expert_options"]["default"] is None
     for name in (trainer, workflow["predict"]["by_expert"],
                  workflow["predict"]["measurements"]):
         assert built["functions"][name]["description"]

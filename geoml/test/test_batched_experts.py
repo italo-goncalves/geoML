@@ -292,6 +292,24 @@ def test_prediction_in_slots_is_prediction_by_set():
     assert np.max(diff) < 0.05
 
 
+def test_a_batch_out_of_memory_by_expert_does_not_say_predict_by_expert(
+        monkeypatch):
+    import tensorflow as tf
+    m = _model()
+
+    def exhausted(*args, **kwargs):
+        raise tf.errors.ResourceExhaustedError(None, None, "OOM")
+
+    monkeypatch.setattr(m, "predict_raw", exhausted)
+    target = geoml.data.PointData.from_array(_targets(5), ["X", "Y"])
+    with pytest.raises(MemoryError) as raised:
+        m.predict_by_expert(target, n_sim=4)
+    assert "prediction_batch_size" in str(raised.value)
+    assert "predict by expert" not in str(raised.value)
+    with pytest.raises(MemoryError, match="or predict by expert"):
+        m.predict(target, n_sim=4)
+
+
 def test_a_prediction_by_expert_sizes_its_batches_to_the_device(
         monkeypatch):
     """GeoScape's item 44: every GP node holds `[width, rows, m, d + size]`
@@ -304,10 +322,18 @@ def test_a_prediction_by_expert_sizes_its_batches_to_the_device(
     m.train_full(5)
     leaf = m.leaves[0]
     n_ip = [int(n) for n in leaf.root.n_ip]
+    # the covariances, `[rows, m, d + size]`, and the shared prior draw's
+    # features, `[rows, J + 1]` per expert times its output and two, and the
+    # blend's per output (GeoScape's item 45, by expert)
+    features = max(1024, 2 * max(n_ip)) + 1
+
+    def cost(points, experts):
+        return 32 * (points * (2 + 1) + features * (experts * 3 + 3))
+
     with m._propagation():
-        assert leaf._expert_row_bytes() == 32 * sum(n_ip) * (2 + 1)
-        assert leaf._expert_row_bytes(one_expert=True) == \
-            32 * max(n_ip) * (2 + 1)
+        assert leaf._feature_kernel()
+        assert leaf._expert_row_bytes() == cost(sum(n_ip), len(n_ip))
+        assert leaf._expert_row_bytes(one_expert=True) == cost(max(n_ip), 1)
     whole = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
     m.predict_by_expert(whole, n_sim=5)
 
@@ -319,7 +345,8 @@ def test_a_prediction_by_expert_sizes_its_batches_to_the_device(
     small = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
     info = m.predict_by_expert(small, n_sim=5)
     # under the slots the call entered, padded to the largest set
-    assert int(0.4 * 1e7 // (32 * info["slots"] * max(n_ip) * 3)) in rows
+    assert int(0.4 * 1e7 // cost(info["slots"] * max(n_ip), info["slots"])
+               ) in rows
     assert max(rows) < len(_targets())
     np.testing.assert_allclose(small.values("v/prediction"),
                                whole.values("v/prediction"),
@@ -391,16 +418,113 @@ def test_training_by_expert_stops_once_the_bound_settles():
     assert m.train_by_expert(5, batch_size=50)["bound"] == []
 
 
-def test_cross_validation_by_expert():
+def test_cross_validation_by_expert(monkeypatch):
     m = _model()
     m.train_full(10)
     labels = (m.data.coordinates[:, 0] > 50).astype(int)
     m.data.add_metadata("fold", labels)
+    # the folds' measurements drawn by expert too (GeoScape's item 46)
+    asked = []
+    batches = geoml.models.VGPNetwork.measurement_batches
+
+    def recorded(self, *args, **kwargs):
+        asked.append(kwargs.get("by_expert"))
+        return batches(self, *args, **kwargs)
+
+    monkeypatch.setattr(geoml.models.VGPNetwork, "measurement_batches",
+                        recorded)
     oof, scores = geoml.models.cross_validate(
         m, method="by_expert", epochs=2,
         expert_options=dict(batch_size=50), n_sim=5)
+    assert asked == [True, True]
     assert np.all(np.isfinite(oof.values("v/prediction")))
     assert np.all(np.isfinite(scores["rmse"]))
+
+
+def test_the_weights_are_carried_to_the_locations_in_chunks(monkeypatch):
+    """The data's expert weights reach the locations a chunk of rows at a
+    time -- taken whole they held rows x neighbours x experts and took a
+    GeoScape refinement past 24 GB -- and the groups are the same."""
+    m = _model()
+    m.train_full(5)
+    target = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    whole = m._expert_groups(target, None)
+    monkeypatch.setattr(geoml.models, "_CARRIED_ROWS", 7)
+    chunked = m._expert_groups(target, None)
+    assert [key for key, _ in whole[0]] == [key for key, _ in chunked[0]]
+    for (_, a), (_, b) in zip(whole[0], chunked[0]):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(whole[3], chunked[3])
+
+
+def test_measurements_by_expert_are_the_measurements_at_full_coverage():
+    """GeoScape's item 46: measurement draws by expert, which with every
+    expert active are the draws, bit for bit by set and to rounding in
+    slots; at the default coverage close to them, each location once."""
+    m = _model()
+    m.train_full(10)
+    target = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    a = m.predict_measurements(target, n_sim=5, n_nodes=4)["v"]
+    b = m.predict_measurements(
+        target, n_sim=5, n_nodes=4, by_expert=True,
+        expert_options=dict(coverage=1.0, slots=False))["v"]
+    np.testing.assert_array_equal(a, b)
+    c = m.predict_measurements(target, n_sim=5, n_nodes=4, by_expert=True,
+                               expert_options=dict(coverage=1.0))["v"]
+    np.testing.assert_allclose(a, c, rtol=1e-10, atol=1e-12)
+
+    events = []
+    with geoml.progress(events.append):
+        d = m.predict_measurements(target, n_sim=5, n_nodes=4,
+                                   by_expert=True)["v"]
+    assert d.shape == a.shape and np.all(np.isfinite(d))
+    assert np.max(np.abs(d - a)) < 0.05
+    groups = [e for e in events if e.task == "predict_by_expert"]
+    assert groups and groups[-1].done == groups[-1].total == len(groups)
+
+    # a subset, each location of it once, in groups of their own experts
+    where = np.arange(target.n_data) % 3 == 0
+    seen = []
+    for rows, samples in m.measurement_batches(target, n_sim=5, n_nodes=4,
+                                               where=where, by_expert=True):
+        seen.append(rows)
+        np.testing.assert_allclose(samples["v"], d[rows], rtol=1e-10,
+                                   atol=1e-12)
+    seen = np.concatenate(seen)
+    assert sorted(seen.tolist()) == np.flatnonzero(where).tolist()
+
+
+def test_a_node_predicted_by_expert_is_the_node_at_full_coverage():
+    """GeoScape's item 46: a node's prediction by expert."""
+    m = _model(deep=True)
+    m.train_full(5)
+    inner = m.leaves[0].parent
+    a = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    b = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    c = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    m.predict_node(inner, a, n_sim=5)
+    m.predict_node(inner, b, n_sim=5, by_expert=True,
+                   expert_options=dict(coverage=1.0, slots=False))
+    m.predict_node(inner, c, n_sim=5, by_expert=True)
+    name = str(inner.name)
+    for path in ("0/latent_mean", "0/latent_variance"):
+        np.testing.assert_array_equal(a.values(name + "/" + path),
+                                      b.values(name + "/" + path))
+        assert np.all(np.isfinite(c.values(name + "/" + path)))
+    np.testing.assert_array_equal(_parts(a.variables[name]),
+                                  _parts(b.variables[name]))
+    assert np.max(np.abs(a.values(name + "/0/latent_mean")
+                         - c.values(name + "/0/latent_mean"))) < 0.05
+    # every expert again: the trace by expert left the plain one as it was
+    d = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    m.predict_node(inner, d, n_sim=5)
+    np.testing.assert_array_equal(_parts(a.variables[name]),
+                                  _parts(d.variables[name]))
+
+
+def _parts(variable):
+    return np.stack([np.asarray(part.simulations)
+                     for part in variable.components.values()], axis=1)
 
 
 def test_refinement_by_expert():

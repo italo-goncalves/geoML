@@ -1,3 +1,67 @@
+## version 0.9.11
+* **A prediction by expert is measured group by group, and the estimate
+counts the realizations** (GeoScape's item 45, again). 0.9.10 measured a
+batch only where a call needed more than one, and `predict_by_expert`
+makes a call of each group of experts, every one of which the estimate
+took whole: on the Run behind item 45, predicted by expert onto its
+Conditioning Set and refined into a block set, the first group of 1672
+rows ran a 16 GB GPU out of memory as one batch, and the refinement's
+group 25 of 56 the same way. The estimate left out what the shared prior
+draw holds at certain inputs -- `[rows, J + 1]` features per expert and per
+output, J at least 1024 -- which is most of a row there: 11.5 MB measured
+against 3.0 estimated, in 19 slots. Each GP node now counts those arrays
+at the same 32 bytes an element (`BasicGP._expert_row_bytes`; 15.0 MB a
+row there), and a
+prediction on a GPU measures its second batch wherever its rows make more
+than one probe batch, a call the estimate takes whole included. The
+prediction by expert finishes in 63 s at a 4.8 GB peak; the refinement
+passes the group that failed, finishing its second prediction (203471
+blocks) at a 5.5 GB peak, a third slower than 0.9.10 ran up to there. A
+plain `predict` takes smaller batches than 0.9.10 measured, the estimate
+now being the larger. An out-of-memory error by expert no longer suggests
+predicting by expert.
+* **A new model predicts with XLA** (`GPOptions(jit_predict=True)`, the
+default for a new model; a model saved before keeps what it was saved with,
+off unless set). A graph XLA will not compile is predicted without it: the
+plain graph answers, the model warns once and keeps to the plain graph for
+the rest of the process, and an error the plain graph raises too is raised
+as it is. On a GPU a network reading an uncertain input through the
+conditioned quadrature predicts without XLA whatever the option says, an
+XLA-compiled quadrature chunk having crashed the CUDA driver there in
+training (2026-10-22). Profiled on the Run behind item 45, by expert in 19
+slots: a batch costs about 0.76 s whatever its rows plus 2 ms a row, 99%
+of it inside the graph, the GPU idle between some 3200 kernels a batch;
+XLA halves the fixed part (0.38 s), takes a row at 1.4 ms and holds a
+batch in a third of the memory (456 rows at 1.6 GB against 5.2), agreeing
+with the plain graph to 1e-9 of the predictions' scale.
+* **A measured batch grows past the estimate**, up to
+`prediction_batch_size`, wherever no node sizes a quadrature or pathwise
+chunk by the rows a call states, and the batch after the probes is
+measured again at its new size: a probe's peak counts its fixed part as
+if it were per row. The estimate cannot see what XLA saves. On the same
+group of 91951 blocks, 29.8 ms a block before (456 rows a batch), 21.8 on
+the plain graph (132 blocks a batch) and 11.7 under XLA (613 blocks, a
+9 GB peak) -- 2.5 times the throughput, the refinement's longest group
+from about six and a half hours to under three.
+* **A prediction by expert carries the data's expert weights to its
+locations a chunk at a time.** Every location takes the weights of its
+eight nearest data, and those were gathered for every row at once -- rows
+by neighbours by experts, in doubles: with the GPU fixed, the same Run's
+refinement went on to its third pass and took the process past 24 GB of
+host memory before predicting a block. In chunks of 65536 rows the groups
+are the same, and 246840 blocks group at a 2.6 GB peak instead of 6.8.
+* **Measurement draws and a node's prediction by expert** (GeoScape's
+item 46). `predict_measurements`, `measurement_batches` and `predict_node`
+take `by_expert=True` and `expert_options`, the keywords of
+`predict_by_expert`'s grouping, and visit each group of locations with its
+own experts, sized by the device as a prediction by expert is;
+`cross_validate(method="by_expert")` draws its folds' measurements so,
+where it drew them with every expert at once. With every expert active
+(`coverage=1.0` without slots) the answer is the one without, bit for
+bit. `predict_measurements` places each batch by its rows rather than
+concatenating them, the groups coming in no order of rows, so its peak is
+the answer and one batch rather than twice the answer.
+
 ## version 0.9.10
 * **A prediction on a GPU measures its batches** (GeoScape's item 45).
 0.9.9 sized a batch from an estimate of what the GP nodes hold for their

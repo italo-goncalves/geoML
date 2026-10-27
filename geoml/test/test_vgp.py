@@ -7,6 +7,7 @@ reproducibility, loss reduction, finite outputs, and prediction results that do
 not depend on the batching used to compute them.
 """
 import numpy as np
+import pytest
 import tensorflow as tf
 
 import geoml
@@ -236,6 +237,7 @@ def test_jit_prediction_matches_the_plain_one():
     """
     model, grid = build_model()
     model.train_full(max_iter=10)
+    model.options.jit_predict = False
 
     model.predict(grid, n_sim=4)
     plain = np.array(grid.variables["V"].latent_mean.values, copy=True)
@@ -259,6 +261,7 @@ def test_jit_holds_one_traced_function_per_setting():
     of settings (XLA, simulation rule) gets its own, built once and kept."""
     model, grid = build_model()
     model.train_full(max_iter=5)
+    model.options.jit_predict = False
 
     model.predict(grid, n_sim=4)
     assert set(model._compiled) == {(False, False, model._propagation_key())}
@@ -404,8 +407,8 @@ def test_models_built_without_options_do_not_share_them():
             walker_point, "V", geoml.likelihood.Gaussian(), gp))
 
     assert models[0].options is not models[1].options
-    models[0].options.jit_predict = True
-    assert models[1].options.jit_predict is False
+    models[0].options.jit_predict = False
+    assert models[1].options.jit_predict is True
 
 
 def test_options_saved_before_jit_predict_still_open():
@@ -419,6 +422,53 @@ def test_options_saved_before_jit_predict_still_open():
 
     assert "jit_predict" not in vars(old)
     assert old.jit_predict is False
+    # a new model predicts with XLA (0.9.11)
+    assert geoml.models.GPOptions().jit_predict is True
+
+
+def _refusing(message):
+    import tensorflow as tf
+
+    def refused(*args, **kwargs):
+        raise tf.errors.InvalidArgumentError(None, None, message)
+    return refused
+
+
+def test_a_graph_xla_refuses_is_predicted_without_it():
+    """XLA refuses what it cannot compile; the plain graph answers instead,
+    the model warns once and keeps to the plain graph from then on."""
+    import warnings
+    model, grid = build_model()
+    model.train_full(max_iter=5)
+    model.options.jit_predict = False
+    model.predict(grid, n_sim=4)
+    plain = np.array(grid.variables["V"].latent_mean.values, copy=True)
+    sims = np.array(grid.variables["V"].get_simulations(), copy=True)
+
+    model.options.jit_predict = True
+    model._compiled[(True, False, model._propagation_key())] = _refusing(
+        "Detected unsupported operations when trying to compile graph")
+    with pytest.warns(UserWarning, match="XLA could not compile"):
+        model.predict(grid, n_sim=4)
+    np.testing.assert_array_equal(grid.variables["V"].latent_mean.values,
+                                  plain)
+    np.testing.assert_array_equal(grid.variables["V"].get_simulations(),
+                                  sims)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.predict(grid, n_sim=4)
+
+
+def test_an_error_the_plain_graph_raises_too_is_not_xlas():
+    import tensorflow as tf
+    model, grid = build_model()
+    model.train_full(max_iter=5)
+    for jit in (True, False):
+        model._compiled[(jit, False, model._propagation_key())] = _refusing(
+            "Cholesky decomposition was not successful")
+    with pytest.raises(tf.errors.InvalidArgumentError, match="Cholesky"):
+        model.predict(grid, n_sim=4)
+    assert not model.__dict__.get("_xla_refused", False)
 
 
 def test_the_training_step_is_traced_once_per_model():

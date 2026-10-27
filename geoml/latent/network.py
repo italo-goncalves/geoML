@@ -1519,7 +1519,10 @@ def _automatic_budget(n_nodes):
 # 23-26 bytes an element by expert in 13 slots and with every expert, over
 # about 1 GB held throughout; out of memory at 10000 rows by expert and
 # 5000 with every expert (GeoScape's item 44, 2026-10-26). The constant
-# keeps a margin, and the share is for every GP node together
+# keeps a margin, and the share is for every GP node together. The shared
+# prior draw's `[rows, features]` arrays are counted at the same rate: on
+# the Run that prompted item 45, by expert in 19 slots, a row held 11.5 MB
+# where the covariances alone said 3.0, and 15.0 with the draw counted
 _EXPERT_ELEMENT_BYTES = 32
 _EXPERT_SHARE = 0.4
 
@@ -1534,17 +1537,23 @@ def _expert_budget():
 
 # A prediction on a GPU measures what a batch holds rather than trusting
 # the estimate (`_expert_budget`, the quadrature's): the estimate counts
-# the GP nodes' covariances and chunks, and nothing else a batch holds --
-# the realizations drawn at certain inputs (`_shared_prior_simulate`, a
-# `[rows, size * (J + 1)]` array per expert and per draw), the operation
-# nodes, a likelihood mixture's populations. On a GeoScape network (four GP
+# the GP nodes' covariances, chunks and, since 0.9.11, the realizations
+# drawn at certain inputs (`_shared_prior_simulate`, a `[rows, size *
+# (J + 1)]` array per expert and per draw), and nothing else a batch holds
+# -- the operation nodes, a likelihood mixture's populations. Before the
+# realizations were counted, on a GeoScape network (four GP
 # nodes, `Multiply`, a `LikelihoodMixture`, 32 experts) a row held 15.5 MB
 # where the estimate said 4.6, and a batch of 1477 rows ran a 16 GB GPU
 # out of memory (GeoScape's item 45, 2026-10-26). The first batches take
 # `1 / _PROBE_FRACTION` of the estimate -- it was a third of the truth
 # there -- the second of them is measured, the first carrying the call's
 # setup, and the rest take the rows that fit `_MEASURED_SHARE` of the
-# device's limit beside what it holds, never more than the estimate
+# device's limit beside what it holds -- never more than the estimate where
+# a node sizes a chunk by the rows a call states, else up to the options'
+# batch size (since 0.9.11; the estimate cannot see what XLA saves). Every
+# call of more than one probe batch is measured, one the estimate takes
+# whole included: a prediction by expert is a call per group, and on the
+# next Run every group fitted the estimate and ran out as one batch
 _PROBE_FRACTION = 4
 _MEASURED_SHARE = 0.7
 
@@ -3488,17 +3497,29 @@ class BasicGP(_GPNode):
         quadrature (`_EXPERT_ELEMENT_BYTES`): its inducing points, times
         the width of its input and its own, for every expert it computes
         at once -- the slots, padded to the largest set, or every active
-        expert; with `one_expert`, the largest one alone."""
+        expert; with `one_expert`, the largest one alone. Where it draws
+        its realizations at a certain input from the shared prior draw
+        (`_shared_prior_simulate`), also that draw's arrays: `[rows,
+        features]` per expert for the residual and per expert and output
+        for the draw, and the blend's per output."""
         slots = _slots_of(self.root)
         if one_expert:
+            experts = 1
             points = max(int(m) for m in self.root.n_ip)
         elif slots is not None:
+            experts = slots.size
             points = slots.size * max(int(m) for m in self.root.n_ip)
         else:
-            points = sum(int(self.root.n_ip[e])
-                         for e in _active_experts(self.root))
-        return _EXPERT_ELEMENT_BYTES * points * (int(self.parent.size)
-                                                 + self.size)
+            active = _active_experts(self.root)
+            experts = len(active)
+            points = sum(int(self.root.n_ip[e]) for e in active)
+        elements = points * (int(self.parent.size) + self.size)
+        if _pathwise() and self._feature_kernel() \
+                and not self._takes_quadrature():
+            features = max(self._FEATURES, 2 * self._feature_count()) + 1
+            elements += features * (experts * (self.size + 2)
+                                    + 2 * self.size + 1)
+        return _EXPERT_ELEMENT_BYTES * elements
 
     def _feature_basis(self, d, seed, count=0):
         """Random Fourier features of the node's kernel, as the expected

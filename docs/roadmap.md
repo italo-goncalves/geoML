@@ -363,6 +363,42 @@ the measured rows through `measurement_batches`, at the same batch size.
   `cpu-` prefix in `predict_run.sh`), the model in
   `/home/italo/coverage_runs/A_model`.
 
+**M — The shared prior draw's fixed part, once per call** (filed
+2026-10-27). A prediction batch at a certain input rebuilds, in every GP
+node, what `_shared_prior_simulate` computes at the inducing points alone:
+the features there, whitened (`_whitened_prior`, `[slots, m, J + 1]`), and
+`chol_r` times them (`[slots, size, m, J + 1]`). None of it depends on the
+batch's rows -- only on the node's seed, its state and the experts in the
+slots. Profiled on the GeoScape Run behind item 45 (four GP nodes, 19
+slots, J = 1024, an RTX 4060 Ti): a batch costs about 0.76 s whatever its
+rows plus 2 ms a row, 99% inside the graph, of it about 0.32 s of float64
+matrix products a 56-row batch spends at the inducing points and the rest
+launching some 3200 kernels. XLA halves the fixed part to 0.38 s, and the
+batches 0.9.11 grows past the estimate spread it: at the steady sizes it is
+about 5% of a batch under XLA (613 blocks, 7.2 s) and 26% on the plain
+graph (132 blocks, 2.9 s) -- the plain graph being what a model saved
+before 0.9.11 predicts with, and a GPU network reading an uncertain input.
+- **What it takes.** The values depend on the node's seed -- the basis and
+  the feature weights are drawn from it, and an operation above shifts its
+  parents' seeds (`_SHIFTS_PARENT_SEEDS`, replayed by `_seed_offset`) -- and
+  on the experts in the slots, which change per group of a prediction by
+  expert. So a cache keyed by seed, held in Variables the traced graph
+  reads, rebuilt at each call's refresh (`refresh_cached`) for every seed
+  the call will draw at. A cache left stale gives other realizations and
+  no error, which is the risk to gate on: realizations with the cache equal
+  to those without, bit for bit, by expert and with every expert, through
+  `Add`/`LinearCombination`, a `GPWalk` riding the field's normals
+  (`_shared_normals`), `predict_node` and `measurement_batches` (which runs
+  eagerly).
+- **The other way round**, deeper: contract the prior with the realizations'
+  normals first (`[slots, m, S]`, S the realizations, against `J + 1`
+  features) so that a row costs `S` columns rather than `J + 1`. What stops
+  it is the blend's rescale, which needs each row's norm over the features
+  -- the same obstacle the experts-as-blocks item names -- and would have to
+  come from the features' Gram matrices across experts.
+- Go only if a plain-graph workload matters enough (old saves, GPU
+  networks with the quadrature); under XLA there is little left to win.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
@@ -3189,7 +3225,38 @@ each failed allocation, minutes across the branches, the GPU idle; a batch
 that still runs out raises a `MemoryError` naming its size. Not done: the
 CPU keeps the estimate -- the resident high-water mark counts the first
 batch's tracing -- which leaves the CPU item filed 2026-10-24 under
-section 1 open.)
+section 1 open. **Reopened the same day, for 0.9.11**: the next Run,
+predicting by expert, ran out on its first group -- each group of
+`predict_by_expert` is a call of its own, the estimate took every one
+whole, and only a call of several batches was measured. Measured on that
+Run's model, a row in 19 slots held 11.5 MB against 3.0 estimated, the
+shared prior draw's features most of it, so the features are counted now
+(`_expert_row_bytes`, at the same 32 bytes an element) and every call of
+more than one probe batch is measured: 63 s at a 4.8 GB peak; the
+refinement's second prediction (203471 blocks) at a 5.5 GB peak, a third
+slower than 0.9.10 ran up to its failure. Its third then took the host
+past 24 GB grouping the blocks -- the data's expert weights carried to
+every row at once, rows x 8 neighbours x 32 experts -- now carried in
+chunks of 65536 rows, the groups the same: 13.6 GB at that pass. Stopped
+there: the third prediction's first group alone was 13830 batches of 57
+blocks at 1.8 s, about seven hours, the GPU busy throughout; at three
+levels this network's refinement is a matter of hours, not measured to
+the end. Profiled then: 0.76 s a batch whatever its rows plus 2 ms a row,
+all inside the graph; so a new model predicts with XLA (falling back where
+XLA refuses, never on a GPU network with the quadrature), a measured batch
+grows past the estimate where nothing chunks by the rows, and the batch
+after the probes is measured again: that group 11.7 ms a block against
+29.8, 2.5 times the throughput. What is left of the fixed part is the
+roadmap item "The shared prior draw's fixed part, once per call".)
+
+(Item 46: **done 2026-10-26, for 0.9.11.**
+`predict_measurements`, `measurement_batches` and `predict_node` take
+`by_expert` and `expert_options` (`predict_by_expert`'s grouping, factored
+out as `_expert_groups`); `cross_validate(method="by_expert")` scores
+through it; with every expert active the answer is the plain one bit for
+bit. A node's traced function is keyed by the experts entered, as
+`predict_raw`'s is. The catalogue picks the keywords up from the
+signatures, so nothing for GeoScape to change but passing them.)
 
 (Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
 `description` on every entry, read off the docstring between its summary

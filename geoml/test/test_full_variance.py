@@ -209,9 +209,10 @@ def _batches_seen(model, monkeypatch, n=100):
 def test_a_prediction_on_a_gpu_measures_its_batches(monkeypatch):
     # GeoScape's item 45: the estimate counts what the GP nodes hold and
     # nothing else, so on a GPU the first batches take a quarter of it, the
-    # second is measured, and the rest take the rows that fit 0.7 of the
-    # device's limit -- never more than the estimate; the answer is the
-    # same as with batches of any other size
+    # second and third are measured, and the rest take the rows that fit 0.7
+    # of the device's limit -- never more than the estimate where a node
+    # chunks by the rows, as here; the answer is the same as with batches of
+    # any other size
     import tensorflow as tf
     model = _deep_model(True)
     model.train_full(5)
@@ -226,7 +227,9 @@ def test_a_prediction_on_a_gpu_measures_its_batches(monkeypatch):
     monkeypatch.setattr(tf.config.experimental, "get_memory_info",
                         lambda device: {"current": 0, "peak": 1e7})
     sizes, measured = _batches_seen(model, monkeypatch)
-    assert sizes == [10, 10, 25, 25, 25, 5]
+    # the third measured too, at the size the second gave: 25 rows at 1 MB
+    # held, a row then 0.4 MB and room for 62, the estimate's 40
+    assert sizes == [10, 10, 25, 40, 15]
     for path in ("v/prediction", "v/latent_variance"):
         np.testing.assert_allclose(measured.values(path),
                                    reference.values(path),
@@ -239,6 +242,60 @@ def test_a_prediction_on_a_gpu_measures_its_batches(monkeypatch):
     monkeypatch.setattr(_net, "_device_limit", lambda: 1e12)
     sizes, _ = _batches_seen(model, monkeypatch)
     assert sizes == [10, 10, 40, 40]
+
+    # a call the estimate takes whole is measured all the same -- each group
+    # of a prediction by expert is one, and on a GeoScape Run every group
+    # ran out of memory as a single batch -- and one a probe batch holds is
+    # left whole
+    monkeypatch.setattr(_net, "_device_limit", lambda: 25e6 / 0.7)
+    model.options.prediction_batch_size = 120
+    sizes, measured = _batches_seen(model, monkeypatch)
+    assert sizes == [30, 30, 40]
+    np.testing.assert_allclose(measured.values("v/prediction"),
+                               reference.values("v/prediction"),
+                               rtol=1e-12, atol=1e-14)
+    model.options.prediction_batch_size = 400
+    sizes, _ = _batches_seen(model, monkeypatch)
+    assert sizes == [100]
+
+
+def test_a_measured_batch_grows_past_the_estimate_where_nothing_chunks(
+        monkeypatch):
+    """A measured batch may take more rows than the estimate, up to the
+    options' batch size, unless a node sizes a quadrature chunk by the rows a
+    call states -- the GP on a GP here, not a GP on the input. The estimate
+    cannot see what XLA saves."""
+    import tensorflow as tf
+    # an estimate of 20 rows, a row measured at 0.5 MB and room for 50
+    monkeypatch.setattr(_net, "_device_limit", lambda: 25e6 / 0.7)
+    monkeypatch.setattr(tf.config.experimental, "reset_memory_stats",
+                        lambda device: None)
+    monkeypatch.setattr(tf.config.experimental, "get_memory_info",
+                        lambda device: {"current": 0, "peak": 2.5e6})
+    for model, expected in ((_input_gp_model(), [5, 5, 50, 40]),
+                            (_deep_model(True), [5, 5, 20, 20, 20, 20, 10])):
+        model.train_full(5)
+        model.options.prediction_batch_size = 1000
+        monkeypatch.setattr(model, "_prediction_rows",
+                            lambda one_expert=False: 20)
+        sizes, _ = _batches_seen(model, monkeypatch)
+        assert sizes == expected
+
+
+def _input_gp_model():
+    """A GP on the input, which takes no quadrature."""
+    geoml.set_seed(7)
+    x = np.random.default_rng(3).uniform(0, 100, [60, 2])
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable(
+        "v", np.sin(x[:, 0] / 20) + 0.3 * np.cos(x[:, 1] / 15))
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(data, 24, seed=0),
+        geoml.transform.Isotropic(40))
+    return geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(geoml.warping.Identity(1)),
+        geoml.latent.BasicGP(root, size=1),
+        options=geoml.models.GPOptions(verbose=False))
 
 
 def test_a_batch_out_of_memory_raises_with_its_size(monkeypatch):
