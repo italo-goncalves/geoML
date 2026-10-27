@@ -363,6 +363,42 @@ the measured rows through `measurement_batches`, at the same batch size.
   `cpu-` prefix in `predict_run.sh`), the model in
   `/home/italo/coverage_runs/A_model`.
 
+**M — The shared prior draw's fixed part, once per call** (filed
+2026-10-27). A prediction batch at a certain input rebuilds, in every GP
+node, what `_shared_prior_simulate` computes at the inducing points alone:
+the features there, whitened (`_whitened_prior`, `[slots, m, J + 1]`), and
+`chol_r` times them (`[slots, size, m, J + 1]`). None of it depends on the
+batch's rows -- only on the node's seed, its state and the experts in the
+slots. Profiled on the GeoScape Run behind item 45 (four GP nodes, 19
+slots, J = 1024, an RTX 4060 Ti): a batch costs about 0.76 s whatever its
+rows plus 2 ms a row, 99% inside the graph, of it about 0.32 s of float64
+matrix products a 56-row batch spends at the inducing points and the rest
+launching some 3200 kernels. XLA halves the fixed part to 0.38 s, and the
+batches 0.9.11 grows past the estimate spread it: at the steady sizes it is
+about 5% of a batch under XLA (613 blocks, 7.2 s) and 26% on the plain
+graph (132 blocks, 2.9 s) -- the plain graph being what a model saved
+before 0.9.11 predicts with, and a GPU network reading an uncertain input.
+- **What it takes.** The values depend on the node's seed -- the basis and
+  the feature weights are drawn from it, and an operation above shifts its
+  parents' seeds (`_SHIFTS_PARENT_SEEDS`, replayed by `_seed_offset`) -- and
+  on the experts in the slots, which change per group of a prediction by
+  expert. So a cache keyed by seed, held in Variables the traced graph
+  reads, rebuilt at each call's refresh (`refresh_cached`) for every seed
+  the call will draw at. A cache left stale gives other realizations and
+  no error, which is the risk to gate on: realizations with the cache equal
+  to those without, bit for bit, by expert and with every expert, through
+  `Add`/`LinearCombination`, a `GPWalk` riding the field's normals
+  (`_shared_normals`), `predict_node` and `measurement_batches` (which runs
+  eagerly).
+- **The other way round**, deeper: contract the prior with the realizations'
+  normals first (`[slots, m, S]`, S the realizations, against `J + 1`
+  features) so that a row costs `S` columns rather than `J + 1`. What stops
+  it is the blend's rescale, which needs each row's norm over the features
+  -- the same obstacle the experts-as-blocks item names -- and would have to
+  come from the features' Gram matrices across experts.
+- Go only if a plain-graph workload matters enough (old saves, GPU
+  networks with the quadrature); under XLA there is little left to win.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
@@ -1028,6 +1064,97 @@ Open, in the order they matter:
 5. **The five refused nodes**: `AdditiveGP`, `UncertainInputGP`,
    `GradientConstrainedInput` (and directional data), `RadialTrend`,
    `GaussianMixture`.
+
+**L–XL — Experts as blocks of one GP, conditioned in sequence** (requested
+2026-10-26; theory only, nothing measured). The user's proposal: with the
+Fourier-feature prior draw and pathwise conditioning, condition the
+experts one at a time in a random order -- the first conditions the prior
+draws, its conditioned realizations are the prior for the next -- as
+sequential Gaussian simulation does, a whole expert at a time; no blend,
+and experts that are not neighbours treated as independent, a Vecchia
+approximation in blocks. The assessment:
+- **The sequence is sound, but not over today's experts.** An expert's
+  posterior is a GP conditioned on m pseudo-observations at its inducing
+  points with noise D (`k (K + D)^-1`, the sites), so the sequence is the
+  chain rule `p(f_1..f_J | sites) = prod_j p(f_j | f_<j, sites)`, and done
+  in full it draws from the GP conditioned on every expert's sites
+  jointly. The sites as trained explain the data through the *blend*, each
+  expert seeing its data alone; conditioning on all of them counts the
+  data twice where experts overlap and partly along every edge. The 0.9.4
+  coupling measurement says so: sequential conditioning on an earlier
+  expert's values kept 0.72 of the variance and pulled 74% of the means
+  off (the expert-coupling list under "Propagate individual realizations"
+  below). So it is a model change -- the experts become blocks of one GP,
+  trained as such -- not a new way to draw the realizations of the
+  present one.
+- **Two corrections to the sequence as proposed.** (1) A block
+  conditioned on the earlier draws and on its *own* sites only moves
+  information forward: an earlier block never sees a later one's data a
+  metre past its edge, and every edge is informed from whichever side the
+  order put first -- a seam. Sequential simulation avoids it by
+  conditioning each node on all the data in its neighbourhood, whatever
+  the path; in blocks, `f_j` given the earlier neighbours' drawn values
+  *and* every neighbour's sites. (2) The non-neighbours are conditionally
+  independent given the blocks between them (the screening effect), not
+  independent; where the range spans several expert widths the
+  neighbourhood does not screen and the long lags come out too smooth, as
+  sequential simulation does with too small a search -- a coarse-to-fine
+  order, or the long structure in a single-expert node of its own.
+- **An exact version, independent of the order.** The pathwise draw from
+  the joint posterior is `f_0 + K_xZ (K_ZZ + D)^-1 (y_sites - f_0(Z) -
+  eps)`, `Z` every expert's inducing points. Solving that system an expert
+  block at a time -- each block's Cholesky already cached, the kernel to
+  its neighbours computed on the fly -- is block Gauss-Seidel, and one
+  sweep in a random order is exactly the proposed sequence with the prior
+  kernel. More sweeps, or conjugate gradients with the experts as a block
+  preconditioner, converge to the exact joint draw; what is stored is one
+  weight vector per expert and realization (`[m, S]`), and any location
+  is `phi(x) w + sum_near k(x, Z_j) v_j` -- batch-invariant, the features'
+  residual included. One sweep then serves as the cheap approximation,
+  several as the exact answer.
+- **Memory is not the argument.** Item 45's realization memory is how the
+  blend is written (`_shared_prior_simulate` builds `[rows, features]`
+  per expert, 32 branches at once), not blending: the weight form above
+  with the experts' terms accumulated one at a time -- already "kept in
+  reserve" under the batched experts -- would save most of it with no
+  change of model; the rescale's per-row norm over the features is what
+  forces the large arrays and would have to be had another way.
+- **What the model change would buy.** No blend: the 0.93 variance ratio
+  the experts' disagreeing means leave goes, and with it the rescale. The
+  bound splits by expert under a local (Vecchia) data term, each row
+  depending on its block and the neighbours only, so Proposition 1 holds
+  and `train_by_expert`'s expert sampling is unbiased, which the blend
+  prevents today. And conjugacy returns: the conjugate trainer (section
+  2) is single-expert because the blend is not conjugate, and block site
+  updates become possible.
+- **What it costs.** A new model: an option or a new submodule, every
+  expert retrained, old saves keeping the blend -- **if the gains are
+  significant, worth a breaking change or a submodule of its own** (the
+  user, 2026-10-26). The inducing sets a partition rather than overlapping
+  (`grid_experts`, `experts(overlap=)`). Training needs every data point's
+  variance under the joint posterior, which must be local (the
+  neighbourhood's sites) or it is the whole M-point problem. In 3-D,
+  conditioning on whole neighbouring experts is about `(27 m)^3` a block,
+  worse than the blend, unless the conditioning sets are cut to the
+  nearest points. The moment path the deep networks train on needs the
+  same local treatment, and the order (random, or maxmin) is a new source
+  of approximation error in the one-sweep version.
+- **Prior art** (cited from memory, to be checked): Vecchia (1988);
+  Guinness (2018, Technometrics), grouping and orderings for Vecchia, a
+  random or maxmin order beating a coordinate one; Katzfuss & Guinness
+  (2021, Statistical Science), the general Vecchia framework; Dimitrakopoulos
+  & Luo (2004, Mathematical Geology), generalized sequential Gaussian
+  simulation of groups of nodes; Wu, Pleiss & Cunningham (2022), the
+  variational nearest-neighbour GP, the same idea inside a sparse
+  variational GP; Wilson et al. (2020, 2021), pathwise conditioning; Lin
+  et al. (NeurIPS 2023), pathwise posterior samples by iterative solvers.
+- **Gates, if pursued**, on Walker in 2-D first: the blend; one block
+  sweep in a random order; k sweeps and CG; the exact joint GP on the
+  same sites -- every arm but the blend retrained under the joint model.
+  The realizations' variance against the reported one, seams at the block
+  edges, the long-lag variogram against the exhaustive field, held-out
+  rmse/CRPS/goodness, memory and time per realization. It goes on only if
+  it beats the blend on scores or memory at equal time.
 
 **S–M — Network presets** (requested 2026-10-14). Common patterns that
 today take several nodes wired by hand, offered as one:
@@ -3098,7 +3225,38 @@ each failed allocation, minutes across the branches, the GPU idle; a batch
 that still runs out raises a `MemoryError` naming its size. Not done: the
 CPU keeps the estimate -- the resident high-water mark counts the first
 batch's tracing -- which leaves the CPU item filed 2026-10-24 under
-section 1 open.)
+section 1 open. **Reopened the same day, for 0.9.11**: the next Run,
+predicting by expert, ran out on its first group -- each group of
+`predict_by_expert` is a call of its own, the estimate took every one
+whole, and only a call of several batches was measured. Measured on that
+Run's model, a row in 19 slots held 11.5 MB against 3.0 estimated, the
+shared prior draw's features most of it, so the features are counted now
+(`_expert_row_bytes`, at the same 32 bytes an element) and every call of
+more than one probe batch is measured: 63 s at a 4.8 GB peak; the
+refinement's second prediction (203471 blocks) at a 5.5 GB peak, a third
+slower than 0.9.10 ran up to its failure. Its third then took the host
+past 24 GB grouping the blocks -- the data's expert weights carried to
+every row at once, rows x 8 neighbours x 32 experts -- now carried in
+chunks of 65536 rows, the groups the same: 13.6 GB at that pass. Stopped
+there: the third prediction's first group alone was 13830 batches of 57
+blocks at 1.8 s, about seven hours, the GPU busy throughout; at three
+levels this network's refinement is a matter of hours, not measured to
+the end. Profiled then: 0.76 s a batch whatever its rows plus 2 ms a row,
+all inside the graph; so a new model predicts with XLA (falling back where
+XLA refuses, never on a GPU network with the quadrature), a measured batch
+grows past the estimate where nothing chunks by the rows, and the batch
+after the probes is measured again: that group 11.7 ms a block against
+29.8, 2.5 times the throughput. What is left of the fixed part is the
+roadmap item "The shared prior draw's fixed part, once per call".)
+
+(Item 46: **done 2026-10-26, for 0.9.11.**
+`predict_measurements`, `measurement_batches` and `predict_node` take
+`by_expert` and `expert_options` (`predict_by_expert`'s grouping, factored
+out as `_expert_groups`); `cross_validate(method="by_expert")` scores
+through it; with every expert active the answer is the plain one bit for
+bit. A node's traced function is keyed by the experts entered, as
+`predict_raw`'s is. The catalogue picks the keywords up from the
+signatures, so nothing for GeoScape to change but passing them.)
 
 (Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
 `description` on every entry, read off the docstring between its summary

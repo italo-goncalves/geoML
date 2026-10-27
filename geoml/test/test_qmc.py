@@ -59,6 +59,7 @@ def test_the_flag_flips_on_a_live_model():
     has to reach for a different traced function -- and back again."""
     model, grid = build_model()
     model.train_full(max_iter=10)
+    model.options.jit_predict = False
 
     model.predict(grid, n_sim=8)
     monte_carlo = _sims(grid)
@@ -89,6 +90,7 @@ def test_qmc_is_unchanged_by_xla():
     model, grid = build_model()
     model.train_full(max_iter=10)
     model.options.qmc_simulations = True
+    model.options.jit_predict = False
 
     model.predict(grid, n_sim=8)
     plain = _sims(grid)

@@ -76,7 +76,7 @@ precision everywhere. Realizations are *stored* as `float32` (half the disk,
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.10.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.11.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -267,10 +267,12 @@ in the catalogue.
   data does not support.
 - **Many experts.** When memory grows with their number, train and predict
   an expert at a time: `model.train_by_expert`, `model.predict_by_expert`,
-  and `refine(..., by_expert=True)` for a block model; a prediction's
+  `refine(..., by_expert=True)` for a block model, and `by_expert=True` on
+  `predict_measurements` and `predict_node` (`cross_validate(method=
+  "by_expert")` draws its measurements so too); a prediction's
   batches are sized to the device for the experts it computes at once --
-  on a GPU measured on its first batches -- so `prediction_batch_size` is
-  a cap, not a size to tune. It matched or beat
+  on a GPU measured on its first batches, each group's -- so
+  `prediction_batch_size` is a cap, not a size to tune. It matched or beat
   `train_svi` on CRPS and on a deposit's rock types in a third to a half of
   the device memory, a little behind on rmse on a smooth synthetic field.
   Fewer, larger experts scored better than many small ones at a fixed
@@ -315,10 +317,11 @@ The papers and the code name the same things differently.
   simulation stream both draw from it, and a saved model keeps its seed.
   `cross_validate` draws each fold's fresh variational state from the same
   generator, so two runs in a row differ; set the seed right before each
-  run that must repeat. Under `GPOptions(jit_predict=True)` XLA draws other
-  normals from the same seed: the latent moments agree, the realizations do
-  not. A model that trains on realizations (a non-Gaussian leaf, a mixing
-  warping) draws them afresh every step (`fresh_training_draws`, the
+  run that must repeat. Predictions are compiled with XLA for a new model
+  (`jit_predict`, falling back where XLA refuses); compiled and plain agree
+  to rounding, realizations included. A model that trains on realizations
+  (a non-Gaussian leaf, a mixing warping) draws them afresh every step
+  (`fresh_training_draws`, the
   default for a new model): its training log is a noisy estimate of the
   bound, still exactly repeatable, and a model saved before 0.9.3 keeps
   the fixed draws it was trained with.

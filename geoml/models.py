@@ -55,12 +55,13 @@ import tensorflow_probability as _tfp
 _tfd = _tfp.distributions
 
 # How much `predict_measurements` will hold in RAM before it refuses. It
-# returns the whole answer as one array per variable -- every batch kept in
-# a list and concatenated at the end, so the chunks and the result are both
-# live for that moment -- and the answer is `n_sim * n_nodes` values a row
-# for each column: 5 KB a row at the defaults, measured. **The peak is twice
-# that**: a 92 MB answer was measured to cost 182 MB of resident memory, the
-# concatenate holding the parts and the whole at once. Ungoverned, a
+# returns the whole answer as one array per variable, and the answer is
+# `n_sim * n_nodes` values a row for each column: 5 KB a row at the
+# defaults, measured. The peak was twice that while the batches were kept
+# in a list and concatenated at the end (a 92 MB answer cost 182 MB of
+# resident memory); since 0.9.11 each batch is placed into the whole by
+# its rows, which a prediction by expert needs, its groups coming in no
+# order of rows, and the whole and one batch are live at once. Ungoverned, a
 # cross-validation fold over a few million rows asks for tens of gigabytes
 # and the Linux OOM killer ends the session, which is what happened on
 # 2026-09-04 (63 GB resident, the notebook's kernel killed outright).
@@ -70,6 +71,18 @@ _tfd = _tfp.distributions
 # of a scalar variable at the defaults -- since the point is to stop the
 # catastrophe, not to police ordinary use.
 MEASUREMENT_LIMIT = 2 * 1024 ** 3
+
+# The rows a prediction by expert carries the data's expert weights to at
+# once (`_expert_groups`): `rows x neighbours x experts` doubles, 134 MB at
+# 8 neighbours and 32 experts
+_CARRIED_ROWS = 1 << 16
+
+# What XLA raises for a graph it will not compile (an operation it has no
+# kernel for, a shape it cannot settle): a prediction under `jit_predict`
+# then runs the plain graph (`VGPNetwork._with_xla`). Running out of memory
+# is not among them -- that is the batch's size, not XLA's refusal
+_XLA_REFUSALS = (_tf.errors.InvalidArgumentError,
+                 _tf.errors.UnimplementedError, _tf.errors.InternalError)
 
 
 class _ModelOptions:
@@ -122,7 +135,7 @@ class GPOptions(_ModelOptions):
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
                  training_batch_size: int = 2000, training_samples: int = 20,
-                 jit_predict: bool = False, qmc_simulations: bool = False,
+                 jit_predict: bool = True, qmc_simulations: bool = False,
                  expert_propagation: _Literal["consensus", "independent"]
                  = "independent",
                  training_tolerance: float | None = None,
@@ -161,12 +174,20 @@ class GPOptions(_ModelOptions):
         training_samples : int
             Number of Monte Carlo samples to be drawn when training requires it.
         jit_predict : bool
-            Whether to compile the prediction graph with XLA. Worth 3-5x on a
-            grid of any size, and more on a GPU, but XLA compiles per distinct
-            batch shape (so a grid that `prediction_batch_size` does not divide
-            pays that cost twice) and refuses to run anything it cannot
-            compile, rather than falling back. Prediction only: the same
-            treatment makes training both slower and unstable.
+            Whether to compile the prediction graph with XLA (the default for
+            a new model since 0.9.11; a model saved before keeps what it was
+            saved with, off unless it was set). Worth 3-5x on a grid of any
+            size, and 1.6x on a GPU on a network of 32 experts, whose batches
+            it also holds in a third of the memory; it agrees with the plain
+            graph to rounding, realizations included. XLA compiles per
+            distinct batch shape, so a grid that `prediction_batch_size` does
+            not divide pays that cost twice. A graph XLA will not compile is
+            predicted without it, with a warning, and the model stays without
+            it for the rest of the process. On a GPU a network whose nodes
+            read an uncertain input through the conditioned quadrature
+            predicts without XLA whatever this says, an XLA-compiled
+            quadrature having crashed the CUDA driver there. Prediction only:
+            the same treatment makes training both slower and unstable.
         qmc_simulations : bool
             Whether to draw the posterior simulations from a seeded-scramble
             Sobol sequence instead of pseudo-random normals, so the same
@@ -1879,30 +1900,62 @@ class VGPNetwork(_GPModel):
         whose graphs refresh internally (`ProjectedVGP`); on this class the
         graph reads snapshotted state, and the extra key is merely unused.
         """
-        jit = bool(self.options.jit_predict)
         qmc = bool(self.options.qmc_simulations)
         rule = self._propagation_key()
         # an expert subset is read at trace time too; `None` (every expert)
         # keeps the key every other caller has always used
         subset = _latent.network._subset_key()
         slots = _latent.network._slots_key()
-        key = (jit, qmc, rule) if subset is None and slots is None \
-            else (jit, qmc, rule, subset, slots)
-        traced = self._compiled.get(key)
-        if traced is None:
-            # `reduce_retracing` relaxes the batch shape, which is the one
-            # thing that varies without meaning anything: a grid divides
-            # into equal batches and a short last one, and every container
-            # of a different size starts the count again. Measured on eight
-            # predictions of differing size: eight traces and 7.6 s become
-            # two and 2.2 s, bit-identical, and XLA agrees either way. What
-            # remains keyed on the value -- `n_sim`, `include_noise` -- is
-            # baked into the graph and has to retrace.
-            traced = _tf.function(self._predict_raw, jit_compile=jit or None,
-                                  reduce_retracing=True)
-            self._compiled[key] = traced
+
+        def traced_for(jit):
+            key = (jit, qmc, rule) if subset is None and slots is None \
+                else (jit, qmc, rule, subset, slots)
+            traced = self._compiled.get(key)
+            if traced is None:
+                # `reduce_retracing` relaxes the batch shape, which is the
+                # one thing that varies without meaning anything: a grid
+                # divides into equal batches and a short last one, and every
+                # container of a different size starts the count again.
+                # Measured on eight predictions of differing size: eight
+                # traces and 7.6 s become two and 2.2 s, bit-identical, and
+                # XLA agrees either way. What remains keyed on the value --
+                # `n_sim`, `include_noise` -- is baked into the graph and has
+                # to retrace.
+                traced = _tf.function(self._predict_raw,
+                                      jit_compile=jit or None,
+                                      reduce_retracing=True)
+                self._compiled[key] = traced
+            return traced
+
         with _latent.simulation_rule(qmc), self._propagation():
-            return traced(*args, **kwargs)
+            return self._with_xla(traced_for, *args, **kwargs)
+
+    def _with_xla(self, traced_for, *args, **kwargs):
+        """`traced_for(jit)(*args, **kwargs)`, compiled with XLA where
+        `options.jit_predict` asks for it, and without where XLA refuses the
+        graph: the plain graph answers instead, the model warns once and
+        predicts without XLA from then on in this process. An error the
+        plain graph raises too is not XLA's, and is raised as it is. On a
+        GPU a model whose nodes take the conditioned quadrature predicts
+        without XLA whatever the options say: an XLA-compiled quadrature
+        chunk took the CUDA driver down there (`_quadrature_xla`), and a
+        crash is no refusal to fall back from."""
+        if not (self.options.jit_predict
+                and not self.__dict__.get("_xla_refused", False)) or (
+                _latent.network._gpu_visible() and self._chunked_by_rows()):
+            return traced_for(False)(*args, **kwargs)
+        try:
+            return traced_for(True)(*args, **kwargs)
+        except _XLA_REFUSALS as error:
+            refusal = str(error).strip().splitlines()[0] if str(error) \
+                else type(error).__name__
+        answer = traced_for(False)(*args, **kwargs)
+        self._xla_refused = True
+        warnings.warn(
+            "XLA could not compile this model's prediction (%s); it predicts "
+            "without XLA from now on, as GPOptions(jit_predict=False) would"
+            % refusal)
+        return answer
 
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
                      n_sim=1, seed=0, include_noise=True, n_splits=None):
@@ -2028,7 +2081,10 @@ class VGPNetwork(_GPModel):
                      n_sim: "int | None" = None,
                      name: "str | None" = None,
                      labels: "Sequence[str] | None" = None,
-                     where: _types.Where = None) -> "_data.LatentVariable":
+                     where: _types.Where = None,
+                     by_expert: bool = False,
+                     expert_options: "dict[str, _Any] | None" = None
+                     ) -> "_data.LatentVariable":
         """Predict what a node inside the tree says, into a container.
 
         The same prediction :meth:`predict` makes, stopped at `node` instead
@@ -2063,6 +2119,14 @@ class VGPNetwork(_GPModel):
             One boolean per location, the indices of the locations to visit,
             the name of a boolean metadata column holding the same, or `None`
             for all of them. Locations left out keep what they hold.
+        by_expert
+            Predict each group of locations with only the experts active
+            there, as :meth:`predict_by_expert` groups them, so that memory
+            does not grow with the experts.
+        expert_options
+            Keywords for the grouping under `by_expert` -- `coverage`,
+            `neighbours`, `grouping`, `slots`, `pack`, as
+            :meth:`predict_by_expert` takes them.
 
         Returns
         -------
@@ -2132,26 +2196,43 @@ class VGPNetwork(_GPModel):
             variable.allocate_simulations(n_sim)
 
         seed = [self.options.seed + self._seed_offset(node), 0]
-        traced = self._node_function(node)
 
         def call(x, x_var, n_splits):
             with _latent.simulation_rule(bool(self.options.qmc_simulations)), \
                     self._propagation():
-                return traced(x, x_var, n_sim, seed)
+                return self._with_xla(
+                    lambda jit: self._node_function(node, jit),
+                    x, x_var, n_sim, seed)
 
-        for batch, (mean, variance, sims) in self._over_batches(
-                newdata, call, where):
-            variable.update(batch, latent_mean=mean.numpy(),
-                            latent_variance=variance.numpy(),
-                            simulations=sims.numpy())
+        def visit(rows):
+            for batch, (mean, variance, sims) in self._over_batches(
+                    newdata, call, rows):
+                variable.update(batch, latent_mean=mean.numpy(),
+                                latent_variance=variance.numpy(),
+                                simulations=sims.numpy())
+
+        if not by_expert:
+            visit(where)
+            return variable
+        groups, entered, _, _ = self._expert_groups(
+            newdata, where, **(expert_options or {}))
+        with _progress.reporting("predict_by_expert", len(groups),
+                                 "group") as report:
+            for done, (key, locs) in enumerate(groups):
+                with entered(key):
+                    visit(locs)
+                report(done + 1)
         return variable
 
-    def _node_function(self, node):
+    def _node_function(self, node, jit):
         """`node.predict` in a graph, one per node and setting, as
-        `predict_raw` holds one for the leaves."""
-        jit = bool(self.options.jit_predict)
+        `predict_raw` holds one for the leaves; compiled with XLA under
+        `jit`."""
+        # the experts a call by expert computes are read at trace time, as
+        # `predict_raw`'s are
         key = ("node", id(node), jit, bool(self.options.qmc_simulations),
-               self._propagation_key())
+               self._propagation_key(), _latent.network._subset_key(),
+               _latent.network._slots_key())
         traced = self._compiled.get(key)
         if traced is None:
             def body(x, x_var, n_sim, seed):
@@ -3291,12 +3372,42 @@ class VGPNetwork(_GPModel):
             and the largest share of weight left out at each location, NaN
             where none was predicted.
         """
+        mask = _where_mask(newdata, where)
+        groups, entered, sizes, left_out = self._expert_groups(
+            newdata, mask, coverage, neighbours, grouping, slots, pack)
+        n_sim = _simulation_count(newdata, self.variables, n_sim,
+                                  keep=mask is not None)
+        with _progress.reporting("predict_by_expert", len(groups),
+                                 "group") as report:
+            for done, (key, locs) in enumerate(groups):
+                with entered(key):
+                    self._predict(newdata, n_sim, include_noise, locs,
+                                  check_measurements=False)
+                report(done + 1)
+        single = len(sizes) == 1
+        return dict(subsets=[g[0][0] if single else g[0] for g in groups],
+                    sizes=[len(g[1]) for g in groups],
+                    slots=(sizes[0] if single else tuple(sizes))
+                    if slots else None,
+                    left_out=left_out)
+
+    def _expert_groups(self, newdata, mask, coverage=0.99, neighbours=8,
+                       grouping="home", slots=True, pack=True):
+        """The groups of locations a prediction by expert visits, and how to
+        enter one, as :meth:`predict_by_expert` describes them.
+
+        Returns `(groups, entered, sizes, left_out)`: each group its
+        experts -- one set per input -- and its locations, sorted, among
+        those `mask` names; `entered(experts)`, a context in which the GP
+        nodes compute those experts alone; the slots per input; and the
+        largest share of weight left out at each location, NaN where none is
+        visited.
+        """
         if grouping not in ("home", "exact"):
             raise ValueError("grouping is 'home' or 'exact', got %r"
                              % (grouping,))
         blocks = self._expert_blocks()
         roots = [root for root, _, _ in blocks]
-        mask = _where_mask(newdata, where)
         locations = _np.arange(newdata.n_data) if mask is None \
             else _np.flatnonzero(mask)
         table = self.expert_weights()
@@ -3311,12 +3422,19 @@ class VGPNetwork(_GPModel):
         for r, (root, start, count) in enumerate(blocks):
             tree = _spatial.cKDTree(self._transformed(self.data, root=root))
             targets = self._transformed(newdata, locations, root=root)
-            distance, nearest = tree.query(targets, k=neighbours)
-            inverse = 1.0 / (distance ** 2 + 1e-12)
-            weights = _np.einsum(
-                "rn,rnj->rj", inverse,
-                table[:, start:start + count][nearest]) \
-                / inverse.sum(axis=1, keepdims=True)
+            own = table[:, start:start + count]
+            weights = _np.empty((len(targets), count))
+            # a chunk of rows at a time: the neighbours' weights are rows x
+            # neighbours x experts, and taken whole on the third pass of a
+            # GeoScape Run's refinement (millions of sub-blocks, 32
+            # experts) they took the process past 24 GB
+            for first in range(0, len(targets), _CARRIED_ROWS):
+                part = slice(first, first + _CARRIED_ROWS)
+                distance, nearest = tree.query(targets[part], k=neighbours)
+                inverse = 1.0 / (distance ** 2 + 1e-12)
+                weights[part] = _np.einsum(
+                    "rn,rnj->rj", inverse, own[nearest]) \
+                    / inverse.sum(axis=1, keepdims=True)
             weights = weights.reshape([len(locations), rows_per, -1])
             home_sets = [sets[r] for sets in home[start:start + count]]
             # in slots, as many as training's largest active set, so that
@@ -3395,35 +3513,23 @@ class VGPNetwork(_GPModel):
                     packed.append([[set(s) for s in key], list(locs)])
             groups = [(tuple(tuple(sorted(s)) for s in e[0]), e[1])
                       for e in packed]
+        groups = [(key, _np.sort(_np.asarray(locs))) for key, locs in groups]
 
-        n_sim = _simulation_count(newdata, self.variables, n_sim,
-                                  keep=mask is not None)
         network = _latent.network
-        with _progress.reporting("predict_by_expert", len(groups),
-                                 "group") as report:
-            for done, (key, locs) in enumerate(groups):
-                if slots:
-                    context = {}
-                    for root, subset, size in zip(roots, key, sizes):
-                        ids, filled = self._slot_variables(root, size)
-                        pad = size - len(subset)
-                        ids.assign(list(subset) + [root.n_experts] * pad)
-                        filled.assign([1.0] * len(subset) + [0.0] * pad)
-                        context[root] = network._Slots(size, ids, filled)
-                    context = network.expert_slots(context)
-                else:
-                    context = _latent.expert_subset(dict(zip(roots, key)))
-                with context:
-                    self._predict(newdata, n_sim, include_noise,
-                                  _np.sort(_np.asarray(locs)),
-                                  check_measurements=False)
-                report(done + 1)
-        single = len(roots) == 1
-        return dict(subsets=[g[0][0] if single else g[0] for g in groups],
-                    sizes=[len(g[1]) for g in groups],
-                    slots=(sizes[0] if single else tuple(sizes))
-                    if slots else None,
-                    left_out=left_out)
+
+        def entered(key):
+            if not slots:
+                return _latent.expert_subset(dict(zip(roots, key)))
+            context = {}
+            for root, subset, size in zip(roots, key, sizes):
+                ids, filled = self._slot_variables(root, size)
+                pad = size - len(subset)
+                ids.assign(list(subset) + [root.n_experts] * pad)
+                filled.assign([1.0] * len(subset) + [0.0] * pad)
+                context[root] = network._Slots(size, ids, filled)
+            return network.expert_slots(context)
+
+        return groups, entered, sizes, left_out
 
     def _predict(self, newdata, n_sim, include_noise, where,
                  check_measurements=True):
@@ -3576,13 +3682,23 @@ class VGPNetwork(_GPModel):
         if where is not None:
             where = _np.asarray(where)
             rows = _np.flatnonzero(where) if where.dtype == bool else where
-        # on a GPU, where more than one batch is needed, the estimate is
-        # checked against what a batch holds (`network._PROBE_FRACTION`)
+        # on a GPU the estimate is checked against what a batch holds
+        # (`network._PROBE_FRACTION`), wherever the rows make more than one
+        # probe batch -- a call the estimate takes whole too: each group of a
+        # prediction by expert is a call of its own, and on the Run behind
+        # GeoScape's item 45 every one of them fitted the estimate and ran
+        # out of memory as one batch
         network = _latent.network
-        measure = network._device_limit() is not None \
-            and len(rows) > batch_size
-        size = max(1, batch_size // network._PROBE_FRACTION) if measure \
-            else batch_size
+        probe = max(1, batch_size // network._PROBE_FRACTION)
+        measure = network._device_limit() is not None and len(rows) > probe
+        size = probe if measure else batch_size
+        # what a measured batch may grow to: past the estimate, up to the
+        # options' batch size, wherever no node sizes a chunk by the rows a
+        # call states (`quadrature_rule`); the estimate cannot see what XLA
+        # saves, a third of the memory on a GeoScape network
+        cap = batch_size if self._chunked_by_rows() else max(
+            batch_size,
+            int(self.options.prediction_batch_size) // per_location)
 
         # Refresh the posterior once (the parameters are fixed during
         # prediction) and snapshot each node's state into Variables, so the
@@ -3617,8 +3733,13 @@ class VGPNetwork(_GPModel):
 
             x = _tf.constant(data_coords, _tf.float64)
             x_var = _tf.constant(data_var, _tf.float64)
-            probe = measure and i == 1
-            if probe:
+            # the second batch, the first carrying the call's setup, and the
+            # third, at the size the second gave: a small batch's peak counts
+            # its fixed part as if it were per row, and on a GeoScape network
+            # under XLA batches sized from the probe alone held a third of
+            # the room
+            measuring = measure and i in (1, 2)
+            if measuring:
                 _tf.config.experimental.reset_memory_stats("GPU:0")
                 base = _tf.config.experimental.get_memory_info(
                     "GPU:0")["current"]
@@ -3634,15 +3755,19 @@ class VGPNetwork(_GPModel):
                 # TensorFlow has retried each allocation before failing, which
                 # on a graph of many branches can take minutes; what the
                 # caller needs is the size that failed
+                by_expert = network._EXPERT_SLOTS is not None \
+                    or network._EXPERT_SUBSET is not None
                 raise MemoryError(
                     "a prediction batch of %d locations (%d rows) ran out of "
                     "the device's memory; set a smaller "
-                    "GPOptions(prediction_batch_size=...), or predict by "
-                    "expert" % (len(batch), len(data_coords))) from error
-            if probe:
+                    "GPOptions(prediction_batch_size=...)%s"
+                    % (len(batch), len(data_coords),
+                       "" if by_expert else ", or predict by expert")
+                ) from error
+            if measuring:
                 size = self._measured_batch(base, len(data_coords),
-                                            batch_size, per_location)
-                measure = False
+                                            cap, per_location)
+                measure = i < 2
             yield batch, out
             start += len(batch)
             i += 1
@@ -3652,12 +3777,20 @@ class VGPNetwork(_GPModel):
         if self.options.verbose:
             print("\n")
 
+    def _chunked_by_rows(self):
+        """Whether a GP node sizes a quadrature or pathwise chunk by the
+        rows a prediction call states (`BasicGP._row_bytes`), so that a
+        batch must not carry more."""
+        with self._propagation():
+            return any(node._row_bytes() > 0 for node in self._nodes()
+                       if hasattr(node, "_row_bytes"))
+
     @staticmethod
     def _measured_batch(base, n_rows, cap, per_location):
         """The locations a prediction batch takes once one batch of `n_rows`
         rows has been measured on the GPU from `base` bytes held: as many as
         fit `network._MEASURED_SHARE` of the device's limit beside what it
-        holds now, never more than `cap`, the estimate."""
+        holds now, never more than `cap` locations."""
         info = _tf.config.experimental.get_memory_info("GPU:0")
         per_row = (info["peak"] - base) / max(1, n_rows)
         if per_row <= 0:
@@ -3669,7 +3802,10 @@ class VGPNetwork(_GPModel):
 
     def predict_measurements(self, newdata: "_data._SpatialData",
                              n_sim: int = 20,
-                             n_nodes: int = 32) -> "dict[str, _np.ndarray]":
+                             n_nodes: int = 32,
+                             by_expert: bool = False,
+                             expert_options: "dict[str, _Any] | None" = None
+                             ) -> "dict[str, _np.ndarray]":
         """Draw the predictive distribution of a measurement per location.
 
         :meth:`predict` reports the ground, with the likelihood noise
@@ -3695,6 +3831,14 @@ class VGPNetwork(_GPModel):
             location and realization from the model's seed, so the sample
             is unbiased in every moment, reaches the tails, and is
             independent between locations.
+        by_expert
+            Ask each group of locations of only the experts active there, as
+            :meth:`predict_by_expert` groups them, so that memory does not
+            grow with the experts.
+        expert_options
+            Keywords for the grouping under `by_expert` -- `coverage`,
+            `neighbours`, `grouping`, `slots`, `pack`, as
+            :meth:`predict_by_expert` takes them.
 
         Returns
         -------
@@ -3709,8 +3853,8 @@ class VGPNetwork(_GPModel):
         MemoryError
             If the answer would not fit. It is held whole, by design, and
             costs `n_sim * n_nodes * 8` bytes a row for each column of each
-            variable -- 5 KB a row at the defaults, and twice that at the
-            peak, while the batches and the assembled whole are both live.
+            variable -- 5 KB a row at the defaults, and a batch more at the
+            peak, while a batch is placed into the whole.
             The ceiling is `models.MEASUREMENT_LIMIT`, and the message names
             the ways under it.
 
@@ -3739,12 +3883,15 @@ class VGPNetwork(_GPModel):
                    wanted_bytes / 1024 ** 3,
                    MEASUREMENT_LIMIT / 1024 ** 3))
 
-        chunks = {v: [] for v, _ in wanted}
-        for _, batch in self.measurement_batches(newdata, n_sim, n_nodes):
+        # placed by their rows: by expert the batches come group by group
+        samples = {v: _np.full((newdata.n_data, lik.size, n_sim * n_nodes),
+                               _np.nan) for v, lik in wanted}
+        for rows, batch in self.measurement_batches(
+                newdata, n_sim, n_nodes, by_expert=by_expert,
+                expert_options=expert_options):
             for v, values in batch.items():
-                chunks[v].append(values)
-        return {v: _np.concatenate(parts, axis=0)
-                for v, parts in chunks.items()}
+                samples[v][rows] = values
+        return samples
 
     def _measured_variables(self):
         """The variables a measurement can be described for, with their
@@ -3756,7 +3903,9 @@ class VGPNetwork(_GPModel):
 
     def measurement_batches(self, newdata: "_data._SpatialData",
                             n_sim: int = 20, n_nodes: int = 32,
-                            where: _types.Where = None):
+                            where: _types.Where = None,
+                            by_expert: bool = False,
+                            expert_options: "dict[str, _Any] | None" = None):
         """The measurement samples, a batch of locations at a time.
 
         What :meth:`predict_measurements` returns whole, yielded in the
@@ -3781,6 +3930,15 @@ class VGPNetwork(_GPModel):
             One boolean per location, or the indices of the locations to
             ask about; all of them by default. A location's sample does not
             depend on which others are asked about with it.
+        by_expert
+            Ask each group of locations of only the experts active there, as
+            :meth:`predict_by_expert` groups them, so that memory does not
+            grow with the experts. The batches then come group by group,
+            each in order within its group.
+        expert_options
+            Keywords for the grouping under `by_expert` -- `coverage`,
+            `neighbours`, `grouping`, `slots`, `pack`, as
+            :meth:`predict_by_expert` takes them.
 
         Yields
         ------
@@ -3877,17 +4035,37 @@ class VGPNetwork(_GPModel):
                                 _tf.float64)}))
                     for k, (sim, jitter, lik) in enumerate(measured)]
 
-        for rows, output in self._over_batches(newdata, batch_measure,
-                                               where=where, with_rows=True):
-            # in the variable's own units, here rather than at the end: a
-            # composition's parts reach the model as fractions of the whole,
-            # and a streaming caller compares them against assays batch by
-            # batch, so the conversion cannot wait for an assembly that
-            # never happens
-            yield rows, {
-                v: self.data.variables[v].from_model_units(
-                    _np.asarray(values))
-                for (v, _), values in zip(wanted, output)}
+        def passes(where):
+            for rows, output in self._over_batches(
+                    newdata, batch_measure, where=where, with_rows=True):
+                # in the variable's own units, here rather than at the end: a
+                # composition's parts reach the model as fractions of the
+                # whole, and a streaming caller compares them against assays
+                # batch by batch, so the conversion cannot wait for an
+                # assembly that never happens
+                yield rows, {
+                    v: self.data.variables[v].from_model_units(
+                        _np.asarray(values))
+                    for (v, _), values in zip(wanted, output)}
+
+        if not by_expert:
+            yield from passes(where)
+            return
+        groups, entered, _, _ = self._expert_groups(
+            newdata, _where_mask(newdata, where), **(expert_options or {}))
+        for done, (key, locs) in enumerate(groups):
+            batches = passes(locs)
+            while True:
+                # the group's experts entered only while its pass runs: held
+                # across a yield, they would reach whatever the caller does
+                # between batches
+                with entered(key):
+                    batch = next(batches, None)
+                if batch is None:
+                    break
+                yield batch
+            _progress.emit("predict_by_expert", done + 1, len(groups),
+                           "group")
 
     def responsibilities(self, newdata: "_data._SpatialData",
                          store: bool = True) -> "dict[str, _np.ndarray]":
@@ -4326,8 +4504,9 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         `"full"` to refit each fold on all its data at every iteration, or
         `"svi"` to refit in minibatches of
         `options.training_batch_size`, or `"by_expert"` to refit with
-        :meth:`VGPNetwork.train_by_expert` and predict the held-out rows
-        with :meth:`VGPNetwork.predict_by_expert` -- the same choice as
+        :meth:`VGPNetwork.train_by_expert`, predict the held-out rows with
+        :meth:`VGPNetwork.predict_by_expert` and draw their measurements by
+        expert too -- the same choice as
         :meth:`VGPNetwork.train_full` against
         :meth:`VGPNetwork.train_svi`, and worth making for the same
         reason: a fold refit costs the whole reduced data set per
@@ -4494,7 +4673,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                 # its batch.
                 fold_acc = {}
                 for batch, samples in fold_model.measurement_batches(
-                        held_points, n_sim=n_sim, n_nodes=n_nodes):
+                        held_points, n_sim=n_sim, n_nodes=n_nodes,
+                        by_expert=method == "by_expert"):
                     for v, sample in samples.items():
                         y_true, has_value, components = truths[v]
                         for c, component in enumerate(components):
