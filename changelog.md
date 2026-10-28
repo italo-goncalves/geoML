@@ -1,3 +1,16 @@
+## version 0.9.12
+* **On a GPU, a prediction batch under the quadrature is sized by the
+experts the call computes.** A GP node reading an uncertain input costs a
+row its quadrature at the smallest chunk, for every expert at once
+(`BasicGP._row_bytes`), and that counted every expert of the model where
+the quadrature computes the slots of a prediction by expert, or the active
+experts: on a GPU, where the measured batches check the estimate, it now
+counts those; on the CPU, where nothing is measured, every expert still.
+Larger batches under the quadrature were tried and not kept: on a GeoScape
+walk network (32 experts, 8 slots) batches ten times larger cost 3% less a
+block at twice the device's memory, the cost there being per row (8.5 ms
+a row, 68 ms a block of 8 sub-blocks).
+
 ## version 0.9.11
 * **A prediction by expert is measured group by group, and the estimate
 counts the realizations** (GeoScape's item 45, again). 0.9.10 measured a

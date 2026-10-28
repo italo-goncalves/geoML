@@ -3695,7 +3695,10 @@ class VGPNetwork(_GPModel):
         # what a measured batch may grow to: past the estimate, up to the
         # options' batch size, wherever no node sizes a chunk by the rows a
         # call states (`quadrature_rule`); the estimate cannot see what XLA
-        # saves, a third of the memory on a GeoScape network
+        # saves, a third of the memory on a GeoScape network. Under the
+        # quadrature a batch keeps to the estimate: growing it ten times on a
+        # GeoScape walk network bought 3% a block -- the cost there is per
+        # row -- for twice the device's memory (2026-10-27)
         cap = batch_size if self._chunked_by_rows() else max(
             batch_size,
             int(self.options.prediction_batch_size) // per_location)
@@ -3779,8 +3782,9 @@ class VGPNetwork(_GPModel):
 
     def _chunked_by_rows(self):
         """Whether a GP node sizes a quadrature or pathwise chunk by the
-        rows a prediction call states (`BasicGP._row_bytes`), so that a
-        batch must not carry more."""
+        rows a prediction call states (`BasicGP._row_bytes`): such a model's
+        batches keep to the estimate, and on a GPU it predicts without XLA
+        (`_with_xla`)."""
         with self._propagation():
             return any(node._row_bytes() > 0 for node in self._nodes()
                        if hasattr(node, "_row_bytes"))

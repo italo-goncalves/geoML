@@ -292,6 +292,28 @@ def test_prediction_in_slots_is_prediction_by_set():
     assert np.max(diff) < 0.05
 
 
+def test_on_a_gpu_the_quadrature_counts_the_experts_a_call_computes(
+        monkeypatch):
+    """The quadrature's row cost, which sizes a deep network's batches,
+    counts on a GPU the experts the call computes -- the slots, or the
+    subset -- as the quadrature itself does; elsewhere every expert, the
+    batches there being unmeasured."""
+    from geoml.latent import network as _net
+    m = _model(deep=True)
+    leaf = m.leaves[0]
+    with m._propagation():
+        every = leaf._row_bytes()
+        assert every > 0
+        with _net.expert_slots(_net._Slots(2, None, None)):
+            assert leaf._row_bytes() == every
+        monkeypatch.setattr(_net, "_gpu_visible", lambda: True)
+        assert leaf._row_bytes() == every
+        with _net.expert_slots(_net._Slots(2, None, None)):
+            assert leaf._row_bytes() == every * 2 // 4
+        with _net.expert_subset([0]):
+            assert leaf._row_bytes() == every // 4
+
+
 def test_a_batch_out_of_memory_by_expert_does_not_say_predict_by_expert(
         monkeypatch):
     import tensorflow as tf

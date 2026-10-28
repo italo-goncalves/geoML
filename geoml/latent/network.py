@@ -3480,11 +3480,20 @@ class BasicGP(_GPNode):
         as `_conditioned_sums` and `_pathwise_simulate` count them -- or 0
         where it reads a certain input and takes neither. What sizes a
         model's prediction batches (`VGPNetwork._prediction_rows`): a
-        budget the floor overrules no longer bounds anything."""
+        budget the floor overrules no longer bounds anything. On a GPU the
+        experts are those a call computes -- the slots of a prediction by
+        expert, or the active ones -- since the measured batches check the
+        estimate there; elsewhere every expert, as before."""
         if not (_FULL_VARIANCE and self._takes_quadrature()):
             return 0
         m, d = self._feature_count(), int(self.parent.size)
-        experts = len(self.root.n_ip)
+        # by expert in 19 slots of 32 experts a GeoScape walk network took
+        # batches of 24 rows, the fixed cost of a call then nearly all of a
+        # batch's time (2026-10-27)
+        slots = _slots_of(self.root)
+        experts = len(self.root.n_ip) if not _gpu_visible() \
+            else slots.size if slots is not None \
+            else len(_active_experts(self.root))
         cost = _node_bytes(self.kernel) * m * d
         if _pathwise() and self._feature_kernel():
             features = max(self._FEATURES, 2 * m) + 1

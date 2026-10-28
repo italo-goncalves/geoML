@@ -399,6 +399,44 @@ before 0.9.11 predicts with, and a GPU network reading an uncertain input.
 - Go only if a plain-graph workload matters enough (old saves, GPU
   networks with the quadrature); under XLA there is little left to win.
 
+**M — Refinement cuts unsampled ground wherever the background sits on a
+cut-off** (found 2026-10-27, on a GeoScape Run). GeoScape's Run 12 -- a
+`GPWalk` network, a `LikelihoodMixture` of two populations over Ag, Pb and
+Zn with `shares="latent"` beside a rock type, 32 experts -- refined a 20 m
+block set to three levels, every variable voting (`split_on` unset): the
+rock contact, and Ag at 100/200/300 ppm, Pb and Zn at 5/10/15 %. Pass 1
+cut 21405 of 22724 blocks, and the run was stopped seven hours in, its
+third prediction's first group about a million blocks at 68 ms a block.
+Read off the first prediction (`C:\Users\Public\segv\why94.py`):
+- **What marks the blocks.** 93% of them by any decision, 98% beyond 100 m
+  of a sample and 61% within 20 m. The rock contact marks 10.5% within
+  20 m and none past 50 m, Ag next to nothing; **Zn @ 10 marks 79% of the
+  blocks beyond 50 m, Zn @ 15 half of them, Pb @ 5 57%**. A block is
+  divided where its sub-blocks' prediction straddles a cut-off, and far
+  from the data the prediction sits on these three: Zn 11.2 % (5-95 %:
+  7.6-15.6), Pb 3.9 % (2.9-5.4), against 3.5 % and 1.6 % within 20 m.
+- **Why the background is high.** The populations are a barren one (Zn
+  0.03 %) and a mineralized one (Zn 12.5 % near the data). Near the data
+  the shares are the samples', 72 % barren; far from them they return to
+  the mixture's trained `bias`, **59 % mineralized**, and the mineralized
+  population's own mean rises with the latent variance (Zn 12.5 -> 19.2 %).
+  Not the mean alone: the realizations' median Zn is 8.4 % far and 0.8 %
+  near. The data's own median is 2.0 %, mean 4.6 %. Whether a bias that
+  calls unsampled ground mineralized is what the fit should say (drilling
+  aimed at ore, no declustering in the share's start, the bias weakly
+  identified where the shares' GP explains the data) is open.
+- **What to do**, in order of cost: GeoScape names `split_on` (the rock
+  type alone here, or the metals at the cut-offs that matter), which is
+  what `needs_splitting`'s docstring advises for a polymetallic deposit;
+  `refine(where=)` with `assign_from_data` keeps unsampled ground out of
+  the passes altogether (it is then not predicted either); in geoML, a
+  criterion that leaves a block whose cut-off the model cannot place --
+  the mean's contour through ground where the variance is the prior's
+  buys no surface, the argument 0.8.5 made against judging realizations
+  -- needs a measure of "cannot place" (the explained share of the
+  variance, the proportion's distance from a half) and a gate on a model
+  with a real contact. And the share bias above, as a question of its own.
+
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
 2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
