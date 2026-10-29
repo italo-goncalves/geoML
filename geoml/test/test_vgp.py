@@ -225,6 +225,42 @@ def test_gradient_constrained_input_reflects_retraining():
     assert not np.allclose(before, after)
 
 
+def test_gradient_constrained_input_keeps_its_root_and_its_constraint():
+    """The node draws through the whitened root `BasicGP` uses, its gradient
+    rows taking the jitter where their variational variance is zero: the
+    covariance it draws is still `K^-1 - (K + D)^-1`, and the mean's
+    derivative along each given direction is still zero."""
+    model, _ = build_gradient_constrained_model()
+    model.train_full(max_iter=8)
+    node = model.leaves[0]
+    node.refresh(model.options.jitter)
+    for e in range(node.n_experts):
+        k = np.asarray(node.cov[e])
+        r = np.asarray(node.chol_r[e])
+        drawn = np.einsum("sij,skj->sik", r, r)
+        wanted = np.linalg.inv(k)[None] - np.asarray(node.cov_smooth_inv[e])
+        assert np.all(np.isfinite(r))
+        np.testing.assert_allclose(drawn, wanted,
+                                   atol=1e-9 * np.abs(wanted).max())
+
+    _, dirs, _ = geoml.datasets.example_fold()
+    x = np.asarray(dirs.coordinates, float)
+    d = np.asarray(dirs.directions, float)
+    across = np.stack([-d[:, 1], d[:, 0]], axis=1)
+    h = 1e-3
+
+    def slope(u):
+        ends = [geoml.data.PointData.from_array(x + t * u, ["X", "Y"])
+                for t in (h, -h)]
+        for end in ends:
+            model.predict(end, n_sim=2)
+        up, down = (np.asarray(end.values("rock_num/latent_mean"),
+                               float).ravel() for end in ends)
+        return (up - down) / (2 * h)
+
+    assert np.max(np.abs(slope(d))) < 1e-4 * np.median(np.abs(slope(across)))
+
+
 # --------------------------------------------------------------------------- #
 # options.jit_predict (XLA)
 # --------------------------------------------------------------------------- #
@@ -256,6 +292,12 @@ def test_jit_prediction_matches_the_plain_one():
     assert np.allclose(plain, plain_again, atol=1e-8)
 
 
+def _predictions(model):
+    """The prediction's traced functions among a model's: the measured
+    rows' (`"measure"`) and a node's (`"node"`) have keys of their own."""
+    return {key for key in model._compiled if isinstance(key[0], bool)}
+
+
 def test_jit_holds_one_traced_function_per_setting():
     """`jit_compile` is fixed when a tf.function is built, so each combination
     of settings (XLA, simulation rule) gets its own, built once and kept."""
@@ -264,17 +306,17 @@ def test_jit_holds_one_traced_function_per_setting():
     model.options.jit_predict = False
 
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False, model._propagation_key())}
-    first = model._compiled[(False, False, model._propagation_key())]
+    assert _predictions(model) == {(False, model._setting(qmc=False))}
+    first = model._compiled[(False, model._setting(qmc=False))]
 
     model.options.jit_predict = True
     model.predict(grid, n_sim=4)
-    assert set(model._compiled) == {(False, False, model._propagation_key()),
-                                    (True, False, model._propagation_key())}
+    assert _predictions(model) == {(False, model._setting(qmc=False)),
+                                   (True, model._setting(qmc=False))}
 
     model.options.jit_predict = False
     model.predict(grid, n_sim=4)
-    assert model._compiled[(False, False, model._propagation_key())] is first
+    assert model._compiled[(False, model._setting(qmc=False))] is first
     # reused, not rebuilt
 
 
@@ -446,7 +488,7 @@ def test_a_graph_xla_refuses_is_predicted_without_it():
     sims = np.array(grid.variables["V"].get_simulations(), copy=True)
 
     model.options.jit_predict = True
-    model._compiled[(True, False, model._propagation_key())] = _refusing(
+    model._compiled[(True, model._setting(qmc=False))] = _refusing(
         "Detected unsupported operations when trying to compile graph")
     with pytest.warns(UserWarning, match="XLA could not compile"):
         model.predict(grid, n_sim=4)
@@ -464,7 +506,7 @@ def test_an_error_the_plain_graph_raises_too_is_not_xlas():
     model, grid = build_model()
     model.train_full(max_iter=5)
     for jit in (True, False):
-        model._compiled[(jit, False, model._propagation_key())] = _refusing(
+        model._compiled[(jit, model._setting(qmc=False))] = _refusing(
             "Cholesky decomposition was not successful")
     with pytest.raises(tf.errors.InvalidArgumentError, match="Cholesky"):
         model.predict(grid, n_sim=4)

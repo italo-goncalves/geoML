@@ -1,4 +1,75 @@
 ## version 0.9.12
+* **A block is cut where its realizations agree on what runs through it.**
+`needs_splitting` marked a block wherever the prediction at its
+sub-blocks straddled a cut-off, and the prediction is the mean of a few
+realizations: on a GeoScape model whose background sat on its cut-offs,
+that mean wobbled across them by sampling noise alone and the first pass
+marked 93% of the blocks, 98% of those beyond 100 m of a sample (Zn at 10
+marked 81% of the far blocks at 25 realizations, 36% at 200). The
+straddle now has to come with coherence: the share of the variation
+inside the block its realizations hold in common, each realization's
+shift of the whole block set aside. It is at least 0.2, and above what
+noise alone reaches once in a thousand blocks, a Beta quantile of the
+block's sub-blocks and the variable's realizations (0.38 at 8 realizations
+of 8 sub-blocks, 0.16 at 20, 0.017 at 200). Measured against four known
+fields at two block sizes and two realization counts, the blocks worth
+cutting ran from 0.55 to 0.99, a gradual rock contact from 0.24, and the
+far blocks of that model at most 0.13: every block the old rule marked
+on the known fields is still marked, and none of the far blocks
+(`docs/benchmarks/split_coherence.py`). `divided` holds the coherence
+where the prediction straddles and 0 elsewhere, a store holding the old
+flag being marked as it was; `needs_splitting(coherence=)` and
+`refine(coherence=)` name a threshold of 0.2 or more instead. A
+category's coherence is read off its realizations by the likelihood's
+own rule for picking a category, the rule a mesh set is told. A contrast
+of the sub-blocks' probabilities of being above the cut-off was tried
+first and lost real contacts (roadmap, Settled by measurement).
+* **A model keeps the training data's expert weights between calls.**
+Every prediction and refinement pass by expert, and every plan
+`train_by_expert` makes, swept the weight table afresh -- 29 s on a GPU
+and 70 s on a CPU on a 32-expert GeoScape network -- with the overlap of
+the experts and a KD-tree of the data per input. They are held now, with
+a fingerprint of what they read (every parameter, the data's locations,
+their variance and which rows are measured, the propagation setting and
+the jitter), and swept again when it changes. A grouping of 7488 blocks
+on that network takes 42.3 s the first time and 0.5 s after, the
+fingerprint 0.08 s. `expert_weights()` hands back a copy.
+* **One factorization for a GP node** (roadmap item L, 4). `BasicGP`'s
+refresh held two copies of its factors, one per expert and one batched
+over the slots, and an inverse of the prior covariance used only for the
+inducing points' coefficients; one builder serves both now, the
+coefficients come from a triangular solve, and a prediction no longer
+keeps what only the KL divergence reads. `GradientConstrainedInput`
+draws its realizations through the same whitened root, its gradient
+rows taking the jitter there: the covariance it draws is the old one's
+to 1e-13 and its mean and bound move at rounding, its realizations being
+other draws of the same law. Every other model moves at rounding (4e-12
+of a moment's scale at most). No speed measured: the refresh is 6% of a
+step where a step is long.
+* **A prediction into measured locations checks them from its own draws**
+(roadmap item L, 1b). The `pit_*` and `warped_*` columns came from a
+second pass over the network after the prediction, which held a trace of
+its own; the prediction's graph now hands back the draws the measurement
+samples are made from, and each batch's columns are written as it lands,
+so a cancelled prediction keeps those of the batches that did. The PITs
+are unchanged to the bit on the models measured. The CPU prediction of a
+GeoScape walk network at its 4429 data locations, killed by a 28 GB cap
+three times out of three, finishes in 340 s at a 20.0 GB peak (roadmap
+item S).
+* **A prediction by expert weighs the experts under the model's own
+rules.** `expert_weights` entered none of its own, and a prediction by
+expert asks for the weights outside any, so they were swept under the
+consensus and marginal rules whatever the options said, while training by
+expert swept under the model's. On a deep model of four experts under the
+joint rule the weights move by up to 0.16 and the prediction by expert by
+0.8% of its scale. Found by the next item's test.
+* **What a traced graph reads from the network module is one value**
+(roadmap item L, 5). The simulation rule, the expert and joint rules, the
+full variance, the quadrature's budget and precision and the module's own
+switches were restated by hand in seven cache keys, each a different
+subset; they are one frozen value now, put in force by one context and the
+key of every cache, and a test flips each part and checks every cache
+traces again. No number moves.
 * **On a GPU, a prediction batch under the quadrature is sized by the
 experts the call computes.** A GP node reading an uncertain input costs a
 row its quadrature at the smallest chunk, for every expert at once
@@ -10,6 +81,29 @@ Larger batches under the quadrature were tried and not kept: on a GeoScape
 walk network (32 experts, 8 slots) batches ten times larger cost 3% less a
 block at twice the device's memory, the cost there being per row (8.5 ms
 a row, 68 ms a block of 8 sub-blocks).
+* **The measured rows are read through a traced graph** (roadmap item L,
+1a). Where `predict` writes the `pit_*` columns it runs the network over
+the measured rows a second time, through `measurement_batches`, and that
+pass -- like `predict_measurements`, `cross_validate`'s scoring and
+`responsibilities` -- ran eagerly: every quadrature and pathwise chunk
+built a `tf.function` per batch, on the CPU compiled with XLA and kept. On
+a GeoScape walk network at 430 rows the pass took 100.6 s against the
+prediction's 21.3 and kept 2.8-3.9 GB more a call; traced once, as the
+prediction is, it takes 6.6 s and grows no more, its trace keeping 6.6 GB
+once. The PIT and warped columns are unchanged to the bit on the models
+measured; the measurement samples move at rounding, and on a GP on a GP by
+up to 3e-8 of their largest value, the pathwise realizations rounding
+differently in a graph. Under `jit_predict` the pass is compiled with XLA
+on the CPU only: on the GPU it took two minutes to compile and ran slower
+than the plain graph (a warm `predict` of Walker's exhaustive grid 6.9 s
+against 1.5 with the prediction alone compiled).
+* **The full and smooth realizations at a certain input come from one
+computation** (roadmap item L, 2). A prediction draws each GP node's
+realizations, then again without the node's own residual for the
+prediction's smooth pass, and the shared prior draw built both parts each
+time and returned one; it now builds them once a pass, as the pathwise draw
+did. The numbers are unchanged to the bit; on the GPU a prediction of
+Walker's models is 7-17% faster.
 
 ## version 0.9.11
 * **A prediction by expert is measured group by group, and the estimate

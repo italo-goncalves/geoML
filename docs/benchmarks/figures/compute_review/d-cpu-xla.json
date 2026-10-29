@@ -1,0 +1,129 @@
+{
+ "case": "saved",
+ "model": "/home/italo/coverage_runs/A_model",
+ "rows": 430,
+ "n_sim": 10,
+ "steps": 20,
+ "quadrature_xla": true,
+ "gpu": false,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 1.1982233640000004,
+  "rss_start_gb": 1.02367232,
+  "rss_peak_gb": 1.083179008,
+  "rss_growth_gb": 0.059506688
+ },
+ "nodes": [
+  "Linear",
+  "Bias",
+  "BasicGP",
+  "GPWalk",
+  "BasicGP",
+  "BasicInput",
+  "Concatenate",
+  "Bias",
+  "Bias",
+  "Scale",
+  "BasicGP",
+  "Scale",
+  "BasicGP"
+ ],
+ "refresh": {
+  "seconds": 43.36072844299997,
+  "rss_start_gb": 7.270146048,
+  "rss_peak_gb": 7.357964288,
+  "rss_growth_gb": 0.08781824,
+  "median": 4.33166079099999
+ },
+ "predict": {
+  "rows": 430,
+  "plain": {
+   "seconds": 21.273092802999827,
+   "rss_start_gb": 16.582303744,
+   "rss_peak_gb": 16.606420992,
+   "rss_growth_gb": 0.024117248,
+   "batches": [
+    3.9454563870001493,
+    3.960206703999802,
+    3.9984844730001896,
+    3.9915633189998516,
+    4.143171658000028
+   ],
+   "batch_count": 6,
+   "rows_per_batch_estimate": 86,
+   "batch_median": 3.9915633189998516,
+   "prediction_seconds": 21.272787039999912,
+   "after_batches_seconds": 0.0003057629999148048,
+   "counts": {},
+   "first": {
+    "seconds": 152.3837956289999,
+    "rss_growth_gb": 10.66303488,
+    "counts": {
+     "_chunked_sums traced": 192,
+     "_chunked_map traced": 99,
+     "_values_and_noise traced": 2
+    }
+   }
+  },
+  "measured": {
+   "seconds": 121.61941105899996,
+   "rss_start_gb": 19.413848064,
+   "rss_peak_gb": 23.341252608,
+   "rss_growth_gb": 3.927404544,
+   "batches": [
+    3.994250926999939,
+    3.967287248000048,
+    3.9372827740000957,
+    4.0129149069998675,
+    3.9816249220000373
+   ],
+   "batch_count": 6,
+   "rows_per_batch_estimate": 86,
+   "batch_median": 3.9816249220000373,
+   "prediction_seconds": 21.062990029000048,
+   "after_batches_seconds": 100.55642102999991,
+   "counts": {
+    "_chunked_sums eager": 192,
+    "_chunked_map eager": 99
+   },
+   "first": {
+    "seconds": 115.28166066899985,
+    "rss_growth_gb": 2.807427072,
+    "counts": {
+     "_chunked_sums eager": 192,
+     "_chunked_map eager": 99
+    }
+   }
+  },
+  "measurement_pass_seconds": 100.34631825600013
+ },
+ "roots": {
+  "seconds": 21.498097793999932,
+  "rss_start_gb": 29.77021952,
+  "rss_peak_gb": 29.777821696,
+  "rss_growth_gb": 0.007602176,
+  "batches": [
+   4.0751267279999865,
+   4.014683828999978,
+   3.9805224200001703,
+   3.97836048399995,
+   4.0945308389998445
+  ],
+  "batch_count": 6,
+  "rows_per_batch_estimate": 86,
+  "batch_median": 4.014683828999978,
+  "prediction_seconds": 21.497802902999865,
+  "after_batches_seconds": 0.00029489100006685476,
+  "counts": {},
+  "first": {
+   "seconds": 119.94735707900008,
+   "rss_growth_gb": 6.762266624,
+   "counts": {
+    "_chunked_sums traced": 96,
+    "_chunked_map traced": 99,
+    "_values_and_noise traced": 2
+   }
+  }
+ }
+}

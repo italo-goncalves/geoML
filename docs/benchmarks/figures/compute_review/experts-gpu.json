@@ -1,0 +1,155 @@
+{
+ "case": "experts",
+ "model": null,
+ "rows": null,
+ "n_sim": 10,
+ "steps": 20,
+ "quadrature_xla": false,
+ "gpu": true,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 10.747177068999918,
+  "rss_start_gb": 1.835393024,
+  "rss_peak_gb": 2.218119168,
+  "rss_growth_gb": 0.382726144
+ },
+ "nodes": [
+  "BasicGP",
+  "BasicInput"
+ ],
+ "step": {
+  "seconds": 10.48501179799996,
+  "rss_start_gb": 2.218119168,
+  "rss_peak_gb": 2.219167744,
+  "rss_growth_gb": 0.001048576,
+  "unit": "epoch",
+  "median": 0.5186906270000691,
+  "count": 383
+ },
+ "refresh": {
+  "seconds": 1.0240572529996825,
+  "rss_start_gb": 2.347388928,
+  "rss_peak_gb": 2.348437504,
+  "rss_growth_gb": 0.001048576,
+  "median": 0.09570026350002081
+ },
+ "plain": {
+  "seconds": 10.84919527000011,
+  "rss_start_gb": 2.348437504,
+  "rss_peak_gb": 2.350010368,
+  "rss_growth_gb": 0.001572864,
+  "unit": "epoch",
+  "median": 0.4801959149999675,
+  "count": 378,
+  "nodes": [
+   "BasicGP_1"
+  ]
+ },
+ "predict": {
+  "rows": 470,
+  "plain": {
+   "seconds": 0.12456016299984185,
+   "rss_start_gb": 2.58404352,
+   "rss_peak_gb": 2.58404352,
+   "rss_growth_gb": 0.0,
+   "batches": [
+    0.041015278000031685
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 3762,
+   "batch_median": 0.041015278000031685,
+   "prediction_seconds": 0.12465044500004296,
+   "after_batches_seconds": -9.028200020111399e-05,
+   "counts": {},
+   "first": {
+    "seconds": 6.761064589999933,
+    "rss_growth_gb": 0.262688768,
+    "counts": {
+     "_shared_prior_simulate traced": 2,
+     "_values_and_noise traced": 2
+    }
+   }
+  },
+  "measured": {
+   "seconds": 0.45609687899968776,
+   "rss_start_gb": 2.617073664,
+   "rss_peak_gb": 2.617073664,
+   "rss_growth_gb": 0.0,
+   "batches": [
+    0.03793731200039474
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 3762,
+   "batch_median": 0.03793731200039474,
+   "prediction_seconds": 0.1133679430004122,
+   "after_batches_seconds": 0.34272893599927556,
+   "counts": {
+    "_shared_prior_simulate eager": 2
+   },
+   "first": {
+    "seconds": 1.4042752669997753,
+    "rss_growth_gb": 0.033030144,
+    "counts": {
+     "_shared_prior_simulate eager": 2
+    }
+   }
+  },
+  "measurement_pass_seconds": 0.3315367159998459
+ },
+ "roots": {
+  "skipped": "no node takes the conditioned quadrature"
+ },
+ "cv": {
+  "seconds": 38.23033308599997,
+  "rss_start_gb": 2.628083712,
+  "rss_peak_gb": 3.859279872,
+  "rss_growth_gb": 1.23119616,
+  "scores": [
+   {
+    "n": 157,
+    "rmse": 236.4631070922,
+    "mae": 197.7670821255,
+    "bias": 37.5087078221,
+    "crps": 143.0168943645,
+    "goodness": 0.9005661713,
+    "variable": "V",
+    "component": "V",
+    "fold": 0
+   },
+   {
+    "n": 157,
+    "rmse": 302.902978798,
+    "mae": 242.8783144422,
+    "bias": 51.0849913655,
+    "crps": 172.9769623607,
+    "goodness": 0.8978149328,
+    "variable": "V",
+    "component": "V",
+    "fold": 1
+   },
+   {
+    "n": 156,
+    "rmse": 333.0988209196,
+    "mae": 254.0116800186,
+    "bias": 90.5404094021,
+    "crps": 179.4837686532,
+    "goodness": 0.9012464387,
+    "variable": "V",
+    "component": "V",
+    "fold": 2
+   },
+   {
+    "n": 470,
+    "rmse": 293.5199441113,
+    "mae": 231.5045730724,
+    "bias": 59.645775828,
+    "crps": 165.1287306718,
+    "goodness": 0.9000591017,
+    "variable": "V",
+    "component": "V",
+    "fold": "all"
+   }
+  ]
+ }
+}

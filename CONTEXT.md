@@ -114,6 +114,20 @@ work out what the block's value should be — never a thing predicted in its
 own right.
 _Avoid_: cell, voxel, panel
 
+**Coherence**:
+How far a block's realizations agree on the pattern inside it: the share
+of the variation among its sub-blocks that every realization holds in
+common, once each realization's shift of the whole block is set aside.
+Near one where the model places a contact inside the block, sharply or
+gradually; near nothing where it only does not know, each realization
+running its own way. A block is cut where the prediction crosses a
+cut-off inside it *and* its realizations are coherent there — never on the
+crossing alone, which a few rough realizations produce wherever the data
+do not reach.
+_Avoid_: contrast, sharpness (how far the field changes across a block is
+a different and rejected measure), crossing share (counting the
+realizations that cross inside a block, whichever way, is another)
+
 ## The model
 
 **Latent network**:

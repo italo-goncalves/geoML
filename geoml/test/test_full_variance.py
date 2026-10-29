@@ -68,7 +68,7 @@ def test_a_new_model_takes_it_and_an_older_save_does_not(tmp_path):
     model.save(tmp_path / "old")
     reopened = geoml.persistence.load_model(tmp_path / "old")
     assert not reopened._full_variance()
-    assert reopened._propagation_key() != _deep_model()._propagation_key()
+    assert reopened._setting() != _deep_model()._setting()
 
 
 def test_off_every_expert_draws_under_the_node_name():
@@ -124,6 +124,26 @@ def _shallow_model(kernel, full_variance=True):
         data, "v", geoml.likelihood.Gaussian(), gp,
         options=geoml.models.GPOptions(verbose=False,
                                        full_variance=full_variance))
+
+
+def test_the_full_and_smooth_realizations_come_from_one_draw(monkeypatch):
+    """A prediction at a certain input takes the realizations and their
+    smooth part, the residual left out, from one shared prior draw: the
+    features are drawn once per node and pass, not once for each."""
+    model = _shallow_model("Gaussian")
+    model.train_full(max_iter=3)
+    model.options.jit_predict = False
+    grid = geoml.data.Grid2D(start=[0, 0], n=[10, 10], step=[10, 10])
+    drawn = []
+    original = geoml.latent.BasicGP._feature_basis
+
+    def counted(self, *args, **kwargs):
+        drawn.append(self.name)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(geoml.latent.BasicGP, "_feature_basis", counted)
+    model.predict(grid, n_sim=4)                 # one batch, one trace
+    assert drawn == [model.leaves[0].name]
 
 
 @pytest.mark.parametrize("kernel", ["Spherical", "Cubic"])

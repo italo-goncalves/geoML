@@ -1,0 +1,94 @@
+{
+ "case": "saved",
+ "model": "/home/italo/coverage_runs/A_model",
+ "rows": 430,
+ "n_sim": 10,
+ "steps": 20,
+ "quadrature_xla": false,
+ "gpu": false,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 0.9240500889998202,
+  "rss_start_gb": 1.023574016,
+  "rss_peak_gb": 1.089634304,
+  "rss_growth_gb": 0.066060288
+ },
+ "nodes": [
+  "Linear",
+  "Bias",
+  "BasicGP",
+  "GPWalk",
+  "BasicGP",
+  "BasicInput",
+  "Concatenate",
+  "Bias",
+  "Bias",
+  "Scale",
+  "BasicGP",
+  "Scale",
+  "BasicGP"
+ ],
+ "predict": {
+  "rows": 430,
+  "plain": {
+   "seconds": 41.94246426699988,
+   "rss_start_gb": 10.039205888,
+   "rss_peak_gb": 10.101858304,
+   "rss_growth_gb": 0.062652416,
+   "batches": [
+    8.006066094000062,
+    7.999620577000087,
+    8.218316100000038,
+    8.28360434000001,
+    8.169231912999976
+   ],
+   "batch_count": 6,
+   "rows_per_batch_estimate": 86,
+   "batch_median": 8.169231912999976,
+   "prediction_seconds": 41.9421186510001,
+   "after_batches_seconds": 0.0003456159997767827,
+   "counts": {},
+   "first": {
+    "seconds": 192.41146630899993,
+    "rss_growth_gb": 8.948523008,
+    "counts": {
+     "_chunked_sums traced": 192,
+     "_chunked_map traced": 99,
+     "_values_and_noise traced": 2
+    }
+   }
+  },
+  "measured": {
+   "seconds": 82.2181732009999,
+   "rss_start_gb": 10.113654784,
+   "rss_peak_gb": 10.123091968,
+   "rss_growth_gb": 0.009437184,
+   "batches": [
+    8.019918665000205,
+    7.912730730999783,
+    7.941425254000023,
+    7.955799759000001,
+    8.136643648000017
+   ],
+   "batch_count": 6,
+   "rows_per_batch_estimate": 86,
+   "batch_median": 7.955799759000001,
+   "prediction_seconds": 41.18031517899999,
+   "after_batches_seconds": 41.03785802199991,
+   "counts": {
+    "_chunked_sums eager": 192,
+    "_chunked_map eager": 99
+   },
+   "first": {
+    "seconds": 82.31205633200011,
+    "rss_growth_gb": 0.011534336,
+    "counts": {
+     "_chunked_sums eager": 192,
+     "_chunked_map eager": 99
+    }
+   }
+  },
+  "measurement_pass_seconds": 40.27570893400002
+ }
+}

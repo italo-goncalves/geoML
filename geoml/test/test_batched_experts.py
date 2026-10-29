@@ -990,3 +990,48 @@ def test_the_traced_weight_sweep_is_the_eager_one(name):
     assert traces <= 2 * len(m._expert_blocks())
     assert sum(s.experimental_get_tracing_count()
                for s in m._weight_sweeps.values()) == traces
+
+
+def test_the_weight_table_is_held_until_what_it_reads_changes(monkeypatch):
+    # the training data's table is swept once and read by every prediction,
+    # refinement pass and plan after it, until a parameter, the data or the
+    # setting moves
+    m = _model()
+    m.train_full(5)
+    sweeps = []
+    sweep = m._weight_table
+    monkeypatch.setattr(m, "_weight_table",
+                        lambda container: sweeps.append(1) or sweep(container))
+    table = m.expert_weights()
+    target = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    m._expert_groups(target, None)
+    m._expert_groups(target, None)
+    m._expert_plan(0.99)
+    assert len(sweeps) == 1
+    # the caller's copy is the caller's
+    table[:] = 0.0
+    assert m.expert_weights().sum() > 0
+    np.testing.assert_array_equal(m.expert_weights(), sweep(m.data))
+    m.train_full(1)
+    m.expert_weights()
+    assert len(sweeps) == 2
+    m._set_data(m.data[np.arange(300)])
+    assert m.expert_weights().shape[0] == 300
+    assert len(sweeps) == 3
+    m.options.jitter *= 10
+    m.expert_weights()
+    assert len(sweeps) == 4
+
+
+def test_a_held_weight_table_predicts_what_a_fresh_one_does():
+    m = _model()
+    m.train_full(5)
+    a = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
+    b = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
+    m.predict_by_expert(a, n_sim=5)
+    del m.__dict__["_held_weights"]
+    m.predict_by_expert(b, n_sim=5)
+    np.testing.assert_array_equal(a.values("v/prediction"),
+                                  b.values("v/prediction"))
+    np.testing.assert_array_equal(a.variables["v"].get_simulations(),
+                                  b.variables["v"].get_simulations())

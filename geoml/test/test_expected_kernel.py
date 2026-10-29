@@ -681,7 +681,7 @@ def _walk_against_draws(model, walk, x, draws=10_000, seed=8):
             # the variance the inducing points leave unexplained, each
             # walker's own normals, the same along its path
             own = rng.normal(size=[draws, len(starts), 2])
-            k_inv = np.asarray(field.cov_inv[e])
+            k_inv = np.linalg.inv(np.asarray(field.cov[e]))
             p = np.broadcast_to(starts, (draws,) + starts.shape).copy()
             for _ in range(walk.n_steps):
                 k = np.asarray(field.covariance_matrix(
