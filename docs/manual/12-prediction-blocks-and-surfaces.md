@@ -149,6 +149,5 @@ itself.
 
 ## Further reading
 
-Chapter 8 for what the blocks contain, chapter 6 for boundaries as level
-sets, and chapter 17 for topography, domains and grade shells on a real
-deposit at once.
+Chapter 8 for what the blocks contain, and chapter 6 for boundaries as
+level sets.

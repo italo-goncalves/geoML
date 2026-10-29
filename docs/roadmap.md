@@ -3284,6 +3284,15 @@ it peaks at 23.1 GB, and the runner has 16. The job runs one process per
 test file now: under a 14 GB cap every file passed, the heaviest peaking
 at 6.1 GB.)
 
+**S — A refined surface in the manual again** (filed 2026-10-29). Chapter
+17 moved to a 2D section of a folded vein, so the manual no longer shows
+the 3D surface workflow end to end: `refine` on a `BlockSet3D`, the
+contour of an indicator at zero with `get_contour`, and a prediction onto
+the mesh, coloured by the uncertainty. Chapter 12 teaches `refine` and
+`get_contour` apart; a small synthetic body in 3D there would carry the
+rest. The 3D vein drillholes that chapter 17 used took 57 minutes a run
+at 0.9.12, so the example should be one a release can afford.
+
 **L — Simplify after the expected kernel, breaking old saves** (agreed
 2026-10-08, after 0.9.0; a major version). 0.9.0 keeps every save opening
 by carrying two propagation rules side by side. Once the expected kernel

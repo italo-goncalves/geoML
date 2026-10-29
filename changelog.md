@@ -1,3 +1,14 @@
+## version 0.9.13
+* **Chapter 17 is a folded vein in section.** The 3D vein drillholes took
+57 minutes a run at 0.9.12, and in 3D the walk could only be drawn on
+one plan section. The chapter now drills a synthetic folded vein in 2D
+with five holes (the raster in `docs/manual/data/vein-truth.npz`), so
+both maps are scored against the truth instead of in-sample, the walk is
+drawn over the whole section with the vein and the holes carried into
+its coordinates, and `GPWalk(reach=)` is explained from a walk held at a
+long reach. Nothing is downloaded any more. The 3D surface workflow it
+also showed is a roadmap item.
+
 ## version 0.9.12
 * **A block is cut where its realizations agree on what runs through it.**
 `needs_splitting` marked a block wherever the prediction at its
