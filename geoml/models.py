@@ -3586,7 +3586,8 @@ class VGPNetwork(_GPModel):
                     left_out=left_out)
 
     def _expert_groups(self, newdata, mask, coverage=0.99, neighbours=8,
-                       grouping="home", slots=True, pack=True):
+                       grouping="home", slots: "bool | int" = True,
+                       pack=True):
         """The groups of locations a prediction by expert visits, and how to
         enter one, as :meth:`predict_by_expert` describes them.
 
@@ -3993,8 +3994,10 @@ class VGPNetwork(_GPModel):
         if per_row <= 0:
             return cap
         network = _latent.network
-        room = network._MEASURED_SHARE * network._device_limit() \
-            - info["current"]
+        limit = network._device_limit()
+        if limit is None:
+            return cap
+        room = network._MEASURED_SHARE * limit - info["current"]
         return max(1, min(cap, int(room // per_row) // per_location))
 
     def predict_measurements(self, newdata: "_data._SpatialData",

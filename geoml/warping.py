@@ -1221,6 +1221,10 @@ class _ContinuousFlow(_Warping):
     likelihood calls `refresh()` once per entry point, where the old
     per-invocation refresh was most of the flow's measured cost.
     """
+
+    # what `refresh` settles the field into; None until it has
+    _state: "dict | None"
+
     _mixes = True
 
     def __init__(self, size, n_steps=10, rtol=1e-6):

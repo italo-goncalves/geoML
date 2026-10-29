@@ -1679,6 +1679,10 @@ class LikelihoodMixture(_Likelihood):
             log_w = _tf.math.log(self.parameters["weights"].get_value())
             bound = _tf.reduce_logsumexp(terms + log_w[None, :], axis=1)
         else:
+            if samples is None:
+                raise ValueError(
+                    "latent shares are read off the realizations, and "
+                    "log_lik was given none")
             # averaged over the share columns' realizations, inside the log
             log_w = _tf.nn.log_softmax(self._share_logits(
                 samples[:, self._population_size:, :]), axis=1)

@@ -368,6 +368,8 @@ class _Predicted(tuple):
     node's input is uncertain (see `BasicGP._mixture_moments`), which a
     likelihood integrates out beside its noise."""
 
+    jitter: "_tf.Tensor | None"
+
     def __new__(cls, mu, var, sims, explained_var, jitter=None):
         predicted = super().__new__(cls, (mu, var, sims, explained_var))
         predicted.jitter = jitter
@@ -2299,6 +2301,9 @@ class _Operation(_LatentVariable):
 
 class _GPNode(_FunctionalLatentVariable):
     _GAUSSIAN = True
+
+    # set by `BasicGP`, from which every GP node descends
+    kernel: "_kr._Kernel"
 
     # Whether the node reads its parent's chain under the expected kernel.
     # `UncertainInputGP` integrates over its input's marginal itself.
