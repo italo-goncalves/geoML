@@ -180,3 +180,113 @@ def test_a_shift_of_the_wrong_width_is_refused():
         3, warping=geoml.warping.Identity(3))
     with pytest.raises(ValueError, match="size 3"):
         likelihood._measurement_nodes(4, np.random.default_rng(0).random((5, 1, 2)))
+
+
+def test_the_pass_is_traced_once_whatever_its_batches(monkeypatch):
+    """The measured rows run through one traced graph, as the prediction
+    does: the network is entered while tracing, never batch by batch. Run
+    eagerly, every quadrature and pathwise chunk built a `tf.function` per
+    batch, and on the CPU compiled and kept each with XLA."""
+    model, walker = _walker_model(1234)
+    model.options.prediction_batch_size = 97          # five batches
+    leaf = model.leaves[0]
+    entries = []
+    original = type(leaf).predict
+
+    def counted(self, *args, **kwargs):
+        entries.append(tf.executing_eagerly())
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(leaf), "predict", counted)
+    batches = list(model.measurement_batches(walker, n_sim=2, n_nodes=4))
+    assert len(batches) == 5
+    assert entries and not any(entries)
+    assert len(entries) <= 2     # the full batches and the short last one
+
+    # a prediction into the data writes its PIT through the same graph
+    entries.clear()
+    model.predict(walker[np.arange(walker.n_data)], n_sim=2)
+    assert not any(entries)
+
+
+def test_the_pass_is_compiled_with_xla_on_the_cpu_only(monkeypatch):
+    """Under `jit_predict` the measured rows are compiled with XLA where
+    TensorFlow sees no GPU, and run on the plain graph where it sees one,
+    whatever the option says."""
+    model, walker = _walker_model(1234)
+    model.options.jit_predict = True
+
+    def measure_keys():
+        return {key for key in model._compiled
+                if isinstance(key, tuple) and key[0] == "measure"}
+
+    list(model.measurement_batches(walker, n_sim=2, n_nodes=4))
+    assert {key[1] for key in measure_keys()} == {True}
+
+    model._compiled.clear()
+    monkeypatch.setattr(geoml.latent.network, "_gpu_visible", lambda: True)
+    traced = model._measure_function(True)
+    assert {key[1] for key in measure_keys()} == {False}
+    assert traced is model._measure_function(False)
+
+
+def _pit_from_the_door(model, target, n_sim):
+    """The PITs of `target`'s measurements from `measurement_batches`, as
+    `predict` wrote them before it took them from its own draws."""
+    truth = np.asarray(target.variables["V"].get_measurements()[0],
+                       dtype=float).reshape(-1)
+    pit = np.full(target.n_data, np.nan)
+    for rows, samples in model.measurement_batches(target, n_sim=n_sim):
+        draws = samples["V"][:, 0, :]
+        pit[rows] = (draws < truth[rows, None]).mean(axis=1) \
+            + 0.5 * (draws == truth[rows, None]).mean(axis=1)
+    return pit
+
+
+def test_a_prediction_checks_its_measured_rows_from_its_own_draws():
+    """`predict` into measured locations takes the PITs from the draws its
+    own graph made: no second pass over the network, and the PITs are the
+    measured rows' door's."""
+    model, walker = _walker_model(1234)
+    model.options.prediction_batch_size = 97
+    model.options.jit_predict = False
+    target = walker[np.arange(walker.n_data)]
+    model.predict(target, n_sim=5)
+    assert not any(isinstance(key, tuple) and key[0] == "measure"
+                   for key in model._compiled)
+    pit = np.asarray(target.get_metadata("pit_V"), dtype=float)
+    reference = _pit_from_the_door(model, target, 5)
+    assert np.isfinite(pit).all()
+    # the same realizations, drawn in another graph: a rank may move where
+    # a sample sits on its measurement to rounding, no further
+    assert np.mean(pit != reference) < 0.01
+    assert np.max(np.abs(pit - reference)) <= 2 / (5 * 32)
+
+
+def test_a_cancelled_prediction_keeps_the_checks_of_the_batches_that_landed():
+    """The PITs and warped values are written batch by batch, so finishing
+    what `unpredicted()` names gives the columns predicting the lot gives."""
+    model, walker = _walker_model(1234)
+    model.options.prediction_batch_size = 97
+    whole = walker[np.arange(walker.n_data)]
+    model.predict(whole, n_sim=3)
+
+    class Stop(Exception):
+        pass
+
+    def stop_after_two(event):
+        if event.task == "predict" and event.done >= 2:
+            raise Stop()
+
+    resumed = walker[np.arange(walker.n_data)]
+    with pytest.raises(Stop):
+        with geoml.progress(stop_after_two):
+            model.predict(resumed, n_sim=3)
+    landed = np.isfinite(np.asarray(resumed.get_metadata("pit_V"),
+                                    dtype=float))
+    assert 0 < landed.sum() < resumed.n_data
+    model.predict(resumed, n_sim=3, where=resumed.unpredicted())
+    for name in ("pit_V", "warped_V_0"):
+        np.testing.assert_array_equal(
+            np.asarray(resumed.get_metadata(name), dtype=float),
+            np.asarray(whole.get_metadata(name), dtype=float), name)

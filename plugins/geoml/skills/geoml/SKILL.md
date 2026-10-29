@@ -76,7 +76,7 @@ precision everywhere. Realizations are *stored* as `float32` (half the disk,
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.11.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.12.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -285,8 +285,10 @@ in the catalogue.
   fold, and `models.conformalize` recalibrates the intervals. In-sample scores
   flatter; only out-of-fold ones speak for the ground between samples.
 - **Block models.** A `BlockSet3D` refined by `models.refine`: predict
-  coarse, split only the blocks the prediction's surface runs through (a
-  block the model is merely unsure about is left whole), predict what the
+  coarse, split only the blocks the prediction's surface runs through and
+  whose realizations agree on it -- their coherence, at least 0.2 and
+  above the noise floor (a block the model is merely unsure about is left
+  whole, however its mean wobbles across a cut-off) -- predict what the
   split made. `MeshSet` contours a column for the prediction and every
   realization at once, with volumes measured as it goes.
 

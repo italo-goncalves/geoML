@@ -340,7 +340,21 @@ rather than squeeze it:
   pass; worth it only if the walk grows longer.
 
 **S — A CPU prediction of the GeoScape walk network runs out of memory**
-(found 2026-10-24, not investigated). The model of the coverage experiments
+(found 2026-10-24; **closed 2026-10-28 by item L's 1b**: the run below
+finishes in 340 s at 20.0 GB under the 28 GB cap; **cause measured
+2026-10-28**: the measurement pass ran
+eagerly, and every quadrature and pathwise chunk it reached built a fresh
+`tf.function` compiled with XLA, kept for the life of the process -- 2.8-3.9
+GB more resident per call at 430 rows, flat at 10.1 GB with
+`_QUADRATURE_XLA = False`; `compute_review.py`, case D). **Narrowed by item
+L's 1a, not closed**: the pass is one traced graph now and grows no more
+batch by batch, but its trace keeps 6.6 GB once (3.6 without the chunks'
+XLA), and the prediction itself holds 24.5 GB at 4429 rows -- each trace of
+its graph about 9 GB of XLA chunk compilations, a short last batch a second
+trace -- so the 4429-row run still met the 28 GB cap, at the pass's first
+batch. Left to 1b, which takes the samples from the prediction's own graph
+(the user's choice, 2026-10-28); padding the short last batch to one shape
+was the other route, not taken. The model of the coverage experiments
 (three GP nodes reading a `GPWalk`, 32 experts, trained by expert),
 predicted at its own 4429 data locations with 10 realizations and the GPU
 hidden, was killed by a 28 GB cap three times out of three -- float64
@@ -398,6 +412,288 @@ before 0.9.11 predicts with, and a GPU network reading an uncertain input.
   come from the features' Gram matrices across experts.
 - Go only if a plain-graph workload matters enough (old saves, GPU
   networks with the quadrature); under XLA there is little left to win.
+
+**L — Six places the computation repeats itself** (agreed 2026-10-28, from
+a review of the training and prediction paths; read off the code, weights
+not yet measured). One branch, one commit per item, released together; an
+item either keeps every number to the bit or is gated at rounding level
+(1e-10) against the version before it, and an item that does not show its
+gain on the benchmarks is dropped and recorded under Settled by
+measurement. Moving bits at rounding level is accepted (the reproducibility
+contract does not span releases; chapters 16-17 will show figure diffs).
+- **0. Benchmarks first.** `docs/benchmarks/compute_review.py`: time and
+  peak memory of a training step, `predict` with and without measurements,
+  and `cross_validate`, on (A) Walker shallow, one expert, a feature kernel
+  at certain inputs; (B) a synthetic `grid_experts` model trained by
+  expert; (C) chapter 17's walked model, joint rule; (D) the GeoScape walk
+  network on the CPU (the out-of-memory item above, `A_model`); (E) a
+  `GradientConstrainedInput` model. Reference outputs stored for every
+  later gate. Items 3, 4b-c and 6 go ahead only where the profile puts
+  their work at 5% or more of a step or batch.
+  **Done 2026-10-28** (results in `docs/benchmarks/figures/compute_review/`,
+  one JSON per case and device; C at 1000 rows, D at 430, 10
+  realizations). What each item can win:
+  - *1a*: the measurement pass, against the prediction over the same rows:
+    A 0.12 s / 0.05, B 0.49 / 0.17 on the CPU; D on the CPU under XLA
+    **100.6 s / 21.3**, with 192 `_chunked_sums` and 99 `_chunked_map`
+    calls run eagerly per pass and 2.8-3.9 GB kept per measured call (16.6
+    → 19.4 → 23.3 → 29.8 GB resident); with `_QUADRATURE_XLA = False` the
+    same pass 41.0 s / 41.9, flat at 10.1 GB; on the GPU 53.2 s / 79.6,
+    flat. C's variable is categorical: no pass.
+  - *2*: confirmed by count -- `_shared_prior_simulate` entered twice per
+    node per trace and `_values_and_noise` twice per likelihood (A, B).
+  - *3*: **dropped** -- the root sums answered by zeros moved a prediction
+    batch 0.8% (C, CPU), 0.7% (C, GPU) and -1.1% (D, CPU); the ablation
+    did take (two `_chunked_sums` traces of four). See Settled by
+    measurement.
+  - *4b-c*: a traced refresh of every node with the KL and its gradient,
+    against a step: A 51% (CPU) / 41% (GPU), E 44% / 45%, B 2% / 19% of an
+    epoch by expert (every expert refreshed, so an upper bound), C 6.0% /
+    6.3% of a 20.3 / 13.5 s step; D 4.3 s (CPU) / 5.4 s (GPU) per full
+    refresh. Go ahead.
+  - *6*: the first layer's plain covariance against the step: A -2.5% /
+    +6.2%, B +3.0% / +7.4%, C +3.0% (CPU), i.e. at the bar on the GPU only
+    and within the steps' scatter on the CPU. Go ahead with the gate
+    re-timed over more steps; dropped if the GPU gain does not hold.
+- **1a. The measured-row pass traced.** `predict` on a target holding
+  measurements runs the network a second time (`_check_measurements` ->
+  `measurement_batches` -> `batch_measure`), eagerly: no `_compiled` cache,
+  no XLA, and `_chunked_sums`/`_chunked_map` wrap a fresh
+  `tf.function(jit_compile=True)` on every call, which in eager mode
+  compiles every batch -- the likeliest cause of the CPU out-of-memory item
+  above. `responsibilities`' `batch_moments` is the same. Both go through a
+  traced cache and `_with_xla`. Gates: one trace across many batches;
+  `pit_*`/`warped_*` bit for bit on the plain graph, 1e-12 under XLA;
+  model D predicts on the CPU under the 28 GB cap (closing that item, or
+  ruling this cause out).
+  **Done 2026-10-28** (`_measure_function`/`_measure_raw`,
+  `_moments_function`/`_moments_raw`; the rotations drawn outside the
+  graph and handed in). On D at 430 rows the pass takes 6.6 s against
+  100.6, no growth between batches, 6.6 GB once for its trace; the
+  4429-row run still meets the cap (item S above). One-threaded on four
+  Walker models (shallow, `grid_experts`, a GP on a GP, a `Mixture`):
+  `pit_*` and `warped_*` bit for bit, plain graph and XLA; the measurement
+  samples not -- 1e-15 to 2e-12 of their largest value on the plain graph,
+  3.8e-9 under XLA, and 2.6e-8 on the GP on a GP, whose pathwise
+  realizations themselves come out of an eager and a traced run 3e-8 to
+  1e-7 apart while the moments agree to 1e-15 (the samples from one set of
+  realizations agree to 2e-13) -- past the 1e-10 bar there, the old pass
+  having drawn realizations as far from the prediction's graph.
+  **On the GPU the pass takes the plain graph** whatever `jit_predict`
+  says, as the quadrature chunks do (`_quadrature_xla`). Compiled with XLA
+  there it was slow both to compile and to run: Walker's single-expert
+  model predicting its exhaustive grid (whose true values run the pass)
+  took 127 s on the first call and 6.9 s on a warm one, against 7.6 and
+  2.0 s on the plain graph and 9.5 and 1.5 s with only the prediction
+  compiled -- 6.0 s of the warm call's 6.9 in `measurement_batches`. On
+  the CPU XLA still pays for the pass. Not run down: which part of the
+  pass XLA compiles badly on the GPU.
+- **2. Full and smooth realizations from one draw.** At a certain input a
+  feature-kernel node has its own residual, so `_predict_raw` (and
+  `batch_measure`) simulate twice; `_shared_prior_simulate` builds both
+  sums each time and returns one (the pathwise branch memoizes through
+  `_ONCE`; this one does not), and `likelihood.predict` folds over the
+  noise nodes twice (`_values_and_noise` for the values, again for the
+  smooth values). One coefficient computation, memoized for both; one fold
+  over both fields. Gate: bit for bit, and a counting stub (one
+  computation per node per batch, one fold per likelihood).
+  **Done 2026-10-28, half of it.** `_shared_prior_simulate` computes both
+  parts and keeps them in `_ONCE` as the pathwise draw does: bit for bit
+  on Walker's single-expert and `grid_experts` models onto the 78k-node
+  grid and on the four measured-row models (plain graph and XLA,
+  one-threaded); on the GPU a whole `predict` onto the grid 7-17% faster
+  (2.19 → 2.03 s, 8.28 → 7.06 under XLA; 4.70 → 4.22, 9.69 → 8.06), on
+  the CPU within the runs' scatter -- the graph optimizer probably merged
+  the twin there already. The grid holds Walker's true values, so each of
+  those calls also runs the measured-row pass, and the XLA figures are
+  mostly that pass compiled with XLA on the GPU, which it no longer is
+  (1a).
+  **The one fold was not built**: the two folds share no work. Answering
+  the smooth one with the full one's values (wrong numbers, the timing
+  only) cuts a CPU batch 25% plain and 13-16% under XLA, but that is the
+  smooth values' own integration -- other inputs, and the node's residual
+  integrated by eight nodes beside each noise node -- which one fold over
+  both fields would still do, over twice the rows; it could save call
+  overhead only, at the risk of bits (`C:\Users\Public\cr\item2.py`).
+- **3. The conditioned quadrature in one loop** (dropped by phase 0: at
+  most 0.8% of a batch). `_mixture_moments` runs
+  `sums` and `root_sums` as two `_chunked_sums` loops in prediction, both
+  computing the component kernel and `ksk`, because a `while_loop` body
+  cannot be pruned and training must leave the root sums out. Instead
+  `_chunked_sums` is told statically which outputs are wanted. Gate: bit
+  for bit, one `While` per node in the prediction graph, none of the root
+  sums in training's.
+- **5. Propagation settings as one value** (before 1b, which needs it). The
+  ~15 module globals the contexts set are restated by hand in six cache
+  keys (`refresh_cached` -- which omits `_FULL_VARIANCE` --
+  `_propagation_key`, `predict_raw`, `_node_function`, `_weight_sweep`,
+  `_step_rule`), and the rows that fit are worked out in five places under
+  three budgets and two device probes. A frozen internal value that is the
+  context, the key and the sizing input; the sizing in one module. Gate:
+  bit for bit on A-E, no extra traces, and a property test flipping each
+  setting and asserting every cache retraces. It is also the key the
+  shared-prior-draw cache above needs to be safe.
+  **Done 2026-10-28, the setting half.** `network._Setting` (frozen: the
+  simulation rule, the expert and joint rules, the full variance, the
+  quadrature's budget and precision, and the module's switches -- second
+  moment, pathwise, rule, Hermite points, Sobol nodes, chunk XLA; `rows`
+  rides along and keys nothing) is put in force by one context
+  (`network.setting`; `simulation_rule`, `propagation_rule` and
+  `quadrature_rule` now wrap it), built from the options by
+  `VGPNetwork._setting`, read back by `network._current()`, and is the key
+  of all seven caches (the prediction, a node's, the measured rows', the
+  moments', the traced refresh, the weight sweep, the training step's
+  rule). `test_setting.py` flips each part through its own door and
+  checks every cache retraces -- the refresh's key now holds the full
+  variance and the precision too, which it lacked (nothing found that the
+  refresh reads them through; the uniform key costs a retrace only when
+  they change) -- and that coming back traces nothing new. **It found a bug**: `expert_weights` entered no setting,
+  so a prediction by expert, which asks for the weights outside any,
+  swept under the module's defaults (the consensus and marginal rules)
+  while training by expert swept under the model's. On a deep model of
+  four experts under the joint rule the weights moved by up to 0.16 and
+  the prediction by expert by 0.8% of its scale; the old tree asked for
+  them inside the model's setting gives the new numbers bit for bit, and
+  everything else is unchanged to the bit one-threaded (1a's four models,
+  Walker's two onto the 78k-node grid, plain and XLA;
+  `C:\Users\Public\cr\gate5.py`). **The sizing half was not done**: the
+  budgets and device probes already sit in one block of `network.py`, the
+  per-row costs are each node's (`_row_bytes`, `_expert_row_bytes`), and
+  their consumers are `_prediction_rows` and the measured batches; a
+  module of their own would move them, not deepen them.
+- **1b. The measurement samples from the prediction's own draws.** The
+  prediction batch returns the samples for the measured rows it holds and
+  the second pass goes; `measurement_batches` stays the door for
+  `predict_measurements` and `cross_validate`, on the same forward module.
+  Batch sizing adds `n_sim · n_nodes · size` per measured row. Gates:
+  `pit_*` equal to 1a's to rounding, one forward pass less on measured
+  rows, peak memory no higher, a cancelled-and-resumed prediction giving
+  the same columns.
+  **Done 2026-10-28.** The prediction graph hands back what the samples
+  are drawn from (`_predict_raw(draws=True)`, `_measured_draws`, off the
+  one `_forward` the measured rows' door now shares), and a graph of its
+  own turns them into the samples (`_samples_function`) rather than the
+  prediction's: compiled into an XLA prediction on the GPU they would have
+  brought back the two-minute compilation found under 1a. Every batch of a
+  call asks for the draws where any visited row is measured, so one trace
+  serves it; `_MeasurementCheck` writes each batch's PITs and warped values
+  as it lands, so a cancelled prediction keeps those of the batches that
+  did -- neither the old pass nor the plan did, both writing at the end.
+  The sizing adds nothing: the samples are made after the forward pass has
+  let go of its arrays, at the old pass's size. Gates, one-threaded on 1a's
+  four models, plain graph and XLA: `pit_*` and the
+  `predict_measurements` samples bit for bit, the GP on a GP's included;
+  `warped_*` 2e-16 of their scale, the warping now run a batch at a time.
+  Item S's run (the GeoScape walk network at its 4429 data locations, the
+  CPU, a 28 GB cap) finishes: 340 s, 20.0 GB resident at its peak, PITs
+  for the 798 assayed rows in all three metals. Tests:
+  `test_a_prediction_checks_its_measured_rows_from_its_own_draws` (no
+  trace of the measured rows' pass, the PITs the door's) and
+  `test_a_cancelled_prediction_keeps_the_checks_of_the_batches_that_landed`.
+- **4. One factorization for a GP node.** `BasicGP.refresh` and
+  `_slot_refresh` hold two copies of 1 + 3·size Choleskys per expert, an
+  explicit `K⁻¹` used only for `alpha`, and ‖k·R‖² is formed at seven
+  sites. (4a, bit for bit) one factor builder for one expert and for
+  slots, one `posterior_factors(k)`, nodes declaring training and
+  prediction state so prediction stops snapshotting training-only tensors;
+  (4b, rounding) `alpha` by a triangular solve, `K⁻¹` gone; (4c, only if
+  4b's numbers ask for it) `chol(W)` from `C⁻ᵀ`, Woodbury for the
+  log-determinant, gated on an ill-conditioned set (points 0.03 apart, the
+  0.6.9 NaN) and on agreement to 1e-8 where conditioning is good.
+  **`GradientConstrainedInput` joins with `eps = jitter` on its gradient
+  rows** (the user's proposal): its `delta = 0` rows already carry the
+  model's `jitter` on the `(K + D)` side, so that side is unchanged and only
+  the root moves, from the cancelling `chol(K⁻¹ − (K+D)⁻¹)` to the whitened
+  form; `inner` is then conditioned about m/eps (3e11 at m = 300, 1e-9).
+  Gate on a test of its own (its coverage is thin): predictions, bound and
+  realization moments against today's, and the constraint still met (the
+  mean's derivative along each given direction zero); if 1e-9 is too loose
+  for the root, raise eps toward 1e-6 and measure what moves.
+  **Done 2026-10-28, 4a and 4b with `GradientConstrainedInput`; 4c not
+  taken.** One builder, `BasicGP._posterior_factors`, makes one expert's
+  factors or every slot's at once; `alpha` is `L⁻ᵀ alpha_white` by a
+  triangular solve, `K⁻¹` gone from `BasicGP`, the slots and
+  `GradientConstrainedInput`; `_held` is the one `|k R|²` (five sites --
+  the other two of the seven square other residuals); `_TRAINING_STATE`
+  names what only the KL reads (the prior and its smoothed Cholesky, the
+  whitened means, the deltas, the mask), which a prediction no longer
+  snapshots. **4a is not bit for bit and cannot be**: the builder is
+  exact against both old paths forward, eager and traced, but the old
+  per-expert code sliced `chol[None]` twice and the slots code reused one
+  broadcast, and the training gradient sums its contributions in the
+  graph's grouping -- the covariance's gradient 4e-16 apart, measured on
+  the builder alone. Gates (`C:\Users\Public\cr\gate4.py`, one-threaded,
+  the per-expert, slots, consensus, joint and constrained paths): models
+  trained and saved by the old tree and predicted by both, every moment
+  within 4e-12 of its scale (the GP on a GP's pathwise realizations 9e-8,
+  their known sensitivity, and its back-transformed prediction 2.5e-8);
+  trained afresh, the bounds within 7e-14. `GradientConstrainedInput`
+  joins with `eps = jitter` (1e-9) on its gradient rows: `R Rᵀ` the old
+  Cholesky's to 1e-13 of its largest entry, the mean and bound to
+  rounding, 2000 realizations' variances within 0.5% (other draws through
+  another root), and a new test holds the root to `K⁻¹ - (K + D)⁻¹` and
+  the mean's slope along every given direction to zero. **Speed: nothing
+  measurable** -- step and refresh within the runs' scatter on Walker,
+  chapter 15's experts, the constrained model and chapter 17 (refresh
+  1.15 → 1.17 s of a 20 s step there). So 4c, which would change every
+  realization (a different root), has nothing to buy: the refresh is 6%
+  of a step on chapter 17, and its share is large only where a step takes
+  17 ms.
+- **6. A plain cross-covariance at certain inputs.** `covariance_matrix`
+  builds the uncertain-input normalization (`total_var`, the determinants,
+  a `norm` of exactly 1) for every first-layer cross-covariance; XLA fuses
+  it away in prediction, training pays. `_expert_moments` takes
+  `_plain_covariance` where the chain is certain. Gate: covariance and
+  gradient to 1e-14 at zero variance; the training step on A and B.
+  **Dropped 2026-10-29** -- the step it would save is within a few
+  percent either way; see Settled by measurement.
+- **Close.** One full suite through `run_parallel.py`; the benchmark
+  numbers in the changelog, the failures under Settled by measurement;
+  CLAUDE.md's module-map notes where they describe what moved.
+
+**M — Refinement cuts unsampled ground wherever the background sits on a
+cut-off** (found 2026-10-27, on a GeoScape Run). GeoScape's Run 12 -- a
+`GPWalk` network, a `LikelihoodMixture` of two populations over Ag, Pb and
+Zn with `shares="latent"` beside a rock type, 32 experts -- refined a 20 m
+block set to three levels, every variable voting (`split_on` unset): the
+rock contact, and Ag at 100/200/300 ppm, Pb and Zn at 5/10/15 %. Pass 1
+cut 21405 of 22724 blocks, and the run was stopped seven hours in, its
+third prediction's first group about a million blocks at 68 ms a block.
+Read off the first prediction (`C:\Users\Public\segv\why94.py`):
+- **What marks the blocks.** 93% of them by any decision, 98% beyond 100 m
+  of a sample and 61% within 20 m. The rock contact marks 10.5% within
+  20 m and none past 50 m, Ag next to nothing; **Zn @ 10 marks 79% of the
+  blocks beyond 50 m, Zn @ 15 half of them, Pb @ 5 57%**. A block is
+  divided where its sub-blocks' prediction straddles a cut-off, and far
+  from the data the prediction sits on these three: Zn 11.2 % (5-95 %:
+  7.6-15.6), Pb 3.9 % (2.9-5.4), against 3.5 % and 1.6 % within 20 m.
+- **Why the background is high.** The populations are a barren one (Zn
+  0.03 %) and a mineralized one (Zn 12.5 % near the data). Near the data
+  the shares are the samples', 72 % barren; far from them they return to
+  the mixture's trained `bias`, **59 % mineralized**, and the mineralized
+  population's own mean rises with the latent variance (Zn 12.5 -> 19.2 %).
+  Not the mean alone: the realizations' median Zn is 8.4 % far and 0.8 %
+  near. The data's own median is 2.0 %, mean 4.6 %. Whether a bias that
+  calls unsampled ground mineralized is what the fit should say (drilling
+  aimed at ore, no declustering in the share's start, the bias weakly
+  identified where the shares' GP explains the data) is open.
+- **What to do**, in order of cost: GeoScape names `split_on` (the rock
+  type alone here, or the metals at the cut-offs that matter), which is
+  what `needs_splitting`'s docstring advises for a polymetallic deposit;
+  `refine(where=)` with `assign_from_data` keeps unsampled ground out of
+  the passes altogether (it is then not predicted either); in geoML, a
+  criterion that leaves a block whose cut-off the model cannot place --
+  the mean's contour through ground where the variance is the prior's
+  buys no surface, the argument 0.8.5 made against judging realizations
+  -- needs a measure of "cannot place" (the explained share of the
+  variance, the proportion's distance from a half) and a gate on a model
+  with a real contact. And the share bias above, as a question of its own.
+  **Built 2026-10-29 (0.9.12)** -- the criterion is the realizations'
+  coherence (`likelihood._coherence`, the share of the variation inside a
+  block they hold in common), at least max(0.2, a Beta noise floor):
+  Run 12's far blocks marked 0% at 25 and 200 realizations, every block
+  the old rule marked on four known fields still marked
+  (`docs/benchmarks/split_coherence.py`). The share bias stays open.
 
 **M — The second moment of a GP at an uncertain input** (Girard's term,
 measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
@@ -3462,6 +3758,50 @@ order of difficulty:
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.
+
+**The split criteria that lost to coherence** (2026-10-29, item M on
+refinement). Scored on four known fields (the pod, the ore body, the rock
+plane, a rough random field; 8 and 20 realizations; coarse blocks and
+blocks half their size) against Run 12's far blocks, by the benefit a cut
+buys against the field (`docs/benchmarks/split_coherence.py`):
+- *The contrast* -- the largest difference across a block's sub-blocks in
+  the probability of being above the cut-off, at least a half and above
+  an exact binomial noise floor. Built first. The floor, taken at its
+  worst (sub-blocks independent), was 0.70 at 20 realizations and left the
+  pod's shell uncut (99 blocks against 533, 14 750 m3 on the wrong side
+  of the field against 12 750); at a fixed half it still lost 2% there and
+  passed none of a gradual rock contact, whose probabilities move at most
+  0.26 across a block though its realizations agree (coherence 0.24 to
+  0.68). How *far* the field moves across a block is not whether the
+  model places it.
+- *The F test of the sub-blocks alone* -- with 200 realizations a tiny
+  real gradient in unsampled ground is significant, and it marked 1% of
+  Run 12's far blocks; an effect size is needed, which is the coherence.
+- *The within-block share of the variance* (dispersion over the total) --
+  100% of the far blocks pass any threshold the worthy ones pass.
+- *The same measures on the indicator of the cut-off* -- lose benefit at
+  thresholds the values keep it at.
+
+**A plain cross-covariance at certain inputs -- not worth it** (2026-10-29,
+item L's 6). The first layer's `covariance_matrix` builds the
+uncertain-input normalization (`total_var`, the determinants, a `norm` of
+exactly one) at inputs whose variance is zero. A training step that reads
+`_plain_covariance` there instead, against the step as it is, three
+repeats each (`docs/benchmarks/compute_review.py`, the `step` and `plain`
+parts): Walker (one node, 200 iterations) +1.4% on the CPU and +0.9% on
+the GPU, slower; chapter 15's experts (761 batches) -1.3% on the CPU and
+-5.1% on the GPU. A twentieth of an expert model's step on the GPU and
+nothing elsewhere does not pay for a second path through every GP node's
+cross-covariance.
+
+**The conditioned quadrature's two loops merged into one -- not worth it**
+(2026-10-28, item L's 3). `_mixture_moments` runs `sums` and `root_sums`
+as two `_chunked_sums` loops in a prediction, both computing the component
+kernel and `ksk`. Answering the root loop with zeros, which bounds what a
+merge could save, moved a prediction batch 0.8% on chapter 17's walked
+model on the CPU, 0.7% on the GPU, and -1.1% on the GeoScape walk network
+on the CPU (`docs/benchmarks/compute_review.py`, the `roots` part): the
+duplicated kernel is not where a batch's time goes.
 
 **The second moment over certain inducing points (the "middle ground") --
 rejected** (2026-10-24). On a GeoScape network of three GP nodes reading a

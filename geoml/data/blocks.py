@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 import numpy as _np
 import pandas as _pd
 import pyvista as _pv
+import scipy.stats as _stats
 import vtk as _vtk
 
 import geoml._types as _types
@@ -603,6 +604,41 @@ def _lattice_corners(origin, size, span):
 
 # the largest slab _painted_contour will hold at once, in cells: two of
 # these in float64 is ~130 MB, transient
+# The least coherence a block needs to be cut: below every block worth
+# cutting measured (0.24, a gradual contact; 0.55 otherwise) and above every
+# block noise straddled on a GeoScape model (0.13 at 25 realizations) --
+# `docs/benchmarks/split_coherence.py`.
+_MIN_COHERENCE = 0.2
+
+# How often a block holding no surface may have its coherence reach the
+# floor `needs_splitting` cuts at, by sampling noise alone.
+_NOISE_LEVEL = 1e-3
+
+
+def _check_coherence(coherence):
+    if coherence is not None and not _MIN_COHERENCE <= coherence <= 1.0:
+        raise ValueError(
+            "a block's coherence is cut at %g or more, and at most one; "
+            "got %r" % (_MIN_COHERENCE, coherence))
+
+
+def _coherence_floor(k, n_sim):
+    """The coherence sampling noise reaches over `k` sub-blocks and `n_sim`
+    realizations once in `_NOISE_LEVEL` blocks holding no surface. With
+    every sub-block's own part of every realization independent and
+    Gaussian, the coherence -- `SS_sub / (SS_sub + SS_res)` in a two-way
+    analysis of variance -- is Beta((k - 1)/2, (k - 1)(n_sim - 1)/2), so
+    the floor is its quantile. Zero where no realizations were recorded (a
+    store that held a flag), above one where there is a single one, which
+    agrees with itself and says nothing."""
+    if n_sim <= 0:
+        return 0.0
+    if n_sim == 1:
+        return 2.0
+    return float(_stats.beta.ppf(1.0 - _NOISE_LEVEL, (k - 1) / 2.0,
+                                 (k - 1) * (n_sim - 1) / 2.0))
+
+
 _PAINT_BUDGET = 8_000_000
 # how many interior points of coarse blocks it fills at once: 32-bit
 # coordinates and float64 values, at most ~160 MB transient with the mask
@@ -1741,14 +1777,15 @@ class BlockSet3D(PointData):
 
     def block_shares(self, split_on: "str | Sequence[str] | None" = None
                      ) -> "dict[str, _np.ndarray]":
-        """How often each decision cuts a block in two.
+        """How sharply each decision cuts a block in two.
 
         A continuous variable contributes one column per cut-off it declares,
-        a categorical one per category, and both mean the same thing: the
-        share of realizations in which this block's sub-blocks fall on both
-        sides of something that matters. A grade is judged against the grades
-        someone declared; an indicator against zero, that being where one
-        category stops winning and its rival starts.
+        a categorical one per category, and both mean the same thing: where
+        the prediction at this block's sub-blocks falls on both sides of
+        something that matters, the block's coherence -- how far its
+        realizations agree on the pattern inside it -- and 0 elsewhere. A grade is judged against the grades someone declared; an
+        indicator against zero, that being where one category stops winning
+        and its rival starts.
 
         Returns a dict of name -> `(n_data,)` array, empty where nothing
         declared a decision to make.
@@ -1767,20 +1804,31 @@ class BlockSet3D(PointData):
         return shares
 
     def needs_splitting(self, split_on: "str | Sequence[str] | None" = None,
-                        tolerance: "float | None" = None) -> _np.ndarray:
+                        tolerance: "float | None" = None,
+                        coherence: "float | None" = None) -> _np.ndarray:
         """Which blocks a decision's surface runs through, and so are worth
         cutting.
 
         A block is marked where the prediction at its sub-blocks falls on both
-        sides of a cut-off, or of a category's boundary: the surface a contour
-        of the prediction draws passes through it, and cutting the block lets
-        that surface bend there.
+        sides of a cut-off, or of a category's boundary, *and* its coherence
+        -- the share of the variation inside the block its realizations hold
+        in common, each realization's shift of the whole block taken out --
+        is at least a threshold: the model places the surface inside the
+        block, sharply or gradually, and cutting it lets that surface bend
+        there.
 
         Note what this does *not* mark: a block the model is merely unsure
-        about. The prediction is the mean over the realizations, and where the
-        data do not reach, each realization crosses the cut-off somewhere of
-        its own while their mean crosses it nowhere -- cutting there would buy
-        blocks and no surface.
+        about. Where the data do not reach, each realization runs its own
+        way inside the block and they share next to nothing, while the mean
+        of a few of them can still wobble across a cut-off near it --
+        cutting there would buy blocks and no surface.
+
+        The threshold is 0.2, or what sampling noise alone reaches if that
+        is more: under pure noise the coherence is a Beta variable whose
+        parameters are the block's sub-blocks and the variable's
+        realizations, and the floor is the value it exceeds once in a
+        thousand (0.38 at eight sub-blocks and eight realizations, 0.16 at
+        twenty, 0.017 at two hundred).
 
         The test is over every decision at once and any one is enough, which
         is the cautious way round on purpose: a block worth splitting for one
@@ -1799,6 +1847,14 @@ class BlockSet3D(PointData):
             Deprecated, and without effect: a block is divided or it is not.
             It was the share of realizations that had to find a block divided,
             and will be removed.
+        coherence : float, optional
+            The coherence a block needs, in place of the threshold worked
+            out from the realizations. At least 0.2.
+
+        Raises
+        ------
+        ValueError
+            Where `coherence` is below 0.2 or above one.
         """
         if tolerance is not None:
             _warnings.warn(
@@ -1806,12 +1862,23 @@ class BlockSet3D(PointData):
                 "where the prediction's sub-blocks straddle a cut-off, which "
                 "is yes or no -- and will be removed", FutureWarning,
                 stacklevel=2)
+        _check_coherence(coherence)
         shares = self.block_shares(split_on)
+        chosen = list(self.variables) if split_on is None else \
+            [str(name) for name in _np.atleast_1d(split_on)]
+        counts = {}
+        for name in chosen:
+            for key, n in self.variables[name]._split_counts().items():
+                counts[("%s %s" % (name, key)).strip()] = n
         mask = _np.zeros(self.n_data, dtype=bool)
-        for values in shares.values():
-            # 0 or 1; a store written before 0.8.5 holds a share of the
-            # realizations, read here as a majority
-            mask |= _np.asarray(values, dtype=float) > 0.5
+        for key, values in shares.items():
+            threshold = coherence if coherence is not None else max(
+                _MIN_COHERENCE,
+                _coherence_floor(self.rows_per_location, counts[key]))
+            # a store written before 0.9.12 holds 1 where the prediction
+            # straddled, marked as it was; one written before 0.8.5 a share
+            # of the realizations, read as a coherence
+            mask |= _np.asarray(values, dtype=float) >= threshold - 1e-9
         return mask & (self._level < self.max_levels)
 
     def _by_level(self):

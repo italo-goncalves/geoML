@@ -292,6 +292,28 @@ def test_prediction_in_slots_is_prediction_by_set():
     assert np.max(diff) < 0.05
 
 
+def test_on_a_gpu_the_quadrature_counts_the_experts_a_call_computes(
+        monkeypatch):
+    """The quadrature's row cost, which sizes a deep network's batches,
+    counts on a GPU the experts the call computes -- the slots, or the
+    subset -- as the quadrature itself does; elsewhere every expert, the
+    batches there being unmeasured."""
+    from geoml.latent import network as _net
+    m = _model(deep=True)
+    leaf = m.leaves[0]
+    with m._propagation():
+        every = leaf._row_bytes()
+        assert every > 0
+        with _net.expert_slots(_net._Slots(2, None, None)):
+            assert leaf._row_bytes() == every
+        monkeypatch.setattr(_net, "_gpu_visible", lambda: True)
+        assert leaf._row_bytes() == every
+        with _net.expert_slots(_net._Slots(2, None, None)):
+            assert leaf._row_bytes() == every * 2 // 4
+        with _net.expert_subset([0]):
+            assert leaf._row_bytes() == every // 4
+
+
 def test_a_batch_out_of_memory_by_expert_does_not_say_predict_by_expert(
         monkeypatch):
     import tensorflow as tf
@@ -968,3 +990,48 @@ def test_the_traced_weight_sweep_is_the_eager_one(name):
     assert traces <= 2 * len(m._expert_blocks())
     assert sum(s.experimental_get_tracing_count()
                for s in m._weight_sweeps.values()) == traces
+
+
+def test_the_weight_table_is_held_until_what_it_reads_changes(monkeypatch):
+    # the training data's table is swept once and read by every prediction,
+    # refinement pass and plan after it, until a parameter, the data or the
+    # setting moves
+    m = _model()
+    m.train_full(5)
+    sweeps = []
+    sweep = m._weight_table
+    monkeypatch.setattr(m, "_weight_table",
+                        lambda container: sweeps.append(1) or sweep(container))
+    table = m.expert_weights()
+    target = geoml.data.PointData.from_array(_targets(12), ["X", "Y"])
+    m._expert_groups(target, None)
+    m._expert_groups(target, None)
+    m._expert_plan(0.99)
+    assert len(sweeps) == 1
+    # the caller's copy is the caller's
+    table[:] = 0.0
+    assert m.expert_weights().sum() > 0
+    np.testing.assert_array_equal(m.expert_weights(), sweep(m.data))
+    m.train_full(1)
+    m.expert_weights()
+    assert len(sweeps) == 2
+    m._set_data(m.data[np.arange(300)])
+    assert m.expert_weights().shape[0] == 300
+    assert len(sweeps) == 3
+    m.options.jitter *= 10
+    m.expert_weights()
+    assert len(sweeps) == 4
+
+
+def test_a_held_weight_table_predicts_what_a_fresh_one_does():
+    m = _model()
+    m.train_full(5)
+    a = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
+    b = geoml.data.PointData.from_array(_targets(), ["X", "Y"])
+    m.predict_by_expert(a, n_sim=5)
+    del m.__dict__["_held_weights"]
+    m.predict_by_expert(b, n_sim=5)
+    np.testing.assert_array_equal(a.values("v/prediction"),
+                                  b.values("v/prediction"))
+    np.testing.assert_array_equal(a.variables["v"].get_simulations(),
+                                  b.variables["v"].get_simulations())

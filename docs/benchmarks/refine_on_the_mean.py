@@ -15,6 +15,15 @@ and the volume on the wrong side of the cut-off -- the 5 m cells whose block
 in the refined set says above where the grid says below, or the reverse.
 (The pod meets the top and bottom of the box, so its contour is an open
 sheet with no volume to compare.)
+
+2026-10-29 (0.9.12): the mean's straddle alone is now `mean_divided`, and
+`lk._divided` adds the coherence -- the share of the variation inside a
+block its realizations hold in common, which `needs_splitting` asks to be
+at least max(0.2, the Beta noise floor) -- run as it comes and at a named
+0.5. A column scores each arm against the field the data were drawn from
+as well. (A contrast of the sub-blocks' probabilities of being above the
+cut-off was tried first and lost the pod's shell: 99 blocks and 14 750 m3
+at its automatic threshold, 484 blocks and 2 500 m3 at a half.)
 """
 import os
 import sys
@@ -49,6 +58,24 @@ def old_divided(x, cutoffs, n_splits=None):
     share = tf.reduce_mean(below, axis=1)
     straddles = tf.cast((share > 0.0) & (share < 1.0), x.dtype)
     return tf.cast(tf.reduce_mean(straddles, axis=2) > 0.05, x.dtype)
+
+
+def mean_divided(x, cutoffs, n_splits=None):
+    """`likelihood._divided` as it stood from 0.8.5 to 0.9.11: 1 where the
+    prediction at the sub-blocks straddles the cut-off."""
+    cuts = lk._cutoff_matrix(cutoffs, x.dtype)
+    if n_splits is None:
+        return tf.zeros(
+            tf.concat([tf.shape(x)[:2], [tf.shape(cuts)[-1]]], axis=0),
+            dtype=x.dtype)
+    n = tf.shape(x)[0] // n_splits
+    grouped = tf.reshape(
+        x, tf.concat([[n_splits, n], tf.shape(x)[1:]], axis=0))
+    grouped = tf.reduce_mean(grouped, axis=3, keepdims=True)
+    below = tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
+    share = tf.reduce_mean(below, axis=1)
+    straddles = tf.cast((share > 0.0) & (share < 1.0), x.dtype)
+    return tf.reduce_mean(straddles, axis=2)
 
 
 def model():
@@ -86,29 +113,40 @@ def main():
                              step=[CELL] * 3)
     model().predict(grid, n_sim=20)
     truth = grid.values("au/prediction") > CUTOFF
+    # and the field the data were drawn from, which no refinement can know
+    # better than the model does
+    radius = np.linalg.norm(np.asarray(grid.coordinates)
+                            - np.array([40.0, 40.0, 20.0]), axis=1)
+    field = 4.0 * np.exp(-(radius / 20.0) ** 2) + 0.02 > CUTOFF
 
     rows = []
-    for arm, divided in (("every realization", old_divided),
-                         ("the mean", lk._divided)):
+    for arm, divided, coherence, n_sim in (
+            ("every realization", old_divided, None, 20),
+            ("the mean", mean_divided, None, 20),
+            ("coherence", lk._divided, None, 20),
+            ("coherence 0.5", lk._divided, 0.5, 20)):
         current = lk._divided
         lk._divided = divided
         try:
-            refined = geoml.models.refine(model(), blocks(), n_sim=20)
+            refined = geoml.models.refine(model(), blocks(), n_sim=n_sim,
+                                          coherence=coherence)
         finally:
             lk._divided = current
         east = np.asarray(refined.coordinates)[:, 0] > 80
         block = refined.index_data(grid)
         called = refined.values("au/prediction")[block] > CUTOFF
         wrong = int(np.count_nonzero(called != truth)) * CELL ** 3
+        off = int(np.count_nonzero(called != field)) * CELL ** 3
         rows.append((arm, refined.n_data, int((~east).sum()),
-                     int(east.sum()), wrong))
+                     int(east.sum()), wrong, off))
 
     print("above the cut-off on the 5 m grid: %.0f m3"
           % (truth.sum() * CELL ** 3))
-    print("%-18s %7s %6s %6s %12s" % ("criterion", "blocks", "west", "east",
-                                      "wrong side"))
-    for arm, total, west, east, wrong in rows:
-        print("%-18s %7d %6d %6d %9.0f m3" % (arm, total, west, east, wrong))
+    print("%-18s %7s %6s %6s %12s %12s" % (
+        "criterion", "blocks", "west", "east", "wrong side", "vs the field"))
+    for arm, total, west, east, wrong, off in rows:
+        print("%-18s %7d %6d %6d %9.0f m3 %9.0f m3"
+              % (arm, total, west, east, wrong, off))
 
 
 if __name__ == "__main__":

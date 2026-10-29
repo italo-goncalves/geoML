@@ -245,22 +245,57 @@ def _proportions(x, cutoffs, n_splits=None):
     return _tf.reduce_mean(below, axis=[1, 3])
 
 
-def _divided(x, cutoffs, n_splits=None):
-    """Whether each of `cutoffs` cuts a block in two.
+def _coherence(r):
+    """How far the realizations agree on the pattern inside each block.
+
+    `r` is `(n_blocks, k, n_var, n_sim)`, a block's sub-blocks second. Each
+    realization's values there are its block mean, the pattern every
+    realization shares, and what is its own; the coherence is the shared
+    pattern's share of the variation inside the block -- a two-way analysis
+    of variance, sub-blocks against realizations, `SS_sub / (SS_sub +
+    SS_res)` -- each realization's shift of the whole block taken out first,
+    since moving a block up or down is nothing a cut resolves. One where the
+    realizations agree how the field runs across the block, about `1/n_sim`
+    where they agree on nothing; how *far* the field runs does not enter.
+    Under pure noise it is Beta((k - 1)/2, (k - 1)(n_sim - 1)/2), which is
+    the floor `BlockSet3D.needs_splitting` reads. Returns `(n_blocks,
+    n_var)`.
+    """
+    sub = _tf.reduce_mean(r, axis=3, keepdims=True)
+    real = _tf.reduce_mean(r, axis=1, keepdims=True)
+    grand = _tf.reduce_mean(sub, axis=1, keepdims=True)
+    n_sim = _tf.cast(_tf.shape(r)[3], r.dtype)
+    ss_sub = n_sim * _tf.reduce_sum(_tf.square(sub - grand), axis=[1, 3])
+    ss_res = _tf.reduce_sum(_tf.square(r - sub - real + grand), axis=[1, 3])
+    total = ss_sub + ss_res
+    return _tf.where(total > 0, ss_sub / _tf.where(total > 0, total, 1.0),
+                     _tf.zeros_like(total))
+
+
+def _divided(x, cutoffs, n_splits=None, realizations=None):
+    """Whether each of `cutoffs` cuts a block in two, and how coherently.
 
     Not the same question as `_proportions`. A block is divided where the
     prediction at its sub-blocks -- the mean over the realizations, sub-block
     by sub-block -- falls on both sides of the cut-off: the surface a contour
-    of the prediction draws runs through it, and cutting the block is what
-    lets that surface bend there. The realizations are averaged first, so a
-    block the model is merely unsure about is not divided: where the data do
-    not reach, every realization crosses the cut-off somewhere of its own and
-    their mean crosses it nowhere.
+    of the prediction draws runs through it. That alone does not say the
+    model places the surface there. Where the data do not reach, the mean of
+    a few rough realizations wobbles across a cut-off near it by sampling
+    noise alone, and on a GeoScape model with a background near its cut-offs
+    that marked 93% of the blocks. So a divided block reports its coherence
+    (`_coherence`): how far its realizations agree on the pattern inside it.
+    A contact the model places, sharp or gradual, is a pattern they share;
+    ground it does not know is each realization's own. Counting the
+    realizations that cross inside a block, whichever way, is the rule this
+    replaced in 0.8.5, and it cannot tell the two apart.
 
-    Returns `(n_blocks, n_var, n_cutoffs)`, 1 where the block is divided and 0
-    where it is not. Zero without a discretization: a location has no
-    sub-blocks to disagree. A realization axis of one (the categorical
-    likelihoods, whose `ind_skew` is already an expectation) is its own mean.
+    Returns `(n_blocks, n_var, n_cutoffs)`: the coherence where the block is
+    divided and 0 where it is not. Zero without a discretization: a location
+    has no sub-blocks to disagree. The coherence is read off `x`, or off
+    `realizations`, `(rows, n_var, n_sim)`, where they are given: a
+    realization axis of one (the categorical likelihoods, whose `ind_skew`
+    is already an expectation) is its own mean, and their realizations are
+    each category's draw against the others.
     """
     cuts = _cutoff_matrix(cutoffs, x.dtype)
 
@@ -272,6 +307,11 @@ def _divided(x, cutoffs, n_splits=None):
     n = _tf.shape(x)[0] // n_splits
     grouped = _tf.reshape(
         x, _tf.concat([[n_splits, n], _tf.shape(x)[1:]], axis=0))
+    drawn = grouped if realizations is None else _tf.reshape(
+        realizations,
+        _tf.concat([[n_splits, n], _tf.shape(realizations)[1:]], axis=0))
+    coherence = _coherence(drawn)
+
     # the prediction at each sub-block, a realization axis of one
     grouped = _tf.reduce_mean(grouped, axis=3, keepdims=True)
     below = _tf.cast(grouped[..., None] <= cuts[:, None, :], x.dtype)
@@ -280,7 +320,7 @@ def _divided(x, cutoffs, n_splits=None):
     share = _tf.reduce_mean(below, axis=1)
     straddles = _tf.cast(
         (share > 0.0) & (share < 1.0), x.dtype)
-    return _tf.reduce_mean(straddles, axis=2)
+    return _tf.reduce_mean(straddles, axis=2) * coherence[:, :, None]
 
 
 class _Likelihood(_gpr.Parametric):
@@ -1639,6 +1679,10 @@ class LikelihoodMixture(_Likelihood):
             log_w = _tf.math.log(self.parameters["weights"].get_value())
             bound = _tf.reduce_logsumexp(terms + log_w[None, :], axis=1)
         else:
+            if samples is None:
+                raise ValueError(
+                    "latent shares are read off the realizations, and "
+                    "log_lik was given none")
             # averaged over the share columns' realizations, inside the log
             log_w = _tf.nn.log_softmax(self._share_logits(
                 samples[:, self._population_size:, :]), axis=1)
@@ -2031,7 +2075,22 @@ class _CategoricalLikelihood(_Likelihood):
 
         return entropy, uncertainty, ind_skew, weights
 
-    def _resolve(self, prob, var, explained_var, n_splits):
+    def _category_draws(self, sims):
+        """Each category's field in every realization, `(rows, n_cat,
+        n_sim)`: positive where the realization puts the category, zero
+        along its contacts -- here its draw against the best of the others,
+        the rule a realization picks its category by (`contour_rule`
+        "largest"). What a block's coherence is read from."""
+        best = _tf.reduce_max(sims, axis=1, keepdims=True)
+        winner = sims >= best
+        runner_up = _tf.reduce_max(
+            _tf.where(winner, sims.dtype.min, sims), axis=1, keepdims=True)
+        shared = _tf.reduce_sum(_tf.cast(winner, sims.dtype), axis=1,
+                                keepdims=True) > 1.0
+        return sims - _tf.where(winner, _tf.where(shared, best, runner_up),
+                                best)
+
+    def _resolve(self, prob, var, explained_var, n_splits, draws=None):
         """The indicator picture, read from the sub-blocks and then averaged.
 
         Taken before the sub-blocks are aggregated, so a block holding a
@@ -2059,7 +2118,8 @@ class _CategoricalLikelihood(_Likelihood):
         # do this block's sub-blocks disagree about who holds it.
         skew = ind_skew[:, :, None]
         share = 1.0 - _proportions(skew, [0.0], n_splits=n_splits)[:, :, 0]
-        divided = _divided(skew, [0.0], n_splits=n_splits)[:, :, 0]
+        divided = _divided(skew, [0.0], n_splits=n_splits,
+                           realizations=draws)[:, :, 0]
 
         return {"entropy": _aggregate(entropy, n_splits),
                 "uncertainty": _aggregate(uncertainty, n_splits),
@@ -2210,7 +2270,8 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
         # prob = _tf.nn.softmax(log_prob_positive, axis=1)
         prob = _tf.nn.softmax(log_prob_final, axis=1)
 
-        indicators = self._resolve(prob, var, explained_var, n_splits)
+        indicators = self._resolve(prob, var, explained_var, n_splits,
+                                   self._category_draws(sims))
 
         prob = _aggregate(prob, n_splits)
         mu = _aggregate(mu, n_splits)
@@ -2342,6 +2403,19 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
 
         return log_density * self.sharpness
 
+    def _category_draws(self, sims):
+        """As the base class's, by this likelihood's rule (`contour_rule`
+        "priority"): a later category overrides an earlier one wherever its
+        draw is positive, so a category holds the ground where its own draw
+        is positive and every later one's negative."""
+        draws = _tf.unstack(sims, axis=1)
+        fields = [None] * len(draws)
+        later = _tf.fill(_tf.shape(draws[0]), _tf.constant(_np.inf, sims.dtype))
+        for k in range(len(draws) - 1, -1, -1):
+            fields[k] = _tf.minimum(draws[k], later)
+            later = _tf.minimum(later, -draws[k])
+        return _tf.stack(fields, axis=1)
+
     def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         mu, sims = self._shifted(mu), self._shifted(sims)
         # n_data = _tf.shape(mu)[0]
@@ -2402,7 +2476,8 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
 
         prob = _tf.nn.softmax(log_prob_final, axis=1)
 
-        indicators = self._resolve(prob, var, explained_var, n_splits)
+        indicators = self._resolve(prob, var, explained_var, n_splits,
+                                   self._category_draws(sims))
 
         prob = _aggregate(prob, n_splits)
         mu = _aggregate(mu, n_splits)
@@ -2555,6 +2630,17 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
 
         return log_density * self.sharpness
 
+    def _category_draws(self, sims):
+        """Each category's field in every realization: the one latent draw
+        against the thresholds either side of the category's interval --
+        positive inside it, zero on its two boundaries."""
+        bounds = _tf.constant([0.0], sims.dtype) if self.levels == 1 \
+            else self.get_thresholds()[:self.levels]
+        infinite = _tf.constant([_np.inf], sims.dtype)
+        lower = _tf.concat([-infinite, bounds], axis=0)[None, :, None]
+        upper = _tf.concat([bounds, infinite], axis=0)[None, :, None]
+        return _tf.minimum(sims - lower, upper - sims)
+
     def predict(self, mu, var, sims, explained_var, n_splits=None, *args, **kwargs):
         mu = mu + (self.levels - 1) / 2
         # var = var * self.levels ** 2
@@ -2575,7 +2661,8 @@ class OrderedGaussianIndicator(_CategoricalLikelihood):
             prob.append(dist.survival_function(self.levels - 1))
         prob = _tf.concat(prob, axis=1)
 
-        indicators = self._resolve(prob, var, explained_var, n_splits)
+        indicators = self._resolve(prob, var, explained_var, n_splits,
+                                   self._category_draws(sims))
 
         prob = _aggregate(prob, n_splits)
 

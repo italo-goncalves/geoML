@@ -64,22 +64,23 @@ def test_the_flag_flips_on_a_live_model():
     model.predict(grid, n_sim=8)
     monte_carlo = _sims(grid)
     mean_mc = np.array(grid.variables["V"].latent_mean.values, copy=True)
-    first = model._compiled[(False, False, model._propagation_key())]
+    first = model._compiled[(False, model._setting(qmc=False))]
 
     model.options.qmc_simulations = True
     model.predict(grid, n_sim=8)
     quasi = _sims(grid)
     mean_qmc = np.array(grid.variables["V"].latent_mean.values, copy=True)
 
-    assert set(model._compiled) == {(False, False, model._propagation_key()),
-                                    (False, True, model._propagation_key())}
+    # the prediction's own traces; the measured rows' have keys of their own
+    assert {key for key in model._compiled if isinstance(key[0], bool)}         == {(False, model._setting(qmc=False)),
+            (False, model._setting(qmc=True))}
     assert not np.allclose(monte_carlo, quasi)
     # the deterministic outputs do not depend on how the ensemble is drawn
     assert np.allclose(mean_mc, mean_qmc, atol=1e-8)
 
     model.options.qmc_simulations = False
     model.predict(grid, n_sim=8)
-    assert model._compiled[(False, False, model._propagation_key())] is first
+    assert model._compiled[(False, model._setting(qmc=False))] is first
     # reused, not rebuilt
     assert np.allclose(_sims(grid), monte_carlo, atol=1e-8)
 
@@ -99,8 +100,8 @@ def test_qmc_is_unchanged_by_xla():
     model.predict(grid, n_sim=8)
     compiled = _sims(grid)
 
-    assert (False, True, model._propagation_key()) in model._compiled
-    assert (True, True, model._propagation_key()) in model._compiled
+    assert (False, model._setting(qmc=True)) in model._compiled
+    assert (True, model._setting(qmc=True)) in model._compiled
     # the realizations' random features go through a Cholesky and a cosine
     # XLA fuses in its own order: 1.4e-7 of the field's scale apart,
     # measured, at values near zero as anywhere

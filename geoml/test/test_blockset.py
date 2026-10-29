@@ -624,6 +624,94 @@ def test_ground_without_data_is_not_refined():
     assert np.any(marked[~empty])
 
 
+def test_the_coherence_floor_is_what_noise_reaches_once_in_a_thousand():
+    """Pure noise -- every sub-block's part of every realization its own --
+    against the Beta quantile `needs_splitting` reads."""
+    import tensorflow as tf
+    floor = geoml.data.blocks._coherence_floor
+    assert floor(8, 0) == 0.0
+    assert floor(8, 1) > 1.0
+    rng = np.random.default_rng(0)
+    for k, n_sim in ((8, 8), (8, 25), (27, 50)):
+        # each realization shifted as a whole, which coherence ignores
+        noise = rng.normal(size=(100_000, k, 1, n_sim)) \
+            + 5.0 * rng.normal(size=(100_000, 1, 1, n_sim))
+        coherence = np.asarray(geoml.likelihood._coherence(
+            tf.constant(noise)))[:, 0]
+        reached = np.mean(coherence >= floor(k, n_sim))
+        assert 0.5e-3 <= reached <= 1.5e-3
+
+
+def test_a_divided_block_reports_its_coherence():
+    """Realizations that agree on the pattern inside a block are coherent
+    however small the pattern; realizations that each run their own way
+    are not, though their mean may straddle; a block wholly on one side
+    reports nothing."""
+    import tensorflow as tf
+    lk = geoml.likelihood
+    k, n_sim = 8, 40
+    rng = np.random.default_rng(1)
+    shift = rng.normal(size=(1, n_sim))
+    # a gentle ramp the realizations share, each moved up or down whole
+    ramp = np.linspace(-0.1, 0.1, k)[:, None] + 0.01 * shift \
+        + 0.01 * rng.normal(size=(k, n_sim))
+    noise = 0.3 + rng.normal(size=(k, n_sim)) * 3.0
+    noise[0] -= noise[0].mean() + 0.5          # the mean straddles anyway
+    above = 5.0 + rng.normal(size=(k, n_sim)) * 0.1
+    x = np.concatenate([ramp, noise, above])[:, None, :]   # rows, var, sims
+    divided = np.asarray(lk._divided(tf.constant(x), [0.0], 3))[:, 0, 0]
+    assert divided[0] > 0.9
+    assert 0.0 < divided[1] < geoml.data.blocks._coherence_floor(k, n_sim)
+    assert divided[2] == 0.0
+
+
+def test_a_category_reads_its_coherence_off_its_realizations_rule():
+    """Each categorical likelihood hands over every category's field in
+    every realization by the rule its realizations pick a category by --
+    the rule a mesh set is told."""
+    import tensorflow as tf
+    from geoml.data.meshsets import _category_fields
+    rng = np.random.default_rng(2)
+    draws = rng.normal(size=(50, 3, 4))
+    for likelihood, rule in (
+            (geoml.likelihood.CategoricalGaussianIndicator(3), "largest"),
+            (geoml.likelihood.HierarchicalGaussianIndicator(3), "priority")):
+        fields = np.asarray(likelihood._category_draws(tf.constant(draws)))
+        for r in range(draws.shape[2]):
+            np.testing.assert_allclose(
+                fields[:, :, r], _category_fields(draws[:, :, r], rule))
+    ordered = geoml.likelihood.OrderedGaussianIndicator(3)
+    z = rng.normal(size=(50, 1, 4)) * 3.0
+    fields = np.asarray(ordered._category_draws(tf.constant(z)))
+    bounds = np.asarray(ordered.get_thresholds())[:3]
+    # positive in exactly the interval the draw falls in
+    held = np.searchsorted(bounds, z[:, 0, :])
+    np.testing.assert_array_equal(np.argmax(fields, axis=1), held)
+    assert np.all(np.sum(fields > 0, axis=1) == 1)
+
+
+def test_the_threshold_follows_the_realizations_and_can_be_named():
+    model = _ore_model()
+    blocks = _ore_blocks()
+    model.predict(blocks, n_sim=40)
+    coherence = blocks.variables["au"].divided[1.0].values.to_numpy()
+    floor = geoml.data.blocks._coherence_floor(8, 40)
+    np.testing.assert_array_equal(blocks.needs_splitting(),
+                                  coherence >= max(0.2, floor))
+    np.testing.assert_array_equal(blocks.needs_splitting(coherence=0.8),
+                                  coherence >= 0.8)
+    for wrong in (0.1, 1.5):
+        with pytest.raises(ValueError, match="coherence"):
+            blocks.needs_splitting(coherence=wrong)
+        with pytest.raises(ValueError, match="coherence"):
+            geoml.models.refine(model, blocks, coherence=wrong)
+    # a store written before the coherence holds 1 where the prediction
+    # straddled, and those blocks are marked as they were
+    blocks.variables["au"].divided[1.0].values[:] = \
+        (coherence > 0).astype(float)
+    np.testing.assert_array_equal(blocks.needs_splitting(), coherence > 0)
+
+
 def _vector_model(seed=1234):
     """Two grades modelled together, so the components carry cut-offs of
     their own -- the shape `block_shares` used to guess wrong about."""

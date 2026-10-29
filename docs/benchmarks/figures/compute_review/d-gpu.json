@@ -1,0 +1,113 @@
+{
+ "case": "saved",
+ "model": "/home/italo/coverage_runs/A_model",
+ "rows": 430,
+ "n_sim": 10,
+ "steps": 20,
+ "quadrature_xla": false,
+ "gpu": true,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 2.4597064710001177,
+  "rss_start_gb": 1.83461888,
+  "rss_peak_gb": 1.998647296,
+  "rss_growth_gb": 0.164028416
+ },
+ "nodes": [
+  "Linear",
+  "Bias",
+  "BasicGP",
+  "GPWalk",
+  "BasicGP",
+  "BasicInput",
+  "Concatenate",
+  "Bias",
+  "Bias",
+  "Scale",
+  "BasicGP",
+  "Scale",
+  "BasicGP"
+ ],
+ "predict": {
+  "rows": 430,
+  "plain": {
+   "seconds": 79.61823648599966,
+   "rss_start_gb": 10.045333504,
+   "rss_peak_gb": 10.06473216,
+   "rss_growth_gb": 0.019398656,
+   "batches": [
+    2.6106553770000573,
+    2.565319220999754,
+    7.991534284999943,
+    7.795394375000342,
+    8.054232958999819,
+    8.049291537000045,
+    8.30917618500007,
+    7.857445020999876,
+    8.008797554000012,
+    7.959634423999887,
+    7.885493688000224
+   ],
+   "batch_count": 12,
+   "rows_per_batch_estimate": 49,
+   "batch_median": 7.959634423999887,
+   "prediction_seconds": 79.6179747680003,
+   "after_batches_seconds": 0.0002617179993649188,
+   "counts": {},
+   "first": {
+    "seconds": 305.89538403100005,
+    "rss_growth_gb": 8.364486656,
+    "counts": {
+     "_chunked_sums traced": 384,
+     "_chunked_map traced": 198,
+     "_values_and_noise traced": 4
+    }
+   }
+  },
+  "measured": {
+   "seconds": 134.50467802100002,
+   "rss_start_gb": 10.097238016,
+   "rss_peak_gb": 10.106937344,
+   "rss_growth_gb": 0.009699328,
+   "batches": [
+    2.657999889000166,
+    2.5907484740000655,
+    8.143651531999694,
+    8.399335405999864,
+    8.112458220999997,
+    7.936056012000336,
+    8.211166464999678,
+    8.1310244350002,
+    8.429117085000144,
+    8.171395181999742,
+    8.100872950999928
+   ],
+   "batch_count": 12,
+   "rows_per_batch_estimate": 49,
+   "batch_median": 8.1310244350002,
+   "prediction_seconds": 81.33168406499999,
+   "after_batches_seconds": 53.17299395600003,
+   "counts": {
+    "_chunked_sums eager": 576,
+    "_chunked_map eager": 297
+   },
+   "first": {
+    "seconds": 138.34775061399978,
+    "rss_growth_gb": 0.032505856,
+    "counts": {
+     "_chunked_sums eager": 576,
+     "_chunked_map eager": 297
+    }
+   }
+  },
+  "measurement_pass_seconds": 54.88644153500036
+ },
+ "refresh": {
+  "seconds": 54.42222380500016,
+  "rss_start_gb": 12.36535296,
+  "rss_peak_gb": 12.37190656,
+  "rss_growth_gb": 0.0065536,
+  "median": 5.428964210000004
+ }
+}

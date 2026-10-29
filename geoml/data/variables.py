@@ -289,6 +289,19 @@ class _Variable(_TreeNode):
     def _share_label(self, cutoff):
         return "@ %g" % cutoff
 
+    def _split_counts(self):
+        """The realizations each of :meth:`split_shares`'s decisions was
+        read over, under the same names, which is what the noise floor of
+        its coherence depends on."""
+        counts = {}
+        for cutoff in (getattr(self, "divided", None) or {}):
+            counts[self._share_label(cutoff)] = self.n_sim
+        for label, component in (
+                getattr(self, "components", None) or {}).items():
+            for key, n in component._split_counts().items():
+                counts[("%s %s" % (label, key)).strip()] = n
+        return counts
+
     def _fill_pyvista(self, write, simulations=False, prefix=None,
                       include="**"):
         """`write(label, attribute)` for every filled column, named by path.
@@ -875,8 +888,10 @@ class ContinuousVariable(_Variable):
         "probabilities": ("value", "unit_interval"),
         # the share of a block at or below a cut-off
         "proportions": ("value", "unit_interval"),
-        # whether the prediction's sub-blocks straddle a cut-off
-        "divided": ("value", "flag"),
+        # where the prediction's sub-blocks straddle a cut-off, the
+        # coherence: how far the realizations agree on the pattern inside
+        # the block; 0 elsewhere
+        "divided": ("value", "unit_interval"),
         "responsibilities": ("value", "unit_interval"),
         "simulations": ("value", "unit"),
         # which population of a mixture of likelihoods each realization
@@ -957,10 +972,11 @@ class ContinuousVariable(_Variable):
         # the sub-blocks and the realizations both -- the complement of the
         # recoverable share, and what a partial-block report wants.
         self.proportions = _col.OrderedDict()
-        # And for each, how often the cut-off passes *through* the block:
-        # the share of realizations whose sub-blocks fall on both sides. A
-        # different question, and the one that says whether cutting the block
-        # finer would settle anything. See `likelihood._divided`.
+        # And for each, whether the cut-off passes *through* the block, and
+        # how far the realizations agree on the pattern there: the
+        # coherence, where their prediction straddles it. A different
+        # question, and the one that says whether cutting the block finer
+        # would settle anything. See `likelihood._divided`.
         self.divided = _col.OrderedDict()
 
         # Which noise component each measurement came from, under a mixture
@@ -1902,7 +1918,7 @@ class _Category(_Variable):
         # the category's log-odds against its best rival
         "indicator_predicted": ("value", "log_odds"),
         "proportions": ("value", "unit_interval"),
-        "divided": ("value", "flag"),
+        "divided": ("value", "unit_interval"),
         "simulations": ("value", "latent"),
     }
     _FAMILY_KEYS = {"proportions": "cutoff", "divided": "cutoff"}

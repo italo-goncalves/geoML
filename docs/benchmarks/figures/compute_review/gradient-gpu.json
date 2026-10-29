@@ -1,0 +1,140 @@
+{
+ "case": "gradient",
+ "model": null,
+ "rows": null,
+ "n_sim": 10,
+ "steps": 20,
+ "quadrature_xla": false,
+ "gpu": true,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 6.4143836200000806,
+  "rss_start_gb": 1.834856448,
+  "rss_peak_gb": 2.145333248,
+  "rss_growth_gb": 0.3104768
+ },
+ "nodes": [
+  "GradientConstrainedInput"
+ ],
+ "step": {
+  "seconds": 0.271832465999978,
+  "rss_start_gb": 2.145333248,
+  "rss_peak_gb": 2.145595392,
+  "rss_growth_gb": 0.000262144,
+  "unit": "iteration",
+  "median": 0.011269691000279636,
+  "count": 20
+ },
+ "refresh": {
+  "seconds": 0.05668726800013246,
+  "rss_start_gb": 2.134339584,
+  "rss_peak_gb": 2.134339584,
+  "rss_growth_gb": 0.0,
+  "median": 0.005078521499854105
+ },
+ "plain": {
+  "skipped": "no GP node reads a certain input directly"
+ },
+ "predict": {
+  "rows": 45,
+  "plain": {
+   "seconds": 0.01347971499990308,
+   "rss_start_gb": 2.175623168,
+   "rss_peak_gb": 2.175885312,
+   "rss_growth_gb": 0.000262144,
+   "batches": [
+    0.0038199859995984298
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 20000,
+   "batch_median": 0.0038199859995984298,
+   "prediction_seconds": 0.013720501999614498,
+   "after_batches_seconds": -0.0002407869997114176,
+   "counts": {},
+   "first": {
+    "seconds": 1.6405964139999014,
+    "rss_growth_gb": 0.041283584,
+    "counts": {
+     "_values_and_noise traced": 1
+    }
+   }
+  },
+  "measured": {
+   "seconds": 0.09661657399965407,
+   "rss_start_gb": 2.200784896,
+   "rss_peak_gb": 2.200784896,
+   "rss_growth_gb": 0.0,
+   "batches": [
+    0.002793567000026087
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 20000,
+   "batch_median": 0.002793567000026087,
+   "prediction_seconds": 0.012821434999750636,
+   "after_batches_seconds": 0.08379513899990343,
+   "counts": {},
+   "first": {
+    "seconds": 0.8248533169999064,
+    "rss_growth_gb": 0.024899584,
+    "counts": {}
+   }
+  },
+  "measurement_pass_seconds": 0.08313685899975098
+ },
+ "roots": {
+  "skipped": "no node takes the conditioned quadrature"
+ },
+ "cv": {
+  "seconds": 3.5225480130002325,
+  "rss_start_gb": 2.212319232,
+  "rss_peak_gb": 2.322907136,
+  "rss_growth_gb": 0.110587904,
+  "scores": [
+   {
+    "n": 15,
+    "rmse": 0.9785225065,
+    "mae": 0.8554560086,
+    "bias": -0.3882823891,
+    "crps": 0.6025548139,
+    "goodness": 0.6319444444,
+    "variable": "rock_num",
+    "component": "rock_num",
+    "fold": 0
+   },
+   {
+    "n": 15,
+    "rmse": 0.9567550025,
+    "mae": 0.8775248378,
+    "bias": 0.110761794,
+    "crps": 0.5887174149,
+    "goodness": 0.4703703704,
+    "variable": "rock_num",
+    "component": "rock_num",
+    "fold": 1
+   },
+   {
+    "n": 15,
+    "rmse": 0.9408307355,
+    "mae": 0.8049884321,
+    "bias": 0.6589413247,
+    "crps": 0.5523232744,
+    "goodness": 0.7296296296,
+    "variable": "rock_num",
+    "component": "rock_num",
+    "fold": 2
+   },
+   {
+    "n": 45,
+    "rmse": 0.9588272183,
+    "mae": 0.8459897595,
+    "bias": 0.1271402432,
+    "crps": 0.5811985011,
+    "goodness": 0.6148148148,
+    "variable": "rock_num",
+    "component": "rock_num",
+    "fold": "all"
+   }
+  ]
+ }
+}

@@ -39,6 +39,8 @@ import geoml.stats.random as _srandom
 import geoml
 
 import contextlib as _contextlib
+import dataclasses as _dataclasses
+import hashlib as _hashlib
 import numpy as _np
 import pandas as _pd
 import scipy.spatial as _spatial
@@ -1205,22 +1207,36 @@ class VGPNetwork(_GPModel):
                     nodes.append(node)
         return nodes
 
-    def _propagation(self, rows=None):
-        """The context every training and prediction call runs under: how
-        the experts propagate, and whether uncertainty travels with its
-        covariance between locations (`GPOptions.propagation`). The network
-        is checked against the expected kernel's refusals each time, since
-        the options can be changed on a live model."""
-        joint = getattr(self.options, "propagation", "marginal") == "joint"
-        if joint:
+    def _propagation(self, rows=None, qmc=None):
+        """The context every training and prediction call runs under: the
+        model's setting (`_setting`) in force. The network is checked
+        against the expected kernel's refusals each time, since the options
+        can be changed on a live model."""
+        value = self._setting(rows, qmc)
+        if value.joint:
             self._check_expected_kernel()
-        stack = _contextlib.ExitStack()
-        stack.enter_context(_latent.propagation_rule(
-            self.options.expert_propagation, joint=joint,
-            full=self._full_variance()))
-        stack.enter_context(_latent.network.quadrature_rule(
-            self._quadrature_memory(), rows, self._quadrature_precision()))
-        return stack
+        return _latent.network.setting(value)
+
+    def _setting(self, rows=None, qmc=None):
+        """What the model's options put in force for a call
+        (`network._Setting`, every cache of traced functions keyed on it):
+        how the experts propagate, whether uncertainty travels with its
+        covariance between locations (`GPOptions.propagation`), whether the
+        moments and realizations carry the full variance, the quadrature's
+        budget and precision -- the rest as the module holds it. `rows` is
+        the most rows a call carries, `qmc` whether its simulations are
+        drawn by quasi-Monte Carlo; None keeps what is in force."""
+        current = _latent.network._current()
+        return _dataclasses.replace(
+            current,
+            qmc=current.qmc if qmc is None else bool(qmc),
+            expert_propagation=self.options.expert_propagation,
+            joint=getattr(self.options, "propagation", "marginal")
+            == "joint",
+            full_variance=self._full_variance(),
+            memory=self._quadrature_memory(),
+            precision=self._quadrature_precision(),
+            rows=current.rows if rows is None else int(rows))
 
     def _full_variance(self):
         """Whether the moments and realizations carry the full variance
@@ -1291,23 +1307,11 @@ class VGPNetwork(_GPModel):
                 rows, int(_latent.network._expert_budget() // spread)))
         return rows
 
-    def _propagation_key(self):
-        """What the propagation adds to a cached trace's key."""
-        return (self.options.expert_propagation,
-                getattr(self.options, "propagation", "marginal"),
-                self._full_variance(),
-                _latent.network._UNCERTAIN_POINTS_SECOND_MOMENT,
-                _latent.network._PATHWISE_REALIZATIONS,
-                self._quadrature_memory(),
-                _latent.network._QUADRATURE_RULE,
-                _latent.network._quadrature_xla(),
-                self._quadrature_precision())
-
     def _step_rule(self):
         """What a cached training step's trace depends on beyond its
-        variables: the propagation, and whether its draws are fresh."""
-        return self._propagation_key() + (
-            bool(getattr(self.options, "fresh_training_draws", False)),)
+        variables: the setting, and whether its draws are fresh."""
+        return (self._setting(),
+                bool(getattr(self.options, "fresh_training_draws", False)))
 
     def _training_seed(self):
         """The seed of one training step's draws, read inside the step.
@@ -1893,23 +1897,21 @@ class VGPNetwork(_GPModel):
         means holding one function per combination of settings rather than a
         flag on a single one. Each is traced at most once per model, and
         `None` (rather than `False`) leaves the uncompiled path exactly as it
-        was. The `simulation_rule`/`propagation_rule` contexts wrap the call
-        rather than the trace because a retrace (a new batch shape, a new
-        `n_sim`) can happen on any call, and has to see the flags the cache
-        key promised. The propagation rule joins the key for the networks
-        whose graphs refresh internally (`ProjectedVGP`); on this class the
-        graph reads snapshotted state, and the extra key is merely unused.
+        was. The setting (`_propagation`) wraps the call rather than the
+        trace because a retrace (a new batch shape, a new `n_sim`) can
+        happen on any call, and has to see the setting the cache key
+        promised.
         """
         qmc = bool(self.options.qmc_simulations)
-        rule = self._propagation_key()
         # an expert subset is read at trace time too; `None` (every expert)
         # keeps the key every other caller has always used
         subset = _latent.network._subset_key()
         slots = _latent.network._slots_key()
 
         def traced_for(jit):
-            key = (jit, qmc, rule) if subset is None and slots is None \
-                else (jit, qmc, rule, subset, slots)
+            setting = _latent.network._current()
+            key = (jit, setting) if subset is None and slots is None \
+                else (jit, setting, subset, slots)
             traced = self._compiled.get(key)
             if traced is None:
                 # `reduce_retracing` relaxes the batch shape, which is the
@@ -1927,7 +1929,7 @@ class VGPNetwork(_GPModel):
                 self._compiled[key] = traced
             return traced
 
-        with _latent.simulation_rule(qmc), self._propagation():
+        with self._propagation(qmc=qmc):
             return self._with_xla(traced_for, *args, **kwargs)
 
     def _with_xla(self, traced_for, *args, **kwargs):
@@ -1957,57 +1959,82 @@ class VGPNetwork(_GPModel):
             % refusal)
         return answer
 
+    def _forward(self, x, x_var, n_sim, seed):
+        """The leaves at `x`, per likelihood: `(mu, var, sim, exp_var,
+        jitter, smooth, own)`, each a list in likelihood order, `smooth` and
+        `own` lists of None where no node has a residual of its own. What
+        the prediction reads, and the measurement samples."""
+        mus, vars_, sims, exp_vars, jitters = [], [], [], [], []
+        with _latent.once_per_pass():
+            per_leaf = [leaf.predict(x, x_var=x_var, n_sim=n_sim,
+                                     seed=[seed, 0])
+                        for leaf in self.leaves]
+            # the realizations carry each node's own residual; the
+            # prediction integrates it analytically from the same draws
+            # without it (the user's choice 2(b))
+            owns = [leaf._own_noise for leaf in self.leaves]
+            smooth = None
+            if any(o is not None for o in owns):
+                with _latent.network.smooth_draws():
+                    smooth = [_tf.transpose(leaf.simulate(
+                        n_sim, [seed, 0]), [1, 0, 2])
+                        for leaf in self.leaves]
+        for predicted in per_leaf:
+            mu, var, sim, exp_var = predicted
+            mus.append(_tf.transpose(mu[:, :, 0]))
+            vars_.append(_tf.transpose(var))
+            sims.append(_tf.transpose(sim, [1, 0, 2]))
+            exp_vars.append(_tf.transpose(exp_var))
+            jitters.append(None if predicted.jitter is None
+                           else _tf.transpose(predicted.jitter))
+
+        # what the realizations leave out at an uncertain input, which a
+        # likelihood integrates beside its noise; a model with certain
+        # inputs passes nothing, as it always has
+        pred_jitter = self._jitter_by_likelihood(jitters, exp_vars)
+        pred_smooth = [None] * len(self.likelihoods)
+        pred_own = [None] * len(self.likelihoods)
+        if smooth is not None:
+            pred_smooth = self._by_likelihood(smooth)
+            pred_own = self._jitter_by_likelihood(
+                [None if o is None else _tf.transpose(o) for o in owns],
+                exp_vars)
+        return (self._by_likelihood(mus), self._by_likelihood(vars_),
+                self._by_likelihood(sims), self._by_likelihood(exp_vars),
+                pred_jitter, pred_smooth, pred_own)
+
+    def _measured_draws(self, forward):
+        """What the measurement samples are drawn from, one `(sim, jitter)`
+        per likelihood that carries a warping: the realizations without the
+        nodes' own residual where some node has one, its variance then
+        joining the latent jitter, so that the samples average back to the
+        prediction rather than to `n_sim` draws of it."""
+        _, _, sims, _, jitters, smooths, owns = forward
+        draws = []
+        for sim, jitter, smooth, own, lik in zip(
+                sims, jitters, smooths, owns, self.likelihoods):
+            if not lik.warped:
+                continue
+            if smooth is not None:
+                sim = smooth
+                jitter = own if jitter is None else jitter + own
+            draws.append((sim, jitter))
+        return draws
+
     def _predict_raw(self, x_new, variable_inputs, x_var=None,
-                     n_sim=1, seed=0, include_noise=True, n_splits=None):
+                     n_sim=1, seed=0, include_noise=True, n_splits=None,
+                     draws=False):
         # The posterior is refreshed once by `predict` and snapshotted into
         # Variables; this cached graph reads that state, so it is not recomputed
-        # per batch.
+        # per batch. Under `draws`, the answer comes with what the
+        # measurement samples are drawn from (`_measured_draws`), so that
+        # `predict` checks the measured rows without a second pass.
         with _tf.name_scope("Prediction"):
-            mus, vars_, sims, exp_vars, jitters = [], [], [], [], []
-            with _latent.once_per_pass():
-                per_leaf = [leaf.predict(x_new, x_var=x_var, n_sim=n_sim,
-                                         seed=[seed, 0])
-                            for leaf in self.leaves]
-                # the realizations carry each node's own residual; the
-                # prediction integrates it analytically from the same draws
-                # without it (the user's choice 2(b))
-                owns = [leaf._own_noise for leaf in self.leaves]
-                smooth = None
-                if any(o is not None for o in owns):
-                    with _latent.network.smooth_draws():
-                        smooth = [_tf.transpose(leaf.simulate(
-                            n_sim, [seed, 0]), [1, 0, 2])
-                            for leaf in self.leaves]
-            for predicted in per_leaf:
-                mu, var, sim, exp_var = predicted
-                mus.append(_tf.transpose(mu[:, :, 0]))
-                vars_.append(_tf.transpose(var))
-                sims.append(_tf.transpose(sim, [1, 0, 2]))
-                exp_vars.append(_tf.transpose(exp_var))
-                jitters.append(None if predicted.jitter is None
-                               else _tf.transpose(predicted.jitter))
-
-            pred_mu = self._by_likelihood(mus)
-            pred_var = self._by_likelihood(vars_)
-            pred_sim = self._by_likelihood(sims)
-            pred_exp_var = self._by_likelihood(exp_vars)
-            # what the realizations leave out at an uncertain input, which
-            # a likelihood integrates beside its noise; a model with
-            # certain inputs passes nothing, as it always has
-            pred_jitter = self._jitter_by_likelihood(jitters, exp_vars)
-            pred_smooth = [None] * len(self.likelihoods)
-            pred_own = [None] * len(self.likelihoods)
-            if smooth is not None:
-                pred_smooth = self._by_likelihood(smooth)
-                pred_own = self._jitter_by_likelihood(
-                    [None if o is None else _tf.transpose(o) for o in owns],
-                    exp_vars)
-
+            forward = self._forward(x_new, x_var, n_sim, seed)
             output = []
             for mu, var, sim, exp_var, jitter, smooth_sim, own, lik, \
-                    v_inp in zip(pred_mu, pred_var, pred_sim, pred_exp_var,
-                                 pred_jitter, pred_smooth, pred_own,
-                                 self.likelihoods, variable_inputs):
+                    v_inp in zip(*forward, self.likelihoods,
+                                 variable_inputs):
                 extra = {} if jitter is None else {"jitter": jitter}
                 if smooth_sim is not None and own is not None:
                     extra = {"smooth": smooth_sim, "own": own}
@@ -2018,6 +2045,8 @@ class VGPNetwork(_GPModel):
                         n_splits=n_splits, **v_inp, **extra
                     )
                 )
+            if draws:
+                return output, self._measured_draws(forward)
             return output
 
     def predict(self, newdata: "_data._SpatialData",
@@ -2198,8 +2227,8 @@ class VGPNetwork(_GPModel):
         seed = [self.options.seed + self._seed_offset(node), 0]
 
         def call(x, x_var, n_splits):
-            with _latent.simulation_rule(bool(self.options.qmc_simulations)), \
-                    self._propagation():
+            with self._propagation(
+                    qmc=bool(self.options.qmc_simulations)):
                 return self._with_xla(
                     lambda jit: self._node_function(node, jit),
                     x, x_var, n_sim, seed)
@@ -2230,9 +2259,8 @@ class VGPNetwork(_GPModel):
         `jit`."""
         # the experts a call by expert computes are read at trace time, as
         # `predict_raw`'s are
-        key = ("node", id(node), jit, bool(self.options.qmc_simulations),
-               self._propagation_key(), _latent.network._subset_key(),
-               _latent.network._slots_key())
+        key = ("node", id(node), jit, _latent.network._current(),
+               _latent.network._subset_key(), _latent.network._slots_key())
         traced = self._compiled.get(key)
         if traced is None:
             def body(x, x_var, n_sim, seed):
@@ -2244,6 +2272,122 @@ class VGPNetwork(_GPModel):
                                   reduce_retracing=True)
             self._compiled[key] = traced
         return traced
+
+    def _measure_function(self, jit):
+        """`_measure_raw` in a graph, one per setting, as `predict_raw`
+        holds one for the prediction; compiled with XLA under `jit` where
+        TensorFlow sees no GPU.
+
+        Run eagerly, the measurement pass built a `tf.function` for every
+        quadrature and pathwise chunk on every batch, and on the CPU
+        compiled each with XLA and kept it: on a GeoScape walk network 2.8
+        to 3.9 GB more a call, and a prediction at its 4429 data locations
+        out of a 28 GB cap (2026-10-28)."""
+        # on the GPU the pass compiled with XLA took 118 s more to compile
+        # and 5.5 s more a call than the plain graph, on Walker's exhaustive
+        # grid behind a single-expert model, where the prediction compiled
+        # with it was faster (2026-10-28)
+        jit = jit and not _latent.network._gpu_visible()
+        key = ("measure", jit, _latent.network._current(),
+               _latent.network._subset_key(), _latent.network._slots_key())
+        traced = self._compiled.get(key)
+        if traced is None:
+            traced = _tf.function(self._measure_raw, jit_compile=jit or None,
+                                  reduce_retracing=True)
+            self._compiled[key] = traced
+        return traced
+
+    def _measure_raw(self, x, x_var, shifts, jitter_shifts, n_sim, n_nodes,
+                     seed):
+        """The measurement samples at `x`: one `[n, size, n_sim *
+        n_nodes]` tensor per likelihood that carries a warping, each
+        likelihood's noise nodes rotated by its `shifts` and its jitter's
+        by its `jitter_shifts` (see `measurement_batches`)."""
+        draws = self._measured_draws(self._forward(x, x_var, n_sim, seed))
+        return self._samples_raw(draws, shifts, jitter_shifts, n_nodes)
+
+    def _samples_function(self, jit):
+        """`_samples_raw` in a graph, one per setting, compiled with XLA
+        under `jit` where TensorFlow sees no GPU, as the measured rows' pass
+        is (`_measure_function`)."""
+        jit = jit and not _latent.network._gpu_visible()
+        key = ("samples", jit, _latent.network._current())
+        traced = self._compiled.get(key)
+        if traced is None:
+            traced = _tf.function(self._samples_raw, jit_compile=jit or None,
+                                  reduce_retracing=True)
+            self._compiled[key] = traced
+        return traced
+
+    def _samples_raw(self, draws, shifts, jitter_shifts, n_nodes):
+        """The measurement samples from `draws` (`_measured_draws`): one
+        `[n, size, n_sim * n_nodes]` tensor per likelihood that carries a
+        warping, its noise nodes rotated by its `shifts` and its jitter's by
+        its `jitter_shifts`."""
+        measured = [lik for lik in self.likelihoods if lik.warped]
+        return [lik.measurement_samples(
+                    sim, n_nodes, shift=shift,
+                    **({} if jitter is None else {
+                        "jitter": jitter, "jitter_shift": jitter_shift}))
+                for (sim, jitter), lik, shift, jitter_shift
+                in zip(draws, measured, shifts, jitter_shifts)]
+
+    def _rotations(self, rows, n_sim):
+        """The noise and jitter rotations of the measurement samples at
+        `rows` (`measurement_batches`), one tensor per likelihood that
+        carries a warping each."""
+        measured = [lik for lik in self.likelihoods if lik.warped]
+        shifts = [_tf.constant(self._rotation(k, lik.size, rows, n_sim),
+                               _tf.float64)
+                  for k, lik in enumerate(measured)]
+        jitter_shifts = [_tf.constant(self._rotation(k, 1, rows, n_sim,
+                                                     stream=2), _tf.float64)
+                         for k in range(len(measured))]
+        return shifts, jitter_shifts
+
+    def _rotation(self, k, size, rows, n_sim, stream=1):
+        """The rows' slice of the k-th warped likelihood's `(n_data, size,
+        n_sim)` stream of uniforms, drawn without generating what comes
+        before it: PCG64 spends exactly one 64-bit output per double, so
+        advancing by the rows' offset lands where a whole draw would.
+        Stream 1 rotates the noise, stream 2 the latent jitter."""
+        first, last = int(rows[0]), int(rows[-1])
+        # the generator `default_rng` would build, named so that its
+        # `advance` is on the type
+        bits = _np.random.PCG64(
+            _np.random.SeedSequence([self.options.seed, stream, k]))
+        bits.advance(first * size * n_sim)
+        block = _np.random.Generator(bits).random(
+            (last - first + 1, size, n_sim))
+        return block[_np.asarray(rows) - first]
+
+    def _moments_function(self, jit):
+        """`_moments_raw` in a graph, one per setting, compiled with XLA
+        under `jit`."""
+        key = ("moments", jit, _latent.network._current(),
+               _latent.network._subset_key(), _latent.network._slots_key())
+        traced = self._compiled.get(key)
+        if traced is None:
+            traced = _tf.function(self._moments_raw, jit_compile=jit or None,
+                                  reduce_retracing=True)
+            self._compiled[key] = traced
+        return traced
+
+    def _moments_raw(self, x, x_var, seed):
+        """The latent mean and variance at `x` of every likelihood that is
+        a mixture, `[(n, size), (n, size)]` each (`responsibilities`)."""
+        mixtures = (_lk.Mixture, _lk.LikelihoodMixture)
+        mus, vars_ = [], []
+        with _latent.once_per_pass():
+            per_leaf = [leaf.predict(x, x_var=x_var, n_sim=1, seed=[seed, 0])
+                        for leaf in self.leaves]
+        for mu, var, _, _ in per_leaf:
+            mus.append(_tf.transpose(mu[:, :, 0]))
+            vars_.append(_tf.transpose(var))
+        mu = self._by_likelihood(mus)
+        var = self._by_likelihood(vars_)
+        return [(m, v) for m, v, lik in zip(mu, var, self.likelihoods)
+                if isinstance(lik, mixtures)]
 
     def _seed_offset(self, node):
         """What the model adds to its seed on the way from the first leaf
@@ -2357,56 +2501,108 @@ class VGPNetwork(_GPModel):
             of several inputs, every input's experts side by side in the
             network's order, each input's summing to one.
         """
+        if container is None:
+            # a copy: the table held between calls is the model's own
+            return self._training_weights()["table"].copy()
+        return self._weight_table(container)
+
+    def _weight_table(self, container):
+        """The body of :meth:`expert_weights`, for any container."""
         _, gp = self._expert_structure()
         # every container holding locations is point-based
-        data = _cast("_data.containers._PointBased",
-                     self.data if container is None else container)
+        data = _cast("_data.containers._PointBased", container)
         n_rows = data.n_data
         # an expert at a time: its rows cost one expert's memory, where a
         # prediction's carry every expert's (32 times fewer rows a band on
         # the GeoScape network, each band a refresh of the expert's nodes)
-        bands = self.options.batch_index(
-            n_rows, batch_size=self._prediction_rows(one_expert=True))
+        band_rows = self._prediction_rows(one_expert=True)
+        bands = self.options.batch_index(n_rows, batch_size=band_rows)
         blocks = []
-        for root, _, count in self._expert_blocks():
-            nodes = gp[id(root)]
-            n_out = sum(n.size for n in nodes)
-            raw = _np.zeros([n_rows, count, n_out])
-            # one trace for every expert, the expert in the input's single
-            # slot: run eagerly, the sweep issued millions of small ops one
-            # at a time (6.2 million on a GeoScape network of three GP nodes
-            # reading a GPWalk, 260-415 s an epoch of train_by_expert)
-            sweep = self._weight_sweep(root, nodes)
-            ids, filled = self._slot_variables(root, 1)
-            filled.assign([1.0])
-            for j in range(count):
-                ids.assign([j])
-                for band in bands:
-                    rows = _np.arange(n_rows)[band]
-                    coords, _ = data.get_batched_coordinates(rows)
-                    variance, _ = data.get_batched_variance(rows)
-                    var = _np.asarray(sweep(
-                        _tf.constant(coords, _tf.float64),
-                        _tf.constant(variance, _tf.float64)))
-                    raw[band, j, :] = (1 - var) / (var + 1e-6) + 1e-6
-            weights = raw / raw.sum(axis=1, keepdims=True)
-            blocks.append(weights.mean(axis=2))
+        # under the model's setting: a prediction by expert asks for the
+        # weights outside any, and the sweep traced under the module's
+        # defaults (the consensus and marginal rules) until 0.9.12
+        with self._propagation(rows=band_rows):
+            for root, _, count in self._expert_blocks():
+                nodes = gp[id(root)]
+                n_out = sum(n.size for n in nodes)
+                raw = _np.zeros([n_rows, count, n_out])
+                # one trace for every expert, the expert in the input's
+                # single slot: run eagerly, the sweep issued millions of
+                # small ops one at a time (6.2 million on a GeoScape network
+                # of three GP nodes reading a GPWalk, 260-415 s an epoch of
+                # train_by_expert)
+                sweep = self._weight_sweep(root, nodes)
+                ids, filled = self._slot_variables(root, 1)
+                filled.assign([1.0])
+                for j in range(count):
+                    ids.assign([j])
+                    for band in bands:
+                        rows = _np.arange(n_rows)[band]
+                        coords, _ = data.get_batched_coordinates(rows)
+                        variance, _ = data.get_batched_variance(rows)
+                        var = _np.asarray(sweep(
+                            _tf.constant(coords, _tf.float64),
+                            _tf.constant(variance, _tf.float64)))
+                        raw[band, j, :] = (1 - var) / (var + 1e-6) + 1e-6
+                weights = raw / raw.sum(axis=1, keepdims=True)
+                blocks.append(weights.mean(axis=2))
         return _np.concatenate(blocks, axis=1)
+
+    def _weights_fingerprint(self):
+        """What the training data's weight table depends on, as a digest:
+        every parameter's value, the data's locations, their variance and
+        which rows are measured, and the setting the sweep runs under."""
+        digest = _hashlib.blake2b(digest_size=16)
+        for parameter in self.all_parameters:
+            digest.update(_np.ascontiguousarray(
+                parameter.variable.numpy()).tobytes())
+        data = _cast("_data.containers._PointBased", self.data)
+        rows = _np.arange(data.n_data)
+        for array in (*data.get_batched_coordinates(rows)[:1],
+                      data.get_batched_variance(rows)[0], self.has_value):
+            digest.update(_np.ascontiguousarray(array).tobytes())
+        setting = _dataclasses.replace(self._setting(), rows=0, qmc=False)
+        digest.update(repr((setting, self.options.jitter)).encode())
+        return digest.digest()
+
+    def _training_weights(self):
+        """The training data's weight table and what is read off it alone,
+        held between calls while :meth:`_weights_fingerprint` stays the
+        same: `table`, `measured` (the rows holding any measurement),
+        `overlap` (the measured weights' `w.T @ w`) and `trees`, a KD-tree
+        of the data in each input's transformed space, built when first
+        asked for. The sweep behind the table takes 29 s on a GPU and 70 s
+        on a CPU on a 32-expert network, and every prediction or refinement
+        pass by expert asked for it afresh."""
+        fingerprint = self._weights_fingerprint()
+        held = self.__dict__.get("_held_weights")
+        if held is not None and held["fingerprint"] == fingerprint:
+            return held
+        table = self._weight_table(self.data)
+        measured = _np.any(self.has_value > 0, axis=1)
+        w = table * measured[:, None]
+        held = dict(fingerprint=fingerprint, table=table, measured=measured,
+                    overlap=w.T @ w, trees={})
+        self.__dict__["_held_weights"] = held
+        return held
+
+    def _data_tree(self, root):
+        """The KD-tree of the training data in `root`'s transformed
+        space, held with the weight table."""
+        trees = self._training_weights()["trees"]
+        if id(root) not in trees:
+            trees[id(root)] = _spatial.cKDTree(
+                self._transformed(self.data, root=root))
+        return trees[id(root)]
 
     def _weight_sweep(self, root, nodes):
         """The traced pass of `expert_weights` for one input: its GP
         `nodes` refreshed and read at a band of rows for the expert in the
         input's single slot (`_slot_variables(root, 1)`), each node's
         variance as columns, `(rows, outputs)`. Kept on the model per input
-        and per propagation rule, which is read at trace time."""
+        and per setting, which is read at trace time."""
         network = _latent.network
-        key = (id(root), network._EXPERT_PROPAGATION,
-               network._JOINT_PROPAGATION, network._FULL_VARIANCE,
-               network._UNCERTAIN_POINTS_SECOND_MOMENT,
-               network._PATHWISE_REALIZATIONS, network._QUADRATURE_MEMORY,
-               network._QUADRATURE_ROWS, network._QUADRATURE_RULE,
-               network._QUADRATURE_DTYPE,
-               network._quadrature_xla(), self.options.jitter)
+        key = (id(root), network._current(), self.options.jitter)
         sweeps = self.__dict__.setdefault("_weight_sweeps", {})
         if key in sweeps:
             return sweeps[key]
@@ -2461,11 +2657,9 @@ class VGPNetwork(_GPModel):
         `sets`, the active sets are kept and only the share of weight each
         leaves out is measured afresh."""
         blocks = self._expert_blocks()
-        table = self.expert_weights()
-        measured = _np.any(self.has_value > 0, axis=1)
-        w = table * measured[:, None]
-        total = w.sum(axis=0)
-        overlap = w.T @ w
+        held = self._training_weights()
+        table, measured, overlap =             held["table"], held["measured"], held["overlap"]
+        total = (table * measured[:, None]).sum(axis=0)
         formed, dropped = self._expert_sets(overlap, coverage, blocks)
         if sets is None:
             sets = formed
@@ -3392,7 +3586,8 @@ class VGPNetwork(_GPModel):
                     left_out=left_out)
 
     def _expert_groups(self, newdata, mask, coverage=0.99, neighbours=8,
-                       grouping="home", slots=True, pack=True):
+                       grouping="home", slots: "bool | int" = True,
+                       pack=True):
         """The groups of locations a prediction by expert visits, and how to
         enter one, as :meth:`predict_by_expert` describes them.
 
@@ -3410,17 +3605,16 @@ class VGPNetwork(_GPModel):
         roots = [root for root, _, _ in blocks]
         locations = _np.arange(newdata.n_data) if mask is None \
             else _np.flatnonzero(mask)
-        table = self.expert_weights()
+        held = self._training_weights()
+        table = held["table"]
         rows_per = newdata.rows_per_location
-        measured = _np.any(self.has_value > 0, axis=1)
-        w = table * measured[:, None]
-        home, _ = self._expert_sets(w.T @ w, coverage, blocks)
+        home, _ = self._expert_sets(held["overlap"], coverage, blocks)
 
         # per input: the locations' weights, carried from the data in that
         # input's own transformed space, and its training sets
         per_input = []
         for r, (root, start, count) in enumerate(blocks):
-            tree = _spatial.cKDTree(self._transformed(self.data, root=root))
+            tree = self._data_tree(root)
             targets = self._transformed(newdata, locations, root=root)
             own = table[:, start:start + count]
             weights = _np.empty((len(targets), count))
@@ -3567,18 +3761,39 @@ class VGPNetwork(_GPModel):
                 newdata.variables[v].allocate_simulations(n_sim)
             variable_inputs.append(self.data.variables[v].prediction_input())
 
-        def batch_pred(x, x_var, n_splits):
-            return self.predict_raw(
+        # where the target holds measurements, every batch of the call
+        # hands back its draws, so that one trace serves it, and the PITs
+        # come from the realizations the prediction reports: the second
+        # pass over the measured rows this replaced held a trace of the
+        # network of its own, 6.6 GB on a GeoScape walk network (item S)
+        check = self._measurement_check(newdata, where) \
+            if check_measurements else None
+
+        def batch_pred(x, x_var, n_splits, rows):
+            answer = self.predict_raw(
                 x,
                 variable_inputs,
                 x_var=x_var,
                 seed=self.options.seed,
                 n_sim=n_sim,
                 include_noise=include_noise,
-                n_splits=n_splits
+                n_splits=n_splits,
+                **({} if check is None else {"draws": True})
             )
+            if check is None:
+                return answer, None
+            output, draws = answer
+            shifts, jitter_shifts = self._rotations(rows, n_sim)
+            with self._propagation():
+                samples = self._with_xla(
+                    lambda jit: self._samples_function(jit), draws, shifts,
+                    jitter_shifts, _lk._MEASUREMENT_NODES)
+            return output, samples
 
-        for batch, output in self._over_batches(newdata, batch_pred, where):
+        for batch, (output, samples) in self._over_batches(
+                newdata, batch_pred, where, with_rows=True):
+            if check is not None:
+                check.add(batch, samples)
             for v, lik, upd in zip(self.variables, self.likelihoods, output):
                 # A vector variable hands the latent moments to its
                 # components only when column i is component i's own, which
@@ -3591,16 +3806,17 @@ class VGPNetwork(_GPModel):
                 newdata.variables[v].update(batch, elementwise=elementwise,
                                             **upd)
 
-        if check_measurements:
-            self._check_measurements(newdata, where, n_sim)
-
-    def _check_measurements(self, newdata, where, n_sim):
-        """Writes `pit_*` and `warped_*` where `newdata` holds measurements
-        (see `predict`), at the locations `where` names. A column already
-        there keeps its values elsewhere, so a prediction finished in parts
-        fills it in parts."""
+    def _measurement_check(self, newdata, where):
+        """What writes `pit_*` and `warped_*` where `newdata` holds
+        measurements (see `predict`), at the locations `where` names, or
+        None where it holds none there: `add(rows, samples)` takes a
+        prediction batch's measurement samples, in model units as the
+        graph gives them, and writes the batch's columns, so that a
+        cancelled prediction keeps those of the batches that landed. A
+        column already there keeps its values elsewhere, so a prediction
+        finished in parts fills it in parts."""
         if newdata.rows_per_location != 1:
-            return
+            return None
         visit = _np.ones(newdata.n_data, dtype=bool) if where is None \
             else where
         truths = {v: _measured_truth(newdata.variables[v])
@@ -3609,34 +3825,12 @@ class VGPNetwork(_GPModel):
             [has.any(axis=1) for _, has, _ in truths.values()] or
             [_np.zeros(newdata.n_data, dtype=bool)], axis=0)
         if not rows.any():
-            return
+            return None
+        return _MeasurementCheck(self, newdata, truths, rows)
 
-        def column(name):
-            if name in newdata.metadata:
-                return _np.asarray(newdata.get_metadata(name),
-                                   dtype=float).copy()
-            return _np.full(newdata.n_data, _np.nan)
-
-        # a pass of its own over the measured rows, silenced: it is part of
-        # the prediction a caller asked for, not a second one to report
-        pit = {}
-        with _progress.progress(None):
-            for batch, samples in self.measurement_batches(
-                    newdata, n_sim=n_sim, where=rows):
-                for v, sample in samples.items():
-                    truth, has, components = truths[v]
-                    for c, component in enumerate(components):
-                        measured = has[batch, c]
-                        if not measured.any():
-                            continue
-                        key = _pit_column(v, component)
-                        if key not in pit:
-                            pit[key] = column(key)
-                        pit[key][batch[measured]] = _pit(
-                            sample[measured, c, :], truth[batch, c][measured])
-        for key, values in pit.items():
-            newdata.add_metadata(key, values)
-
+    def _write_warped(self, newdata, rows, column):
+        """The `warped_*` columns at `rows` (see `predict`), `column(name)`
+        giving what a column holds already."""
         for v, lik in self._measured_variables():
             values, has_value = newdata.variables[v].get_measurements()
             values = _np.asarray(values, dtype=float)
@@ -3695,7 +3889,10 @@ class VGPNetwork(_GPModel):
         # what a measured batch may grow to: past the estimate, up to the
         # options' batch size, wherever no node sizes a chunk by the rows a
         # call states (`quadrature_rule`); the estimate cannot see what XLA
-        # saves, a third of the memory on a GeoScape network
+        # saves, a third of the memory on a GeoScape network. Under the
+        # quadrature a batch keeps to the estimate: growing it ten times on a
+        # GeoScape walk network bought 3% a block -- the cost there is per
+        # row -- for twice the device's memory (2026-10-27)
         cap = batch_size if self._chunked_by_rows() else max(
             batch_size,
             int(self.options.prediction_batch_size) // per_location)
@@ -3779,8 +3976,9 @@ class VGPNetwork(_GPModel):
 
     def _chunked_by_rows(self):
         """Whether a GP node sizes a quadrature or pathwise chunk by the
-        rows a prediction call states (`BasicGP._row_bytes`), so that a
-        batch must not carry more."""
+        rows a prediction call states (`BasicGP._row_bytes`): such a model's
+        batches keep to the estimate, and on a GPU it predicts without XLA
+        (`_with_xla`)."""
         with self._propagation():
             return any(node._row_bytes() > 0 for node in self._nodes()
                        if hasattr(node, "_row_bytes"))
@@ -3796,8 +3994,10 @@ class VGPNetwork(_GPModel):
         if per_row <= 0:
             return cap
         network = _latent.network
-        room = network._MEASURED_SHARE * network._device_limit() \
-            - info["current"]
+        limit = network._device_limit()
+        if limit is None:
+            return cap
+        room = network._MEASURED_SHARE * limit - info["current"]
         return max(1, min(cap, int(room // per_row) // per_location))
 
     def predict_measurements(self, newdata: "_data._SpatialData",
@@ -3977,63 +4177,18 @@ class VGPNetwork(_GPModel):
         # `docs/cross-validation.md`. The stream restarts from the seed on
         # every call, so two containers of one size get the same uniforms
         # row for row: nothing to a per-row score, and a caller reading
-        # samples jointly across calls should know.
-        def rotation(k, size, rows, stream=1):
-            """The rows' slice of the k-th variable's `(n_data, size,
-            n_sim)` stream, drawn without generating what comes before it:
-            PCG64 spends exactly one 64-bit output per double, so advancing
-            by the rows' offset lands where a whole draw would. Stream 1
-            rotates the noise, stream 2 the latent jitter."""
-            first, last = int(rows[0]), int(rows[-1])
-            # the generator `default_rng` would build, named so that its
-            # `advance` is on the type
-            bits = _np.random.PCG64(
-                _np.random.SeedSequence([self.options.seed, stream, k]))
-            bits.advance(first * size * n_sim)
-            block = _np.random.Generator(bits).random(
-                (last - first + 1, size, n_sim))
-            return block[_np.asarray(rows) - first]
-
+        # samples jointly across calls should know (`_rotation`).
         def batch_measure(x, x_var, n_splits, rows):
-            per_leaf, jitters, like = [], [], []
-            with _latent.simulation_rule(self.options.qmc_simulations), \
-                    _latent.once_per_pass():
-                for leaf in self.leaves:
-                    predicted = leaf.predict(
-                        x, x_var=x_var, n_sim=n_sim,
-                        seed=[self.options.seed, 0])
-                    per_leaf.append(_tf.transpose(predicted[2], [1, 0, 2]))
-                    like.append(_tf.transpose(predicted[3]))
-                    jitters.append(None if predicted.jitter is None
-                                   else _tf.transpose(predicted.jitter))
-                # as the prediction takes them (`_predict_raw`): the same
-                # draws without the nodes' own residual, its variance drawn
-                # by the jitter's nodes, so that the samples average back to
-                # the prediction rather than to `n_sim` draws of it
-                owns = [leaf._own_noise for leaf in self.leaves]
-                if any(o is not None for o in owns):
-                    with _latent.network.smooth_draws():
-                        per_leaf = [_tf.transpose(leaf.simulate(
-                            n_sim, [self.options.seed, 0]), [1, 0, 2])
-                            for leaf in self.leaves]
-                    jitters = [j if o is None else
-                               _tf.transpose(o) if j is None
-                               else j + _tf.transpose(o)
-                               for j, o in zip(jitters, owns)]
-            sims = self._by_likelihood(per_leaf)
-            jitters = self._jitter_by_likelihood(jitters, like)
-            measured = [(sim, jitter, lik) for sim, jitter, lik
-                        in zip(sims, jitters, self.likelihoods) if lik.warped]
-            return [lik.measurement_samples(
-                        sim, n_nodes,
-                        shift=_tf.constant(rotation(k, lik.size, rows),
-                                           _tf.float64),
-                        **({} if jitter is None else {
-                            "jitter": jitter,
-                            "jitter_shift": _tf.constant(
-                                rotation(k, 1, rows, stream=2),
-                                _tf.float64)}))
-                    for k, (sim, jitter, lik) in enumerate(measured)]
+            # the rotations are the batch's rows' slices of seeded streams,
+            # drawn here and handed to the graph; the jitter's whether or
+            # not a likelihood has one, which only the trace can tell
+            shifts, jitter_shifts = self._rotations(rows, n_sim)
+            qmc = bool(self.options.qmc_simulations)
+            with self._propagation(qmc=qmc):
+                return self._with_xla(
+                    lambda jit: self._measure_function(jit),
+                    x, x_var, shifts, jitter_shifts, n_sim, n_nodes,
+                    self.options.seed)
 
         def passes(where):
             for rows, output in self._over_batches(
@@ -4130,19 +4285,10 @@ class VGPNetwork(_GPModel):
                 % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
 
         def batch_moments(x, x_var, n_splits):
-            mus, vars_ = [], []
-            with _latent.once_per_pass():
-                per_leaf = [leaf.predict(x, x_var=x_var, n_sim=1,
-                                         seed=[self.options.seed, 0])
-                            for leaf in self.leaves]
-            for mu, var, _, _ in per_leaf:
-                mus.append(_tf.transpose(mu[:, :, 0]))
-                vars_.append(_tf.transpose(var))
-            mu = self._by_likelihood(mus)
-            var = self._by_likelihood(vars_)
-            return [(m, v) for m, v, lik
-                    in zip(mu, var, self.likelihoods)
-                    if isinstance(lik, mixtures)]
+            with self._propagation():
+                return self._with_xla(
+                    lambda jit: self._moments_function(jit),
+                    x, x_var, self.options.seed)
 
         chunks = {v: ([], []) for v, _ in wanted}
         for _, output in self._over_batches(newdata, batch_moments):
@@ -4232,15 +4378,18 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
            meshes: "Sequence[_data.Mesh3D] | None" = None,
            verbose: bool = False,
            by_expert: bool = False,
-           expert_options: "dict[str, _Any] | None" = None
+           expert_options: "dict[str, _Any] | None" = None,
+           coherence: "float | None" = None
            ) -> "_data.BlockSet3D":
     """Predict on a block model, cutting finer wherever it cannot decide.
 
     Predicts on the coarse blocks, splits the ones still in doubt, predicts
     only what the split created, and repeats. Three criteria mark a block for
     splitting: the prediction at its sub-blocks falls on both sides of a
-    cut-off or a category boundary
-    (:meth:`~geoml.data.BlockSet3D.needs_splitting`); a neighbour is more
+    cut-off or a category boundary, with realizations coherent enough to say
+    the model places the boundary there
+    (:meth:`~geoml.data.BlockSet3D.needs_splitting`);
+    a neighbour is more
     than one level finer than it (:meth:`~geoml.data.BlockSet3D.unbalanced`);
     or a mesh passes through it (:meth:`~geoml.data.BlockSet3D.crossed_by`).
 
@@ -4286,6 +4435,10 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
         Keywords for :meth:`VGPNetwork.predict_by_expert` under
         `by_expert` -- `coverage`, `neighbours`, `grouping`, `slots`,
         `pack`.
+    coherence
+        The coherence a block needs to be cut, at least 0.2, in place of the
+        threshold :meth:`~geoml.data.BlockSet3D.needs_splitting` works out
+        from the realizations.
 
     Returns
     -------
@@ -4306,6 +4459,7 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     `docs/variable-block-models.md`.
     """
     keep = _where_mask(blocks, where)
+    _data.blocks._check_coherence(coherence)
     if tolerance is not None:
         warnings.warn(
             "`tolerance` has no effect since 0.8.5 -- a block is divided "
@@ -4320,12 +4474,12 @@ def refine(model, blocks: "_data.BlockSet3D", n_sim: "int | None" = None,
     with _progress.reporting("refine", None, "pass") as report:
         return _refine_passes(model, blocks, n_sim, split_on,
                               include_noise, keep, meshes, verbose, report,
-                              by_expert, expert_options)
+                              by_expert, expert_options, coherence)
 
 
 def _refine_passes(model, blocks, n_sim, split_on, include_noise,
                    keep, meshes, verbose, report, by_expert=False,
-                   expert_options=None):
+                   expert_options=None, coherence=None):
     """The body of :func:`refine`, one pass at a time. Separate only so that
     the reporting block can wrap a function that returns from its middle."""
     predict = model.predict
@@ -4338,7 +4492,7 @@ def _refine_passes(model, blocks, n_sim, split_on, include_noise,
 
     step = 0
     while True:
-        undecided = blocks.needs_splitting(split_on)
+        undecided = blocks.needs_splitting(split_on, coherence=coherence)
         uneven = blocks.unbalanced()
         crossed = _np.zeros(blocks.n_data, dtype=bool)
         for mesh in (meshes or []):
@@ -4793,6 +4947,47 @@ def _pit(draws, truth):
     share -- mid-rank, so ties split evenly."""
     return (draws < truth[:, None]).mean(axis=1) \
         + 0.5 * (draws == truth[:, None]).mean(axis=1)
+
+
+class _MeasurementCheck:
+    """The PITs and the warped values of a prediction's measured rows,
+    written batch by batch (`VGPNetwork._measurement_check`)."""
+
+    def __init__(self, model, newdata, truths, rows):
+        self.model = model
+        self.newdata = newdata
+        self.truths = truths
+        self.rows = rows
+        self.pit = {}
+
+    def column(self, name):
+        """The metadata column `name`, or one of missing values."""
+        if name in self.newdata.metadata:
+            return _np.asarray(self.newdata.get_metadata(name),
+                               dtype=float).copy()
+        return _np.full(self.newdata.n_data, _np.nan)
+
+    def add(self, batch, samples):
+        """Writes the PITs of `batch`'s measured rows, from its samples,
+        and their warped values."""
+        for (v, _), values in zip(self.model._measured_variables(), samples):
+            sample = self.model.data.variables[v].from_model_units(
+                _np.asarray(values))
+            truth, has, components = self.truths[v]
+            for c, component in enumerate(components):
+                measured = has[batch, c] & self.rows[batch]
+                if not measured.any():
+                    continue
+                key = _pit_column(v, component)
+                if key not in self.pit:
+                    self.pit[key] = self.column(key)
+                self.pit[key][batch[measured]] = _pit(
+                    sample[measured, c, :], truth[batch, c][measured])
+                self.newdata.add_metadata(key, self.pit[key])
+        here = _np.zeros(self.newdata.n_data, dtype=bool)
+        here[batch] = True
+        self.model._write_warped(self.newdata, self.rows & here,
+                                 self.column)
 
 
 def _pit_column(name, component):

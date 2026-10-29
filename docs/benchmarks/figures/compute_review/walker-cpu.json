@@ -1,0 +1,155 @@
+{
+ "case": "walker",
+ "model": null,
+ "rows": null,
+ "n_sim": 10,
+ "steps": 20,
+ "quadrature_xla": true,
+ "gpu": false,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 7.311306406,
+  "rss_start_gb": 1.013387264,
+  "rss_peak_gb": 1.315385344,
+  "rss_growth_gb": 0.30199808
+ },
+ "nodes": [
+  "BasicGP",
+  "BasicInput"
+ ],
+ "step": {
+  "seconds": 0.3355988510000145,
+  "rss_start_gb": 1.315385344,
+  "rss_peak_gb": 1.316171776,
+  "rss_growth_gb": 0.000786432,
+  "unit": "iteration",
+  "median": 0.016856944500005966,
+  "count": 20
+ },
+ "refresh": {
+  "seconds": 0.08620947500000398,
+  "rss_start_gb": 1.318268928,
+  "rss_peak_gb": 1.318268928,
+  "rss_growth_gb": 0.0,
+  "median": 0.008627788500007227
+ },
+ "plain": {
+  "seconds": 0.699998963000013,
+  "rss_start_gb": 1.318268928,
+  "rss_peak_gb": 1.328726016,
+  "rss_growth_gb": 0.010457088,
+  "unit": "iteration",
+  "median": 0.017284015999990743,
+  "count": 20,
+  "nodes": [
+   "BasicGP_1"
+  ]
+ },
+ "predict": {
+  "rows": 470,
+  "plain": {
+   "seconds": 0.06068969099999322,
+   "rss_start_gb": 1.51392256,
+   "rss_peak_gb": 1.53358336,
+   "rss_growth_gb": 0.0196608,
+   "batches": [
+    0.05169281999999953
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 20000,
+   "batch_median": 0.05169281999999953,
+   "prediction_seconds": 0.06082387600000061,
+   "after_batches_seconds": -0.00013418500000739186,
+   "counts": {},
+   "first": {
+    "seconds": 2.6057641329999797,
+    "rss_growth_gb": 0.185196544,
+    "counts": {
+     "_shared_prior_simulate traced": 2,
+     "_values_and_noise traced": 2
+    }
+   }
+  },
+  "measured": {
+   "seconds": 0.18214041199999542,
+   "rss_start_gb": 1.554030592,
+   "rss_peak_gb": 1.56766208,
+   "rss_growth_gb": 0.013631488,
+   "batches": [
+    0.05153699299998493
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 20000,
+   "batch_median": 0.05153699299998493,
+   "prediction_seconds": 0.057994648000004645,
+   "after_batches_seconds": 0.12414576399999078,
+   "counts": {
+    "_shared_prior_simulate eager": 2
+   },
+   "first": {
+    "seconds": 0.22752626400000509,
+    "rss_growth_gb": 0.020447232,
+    "counts": {
+     "_shared_prior_simulate eager": 2
+    }
+   }
+  },
+  "measurement_pass_seconds": 0.1214507210000022
+ },
+ "roots": {
+  "skipped": "no node takes the conditioned quadrature"
+ },
+ "cv": {
+  "seconds": 5.021086609999998,
+  "rss_start_gb": 1.568710656,
+  "rss_peak_gb": 1.790517248,
+  "rss_growth_gb": 0.221806592,
+  "scores": [
+   {
+    "n": 157,
+    "rmse": 262.0156869598,
+    "mae": 220.6278924239,
+    "bias": 20.8188365707,
+    "crps": 153.2453232214,
+    "goodness": 0.9514508139,
+    "variable": "V",
+    "component": "V",
+    "fold": 0
+   },
+   {
+    "n": 157,
+    "rmse": 328.9290346918,
+    "mae": 279.8333858626,
+    "bias": -37.2968292517,
+    "crps": 186.9449251004,
+    "goodness": 0.8485934183,
+    "variable": "V",
+    "component": "V",
+    "fold": 1
+   },
+   {
+    "n": 156,
+    "rmse": 272.1052358333,
+    "mae": 219.460940375,
+    "bias": 37.9734289019,
+    "crps": 151.4843385898,
+    "goodness": 0.9614672365,
+    "variable": "V",
+    "component": "V",
+    "fold": 2
+   },
+   {
+    "n": 470,
+    "rmse": 289.2225149537,
+    "mae": 240.01771785,
+    "bias": 7.0995958676,
+    "crps": 163.917927248,
+    "goodness": 0.9507978723,
+    "variable": "V",
+    "component": "V",
+    "fold": "all"
+   }
+  ]
+ }
+}

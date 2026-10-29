@@ -1,0 +1,114 @@
+{
+ "case": "saved",
+ "model": "/home/italo/chapter_models/17_deep_model",
+ "rows": 1000,
+ "n_sim": 10,
+ "steps": 5,
+ "quadrature_xla": true,
+ "gpu": false,
+ "threads": null,
+ "version": "0.9.11",
+ "build": {
+  "seconds": 0.3042043489999742,
+  "rss_start_gb": 1.014218752,
+  "rss_peak_gb": 1.029685248,
+  "rss_growth_gb": 0.015466496
+ },
+ "nodes": [
+  "Linear",
+  "BasicGP",
+  "GPWalk",
+  "BasicGP",
+  "BasicInput"
+ ],
+ "step": {
+  "seconds": 114.44087803500003,
+  "rss_start_gb": 1.029685248,
+  "rss_peak_gb": 13.573656576,
+  "rss_growth_gb": 12.543971328,
+  "unit": "iteration",
+  "median": 20.339929883000025,
+  "count": 5
+ },
+ "refresh": {
+  "seconds": 12.347999398000013,
+  "rss_start_gb": 13.363064832,
+  "rss_peak_gb": 13.435154432,
+  "rss_growth_gb": 0.0720896,
+  "median": 1.223490183999985
+ },
+ "plain": {
+  "seconds": 102.89775884199997,
+  "rss_start_gb": 13.36231936,
+  "rss_peak_gb": 13.908856832,
+  "rss_growth_gb": 0.546537472,
+  "unit": "iteration",
+  "median": 19.731855938999956,
+  "count": 5,
+  "nodes": [
+   "BasicGP_1"
+  ]
+ },
+ "predict": {
+  "rows": 1000,
+  "plain": {
+   "seconds": 1.2420798110000533,
+   "rss_start_gb": 13.799743488,
+   "rss_peak_gb": 13.9630592,
+   "rss_growth_gb": 0.163315712,
+   "batches": [
+    0.9234945949999656
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 3375,
+   "batch_median": 0.9234945949999656,
+   "prediction_seconds": 1.2422075939999786,
+   "after_batches_seconds": -0.00012778299992532993,
+   "counts": {},
+   "first": {
+    "seconds": 6.141837580000015,
+    "rss_growth_gb": 0.047091712,
+    "counts": {
+     "_chunked_sums traced": 2,
+     "_chunked_map traced": 2
+    }
+   }
+  },
+  "measured": {
+   "seconds": 1.241224293000073,
+   "rss_start_gb": 13.924806656,
+   "rss_peak_gb": 14.061645824,
+   "rss_growth_gb": 0.136839168,
+   "batches": [
+    0.9258400010000969
+   ],
+   "batch_count": 2,
+   "rows_per_batch_estimate": 3375,
+   "batch_median": 0.9258400010000969,
+   "prediction_seconds": 1.241436166000085,
+   "after_batches_seconds": -0.00021187300001201947,
+   "counts": {},
+   "first": {
+    "seconds": 1.2501393189999135,
+    "rss_growth_gb": 0.147062784,
+    "counts": {}
+   }
+  },
+  "measurement_pass_seconds": -0.0008555179999802931
+ },
+ "roots": {
+  "seconds": 1.2325719560000152,
+  "rss_start_gb": 13.9867136,
+  "rss_peak_gb": 14.14662144,
+  "rss_growth_gb": 0.15990784,
+  "batches": [
+   0.9094246379999049
+  ],
+  "batch_count": 2,
+  "rows_per_batch_estimate": 3375,
+  "batch_median": 0.9094246379999049,
+  "prediction_seconds": 1.2326872950000052,
+  "after_batches_seconds": -0.00011533899998994457,
+  "counts": {}
+ }
+}

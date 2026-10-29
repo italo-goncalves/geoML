@@ -28,6 +28,7 @@ import tensorflow as _tf
 import tensorflow_probability as _tfp
 import collections as _collections
 import contextlib as _contextlib
+import dataclasses as _dataclasses
 import functools as _functools
 import warnings as _warnings
 import zlib as _zlib
@@ -81,13 +82,8 @@ _QMC_SIMULATIONS = False
 @_contextlib.contextmanager
 def simulation_rule(qmc):
     """Chooses how the posterior simulations are drawn while active."""
-    global _QMC_SIMULATIONS
-    previous = _QMC_SIMULATIONS
-    _QMC_SIMULATIONS = bool(qmc)
-    try:
+    with setting(_dataclasses.replace(_current(), qmc=bool(qmc))):
         yield
-    finally:
-        _QMC_SIMULATIONS = previous
 
 
 # How a deep network's experts see each other's inducing sets. Set through
@@ -116,15 +112,10 @@ def propagation_rule(rule, joint=False, full=True):
     """Chooses how experts propagate their inducing sets, whether
     uncertainty travels with its covariance between locations, and whether
     the moments and realizations carry the full variance, while active."""
-    global _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE
-    previous = _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE
-    _EXPERT_PROPAGATION = rule
-    _JOINT_PROPAGATION = bool(joint)
-    _FULL_VARIANCE = bool(full)
-    try:
+    with setting(_dataclasses.replace(
+            _current(), expert_propagation=rule, joint=bool(joint),
+            full_variance=bool(full))):
         yield
-    finally:
-        _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _FULL_VARIANCE = previous
 
 
 # Which experts the GP nodes compute, or None for all of them. Set through
@@ -377,6 +368,8 @@ class _Predicted(tuple):
     node's input is uncertain (see `BasicGP._mixture_moments`), which a
     likelihood integrates out beside its noise."""
 
+    jitter: "_tf.Tensor | None"
+
     def __new__(cls, mu, var, sims, explained_var, jitter=None):
         predicted = super().__new__(cls, (mu, var, sims, explained_var))
         predicted.jitter = jitter
@@ -403,6 +396,15 @@ def _expert_key(name, expert):
     if int(expert) == 0 or not _FULL_VARIANCE:
         return name
     return "%s/expert%d" % (name, int(expert))
+
+
+def _held(cov_cross, root):
+    """`|k R|^2` per row, output and location: the variance the realizations
+    drawn through the whitened root `root` `[..., size, m, m]` carry at
+    locations whose covariance with the inducing points is `cov_cross`
+    `[..., n, m]`, `[..., size, n]`."""
+    return _tf.reduce_sum(
+        _tf.einsum("...nm,...smj->...snj", cov_cross, root) ** 2, axis=-1)
 
 
 def _blend_scale(agree, actual):
@@ -1318,10 +1320,9 @@ def refresh_cached(network, jitter=1e-6, owner=None):
         else [network]
     holder = owner if owner is not None else leaves[0]
 
-    # the propagation rule and the expert subset are Python-level branches
-    # inside `refresh`, so they are baked into the trace and key the cache
-    key = (jitter, _EXPERT_PROPAGATION, _JOINT_PROPAGATION, _subset_key(),
-           _slots_key())
+    # the setting and the expert subset are Python-level branches inside
+    # `refresh`, so they are baked into the trace and key the cache
+    key = (jitter, _current(), _subset_key(), _slots_key())
     # every expert: one trace, replaced when the key changes; a subset of
     # them, or a number of slots: one trace each, kept, since a prediction
     # by expert visits several in turn and comes back to them
@@ -1587,22 +1588,91 @@ def quadrature_rule(memory=None, rows=None, precision=None):
     """The quadrature's memory budget, in bytes, the most rows a call
     carries, and the precision of its large arrays (`"float64"` or
     `"float32"`), while active (None keeps what is set)."""
-    global _QUADRATURE_MEMORY, _QUADRATURE_ROWS, _QUADRATURE_DTYPE
-    previous = _QUADRATURE_MEMORY, _QUADRATURE_ROWS, _QUADRATURE_DTYPE
-    if memory is not None:
-        _QUADRATURE_MEMORY = float(memory)
-    if rows is not None:
-        _QUADRATURE_ROWS = int(rows)
-    if precision is not None:
-        if precision not in ("float64", "float32"):
-            raise ValueError("the quadrature's precision is 'float64' or "
-                             "'float32', got %r" % (precision,))
-        _QUADRATURE_DTYPE = _tf.float32 if precision == "float32" \
-            else _tf.float64
+    current = _current()
+    with setting(_dataclasses.replace(
+            current,
+            memory=current.memory if memory is None else float(memory),
+            rows=current.rows if rows is None else int(rows),
+            precision=current.precision if precision is None
+            else precision)):
+        yield
+
+
+@_dataclasses.dataclass(frozen=True)
+class _Setting:
+    """What a traced graph reads from this module when it is traced, as one
+    value: what a model's options choose, and the switches a test or a
+    benchmark flips. Every cache of traced functions keys on it, so a graph
+    traced under one setting never answers under another. `rows` sizes the
+    quadrature's chunks where a traced shape does not say; it steers the
+    chunking only, and keys nothing."""
+    qmc: bool
+    expert_propagation: str
+    joint: bool
+    full_variance: bool
+    memory: float
+    precision: str
+    second_moment: bool
+    pathwise: bool
+    rule: str
+    hermite_points: int
+    quadrature_nodes: int
+    xla: bool
+    rows: int = _dataclasses.field(compare=False)
+
+
+def _current():
+    """The setting in force."""
+    return _Setting(
+        qmc=_QMC_SIMULATIONS, expert_propagation=_EXPERT_PROPAGATION,
+        joint=_JOINT_PROPAGATION, full_variance=_FULL_VARIANCE,
+        memory=_QUADRATURE_MEMORY,
+        precision="float32" if _QUADRATURE_DTYPE == _tf.float32
+        else "float64",
+        second_moment=_UNCERTAIN_POINTS_SECOND_MOMENT,
+        pathwise=_PATHWISE_REALIZATIONS, rule=_QUADRATURE_RULE,
+        hermite_points=_HERMITE_POINTS, quadrature_nodes=_QUADRATURE_NODES,
+        xla=_QUADRATURE_XLA, rows=_QUADRATURE_ROWS)
+
+
+@_contextlib.contextmanager
+def setting(value):
+    """Puts the `_Setting` `value` in force while active."""
+    global _QMC_SIMULATIONS, _EXPERT_PROPAGATION, _JOINT_PROPAGATION, \
+        _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS, \
+        _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, \
+        _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS, \
+        _QUADRATURE_NODES, _QUADRATURE_XLA
+    if value.precision not in ("float64", "float32"):
+        raise ValueError("the quadrature's precision is 'float64' or "
+                         "'float32', got %r" % (value.precision,))
+    previous = (_QMC_SIMULATIONS, _EXPERT_PROPAGATION, _JOINT_PROPAGATION,
+                _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
+                _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT,
+                _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS,
+                _QUADRATURE_NODES, _QUADRATURE_XLA)
+    _QMC_SIMULATIONS = bool(value.qmc)
+    _EXPERT_PROPAGATION = value.expert_propagation
+    _JOINT_PROPAGATION = bool(value.joint)
+    _FULL_VARIANCE = bool(value.full_variance)
+    _QUADRATURE_MEMORY = float(value.memory)
+    _QUADRATURE_ROWS = int(value.rows)
+    _QUADRATURE_DTYPE = _tf.float32 if value.precision == "float32" \
+        else _tf.float64
+    _UNCERTAIN_POINTS_SECOND_MOMENT = value.second_moment
+    _PATHWISE_REALIZATIONS = value.pathwise
+    _QUADRATURE_RULE = value.rule
+    _HERMITE_POINTS = value.hermite_points
+    _QUADRATURE_NODES = value.quadrature_nodes
+    _QUADRATURE_XLA = value.xla
     try:
         yield
     finally:
-        _QUADRATURE_MEMORY, _QUADRATURE_ROWS, _QUADRATURE_DTYPE = previous
+        (_QMC_SIMULATIONS, _EXPERT_PROPAGATION, _JOINT_PROPAGATION,
+         _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
+         _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT,
+         _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS,
+         _QUADRATURE_NODES, _QUADRATURE_XLA) = previous
 
 
 def _node_bytes(kernel):
@@ -1960,7 +2030,8 @@ class _LatentVariable(_gpr.Parametric):
         trace reads them whichever experts fill the slots."""
         prefix = "slots%d_" % _slots_of(self.root).size
         for name, value in list(vars(self).items()):
-            if name.startswith("slots_") and isinstance(value, _tf.Tensor):
+            if name.startswith("slots_") and isinstance(value, _tf.Tensor) \
+                    and name not in self._TRAINING_STATE:
                 setattr(self, name, self._state_var(prefix + name, value))
         for name in ("inducing_points", "inducing_points_variance",
                      "inducing_points_covariance"):
@@ -1969,6 +2040,10 @@ class _LatentVariable(_gpr.Parametric):
                     and isinstance(value[0], _tf.Tensor):
                 setattr(self, name,
                         (self._state_var(prefix + name, value[0]),))
+
+    # the state a refresh leaves that only training reads (the KL
+    # divergence's), which a prediction does not snapshot
+    _TRAINING_STATE = frozenset()
 
     def cache_prediction_state(self):
         """
@@ -2227,6 +2302,9 @@ class _Operation(_LatentVariable):
 class _GPNode(_FunctionalLatentVariable):
     _GAUSSIAN = True
 
+    # set by `BasicGP`, from which every GP node descends
+    kernel: "_kr._Kernel"
+
     # Whether the node reads its parent's chain under the expected kernel.
     # `UncertainInputGP` integrates over its input's marginal itself.
     _READS_CHAIN = True
@@ -2364,9 +2442,8 @@ class _GPNode(_FunctionalLatentVariable):
                 draws = _tf.stack([
                     _tf.einsum("ab,sbc->sac", a, _tf.matmul(b, c))
                     for a, b, c in zip(cov_cross, self.chol_r, rnd)], 0)
-                held = _tf.stack([
-                    _tf.reduce_sum(_tf.einsum("nm,smj->snj", a, b) ** 2, -1)
-                    for a, b in zip(cov_cross, self.chol_r)], 0)
+                held = _tf.stack([_held(a, b) for a, b
+                                  in zip(cov_cross, self.chol_r)], 0)
                 scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
                                      _tf.reduce_sum(weights ** 2 * held, 0))
                 sims = _tf.reduce_sum(
@@ -2739,9 +2816,7 @@ class BasicGP(_GPNode):
         self.range_prior = range_prior
 
         self.cov = None
-        self.cov_inv = None
         self.cov_chol = None
-        self.cov_smooth = None
         self.cov_smooth_chol = None
         self.cov_smooth_inv = None
         self.chol_r = None
@@ -2843,16 +2918,61 @@ class BasicGP(_GPNode):
             cov = cov * norm
             return cov
 
+    # what only the KL divergence reads of a refresh under slots
+    _TRAINING_STATE = frozenset({
+        "slots_cov", "slots_cov_smooth_chol",
+        "slots_alpha_white", "slots_delta", "slots_input_mask"})
+
     @staticmethod
     def _whitened_root(chol, delta, eye):
         """`L^-T chol(W)`, `W = (I + L^T D^-1 L)^-1`, per output: a square
-        root of `K^-1 - (K+D)^-1` that never forms the difference."""
-        scaled = _tf.transpose(chol)[None, :, :] / delta[:, None, :]
-        inner = eye + _tf.matmul(scaled, chol[None, :, :])
+        root of `K^-1 - (K+D)^-1` that never forms the difference. `chol`
+        is `[..., m, m]`, `delta` `[..., size, m]`, `eye` `[..., size, m,
+        m]`."""
+        lower = chol[..., None, :, :]
+        scaled = _tf.linalg.matrix_transpose(chol)[..., None, :, :] \
+            / delta[..., :, None, :]
+        inner = eye + _tf.matmul(scaled, lower)
         w = _tf.linalg.cholesky_solve(_tf.linalg.cholesky(inner), eye)
         root = _tf.linalg.cholesky(w)
-        return _tf.linalg.triangular_solve(chol[None, :, :], root,
-                                           lower=True, adjoint=True)
+        return _tf.linalg.triangular_solve(lower, root, lower=True,
+                                           adjoint=True)
+
+    @classmethod
+    def _posterior_factors(cls, cov, delta, alpha_white, jitter,
+                           root_delta=None):
+        """The posterior's factors from the prior covariance at the
+        inducing points `cov` `[..., m, m]`, its jitter included, the
+        variational variances `delta` `[..., size, m]` and the whitened
+        means `alpha_white` `[..., size, m, 1]`: `(chol, smooth_chol,
+        smooth_inv, chol_r, alpha)`, `smooth` being `K + D`. One expert's,
+        or every slot's at once. `root_delta`, where given, stands for
+        `delta` in the simulations' root, which divides by it: what a
+        node whose `delta` holds zeros puts there instead."""
+        eye = _tf.eye(cov.shape[-1], dtype=_tf.float64)
+        chol = _tf.linalg.cholesky(cov)
+        eye_s = _tf.broadcast_to(
+            eye, _tf.concat([_tf.shape(delta), _tf.shape(delta)[-1:]], 0))
+        smooth = cov[..., None, :, :] + _tf.linalg.diag(delta)
+        smooth_chol = _tf.linalg.cholesky(smooth + eye_s * jitter)
+        smooth_inv = _tf.linalg.cholesky_solve(smooth_chol, eye_s)
+        # the square root the simulations draw through, with
+        # chol_r chol_r^T = K^-1 - (K+D)^-1, in the whitened form
+        # L^-T chol(W) with W = (I + L^T D^-1 L)^-1 rather than as the
+        # Cholesky of the difference itself: that difference cancels
+        # catastrophically once K is ill-conditioned -- inducing points
+        # 0.03 apart behind a fault displacement put K^-1 at 1e9 against
+        # (K+D)^-1 at 1e3, and the Cholesky came back NaN in graph mode
+        # while it passed eagerly, so every simulation and the prediction
+        # built on them was NaN -- where W has its eigenvalues in (0, 1]
+        # whatever K does
+        chol_r = cls._whitened_root(
+            chol, delta if root_delta is None else root_delta, eye_s)
+        # `K^-1 L alpha_white`, which is `L^-T alpha_white`: one triangular
+        # solve where the inverse of `K` and two products were
+        alpha = _tf.linalg.triangular_solve(
+            chol[..., None, :, :], alpha_white, lower=True, adjoint=True)
+        return chol, smooth_chol, smooth_inv, chol_r, alpha
 
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_refresh"):
@@ -2889,57 +3009,20 @@ class BasicGP(_GPNode):
                         self.covariance_matrix(ip, ip, ip_var, ip_var) + e * jitter
                         for ip, ip_var, e in zip(ips, ipvs, eye)
                 )
-            chol = tuple(_tf.linalg.cholesky(mat) for mat in cov)
-            cov_inv = tuple(_tf.linalg.cholesky_solve(mat, e) for mat, e in zip(chol, eye))
-
-            self.cov = cov
-            self.cov_chol = chol
-            self.cov_inv = cov_inv
-
-            # posterior
-            eye = tuple(_tf.tile(e[None, :, :], [self.size, 1, 1]) for e in eye)
             delta = tuple(self.parameters[f"delta_{i}"].get_value() for i in ids)
-            delta_diag = tuple(_tf.linalg.diag(d) for d in delta)
-            self.cov_smooth = tuple(mat[None, :, :] + d for mat, d in zip(self.cov, delta_diag))
-            self.cov_smooth_chol = tuple(
-                _tf.linalg.cholesky(mat + e * jitter)
-                for mat, e in zip(self.cov_smooth, eye)
-            )
-            self.cov_smooth_inv = tuple(
-                _tf.linalg.cholesky_solve(mat, e)
-                for mat, e in zip(self.cov_smooth_chol, eye)
-            )
-            # the square root the simulations draw through, with
-            # chol_r chol_r^T = K^-1 - (K+D)^-1, in the whitened form
-            # L^-T chol(W) with W = (I + L^T D^-1 L)^-1 rather than as the
-            # Cholesky of the difference itself: that difference cancels
-            # catastrophically once K is ill-conditioned -- inducing points
-            # 0.03 apart behind a fault displacement put K^-1 at 1e9 against
-            # (K+D)^-1 at 1e3, and the Cholesky came back NaN in graph mode
-            # while it passed eagerly, so every simulation and the prediction
-            # built on them was NaN -- where W has its eigenvalues in (0, 1]
-            # whatever K does
-            self.chol_r = tuple(
-                self._whitened_root(chol, d, e)
-                for chol, d, e in zip(self.cov_chol, delta, eye)
-            )
+            alpha_white = tuple(self.parameters[f"alpha_white_{i}"].get_value() for i in ids)
+            factors = [self._posterior_factors(c, d, a, jitter)
+                       for c, d, a in zip(cov, delta, alpha_white)]
+            self.cov = cov
+            (self.cov_chol, self.cov_smooth_chol, self.cov_smooth_inv,
+             self.chol_r, self.alpha) = (
+                tuple(part) for part in zip(*factors))
             # the factor that turns a covariance with the inducing points
             # into the posterior's: `(K + D)^-1 D`, per output
             self.joint_gain = tuple(
                 inv * d[:, None, :]
                 for inv, d in zip(self.cov_smooth_inv, delta)
             ) if _wants_joint(self) else None
-
-            # inducing points
-            alpha_white = tuple(self.parameters[f"alpha_white_{i}"].get_value() for i in ids)
-            means = tuple(
-                _tf.einsum("ab,sbc->sac", mat, vec)
-                for mat, vec in zip(self.cov_chol, alpha_white)
-            )
-            self.alpha = tuple(
-                _tf.einsum("ab,sbc->sac", mat, vec)
-                for mat, vec in zip(self.cov_inv, means)
-            )
 
             # inducing points, for whatever is built on top of this node.
             # Under the default rule every expert's set is predicted from
@@ -3094,27 +3177,11 @@ class BasicGP(_GPNode):
             raw = self.covariance_matrix(ips, ips, ipvs, ipvs) * outer
         cov = raw + eye[None] * (1.0 - pmask)[:, None, :] \
             + eye[None] * jitter
-        chol = _tf.linalg.cholesky(cov)
-        cov_inv = _tf.linalg.cholesky_solve(
-            chol, _tf.broadcast_to(eye, _tf.shape(cov)))
-        eye_s = _tf.broadcast_to(eye, [slots.size, self.size, m, m])
-        cov_smooth = cov[:, None, :, :] + _tf.linalg.diag(delta)
-        smooth_chol = _tf.linalg.cholesky(cov_smooth + eye_s * jitter)
-        smooth_inv = _tf.linalg.cholesky_solve(smooth_chol, eye_s)
-        # the whitened root of `_whitened_root`, per slot and output
-        chol_s = _tf.broadcast_to(chol[:, None, :, :],
-                                  [slots.size, self.size, m, m])
-        scaled = _tf.linalg.matrix_transpose(chol_s) / delta[:, :, None, :]
-        inner = eye_s + _tf.matmul(scaled, chol_s)
-        w = _tf.linalg.cholesky_solve(_tf.linalg.cholesky(inner), eye_s)
-        chol_r = _tf.linalg.triangular_solve(
-            chol_s, _tf.linalg.cholesky(w), lower=True, adjoint=True)
-        means = _tf.einsum("pab,psbc->psac", chol, alpha_white)
-        alpha = _tf.einsum("pab,psbc->psac", cov_inv, means)
+        chol, smooth_chol, smooth_inv, chol_r, alpha = \
+            self._posterior_factors(cov, delta, alpha_white, jitter)
 
         self.slots_cov = cov
         self.slots_cov_chol = chol
-        self.slots_cov_inv = cov_inv
         self.slots_cov_smooth_chol = smooth_chol
         self.slots_cov_smooth_inv = smooth_inv
         self.slots_chol_r = chol_r
@@ -3241,8 +3308,7 @@ class BasicGP(_GPNode):
                 # 0.9.3's blend, the experts sharing their normals
                 return _tf.reduce_sum((draws + mu) * weights[:, :, :, None],
                                       axis=0)
-            held = _tf.reduce_sum(_tf.einsum(
-                "pnm,psmj->psnj", cov_cross, self.slots_chol_r) ** 2, -1)
+            held = _held(cov_cross, self.slots_chol_r)
             scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
                                  _tf.reduce_sum(weights ** 2 * held, 0))
             return _tf.reduce_sum(mu * weights[:, :, :, None], axis=0) \
@@ -3256,7 +3322,6 @@ class BasicGP(_GPNode):
         if _subset_of(self.root) is None:
             super().cache_prediction_state()
             self.alpha = self._cache_tuple("alpha", self.alpha)
-            self.cov_inv = self._cache_tuple("cov_inv", self.cov_inv)
             self.cov_chol = self._cache_tuple("cov_chol", self.cov_chol)
             self.cov_smooth_inv = self._cache_tuple(
                 "cov_smooth_inv", self.cov_smooth_inv)
@@ -3286,7 +3351,6 @@ class BasicGP(_GPNode):
         if self.joint_gain is not None:
             self.joint_gain = by_expert("joint_gain", self.joint_gain)
         self.alpha = by_expert("alpha", self.alpha)
-        self.cov_inv = by_expert("cov_inv", self.cov_inv)
         self.cov_chol = by_expert("cov_chol", self.cov_chol)
         self.cov_smooth_inv = by_expert("cov_smooth_inv", self.cov_smooth_inv)
         self.chol_r = by_expert("chol_r", self.chol_r)
@@ -3480,11 +3544,20 @@ class BasicGP(_GPNode):
         as `_conditioned_sums` and `_pathwise_simulate` count them -- or 0
         where it reads a certain input and takes neither. What sizes a
         model's prediction batches (`VGPNetwork._prediction_rows`): a
-        budget the floor overrules no longer bounds anything."""
+        budget the floor overrules no longer bounds anything. On a GPU the
+        experts are those a call computes -- the slots of a prediction by
+        expert, or the active ones -- since the measured batches check the
+        estimate there; elsewhere every expert, as before."""
         if not (_FULL_VARIANCE and self._takes_quadrature()):
             return 0
         m, d = self._feature_count(), int(self.parent.size)
-        experts = len(self.root.n_ip)
+        # by expert in 19 slots of 32 experts a GeoScape walk network took
+        # batches of 24 rows, the fixed cost of a call then nearly all of a
+        # batch's time (2026-10-27)
+        slots = _slots_of(self.root)
+        experts = len(self.root.n_ip) if not _gpu_visible() \
+            else slots.size if slots is not None \
+            else len(_active_experts(self.root))
         cost = _node_bytes(self.kernel) * m * d
         if _pathwise() and self._feature_kernel():
             features = max(self._FEATURES, 2 * m) + 1
@@ -3611,6 +3684,15 @@ class BasicGP(_GPNode):
         section's overlaps before the rescale, against 0.47 drawn apart.
         Under `smooth_draws` the realizations without the residual, scaled
         alike. `[size, n, S]`."""
+        key = None
+        if _ONCE is not None:
+            # one computation serves the realizations and the prediction's
+            # smooth pass, as the pathwise draw's does
+            key = (id(self), "shared prior", n_sim) + tuple(
+                _key_part(v) for v in seed)
+            if key in _ONCE:
+                full, smooth = _ONCE[key][0]
+                return smooth if _SMOOTH_DRAWS else full
         x = self._residual_state
         cov_cross, mu, weights = self._swept()
         w_var = self._moment_state[2]
@@ -3662,27 +3744,27 @@ class BasicGP(_GPNode):
             # moments report, the smooth part to that less the residual's
             # (`_own_noise`), so that the smooth realizations and the
             # residual integrated beside them add up to the whole exactly
-            if _SMOOTH_DRAWS:
-                own = self._own_noise if self._own_noise is not None \
-                    else _tf.zeros_like(w_var)
-                factor = _residual_scale(_tf.maximum(w_var - own, 0.0),
-                                         _tf.reduce_sum(smooth ** 2, -1))
-                part = smooth
-            else:
-                factor = _residual_scale(w_var,
-                                         _tf.reduce_sum(total ** 2, -1))
-                part = total
-            return mean[..., None] + factor[..., None] * _tf.einsum(
-                "snj,sjS->snS", part, draws)
+            own = self._own_noise if self._own_noise is not None \
+                else _tf.zeros_like(w_var)
+
+            def scaled(part, variance):
+                factor = _residual_scale(variance,
+                                         _tf.reduce_sum(part ** 2, -1))
+                return mean[..., None] + factor[..., None] * _tf.einsum(
+                    "snj,sjS->snS", part, draws)
+
+            full = scaled(total, w_var)
+            smooth = scaled(smooth, _tf.maximum(w_var - own, 0.0))
+            if key is not None:
+                _ONCE[key] = ((full, smooth), (), {})
+            return smooth if _SMOOTH_DRAWS else full
 
     def _certain_gap(self, cov_cross, var, weights):
         if _slots_of(self.root) is not None:
-            seen = _tf.reduce_sum(_tf.einsum(
-                "pnm,psmj->psnj", cov_cross, self.slots_chol_r) ** 2, -1)
+            seen = _held(cov_cross, self.slots_chol_r)
             return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
-        seen = _tf.stack([
-            _tf.reduce_sum(_tf.einsum("nm,smj->snj", k, r) ** 2, -1)
-            for k, r in zip(cov_cross, self.chol_r)], axis=0)
+        seen = _tf.stack([_held(k, r) for k, r
+                          in zip(cov_cross, self.chol_r)], axis=0)
         return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
 
     # realizations a chunk of `_pathwise_simulate` draws: None for the
@@ -4123,9 +4205,7 @@ class BasicGP(_GPNode):
         spread = _tf.maximum(moments[1] - offset ** 2, 0.0)
         jitter = own = None
         if root_r is not None:
-            seen = _tf.reduce_sum(
-                _tf.einsum("...nm,...smj->...snj", cov_cross, root_r) ** 2,
-                axis=-1)
+            seen = _held(cov_cross, root_r)
             jitter = _tf.maximum(moments[2] - seen, 0.0) + spread
             # the residual's variance: `1 - k K^-1 kᵀ` over the input
             own = _tf.maximum(1.0 - explained - moments[2], 0.0)
@@ -6681,7 +6761,6 @@ class GradientConstrainedInput(_RootLatentVariable):
         # GP setup
         self.scale = None
         self.cov = None
-        self.cov_inv = None
         self.cov_chol = None
         self.cov_smooth = None
         self.cov_smooth_chol = None
@@ -6755,50 +6834,33 @@ class GradientConstrainedInput(_RootLatentVariable):
                 for mat, sc  in zip(full_cov, self.scale)
             )
 
-            eye = tuple(_tf.eye(n + d, dtype=_tf.float64) for n, d in zip(self.n_ip, self.n_dir))
-            chol = tuple(_tf.linalg.cholesky(mat) for mat in full_cov)
-            cov_inv = tuple(_tf.linalg.cholesky_solve(mat, e) for mat, e in zip(chol, eye))
-
             self.cov = full_cov
-            self.cov_chol = chol
-            self.cov_inv = cov_inv
 
-            # posterior
-            eye = tuple(_tf.tile(e[None, :, :], [self.size, 1, 1]) for e in eye)
+            # posterior: the gradient rows have no variational variance of
+            # their own (`delta` zero there), which the simulations' root
+            # divides by, so it takes the jitter there instead -- the
+            # `(K + D)` side has the jitter on those rows already
             delta = tuple(self.parameters[f"delta_{i}"].get_value() for i in range(self.n_experts))
+            root_delta = tuple(
+                _tf.concat([_tf.fill([self.size, n], _tf.constant(
+                    jitter, _tf.float64)), d], axis=1)
+                for n, d in zip(self.n_dir, delta)
+            )
             delta = tuple(
                 _tf.concat([_tf.zeros([self.size, n], dtype=_tf.float64), d], axis=1)
                 for n, d in zip(self.n_dir, delta)
             )
-            delta_diag = tuple(_tf.linalg.diag(d) for d in delta)
-            self.cov_smooth = tuple(mat[None, :, :] + d for mat, d in zip(self.cov, delta_diag))
-            self.cov_smooth_chol = tuple(
-                _tf.linalg.cholesky(mat + e * jitter)
-                for mat, e in zip(self.cov_smooth, eye)
-            )
-            self.cov_smooth_inv = tuple(
-                _tf.linalg.cholesky_solve(mat, e)
-                for mat, e in zip(self.cov_smooth_chol, eye)
-            )
-            self.chol_r = tuple(
-                _tf.linalg.cholesky(m1[None, :, :] - m2 + e * jitter)
-                for m1, m2, e in zip(self.cov_inv, self.cov_smooth_inv, eye)
-            )
-
-            # inducing points
             alpha_white = tuple(self.parameters[f"alpha_white_{i}"].get_value() for i in range(self.n_experts))
             alpha_white = tuple(
                 _tf.concat([_tf.zeros([self.size, n, 1], dtype=_tf.float64), a], axis=1)
                 for n, a in zip(self.n_dir, alpha_white)
             )
-            means = tuple(
-                _tf.einsum("ab,sbc->sac", mat, vec)
-                for mat, vec in zip(self.cov_chol, alpha_white)
-            )
-            self.alpha = tuple(
-                _tf.einsum("ab,sbc->sac", mat, vec)
-                for mat, vec in zip(self.cov_inv, means)
-            )
+            factors = [BasicGP._posterior_factors(c, d, a, jitter, r)
+                       for c, d, a, r in zip(full_cov, delta, alpha_white,
+                                             root_delta)]
+            (self.cov_chol, self.cov_smooth_chol, self.cov_smooth_inv,
+             self.chol_r, self.alpha) = (
+                tuple(part) for part in zip(*factors))
 
             bias = [self.parameters[f'bias_{i}'].get_value() for i in range(self.n_experts)]
 
@@ -6843,7 +6905,6 @@ class GradientConstrainedInput(_RootLatentVariable):
         super().cache_prediction_state()
         self.scale = self._cache_tuple("scale", self.scale)
         self.alpha = self._cache_tuple("alpha", self.alpha)
-        self.cov_inv = self._cache_tuple("cov_inv", self.cov_inv)
         self.cov_smooth_inv = self._cache_tuple(
             "cov_smooth_inv", self.cov_smooth_inv)
         self.chol_r = self._cache_tuple("chol_r", self.chol_r)

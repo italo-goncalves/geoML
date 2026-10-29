@@ -80,13 +80,13 @@ def test_a_new_model_takes_single_on_a_gpu_and_an_older_save_double(
     monkeypatch.setattr(_net, "_gpu_visible", lambda: True)
     model.options.quadrature_precision = "float64"
     assert model._quadrature_precision() == "float64"
-    key = model._propagation_key()
+    key = model._setting()
     model.options.quadrature_precision = "float32"
-    assert model._propagation_key() != key
+    assert model._setting() != key
     # a save made before 0.9.8 records no such option
     del model.options.__dict__["quadrature_precision"]
     assert model._quadrature_precision() == "float64"
-    assert model._propagation_key() == key
+    assert model._setting() == key
     model.save(tmp_path / "old")
     reopened = geoml.persistence.load_model(tmp_path / "old")
     assert reopened._quadrature_precision() == "float64"
