@@ -519,6 +519,7 @@ class ZScore(_Warping):
             )
         )
         if std is not None:
+            std = _np.asarray(std, dtype=float)
             self.parameters["std"].set_value(std)
             self.parameters["std"].set_limits(std / 100, std * 10)
         
@@ -1990,3 +1991,21 @@ Rotation._catalogue = _declared(
     fixed={"type": "bool"})
 ScaledSimplex._catalogue = _declared(_SIZED, label="Scaled simplex",
                                      size=_COUNT)
+
+# What each trains, under the names `parameters` holds them by (see
+# `latent/network.py`). `Center`'s `std` and `Scale`'s `mean` are held by what
+# those classes are, and `BoxCox`'s `shift` is found by `initialize`.
+for _class, _trained in (
+        (Spline, [{"name": "warped_partition_left_{i}", "per": "size"},
+                  {"name": "warped_partition_right_{i}", "per": "size"}]),
+        (ZScore, ["mean", "std"]), (Center, ["mean"]),
+        (Scale, [{"name": "std", "start": "scale"}]),
+        (BoxCox, ["exponent"]), (YeoJohnson, ["exponent"]),
+        (Arcsinh, ["scale"]), (SinhArcsinh, ["skewness", "tailweight"]),
+        (ContinuousNormalizingFlow, ["rng_time", "alpha_white", "amp",
+                                     "rng_space"]),
+        (TensorProductFlow, ["rng_time", "factors_space", "factors_time",
+                             "factors_component", "weights", "rng_space"]),
+        (Rotation, [{"name": "rotation",
+                     "fixed_when": {"argument": "fixed", "equals": True}}])):
+    _class._catalogue["trainable"] = _trained

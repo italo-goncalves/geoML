@@ -249,6 +249,7 @@ def class_entry(cls: type) -> "dict[str, _Any]":
     constructor, and the first paragraph of its docstring."""
     declared = dict(cls.__dict__["_catalogue"])
     overrides = declared.pop("params", {})
+    trainable = declared.pop("trainable", [])
     entry: "dict[str, _Any]" = {"label": cls.__name__,
                                 "summary": _summary(cls),
                                 "description": _description(cls),
@@ -259,7 +260,25 @@ def class_entry(cls: type) -> "dict[str, _Any]":
         entry["gaussian"] = getattr(cls, "_GAUSSIAN")
     entry["params"] = _parameters(getattr(cls, "__init__"), overrides,
                                   _parameter_docs(cls))
+    if entry["stability"] != "internal":
+        entry["trainable"] = _trainable(trainable, getattr(cls, "__init__"))
     return entry
+
+
+def _trainable(declared, function):
+    """Each parameter a class trains, as an object. A name alone is enough
+    to declare one, and a parameter named as a constructor argument starts
+    from it, unless it says otherwise with `"start": None`."""
+    arguments = _signature(function).parameters
+    out = []
+    for item in declared:
+        item = {"name": item} if isinstance(item, str) else dict(item)
+        if item["name"] in arguments:
+            item.setdefault("start", item["name"])
+        if item.get("start", "") is None:
+            del item["start"]
+        out.append(item)
+    return out
 
 
 def container_entry(name: str) -> "dict[str, _Any]":

@@ -10,6 +10,7 @@ something its class does not do.
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -681,6 +682,240 @@ def test_every_class_offered_survives_a_save(cls, tmp_path):
     back = persistence._decode(json.loads(json.dumps(node)),
                                persistence._Reader(group, store))
     assert type(back) is cls
+
+
+# --------------------------------------------------------------------------- #
+# what trains: every parameter a class registers, listed or left out on purpose
+# --------------------------------------------------------------------------- #
+EXPERT_STATE = re.compile(r"(alpha_white|delta|bias)_\d+$")
+
+
+def _named(item):
+    """A listed name as a pattern, `{i}` standing for a family's number."""
+    return re.compile(re.escape(item["name"]).replace(r"\{i\}", r"\d+") + "$")
+
+
+def _matches(item, obj):
+    return [n for n in obj.parameters if _named(item).match(n)]
+
+
+@pytest.mark.parametrize("cls", OFFERED, ids=lambda c: c.__name__)
+def test_what_a_class_trains_is_listed(cls, built):
+    """A free parameter nobody can see is one the Inspector cannot fix, and
+    one listed that is not there is a box that fails the Script."""
+    obj = _instances(cls)
+    items = built["classes"][catalogue.path(cls)]["trainable"]
+    for name, parameter in obj.parameters.items():
+        if EXPERT_STATE.match(name):
+            continue
+        item = next((i for i in items if _named(i).match(name)), None)
+        if item is None:
+            assert parameter.fixed, name
+        elif parameter.fixed:
+            assert "fixed_when" in item, name
+    for item in items:
+        if "exists_when" not in item:
+            assert _matches(item, obj), item
+
+
+def test_an_expert_s_own_state_is_not_listed(built):
+    for name, entry in built["classes"].items():
+        if entry["stability"] == "internal":
+            assert "trainable" not in entry
+            continue
+        for item in entry["trainable"]:
+            assert not EXPERT_STATE.match(item["name"].replace("{i}", "0")), \
+                (name, item)
+
+
+def _gaussians():
+    return [lk.Gaussian(wp.ZScore(1)), lk.Gaussian(wp.ZScore(1))]
+
+
+def _conditioned_builds():
+    """`(class, args, kwargs, facts)`: each condition a declaration states,
+    built true and false. The facts are what no argument says."""
+    builds = []
+    for cls in (latent.BasicGP, latent.AdditiveGP, latent.UncertainInputGP,
+                latent.MultiStructureGP):
+        for fixed in (True, False):
+            args, kwargs = _calls(cls)[0]
+            builds.append((cls, args, dict(kwargs, fix_range=fixed), {}))
+    root = _root()
+    for parent, size in ((1, 2), (1, 3), (2, 2)):
+        builds.append((latent.Linear, (_gp(root, parent),), {"size": size},
+                       {"parent_size": parent}))
+    for reach in (0.5, None):
+        args, kwargs = _calls(latent.GPWalk)[0]
+        builds.append((latent.GPWalk, args, dict(kwargs, reach=reach), {}))
+    for fixed in (True, False):
+        builds.append((wp.Rotation, (3,), {"fixed": fixed}, {}))
+    for points, normals in (_plane(), _line()):
+        for extra in ({}, {"drag": True}, {"profile": "bell"}):
+            builds.append((tr.FaultDisplacement, (points, normals),
+                           dict(extra, throw=5.0, reach=1000.0),
+                           {"input_dimension": points.shape[1]}))
+    for shares in ("latent", "fixed"):
+        builds.append((lk.LikelihoodMixture, (_gaussians(),),
+                       {"shares": shares}, {}))
+    for cls in (lk.CategoricalGaussianIndicator,
+                lk.HierarchicalGaussianIndicator):
+        for bias in (True, False):
+            builds.append((cls, (2,), {"bias": bias}, {}))
+    for levels in (1, 3):
+        builds.append((lk.OrderedGaussianIndicator, (levels,), {}, {}))
+    return builds
+
+
+def _holds(condition, arguments, facts):
+    """Every clause of a declared condition: an argument's value, and the
+    facts no argument says."""
+    for clause, wanted in condition.items():
+        if clause in ("parent_size", "input_dimension"):
+            if facts[clause] != wanted:
+                return False
+    if "argument" not in condition:
+        return True
+    value = arguments[condition["argument"]]
+    if "equals" in condition and value != condition["equals"]:
+        return False
+    if "differs" in condition and value == condition["differs"]:
+        return False
+    return "at_least" not in condition or value >= condition["at_least"]
+
+
+def test_every_condition_declared_is_what_the_class_does(built):
+    """Read as a program would read them: whether a parameter exists and
+    whether it starts fixed, from the arguments alone."""
+    seen = set()
+    for cls, args, kwargs, facts in _conditioned_builds():
+        obj = cls(*args, **kwargs)
+        arguments = _bound(cls, args, kwargs)
+        for item in built["classes"][catalogue.path(cls)]["trainable"]:
+            exists = _holds(item.get("exists_when", {}), arguments, facts)
+            found = _matches(item, obj)
+            assert bool(found) == exists, (cls, item, kwargs)
+            if "exists_when" in item:
+                seen.add((cls, item["name"], "exists_when", exists))
+            if not exists:
+                continue
+            fixed = "fixed_when" in item and _holds(
+                item["fixed_when"], arguments, facts)
+            assert all(obj.parameters[n].fixed == fixed for n in found), \
+                (cls, item, kwargs)
+            if "fixed_when" in item:
+                seen.add((cls, item["name"], "fixed_when", fixed))
+    for cls in OFFERED:
+        for item in built["classes"][catalogue.path(cls)]["trainable"]:
+            for key in {"exists_when", "fixed_when"} & set(item):
+                for outcome in (True, False):
+                    assert (cls, item["name"], key, outcome) in seen, \
+                        (cls.__name__, item, outcome)
+
+
+def test_a_family_counts_what_it_says(built):
+    args, kwargs = _calls(latent.MultiStructureGP)[0]
+    kwargs = dict(kwargs, n_structures=3)
+    cases = [(latent.MultiStructureGP, args, kwargs), (wp.Spline, (2,), {})]
+    for cls, args, kwargs in cases:
+        obj = cls(*args, **kwargs)
+        arguments = _bound(cls, args, kwargs)
+        items = [i for i in built["classes"][catalogue.path(cls)]["trainable"]
+                 if "per" in i]
+        assert items
+        for item in items:
+            assert len(_matches(item, obj)) == arguments[item["per"]]
+    families = {cls for cls in OFFERED for item in built["classes"][
+        catalogue.path(cls)]["trainable"] if "per" in item}
+    assert families == {case[0] for case in cases}
+
+
+@pytest.mark.parametrize("cls", [latent.BasicInput, latent.GaussianInput,
+                                 latent.GradientConstrainedInput],
+                         ids=lambda c: c.__name__)
+def test_an_argument_fixes_what_it_says(cls, built):
+    (fixes,) = built["classes"][catalogue.path(cls)]["fixes"]
+    for flag in (True, False):
+        args, kwargs = _calls(cls)[0]
+        kwargs = dict(kwargs, **{fixes["argument"]: flag})
+        cls(*args, **kwargs)
+        target = _bound(cls, args, kwargs)[fixes["param"]]
+        assert target.all_parameters
+        assert all(p.fixed == flag for p in target.all_parameters)
+
+
+def _start_calls():
+    """A value for every argument a parameter starts from, `(class, args,
+    kwargs)`."""
+    plane, across = _plane()
+    return [
+        (tr.Isotropic, (), {"r": 3.0}),
+        (tr.Anisotropy2D, (), {"maxrange": 3.0, "minrange_fct": 0.5,
+                               "azimuth": 30.0}),
+        (tr.Anisotropy2DMath, (), {"range_x": 3.0, "range_y": 2.0,
+                                   "theta": 30.0}),
+        (tr.Anisotropy3D, (), {"maxrange": 3.0, "midrange_fct": 0.5,
+                               "minrange_fct": 0.25, "azimuth": 30.0,
+                               "dip": 20.0, "rake": 10.0}),
+        (tr.Anisotropy3DMath, (), {"range_x": 3.0, "range_y": 2.0,
+                                   "range_z": 1.5, "theta_x": 30.0,
+                                   "theta_y": 20.0, "theta_z": 10.0}),
+        (tr.FaultDisplacement, (plane, across),
+         {"throw": 5.0, "strike_slip": 2.0, "width": 3.0, "reach": 1000.0}),
+        (wp.ZScore, (3,), {"mean": [1.0, 2.0, 3.0], "std": [1.0, 2.0, 3.0]}),
+        (wp.Center, (3,), {"mean": [1.0, 2.0, 3.0]}),
+        (wp.Scale, (3,), {"scale": 2.0}),
+        (wp.BoxCox, (3,), {"exponent": 0.5}),
+        (wp.YeoJohnson, (3,), {"exponent": 0.5}),
+        (wp.Arcsinh, (3,), {"scale": 2.0}),
+        (wp.SinhArcsinh, (3,), {"skewness": 0.5, "tailweight": 2.0}),
+        (lk.Mixture, (wp.ZScore(1),), {"weights": [0.3, 0.7]}),
+        (lk.LikelihoodMixture, (_gaussians(),), {"weights": [0.3, 0.7]}),
+        (lk.Bernoulli, (), {"shift": 1.0}),
+        (kr.RationalQuadratic, (), {"scale": 2.0})]
+
+
+def test_a_parameter_starts_from_the_argument_it_names(built):
+    tested = set()
+    for cls, args, kwargs in _start_calls():
+        obj = cls(*args, **kwargs)
+        for item in built["classes"][catalogue.path(cls)]["trainable"]:
+            if "start" in item:
+                value = np.asarray(obj.parameters[item["name"]].get_value())
+                assert np.allclose(value, kwargs[item["start"]]), (cls, item)
+                tested.add((cls, item["name"]))
+    declared = {(cls, item["name"]) for cls in OFFERED
+                for item in built["classes"][catalogue.path(cls)]["trainable"]
+                if "start" in item}
+    assert declared == tested
+
+
+def test_a_parameter_held_fixed_by_name_stays_there_and_says_so_when_reopened(
+        tmp_path):
+    geoml.set_seed(1234)
+    x = np.random.default_rng(0).uniform(0.0, 100.0, (40, 2))
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_continuous_variable("V", np.sin(x[:, 0] / 20.0))
+    gp = latent.BasicGP(latent.BasicInput(_points(), tr.Isotropic(30.0)))
+    likelihood = lk.Gaussian()
+    model = geoml.models.VGPNetwork(
+        data, "V", likelihood, gp,
+        options=geoml.models.GPOptions(verbose=False))
+    likelihood.parameters["noise"].fix()
+    gp.parameters["ranges"].fix()
+    noise = np.asarray(likelihood.parameters["noise"].get_value()).copy()
+    ranges = np.asarray(gp.parameters["ranges"].get_value()).copy()
+    model.train_full(max_iter=3)
+    assert np.array_equal(
+        np.asarray(likelihood.parameters["noise"].get_value()), noise)
+    assert np.array_equal(np.asarray(gp.parameters["ranges"].get_value()),
+                          ranges)
+    path = str(tmp_path / "model.zarr")
+    model.save(path)
+    back = geoml.models.VGPNetwork.open(path)
+    assert back.likelihoods[0].parameters["noise"].fixed
+    assert back.leaves[0].parameters["ranges"].fixed
+    assert not back.leaves[0].parameters["alpha_white_0"].fixed
 
 
 # --------------------------------------------------------------------------- #

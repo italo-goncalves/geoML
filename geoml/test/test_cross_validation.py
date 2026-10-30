@@ -183,6 +183,25 @@ def test_the_original_model_is_left_untouched(walker_cv):
     assert not model.latent_network.parameters["alpha_white_0"].fixed
 
 
+def test_the_fresh_state_trains_a_bias_only_where_the_model_does():
+    """A bias a node holds at zero is part of the model being scored; the
+    refit used to free it, so a fold scored another model."""
+    geoml.set_seed(1234)
+    walker, _ = geoml.datasets.walker()
+    inducing = geoml.data.Grid2D(start=[1, 1], n=[4, 4], step=[70, 75])
+    gp = geoml.latent.BasicGP(geoml.latent.BasicInput(
+        inducing, transform=geoml.transform.Isotropic(50)), bias=True)
+    model = geoml.models.VGPNetwork(
+        walker, "V", geoml.likelihood.Gaussian(), gp,
+        options=geoml.models.GPOptions(verbose=False))
+    gp.parameters["bias_0"].set_value(1.0)
+
+    geoml.models._fresh_variational_state(model)
+
+    assert not gp.parameters["bias_0"].fixed
+    assert np.allclose(np.asarray(gp.parameters["bias_0"].get_value()), 0.0)
+
+
 def test_the_fresh_state_is_ignorant_and_everything_else_is_frozen():
     model, _, _ = _walker_model()
     trained_noise = np.asarray(
@@ -197,7 +216,8 @@ def test_the_fresh_state_is_ignorant_and_everything_else_is_frozen():
     assert np.allclose(np.asarray(gp.parameters["bias_0"].get_value()), 0.0)
 
     unfixed = model.get_unfixed_variables()
-    assert len(unfixed) == 3  # alpha, delta, bias -- nothing else trains
+    assert len(unfixed) == 2  # alpha, delta -- nothing else trains
+    assert gp.parameters["bias_0"].fixed
     assert model.likelihoods[0].parameters["noise"].fixed
     assert np.allclose(np.asarray(
         model.likelihoods[0].parameters["noise"].get_value()), trained_noise)

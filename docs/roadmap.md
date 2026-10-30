@@ -3720,6 +3720,19 @@ bit. A node's traced function is keyed by the experts entered, as
 `predict_raw`'s is. The catalogue picks the keywords up from the
 signatures, so nothing for GeoScape to change but passing them.)
 
+(Item 47, asked 2026-10-30: **done the same day, for 0.9.13.** `trainable`
+on every class on offer, format 2 kept (`docs/catalogue.md` has the fields).
+The item asked for an expert's state to be flagged; the user left
+`alpha_white_i`, `delta_i` and `bias_i` out instead, which took "one per
+expert" and "variational" out of the format. Reading its claim that training
+leaves out what is fixed found the one place that did not: `cross_validate`'s
+reset freed every `bias_*`, so a model holding its bias at zero was scored
+with one (fixed). Two things that train stay unlisted, having no name a
+program can reach: the directions a dynamic anisotropy builds and the
+components a `Mixture` builds. **To do beside it, on GeoScape's side and not
+written from here**: `docs/geoml-catalogue.md` gains the fields and item 47
+is marked.)
+
 (Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
 `description` on every entry, read off the docstring between its summary
 and its first section, and forty docstrings written to have one; every
