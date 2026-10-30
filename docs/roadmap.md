@@ -1689,6 +1689,16 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   against the truth 0.16, today's 0.37); the GP on a GP recovers it under
   no training. The moment bound had converged: 10 000 steps move no seed
   by more than 0.2.
+- **Rechecked 2026-10-30 on 0.9.12: the 64-draw row beside the coordinates
+  does not reproduce.** The same seeds (2026, 11, 12) score -8.60, -2.17,
+  -8.32 against the table's -3.91, -2.20, -5.07: mean -6.36, not -3.73. The
+  package on those seeds scores -1.90, -8.51, -1.97, where 0.9.4's step 3
+  recorded -2.04 for seed 11. So this network's scores are bimodal, about
+  -2 or about -8, and a seed can change side between versions; what moves
+  it is not established. On six seeds the package reaches the good side on
+  three (mean -5.22), 64 draws on one of five (-7.32). A mean over three
+  seeds here mostly counts those hits, and "the grid starts in a worse
+  basin" below describes the 5x5 grid of 2026-10-16, not today's rule.
 - **The grid is correct but starts in a worse basin.** A Gauss-Hermite
   grid over the hidden outputs, the inducing inputs conditioned at each
   node, matches 4000 draws to a standard error at 15 nodes a dimension, the
@@ -1704,7 +1714,9 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   "Fresh training draws").
 - **One draw a step** costs a moment step and is unbiased, but at a
   constant learning rate its bound stops rising early (table). A decaying
-  rate, and one hidden realization shared by every point, are untried.
+  rate is untried. One hidden function shared by every point was measured
+  at 16 and 64 draws (2026-10-30, "A GP node reading whole draws of its
+  parent" below); at one draw it is untried too.
 - **Reading a moment-trained model by draws makes it worse** (settled
   below), so the prediction-only route planned above is dropped.
 - **Realizations**: today's leaf realizations cover the true field's 90%
@@ -2524,6 +2536,151 @@ orthant only, and a GP node that failed to build left among its parent's
 children: **fixed 2026-10-15, 0.9.3**, `test_small_fixes.py`. The
 catalogue still marks `ProjectionTo1D` and `RandomProjections`
 `experimental`; nothing in either has been trained in earnest.)
+
+**M — A sampling-based conditioned quadrature for training** (filed
+2026-10-30, from the GP-NN link research project, whose stage A is the
+measurement below). The conditioned quadrature's fixed nodes, 7, 49 or 64
+for one, two or more hidden outputs, replaced in training by S fresh draws
+per location and step: the same integrand (the inducing inputs conditioned
+on each draw, the kernel averaged over what is left of their spread), the
+chain kept, the model unchanged, the Gaussian expectation closed per draw.
+So not the doubly stochastic route of "Propagate individual realizations",
+whose fixed-input form is a different model and scored worse; this is that
+item's 64-draw arm, taken at small S, as a cheaper quadrature (its reading
+for step 4 asked for one). Its 16 draws were "4-5x the time" against the
+moment bound, which has no second moment to pay for; the comparison here is
+against the second moment.
+
+- **Accuracy at fixed parameters** (four GP-on-a-GP models trained on the
+  joint rule, Gaussian kernels, one expert: a synthetic composition at 1500
+  points with 225 inducing points, Walker at 470 with 225, one and two
+  hidden outputs; against 4096 draws per location, relative error of one
+  gradient of the data term):
+
+  | Case | 7 or 49 nodes | 4 draws | 16 draws |
+  |---|---|---|---|
+  | synthetic, one output | 0.28 | 0.09 | 0.05 |
+  | synthetic, two outputs | 0.05 | 0.07 | 0.04 |
+  | Walker, one output | 0.06 | 0.38 | 0.17 |
+  | Walker, two outputs | 0.01 | 0.29 | 0.15 |
+
+  The nodes' error is a bias, kept step after step; the draws' is noise,
+  with no bias detected over 24 settings (z-rms 0.84-1.50). The bias is
+  all in the variance, since the mean is closed: the worst test point's 90%
+  interval covers 35% on the synthetic model at seven nodes (mean over the
+  points 0.92), and the data term sits 62 nats (24 standard errors) from
+  the draws' on the synthetic model at 49. Those Walker models fit poorly
+  (the noise took 0.9 of the variance), so the child is nearly linear
+  there, which is the quadrature's easy case. This does not overturn
+  `gate_nodes.py`'s 7x7, which is a median over the folded section.
+- **Cost** (one model's value and gradient, CPU). Run eagerly, 3.5-6.3x
+  less at 16 draws and 6.0-8.4x at 4. Eager calls flatter the draws;
+  traced, on the Walker model of `phase3_walker.py` (120 k-means points, two
+  outputs), 88 ms a step against 20 at 4 draws, on 200 steps.
+- **Training, being measured** (stage B of that project, started
+  2026-10-30, Adam from one start, three seeds, one held-out scorer for
+  every arm): 1, 4, 16 draws (and 64 on the folded section) against the
+  joint rule, on the folded section, Walker as in `phase3_walker.py`, the
+  synthetic models, and at 10000 points with two and three hidden outputs.
+  The adoption rule set before the runs: a draw count reaching the rule's
+  held-out log score within one seed's standard error, at 3x less time to
+  target or peak memory. Basins may well decide it rather than cost: fresh
+  noise is what found the better basin under "Fresh training draws".
+- **The change, if it passes** (S-M): a value of the quadrature's rule
+  beside `"hermite"` (`_Setting.rule`, `_input_rule`), drawing in
+  `_conditioned_sums` under `_training_seed`, so that chunks and replays
+  stay as they are, for training only: prediction keeps the fixed nodes and
+  stays deterministic. Draws per location where the nodes are per call, so
+  `kernel_at`'s offset takes a location axis; the memory budget's
+  `_NODE_BYTES` then counts draws as nodes. Not chunked in the prototype;
+  under the gradient it must be. A class default off for a save, as
+  `propagation` did. Its gates: the integrand at the rule's own nodes
+  equals the moments (measured: 1e-15 of the variance, and the data term
+  against `_data_log_lik` to 1e-9); a Matérn kernel's eight Gaussians and
+  experts, neither tried yet.
+
+**M — A GP node reading whole draws of its parent, with its own `K` at
+each** (measured 2026-10-30, open; the prototype is
+`C:\Users\Public\cr\paths\paths.py`, outside the repository, with its
+results beside it). The question: the expected kernel and the moments
+computed through a node's realizations instead of in closed form. The
+folded section's two deep networks, a Gaussian likelihood, warping fixed,
+2000 Adam steps, one expert, CPU. Each step draws S functions of the hidden
+node, one per draw, at the data and at the inducing points together:
+
+```
+u_s    = alpha + R eta_s
+Z_s    = K_h u_s + b
+h_s(x) = k_x u_s + b + sqrt(1 - k_x K_h^-1 k_x') eps_s
+```
+
+The residual is independent of the inducing values, so a row's joint with
+`Z_s` is exact with no random features; rows are independent given `u_s`,
+which a factorized likelihood does not read. The leaf then takes the plain
+kernel, `k_s = k(h_s(x), Z_s)`, `K_s = k(Z_s, Z_s)`, `alpha_s = L_s^-T w`,
+`v_s = 1 - k_s (K_s + D)^-1 k_s'`, with `w` and `D` shared by the draws and
+the leaf's KL averaged over them. The inducing inputs being the hidden
+node's inducing values, this is the deep GP's own bound, and `v_s` needs no
+clamp. Want (1) above draws each point from its marginal and conditions the
+inducing inputs on it, with one `K`, and its bound in expectation is the
+second moment's; this is a different model. One `K` read through whole
+draws is settled below (rejected).
+
+New-hole log score, a mean over the seeds shown (the flat GP -12.2; the
+package read by its moments, the draws by their mixture at S = 256):
+
+| Network | Package | `K_s`, 16 draws | `K_s`, 64 draws |
+|---|---|---|---|
+| GP on a GP, Gaussian leaf | -8.71 (3) | -13.03 (3) | -12.40 (3) |
+| GP on a GP, Matérn 3/2 leaf | -7.86 (3) | | -12.05 (3) |
+| Beside the coordinates, Gaussian leaf | -5.22 (6) | -7.28 (3) | -7.46 (3) |
+| Beside the coordinates, Matérn 3/2 leaf | -5.43 (6) | -8.28 (3) | -5.79 (6) |
+
+- **Beside the coordinates at 64 draws it ties, on the Matérn leaf.** Per
+  seed -4.06, -5.51, -8.07, -6.07, -4.27, -4.59 against -5.02, -5.89,
+  -5.35, -5.09, -5.02, -8.38; held-out CRPS 0.267 against 0.262, CRPS
+  against the true field 0.185 against 0.173, its 90% coverage 0.91 against
+  0.94, the draws' figures from per-location marginals, since they define
+  no field. At three seeds it looked better; three more made it a tie. The
+  Gaussian leaf's row compares six seeds with three on a bimodal network
+  (see the recheck under "Propagate individual realizations"), so it is no
+  verdict either way.
+- **On a GP on a GP it stays near the flat GP**, on both leaves and at 64
+  draws. The cause is not established. Sharing `w` across draws ties the
+  inducing means together (`L_s w`) and is the first thing to test.
+- **Cost** (the Matérn leaf beside the coordinates, the median single step,
+  CPU, four threads; a `train_full` called in blocks retraces inside the
+  timed window, so time single steps):
+
+  | Rows x inducing points | Package | `K_s`, 16 | `K_s`, 64 |
+  |---|---|---|---|
+  | 2 400 x 100 | 2.14 s, 4.3 GB | 0.29 s, 1.5 GB | 1.09 s, 2.8 GB |
+  | 4 800 x 200 | 18.9 s, 4.5 GB | 1.09 s, 2.9 GB | 3.8 s, 8.0 GB |
+
+  So 2-5x faster at 64 draws, and more memory at the larger size: the
+  package is chunked to its budget and the prototype is not. Want (1)'s
+  conditioned draws, also unchunked, cost 1.00 s, 4.1 GB and 3.7 s, 12.3 GB
+  at 16.
+- **Noise.** The bound's standard deviation at fixed parameters, beside the
+  coordinates, 8.7, 3.3, 1.6 at 16, 64, 256 draws (at the package-trained
+  parameters), and on the GP on a GP 35, 9.5, 8.4. A per-location variance
+  from one `K`'s draws errs by 20-25%, 10-13%, 5-6% at the same counts,
+  against 0.7-1% for the 7x7 grid, so reported variances would need many
+  draws at prediction, or the quadrature.
+- **What it would remove, if it won everywhere**: the named expected-kernel
+  helpers (about 900 of `latent/network.py`'s 7120 lines), most of the 18
+  `propagate` methods' 477 lines, the refusals of `Spherical`, `Cubic` and
+  `Cosine` on an uncertain input, and "Covariance between a node's outputs".
+  Stored realizations would still need random features for their spatial
+  structure.
+- **Next, in order; each stops if it fails.** (1) A reader of a `GPWalk`,
+  the case GeoScape's network and chapter 17 use and where the quadrature
+  is 83% of a step: the folded section, one expert, six seeds against the package,
+  counting basin hits; it goes on if it ties and is at least 2x faster. (2)
+  Experts. (3) A non-Gaussian likelihood: with a Gaussian one the data term
+  reads two moments alone, so nothing above has tested dropping moment
+  matching itself. Separately, why the GP on a GP fails. If (1) fails, this
+  moves to Settled with these numbers.
 
 **M — Mixed precision for the conditioned quadrature** (agreed 2026-10-24,
 the user's go-ahead for every step). On a GeoScape network of three GP
@@ -3922,6 +4079,27 @@ section's GP on a GP, -11.46 against -11.12 beside the coordinates. The
 moment bound reports 10-32% of such a model's own variance, so training
 leaves the hidden layer uncertain at no cost and the exact read charges for
 it. A deep model is read the way it was trained.
+
+**One `K` read through whole draws of the parent -- rejected** (2026-10-30;
+prototype and setting under "A GP node reading whole draws of its parent").
+The literal form of computing the expected kernel through realizations:
+`K` the mean of `k(Z_s, Z_s)`, or the package's own, with `f_s = k_s alpha`
+and `v_s = 1 - k_s (K + D)^-1 k_s'` at each joint draw. At a model the
+package trained, against 16384 draws, the mean agrees to 0.006 and 0.003
+sd, but the package's variance is 0.057x (GP on a GP) and 0.446x (beside the
+coordinates) of the draws', nearly all of them the spread of `f_s`. With
+`C = Cov[k(h, Z) | h]` and the clamp ignored, the draws exceed the package
+by `E_h[alpha' C alpha - tr((K + D)^-1 C)]`: `alpha` has large cancelling
+entries that cancel only for the averaged kernel, and the package integrates
+`Z`'s remaining spread inside the kernel before squaring. Sampling that
+spread away needs per-location `Z | h`, the same `[n, S, m, d]` arrays the
+quadrature holds. Trained on it the hidden layer is priced out: new-hole log
+scores of -11.13 to -11.64 on the GP on a GP (the package -8.71, the flat GP
+-12.2) and -10.28 to -10.76 beside the coordinates (the package -6.14 on the
+same three seeds), whether `K` was the package's, the mean over the same 16
+or 64 draws, or the mean over 256 draws of its own. `[[1, k_s], [k_s', K]]`
+need not be positive semi-definite either, so `v_s` needs its clamp and no
+joint model was shown to stand behind the bound.
 
 **Natural-gradient steps for the experts -- rejected** (2026-10-09; Level 2
 of `report/design_dual_parameter_geoml.md` in the research project
