@@ -842,3 +842,9 @@ Product._catalogue = {"category": "covariance",
                       "params": {"args": {"type": "ref:covariance[]"}}}
 Scale._catalogue = {"category": "covariance",
                     "params": {"base_covariance": {"type": "ref:covariance"}}}
+
+# What each trains, under the names `parameters` holds them by (see
+# `latent/network.py`).
+for _class, _trained in ((RationalQuadratic, ["scale"]), (Sum, ["variance"]),
+                         (Scale, ["amplitude"])):
+    _class._catalogue["trainable"] = _trained

@@ -1541,3 +1541,36 @@ ImplicitFaultBlocks._catalogue = _declared(
     {"in": None, "out": {"rule": "len", "param": "faults"}},
     label="Fault blocks", stability="experimental",
     faults={"type": "ref:transform[]"}, abutting={"type": "json"})
+
+# What each trains, under the names `parameters` holds them by (see
+# `latent/network.py`). A dynamic anisotropy's own directions, which it builds
+# itself, are not listed: no program can reach them by a name of its own.
+_ELLIPSOID_2D = ["maxrange", "minrange_fct", "azimuth"]
+_ELLIPSOID_3D = ["maxrange", "midrange_fct", "minrange_fct", "azimuth", "dip",
+                 "rake"]
+for _class, _trained in (
+        (Isotropic, [{"name": "range", "start": "r"}]),
+        (Anisotropy2D, _ELLIPSOID_2D),
+        (Anisotropy2DMath, ["range_x", "range_y", "theta"]),
+        (Anisotropy2DDynamic, ["weights"]),
+        (Anisotropy3D, _ELLIPSOID_3D),
+        (Anisotropy3DMath, ["range_x", "range_y", "range_z", "theta_x",
+                            "theta_y", "theta_z"]),
+        (Anisotropy3DDynamic, ["weights"]),
+        (ProjectionTo1D, ["directions"]), (AnisotropyARD, ["ranges"]),
+        (ImplicitFault, ["range", "amp"]),
+        (FaultDisplacement, [
+            "throw",
+            {"name": "strike_slip", "exists_when": {"input_dimension": 3}},
+            {"name": "width",
+             "fixed_when": {"argument": "drag", "equals": False}},
+            {"name": "extent",
+             "exists_when": {"argument": "profile", "differs": None,
+                             "input_dimension": 2}},
+            {"name": "extent_strike",
+             "exists_when": {"argument": "profile", "differs": None,
+                             "input_dimension": 3}},
+            {"name": "extent_dip",
+             "exists_when": {"argument": "profile", "differs": None,
+                             "input_dimension": 3}}])):
+    _class._catalogue["trainable"] = _trained

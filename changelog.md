@@ -1,3 +1,33 @@
+## version 0.9.13
+* **The catalogue lists what each class trains** (GeoScape's item 47), so a
+program can offer to hold a parameter fixed before any fit. Every class on
+offer has `trainable`, one object per parameter under the name
+`parameters[name]` reads: `start` the argument it starts from, `fixed_when`
+what holds it fixed from construction, `exists_when` what registers it,
+`per` the argument counting a family (`ranges_{i}`). An input's `fixes` says
+which argument holds a whole transform or covariance fixed. An expert's own
+state (`alpha_white_i`, `delta_i`, `bias_i`) is left out, and so is what
+never trains, a quadrature's `nodes`. Not listed either: what a class builds
+for itself and no program can name, a dynamic anisotropy's directions and a
+`Mixture`'s components. The format stays 2. `test_catalogue.py` holds every
+declaration to the built class, each condition true and false.
+* **`cross_validate` no longer trains a bias the model holds at zero.** The
+refit's reset freed every `bias_*`, so since 0.9.4 a model without `bias=True`
+was scored with a bias it does not have (on a small synthetic model, 0.070 on
+the last fold, rmse 0.3084 against 0.3056). The reset now leaves alone
+whatever the model holds fixed. Cross-validation scores of such a model move.
+* **`ZScore(std=[...])` takes a list**, which the catalogue says it does; it
+raised a `TypeError`.
+* **Chapter 17 is a folded vein in section.** The 3D vein drillholes took
+57 minutes a run at 0.9.12, and in 3D the walk could only be drawn on
+one plan section. The chapter now drills a synthetic folded vein in 2D
+with five holes (the raster in `docs/manual/data/vein-truth.npz`), so
+both maps are scored against the truth instead of in-sample, the walk is
+drawn over the whole section with the vein and the holes carried into
+its coordinates, and `GPWalk(reach=)` is explained from a walk held at a
+long reach. Nothing is downloaded any more. The 3D surface workflow it
+also showed is a roadmap item.
+
 ## version 0.9.12
 * **A block is cut where its realizations agree on what runs through it.**
 `needs_splitting` marked a block wherever the prediction at its

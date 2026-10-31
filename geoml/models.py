@@ -4589,14 +4589,18 @@ def _fresh_variational_state(model, nodes=None):
 
     `nodes` restricts the forgetting to those nodes (`refit="leaves"` passes
     the terminal GP nodes); every other node's state is frozen with the rest.
+    A part of the state the model holds fixed stays where it is, fixed: a
+    bias is, unless the node was given `bias=True`.
     """
+    free = {id(parameter) for parameter in model._all_parameters
+            if not parameter.fixed}
     for parameter in model._all_parameters:
         parameter.fix()
 
     for node in model._nodes() if nodes is None else nodes:
         for name, parameter in node.parameters.items():
             for prefix, init in _VARIATIONAL_STATE.items():
-                if name.startswith(prefix):
+                if name.startswith(prefix) and id(parameter) in free:
                     shape = _np.asarray(parameter.get_value()).shape
                     parameter.set_value(init(shape))
                     parameter.unfix()

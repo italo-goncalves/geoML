@@ -133,5 +133,4 @@ competent person signs against, and it costs one line to include.
 
 ## Further reading
 
-Chapter 15 assembles the full sequence, data to dashboard, on Walker Lake,
-and chapter 17 does it with the geometry of a real deposit in the way.
+Chapter 15 assembles the full sequence, data to dashboard, on Walker Lake.

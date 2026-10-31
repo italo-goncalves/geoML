@@ -65,4 +65,4 @@ connection and nothing cached.
 
 15. [Walker Lake](15-case-study-walker-lake.md)
 16. [Jura](16-case-study-jura.md)
-17. [A folded quartz vein in 3D](17-case-study-quartz-vein.md)
+17. [A folded vein in section](17-case-study-folded-vein.md)

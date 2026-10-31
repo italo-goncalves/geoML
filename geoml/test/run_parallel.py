@@ -65,7 +65,7 @@ DESELECT = ["geoml/test/test_real_cases.py::test_sunspot_deep_model"]
 # shared by two units), the order for units this machine has not timed; a
 # unit in neither starts after these, larger files first
 MEASURED = {
-    "manual/17-case-study-quartz-vein": 3077,
+    "manual/17-case-study-folded-vein": 3077,
     "test_batched_experts.py": 1198,
     "manual/16-case-study-jura": 758,
     "test_expected_kernel.py": 381,

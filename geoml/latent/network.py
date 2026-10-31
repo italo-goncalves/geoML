@@ -7118,3 +7118,35 @@ GaussianMixture._catalogue = _declared(
     label="Gaussian mixture", stability="internal",
     weights={"type": "node"}, components={"type": "node[]"},
     n_nodes={"type": "int", "constraints": {"min": 1}})
+
+# What each class trains, under the names `parameters` holds them by, for a
+# program offering to hold them fixed. An expert's own state (`alpha_white_i`,
+# `delta_i`, `bias_i`) is left out: it is what the data fits, and a bias is
+# governed by the node's `bias=`. So are `nodes`, a quadrature's points. Each
+# is checked against the built class in `test_catalogue.py`.
+_RANGES = {"name": "ranges",
+           "fixed_when": {"argument": "fix_range", "equals": True}}
+for _class, _trained in (
+        (BasicGP, [_RANGES]), (AdditiveGP, [_RANGES]),
+        (UncertainInputGP, [_RANGES]),
+        (MultiStructureGP, [
+            dict(_RANGES, name="ranges_{i}", per="n_structures"), "weights"]),
+        # two columns over one are the two sides of a binary split, 1 and -1
+        (Linear, [{"name": "weights",
+                   "fixed_when": {"parent_size": 1, "argument": "size",
+                                  "equals": 2}}]),
+        (LinearCombination, ["weights"]),
+        (Exponentiation, ["amp_mean", "amp_scale"]),
+        (Bias, ["bias"]), (Scale, ["scale"]),
+        (RadialTrend, ["scale", "center"]),
+        (GPWalk, [{"name": "amp",
+                   "fixed_when": {"argument": "reach", "differs": None}},
+                  "precision"])):
+    _class._catalogue["trainable"] = _trained
+# an argument holding fixed everything an object it was given trains
+for _class, _param, _argument in (
+        (BasicInput, "transform", "fix_transform"),
+        (GaussianInput, "transform", "fix_transform"),
+        (GradientConstrainedInput, "covariance", "fix_covariance")):
+    _class._catalogue["fixes"] = [{"param": _param, "argument": _argument,
+                                   "equals": True}]

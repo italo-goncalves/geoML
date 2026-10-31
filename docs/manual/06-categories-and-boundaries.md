@@ -139,8 +139,8 @@ and says so instead of extending the nearest class over the whole square.
 Inside the sampled area it rises along the boundaries, where the winning
 field wins narrowly, which is exactly where a mapped contact should be
 doubted. Chapter 12 turns the log-odds zero into an actual surface for a
-3D case, and chapter 17 does it on a real deposit with contacts read from
-drillholes.
+3D case, and chapter 17 follows a folded vein through a section drilled
+by five holes.
 
 ## Further reading
 

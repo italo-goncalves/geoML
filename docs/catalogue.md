@@ -72,6 +72,30 @@ set's `split`, `crossed_by` and `unbalanced`. Not a shared list by name:
 `Mesh3D.split` separates a mesh's pieces and would have been published as
 the block set's operation. A mesh argument is typed `data:Mesh3D`.
 
+Added in 0.9.13 for GeoScape's item 47, the format staying 2: `trainable` on
+every class that is not internal, empty where it trains nothing, one object
+per parameter a program may offer to hold fixed. `name` is what
+`parameters[name]` reads, with `{i}` for a family's number and `per` naming
+the argument that counts it (`ranges_{i}` per `n_structures`,
+`warped_partition_left_{i}` per `size`). `start` is the argument the value
+starts from, filled in wherever the parameter has an argument's name, as the
+commitment "a trained argument is the parameter of its name" already says;
+it is declared where the names differ (`Isotropic`'s `r`) and switched off
+where they only coincide (an indicator's `bias`, a flag). `fixed_when` and
+`exists_when` are conditions on the constructor call. All a condition's
+clauses must hold: `argument` with `equals`, `differs` or `at_least`, and
+`parent_size` and `input_dimension`, the two facts no argument says. An input
+also has `fixes`, an argument holding fixed everything the object in `param`
+trains. The class's own `trainable` is what a program can reach by name,
+which is why two things that train are missing from it: the directions a
+dynamic anisotropy builds and the components a `Mixture` builds.
+
+Left out by the user's choice: an expert's own state, `alpha_white_i`,
+`delta_i` and `bias_i`. The first two are what the data fits and the last is
+governed by the node's `bias=`, so nothing in the format has to say "one per
+expert" or "variational". Also left out, as never trained: a quadrature's
+`nodes`, `Center`'s `std`, `Scale`'s `mean` and `BoxCox`'s found `shift`.
+
 ## Found on the way
 
 Each of these would have made a declaration false, and the tests below
@@ -89,6 +113,11 @@ caught or would have caught it:
   one structure. All three refuse with a message.
 - `warping.__all__` lacked the four parametric links and `kernels.__all__`
   `Covariance` and `RationalQuadratic`.
+- `ZScore`'s `std` is declared `float[]`, and a list raised a `TypeError` at
+  `std / 100` (found by the test of `start`, 0.9.13).
+- The refit `cross_validate` runs freed every `bias_*`, whatever the node's
+  `bias=` said, so a box holding one fixed would not have held there (found
+  reading item 47's claim that training leaves out what is fixed, 0.9.13).
 
 ## Stability
 
@@ -108,9 +137,10 @@ sizes and its size compared with the rule, a GP placed on it to see whether
 inducing points pass, and a parent that passes none put under it; each
 transform and warping applied to data of the width it declares; every
 likelihood trained a step on every variable type it accepts; every class
-that can be offered sent through persistence's encoding and back; and the
-catalogue written by two processes under different hash seeds, compared
-byte for byte. 238 tests, 78 s, 3.3 GB at the peak.
+that can be offered sent through persistence's encoding and back; what each
+class trains against what it registers, every condition built true and false
+and every `start` given a value; and the catalogue written by two processes
+under different hash seeds, compared byte for byte.
 
 ## Left out
 

@@ -76,7 +76,7 @@ precision everywhere. Realizations are *stored* as `float32` (half the disk,
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.12.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.13.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -149,7 +149,8 @@ image = grid.get("Landuse/predicted").as_image()
 
 `model.to_dot()` renders the network as a diagram. The full modelling arcs
 are the case-study chapters: Walker Lake (15), Jura with a non-stationary
-multivariate network (16), and a folded quartz vein in 3D (17).
+multivariate network (16), and a folded vein in section, stationary
+against `GPWalk` (17).
 
 ### 1.3 Where things live
 
@@ -420,7 +421,7 @@ arcs.
 | `14-reporting.md` | grade-tonnage, swaths, figures |
 | `15-case-study-walker-lake.md` | a positive grade in 2D |
 | `16-case-study-jura.md` | a non-stationary multivariate model with rock types |
-| `17-case-study-quartz-vein.md` | implicit modelling of a folded vein in 3D |
+| `17-case-study-folded-vein.md` | a folded vein in section, stationary against a walked input |
 
-Figure links point at the documentation site. Chapter 17 reads two CSV files
-from `docs/manual/data/` in the repository.
+Figure links point at the documentation site. Chapter 17 reads its truth, a
+small raster, from `docs/manual/data/` in the repository.

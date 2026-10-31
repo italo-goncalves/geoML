@@ -2793,3 +2793,30 @@ GradientIndicator._catalogue = {
     "category": "likelihood", "size": {"rule": "const", "value": 1},
     "accepts": [], "stability": "internal",
     "params": {"tol": {"type": "float"}}}
+
+# What each trains, under the names `parameters` holds them by (see
+# `latent/network.py`). A `Mixture`'s components are built by it, and their
+# noise is not listed: no program can reach it by a name of its own.
+_SHIFTS = {"name": "bias", "start": None,
+           "exists_when": {"argument": "bias", "equals": True}}
+for _class, _trained in (
+        (Gaussian, ["noise"]), (Laplace, ["scale"]), (Gamma, ["mean_alpha"]),
+        (StudentT, ["scale", "df"]),
+        (EpsilonInsensitive, ["epsilon", "c_rate"]),
+        (Huber, ["threshold", "std"]),
+        (Mixture, ["weights"]),
+        (LikelihoodMixture, [
+            {"name": "weights",
+             "exists_when": {"argument": "shares", "differs": "latent"}},
+            {"name": "amplitude",
+             "exists_when": {"argument": "shares", "equals": "latent"}},
+            {"name": "bias",
+             "exists_when": {"argument": "shares", "equals": "latent"}}]),
+        (Bernoulli, ["shift", "slope"]),
+        (BernoulliMaximumMargin, ["c_rate"]),
+        (CategoricalGaussianIndicator, [_SHIFTS]),
+        (HierarchicalGaussianIndicator, [_SHIFTS]),
+        (OrderedGaussianIndicator, [
+            {"name": "thresholds",
+             "exists_when": {"argument": "levels", "at_least": 2}}])):
+    _class._catalogue["trainable"] = _trained
