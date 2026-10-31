@@ -1479,9 +1479,64 @@ and trains under `train_svi` and `train_by_expert`. The weighted form
 may be better served by the Gaussian node of the next item, which would
 make that half of this preset unnecessary.
 
-**M–L — Spatially varying weights as a Gaussian node (the offset taper)**
-(requested 2026-10-26, from the research project `OneDrive\Claude\Research\
-Deep taper\`, report `report/main.pdf`, run against 0.9.8 at `f83603e`).
+**S — Independent trees left unnamed draw the same realizations** (found
+2026-10-30, building `TaperedGP`; measured, and open). `_set_name` numbers a node
+among the nodes connected to it, so leaves on separate roots both come out
+`BasicGP_1`, and `_node_seed` keys the draws by name: the 0.6.10 fix for
+identical normals between GP nodes does not reach across trees. Measured on two
+untrained `BasicGP` leaves on two `BasicInput` roots with the same inducing
+points, two variables, 200 realizations: the correlation between the variables'
+realizations at a location is 1.000 at every location unnamed, and 0.043 (median)
+named apart. Training the two trees apart is not measured. Moments and the bound
+are untouched; anything reading realizations jointly across such variables is
+wrong, a joint grade-tonnage or `derive` above all. GeoScape passes every node a
+name, so its Runs are not affected as long as those differ. `TaperedGP` settles
+its own names when it joins trees (`_settle_names`). The fix for
+`VGPNetwork` is the same call across the leaves, but renaming changes a saved
+model's realizations on reload, against the reproducibility contract, so it needs
+a decision: new models only, through a class default as `propagation` did.
+
+**S — Check `AdditiveGP`'s realizations** (noticed 2026-10-30, building
+`TaperedGP`; found by reading the code, not measured). `BasicGP._feature_kernel`
+returns True for it: it has no override and inherits
+`_CONDITIONED_SECOND_MOMENT = True`, where `MultiStructureGP` sets the flag False,
+and the comment on `_feature_kernel` says both keep the gap. But `_feature_basis`
+draws frequencies `[J, d]` and `_features` projects all `d` dimensions at once,
+random features of a product of the dimensions' kernels, where
+`AdditiveGP.covariance_matrix` is their mean. So at a certain input its
+realizations' residual should carry the product kernel's correlation, with the
+right variance at each point. To do: compare the sample covariance of its
+realizations at nearby pairs with `k12 - k1 (K+D)^-1 k2` (the same comparison
+`test_pair_covariance.py` makes for a `BasicGP`), and check `_pathwise_simulate`
+at an uncertain input. If it is wrong, either `_feature_kernel` returns False, so
+it keeps the gap as `MultiStructureGP` does, or the features are drawn per
+dimension. `TaperedGP` refuses it as a taper meanwhile (`_taper_refusal`), which
+can go once this is settled.
+
+**S — The conditioned quadrature takes a wide `Linear`'s columns as independent**
+(found 2026-10-31 by the research project; the code read here, the error not
+measured here). `_conditioned_sums` and `_at_input_nodes` place a location's
+quadrature nodes at `mean + sd * nodes`, one standard deviation per parent column
+and independent nodes (`_input_rule`, `_input_nodes`). A `Linear` wider than what
+it reads has correlated columns, so the input's spread is put in directions it
+does not have. The project reports a kernel error of 0.039 at width 4 against
+0.003 at width 0. This is released code and not the taper's: it should reach any
+GP node on a wide `Linear` over an uncertain input. To do: measure a plain GP,
+wide `Linear`, GP network against Monte Carlo over the input's full covariance,
+then decide whether the node takes the columns' covariance (the `Linear` knows
+its weights and what it reads) or a wide `Linear` warns.
+
+**L — Spatially varying weights as a Gaussian node (the offset taper)**
+(requested 2026-10-26, planned 2026-10-30, from the research project
+`OneDrive\Claude\Research\Deep taper\`, report `report/main.pdf`, run against
+0.9.8 at `f83603e`).
+**State, 2026-10-31**: stages 1-4 are built on `tapered-gp`, not committed and
+in no release. The fold gate passes only at its minimum as first specified.
+The research project's follow-up (under stage 4, from its `report/geoml_note.pdf`)
+found better forms that have not been run on the node, and that contradict part
+of the design below; the statements it overturned are corrected where they
+stand. Open for the user: whether stage 5 is held, and whether stage 6's "no
+worse" allows a margin.
 Today a combination whose weights vary in space is a `Multiply` of a
 weights node and the values -- a product, not Gaussian, so a leaf like it
 trains on `training_samples` realizations, passes no inducing points on,
@@ -1503,6 +1558,12 @@ and nothing can sit on it.
   drops the product's heavy tails where the weights are uncertain
   (excess kurtosis up to 6). Uncertain weights shrink the outputs'
   cross-correlation toward `kappa / (kappa + 1)` instead of inventing it.
+  **Measured 2026-10-31**: the heavy tails are the prior's (excess kurtosis
+  median 3.3, up to 4.9); conditioned draws show almost none (median 0.01,
+  largest 0.17), so there is little to drop once there are data. The floor is
+  `E[k_s] (kappa + rho_w) / (kappa + 1)`, `rho_w` the taper's own far
+  correlation, so `kappa / (kappa + 1)` needs `rho_w = 0`. The two-moment proof
+  at a certain input holds.
 - **Measured in the report**, on Jura's seven metals (one split, three
   seeds; the research's own exact models, so not yet under geoML's
   likelihoods and warpings):
@@ -1522,34 +1583,213 @@ and nothing can sit on it.
     model with 5 holes (IoU 0.842 against 0.816). The offset taper scored
     0.849 and `GPWalk` 0.859. With 3 near-vertical holes only `GPWalk`
     beat the stationary model, narrowly.
-- **What to settle in geoML**:
-  - **Where the inducing points go.** The report's option A puts them on
-    the outputs, evaluating the covariance with the weights' moments at
-    the inducing points and the data, which needs the weights node's
-    inducing points propagated to it. Option B puts them on the shared
-    bases, which is cheaper when there are many outputs, the weights'
-    uncertainty carried by residuals with a non-stationary covariance.
-  - **The predictive variance's second moment**: by Isserlis for these
-    forms.
-  - **The parents taken as independent**, as `Multiply` takes them,
-    stated as the approximation it is.
+- **What the report does not say.** With 3 near-vertical holes the offset
+  taper is clearly worse than a stationary model under geoML's indicator
+  (IoU 0.656, log score 0.458, 3.3 bodies, against 0.709, 0.270, 1), and
+  worse than the selection bank (0.685, 0.388, 2), which also keeps one body
+  with 5 holes. On the fold it works as a soft domain, anticorrelated across
+  the boundary, not as anisotropy: free bases grew into a trend in every run.
+  The selection taper stays the recorded alternative.
+- **Decided 2026-10-30** (a grilling session; these replace the options
+  listed here before):
+  - **The node**: `TaperedGP(parent, tapers, kernel=None, ...)`, a subclass
+    of `MultiStructureGP`, experimental. `tapers` is a list of nodes, one per
+    output, so `size = len(tapers)`; every taper has one column per basis, so
+    `J` is their common size, independent of the parent's. Each basis reads
+    the whole parent, with ranges per parent dimension (the measured form).
+    No per-basis rotation: a `Linear` wider than the hidden layer under it
+    gives orientation through the ranges, up to their ceiling. **Measured
+    2026-10-31, this reason is wrong**: the `Linear` gives reach, not
+    orientation (stage 4).
+  - **Outputs are independent** (the report's option A, one output at a
+    time). Each output has its own taper and so its own `K`, `M` Choleskys a
+    step where a `BasicGP` has one. It does not replace a `Multiply` network
+    with bases shared across outputs; that needs its own evidence, since on
+    Jura nothing beat independent GPs decisively.
+  - **`offset`**: one per basis, shared by the outputs, trainable, starting
+    at 1 within 1e-4 to 1e4. Large switches the taper off, leaving a
+    `MultiStructureGP`.
+  - **The taper's parents are independent of the bases**, by construction,
+    so no covariance between them is needed, and none between a taper's
+    columns. What a taper needs is each column's own `C(x, x')` at any two
+    point sets, through a new method `_pair_covariance(x1, x2)`, recursive:
+    exact for a GP on a certain input on any root (`k12 - k1 (K+D)^-1 k2`)
+    and the linear operations; approximate for a GP on an uncertain input
+    (`E[k(h1, h2)] - l1 (K+D)^-1 l2`, which drops the mean's spread between
+    locations; on a hand-set GP on a GP it correlates 0.94 with the model's own
+    realizations at nearby pairs, rms 0.030 on covariances of 0.09, Monte Carlo
+    0.011). **Its diagonal is its own, never the node's variance**, which may
+    read either side of it, so that `d` and `T` stay PSD with a unit diagonal
+    and no jump at coincident points (the first design put the variance there;
+    a test found it smaller at some locations, which could break positive
+    definiteness). Refused for `Multiply`, `Exponentiation`, `GaussianMixture` and
+    `GPWalk`, though the taper needs only `E[w w']`, so `Multiply` could come
+    later. Experts blend as `sum_e sqrt(pi_e(x) pi_e(x')) C_e(x, x')`: PSD, and
+    at a certain input its diagonal is the variance the blend reports. At an
+    uncertain input its correlation against draws reads RMS 0.053-0.059, Monte
+    Carlo 0.016 (2026-10-31).
+  - **Certain and uncertain inputs are both supported.** The taper is a fixed
+    `[n, m]` factor computed at the coordinates, whatever the input does, and
+    adds no second moment of its own: at a certain input the variance is
+    `1 - k (K+D)^-1 k^T` (the report's Proposition 8 and what it measured; the
+    Isserlis line once written here is dropped). At an uncertain input the
+    existing conditioned second moment takes `k_q = sum_j a_j^2 k_j(h_q, Z |
+    h_q) o T_j(x, Z)` and `K = sum_j a_j^2 E[k_j(Z, Z)] o T_j(Z, Z)`, always by
+    the 64-point quadrature, since the closed form's fixed `[m, m]` matrix
+    would need one per row. `MultiStructureGP` itself keeps its flag and its
+    bits. Expected about `J` times the quadrature's time, on networks where it
+    is already 83% of a step; measured about `2J` (stage 5).
+  - **Realizations are the full draw.** `g_mj,s = (sqrt(kappa_j) xi_js +
+    w_mj,s) / d_mj`, `z~_m,s = sum_j a_j g_mj,s f_mj,s` by random features, and
+    `z_m,s = z~_m,s + k K^-1 (K (alpha + R eta_s) - z~_m,s(Z))`. Exact in two
+    moments at a certain input, non-Gaussian where the weights are unknown
+    (the product's own tail). At an uncertain input, `k` is the draw's
+    conditioned kernel times `T`, rescaled to the reported variance as
+    `_pathwise_simulate` does. Seeds stay keyed by node name, so batch
+    invariance holds and the draws at `Z` can be cached. `Spherical` and
+    `Cubic` bases are refused, having no features, and so are tapers whose
+    realizations leave a gap (`MultiStructureGP`, `AdditiveGP`, `TaperedGP`).
   - **The weights enter through the moments of `q(w)`**, as every
     expected-kernel node's input does, so the bound is not comparable with
     a `Multiply` network's. The report's tapered models reached much
     higher objectives without better maps: choose on held-out data.
-  - **The catalogue's declaration**: `_GAUSSIAN` true, its
-    `propagates_inducing`, and a stand-in in `test_catalogue.py`.
-- **Steps and gates**:
-  1. The report's Propositions 7 and 8 as unit tests: the covariance
-     against draws of the generative model, positive definiteness, and
-     the LMC limit to 1e-11 (its scripts are
-     `verification/prop7_svc_taper.py` and `prop8_gaussian_construction.py`).
-  2. The node, option A first.
-  3. Jura at J = 3, 5 and 7 under geoML's own likelihood and warping,
-     against the `Multiply` network and the LMC, scored on the validation
-     set: the report's ordering holds, or the item stops there.
-  4. The folded-vein benchmark, and a training time against `Multiply`'s.
-  5. The catalogue and the skill.
+- **Stages**, on a branch `tapered-gp` in its own worktree. Stages 1-4 do not
+  wait for the research project; stage 5 reads its derivation of the
+  uncertain-input moments:
+  1. `_pair_covariance` on the nodes above, with the Expert blend: against
+     draws of the posterior, PSD, the diagonal its own. (The reported variance
+     on the diagonal, as first written here, is indefinite: smallest eigenvalue
+     -0.11 to -0.047. `C(x, x)` sits RMS 0.07-0.08 from the reported variance,
+     which moves `T` by RMS 0.03; the effect on the fold is not measured.)
+  2. `TaperedGP` at a certain input and one Expert, refusing the rest with
+     messages in `_check_expected_kernel`. The report's Propositions 7 and 8
+     as unit tests (`verification/prop7_svc_taper.py`,
+     `prop8_gaussian_construction.py`): the covariance against draws of the
+     generative model, positive definiteness, and `kappa -> infinity` giving
+     `MultiStructureGP`. The catalogue's declaration comes here, since the
+     completeness test demands it: `parents` slots, the `len` size rule,
+     `gaussian` true, `trainable` (`weights`, `ranges_{i}`, `offset`), a
+     stand-in in `test_catalogue.py`, the refusals in `_conditioned_builds`.
+  3. The full draw at a certain input: the ensemble's two moments against
+     the node's.
+  4. **Gate, the fold at a certain input**, six seeds, basin hits counted:
+     the hierarchical indicator, waste a `BasicGP`, ore this node, against the
+     stationary model and `GPWalk` rerun on today's code. With 5 holes it must
+     beat stationary on IoU, Brier and log score on at least 5 of 6 seeds,
+     which also tests the departures from the report (no rotations,
+     compositional shares, range priors, geoML's variational family). 3 holes
+     is recorded without blocking, and the docstring says it. **Failing stops
+     the item, which moves to Settled with its numbers.**
+     **Measured 2026-10-31** (`docs/benchmarks/fold_regression/fold_tapered.py`
+     on `tapered-gp`): IoU, Brier, log score with 5 holes, stationary 0.790,
+     0.0458, 0.172. At x/2, the node directly on the coordinates **fails**, 0 of
+     6 (0.782, 0.0473, 0.174). With a `Linear(4, unit_norm=False)` as its parent,
+     then read as the design's replacement for rotations, it **passes at the
+     minimum**, 5 of 6 on all three together (0.864, 0.0316, 0.167); seed 3
+     stands at a bound 20 nats lower at 500 steps with IoU 0.759. The log score's
+     margin is small on two of the five (0.1709 and 0.1633 against 0.1715), and
+     `GPWalk` stays far ahead on it (0.101). A unit-norm `Linear` fails (0.767, 1
+     of 6); why was not looked into. With 3 holes the free-weight form loses on
+     all six (0.681, 0.0796, 0.448, 2.2 bodies, against 0.701, 0.0676, 0.306, 1),
+     at a higher bound. The `GPWalk` rows are the research project's at
+     `fcd2a02`, this branch's base, not rerun here. The node matches the research
+     prototype to the third decimal of the bound over 100 steps.
+     **Why the margin is thin, off the gate's maps**: the free-weight form's
+     good seeds halve the area wrong at p = 0.5 (3.2% of the section against
+     6.0%) but not the area confidently wrong, error above 0.9 (2.1% against
+     1.8%), with 2.9% of the section undecided against 16.7%. With 3 holes the
+     area wrong is the same (9.0% against 8.8%) and the area confidently wrong
+     nearly double (5.8% against 3.2%): the node cuts the vein at the gap between
+     holes and is sure of the cut.
+     **The research project's follow-up, 2026-10-31**
+     (`experiments/tg_fold.py`, its `report/geoml_note.pdf` and `main.pdf`), on
+     its prototype, 6 seeds unless stated, the same section, 500 steps. IoU,
+     Brier, log score, seeds beating stationary:
+     - **Long scale, no `Linear`** (the coordinates at x/20 instead of x/2):
+       0.884, 0.027, 0.148, 6 of 6, one body, 0.26 s/step. So the node on the
+       coordinates can beat stationary, and the sentence saying otherwise in its
+       docstring on `tapered-gp` (written from the x/2 run alone) is false and
+       has to go, with "needs a parent with directions of its own". All four
+       bases of the `Linear` form share one azimuth (145-149 degrees), main ranges
+       97-146 m by 23-26 m on a 16 by 20 m section, and the taper makes the
+       structure: ore-waste correlation at 4-8 m falls from 0.83 to -0.04 with
+       it. The x/20 run changes the start and the ceiling of the ranges together,
+       so it does not say which matters, nor whether that is why the unit-norm
+       `Linear`, which cannot shrink the coordinates, fails.
+     - **`Linear(4)` with the offset fixed at 1**: 0.889, 0.025, 0.124, 6 of 6,
+       seed 3's poor start gone, 0.23 s/step. Trained, the main basis's offset
+       falls to about 0.09. `parameters["offset"].fix()` does this on the node
+       with no new code. Offset fixed at 10 or 100, or started at 10: about 0.709,
+       3 bodies. A small fixed offset costs too (0.01: 0.815, and 0.566 with 3
+       holes). Per-column tapers also clear seed 3 (0.890, 0.025, 0.143, 6 of 6) at
+       twice the time. Fixed offset with long scale was not tried together.
+     - **With the taper off** (`Linear(4)`, offset fixed at 1e4; 3 seeds): 0.697,
+       0.073, 0.298, 3 bodies.
+     - **Steps**: at 2000, seed 1, stationary reaches 0.820, log 0.141 (3 holes
+       0.730, 0.290); `Linear(4)` 0.890, 0.117 (0.703, 0.472); offset fixed at 1
+       0.888, 0.099 (0.706, 0.452). Seed 3 recovers to 0.838 with one body, so its
+       poor start is partly slow convergence. One seed each, and `GPWalk` was not
+       rerun at 2000. The gate does not state a step count; it should.
+     - **3 holes**: no setting tried keeps stationary's scores along with the
+       5-hole gain. Best with the gain: per-column 0.699, log 0.449; offset fixed
+       at 1 0.685, 0.424. `GPWalk` alone wins here (0.733, 0.054, 0.239).
+     - **The bound does not pick the form**, at 5 holes: mean bound -66 for long
+       scale (log 0.148), -80 for the fixed offset (0.124), -81 for the `Linear`
+       with a trained offset (0.167), -93 for `GPWalk` (0.101), -104 for
+       stationary (0.172).
+     - **Time**, one job at a time, 12 threads, tracing excluded, 5 holes, in
+       s/step: stationary 0.089, `Linear(4)` 0.239, long scale 0.263, fixed offset
+       0.230, per-column 0.514, `GPWalk` 1.721.
+     **Still to do at this stage**: run long scale, the fixed offset, and both
+     together on the node itself, since only the two forms above were compared
+     with it. These forms were chosen among about thirty on this one section and
+     these seeds, and a seed only changes the start, so rerunning the same gate
+     cannot confirm them: state the step count and add a hole layout that no
+     form was chosen on. Then correct the docstring on `tapered-gp`, including
+     its "settle at a poorer fit". Whether long scale can become a default is
+     open: x/20 is a choice for this section's size.
+  5. Uncertain inputs: `_conditioned_sums` and the pathwise draw generalized
+     to several structures with the taper factor; the moments and the
+     ensemble's variance against Monte Carlo, the ensemble within 10% before
+     the rescale is relied on. **Gate, the fold** with GP, `Linear`, this
+     node, against stage 4 and `GPWalk`, with time per step and the prediction
+     cost. Failing keeps the node at certain inputs, refusing the rest.
+     **Measured 2026-10-31, on the research prototype, not built here, and the
+     experiment was cancelled partway** (9 by 11 inducing grid, 4 of the planned
+     six seeds; stationary 0.760, the design 0.853): GP, node 0.747, 1 of 4; GP,
+     `Linear(4)`, node 0.620, 0 of 4, 3.75 bodies. Offsets stay at 2.5-31, and in
+     the two runs diagnosed the correlation is unchanged by the taper to 0.01:
+     the taper is off and the hidden GP makes the domain. A stationary reader on
+     the same layers also scores only 0.70 and 0.63, so the deep network may be
+     unconverged at 500 steps; this says the gate would fail, not that the node
+     cannot work. Cost about `2J`: 5.2 and 11.5 s/step against 0.70 and 1.43 with
+     a stationary reader. **The condition "within 10% before the rescale" cannot
+     pass**: the unscaled ratio has median 1.65 (1.20-2.20), 1.77 at width 4, none
+     within 10%, because the moments are of the mixture at a fixed `K`, not of
+     the network; compare the ensemble with the network, or drop the condition.
+     The moment formula itself is right (variance to 1e-15), the clamp harmless
+     (3.5% of nodes, mean excess 0.0026). A wider `Linear` also meets the
+     independent nodes of the item "The conditioned quadrature takes a wide
+     `Linear`'s columns as independent". Both the research note and the reading
+     here recommend holding this stage until a use appears that a stationary reader or
+     `GPWalk` cannot serve; that reverses the decision that uncertain inputs must
+     be supported, so **it is the user's**, not settled.
+  6. **Gate, Jura** at J = 3, 5 and 7, independent outputs, geoML's warping,
+     against plain independent GPs by paired bootstrap on the validation set:
+     CRPS and NLPD no worse.
+     **Measured 2026-10-31 on the research prototype, six seeds, 500 steps: it
+     would fail on CRPS as written.** CRPS/sd against 0.462: J = 3 +0.0019
+     [+0.0006, +0.0033], J = 5 +0.0021 [-0.0000, +0.0042], J = 7 +0.0031 [+0.0004,
+     +0.0057]; NLPD indistinguishable; 0.28-0.45 s/step against 0.09. At most
+     0.7%, and the taper is not the cause: with it off the scores agree to 0.0002.
+     So the node brings nothing on Jura. **Open for the user**: whether "no worse"
+     allows a margin. Recommended: no, a margin chosen after the result proving
+     little; record it as no gain on Jura and describe the node as a soft
+     domain, for data that constrain the domain.
+  7. Experts: dense, then the slots path, after checking how `train_by_expert`
+     treats a taper on a second root. GeoScape trains by Expert wherever a Run
+     has Experts, so this is what lets it offer the node.
+  8. The skill, the changelog, a section in the manual if a gate earned one.
 
 **What the gridded-GP research gives geoML as it stands** (assessed
 2026-10-14 from the research project `OneDrive\Claude\Research\Kronecker

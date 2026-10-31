@@ -191,6 +191,22 @@ models saved under it.
 _Avoid_: moment matching (it matches moments, but so does the expected
 kernel)
 
+**Taper**:
+A factor on a kernel's covariance, built from what another node believes at
+the two locations and equal to one at a location against itself. It says
+which locations may share information: positive where the node agrees about
+them, near zero where it knows nothing, negative where it is confident they
+differ. It changes correlation, never variance. Not a fault's taper, which
+fades a displacement away from the surface, and not covariance tapering,
+which sparsifies a matrix to save time.
+_Avoid_: weight, gate, mask
+
+**Offset**:
+How far a basis ignores its taper. Large, and the taper is one everywhere so
+the basis stays stationary; small, and the taper decides alone, with
+independence where its node knows nothing.
+_Avoid_: kappa, intercept, relevance
+
 **Variational state**:
 The parameters that encode the *data* in a trained model, as opposed to the
 hyperparameters that encode the structure. What cross-validation
