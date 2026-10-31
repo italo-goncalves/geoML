@@ -357,6 +357,12 @@ class _Likelihood(_gpr.Parametric):
     def size(self) -> int:
         return self._size
 
+    @property
+    def data_size(self) -> int:
+        """The columns of a measurement, which may not be the latent `size`:
+        a projection and a mixture of likelihoods keep the two apart."""
+        return self._size
+
     def log_lik(self, mu, var, y, has_value, *args, **kwargs):
         raise NotImplementedError
 
@@ -736,6 +742,10 @@ class _ContinuousLikelihood(_Likelihood):
         super().__init__(warping.size_out)
         self.warping = self._register(warping)
         self.sharpness = sharpness
+
+    @property
+    def data_size(self) -> int:
+        return self.warping.size_in
 
     def initialize(self, y, weights=None):
         self.warping.initialize(y, weights)
@@ -1606,7 +1616,6 @@ class LikelihoodMixture(_Likelihood):
         super().__init__(self._population_size
                          + (n if shares == "latent" else 0))
         self.components = [self._register(c) for c in components]
-        self.data_size = widths.pop()
 
         if shares == "latent":
             if weights is not None:
@@ -1628,6 +1637,10 @@ class LikelihoodMixture(_Likelihood):
         if weights.shape != (n,):
             raise ValueError("one weight per component")
         self._add_parameter("weights", _gpr.CompositionalParameter(weights))
+
+    @property
+    def data_size(self) -> int:
+        return self.components[0].data_size
 
     def _slices(self):
         start = 0

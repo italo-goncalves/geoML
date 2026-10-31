@@ -1,3 +1,15 @@
+## version 0.9.14
+* **`predict_measurements` sizes its answer by the variable's columns.** Since
+0.9.11, when it began placing batches by their rows, it allocated one column
+per *latent* column. A likelihood whose two differ raised a shape mismatch: a
+`LikelihoodMixture` over a vector variable (three columns read by eight latent
+ones under `shares="latent"`), and a warping that projects, such as a `PCA`
+with fewer components. A mixture over a single column raised nothing, its
+column broadcast across the latent ones, so the answer held the same column
+two or four times. The size ceiling counted the latent columns too.
+`measurement_batches` and `cross_validate` were never affected. Likelihoods
+that carry a warping now say how wide a measurement is, as `data_size`.
+
 ## version 0.9.13
 * **The catalogue lists what each class trains** (GeoScape's item 47), so a
 program can offer to hold a parameter fixed before any fit. Every class on

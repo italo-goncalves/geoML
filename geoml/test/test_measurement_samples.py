@@ -175,6 +175,28 @@ def test_the_noise_is_independent_between_locations():
         assert abs(lag_one) < 0.15
 
 
+def test_a_projection_answers_in_the_data_columns():
+    """Two latent columns behind a PCA read three data columns, and the door
+    is sized by the three."""
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 100, (100, 2))
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_vector_variable("v", ["a", "b", "c"], rng.normal(size=(100, 3)))
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(data, 30, seed=0),
+        transform=geoml.transform.Isotropic(20.0))
+    model = geoml.models.VGPNetwork(
+        data, "v",
+        geoml.likelihood.Gaussian(geoml.warping.PCA(3, n_components=2)),
+        geoml.latent.BasicGP(root, size=2),
+        options=geoml.models.GPOptions(verbose=False))
+    target = geoml.data.PointData.from_array(x[:30], ["X", "Y"])
+    draws = model.predict_measurements(target, n_sim=4, n_nodes=4)["v"]
+    assert draws.shape == (30, 3, 16)
+    assert np.all(np.isfinite(draws))
+
+
 def test_a_shift_of_the_wrong_width_is_refused():
     likelihood = geoml.likelihood.MultivariateGaussian(
         3, warping=geoml.warping.Identity(3))
