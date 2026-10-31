@@ -4043,8 +4043,9 @@ class VGPNetwork(_GPModel):
         Returns
         -------
         dict of str to ndarray
-            One `(n_data, size, n_sim * n_nodes)` array per variable whose
-            likelihood carries a warping. Categorical variables are skipped:
+            One `(n_data, columns, n_sim * n_nodes)` array per variable whose
+            likelihood carries a warping, one column per column of the
+            variable. Categorical variables are skipped:
             their noise lives in the probabilities, leaving no value for a
             measurement to scatter around.
 
@@ -4068,7 +4069,7 @@ class VGPNetwork(_GPModel):
         # this door holds the answer whole, and its size is known from the
         # shapes alone. Sized in bytes rather than rows because a vector
         # variable costs a column each and the two node counts multiply.
-        wanted_bytes = sum(newdata.n_data * lik.size * n_sim * n_nodes * 8
+        wanted_bytes = sum(newdata.n_data * lik.data_size * n_sim * n_nodes * 8
                            for _, lik in wanted)
         if wanted_bytes > MEASUREMENT_LIMIT:
             raise MemoryError(
@@ -4083,8 +4084,11 @@ class VGPNetwork(_GPModel):
                    wanted_bytes / 1024 ** 3,
                    MEASUREMENT_LIMIT / 1024 ** 3))
 
-        # placed by their rows: by expert the batches come group by group
-        samples = {v: _np.full((newdata.n_data, lik.size, n_sim * n_nodes),
+        # placed by their rows: by expert the batches come group by group.
+        # One column per column of the variable, which a projection or a
+        # mixture of likelihoods keeps apart from the latent `size`
+        samples = {v: _np.full((newdata.n_data, lik.data_size,
+                                n_sim * n_nodes),
                                _np.nan) for v, lik in wanted}
         for rows, batch in self.measurement_batches(
                 newdata, n_sim, n_nodes, by_expert=by_expert,
@@ -4145,9 +4149,9 @@ class VGPNetwork(_GPModel):
         rows : ndarray
             Indices into `newdata` of the locations in this batch.
         samples : dict of str to ndarray
-            One `(len(rows), size, n_sim * n_nodes)` array per variable
+            One `(len(rows), columns, n_sim * n_nodes)` array per variable
             whose likelihood carries a warping, in the variable's own
-            units.
+            units, one column per column of the variable.
 
         See Also
         --------

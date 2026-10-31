@@ -203,6 +203,62 @@ def test_latent_shares_take_a_column_per_population():
                              shares="latent").labels(10)
 
 
+def _three_columns():
+    """Three columns read by two populations of three latent columns each
+    and two share columns: eight latent columns, as GeoScape's Run 12 has."""
+    geoml.set_seed(1234)
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 100, (120, 2))
+    data = geoml.data.PointData.from_array(x, ["X", "Y"])
+    data.add_vector_variable("v", ["a", "b", "c"],
+                             np.exp(rng.normal(size=(120, 3))))
+    points = geoml.data.inducing.from_kmeans(data, 40, seed=0)
+    root = latent.BasicInput(geoml.data.inducing.experts(points, 2, seed=0),
+                             transform=geoml.transform.Isotropic(20.0))
+    mixture = lk.LikelihoodMixture(
+        [lk.Gaussian(wp.ChainedWarping(wp.BoxCox(3, shift=0.1),
+                                       wp.RobustPCA(3, n_components=3)))
+         for _ in range(2)], shares="latent")
+    assert mixture.size == 8
+    model = geoml.models.VGPNetwork(
+        data, "v", mixture, latent.BasicGP(root, size=8),
+        options=geoml.models.GPOptions(verbose=False, training_samples=4))
+    target = geoml.data.PointData.from_array(x[:40], ["X", "Y"])
+    return model, target
+
+
+@pytest.mark.parametrize("by_expert", [False, True])
+def test_a_measurement_has_the_variables_columns_not_the_latent_ones(by_expert):
+    model, target = _three_columns()
+    draws = model.predict_measurements(target, n_sim=5, n_nodes=4,
+                                       by_expert=by_expert)["v"]
+    assert draws.shape == (40, 3, 20)
+    assert np.all(np.isfinite(draws))
+
+
+def test_the_ceiling_counts_the_variables_columns():
+    model, target = _three_columns()
+    limit = geoml.models.MEASUREMENT_LIMIT
+    try:
+        geoml.models.MEASUREMENT_LIMIT = 40 * 3 * 20 * 8
+        model.predict_measurements(target, n_sim=5, n_nodes=4)
+        geoml.models.MEASUREMENT_LIMIT -= 1
+        with pytest.raises(MemoryError):
+            model.predict_measurements(target, n_sim=5, n_nodes=4)
+    finally:
+        geoml.models.MEASUREMENT_LIMIT = limit
+
+
+def test_a_single_column_is_not_copied_across_the_latent_ones():
+    """One data column broadcast into two latent ones raised nothing: the
+    answer came back with the column twice."""
+    model, _, _ = _model()
+    target = geoml.data.PointData.from_array(
+        np.linspace(0, 10, 50)[:, None], ["X"])
+    draws = model.predict_measurements(target, n_sim=4, n_nodes=4)["v"]
+    assert draws.shape == (50, 1, 16)
+
+
 def test_the_amplitude_sharpens_the_shares():
     """The share columns are scaled by the square root of the amplitude, a
     variance, before the softmax: at one the shares are the plain softmax,
