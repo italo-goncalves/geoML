@@ -81,6 +81,9 @@ def test_off_every_expert_draws_under_the_node_name():
 
 def test_the_realizations_carry_the_reported_variance_only_when_on():
     on, off = _deep_model(True), _deep_model(False)
+    # the conditioned quadrature's realizations; the closed forms' are
+    # test_deep_moments.py's
+    on.options.deep_moments = "quadrature"
     for model in (on, off):
         model.train_full(30)
     ratio_on, ratio_off = _variance_ratio(on), _variance_ratio(off)

@@ -76,7 +76,7 @@ precision everywhere. Realizations are *stored* as `float32` (half the disk,
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.9.14.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.0.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -247,9 +247,17 @@ in the catalogue.
   coordinates concatenated beside the inner GP (`Concatenate(root,
   inner)`). A GP on an uncertain input takes the Gaussian, exponential,
   Matérn or rational quadratic kernel; spherical and cubic are refused
-  there, and the error message says so. Since 0.9.4 the realizations
-  carry the variance the prediction reports (`GPOptions(full_variance=True)`,
-  the default for a new model): a GP reading an uncertain input takes its
+  there, and the error message says so. Since 0.10.0 a GP node whose own
+  inducing points are uncertain -- a deep layer, a walk's reader -- takes
+  its variance in closed form (`GPOptions(deep_moments="hinge")`, the
+  default; `"blur"` and `"bound"` the other closed forms, `"quadrature"` what
+  a save made before keeps). Give such a node the Gaussian kernel: it is
+  one component where a Matérn or the exponential is eight, a step nearly
+  three times faster under the hinge, and under `"bound"` the others are
+  slower than the quadrature by far (the model warns). Since 0.9.4 the
+  realizations carry the variance the prediction reports
+  (`GPOptions(full_variance=True)`, the default for a new model): a GP
+  reading an uncertain input takes its
   second moment with its own inducing inputs uncertain too and draws
   through its parent's realizations, and every GP node's realizations carry
   what its inducing points leave out, shallow models included -- except a

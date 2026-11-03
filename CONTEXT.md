@@ -191,6 +191,20 @@ models saved under it.
 _Avoid_: moment matching (it matches moments, but so does the expected
 kernel)
 
+**Deep moments**:
+The variance a GP node reports where its own inducing points are uncertain
+— a deep layer, the reader of a walk. Four forms. The **quadrature**
+averages over the input at nodes and clamps each node's variance at zero;
+the clamp changes the answer, so it is not exact. The **hinge** is the same
+clamped average without nodes. The **blur** is the unclamped residual of the
+expected kernel plus the spread of the mean to first order. The **bound** is
+that residual with the spread taken exactly and a divergence term that
+overstates the true one, which keeps the training objective a lower bound on
+the evidence for a Gaussian likelihood, two layers and one expert; anywhere
+else it is a closure, as the others are. *The bound* alone still names the
+training objective, which every form maximizes.
+_Avoid_: exact (for the quadrature), Taylor (for the blur)
+
 **Taper**:
 A factor on a kernel's covariance, built from what another node believes at
 the two locations and equal to one at a location against itself. It says

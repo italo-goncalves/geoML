@@ -102,7 +102,7 @@ Both models are the two-scale indicator model of chapter 6. One input
 reads the coordinates through two transforms, one starting at a 20 m
 range and one at 2 m, and hands each GP its own pair of columns: a
 long-range GP carries the broad split between ore and waste, and a
-Matern32 GP carries the vein itself. The hierarchical indicator turns the
+short-range GP carries the vein itself. The hierarchical indicator turns the
 two into the probability of ore. Every inducing point sits on a 1 m grid
 over the section. The transforms' ranges train; the GPs' own ranges are
 held where a transform already sets the scale (`fix_range=True`).
@@ -114,7 +114,11 @@ two outputs is a vector field over the section, the walk moves every
 point along it in ten small steps, and the short GP reads the moved
 coordinates. That GP is isotropic, because the walk already says how the
 space is stretched; a range per axis above a walk would be a second way
-of saying the same thing.
+of saying the same thing. Both short GPs take the Gaussian kernel. The
+deep one reads the walk, so it averages its kernel over where each point
+may have been carried, which is one closed-form term for the Gaussian
+kernel and eight for a Matérn one; the stationary one takes it too, so
+that the two models differ in the walk alone.
 
 ```python
 inducing = geoml.data.Grid2D(start=[-8, -20], end=[8, 0], n=[17, 21])
@@ -134,11 +138,11 @@ def vein_model(deep):
     if deep:
         field = geoml.latent.BasicGP(short_input, size=2, fix_range=True)
         walk = geoml.latent.GPWalk(field)
-        short_gp = geoml.latent.BasicGP(walk, kernel=geoml.kernels.Matern32(),
+        short_gp = geoml.latent.BasicGP(walk, kernel=geoml.kernels.Gaussian(),
                                         isotropic=True)
     else:
         short_gp = geoml.latent.BasicGP(short_input,
-                                        kernel=geoml.kernels.Matern32())
+                                        kernel=geoml.kernels.Gaussian())
     model = geoml.models.VGPNetwork(
         samples, "Rock",
         geoml.likelihood.HierarchicalGaussianIndicator(2),
@@ -175,7 +179,7 @@ figure.savefig("figures/17-elbo.png", dpi=150, bbox_inches="tight")
 
 The stationary model climbs faster, having only its variational state
 and its ranges to fit; the deep model also has a vector field to learn.
-It overtakes near iteration 280 and ends higher, at -93.5 against -104.0.
+It overtakes near iteration 250 and ends higher, at -90.1 against -94.9.
 A bound is the training data's verdict, though, and the next section asks
 the ground.
 
@@ -244,16 +248,14 @@ figure.savefig("figures/17-maps.png", dpi=150, bbox_inches="tight")
 
 ![The two models' maps, the true vein dashed](https://italo-goncalves.github.io/geoML/_images/17-maps.png)
 
-The deep model is better on every score: accuracy 0.962 against 0.940,
-an IoU of 0.860 against 0.790, a Brier score of 0.029 against 0.046 and a
-log score of 0.100 against 0.171, each drawing the vein as one body. The
-maps show where the difference lies. The
-stationary model reads the vein through one ellipse, which suits the
-limbs that dip one way and not the others: it pinches the upper limb into
-a blob that stops short of the surface and swells the lower-left limb into
-a second lobe under the hinge. The deep model draws the upper limb as one
-band to the surface, closes the hinge sharply and keeps the lower limb at
-its thickness.
+The deep model is better on every score: accuracy 0.942 against 0.933,
+an IoU of 0.801 against 0.769, a Brier score of 0.047 against 0.069 and a
+log score of 0.182 against 0.253, and it draws the vein as one body where
+the stationary model draws two. The maps show where the difference lies.
+The stationary model reads the vein through one ellipse, which suits the
+limbs that dip one way and not the others: it breaks the lower limb short
+of its tip and leaves the tip, under the hinge, as a lobe of its own. The
+deep model carries the lower limb to its tip as one band.
 
 The uncertainty tells the same story from the other side. The stationary
 model's pale patches cover the ground between the holes on the lower
@@ -338,15 +340,14 @@ figure.savefig("figures/17-walk.png", dpi=150, bbox_inches="tight")
 
 ![What the walk does to the section](https://italo-goncalves.github.io/geoML/_images/17-walk.png)
 
-The walk is short: its reach trained to 0.18. On a section 2.2
-transformed units wide it moves a
-point by a third of a unit at most and an eighth on average, and in the
-walked coordinates (the middle panel) the vein keeps its shape: the walk
-does not unfold the fold into a flat layer. What it does is change the
-spacing locally. The largest moves are in the hinge and along the right
-limb, pulling the limbs together across the waste between them, so the
-stationary GP above sees those intercepts closer than they are on the
-section; the holes (right panel) bend into gentle S-shapes. The deep
+The walk is short: its reach trained to 0.14. On a section 3.1
+transformed units wide it moves a point by 0.23 of a unit at most and
+0.07 on average, and in the walked coordinates (the middle panel) the
+vein keeps its shape: the walk does not unfold the fold into a flat
+layer. What it does is change the spacing locally. The largest moves are
+in the hinge, pulling the limbs together across the waste between them,
+so the stationary GP above sees those intercepts closer than they are on
+the section; the holes (right panel) bend into gentle S-shapes. The deep
 model's gain is a range that changes from place to place, not a
 restoration of the fold. The scores could only say that the deep model is
 better; `predict_node` is what shows why.
@@ -355,15 +356,15 @@ better; `predict_node` is what shows why.
 
 The walk's **reach**, `step * n_steps * amp`, is how far it can carry a
 point: the field's strength, in transformed units. Above, the amplitude
-trained and the bound chose a reach of 0.18. `GPWalk(reach=)` holds it
+trained and the bound chose a reach of 0.14. `GPWalk(reach=)` holds it
 instead, and a long reach does not unfold the vein either. A free field
 is allowed to converge: held at a full unit, the walk collapses whole
 stretches of the section into a few sinks, drags the holes in with them
 and stretches the ground between over the rest. Ore intercepts from
 different limbs land side by side in those coordinates, and the GP above
 joins them across the waste. On this section that model scored an
-accuracy of 0.843 and an IoU of 0.598, broke the vein into two bodies,
-and ended 60 nats below the trained walk's bound.
+accuracy of 0.911 and an IoU of 0.723, broke the vein into two bodies,
+and ended 85 nats below the trained walk's bound.
 
 There the bound and the truth agree, but they need not. On three holes
 instead of five, the benchmark behind this chapter found the best bound

@@ -767,6 +767,8 @@ def test_a_gp_on_a_gp_takes_the_second_moment_over_its_inducing_inputs(
         monkeypatch):
     model, leaf, hidden, mapping, x = _network(
         _two_layers, kernel=geoml.kernels.Gaussian())
+    # the draws are the conditioned quadrature's model, clamp and all
+    model.options.deep_moments = "quadrature"
     x = x[:25]
     mean_ref, var_ref = _conditioned_draws(model, leaf, x)
     out = {}
@@ -843,6 +845,9 @@ def test_the_realizations_hold_the_variance_the_moments_report():
     # unexplained variance the same way
     model, leaf, hidden, mapping, x = _network(
         _two_layers, kernel=geoml.kernels.Gaussian())
+    # the quadrature's moments, which the realizations clamp draw by draw
+    # as they do; the other forms' are `test_deep_moments.py`'s
+    model.options.deep_moments = "quadrature"
     x = x[:30]
     parts = [_leaf_realizations(model, leaf, x, 200, (11, c))
              for c in range(10)]

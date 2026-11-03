@@ -1,3 +1,75 @@
+## version 0.10.0
+* **A deep GP node takes its variance without the quadrature.** Where a GP
+node's own inducing points are uncertain -- a deep layer, the reader of a
+`GPWalk` -- its variance was averaged over 49 to 64 nodes of the input, the
+conditional variance clamped at zero node by node. `GPOptions(deep_moments=)`
+now names the way, from the research report on the expected kernel's
+closure: `"hinge"` (the default for a new model) takes the same clamped
+average in closed form, `"blur"` the residual at the expected kernel plus
+the spread of the mean to first order, and `"bound"` the same residual with
+the spread exact and an upper bound in place of the KL divergence, so that
+under a Gaussian likelihood, two layers and one expert the training
+objective is a lower bound on the evidence. A model saved before keeps
+`"quadrature"`. Measured on chapter 5's model, 16 experts of 100 inducing
+points, a training step on the GPU: with the Gaussian kernel 1.31 s under
+the quadrature, 0.53 s under the hinge, 0.48 s under the blur (0.25 s on the
+CPU, against 2.04 s) and 2.82 s under the bound; with the Matérn 3/2 kernel
+3.66 s, 1.45 s, 1.29 s and over 290 s. The bound's exact spread runs over
+every pair of inducing points and every pair of the kernel's Gaussian
+components, which is why it is the slowest, and why the model warns when it
+is asked for with the exponential or a Matérn kernel. The rational quadratic
+kernel and `AdditiveGP` keep the quadrature under it, with a warning, and
+`AdditiveGP` refuses the other two. The realizations take the residual the
+form reports, so the ensemble carries the reported variance -- under the
+bound 0.88 of it on a GP on a GP, short by the inducing points' own spread
+given the input, which the bound counts. The bound charges for uncertain
+inducing inputs, which is what a walk makes its reader's: on chapter 17's
+folded vein the walk trained to a reach of 0.02 under it and the deep map
+became the stationary one. A prediction batch no longer holds memory for
+quadrature nodes under the closed forms.
+* **The manual's deep nodes take the Gaussian kernel**, which the
+expected kernel reads as one Gaussian where a Matérn kernel is eight:
+chapter 5's outer GP, chapter 16's rock GP and both of chapter 17's short
+GPs, and the chapters run under the new default. On the GPU chapter 5's
+training block takes 99 s under the hinge against 189 s under the
+quadrature; in chapter 16 the scores move by hundredths; in chapter 17
+the deep model still wins on every score (IoU 0.801 against 0.769) and the
+stationary model now breaks the vein into two bodies.
+* **`AdditiveGP` is internal in the catalogue**, so a program building
+Networks from it no longer offers it; it stays importable, for saved models.
+It averages its kernels over the dimensions where the expected kernel and
+every closed form multiply them, and nothing uses it.
+* **A training step rebuilt under a new setting trains on that setting's
+objective.** `_training_elbo` and `_log_lik` were traced functions of their
+own, keyed on their arguments alone, so a step rebuilt after a setting
+changed on a live model -- the propagation, the full variance -- kept
+reading the old setting's objective: the log read −861.94 where the new
+setting's was −764.38. They are traced as part of the step now.
+* **`CategoricalGaussianIndicator` reports a probability.** Its `predict` took
+the other categories' "negative" term from the normal *density* where the
+formula asks for the probability of a negative value, and `log_lik` always
+took it from the CDF. The density left a `log(sd)` in each category's score and
+largely cancelled what the other columns said against it. Every prediction of
+this likelihood since at least 2022 is affected, and the columns that move are
+`probability`, `entropy`, `uncertainty` and `indicator_predicted`, plus
+`predicted` and `proportions` where a label flips. Training, the bound, `mean`,
+`variance`, the realizations and `divided` do not move, so neither do
+refinement's cuts or anything a metal reads. `HierarchicalGaussianIndicator`
+was already right. Predictions must be redone to change: on points, the new
+probability can also be computed from the stored `indicator_mean` and
+`indicator_variance`.
+
+Measured on chapters 6 and 16, grid and held-out sites. Labels flip at 0.6% and
+0.8% of the grid and at 2 and 1 of 100 held-out sites, every flip the `log(sd)`
+term's. Held-out accuracy goes from 0.600 to 0.620 and from 0.690 to 0.680.
+Stated confidence goes from 0.544 to 0.782 and from 0.551 to 0.821, so **the
+probabilities were too low on average and are now too high on both**: over
+0.95, the call is right 82% and 85% of the time. The Brier score goes from
+0.568 to 0.596 on chapter 6 and from 0.476 to 0.464 on chapter 16, the log
+score from 1.078 to 1.270 and from 0.954 to 0.882. Figures
+`06-jura-probability.png` and `16-rock-maps.png` regenerated.
+
+
 ## version 0.9.14
 * **`predict_measurements` sizes its answer by the variable's columns.** Since
 0.9.11, when it began placing batches by their rows, it allocated one column
