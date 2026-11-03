@@ -35,6 +35,10 @@ training block takes 99 s under the hinge against 189 s under the
 quadrature; in chapter 16 the scores move by hundredths; in chapter 17
 the deep model still wins on every score (IoU 0.801 against 0.769) and the
 stationary model now breaks the vein into two bodies.
+* **`AdditiveGP` is internal in the catalogue**, so a program building
+Networks from it no longer offers it; it stays importable, for saved models.
+It averages its kernels over the dimensions where the expected kernel and
+every closed form multiply them, and nothing uses it.
 * **A training step rebuilt under a new setting trains on that setting's
 objective.** `_training_elbo` and `_log_lik` were traced functions of their
 own, keyed on their arguments alone, so a step rebuilt after a setting

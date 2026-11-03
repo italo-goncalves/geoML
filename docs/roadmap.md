@@ -1597,7 +1597,8 @@ What it leaves open, each its own item when taken up:
   quadrature it is read as the product kernel, which is not its kernel (the
   item "Check `AdditiveGP`'s realizations" above is the same mismatch).
   Refused under `"hinge"` and `"blur"`, the quadrature with a warning under
-  `"bound"`. Not used in practice: a candidate for deprecation.
+  `"bound"`. Not used in practice: internal in the catalogue since 0.10.0,
+  a candidate for deprecation.
 - *The rational quadratic under `"bound"`* takes the quadrature, with a
   warning: its 48 components and constant part make 1176 pairs.
 - *Several outputs* share the input and the inducing points, so their

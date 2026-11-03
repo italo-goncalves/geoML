@@ -736,7 +736,7 @@ def _conditioned_builds():
     """`(class, args, kwargs, facts)`: each condition a declaration states,
     built true and false. The facts are what no argument says."""
     builds = []
-    for cls in (latent.BasicGP, latent.AdditiveGP, latent.UncertainInputGP,
+    for cls in (latent.BasicGP, latent.UncertainInputGP,
                 latent.MultiStructureGP):
         for fixed in (True, False):
             args, kwargs = _calls(cls)[0]

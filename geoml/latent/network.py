@@ -7426,7 +7426,7 @@ BasicGP._catalogue = _declared(
     requires=True, label="GP", **_GP)
 AdditiveGP._catalogue = _declared(
     "latent", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
-    requires=True, label="Additive GP", **_GP)
+    requires=True, label="Additive GP", stability="internal", **_GP)
 UncertainInputGP._catalogue = _declared(
     "latent", _ONE_PARENT, {"rule": "param", "param": "size"}, "parents",
     requires=True, label="Uncertain-input GP", stability="experimental",
