@@ -1,3 +1,14 @@
+## version 0.10.2
+* **`models.score_measurements(model, data)` scores a model against the
+measurements a container holds** -- the table `cross_validate` returns
+(`n`, `rmse`, `mae`, `bias`, `crps`, `goodness`, per variable and
+component), without the folds. The measurement samples are drawn and
+folded into counts and sums a batch of locations at a time, as
+`cross_validate` scores its folds, so no more than a batch of them is held
+whatever the container's size; only the measured locations named by
+`where` are drawn, and `by_expert=True` draws them an expert group at a
+time. In the catalogue's workflow as `predict.score`. GeoScape's item 50.
+
 ## version 0.10.1
 * **A prediction by expert writes the PITs and the warped values.**
 `predict_by_expert` predicted each group with the measurement check off, so

@@ -291,8 +291,10 @@ in the catalogue.
   them.
 - **Validation.** `PointData.spatial_k_fold` writes folds that resemble the
   real prediction task, `models.cross_validate` scores the model out of
-  fold, and `models.conformalize` recalibrates the intervals. In-sample scores
-  flatter; only out-of-fold ones speak for the ground between samples.
+  fold, and `models.conformalize` recalibrates the intervals.
+  `models.score_measurements` gives the same scores for a model's draws at
+  any measured container -- a validation set, or the training data. In-sample
+  scores flatter; only out-of-fold ones speak for the ground between samples.
 - **Block models.** A `BlockSet3D` refined by `models.refine`: predict
   coarse, split only the blocks the prediction's surface runs through and
   whose realizations agree on it -- their coherence, at least 0.2 and
