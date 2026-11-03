@@ -3629,6 +3629,9 @@ class VGPNetwork(_GPModel):
         whose set holds `coverage` of its weight, then the union of its
         leading experts' sets, and its own only where neither does.
 
+        Where `newdata` holds measurements, the `pit_*` and `warped_*`
+        metadata are written at the locations visited, as by `predict`.
+
         Parameters
         ----------
         newdata
@@ -3664,6 +3667,16 @@ class VGPNetwork(_GPModel):
             and the largest share of weight left out at each location, NaN
             where none was predicted.
         """
+        return self._predict_by_expert(newdata, n_sim, coverage, neighbours,
+                                       include_noise, grouping, where, slots,
+                                       pack)
+
+    def _predict_by_expert(self, newdata, n_sim=None, coverage=0.99,
+                           neighbours=8, include_noise=True, grouping="home",
+                           where=None, slots=True, pack=True,
+                           check_measurements=True):
+        """The body of :meth:`predict_by_expert`; `cross_validate` calls it
+        with the check off, taking its own at its own node count."""
         mask = _where_mask(newdata, where)
         groups, entered, sizes, left_out = self._expert_groups(
             newdata, mask, coverage, neighbours, grouping, slots, pack)
@@ -3674,7 +3687,7 @@ class VGPNetwork(_GPModel):
             for done, (key, locs) in enumerate(groups):
                 with entered(key):
                     self._predict(newdata, n_sim, include_noise, locs,
-                                  check_measurements=False)
+                                  check_measurements=check_measurements)
                 report(done + 1)
         single = len(sizes) == 1
         return dict(subsets=[g[0][0] if single else g[0] for g in groups],
@@ -4912,7 +4925,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                 else:
                     fold_model.train_full(max_iter=iterations)
                 if method == "by_expert":
-                    fold_model.predict_by_expert(oof, n_sim, where=held)
+                    fold_model._predict_by_expert(
+                        oof, n_sim, where=held, check_measurements=False)
                 else:
                     fold_model._predict(oof, n_sim, True, held,
                                         check_measurements=False)
