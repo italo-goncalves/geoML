@@ -17,7 +17,8 @@
 # ProjectedVGP stays out on purpose: importable for old saves, unadvertised
 # until its latent side (geoml.latent.fourier) earns tests.
 __all__ = ["GP", "GPEnsemble", "Normalizer", "StructuralField", "GPOptions",
-           "VGPNetwork", "refine", "cross_validate", "conformalize",
+           "VGPNetwork", "refine", "cross_validate", "score_measurements",
+           "conformalize",
            "ConformalCalibration"]
 
 import numpy as np
@@ -3673,8 +3674,8 @@ class VGPNetwork(_GPModel):
 
     def _predict_by_expert(self, newdata, n_sim=None, coverage=0.99,
                            neighbours=8, include_noise=True, grouping="home",
-                           where=None, slots=True, pack=True,
-                           check_measurements=True):
+                           where=None, slots: "bool | int" = True,
+                           pack=True, check_measurements=True):
         """The body of :meth:`predict_by_expert`; `cross_validate` calls it
         with the check off, taking its own at its own node count."""
         mask = _where_mask(newdata, where)
@@ -4987,6 +4988,86 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
 
     return oof, _pd.DataFrame(rows)
 
+
+def score_measurements(model: VGPNetwork, data: "_data._SpatialData",
+                       n_sim: int = 20, n_nodes: int = 32,
+                       where: _types.Where = None, by_expert: bool = False,
+                       expert_options: "dict[str, _Any] | None" = None
+                       ) -> _pd.DataFrame:
+    """Score a model's measurement samples against the measurements a
+    container holds.
+
+    The samples are drawn a batch of locations at a time, as
+    :meth:`VGPNetwork.measurement_batches` yields them, and folded into
+    counts and sums as they come, so no more than a batch of them is held
+    whatever the size of `data`. The scores are those
+    :func:`cross_validate` reports, with the same arithmetic: on data the
+    model was trained from they are in-sample, on data it never saw they
+    are held out. Only the measured locations are drawn. Categorical
+    variables get no rows, nor does a variable `data` does not hold, nor a
+    component measured at none of the locations scored.
+
+    Parameters
+    ----------
+    model
+        The trained model.
+    data
+        Locations holding measurements of the model's variables, as points.
+    n_sim
+        Latent realizations per location.
+    n_nodes
+        Equal-share noise values per realization.
+    where
+        The locations to score -- one boolean per location, their indices,
+        or the name of a boolean metadata column; all of them by default.
+    by_expert
+        Draw each group of locations from only the experts active there,
+        as :meth:`VGPNetwork.predict_by_expert` groups them.
+    expert_options
+        Keywords for the grouping under `by_expert`, as
+        :meth:`VGPNetwork.measurement_batches` takes them.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per scored component: `n` (the measurements scored),
+        `rmse`, `mae`, `bias` (the samples' mean minus the measurement),
+        `crps`, `goodness`, `variable` and `component`.
+
+    See Also
+    --------
+    cross_validate : the same scores, out of fold.
+    VGPNetwork.predict_measurements : the samples, returned whole.
+    """
+    truths = {v: _measured_truth(data.variables[v])
+              for v, _ in model._measured_variables() if v in data.variables}
+    # only the measured rows are drawn: the rest have nothing to score
+    mask = _where_mask(data, where)
+    measured = _np.any([has.any(axis=1) for _, has, _ in truths.values()]
+                       or [_np.zeros(data.n_data, dtype=bool)], axis=0)
+    mask = measured if mask is None else mask & measured
+    columns = ["n", "rmse", "mae", "bias", "crps", "goodness", "variable",
+               "component"]
+    if not mask.any():
+        return _pd.DataFrame(columns=columns)
+    acc = {}
+    for batch, samples in model.measurement_batches(
+            data, n_sim=n_sim, n_nodes=n_nodes, where=mask,
+            by_expert=by_expert, expert_options=expert_options):
+        for v, sample in samples.items():
+            if v not in truths:
+                continue
+            y_true, has_value, components = truths[v]
+            for c, component in enumerate(components):
+                here = has_value[batch, c]
+                if not here.any():
+                    continue
+                _accumulate(acc.setdefault((v, component), _fresh_scores()),
+                            y_true[batch, c][here], sample[here, c, :])
+    return _pd.DataFrame([dict(_scores_from(a), variable=v,
+                               component=component)
+                          for (v, component), a in acc.items()],
+                         columns=columns)
 
 def _fresh_scores():
     """An empty accumulator for one component's held-out scores.

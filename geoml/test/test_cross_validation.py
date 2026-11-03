@@ -321,6 +321,65 @@ def test_the_scores_do_not_depend_on_the_batch_size(walker_cv, monkeypatch):
         narrow[columns].to_numpy(dtype=float), rtol=1e-12, atol=0.0)
 
 
+# --------------------------------------------------------------------------- #
+# the scores of a prediction onto measurements (GeoScape's item 50)
+# --------------------------------------------------------------------------- #
+def _scores_by_hand(model, walker, rows):
+    samples = model.predict_measurements(walker, n_sim=4, n_nodes=8)["V"]
+    y_true, has_value = walker.variables["V"].get_measurements()
+    keep = rows & (np.asarray(has_value)[:, 0] == 1)
+    truth = np.asarray(y_true)[keep, 0]
+    draw = samples[keep, 0, :]
+    point = draw.mean(axis=1)
+    return dict(n=int(keep.sum()), rmse=geoml.metrics.rmse(truth, point),
+                mae=np.mean(np.abs(point - truth)),
+                bias=np.mean(point - truth),
+                crps=geoml.metrics.crps(truth, draw))
+
+
+@pytest.mark.parametrize("where", [None, "mask", "name"])
+def test_the_scores_are_those_of_the_whole_samples(walker_cv, where):
+    """Streamed and folded a batch at a time, the scores are the ones the
+    samples returned whole give, at the locations `where` names."""
+    model, walker, _, _ = walker_cv
+    rows = np.ones(walker.n_data, dtype=bool)
+    if where is not None:
+        rows = np.arange(walker.n_data) % 3 == 0
+        walker.add_metadata("scored", rows)
+    argument = {None: None, "mask": rows, "name": "scored"}[where]
+    scores = geoml.models.score_measurements(model, walker, n_sim=4,
+                                             n_nodes=8, where=argument)
+    assert list(scores.columns) == ["n", "rmse", "mae", "bias", "crps",
+                                    "goodness", "variable", "component"]
+    row = scores.iloc[0]
+    assert len(scores) == 1 and row["variable"] == "V"
+    for key, value in _scores_by_hand(model, walker, rows).items():
+        np.testing.assert_allclose(row[key], value, rtol=1e-10)
+    assert 0.0 <= row["goodness"] <= 1.0
+
+
+def test_the_streamed_scores_do_not_depend_on_the_batch_size(
+        walker_cv, monkeypatch):
+    model, walker, _, _ = walker_cv
+    monkeypatch.setattr(model.options, "prediction_batch_size", 100000)
+    wide = geoml.models.score_measurements(model, walker, n_sim=4, n_nodes=8)
+    monkeypatch.setattr(model.options, "prediction_batch_size", 37)
+    narrow = geoml.models.score_measurements(model, walker, n_sim=4,
+                                             n_nodes=8)
+    columns = ["rmse", "mae", "bias", "crps", "goodness", "n"]
+    np.testing.assert_allclose(wide[columns].to_numpy(dtype=float),
+                               narrow[columns].to_numpy(dtype=float),
+                               rtol=1e-12, atol=0.0)
+
+
+def test_locations_with_no_measurement_score_nothing(walker_cv):
+    model = walker_cv[0]
+    target = geoml.data.Grid2D(start=[10, 10], n=[5, 5], step=[20, 20])
+    scores = geoml.models.score_measurements(model, target, n_sim=2,
+                                             n_nodes=2)
+    assert scores.empty and "rmse" in scores.columns
+
+
 def test_a_request_that_fits_is_left_alone(walker_cv):
     model, walker, _, _ = walker_cv
     just_under = int(

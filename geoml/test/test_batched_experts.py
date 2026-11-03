@@ -515,6 +515,20 @@ def test_the_weights_are_carried_to_the_locations_in_chunks(monkeypatch):
     np.testing.assert_array_equal(whole[3], chunked[3])
 
 
+def test_scores_by_expert_are_the_scores_at_full_coverage():
+    """GeoScape's item 50, by expert: with every expert in its one set, the
+    draws are the draws, and so are their scores."""
+    m, data, _ = _measured(150)
+    a = geoml.models.score_measurements(m, data, n_sim=5, n_nodes=4)
+    b = geoml.models.score_measurements(
+        m, data, n_sim=5, n_nodes=4, by_expert=True,
+        expert_options=dict(coverage=1.0, slots=False))
+    assert a["n"].item() == 150
+    columns = ["n", "rmse", "mae", "bias", "crps", "goodness"]
+    np.testing.assert_array_equal(a[columns].to_numpy(dtype=float),
+                                  b[columns].to_numpy(dtype=float))
+
+
 def test_measurements_by_expert_are_the_measurements_at_full_coverage():
     """GeoScape's item 46: measurement draws by expert, which with every
     expert active are the draws, bit for bit by set and to rounding in

@@ -72,6 +72,7 @@ FUNCTIONS = {
     "geoml.models.VGPNetwork.open": "workflow",
     "geoml.models.refine": "workflow",
     "geoml.models.cross_validate": "workflow",
+    "geoml.models.score_measurements": "workflow",
     "geoml.data.containers.PointData.assign_from_data": "workflow",
     "geoml.data.variables.ContinuousVariable.set_cutoffs": "workflow",
     "geoml.data.meshsets.MeshSet": "workflow",
@@ -109,6 +110,9 @@ WORKFLOW = {
         "measurements": "geoml.models.VGPNetwork.predict_measurements",
         # what a node inside the tree says, as a latent variable
         "node": "geoml.models.VGPNetwork.predict_node",
+        # the scores of a prediction onto measurements, the samples drawn
+        # and folded a batch at a time
+        "score": "geoml.models.score_measurements",
         "refine": "geoml.models.refine",
         "reach": "geoml.data.containers.PointData.assign_from_data",
         "cutoffs": "geoml.data.variables.ContinuousVariable.set_cutoffs",
