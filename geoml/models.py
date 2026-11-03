@@ -1541,9 +1541,10 @@ class VGPNetwork(_GPModel):
                 out[i] = piece
         return out
 
-    # traced inside the training step (`_training_step`), which is rebuilt
-    # when the setting changes; a `tf.function` of its own kept the first
-    # setting's graph and answered under every later one
+    # traced by the training step's own `tf.function` of it
+    # (`_training_step`), rebuilt when the setting changes; one `tf.function`
+    # for the model kept the first setting's graph and answered under every
+    # later one
     def _training_elbo(self, x, y, has_value, training_inputs,
                        x_dir=None, directions=None, y_dir=None,
                        has_value_directions=None, x_var=None,
@@ -1800,10 +1801,16 @@ class VGPNetwork(_GPModel):
                 has_value_directions=_tf.constant(
                     self.has_value_dir, _tf.float64))
 
+        # the objective as a function of this step's own: a step whose first
+        # call creates the optimizer's slots is traced twice, and the
+        # objective once for both; built anew with the step, so a new setting
+        # traces it afresh
+        objective = _tf.function(self._training_elbo)
+
         @_tf.function(reduce_retracing=True)
         def step(x, y, has_value, x_var):
             with _tf.GradientTape() as tape:
-                loss = - self._training_elbo(
+                loss = - objective(
                     x, y, has_value, training_inputs, x_var=x_var,
                     samples=self.options.training_samples,
                     jitter=self.options.jitter,
