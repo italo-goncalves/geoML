@@ -1,3 +1,14 @@
+## version 0.10.1
+* **A prediction by expert writes the PITs and the warped values.**
+`predict_by_expert` predicted each group with the measurement check off, so
+where the target held measurements it wrote no `pit_<variable>[_<component>]`
+and no `warped_<variable>_<i>`, which `predict` writes -- the check was a
+second pass over the network with every expert at once until 0.9.12, and has
+come from the prediction's own draws since. It writes both now, at the
+locations visited, and a prediction finished in parts fills them in parts.
+`cross_validate(method="by_expert")` keeps writing its own, out of fold.
+GeoScape's item 49.
+
 ## version 0.10.0
 * **A deep GP node takes its variance without the quadrature.** Where a GP
 node's own inducing points are uncertain -- a deep layer, the reader of a

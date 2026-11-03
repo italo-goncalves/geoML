@@ -378,6 +378,42 @@ def test_a_prediction_by_expert_sizes_its_batches_to_the_device(
                                rtol=1e-12, atol=1e-14)
 
 
+def _measured(n=200):
+    """The first `n` of the model's own data, measurements included."""
+    m = _model()
+    m.train_full(10)
+    return m, m.data[np.arange(n)], m.data[np.arange(n)]
+
+
+def test_prediction_by_expert_records_where_each_measurement_fell():
+    """GeoScape's item 49: the columns `predict` writes, by expert too."""
+    m, a, b = _measured()
+    m.predict(a, n_sim=5)
+    m.predict_by_expert(b, n_sim=5, coverage=1.0, slots=False)
+    pit = b.get_metadata("pit_v")
+    assert np.all((pit >= 0.0) & (pit <= 1.0))
+    # with every expert in its one set, the prediction is predict's bit for
+    # bit, and so are the samples the PITs are read from
+    np.testing.assert_array_equal(pit, a.get_metadata("pit_v"))
+    np.testing.assert_array_equal(b.get_metadata("warped_v_0"),
+                                  a.get_metadata("warped_v_0"))
+
+
+def test_prediction_by_expert_fills_the_measurement_columns_in_parts():
+    m, whole, parts = _measured()
+    m.predict_by_expert(whole, n_sim=5, pack=False)
+    first = np.arange(parts.n_data) < 70
+    m.predict_by_expert(parts, n_sim=5, where=first, pack=False)
+    assert np.all(np.isnan(parts.get_metadata("pit_v")[~first]))
+    assert np.all(np.isfinite(parts.get_metadata("pit_v")[first]))
+    m.predict_by_expert(parts, n_sim=5, where=parts.unpredicted(),
+                        pack=False)
+    np.testing.assert_allclose(parts.get_metadata("pit_v"),
+                               whole.get_metadata("pit_v"), atol=1e-12)
+    np.testing.assert_array_equal(parts.get_metadata("warped_v_0"),
+                                  whole.get_metadata("warped_v_0"))
+
+
 def test_prediction_by_expert_takes_where_and_resumes():
     m = _model()
     m.train_full(10)

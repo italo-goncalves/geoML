@@ -3226,6 +3226,22 @@ sit at rows of small variance.
 
 ---
 
+**M — Experts with fixed weights** (requested 2026-11-03). Today
+an expert's weight at a location is read off its own prediction there:
+`_GPNode.get_expert_weights` gives each expert its explained variance over
+the variance it leaves, normalized over the experts (`_blend`; under the
+second moment `1 - explained`). The weights therefore move with training
+and with the input's uncertainty, and every expert is predicted at every
+location to compute them. Fixed weights would be a function of the
+location alone, set when the experts are built -- a partition of unity over
+the experts' regions -- so that a location reads only the experts whose
+weight is not zero there. To settle before building: what fixes them (the
+inducing points' clusters, a taper over the overlap `experts()` and
+`grid_experts` already make), whether they ride on the root as the expert
+sets do, how they meet slots and prediction by expert, what a save records,
+and the gate against today's weights (held-out scores, seams in a map, time
+and memory on a many-expert model).
+
 ## 2. Fitting and initialization
 
 The theme is measured rather than assumed: **training does not leave the
