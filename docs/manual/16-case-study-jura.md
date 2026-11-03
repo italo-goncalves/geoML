@@ -93,7 +93,11 @@ the real space, which is chapter 5's argument applied to a contact rather
 than to a grade. The rock GP reading the walk is isotropic: the walk
 already bends the space, and a range per direction on top of it would be a
 second way to say the same thing, which training resolves into a
-stretched, overconfident reader.
+stretched, overconfident reader. It also takes the Gaussian kernel. A GP
+reading the walk averages its kernel over where the walk may have carried
+each point, and that average is one closed-form term for the Gaussian
+kernel and eight for a Matérn one, so the same model trains nearly three
+times faster.
 
 ```python
 displacement = geoml.latent.BasicGP(
@@ -102,7 +106,7 @@ displacement = geoml.latent.BasicGP(
 walked = geoml.latent.GPWalk(displacement, n_steps=5)
 
 rock_gp = geoml.latent.BasicGP(
-    walked, size=len(rocks), kernel=geoml.kernels.Matern32(),
+    walked, size=len(rocks), kernel=geoml.kernels.Gaussian(),
     isotropic=True)
 ```
 

@@ -2,7 +2,7 @@
 
 A category holds a location where its own latent value is positive and every
 other category's is negative. Both are probabilities of a sign under the
-latent marginals, so a density has no place in the formula: until 0.9.15 the
+latent marginals, so a density has no place in the formula: before 0.10.0 the
 negative side was one, which left a `log(sd)` in the winner's score.
 """
 import numpy as np

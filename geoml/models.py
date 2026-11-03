@@ -133,6 +133,8 @@ class GPOptions(_ModelOptions):
     full_variance = False
     # a model saved before 0.9.8 computes its quadrature in double precision
     quadrature_precision = "float64"
+    # a model saved before 0.10.0 takes the conditioned quadrature
+    deep_moments = "quadrature"
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -146,7 +148,9 @@ class GPOptions(_ModelOptions):
                  quadrature_memory: float | None = None,
                  full_variance: bool = True,
                  quadrature_precision: _Literal["float64", "float32"]
-                 | None = None):
+                 | None = None,
+                 deep_moments: _Literal["hinge", "blur", "bound",
+                                        "quadrature"] = "hinge"):
         """
         Configuration of Gaussian process models.
 
@@ -291,14 +295,16 @@ class GPOptions(_ModelOptions):
             (the default since 0.9.4; a model saved before it keeps what it
             was trained under). A GP node reading another node's output --
             a deep layer, a `GPWalk` -- takes the second moment of its input
-            with its own inducing inputs uncertain too, and draws its
+            with its own inducing inputs uncertain too, by the form
+            `deep_moments` names, and draws its
             realizations through its parent's; every GP node's realizations
             carry the variance its inducing points leave out, by random
             features, and every expert of a node draws from one prior draw,
             so the ensemble's variance is the reported one where the
             realizations used to carry the explained part alone. The
-            prediction integrates that residual analytically, and a bound
-            trained on realizations draws each location's marginal. Off,
+            prediction integrates that residual analytically, and an
+            objective trained on realizations draws each location's
+            marginal. Off,
             the moments and realizations of 0.9.3. The residual is drawn by
             random features of the node's kernel, which the Gaussian,
             rational quadratic, exponential and Matérn kernels have; the
@@ -322,6 +328,43 @@ class GPOptions(_ModelOptions):
             rational quadratic kernel's quadrature stays in double. `None`
             takes `"float32"` where TensorFlow sees a GPU and `"float64"`
             elsewhere, decided where the model runs.
+        deep_moments : {"hinge", "blur", "bound", "quadrature"}
+            How a GP node whose own inducing inputs are uncertain -- a deep
+            layer, the reader of a `GPWalk` -- takes the variance of its
+            output, under `full_variance` and the expected kernel.
+            `"quadrature"` (what a model saved before 0.10.0 keeps) averages
+            the conditional variance, clamped at zero, over 49 to 64 nodes
+            of the input. The other three take no nodes. `"hinge"` (the
+            default) averages the same clamped variance in closed form, the
+            variance taken as Gaussian over the input. `"blur"` takes `1 - l
+            (K + D)^-1 lᵀ` at the expected kernel `l` and adds the spread of
+            the mean to first order. `"bound"` takes the same residual and
+            the spread of the mean exactly, with the KL divergence replaced
+            by an upper bound on it, so that under a Gaussian likelihood,
+            two layers and one expert the training objective is a lower
+            bound on the evidence; elsewhere it is a closure, as the other
+            forms are. The exact spread is taken over every pair of inducing
+            points, elementwise, at every location and for every pair of the
+            kernel's Gaussian components -- one for the Gaussian kernel, 36
+            for the exponential and the Matérn kernels -- so `"bound"` is
+            the slowest form, and with those kernels slower than the
+            quadrature by far; the model warns. Measured on the Walker Lake
+            GP on a GP, 16 experts of 100 inducing points, the Gaussian
+            kernel: a training step of 0.5 s under `"hinge"` and `"blur"`,
+            1.3 s under the quadrature, 2.8 s under `"bound"`. The
+            realizations follow the form: under the closed forms every draw
+            takes the residual the form reports, so the ensemble carries the
+            reported variance -- under `"bound"` short of it by the inducing
+            points' own spread given the input, which the bound counts and a
+            draw at the conditioned kernel does not (measured 0.88 and 0.95
+            of the reported variance on a GP on a GP and on a GP reading the
+            coordinates beside one). The bound charges for uncertain inducing
+            inputs, and a walk is what makes its reader's uncertain: under
+            `"bound"` a walk may train to nothing (on the manual's folded
+            vein its reach went to 0.02, and the deep map to the stationary
+            one). The rational quadratic kernel and
+            `AdditiveGP` keep the quadrature under `"bound"`, with a
+            warning, and `AdditiveGP` refuses `"hinge"` and `"blur"`.
         """
         if quadrature_precision not in (None, "float64", "float32"):
             raise ValueError(
@@ -342,6 +385,10 @@ class GPOptions(_ModelOptions):
                 "expert's own chain, which is the independent rule; pass "
                 "expert_propagation='independent', or propagation='marginal' "
                 "for the consensus")
+        if deep_moments not in _latent.network._DEEP_MOMENT_FORMS:
+            raise ValueError(
+                "deep_moments must be 'bound', 'hinge', 'blur' or "
+                "'quadrature', got %r" % (deep_moments,))
         super().__init__(verbose, prediction_batch_size,
                          training_batch_size)
         self.jitter = jitter
@@ -355,6 +402,7 @@ class GPOptions(_ModelOptions):
         self.quadrature_memory = quadrature_memory
         self.full_variance = full_variance
         self.quadrature_precision = quadrature_precision
+        self.deep_moments = deep_moments
 
 
 class _Convergence:
@@ -1236,6 +1284,7 @@ class VGPNetwork(_GPModel):
             full_variance=self._full_variance(),
             memory=self._quadrature_memory(),
             precision=self._quadrature_precision(),
+            deep_moments=getattr(self.options, "deep_moments", "quadrature"),
             rows=current.rows if rows is None else int(rows))
 
     def _full_variance(self):
@@ -1395,6 +1444,13 @@ class VGPNetwork(_GPModel):
                         "kernel needs: take Gaussian, Exponential, Matern32, "
                         "Matern52 or RationalQuadratic"
                         % (name, type(kernel).__name__))
+                elif self._full_variance() and node._READS_CHAIN \
+                        and node._CONDITIONED_SECOND_MOMENT \
+                        and any(isinstance(p, (network._GPNode,
+                                               network.GPWalk))
+                                for p in node.get_unique_parents()):
+                    # its own inducing points are uncertain
+                    self._check_deep_moments(node, name)
             elif isinstance(node, network.GPWalk) and not \
                     network._expected_kernel_supported(node.field.kernel):
                 # the walk reads its field where the walkers have been
@@ -1415,6 +1471,40 @@ class VGPNetwork(_GPModel):
                     "%s is a random input whose covariance between "
                     "locations the expected kernel does not carry; a GP "
                     "node may not read it under propagation='joint'" % name)
+
+    def _check_deep_moments(self, node, name):
+        """Refuses `GPOptions.deep_moments` "hinge" and "blur" at an
+        `AdditiveGP` whose inducing points are uncertain, and warns where
+        "bound" falls back on the quadrature (`BasicGP._deep_form`) or
+        takes a kernel of several components."""
+        form = getattr(self.options, "deep_moments", "quadrature")
+        if form in ("hinge", "blur") \
+                and isinstance(node, _latent.network.AdditiveGP):
+            raise ValueError(
+                "%s averages its kernels over the dimensions, which the "
+                "%r deep moments do not take: set deep_moments='bound' or "
+                "'quadrature'" % (name, form))
+        if form == "bound" and node._form_for(form) == "quadrature":
+            warnings.warn(
+                "%s has no closed form for the bound's deep moments "
+                "(deep_moments='bound'), %s, and takes the quadrature"
+                % (name, "its kernels being averaged"
+                   if isinstance(node, _latent.network.AdditiveGP)
+                   else "its %s kernel's components moving with a trained "
+                        "parameter" % type(node.kernel).__name__),
+                stacklevel=4)
+        elif form == "bound" and type(node.kernel) is not _kr.Gaussian:
+            # 36 pairs of components against the Gaussian's one: measured
+            # on chapter 5's model with the Matern32 kernel, a step over 8x
+            # the quadrature's on the CPU and over 75x on the GPU
+            warnings.warn(
+                "%s takes the bound's deep moments (deep_moments='bound') "
+                "with the %s kernel, whose exact spread runs over 36 pairs "
+                "of its Gaussian components at every pair of inducing "
+                "points: training is many times slower than under the "
+                "quadrature. The Gaussian kernel takes one pair; "
+                "deep_moments='hinge' takes none"
+                % (name, type(node.kernel).__name__), stacklevel=4)
 
     def _refresh(self, jitter):
         # a parent several leaves share is refreshed once
@@ -1451,7 +1541,9 @@ class VGPNetwork(_GPModel):
                 out[i] = piece
         return out
 
-    @_tf.function
+    # traced inside the training step (`_training_step`), which is rebuilt
+    # when the setting changes; a `tf.function` of its own kept the first
+    # setting's graph and answered under every later one
     def _training_elbo(self, x, y, has_value, training_inputs,
                        x_dir=None, directions=None, y_dir=None,
                        has_value_directions=None, x_var=None,
@@ -1481,7 +1573,6 @@ class VGPNetwork(_GPModel):
         self.kl_div.assign(kl)
         return elbo - kl + log_prior
 
-    @_tf.function
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
@@ -5790,7 +5881,6 @@ class Normalizer(_GPModel):
 
 
 class ProjectedVGP(VGPNetwork):
-    @_tf.function
     def _log_lik(self, x, y, has_value, training_inputs, x_var=None,
                  samples=20, seed=0):
         with _tf.name_scope("batched_elbo"):
