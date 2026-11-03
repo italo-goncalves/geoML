@@ -1,3 +1,28 @@
+## version 0.9.15
+* **`CategoricalGaussianIndicator` reports a probability.** Its `predict` took
+the other categories' "negative" term from the normal *density* where the
+formula asks for the probability of a negative value, and `log_lik` always
+took it from the CDF. The density left a `log(sd)` in each category's score and
+largely cancelled what the other columns said against it. Every prediction of
+this likelihood since at least 2022 is affected, and the columns that move are
+`probability`, `entropy`, `uncertainty` and `indicator_predicted`, plus
+`predicted` and `proportions` where a label flips. Training, the bound, `mean`,
+`variance`, the realizations and `divided` do not move, so neither do
+refinement's cuts or anything a metal reads. `HierarchicalGaussianIndicator`
+was already right. Predictions must be redone to change: on points, the new
+probability can also be computed from the stored `indicator_mean` and
+`indicator_variance`.
+
+Measured on chapters 6 and 16, grid and held-out sites. Labels flip at 0.6% and
+0.8% of the grid and at 2 and 1 of 100 held-out sites, every flip the `log(sd)`
+term's. Held-out accuracy goes from 0.600 to 0.620 and from 0.690 to 0.680.
+Stated confidence goes from 0.544 to 0.782 and from 0.551 to 0.821, so **the
+probabilities were too low on average and are now too high on both**: over
+0.95, the call is right 82% and 85% of the time. The Brier score goes from
+0.568 to 0.596 on chapter 6 and from 0.476 to 0.464 on chapter 16, the log
+score from 1.078 to 1.270 and from 0.954 to 0.882. Figures
+`06-jura-probability.png` and `16-rock-maps.png` regenerated.
+
 ## version 0.9.14
 * **`predict_measurements` sizes its answer by the variable's columns.** Since
 0.9.11, when it began placing batches by their rows, it allocated one column

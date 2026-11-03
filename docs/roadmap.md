@@ -2647,6 +2647,65 @@ own 0.603 -- a near miss, which the anisotropy and the separate share GP
 closed; the plain chain was 58.6 / 5.58 / 8.46 there, so the configuration
 helped the single likelihood most.
 
+**L — `LithologicalControl`: the logged rock type as an observation of the
+population** (requested 2026-10-31; proposed, nothing measured yet). Reading
+a rock type and a `LikelihoodMixture`'s shares off one latent node ties the
+*field*, and the effect is weak. Given the share columns `g`, the rock `c` and
+the population are independent:
+`log p(c | g) + log Σ_k π_k(g) exp(t_k)`, with `t_k` population k's expected
+log-density of the metals. The rock reaches a row's population only by moving
+`g`, and three things blunt that. A row's log-odds of population is
+`Δlog π + Δt`, and `Δt` likely dominates at an assayed row: in-sample agreement
+with `Code_Simple` above is 0.94 in every arm, including the one that never
+sees the rock. The mixture's own `amplitude` and `bias` let the shares' contact
+sit away from the rock's. And one field has several read-outs: a separate
+probit per column in training, `probability`, the largest column in a
+realization, a scaled softmax in the shares. With the rock on every logged
+interval, the rock's own call has recall 0.219 on Tom East and the shares
+0.555, off the same columns.
+
+This class ties the *label*: one likelihood over both variables, with a trained
+`P(c | k)`, populations by rock categories, and per row
+
+`log Σ_k π_k(g) · P(c | k) · exp(t_k)`
+
+`exp(t_k)` dropping out where a row has no assay and `P(c | k)` where it has
+no log. The rock then sits in the same sum as the metals, so it decides
+ambiguous rows' population directly, and through them each population's noise
+and warping. The rock's probability is `Σ_k E[π_k] P(c | k)` and its
+realizations come from the `population` store, so there is one contact.
+`amplitude` and `bias` stay and can no longer separate the two. An identity
+`P(c | k)` would be hard domains, forcing the rows where the log and the assay
+disagree (6% on Tom East) into the wrong population; trained, it absorbs them
+and reports how often they disagree. The number of populations need not match
+the number of categories.
+
+What it asks for:
+- **One likelihood reading two variables.** `_data_log_lik` gives each
+  likelihood its own variable and adds the results, and a sum inside a log does
+  not split that way. How a likelihood is named against two variables, and how
+  `predict` writes both, is the first design question; `update`,
+  `cross_validate`, `predict_measurements` and the catalogue all follow from it.
+- **Contact rows.** `is_boundary` needs a term; `log π_a + log π_b`, which
+  peaks at equal shares, is the natural candidate.
+- **The start.** `P(c | k)` starts from the clustering's overlap with the log,
+  or the population labels can switch.
+
+**Check before building**, on Tom East's tied arm: count the rows whose
+`responsibilities` change population with and without the rock. If almost none
+do, the assay decides the populations, and the class would change mainly the
+rock-only rows and the rock's contact, not the grades.
+
+**Gates**, against the tied and the metals-alone arms above, out of fold by
+hole: CRPS per metal; balanced accuracy of the rock on every logged interval;
+and the rock's probabilities against their own frequency, since the indicator
+they replace overstates its confidence (0.9.15: stated 0.821, right 0.680 on
+chapter 16). The rock type is barely predictable between holes on Tom East, so
+a large CRPS gain is not to be expected. The rock's scores in the tables above
+were taken before 0.9.15, when `predict` read a density; on chapters 6 and 16
+the fix moved under 1% of the grid's labels, and its effect on Tom East has not
+been measured.
+
 **S — Say when a heavy-tailed noise under a log-like warping has no
 finite mean** (requested 2026-10-15, after a GeoScape mixture that would
 not show its two populations; **the warning built 2026-10-16, 0.9.3**:
@@ -2817,7 +2876,9 @@ against the second moment.
   less at 16 draws and 6.0-8.4x at 4. Eager calls flatter the draws;
   traced, on the Walker model of `phase3_walker.py` (120 k-means points, two
   outputs), 88 ms a step against 20 at 4 draws, on 200 steps.
-- **Training, being measured** (stage B of that project, started
+- **Training, stopped at the user's request with 48 runs** (read 2026-11-01
+  under "The quadrature's rule should follow the input" below; stage B of
+  that project, started
   2026-10-30, Adam from one start, three seeds, one held-out scorer for
   every arm): 1, 4, 16 draws (and 64 on the folded section) against the
   joint rule, on the folded section, Walker as in `phase3_walker.py`, the
@@ -2888,6 +2949,25 @@ package read by its moments, the draws by their mixture at S = 256):
 - **On a GP on a GP it stays near the flat GP**, on both leaves and at 64
   draws. The cause is not established. Sharing `w` across draws ties the
   inducing means together (`L_s w`) and is the first thing to test.
+- **Untying the means helps by about a nat and does not close the gap**
+  (2026-11-02; `C:\Users\Public\qm\neg\site`, the prototype with one change).
+  Pseudo-data `y` and `D` shared by the draws, `q(u | Z_s) = N(K_s B_s y, K_s -
+  K_s B_s K_s)`, the form of Ober et al. 2021: a leaf's values stay at `y` while
+  their locations move, and it is a true bound. Gaussian leaf, 64 draws, seeds
+  2026, 1, 2, 11, 12, 13, against the package on the same seeds:
+
+  | Network | Package | `K_s` | Pseudo-data |
+  |---|---|---|---|
+  | GP on a GP | -9.02 | -12.32 | -11.23, worse on 6 of 6 |
+  | Beside the coordinates | -5.22, 3 of 6 in the -2 basin | -7.66, none | -6.65, one (-3.3), worse on 4 of 6 |
+
+  Held-out CRPS beside the coordinates 0.299 against the package's 0.269, CRPS
+  against the true field 0.212 against 0.186. The fit trades the hidden layer
+  for noise (0.215 against the clamp's 0.153, 0.400 against 0.279 on the GP on a
+  GP), as the research report's narrow-hidden-layer argument expects. The
+  per-draw collapse (its H) was not run: it needs the closed `E[k_i k_j | Z]`
+  and a per-draw solve at prediction, and it differs only by a freer leaf. A
+  Matérn leaf was not run on this form either; there `K_s` already ties.
 - **Cost** (the Matérn leaf beside the coordinates, the median single step,
   CPU, four threads; a `train_full` called in blocks retraces inside the
   timed window, so time single steps):
@@ -2969,6 +3049,100 @@ measurement); this keeps the work and makes it cheaper.
   levers planned after it -- the realizations' feature products and
   `k (K + D)^-1 kᵀ` in float32 -- were measured and rejected (Settled by
   measurement).
+
+**M — The quadrature's rule should follow the input** (measured 2026-11-01;
+nothing in the package changed; harness and tables in
+`C:\Users\Public\qm`, outside the repository). The models fall into two
+regimes, and one rule serves neither well. Against a Hermite grid of 31 points
+a dimension (13 in three dimensions; chapter 17's against 9, the finer one out
+of memory), at the rows an expert carries:
+
+| Model | nodes | input sd / range | nodes with `k S kᵀ` > 1 | clamp's addition / variance | spread's share | variance error, median, p95 | gradient error |
+|---|---|---|---|---|---|---|---|
+| GeoScape walk network | 64 | 0.02 | 0 | 0 | at most 0.007 | under 1e-5 | 0.6-1.5e-4 |
+| Chapter 16 | 49 | 0.05-0.07 | 3-7% | 0 | at most 0.02 | 1e-5, 3e-5 to 2e-4 | 4e-5 to 7e-4 |
+| Chapter 17 | 64 | 0.07 | 37% | 0.13 | 0.45 | 0.023, 0.31 | 0.021 |
+| Folded section, GP on a GP, 2000 steps | 49 | 0.13-0.17 | 86% | 1.2 | 0.75 | 0.020, 0.090 | 0.051 |
+| Folded section, walk, 2000 steps | 49 | 0.01-0.08 | 70% | 0.46 | 0.39 | 0.033, 0.79 | 0.042 |
+| Walker, GP on a GP, 2000 steps | 49 | 0.33-0.43 | 90% | 19 | 1.00 | 0.036, 0.26 | 0.092 |
+
+`gate_nodes.py` reported a median of 0.7% for the 7x7 grid; the medians here
+are 2-4% on the deep networks, and the tails are what that gate did not show.
+The walk's p95 is 0.10 over the larger half of the variances, so those errors
+sit at rows of small variance.
+
+- **Where the input is nearly certain the nodes are wasted.** On the GeoScape
+  walk network (`A_model`, 32 experts, two epochs of `train_by_expert` on the
+  GPU, the same seed, `_input_rule` replaced for three dimensions):
+
+  | Rule | seconds an epoch | GPU peak | bound after two epochs | parameters, against 64 nodes |
+  |---|---|---|---|---|
+  | 64 Sobol nodes | 404 | 8.3 GB | -16919.363 | |
+  | Stroud's degree 5, 14 nodes | 195 | 7.2 GB | -16919.369 | 2e-5 |
+  | The axes, degree 3, 6 nodes | 151 | 6.0 GB | -16919.337 | 4e-5 |
+
+  The bound rose 619 over those epochs. At fixed parameters the 14 nodes are
+  more accurate than the 64 (gradient 1e-5 against 1e-4). This is not the
+  rejected middle ground: the chain and the conditioning stay. Chapter 16 holds
+  at 9 nodes too (p95 1e-3, gradient 1e-3). Not tried: held-out scores, longer
+  training, prediction.
+- **The rule cannot be chosen from the input's spread alone.** Chapter 17 and
+  chapter 16 have about the same sd / range, and 14 nodes do not hold on 17
+  (p95 0.55 against the 64 nodes' 0.31). What separates them is the clamp. The
+  question left is the switch: an option a model sets, or a choice made in the
+  graph from a cheap pilot.
+- **The corners of the 7x7 grid carry nothing.** Dropping the nodes that hold
+  the last 1e-3 of the weight leaves 31 of 49. Variance p95 0.088 against 0.090,
+  0.79 against 0.79, 0.26 against 0.26 on the three deep cases, 5e-4 against
+  2e-4 on chapter 16; Walker's median alone moves, 0.036 to 0.057. Time 0.6-0.9
+  of the full grid, about 0.63 at the larger sizes. Dropping to 21 nodes starts
+  to cost on Walker.
+  Numbers move, so it is not bit-compatible.
+- **Exact arithmetic that is cheaper** (isolated calls, the same sums in one
+  chunk; a whole step not measured). On a tensor grid each Gaussian component
+  of the kernel is a product over the coordinates, so a coordinate needs its
+  own 7 nodes rather than the grid's 49 and a certain one none: 5e-16 from
+  the package's kernel, 0.69-1.0 of the time on the CPU, 0.75-0.91 on the GPU;
+  beside the coordinates, also 49 nodes against 64, 0.39-0.51, though no gain
+  at the folded section's 192 rows on the GPU. And `k S kᵀ` with a gradient by hand, the
+  forward product reused: 0.64-0.93 on either device, 3e-15 from
+  autodifferentiation. With the corners dropped, the three together are 0.39-0.44
+  on the GPU and 0.46-0.61 on the CPU with a Gaussian kernel. On chapter 16's
+  CPU, eight components under XLA, they are slower than the package, 1.2,
+  which is unexplained and comes first. The prototype's components are unrolled,
+  so its memory is not yet what the package's would be.
+- **Where the input is uncertain the bias is real and the clamp is why.**
+  Conditioned on a node the kernel `k` is larger than the expected kernel in
+  `(K + D)^-1` allows, so `k S kᵀ` passes one. After 2000 steps on the deep
+  networks it does at 70-90% of the nodes, where the variance is then zero and
+  the gradient through it is zero, and what the clamp adds is up to 19 times the
+  variance (raw, the conditional variance is far below zero). The integrand has
+  a kink, which is why a rule's polynomial degree buys little there and even
+  the 15-point grid is 32% off at the walk's p95. This is the model rather than
+  the arithmetic, and it is the larger question: chapter 17 is in this regime.
+  Whether a consistent `K` per node can be afforded, or a different limit than
+  a clamp is right, is open.
+- **Draws per location suit this regime and not the other.** A gradient by 16
+  draws is 0.13-0.36 off on chapter 17 and the folded section against the fixed
+  nodes' 0.02-0.05, but its error averages and theirs does not; on the GeoScape
+  network it is 0.18-0.31 off against the nodes' 1e-4. Time 0.23-0.62 of the
+  package. The stopped stage B runs, 2000 steps, new-location log score, mean of
+  two seeds (one on `d1_dp2`), the 49 nodes against 4 and 16 draws, seconds a
+  step in brackets: `d1_dp2` -0.268 (0.72), -0.296 (0.09), -0.290 (0.27);
+  folded -0.720 (0.010), -0.798 (0.004), -0.644 (0.008); Walker -6.203 (0.081),
+  -6.210 (0.020), -6.211 (0.041). Against 7 nodes the draws save little: `d1_dp1`
+  -0.075 (0.080), -0.139 (0.057), -0.040 (0.172). Too few seeds to decide. Plain
+  draws, unchunked; randomized QMC draws (Buchholz et al., 2018) are untried.
+- **Where a step goes** (one call, one chunk): the backward pass is 60-80%.
+  Eight-component kernels spend their time in the kernel (GeoScape 0.6 of the
+  CPU's call, `k S kᵀ` 0.11-0.17), a Gaussian kernel at large `m` in `k S kᵀ`
+  (chapter 17 about half). Forcing the floor of four nodes a chunk costs 3x on
+  the GPU in an isolated GeoScape call, at half the peak.
+- **In order**: (1) the rule as an option, off by default, gated on the GeoScape
+  network to convergence and held out; (2) the corners dropped; (3) the kernel
+  by coordinates and `k S kᵀ` by hand, after the chapter 16 CPU regression is
+  understood; (4) the clamp, as a modelling question of its own; (5) stage B
+  finished, if (4) leaves it worth doing.
 
 ---
 
@@ -4221,6 +4395,72 @@ merge could save, moved a prediction batch 0.8% on chapter 17's walked
 model on the CPU, 0.7% on the GPU, and -1.1% on the GeoScape walk network
 on the CPU (`docs/benchmarks/compute_review.py`, the `roots` part): the
 duplicated kernel is not where a batch's time goes.
+
+**Four cheaper forms of the conditioned quadrature -- rejected** (2026-11-01;
+`C:\Users\Public\qm`, under "The quadrature's rule should follow the input").
+- **`k S kᵀ` by `matmul` in place of `einsum`**: 1.0-1.4 of the time on the CPU
+  and 1.0-1.15 on the GPU; the `einsum` is not the cost.
+- **One Gram matrix per row, then one trace per output** (`n q m²` once, not per
+  output): it cannot clamp node by node, which is up to 19 times the variance,
+  and it is no faster at one output (Walker 2.1x slower on the CPU).
+- **A rule turned at random each step** (Genz and Monahan's stochastic
+  spherical rules, the radii left fixed): the mean of 16 turns is as far from
+  the reference as one turn (gradient 0.131 against 0.133 on the folded section,
+  0.492 against 0.493 on Walker). The error is in the radii, and turning does
+  not move it.
+- **Cubatures of fewer nodes for the same degree** (Möller's 12 at degree 7,
+  rings of 7, 16 and 21): no better than the Hermite grid of the same size on
+  the deep cases, whose integrand has a kink. Rings of 36 at degree 11 did beat
+  the 49 on the folded walk (p95 0.35 against 0.79) and are the one worth a
+  second look.
+- Also mixed, and not adopted alone: a Hermite grid over only the uncertain
+  coordinates beside certain ones. 0.75 of the time; better than 64 Sobol
+  nodes on the folded section (median 4e-4 against 0.009), worse on Walker
+  (gradient 0.087 against 0.018).
+
+**Repairing the conditional variance's clamp -- rejected** (2026-11-02;
+`C:\Users\Public\qm\neg`, theory in the research project's
+`Spatial cross-validation/report/kq_closure.tex`). `1 - k_q (K + D)^-1 k_qᵀ` at
+an input node is a simple-kriging variance on weights solved with the wrong
+covariance, the expected `K` where the node's own is `K_q`, and it goes negative:
+at a fit on the folded section the unclamped mean is -0.039 on the GP on a GP,
+and 76% of rows are negative across their nodes. The clamp is what keeps the
+objective a number, and an active clamp shows the family it would bound is not
+a distribution there, so the objective is not a bound. Every repair removes the
+negatives and predicts no better. New-hole log score on the folded section,
+Gaussian leaf, 2000 steps, seeds 2026, 1, 2, 11, 12, 13:
+
+| Arm | GP on a GP | Beside the coordinates | Walk |
+|---|---|---|---|
+| the clamp (the package) | **-9.02** | **-5.22**, 3 of 6 in the -2 basin | -9.18 |
+| the kriging variance of the same weights (K1) | -10.08 | -8.05, none | -9.09 |
+| K1, one CG step on the weights, mean and variance | -10.81 | -9.34, none | -9.54 |
+| K1, three CG steps | -10.17 | -8.23, none | not run |
+| `K_q` whitened per node, shared `S_w` | -10.76 | -8.76, two seeds, none | not run |
+| first moment only, no spread | -10.75 | -9.37, none | -10.25 |
+
+K1 and the steps lose to the clamp on 5 of 6 seeds on the GP on a GP and 4 or 5
+of 6 beside the coordinates; on the walk K1 ties (3 of 6) and one step is
+slightly behind. The steps cap the largest node variance (2.2 to 0.99 at the
+first fit), so the tail nodes are not why K1 loses. `K_q` per node cost 160x the
+clamp a step. With the hyperparameters trained, K1 narrows the hidden layer
+(sd/range 0.204 to 0.065) and raises the noise (0.279 to 0.312, and 0.153 to
+0.237 beside the coordinates), the opposite of the report's toy, whose
+hyperparameters were fixed. Why the clamp's objective finds the better basin is
+open. The kernel was Gaussian throughout; only three Matérn 3/2 seeds ran, for
+the clamp. `network.py`'s `_mixture_moments` and `models.py` should stop calling
+this quantity a bound; not done yet.
+
+**Whitening the second moment into one-dimensional quadratures -- rejected**
+(2026-11-02; `C:\Users\Public\qm\neg\q1.py`). With independent input
+coordinates and a Gaussian kernel component, `E[k_i k_j]` factors over the
+coordinates into closed one-dimensional integrals: it matches 101 points per
+coordinate to 1e-15, and 7 points per coordinate equal the 7x7 grid to 8e-16.
+It computes the expectation, so it cannot clamp node by node, and the raw
+conditional variance is negative for whole rows (shares 0.76 on the folded
+GP on a GP, 0.99 on Walker, 0.58 on Matern 5/2, 0.50 on chapter 17). It is also
+slower at these sizes: 0.061 s against 0.025, 0.351 against 0.101, 2.166 against
+0.070, 4.03 against 0.397. The spread's quadrature error stays (3e-3 to 9.5e-3).
 
 **The second moment over certain inducing points (the "middle ground") --
 rejected** (2026-10-24). On a GeoScape network of three GP nodes reading a

@@ -2271,7 +2271,7 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
 
         dist = _tfd.Normal(mu, _tf.sqrt(var))
         log_prob_positive = dist.log_survival_function(self.tol)
-        log_prob_negative = dist.log_prob(- self.tol)
+        log_prob_negative = dist.log_cdf(- self.tol)
 
         # probability of being class i AND not being the others -- the whole
         # row of negative log-probabilities, with category i's own swapped
