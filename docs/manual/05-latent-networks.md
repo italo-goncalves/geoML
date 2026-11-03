@@ -158,11 +158,11 @@ inner = geoml.latent.BasicGP(
 deep_input = geoml.latent.Concatenate(root, inner)
 
 # a GP reading an uncertain input takes a kernel that is a mixture of
-# Gaussians, as the Matern32 and the exponential both are
+# Gaussians; the Gaussian kernel is the one with a single component
 outer = geoml.latent.BasicGP(
     deep_input,
     size=1,
-    kernel=geoml.kernels.Matern32())
+    kernel=geoml.kernels.Gaussian())
 
 warping = geoml.warping.ChainedWarping(
     geoml.warping.BoxCox(1, shift=1.0),

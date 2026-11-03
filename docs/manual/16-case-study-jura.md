@@ -93,7 +93,11 @@ the real space, which is chapter 5's argument applied to a contact rather
 than to a grade. The rock GP reading the walk is isotropic: the walk
 already bends the space, and a range per direction on top of it would be a
 second way to say the same thing, which training resolves into a
-stretched, overconfident reader.
+stretched, overconfident reader. It also takes the Gaussian kernel. A GP
+reading the walk averages its kernel over where the walk may have carried
+each point, and that average is one closed-form term for the Gaussian
+kernel and eight for a Matérn one, so the same model trains nearly three
+times faster.
 
 ```python
 displacement = geoml.latent.BasicGP(
@@ -102,7 +106,7 @@ displacement = geoml.latent.BasicGP(
 walked = geoml.latent.GPWalk(displacement, n_steps=5)
 
 rock_gp = geoml.latent.BasicGP(
-    walked, size=len(rocks), kernel=geoml.kernels.Matern32(),
+    walked, size=len(rocks), kernel=geoml.kernels.Gaussian(),
     isotropic=True)
 ```
 
@@ -276,13 +280,14 @@ scores samples of a measurement, where the table's goodness reads the
 stored simulations and so reads low (§16.3).
 
 One column in the rock table is worth reading before it is mistaken for a
-bug. Portlandian comes back with a balanced accuracy of 0.5 and a Jaccard
-of zero, which is what those statistics say about a class the model never
-predicts anywhere. Its precision is empty, there being no call of it to be
-right or wrong, and the disagreement rows say the same in their own terms:
-all of its error is quantity and none of it allocation, a proportion wrong
-rather than a place. It is the rarest formation in the training set, the
-other four outvote it at every location, and no amount of fitting will
+bug. Portlandian comes back with a balanced accuracy just under 0.5 and a
+Jaccard of zero, which is what those statistics say about a class the
+model calls almost nowhere and never right. It calls it at one site of the
+hundred, where the rock is something else, and misses the three where it
+is, so its precision is zero; the disagreement rows split the error in
+their own terms, two calls too few (quantity) and the one call in the
+wrong place (allocation). It is the rarest formation in the training set,
+the other four outvote it nearly everywhere, and no amount of fitting will
 change that without telling the model the class matters more than its
 frequency suggests. A rare domain that matters is a modelling decision, not
 a scoring accident.

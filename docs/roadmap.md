@@ -263,6 +263,10 @@ it by 0.10-0.13 (exponential), 0.04-0.06 (Matern32) and 0.03-0.04
 (Matern52) in one to three dimensions; positive definite for independent
 inputs (Paciorek's theorem, by congruence) and not guaranteed with
 correlated ones, though no failure turned up on near-singular lattices.
+**Reopened 2026-11-02** by the deep moments' bound (item "Deep moments
+without the quadrature" below): its exact spread pairs the components, eight
+of them 36 pairs, each the size of the Gaussian kernel's one, so fewer
+components is what would make the bound fast for the Matérn family.
 
 **M — A principled price for the walk** (from the expected kernel,
 2026-10-08; **settled 2026-10-09**: the field's KL the only price, and the
@@ -1525,6 +1529,81 @@ GP node on a wide `Linear` over an uncertain input. To do: measure a plain GP,
 wide `Linear`, GP network against Monte Carlo over the input's full covariance,
 then decide whether the node takes the columns' covariance (the `Linear` knows
 its weights and what it reads) or a wide `Linear` warns.
+
+**L — Deep moments without the quadrature** (agreed 2026-11-02 from the
+research project's report on the expected kernel's closure, `kq_closure.tex`;
+**being built** on branch `deep-moments`). `GPOptions(deep_moments=)` chooses
+how a GP node whose own inducing points are uncertain takes its variance:
+`"quadrature"` (what a save made before keeps), `"hinge"` (the default for a
+new model), `"blur"` and `"bound"`, the last three without nodes. The end is
+fast cross-validation, which needs a smooth objective; this step is fast
+training and prediction. `"bound"` was to be the default and was measured
+out of it (2026-11-02, chapter 5's model, 16 experts of 100 points, a
+training step on the GPU / on the CPU with XLA): the Gaussian kernel 1307 /
+2042 ms under the quadrature, 526 ms under the hinge, 477 / 249 under the
+blur, **2816 / 3946 under the bound**; the Matérn 3/2 3655 / 5899 under the
+quadrature, 1454 and 1285 under the hinge and the blur, over 290 s / 51 s
+under the bound. Its exact `alphaᵀ Psi alpha` is elementwise over every pair
+of inducing points, for every pair of the kernel's components (36 for the
+Matérn family), at every location of every expert; XLA's fusion on the CPU
+does not save it, while the quadrature's `m²` work is matrix products. The
+hinge's objective is the closest to the quadrature's (−3903 against −3913
+after 21 steps; the blur −3933, the bound −3998). The realizations follow
+the form: every draw takes the residual the form reports. Drawing the
+hinge's with the quadrature's per-draw clamp was the plan and was measured
+out of it -- on `test_full_variance.py`'s GP on a GP the ensemble carried
+1.165 of the hinge's reported variance (the first-order kernel overstates
+`k B kᵀ` for draws far out); on the residual it reports, 0.93. The blur's
+ensemble carries 1.02 of its variance, the bound's 0.88 (0.95 with the
+coordinates read beside the GP): the bound's spread holds the inducing
+points' own spread given the input, `alphaᵀ R_n alpha`, which a draw at the
+conditioned kernel leaves out. The manual's three deep chapters, run under
+each form with the Gaussian kernel at their deep nodes (GPU, chapter time
+quadrature / hinge / blur / bound): chapter 5 234 / 133 / 124 / 368 s,
+positive everywhere under all four; chapter 16 480 / 381 / 371 / 654 s,
+metals within 0.01 of each other, the bound's rock a little behind (mean
+kappa 0.39 against 0.41-0.42); **chapter 17 reverses under the bound** --
+its walk trained to a reach of 0.02 (0.14-0.16 under the quadrature and the
+hinge, 0.11 under the blur), the deep map turned into the stationary one and
+scored below it (IoU 0.742 against 0.769, two bodies), the deep objective
+ending at −105.4 against the stationary −94.9. The bound charges for
+uncertain inducing inputs, through its majorant divergence and the
+`alphaᵀ R_n alpha` in its spread, and a walk is exactly what makes them
+uncertain, so before the bound serves cross-validation on a walk this needs
+an answer. Under the blur the deep objective also ends below the
+stationary one (−103.8), its maps still ahead. The manual runs the hinge.
+What it leaves open, each its own item when taken up:
+- *A cheaper exact spread for the bound.* Dimensions certain everywhere (a
+  `Concatenate`'s coordinates) factor out of the pairs as plain kernel
+  values, halving the work on chapter 5's model; fewer Matérn components
+  (the item "Fewer components for the Matérn kernels' expected kernel") cut
+  the 36 pairs. Neither brings it under the hinge.
+- *Minorants for the other likelihoods.* `"bound"` is a lower bound on the
+  evidence only under a Gaussian likelihood, two layers and one expert;
+  elsewhere the likelihood reads the moments through its Gaussian stand-in
+  and the objective is a closure. The report's minorants keep it a bound: a
+  logistic Bernoulli with curvature 1/4, a Student-t with `(nu + 1) / (nu
+  s²)`, a Laplace through Jensen's `E|y - f| <= sqrt((y - mu)² + v)`; a probit
+  with curvature 1 is unconfirmed, and a Poisson with a log link has none. A
+  method on each likelihood beside its quadrature, so a model chooses.
+- *Fast cross-validation*, the end goal: it needs second derivatives of the
+  bound, which the compiled Ψ's custom gradient gives (checked against
+  differences of the gradient).
+- *`MultiStructureGP`* keeps its own rule (`_CONDITIONED_SECOND_MOMENT =
+  False`, the plain `1 - k (K + D)^-1 kᵀ` at an uncertain input), so its
+  variance takes no part of the spread over its inducing points at all.
+- *`AdditiveGP`* averages its kernels over the dimensions, where the
+  conditioned quadrature and the closed forms multiply them: under the
+  quadrature it is read as the product kernel, which is not its kernel (the
+  item "Check `AdditiveGP`'s realizations" above is the same mismatch).
+  Refused under `"hinge"` and `"blur"`, the quadrature with a warning under
+  `"bound"`. Not used in practice: a candidate for deprecation.
+- *The rational quadratic under `"bound"`* takes the quadrature, with a
+  warning: its 48 components and constant part make 1176 pairs.
+- *Several outputs* share the input and the inducing points, so their
+  spreads are correlated; the forms keep each output's alone, as the
+  covariance between outputs is kept nowhere (see "Covariance between a
+  node's outputs" above).
 
 **L — Spatially varying weights as a Gaussian node (the offset taper)**
 (requested 2026-10-26, planned 2026-10-30, from the research project

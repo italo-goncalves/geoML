@@ -36,6 +36,7 @@ FLIPS = {
     "memory": ("option", "quadrature_memory", 1e9),
     "precision": ("option", "quadrature_precision", "float32"),
     "second_moment": ("module", "_UNCERTAIN_POINTS_SECOND_MOMENT", False),
+    "deep_moments": ("option", "deep_moments", "blur"),
     "pathwise": ("module", "_PATHWISE_REALIZATIONS", False),
     "rule": ("module", "_QUADRATURE_RULE", "sobol"),
     "hermite_points": ("module", "_HERMITE_POINTS", 5),
@@ -135,6 +136,24 @@ def test_every_cache_retraces_when_the_setting_changes(field, monkeypatch):
     for cache in ("predict", "node", "measure", "weights"):
         assert again[cache] == flipped[cache], cache
     assert again["step"] == before["step"]
+
+
+def test_a_rebuilt_step_trains_on_the_bound_of_its_setting():
+    # the step is rebuilt when the setting changes; the bound it logs must
+    # then be the bound a model that never trained under the first setting
+    # logs at the same parameters
+    model, _, _ = _model()
+    model.train_full(1)
+    state = [p.variable.numpy() for p in model._all_parameters]
+    model.options.__dict__["propagation"] = "marginal"
+    model.train_full(1)
+
+    fresh, _, _ = _model(propagation="marginal")
+    for parameter, value in zip(fresh._all_parameters, state):
+        parameter.variable.assign(value)
+    fresh.train_full(1)
+    np.testing.assert_allclose(model.training_log[-1],
+                               fresh.training_log[-1], rtol=1e-10)
 
 
 def test_the_rows_a_call_carries_key_nothing():

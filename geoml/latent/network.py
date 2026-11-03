@@ -1262,6 +1262,172 @@ def _second_moment(items, mean, var, points, weights):
         return totals
 
 
+def _pair_items(kernel, ranges, d):
+    """`kernel` at `ranges` as `_pair_terms` takes it: the scales
+    `[Q, d]`, each component `w_q exp(-|h - z|² / (2 s_q))` per dimension,
+    and the static pairs `(p, q, weight)`, each once, the weight `w_p w_q`
+    doubled where `p != q` -- the pair `(q, p)` being the transpose of
+    `(p, q)`, which a quadratic form cannot tell apart."""
+    omega, weights, constant = _kernel_components(kernel)
+    if not isinstance(constant, float) or constant != 0.0:
+        raise NotImplementedError(
+            "the deep moments' bound takes the Gaussian kernel and the "
+            "Matern family's tables, not %s" % type(kernel).__name__)
+    r2 = _tf.reshape(ranges, [-1]) ** 2 * _tf.ones([d], _tf.float64)
+    scales = r2[None, :] / (2.0 * omega[:, None])
+    w = [float(x) for x in _tf.get_static_value(weights)]
+    pairs = tuple((p, q, w[p] * w[q] * (1.0 if p == q else 2.0))
+                  for p in range(len(w)) for q in range(p, len(w)))
+    return scales, pairs
+
+
+def _pair_body(scales, mean, var, cov, points, points_var, points_cov,
+               alpha, pairs):
+    """`alphaᵀ Psi alpha`, `[..., size, n]`, with `Psi = E[k(h, Z)ᵀ k(h,
+    Z)]` over a jointly Gaussian input `h` -- mean and variance `[..., n,
+    d]`, covariance with the inducing points `[..., n, m, d]` -- and
+    inducing points `Z` -- mean and variance `[..., m, d]`, covariance among
+    themselves `[..., m, m, d]`. `alpha` is `[..., size, m]`; `scales` and
+    `pairs` as `_pair_items` gives them.
+
+    Per dimension the pair `(h - Z_i, h - Z_j)` is Gaussian, with means `e`
+    and covariance `S`, and `E exp(-a²/(2 s_p) - b²/(2 s_q))` is `sqrt(s_p
+    s_q / |A|) exp(-eᵀ A^-1 e / 2)` with `A = diag(s_p, s_q) + S`; the
+    dimensions multiply, so their logarithms are summed and the sum
+    exponentiated once."""
+    off = mean[..., :, None, :] - points[..., None, :, :]        # [.., n, m, d]
+    spread = _tf.maximum(var[..., :, None, :] + points_var[..., None, :, :]
+                         - 2.0 * cov, 0.0)
+    shared = var[..., :, None, None, :] - cov[..., :, :, None, :] \
+        - cov[..., :, None, :, :] + points_cov[..., None, :, :, :]
+    oi, oj = off[..., :, :, None, :], off[..., :, None, :, :]
+    total = None
+    for p, q, weight in pairs:
+        sp, sq = scales[p], scales[q]
+        a11 = sp + spread[..., :, :, None, :]
+        a22 = sq + spread[..., :, None, :, :]
+        det = _tf.maximum(a11 * a22 - shared ** 2, 1e-12 * sp * sq)
+        quad = (a22 * oi ** 2 - 2.0 * shared * oi * oj + a11 * oj ** 2) / det
+        log_pair = _tf.reduce_sum(
+            0.5 * _tf.math.log(sp * sq) - 0.5 * _tf.math.log(det) - 0.5 * quad,
+            -1)
+        term = weight * _tf.einsum("...si,...nij,...sj->...sn", alpha,
+                                   _tf.exp(log_pair), alpha)
+        total = term if total is None else total + term
+    return total
+
+
+# `_pair_body`'s two passes, compiled or not, by its pairs: built once each
+_PAIR_FUNCTIONS = {}
+# the bytes a row of `_pair_body` holds per element of its `[..., m, m, d]`
+# arrays and per pair of components, both passes: the pair's covariances,
+# determinant and exponent and their temporaries
+_PAIR_BYTES = 64
+
+
+def _to_front(x, axis):
+    """`x` with `axis` moved to the front."""
+    rank = len(x.shape)
+    axis = axis % rank
+    return _tf.transpose(x, [axis] + [i for i in range(rank) if i != axis])
+
+
+def _from_front(x, axis):
+    """`_to_front` undone: the front axis put back at `axis`."""
+    rank = len(x.shape)
+    axis = axis % rank
+    return _tf.transpose(x, list(range(1, axis + 1)) + [0]
+                         + list(range(axis + 1, rank)))
+
+
+def _pair_terms(scales, mean, var, cov, points, points_var, points_cov,
+                alpha, pairs, parallel=1):
+    """`_pair_body` with a gradient of its own, a chunk of rows at a time.
+
+    The backward pass keeps the inputs alone and recomputes the terms under
+    a tape, and both passes are one XLA kernel where the quadrature's chunks
+    are compiled (`_quadrature_xla`). Left to TensorFlow, every `[..., n, m,
+    m, d]` intermediate stays alive for the backward pass, and the backward
+    pass of a compiled function runs uncompiled: in the report's prototype a
+    step of the bound took 8.5 ms against 6.0 this way. The rows are taken
+    as many at a time as the quadrature's memory budget holds, `parallel`
+    calls of this sharing it (the experts of a node, independent branches of
+    one graph): on chapter 5's sixteen experts the rows taken all at once ran
+    a 16 GB GPU out of memory."""
+    xla = _quadrature_xla()
+    if (pairs, xla) not in _PAIR_FUNCTIONS:
+        def value(*args):
+            return _pair_body(*args, pairs)
+
+        def vjp(upstream, *args):
+            with _tf.GradientTape() as tape:
+                tape.watch(args)
+                total = _tf.reduce_sum(value(*args) * upstream)
+            return tape.gradient(
+                total, args,
+                unconnected_gradients=_tf.UnconnectedGradients.ZERO)
+
+        if xla:
+            value = _tf.function(value, jit_compile=True,
+                                 reduce_retracing=True)
+            vjp = _tf.function(vjp, jit_compile=True, reduce_retracing=True)
+        _PAIR_FUNCTIONS[(pairs, xla)] = (value, vjp)
+    value, vjp = _PAIR_FUNCTIONS[(pairs, xla)]
+
+    @_tf.custom_gradient
+    def terms(*args):
+        def grad(upstream):
+            return list(vjp(upstream, *args))
+
+        return value(*args), grad
+
+    lead = 1
+    for dim in mean.shape[:-2]:
+        lead *= _static(dim, 1)
+    m, d = _static(points.shape[-2], 1), _static(points.shape[-1], 1)
+    rows = max(1, int(_QUADRATURE_MEMORY // (
+        _PAIR_BYTES * len(pairs) * parallel * lead * m * m * d)))
+    if _static(mean.shape[-2], _QUADRATURE_ROWS) <= rows:
+        return terms(scales, mean, var, cov, points, points_var, points_cov,
+                     alpha)
+    # the rows padded to a whole number of chunks, so that every chunk has
+    # one shape, which XLA compiles once; a padded row is a certain input at
+    # the origin, finite, and its terms are dropped
+    n = _tf.shape(mean)[-2]
+    count = (n + rows - 1) // rows
+
+    def padded(x, axis):
+        pads = [[0, 0]] * len(x.shape)
+        pads[axis % len(x.shape)] = [0, count * rows - n]
+        return _tf.pad(x, pads)
+
+    mean_p, var_p, cov_p = padded(mean, -2), padded(var, -2), padded(cov, -3)
+
+    def chunk(c, out):
+        rows_c = c * rows + _tf.range(rows)
+        part = terms(scales,
+                     _tf.gather(mean_p, rows_c, axis=len(mean.shape) - 2),
+                     _tf.gather(var_p, rows_c, axis=len(var.shape) - 2),
+                     _tf.gather(cov_p, rows_c, axis=len(cov.shape) - 3),
+                     points, points_var, points_cov, alpha)
+        return c + 1, out.write(c, _to_front(part, -1))
+
+    _, out = _tf.while_loop(
+        lambda c, _: c < count, chunk,
+        (_tf.constant(0), _tf.TensorArray(_tf.float64, count)),
+        parallel_iterations=1)
+    return _from_front(out.concat(), -1)[..., :n]
+
+
+def _hinge(mean, var):
+    """`E max(X, 0)` for a Gaussian `X` of `mean` and `var`, smooth in both:
+    `mean Phi(z) + sd phi(z)`, `z = mean / sd`."""
+    sd = _tf.sqrt(var + 1e-12)
+    z = mean / sd
+    return mean * 0.5 * _tf.math.erfc(-z / _np.sqrt(2.0)) \
+        + sd * _tf.exp(-0.5 * z ** 2) / _np.sqrt(2.0 * _np.pi)
+
+
 def _graph_state(node):
     """
     The attributes a node holds as tensors, which a traced refresh must return.
@@ -1377,6 +1543,13 @@ _ONCE = None
 # each quadrature node of the input (the roadmap's plan of 2026-10-18,
 # step 1). Off gives the 0.9.3 moments; kept switchable while measured.
 _UNCERTAIN_POINTS_SECOND_MOMENT = True
+
+# How that second moment is taken (`GPOptions.deep_moments`): "quadrature",
+# the conditioned quadrature over the input's nodes; "hinge", "blur" and
+# "bound", the closed forms of the report on the closure of the expected
+# kernel, which take no nodes. Set from the options in a model's context and
+# read at trace time; the quadrature outside one, as before the option.
+_DEEP_MOMENTS = "quadrature"
 
 # Whether a GP node that takes the second moment at an uncertain input
 # draws its realizations through its parent's (step 2 of the same plan):
@@ -1613,12 +1786,17 @@ class _Setting:
     memory: float
     precision: str
     second_moment: bool
+    deep_moments: str
     pathwise: bool
     rule: str
     hermite_points: int
     quadrature_nodes: int
     xla: bool
     rows: int = _dataclasses.field(compare=False)
+
+
+# what `GPOptions.deep_moments` takes
+_DEEP_MOMENT_FORMS = ("quadrature", "hinge", "blur", "bound")
 
 
 def _current():
@@ -1630,6 +1808,7 @@ def _current():
         precision="float32" if _QUADRATURE_DTYPE == _tf.float32
         else "float64",
         second_moment=_UNCERTAIN_POINTS_SECOND_MOMENT,
+        deep_moments=_DEEP_MOMENTS,
         pathwise=_PATHWISE_REALIZATIONS, rule=_QUADRATURE_RULE,
         hermite_points=_HERMITE_POINTS, quadrature_nodes=_QUADRATURE_NODES,
         xla=_QUADRATURE_XLA, rows=_QUADRATURE_ROWS)
@@ -1640,17 +1819,21 @@ def setting(value):
     """Puts the `_Setting` `value` in force while active."""
     global _QMC_SIMULATIONS, _EXPERT_PROPAGATION, _JOINT_PROPAGATION, \
         _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS, \
-        _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, \
+        _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, _DEEP_MOMENTS, \
         _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS, \
         _QUADRATURE_NODES, _QUADRATURE_XLA
     if value.precision not in ("float64", "float32"):
         raise ValueError("the quadrature's precision is 'float64' or "
                          "'float32', got %r" % (value.precision,))
+    if value.deep_moments not in _DEEP_MOMENT_FORMS:
+        raise ValueError("the deep moments are one of %s, got %r"
+                         % (", ".join(map(repr, _DEEP_MOMENT_FORMS)),
+                            value.deep_moments))
     previous = (_QMC_SIMULATIONS, _EXPERT_PROPAGATION, _JOINT_PROPAGATION,
                 _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
                 _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT,
-                _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS,
-                _QUADRATURE_NODES, _QUADRATURE_XLA)
+                _DEEP_MOMENTS, _PATHWISE_REALIZATIONS, _QUADRATURE_RULE,
+                _HERMITE_POINTS, _QUADRATURE_NODES, _QUADRATURE_XLA)
     _QMC_SIMULATIONS = bool(value.qmc)
     _EXPERT_PROPAGATION = value.expert_propagation
     _JOINT_PROPAGATION = bool(value.joint)
@@ -1660,6 +1843,7 @@ def setting(value):
     _QUADRATURE_DTYPE = _tf.float32 if value.precision == "float32" \
         else _tf.float64
     _UNCERTAIN_POINTS_SECOND_MOMENT = value.second_moment
+    _DEEP_MOMENTS = value.deep_moments
     _PATHWISE_REALIZATIONS = value.pathwise
     _QUADRATURE_RULE = value.rule
     _HERMITE_POINTS = value.hermite_points
@@ -1670,7 +1854,7 @@ def setting(value):
     finally:
         (_QMC_SIMULATIONS, _EXPERT_PROPAGATION, _JOINT_PROPAGATION,
          _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
-         _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT,
+         _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, _DEEP_MOMENTS,
          _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS,
          _QUADRATURE_NODES, _QUADRATURE_XLA) = previous
 
@@ -2374,7 +2558,7 @@ class _GPNode(_FunctionalLatentVariable):
                 # the realizations are drawn through the parent's and carry
                 # the whole variance: no gap, and no jitter left to add
                 self._path_state = (coords, chain, weights, w_mu, w_var,
-                                    x, x_var)
+                                    x, x_var, second.left)
                 self._input_jitter = None
                 # the variance of the residual the realizations draw, for
                 # the prediction to integrate (`smooth_draws`)
@@ -2977,6 +3161,9 @@ class BasicGP(_GPNode):
     def refresh(self, jitter=1e-6):
         with _tf.name_scope("basic_refresh"):
             self.parent.refresh(jitter)
+            # what the bound's divergence adds to `delta`, as the factors do
+            # (`expert_kl_terms`)
+            self._kl_jitter = jitter
             if _slots_of(self.root) is not None:
                 self._slot_refresh(jitter)
                 return
@@ -3262,8 +3449,9 @@ class BasicGP(_GPNode):
         cov_cross = cov_cross * pmask[:, None, :]
         mu = _tf.einsum("pab,psbc->psac", cov_cross, self.slots_alpha) \
             + self.slots_bias[:, None, None, None]
+        points_cov = _slot_covariance(self.parent)
         if chain is not None and self._takes_second_moment(
-                chain, [_slot_covariance(self.parent)]):
+                chain, [points_cov]):
             # a padded point reaches nothing: its row and column of every
             # matrix the moments are read through are zero
             outer = pmask[:, None, :, None] * pmask[:, None, None, :]
@@ -3271,7 +3459,8 @@ class BasicGP(_GPNode):
                 chain[0], ips, self.slots_cov_smooth_inv * outer,
                 self.slots_alpha, mu[..., 0]
                 - self.slots_bias[:, None, None], cov_cross,
-                self.slots_chol_r * outer if with_second else None, ipvs)
+                self.slots_chol_r * outer if with_second else None, ipvs,
+                points_cov)
             second = _Second(_tf.maximum(1.0 - explained_var, 0.0), jitter,
                              own)
             return (cov_cross, mu, var, explained_var) \
@@ -3406,14 +3595,15 @@ class BasicGP(_GPNode):
                 for mat, vec, b in zip(cov_cross, self.alpha, bias)
             ]
 
-            if chain is not None and self._takes_second_moment(
-                    chain, _covariances_of(self.parent, ids)):
+            ipcs = _covariances_of(self.parent, ids)
+            if chain is not None and self._takes_second_moment(chain, ipcs):
                 moments = [
                     self._mixture_moments(e, ip, inv, a, m[..., 0] - b, l,
-                                          r if with_second else None, ipv)
-                    for e, ip, ipv, inv, a, m, b, l, r in zip(
-                        chain, ips, ipvs, self.cov_smooth_inv, self.alpha, mu,
-                        bias, cov_cross, self.chol_r)]
+                                          r if with_second else None, ipv,
+                                          ipc)
+                    for e, ip, ipv, ipc, inv, a, m, b, l, r in zip(
+                        chain, ips, ipvs, ipcs, self.cov_smooth_inv,
+                        self.alpha, mu, bias, cov_cross, self.chol_r)]
                 var = _tf.stack([v for v, _, _, _ in moments], axis=0)
                 explained_var = [x for _, x, _, _ in moments]
                 second = _Second(_tf.maximum(
@@ -3559,11 +3749,24 @@ class BasicGP(_GPNode):
             else slots.size if slots is not None \
             else len(_active_experts(self.root))
         cost = _node_bytes(self.kernel) * m * d
+        if self._node_free():
+            # the closed forms hold about one node's arrays, and the bound's
+            # pairs take their own rows a chunk at a time (`_pair_terms`)
+            cost = cost // _FEWEST_PER_CHUNK
         if _pathwise() and self._feature_kernel():
             features = max(self._FEATURES, 2 * m) + 1
             cost = max(cost, _REALIZATION_BYTES * (m * d + self.size
                                                    * features))
         return _FEWEST_PER_CHUNK * experts * cost
+
+    def _node_free(self):
+        """Whether the node takes its moments over uncertain inducing points
+        without nodes of the input: its own inducing points come through a
+        GP node or a walk, and `GPOptions.deep_moments` is not the
+        quadrature (`_deep_form`)."""
+        return self._deep_form() != "quadrature" and any(
+            isinstance(p, (_GPNode, GPWalk))
+            for p in self.get_unique_parents())
 
     def _expert_row_bytes(self, one_expert=False):
         """The bytes a row of a prediction batch costs the node outside the
@@ -3781,12 +3984,16 @@ class BasicGP(_GPNode):
         `_shared_prior_simulate` writes them (the damped features at
         uncertain inducing points); blended over the experts and rescaled,
         draw by draw, to the conditional variance `max(1 - k (K + D)^-1 kᵀ,
-        0)` blended alike. The ensemble then carries the variance the second
-        moment reports. Every random number is drawn first, as the other
-        nodes draw them; the realizations are then computed a chunk at a
-        time in both passes (`_chunked_map`), memory going with the
-        chunk."""
-        coords, chain, weights, w_mu, w_var, x, x_var = self._path_state
+        0)` blended alike -- or, where the expert's inducing points are
+        uncertain and `GPOptions.deep_moments` is a closed form, to the
+        residual that form reports (`_deep_moments`), the same for every
+        draw. The ensemble then
+        carries the variance the second moment reports. Every random number
+        is drawn first, as the other nodes draw them; the realizations are
+        then computed a chunk at a time in both passes (`_chunked_map`),
+        memory going with the chunk."""
+        coords, chain, weights, w_mu, w_var, x, x_var, left = \
+            self._path_state
         key = None
         if _ONCE is not None:
             # one draw serves the realizations and the prediction's smooth
@@ -3876,7 +4083,8 @@ class BasicGP(_GPNode):
                     + prior_parts(ips, ipvs, self.slots_chol_r * outer, pmask)
                     + [self.slots_alpha[..., 0],
                        self.slots_bias[:, None, None, None], pmask, weights,
-                       self.slots_cov_chol]]
+                       self.slots_cov_chol, left]]
+                frees = [chain[0].covariance is not None]
             else:
                 ids = _active_experts(self.root)
                 ips, ipvs = self._parent_points(ids)
@@ -3887,8 +4095,12 @@ class BasicGP(_GPNode):
                        _tf.reshape(self.parameters["bias_%d" % i].get_value(),
                                    [1, 1, 1]),
                        _tf.ones([int(self.root.n_ip[i])], _tf.float64),
-                       weights[p], self.cov_chol[p]]
+                       weights[p], self.cov_chol[p], left[p]]
                     for p, i in enumerate(ids)]
+                frees = [chain[p].covariance is not None
+                         for p in range(len(ids))]
+            # the closed forms' residual is one for every draw
+            frees = [f and self._deep_form() != "quadrature" for f in frees]
             per_group = len(groups[0])
             sliced = slots is not None
 
@@ -3914,7 +4126,7 @@ class BasicGP(_GPNode):
                 w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
                 for g in range(len(groups)):
                     (mean, var, cov, points, spread, smooth_inv, root_prior,
-                     prior, alpha, bias, mask, w, chol) = \
+                     prior, alpha, bias, mask, w, chol, residual) = \
                         flat[g * per_group:(g + 1) * per_group]
                     # the standard deviation with a finite gradient at zero
                     held = var > 0.0
@@ -3925,11 +4137,15 @@ class BasicGP(_GPNode):
                         h_e, mean, var, cov, points,
                         spread, r2, omega, kweights, constant, rational) \
                         * mask[..., None, None, :]          # [.., n, c, m]
-                    ksk = _tf.einsum("...nSi,...sij,...nSj->...snS", k,
-                                     smooth_inv, k)
-                    conditional = _tf.maximum(1.0 - ksk, 0.0)
                     part = _tf.einsum("...nSm,...sm->...snS", k, alpha) \
                         + bias
+                    if frees[g]:
+                        conditional = _tf.broadcast_to(residual[..., None],
+                                                       _tf.shape(part))
+                    else:
+                        ksk = _tf.einsum("...nSi,...sij,...nSj->...snS", k,
+                                         smooth_inv, k)
+                        conditional = _tf.maximum(1.0 - ksk, 0.0)
                     # the expert's draw of its inducing values from the
                     # shared prior, `k R G^-1 Phi(Z) w` as coefficients of w
                     drawn = _tf.einsum("...nSm,...smj->...snSj", k,
@@ -4126,11 +4342,122 @@ class BasicGP(_GPNode):
         return _second_moment(self._kernel_items(), mean, var, points,
                               weights)
 
+    # whether `GPOptions.deep_moments="bound"` has a closed form for the
+    # node; `AdditiveGP` averages its kernels over the dimensions where the
+    # closed form multiplies them, and keeps the quadrature
+    _CLOSED_BOUND = True
+
+    def _deep_form(self):
+        """The form the node takes its moments by where its own inducing
+        points are uncertain: `GPOptions.deep_moments`, or the quadrature
+        where `"bound"` has no closed form for the node -- the rational
+        quadratic kernel, whose components move with a trained parameter,
+        and `AdditiveGP`."""
+        return self._form_for(_DEEP_MOMENTS)
+
+    def _form_for(self, form):
+        """`_deep_form` under the option `form`."""
+        if form == "bound" and not (
+                self._CLOSED_BOUND
+                and (type(self.kernel) is _kr.Gaussian
+                     or type(self.kernel) in _KERNEL_MIXTURES)):
+            return "quadrature"
+        return form
+
+    def _deep_moments(self, mean, var, cov, points, points_var, points_cov,
+                      smooth_inv, alpha, offset, cov_cross, root_r):
+        """`_mixture_moments` over uncertain inducing points without nodes:
+        the variance, the explained variance, the latent jitter and the
+        residual's variance, `[..., size, n]` each, by the form in force.
+
+        Given the input `h`, the inducing points are Gaussian about `z + g
+        (h - m)`, `g = cov / var` the gain, with what is left of their
+        variance, and the kernel averaged over them, `k_q(h)`, is taken to
+        first order about the mean, `k_m + (h - m) a` with `a = (1 - g)
+        dk_m / dh`. Under `"hinge"` the conditional variance `X = 1 - k_q B
+        k_qᵀ` is then quadratic in `h`; its mean and variance are taken and
+        `E max(X, 0)` read as a Gaussian's. Under `"blur"` and `"bound"` it
+        is `1 - l B lᵀ` at the expected kernel `l`, clamped at zero. The
+        spread of the mean over the input is `sum_d var_d (a_d alpha)²`
+        under `"hinge"` and `"blur"`, and under `"bound"` `alphaᵀ Psi alpha
+        - (l alpha)²` exactly (`_pair_terms`). Where `root_r` is given the
+        latent jitter is taken to first order too, and the variance of the
+        residual the realizations draw by the hinge, with `R Rᵀ` about the
+        residual reported, which every draw takes."""
+        form = self._deep_form()
+        ranges = self.parameters["ranges"].get_value()
+        if points_var is None:
+            points_var = _tf.zeros_like(points)
+        gain = _tf.math.divide_no_nan(cov, var[..., :, None, :])
+        left = _tf.maximum(points_var[..., None, :, :] - gain * cov, 0.0)
+        # the conditioned kernel at the mean and its slope, `[..., n, m]`
+        # and `[..., n, m, d]`: the expected kernel takes a variance that
+        # differs by row as a covariance of minus half of it
+        k_m, slope = _expected_kernel(self.kernel, ranges, mean, None,
+                                      points, None, -0.5 * left, True)
+        a = (1.0 - gain) * slope
+        v = var[..., None, :, :]
+        explained = _tf.einsum("...ni,...sij,...nj->...sn", cov_cross,
+                               smooth_inv, cov_cross)
+        spread = _tf.reduce_sum(v * _tf.einsum(
+            "...nid,...si->...snd", a, alpha[..., 0]) ** 2, -1)
+
+        def hinge(inv, l_inv_l):
+            """`E max(1 - k_q inv k_qᵀ, 0)` over the input, `l_inv_l` being
+            `l inv lᵀ`."""
+            a_inv = _tf.einsum("...nid,...sij->...snjd", a, inv)
+            a_k = _tf.einsum("...snjd,...nj->...snd", a_inv, k_m)
+            a_a = _tf.einsum("...snjd,...nje->...snde", a_inv, a)
+            mean_x = 1.0 - l_inv_l \
+                - _tf.reduce_sum(v * _tf.linalg.diag_part(a_a), -1)
+            var_x = 4.0 * _tf.reduce_sum(v * a_k ** 2, -1) + 2.0 * _tf.einsum(
+                "...nd,...ne,...snde->...sn", var, var, a_a ** 2)
+            return _hinge(mean_x, var_x)
+
+        if form == "hinge":
+            conditional = hinge(smooth_inv, explained)
+            total, explained = conditional + spread, 1.0 - conditional
+        else:
+            if form == "bound":
+                if points_cov is None:
+                    # no covariance among the points: each with its own
+                    # variance alone
+                    points_cov = points_var[..., :, None, :] * _tf.eye(
+                        _tf.shape(points)[-2], dtype=_tf.float64)[..., None]
+                scales, pairs = _pair_items(self.kernel, ranges,
+                                            int(self.parent.size))
+                # one call per expert, which share the budget; a slot axis
+                # counts its experts in the call's own shape
+                parallel = len(_active_experts(self.root)) \
+                    if len(mean.shape) == 2 else 1
+                spread = _tf.maximum(_pair_terms(
+                    scales, mean, var, cov, points, points_var, points_cov,
+                    alpha[..., 0], pairs, parallel) - offset ** 2, 0.0)
+            total = _tf.maximum(1.0 - explained, 0.0) + spread
+        jitter = own = None
+        if root_r is not None:
+            jitter = _tf.einsum("...nd,...snjd->...sn", var, _tf.einsum(
+                "...nid,...sij->...snjd", a, root_r) ** 2) + spread
+            # the realizations' residual, `max(r - k R Rᵀ kᵀ, 0)` at the
+            # residual `r` the form reports (`_pathwise_simulate`)
+            drawn = _tf.matmul(root_r, root_r, transpose_b=True)
+            own = hinge(drawn, _tf.einsum(
+                "...ni,...sij,...nj->...sn", cov_cross, drawn, cov_cross)
+                + 1.0 - _tf.maximum(1.0 - explained, 0.0))
+        return total, explained, jitter, own
+
     def _mixture_moments(self, chain, points, smooth_inv, alpha, offset,
-                         cov_cross=None, root_r=None, points_var=None):
+                         cov_cross=None, root_r=None, points_var=None,
+                         points_cov=None):
         """One expert's variance, explained variance and latent jitter at
-        an uncertain input over certain inducing points: the mixture's,
-        exactly.
+        an uncertain input. Over certain inducing points the mixture's: in
+        closed form for the Gaussian kernel, over 64 points of the input for
+        the others. Over uncertain inducing points -- `points_var` their
+        variances, `points_cov` their covariances `[..., m, m, d]` -- under
+        `GPOptions.deep_moments="quadrature"` the conditioned quadrature,
+        whose clamp node by node makes it other than the mixture's
+        (`_conditioned_sums`), and otherwise the closed form the option
+        names (`_deep_moments`).
 
         With `L = E[k(x, z) k(x, z)ᵀ]` and `l = E[k(x, z)]` (`cov_cross`),
         the posterior's variance averaged over the input is
@@ -4149,6 +4476,11 @@ class BasicGP(_GPNode):
         var = chain.variance
         if var is None:
             var = _tf.zeros_like(chain.mean)
+        if chain.covariance is not None and self._deep_form() != "quadrature":
+            return self._deep_moments(chain.mean, var, chain.covariance,
+                                      points, points_var, points_cov,
+                                      smooth_inv, alpha, offset, cov_cross,
+                                      root_r)
         if chain.covariance is not None:
             # over uncertain inducing points, conditioned on each node of
             # the input, the nodes summed a chunk at a time: the same
@@ -4241,23 +4573,40 @@ class BasicGP(_GPNode):
         the slots, to which a padded point adds nothing."""
         if _slots_of(self.root) is not None:
             pmask = self.slots_input_mask
+            fit = _tf.reduce_sum(self.slots_alpha_white ** 2, axis=[1, 2, 3])
+            if self._bounded_kl(_slot_covariance(self.parent)):
+                delta = self.slots_delta + self._kl_jitter
+                # a padded point's row and column hold its diagonal alone,
+                # so its factor's entry leaves the others' determinant be
+                det_e = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(
+                    _tf.linalg.cholesky(self.slots_cov[:, None, :, :]
+                                        + _np.e * _tf.linalg.diag(delta))))
+                    * pmask[:, None, :], axis=[1, 2])
+                det_d = _tf.reduce_sum(_tf.math.log(delta)
+                                       * pmask[:, None, :], axis=[1, 2])
+                count = self.size * _tf.reduce_sum(pmask, axis=1)
+                return 0.5 * (fit - count + det_e - det_d)
             outer = pmask[:, :, None] * pmask[:, None, :]
             tr = _tf.reduce_sum(self.slots_cov_smooth_inv
                                 * (self.slots_cov * outer)[:, None, :, :],
                                 axis=[1, 2, 3])
-            fit = _tf.reduce_sum(self.slots_alpha_white ** 2, axis=[1, 2, 3])
             det_1 = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(
                 self.slots_cov_smooth_chol)) * pmask[:, None, :], axis=[1, 2])
             det_2 = _tf.reduce_sum(_tf.math.log(self.slots_delta)
                                    * pmask[:, None, :], axis=[1, 2])
             return 0.5 * (- tr + fit + det_1 - det_2)
         all_kl = []
-        for p, i in enumerate(_active_experts(self.root)):
+        ids = _active_experts(self.root)
+        for p, (i, ipc) in enumerate(zip(ids, _covariances_of(self.parent,
+                                                              ids))):
             delta = self.parameters[f"delta_{i}"].get_value()
             alpha_white = self.parameters[f"alpha_white_{i}"].get_value()
+            fit = _tf.reduce_sum(alpha_white**2)
+            if self._bounded_kl(ipc):
+                all_kl.append(self._majorant_kl(self.cov[p], delta, fit))
+                continue
 
             tr = _tf.reduce_sum(self.cov_smooth_inv[p] * self.cov[p][None, :, :])
-            fit = _tf.reduce_sum(alpha_white**2)
             det_1 = 2 * _tf.reduce_sum(_tf.math.log(
                 _tf.linalg.diag_part(self.cov_smooth_chol[p])))
             det_2 = _tf.reduce_sum(_tf.math.log(delta))
@@ -4265,6 +4614,33 @@ class BasicGP(_GPNode):
 
             all_kl.append(kl)
         return all_kl
+
+    def _bounded_kl(self, covariance):
+        """Whether the divergence of an expert whose inducing points have
+        `covariance` among them is the bound's majorant (`_majorant_kl`):
+        where the node takes its moments over uncertain inducing points by
+        `GPOptions.deep_moments="bound"`."""
+        return (covariance is not None and self._READS_CHAIN
+                and _JOINT_PROPAGATION and _FULL_VARIANCE
+                and _UNCERTAIN_POINTS_SECOND_MOMENT
+                and self._CONDITIONED_SECOND_MOMENT
+                and self._deep_form() == "bound")
+
+    def _majorant_kl(self, cov, delta, fit):
+        """An expert's divergence as the bound takes it over uncertain
+        inducing points: `[alphaᵀ K alpha - M + log|K + e D| - log|D|] / 2`
+        per output, with `K` the expected covariance at the inducing points,
+        its jitter included, and `D` the variational variances with the
+        jitter `(K + D)^-1` adds. `log(e + x)` majorizes the divergence's
+        `1 / (1 + x) + log(1 + x)` eigenvalue by eigenvalue and is concave,
+        so its trace at the expected `K` bounds the expected divergence;
+        `fit` is `alphaᵀ K alpha`, the whitened means' squared norm."""
+        delta = delta + self._kl_jitter
+        det_e = 2 * _tf.reduce_sum(_tf.math.log(_tf.linalg.diag_part(
+            _tf.linalg.cholesky(cov[None, :, :]
+                                + _np.e * _tf.linalg.diag(delta)))))
+        count = float(delta.shape[0] * delta.shape[1])
+        return 0.5 * (fit - count + det_e - _tf.reduce_sum(_tf.math.log(delta)))
 
     # def covariance_matrix_d1(self, y, dir_y, step=1e-3):
     #     with _tf.name_scope("basic_covariance_matrix_d1"):
@@ -4336,6 +4712,9 @@ class AdditiveGP(BasicGP):
     This node is similar to the `BasicGP`, with the difference that is covariance matrices are computed separately for
     each input dimension and then averaged. It makes more sense to use it on high-dimensional non-spatial inputs.
     """
+    # its kernels are averaged, which the bound's closed form does not take
+    _CLOSED_BOUND = False
+
     def covariance_matrix(self, x, y, var_x=None, var_y=None):
         with _tf.name_scope("basic_covariance_matrix"):
             ranges = self.parameters["ranges"].get_value()
