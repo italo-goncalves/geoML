@@ -1,3 +1,19 @@
+## version 0.10.5
+* **`inducing.experts` gives the same experts in every process.** Its
+k-means took the best of ten starts by inertia, and on a symmetric set --
+a lattice of inducing points, the usual input -- the starts reach mirror
+images of one split whose inertias differ in the thirteenth digit, which
+the threaded sums of scikit-learn decided by process: on the folded
+section's 17 x 21 lattice, `experts(points, 3, seed=0)` came out as three
+different splits in four orders over twelve processes, and the model built
+on them started from a different bound. The k-means runs on one thread
+now (`threadpoolctl`; on a few thousand inducing points the cost is
+nothing), and `test_experts.py` builds the split in six processes. A
+split may differ from what an earlier version gave for the same seed,
+which was itself one of several. `from_kmeans` keeps its threads: its
+centres are one solution in any process, apart in the last bit (3e-14),
+and one thread costs it two to three times as long.
+
 ## version 0.10.4
 * **A reader's realizations multiply by the inducing points once.** A GP
 node reading an uncertain input draws each realization from `k R G^-1
