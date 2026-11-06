@@ -136,6 +136,10 @@ class GPOptions(_ModelOptions):
     quadrature_precision = "float64"
     # a model saved before 0.10.0 takes the conditioned quadrature
     deep_moments = "quadrature"
+    # a model saved before 0.10.6 weights its experts by their variances
+    expert_weights = "variance"
+    expert_temperature = 1.0
+    expert_blend = "moments"
 
     def __init__(self, verbose: bool = True,
                  prediction_batch_size: int = 20000, jitter: float = 1e-9,
@@ -151,7 +155,11 @@ class GPOptions(_ModelOptions):
                  quadrature_precision: _Literal["float64", "float32"]
                  | None = None,
                  deep_moments: _Literal["hinge", "blur", "bound",
-                                        "quadrature"] = "hinge"):
+                                        "quadrature"] = "hinge",
+                 expert_weights: _Literal["variance", "coverage"]
+                 = "variance",
+                 expert_temperature: float = 1.0,
+                 expert_blend: _Literal["moments", "balanced"] = "moments"):
         """
         Configuration of Gaussian process models.
 
@@ -374,7 +382,58 @@ class GPOptions(_ModelOptions):
             one). The rational quadratic kernel and
             `AdditiveGP` keep the quadrature under `"bound"`, with a
             warning, and `AdditiveGP` refuses `"hinge"` and `"blur"`.
+        expert_weights : {"variance", "coverage"}
+            How a GP node weights its experts where they meet. `"variance"`
+            (what a model saved before 0.10.6 keeps) weights each by the
+            variance it explains there, `(1 - v) / v`, normalized over the
+            experts, so the weights move with training and every expert is
+            computed at every location. `"coverage"` weights each by the
+            same formula at a fixed reference posterior: `v` is one less the
+            coverage of a Gaussian kernel over the expert's inducing points,
+            its length the points' median spacing, in the input's own
+            coordinates, so a weight depends on the location alone and is
+            the same for every GP node of the input. A weight under a
+            thousandth of the largest at its location is zero, and the
+            expert is not computed there: `predict` then computes each group
+            of locations with only its own experts. Needs
+            `propagation="joint"` and inputs that are a `BasicInput` or a
+            `GaussianInput` (weighted at its mean); `UncertainInputGP` and
+            `GradientConstrainedInput` refuse it.
+        expert_temperature : float
+            The power the raw weights are raised to before they are
+            normalized, under either rule: above one, each location leans
+            further toward the expert that knows it best.
+        expert_blend : {"moments", "balanced"}
+            Under `"moments"` the weights sum to one and the blend reports
+            `sum w mu` and `sum w v`. Under `"balanced"`, taken with
+            `expert_weights="coverage"`, they are normalized to a unit sum of
+            squares and the blend reports `sum w mu` and `sum w² v`: the
+            moments of the weighted sum of independent experts, a model
+            whose prior variance is one everywhere and whose training
+            objective is its exact bound. Each expert is then a part of the
+            field rather than a prediction of it, which a GP node reading
+            another's output, a walk or a `GaussianInput` cannot take.
         """
+        if expert_weights not in _latent.network._EXPERT_WEIGHT_RULES:
+            raise ValueError(
+                "expert_weights must be 'variance' or 'coverage', got %r"
+                % (expert_weights,))
+        if expert_blend not in _latent.network._EXPERT_BLENDS:
+            raise ValueError(
+                "expert_blend must be 'moments' or 'balanced', got %r"
+                % (expert_blend,))
+        if expert_blend == "balanced" and expert_weights != "coverage":
+            raise ValueError(
+                "the balanced blend takes fixed weights: pass "
+                "expert_weights='coverage'")
+        if not expert_temperature > 0:
+            raise ValueError("expert_temperature must be positive, got %r"
+                             % (expert_temperature,))
+        if expert_weights == "coverage" and propagation != "joint":
+            raise ValueError(
+                "fixed expert weights (expert_weights='coverage') are read "
+                "at each location's own coordinates, which the marginal "
+                "rule's walk does not carry: pass propagation='joint'")
         if quadrature_precision not in (None, "float64", "float32"):
             raise ValueError(
                 "quadrature_precision must be 'float64', 'float32' or None, "
@@ -412,6 +471,9 @@ class GPOptions(_ModelOptions):
         self.full_variance = full_variance
         self.quadrature_precision = quadrature_precision
         self.deep_moments = deep_moments
+        self.expert_weights = expert_weights
+        self.expert_temperature = float(expert_temperature)
+        self.expert_blend = expert_blend
 
 
 class _Convergence:
@@ -1123,6 +1185,8 @@ class VGPNetwork(_GPModel):
         self._refresh_graph = None
         if getattr(self.options, "propagation", "marginal") == "joint":
             self._check_expected_kernel()
+        if getattr(self.options, "expert_weights", "variance") == "coverage":
+            self._check_fixed_weights(self._setting())
         if self._full_variance():
             self._warn_explained_only()
 
@@ -1272,7 +1336,41 @@ class VGPNetwork(_GPModel):
         value = self._setting(rows, qmc)
         if value.joint:
             self._check_expected_kernel()
+        if value.expert_weights == "coverage":
+            self._check_fixed_weights(value)
         return _latent.network.setting(value)
+
+    def _check_fixed_weights(self, value):
+        """Refuses what fixed expert weights cannot weight: a location with
+        no coordinates of its own to read them at (the marginal rule, a
+        `GradientConstrainedInput`, `UncertainInputGP`'s nodes), and under
+        the balanced blend an expert that is read as a prediction of the
+        field rather than a part of it."""
+        network = _latent.network
+        if not value.joint:
+            raise ValueError(
+                "fixed expert weights (expert_weights='coverage') are read "
+                "at each location's own coordinates, which the marginal "
+                "rule's walk does not carry: set propagation='joint'")
+        for node in self._nodes():
+            name = "%s (%s)" % (node.name, type(node).__name__)
+            if isinstance(node, (network.GradientConstrainedInput,
+                                 network.UncertainInputGP)):
+                raise ValueError(
+                    "%s weights its experts at locations of its own, and "
+                    "takes expert_weights='variance'" % name)
+            if value.expert_blend != "balanced":
+                continue
+            if isinstance(node, network.GaussianInput) or (
+                    isinstance(node, (network._GPNode, network.GPWalk))
+                    and any(isinstance(p, (network._GPNode, network.GPWalk,
+                                           network.GaussianInput))
+                            for p in node.get_unique_parents())):
+                raise ValueError(
+                    "%s: under the balanced blend each expert is a part of "
+                    "the field, and a GP node reading an uncertain input "
+                    "reads each expert's own chain as a prediction of it; "
+                    "take expert_blend='moments'" % name)
 
     def _setting(self, rows=None, qmc=None):
         """What the model's options put in force for a call
@@ -1294,6 +1392,11 @@ class VGPNetwork(_GPModel):
             memory=self._quadrature_memory(),
             precision=self._quadrature_precision(),
             deep_moments=getattr(self.options, "deep_moments", "quadrature"),
+            expert_weights=getattr(self.options, "expert_weights",
+                                   "variance"),
+            expert_temperature=float(getattr(
+                self.options, "expert_temperature", 1.0)),
+            expert_blend=getattr(self.options, "expert_blend", "moments"),
             rows=current.rows if rows is None else int(rows))
 
     def _full_variance(self):
@@ -2606,8 +2709,43 @@ class VGPNetwork(_GPModel):
             return self._training_weights()["table"].copy()
         return self._weight_table(container)
 
+    def _fixed_weights(self):
+        """Whether the experts are weighted by their fixed weights
+        (`GPOptions.expert_weights="coverage"`)."""
+        return getattr(self.options, "expert_weights",
+                       "variance") == "coverage"
+
+    def _fixed_table(self, container, rows=None):
+        """The fixed weights at `rows` of `container` (every row of a
+        block's fan-out), every input's experts side by side, `(rows,
+        experts)` -- under the balanced blend their squares, the share of
+        the variance, so that a row sums to one either way. Read at the
+        locations' own coordinates, in bands of as many rows as a batch's
+        coverage, `[experts, rows, inducing points]`, holds at the
+        prediction's batch size."""
+        rows = _np.arange(container.n_data) if rows is None else rows
+        coords, _ = container.get_batched_coordinates(rows)
+        network = _latent.network
+        blocks = []
+        with self._propagation():
+            balanced = network._EXPERT_BLEND == "balanced"
+            for root, _, count in self._expert_blocks():
+                size = max(1, self.options.prediction_batch_size // count)
+                parts = []
+                for band in self.options.batch_index(len(coords),
+                                                     batch_size=size):
+                    weights = _np.asarray(network._fixed_weights(
+                        root, _tf.constant(coords[band], _tf.float64),
+                        tuple(range(count)))).T
+                    parts.append(weights ** 2 if balanced else weights)
+                blocks.append(_np.concatenate(parts, axis=0)
+                              if parts else _np.zeros([0, count]))
+        return _np.concatenate(blocks, axis=1)
+
     def _weight_table(self, container):
         """The body of :meth:`expert_weights`, for any container."""
+        if self._fixed_weights():
+            return self._fixed_table(container)
         _, gp = self._expert_structure()
         # every container holding locations is point-based
         data = _cast("_data.containers._PointBased", container)
@@ -3722,35 +3860,51 @@ class VGPNetwork(_GPModel):
         table = held["table"]
         rows_per = newdata.rows_per_location
         home, _ = self._expert_sets(held["overlap"], coverage, blocks)
+        fixed = self._fixed_weights()
+        exact = self._fixed_table(newdata, locations) if fixed else None
 
         # per input: the locations' weights, carried from the data in that
         # input's own transformed space, and its training sets
         per_input = []
         for r, (root, start, count) in enumerate(blocks):
-            tree = self._data_tree(root)
-            targets = self._transformed(newdata, locations, root=root)
-            own = table[:, start:start + count]
-            weights = _np.empty((len(targets), count))
-            # a chunk of rows at a time: the neighbours' weights are rows x
-            # neighbours x experts, and taken whole on the third pass of a
-            # GeoScape Run's refinement (millions of sub-blocks, 32
-            # experts) they took the process past 24 GB
-            for first in range(0, len(targets), _CARRIED_ROWS):
-                part = slice(first, first + _CARRIED_ROWS)
-                distance, nearest = tree.query(targets[part], k=neighbours)
-                inverse = 1.0 / (distance ** 2 + 1e-12)
-                weights[part] = _np.einsum(
-                    "rn,rnj->rj", inverse, own[nearest]) \
-                    / inverse.sum(axis=1, keepdims=True)
-            weights = weights.reshape([len(locations), rows_per, -1])
+            if fixed:
+                # the locations' own weights, exactly: no carrying from the
+                # data, and an expert of zero weight is never needed
+                weights = exact[:, start:start + count].reshape(
+                    [len(locations), rows_per, -1])
+            else:
+                tree = self._data_tree(root)
+                targets = self._transformed(newdata, locations, root=root)
+                own = table[:, start:start + count]
+                weights = _np.empty((len(targets), count))
+                # a chunk of rows at a time: the neighbours' weights are
+                # rows x neighbours x experts, and taken whole on the third
+                # pass of a GeoScape Run's refinement (millions of
+                # sub-blocks, 32 experts) they took the process past 24 GB
+                for first in range(0, len(targets), _CARRIED_ROWS):
+                    part = slice(first, first + _CARRIED_ROWS)
+                    distance, nearest = tree.query(targets[part],
+                                                   k=neighbours)
+                    inverse = 1.0 / (distance ** 2 + 1e-12)
+                    weights[part] = _np.einsum(
+                        "rn,rnj->rj", inverse, own[nearest]) \
+                        / inverse.sum(axis=1, keepdims=True)
+                weights = weights.reshape([len(locations), rows_per, -1])
             home_sets = [sets[r] for sets in home[start:start + count]]
             # in slots, as many as training's largest active set, so that
-            # prediction holds what training held, or as many as asked for
+            # prediction holds what training held, or as many as asked for;
+            # under fixed weights at least as many as any location's own
             size = max(len(s) for s in home_sets) if slots is True \
                 else int(slots)
+            if fixed and slots is True and len(locations):
+                size = max(size, int(_np.max(_np.sum(
+                    _np.any(weights > 0, axis=1), axis=1))))
             per_input.append((weights, home_sets, size))
 
         def own_set(weights, at):
+            if fixed:
+                return tuple(_np.flatnonzero(
+                    _np.any(weights[at] > 0, axis=0)).tolist())
             keep = set()
             for row in weights[at]:
                 order = _np.argsort(-row)
@@ -3765,6 +3919,14 @@ class VGPNetwork(_GPModel):
         def choose(weights, home_sets, size, at):
             mean = weights[at].mean(axis=0)
             subset = None
+            if fixed:
+                # exactly the experts of nonzero weight, which every group
+                # holding them answers alike -- its leading ones only where
+                # fewer slots were asked for
+                subset = own_set(weights, at)
+                if slots and len(subset) > size:
+                    subset = tuple(sorted(_np.argsort(-mean)[:size].tolist()))
+                return subset
             if slots:
                 # a location's own experts -- grouping into few sets only
                 # ever saved traces, and in slots there is one -- its
