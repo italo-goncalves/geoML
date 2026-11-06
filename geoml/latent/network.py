@@ -6373,6 +6373,11 @@ class GPWalk(_FunctionalLatentVariable):
         # each point's sensitivity to normals of its own, the same along its
         # path and shared with no other point
         r = _tf.zeros(_tf.concat([lead, [size, size]], 0), _tf.float64)
+        # R R^T + (K + D)^-1 = K^-1 for every output, the field's outputs
+        # sharing its kernel: so the unexplained variance is one number per
+        # walker, read through K^-1 once rather than per output
+        k_inv = _tf.matmul(root_r[..., 0, :, :], root_r[..., 0, :, :],
+                           transpose_b=True) + smooth_inv[..., 0, :, :]
         start_var = None
         for k in range(self.n_steps):
             # each step is recomputed in the backward pass rather than kept:
@@ -6383,17 +6388,17 @@ class GPWalk(_FunctionalLatentVariable):
             # points, and five steps needed 26 GB; recomputed, 60% less for
             # 15% more time (the changelog, 0.9.2)
             out = _recomputed(self._walk_step, k, size, step, u, u_var,
-                              alpha, root_r, smooth_inv, bias, mask, var0,
-                              cov0, mean, a, h, r)
+                              alpha, root_r, k_inv, bias, mask, var0, cov0,
+                              mean, a, h, r)
             mean, a, h, r = out[:4]
             if k == 0:
                 start_var = out[4]
         return mean, a, h, r, start_var
 
-    def _walk_step(self, k, size, step, u, u_var, alpha, root_r, smooth_inv,
+    def _walk_step(self, k, size, step, u, u_var, alpha, root_r, k_inv,
                    bias, mask, var0, cov0, mean, a, h, r):
-        """Step `k` of `_joint_walk`: the walkers' new `mean`, `a`, `h`
-        and `r`, and at the first step also the field's variance at the
+        """Step `k` of `_joint_walk`: the walkers' new `mean`, `a`, `h` and
+        `r`, and at the first step also the field's variance at the
         start."""
         eye = _tf.eye(size, dtype=_tf.float64)
         start_var = None
@@ -6418,23 +6423,22 @@ class GPWalk(_FunctionalLatentVariable):
         if k > 0:
             f = f + _tf.einsum("...njd,...sjl,...ndsl->...ns",
                                grad, root_r, h)
-        if k == 0:
-            explained = _tf.reduce_sum(
-                _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
-                * cov[..., None, :, :], axis=-1)
-            start_var = _tf.maximum(1.0 - explained, 0.0)
         g = _tf.einsum("...nm,...sml->...snl", cov, root_r)
+        # k K^-1 k = k (K + D)^-1 k + |k R|^2, for every output
+        explained_all = _tf.reduce_sum(_tf.matmul(cov, k_inv) * cov,
+                                       axis=-1)                # [..., n]
+        g2 = _tf.reduce_sum(g ** 2, axis=-1)                   # [..., s, n]
+        if k == 0:
+            start_var = _tf.maximum(
+                1.0 - (explained_all[..., None, :] - g2), 0.0)
         mean = mean + step * f
         a = a + step * _tf.einsum("...ij,...jk->...ik", jac, a)
         h = h + step * (_tf.einsum("...ij,...jsq->...isq", jac, h)
                         + _tf.einsum("...snq,ds->...ndsq", g, eye))
-        # (K + D)^-1 and R R^T = K^-1 - (K + D)^-1 together give
-        # k K^-1 k, and what is left of the prior is unexplained
-        smooth = _tf.reduce_sum(
-            _tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
-            * cov[..., None, :, :], axis=-1)
-        left = _tf.maximum(
-            1.0 - smooth - _tf.reduce_sum(g ** 2, axis=-1), 0.0)
+        # what is left of the prior is unexplained
+        left = _tf.broadcast_to(
+            _tf.maximum(1.0 - explained_all, 0.0)[..., None, :],
+            _tf.shape(g2))
         positive = left > 0.0
         sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, left, 1.0)),
                        _tf.zeros_like(left))

@@ -7,6 +7,15 @@ never cached: every `train_full` call traced the step again -- 10 s a call
 on the folded section's walk, 1.6 s on its stationary model -- and kept the
 trace's memory, and every fold of a `cross_validate` traced its own. The
 column and the parameter are gone, and the bound is unchanged to the bit.
+* **A walk step reads its field's unexplained variance once.** The
+variance the inducing points leave unexplained, `1 - k K^-1 k`, is the same
+for every output of the field, its outputs sharing one kernel; a walk step
+took it output by output, through `(K + D)^-1` and `|k R|^2`. It now reads it
+once through `K^-1 = R R^T + (K + D)^-1`, and the start's explained variance
+from it. The walk is the same to rounding (`test_expected_kernel.py` holds
+it against the 0.10.2 formulas on one and three experts and in slots); a
+training step of the folded section's walk takes 527 ms on the GPU instead
+of 555, and 786 ms on the CPU instead of 808.
 
 ## version 0.10.2
 * **`models.score_measurements(model, data)` scores a model against the
