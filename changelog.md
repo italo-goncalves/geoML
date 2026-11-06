@@ -1,3 +1,13 @@
+## version 0.10.4
+* **A reader's realizations multiply by the inducing points once.** A GP
+node reading an uncertain input draws each realization from `k R G^-1
+Phi(Z)` and the prior draw's projection on the inducing points, `k L^-T
+G^-1 Phi(Z)`; the projection was found by solving the triangle of `L` for
+every row's `k`, a quarter of the draw. `L^-T G^-1 Phi(Z)` is now solved
+once per call and joined to the other, and the two are one product. The
+realizations are the same to rounding (7e-15 on the folded section's walk,
+one expert, three and in slots); the stored ones, in float32, to the bit.
+
 ## version 0.10.3
 * **A model with a rock type keeps its traced training step.** The
 variable's boundary column rode every training step as a constant that no

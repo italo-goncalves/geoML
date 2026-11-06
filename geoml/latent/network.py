@@ -4104,10 +4104,19 @@ class BasicGP(_GPNode):
                     * _tf.zeros_like(points)[..., None, :, :]
                 return [e.mean, var, cov, points, spread]
 
-            def prior_parts(points, points_var, root_r, mask=None):
+            def prior_parts(points, points_var, root_r, chol, mask=None):
+                """What the draw multiplies `k` by, once: `R G^-1 Phi(Z)`
+                for each output and `L^-T G^-1 Phi(Z)` after them, `[...,
+                size + 1, m, J + 1]` -- the inducing draw and the prior's
+                projection in one product, where solving the triangle for
+                every row's `k` cost a quarter of the draw."""
                 prior = self._whitened_prior(
                     damped_features(points, points_var), mask)
-                return [_tf.matmul(root_r, prior[..., None, :, :]), prior]
+                projection = _tf.linalg.triangular_solve(
+                    chol, prior, lower=True, adjoint=True)
+                return [_tf.concat([
+                    _tf.matmul(root_r, prior[..., None, :, :]),
+                    projection[..., None, :, :]], axis=-3)]
 
             if slots is not None:
                 ips, ipvs = _slot_points(self.parent)
@@ -4115,22 +4124,24 @@ class BasicGP(_GPNode):
                 outer = pmask[:, None, :, None] * pmask[:, None, None, :]
                 groups = [chain_parts(chain[0], ips, ipvs) + [
                     self.slots_cov_smooth_inv * outer]
-                    + prior_parts(ips, ipvs, self.slots_chol_r * outer, pmask)
+                    + prior_parts(ips, ipvs, self.slots_chol_r * outer,
+                                  self.slots_cov_chol, pmask)
                     + [self.slots_alpha[..., 0],
                        self.slots_bias[:, None, None, None], pmask, weights,
-                       self.slots_cov_chol, left]]
+                       left]]
                 frees = [chain[0].covariance is not None]
             else:
                 ids = _active_experts(self.root)
                 ips, ipvs = self._parent_points(ids)
                 groups = [chain_parts(chain[p], ips[p], ipvs[p]) + [
                     self.cov_smooth_inv[p]]
-                    + prior_parts(ips[p], ipvs[p], self.chol_r[p])
+                    + prior_parts(ips[p], ipvs[p], self.chol_r[p],
+                                  self.cov_chol[p])
                     + [self.alpha[p][..., 0],
                        _tf.reshape(self.parameters["bias_%d" % i].get_value(),
                                    [1, 1, 1]),
                        _tf.ones([int(self.root.n_ip[i])], _tf.float64),
-                       weights[p], self.cov_chol[p], left[p]]
+                       weights[p], left[p]]
                     for p, i in enumerate(ids)]
                 frees = [chain[p].covariance is not None
                          for p in range(len(ids))]
@@ -4160,8 +4171,8 @@ class BasicGP(_GPNode):
                 sims = smooth = resid = target = smooth_target = 0.0
                 w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
                 for g in range(len(groups)):
-                    (mean, var, cov, points, spread, smooth_inv, root_prior,
-                     prior, alpha, bias, mask, w, chol, residual) = \
+                    (mean, var, cov, points, spread, smooth_inv, joined,
+                     alpha, bias, mask, w, residual) = \
                         flat[g * per_group:(g + 1) * per_group]
                     # the standard deviation with a finite gradient at zero
                     held = var > 0.0
@@ -4182,27 +4193,22 @@ class BasicGP(_GPNode):
                                          smooth_inv, k)
                         conditional = _tf.maximum(1.0 - ksk, 0.0)
                     # the expert's draw of its inducing values from the
-                    # shared prior, `k R G^-1 Phi(Z) w` as coefficients of w
-                    drawn = _tf.einsum("...nSm,...smj->...snSj", k,
-                                       root_prior)  # [.., size, n, c, J + 1]
+                    # shared prior, `k R G^-1 Phi(Z) w` as coefficients of
+                    # w, and the prior draw's projection on the inducing
+                    # points, `k L^-T G^-1 Phi(Z)`, in one product
+                    product = _tf.einsum("...nSm,...smj->...snSj", k,
+                                         joined)  # [.., size + 1, n, c, J+1]
+                    drawn = product[..., :-1, :, :, :]
                     # the residual: the prior draw at the realized input
-                    # less its projection on the inducing points, through
-                    # the Cholesky of K
+                    # less that projection
                     cosines = fscale * _tf.cos(_tf.einsum(
                         "...nSd,jd->...nSj", h_e / ranges, frequencies)
                         + phases)
                     phi_h = _tf.concat([cosines, _tf.ones_like(
                         cosines[..., :1]) * _tf.sqrt(constant)], axis=-1)
-                    shape = _tf.shape(k)
-                    white = _tf.linalg.triangular_solve(
-                        chol, _tf.linalg.matrix_transpose(_tf.reshape(
-                            k, _tf.concat([shape[:-3], [-1, shape[-1]]], 0))),
-                        lower=True)                       # [.., m, n c]
-                    # shaped from `k`, which carries the slots where the
+                    # the projection carries the slots `k` does, where the
                     # input's mean (a `GaussianInput`'s) may not
-                    res = phi_h - _tf.reshape(_tf.einsum(
-                        "...mN,...mj->...Nj", white, prior),
-                        _tf.concat([shape[:-1], _tf.shape(phi_h)[-1:]], 0))
+                    res = phi_h - product[..., -1, :, :, :]
                     # the smooth part's own variance: the conditional less
                     # the residual's, `max(conditional - |k R|², 0)`; the
                     # rows of `G^-1 Phi` are orthonormal, so `|k R|²` is the
