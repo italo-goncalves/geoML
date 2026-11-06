@@ -21,7 +21,19 @@ float32 products TensorFlow runs on TensorFloat-32 cores by default, by up
 to 0.7% (against 4e-7 when only the kernel was single), and they depend at
 about a part in a thousand on the batch they are computed in --
 `docs/source/reference/reproducibility.md` says so. `"float64"` keeps the
-old numbers.
+old numbers. A prediction by expert at full coverage is the prediction to
+rounding in double; on such a GPU, in single, its realizations differ from
+the plain prediction's by about as much.
+* **On a GPU a prediction compiles its realizations with XLA.** The chunks
+a reader's pathwise draw and a walk's realizations are computed in
+(`_chunked_map`) were compiled with XLA on the CPU only, an XLA-compiled
+chunk having crashed the CUDA driver in a GeoScape network's
+`train_by_expert` (2026-10-22). They are compiled on a GPU too where no
+tape records them -- a prediction, never training (`_realization_xla`).
+On that network, trained 30 expert batches on the GPU, the predictions by
+expert, of its measurements by expert and plain all ran compiled and
+finished; the folded section's grid prediction takes 5.9 s instead of 8.5
+(12.3 at 0.10.3). On the CPU nothing changes.
 
 ## version 0.10.3
 * **A model with a rock type keeps its traced training step.** The

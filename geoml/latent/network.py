@@ -33,6 +33,7 @@ import functools as _functools
 import warnings as _warnings
 import zlib as _zlib
 from scipy import special as _special
+from tensorflow.python.eager import record as _record
 
 _tfd = _tfp.distributions
 
@@ -934,7 +935,7 @@ def _chunked_map(fn, inputs, n_chunks):
     must read no variable; whatever it differentiates arrives in
     `inputs`, all tensors."""
     inputs = tuple(inputs)
-    if _quadrature_xla():
+    if _realization_xla():
         fn = _tf.function(fn, jit_compile=True)
     if n_chunks == 1:
         return fn(_tf.constant(0), *inputs)
@@ -1788,6 +1789,16 @@ def _quadrature_xla():
     # trained on with the same bounds (2026-10-22); and on the GPU it bought
     # nothing, the uncompiled run reaching batch 16 as fast
     return _QUADRATURE_XLA and not _gpu_visible()
+
+
+def _realization_xla():
+    """Whether a chunk of realizations (`_chunked_map`: a reader's pathwise
+    draw, a walk's realizations) is compiled with XLA: as a quadrature
+    chunk on the CPU, and on a GPU too where no tape records it -- a
+    prediction. The crash `_quadrature_xla` keeps XLA off a GPU for was in
+    training. Read at trace time."""
+    return _QUADRATURE_XLA and (not _gpu_visible()
+                                or not _record.could_possibly_record())
 
 
 @_contextlib.contextmanager
@@ -6781,7 +6792,7 @@ class GPWalk(_FunctionalLatentVariable):
         rather than one by one (`tf.map_fn`): `starts` `[S, n, d]`, `coef`
         `[S, ..., size, m]`, the field read through `_plain_covariance`'s
         distance expansion, a chunk of realizations at a time under the
-        memory budget (`_chunked_map`, compiled under `_quadrature_xla`).
+        memory budget (`_chunked_map`, compiled under `_realization_xla`).
         Returns `[S, ..., n, d]`. On the folded-ore model the realizations
         walked one at a time were nearly half of a grid prediction."""
         field = self.field
