@@ -3246,14 +3246,16 @@ and memory on a many-expert model).
 folded section's training step from 555 to 349 ms on the GPU and from 808 to
 609 on the CPU; `docs/benchmarks/walk_cost.py`, `walk_ops.py`). Three parts
 remain, largest first:
-- *The reader's pathwise draws*, 41% of a grid prediction on the GPU (5.3 s
-  of 12.8) and about half on the CPU (12 s of 23): a GP reading the walk
-  draws each realization at its own positions, `k R G^-1 Phi(Z) w` and the
-  residual through the Cholesky of `K`, two products of rows x realizations
-  x inducing points x 1025 features (`BasicGP._pathwise_simulate`). It is
-  the cost of any GP reading an uncertain input, not the walk's; contracting
-  the feature weights first would leave only the norms that rescale each
-  draw, which read the features whole. Profile it on its own first.
+- *The reader's pathwise draws* -- **done in 0.10.4** (profiled 2026-11-06,
+  `docs/benchmarks/realization_cost.py`): the triangle solved once per call
+  and the two products joined, the features' products in single precision
+  under `quadrature_precision="float32"` (the GPU's default), the chunks
+  compiled with XLA on a GPU outside a tape; the folded section's grid
+  prediction 12.3 -> 5.9 s on the GPU, 22.6 -> 21.7 s on the CPU in float64
+  and 17.8 in float32. What is left of a GPU prediction is the moments,
+  4.6 s at one realization. Contracting the feature weights first would
+  still halve the products, the norms that rescale each draw reading the
+  features whole; not tried.
 - *The refresh grows as the cube of the inducing points*: they walk
   themselves every step, m walkers against m points, and at 775 a step is
   2.0 s against 0.35 at 357. Experts divide it.
@@ -3261,6 +3263,24 @@ remain, largest first:
   with its gradient, isolated, at the folded section's shapes; never tried
   in a training step, where XLA as a whole was slower and went NaN before,
   and on the GPU it bought nothing in the step.
+
+**S — A reader's whitened prior is not standard** (found 2026-11-06,
+profiling the realizations). `BasicGP._whitened_prior` promises that `G^-1
+Phi(Z) w` is "exactly standard whatever the features", `G` the Cholesky of
+the features' Gram `Phi(Z) Phi(Z)^T + 1e-9 I`. At the folded section
+reader's 357 walked inducing points the Gram of its 1025 Matern32 features
+has 55 eigenvalues under the 1e-9 jitter (the exact kernel's smallest is
+1.2e-3, no two points closer than 0.15 ranges), so the whitened rows'
+variances fall to 0.33 and 212 of 357 rows are off by more than 1e-3; the
+draw's comment in `_pathwise_simulate` that the rows are orthonormal says
+the same thing. The rescale to the moments' variance restores every
+location's marginal, so what is wrong is the realizations' covariance
+between locations, by an amount not measured. Measure first: the
+realizations' empirical covariance between locations against the one the
+posterior implies, at the folded section's grid; then, if it matters, draw
+the null
+space of the Gram with normals of its own or take more features where the
+Gram is short of rank.
 
 ## 2. Fitting and initialization
 
