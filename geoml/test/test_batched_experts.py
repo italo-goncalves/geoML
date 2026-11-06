@@ -761,6 +761,10 @@ ALL_NETWORKS = sorted(NETWORKS) + ["gaussian_input", "two_inputs", "stack",
 def test_a_network_predicts_by_expert_as_the_model_does(name):
     """Every expert in the slots is the model, whatever the nodes."""
     m = _node_model(name)
+    # in double wherever it runs: a GPU's default single precision rounds
+    # the realizations' feature products by the batch's shape, padded slots
+    # and all (test_quadrature_precision)
+    m.options.quadrature_precision = "float64"
     m.train_full(5)
     a = geoml.data.PointData.from_array(_targets(8), ["X", "Y"])
     b = geoml.data.PointData.from_array(_targets(8), ["X", "Y"])

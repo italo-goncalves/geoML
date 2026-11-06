@@ -29,6 +29,14 @@ import tensorflow as tf
 import geoml
 import geoml.latent.network as _net
 
+# what single precision moves a realization by, against its spread: its
+# rounding on a CPU; on a GPU whose float32 products TensorFlow runs on
+# TensorFloat-32 cores, the features' products round to about 1e-3, and by
+# the batch's shape
+_TF32 = _net._gpu_visible() \
+    and tf.config.experimental.tensor_float_32_execution_enabled()
+_REALIZATION_TOLERANCE = 1e-2 if _TF32 else 1e-5
+
 
 def _model(network, kernel, shift=0.0, center=True):
     geoml.set_seed(7)
@@ -128,7 +136,24 @@ def test_single_precision_moves_the_realizations_by_its_rounding(
         sims[precision] = _realizations(model, x)[0]
     assert np.all(np.isfinite(sims["float32"]))
     spread = sims["float64"].std(axis=1).mean()
-    assert np.abs(sims["float32"] - sims["float64"]).max() < 1e-5 * spread
+    assert np.abs(sims["float32"] - sims["float64"]).max() \
+        < _REALIZATION_TOLERANCE * spread
+
+
+def test_single_precision_keeps_the_realizations_at_the_inducing_points():
+    # where the prior draw's residual cancels against its projection on the
+    # inducing points, the subtraction the features make in float32
+    model, data = _model("walk", "Exponential")
+    x = np.asarray(geoml.data.inducing.from_kmeans(data, 16, seed=0)
+                   .coordinates)
+    sims = {}
+    for precision in ("float64", "float32"):
+        model.options.quadrature_precision = precision
+        sims[precision] = _realizations(model, x)[0]
+    assert np.all(np.isfinite(sims["float32"]))
+    spread = sims["float64"].std(axis=1).mean()
+    assert np.abs(sims["float32"] - sims["float64"]).max() \
+        < _REALIZATION_TOLERANCE * spread
 
 
 def test_single_precision_keeps_the_variance_and_the_batching():
@@ -141,10 +166,12 @@ def test_single_precision_keeps_the_variance_and_the_batching():
         model.options.quadrature_precision = precision
         sims, reported = _realizations(model, x, n_sim=400)
         ratio[precision] = np.median(np.var(sims, axis=1) / reported)
-    assert abs(ratio["float32"] / ratio["float64"] - 1.0) < 1e-4
+    assert abs(ratio["float32"] / ratio["float64"] - 1.0) \
+        < (1e-2 if _TF32 else 1e-4)
     model.options.prediction_batch_size = 25
     batched, _ = _realizations(model, x, n_sim=400)
-    assert np.abs(batched - sims).max() < 1e-5 * sims.std(axis=1).mean()
+    assert np.abs(batched - sims).max() \
+        < _REALIZATION_TOLERANCE * sims.std(axis=1).mean()
 
 
 def test_the_rational_quadratic_stays_in_double():

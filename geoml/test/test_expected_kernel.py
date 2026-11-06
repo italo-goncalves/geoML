@@ -1067,6 +1067,9 @@ def test_the_realizations_do_not_depend_on_the_batch_or_the_chunk(
         n_experts, monkeypatch):
     model, leaf, hidden, mapping, x = _network(
         _two_layers, n_experts=n_experts, kernel=geoml.kernels.Matern52())
+    # in double wherever it runs: a GPU's default single precision rounds
+    # the features' products by the batch's shape (test_quadrature_precision)
+    model.options.quadrature_precision = "float64"
     _, _, whole = _leaf_realizations(model, leaf, x[:30], 12)
     _, _, part = _leaf_realizations(model, leaf, x[10:20], 12)
     np.testing.assert_allclose(part, whole[10:20], rtol=1e-10, atol=1e-12)

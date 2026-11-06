@@ -324,9 +324,17 @@ class GPOptions(_ModelOptions):
             `"float32"` computes them in single precision, from offsets,
             gains and conditional variances taken in double, and returns
             the kernel in double, every product and sum after it in double
-            too. Faster where single precision is, on a GPU above all, at a
-            relative error of about single precision in the kernel. The
-            rational quadratic kernel's quadrature stays in double. `None`
+            too; in the realizations, the random features at the realized
+            input and their products with the inducing points as well, the
+            features' phase reduced in double first and the realizations
+            assembled in double. Faster where single precision is, on a GPU
+            above all, at a relative error of about single precision in the
+            kernel and of a few parts in a million in the realizations --
+            up to about a percent on a GPU whose single-precision products
+            run on TensorFloat-32 cores, as TensorFlow lets them by default,
+            the realizations then depending slightly on the batch they are
+            computed in. The rational quadratic
+            kernel's quadrature stays in double. `None`
             takes `"float32"` where TensorFlow sees a GPU and `"float64"`
             elsewhere, decided where the model runs.
         deep_moments : {"hinge", "blur", "bound", "quadrature"}

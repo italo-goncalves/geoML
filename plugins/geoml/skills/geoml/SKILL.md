@@ -71,12 +71,14 @@ TensorFlow sees a GPU, the large elementwise arrays of the quadrature a GP
 node takes over an uncertain input run in `float32`
 (`GPOptions(quadrature_precision=None)`, the default), every product and sum
 after them in `float64` -- held-out scores unchanged, results moving in
-about the eighth digit against a CPU run; pass `"float64"` to keep one
-precision everywhere. Realizations are *stored* as `float32` (half the disk,
+about the eighth digit against a CPU run -- and so do the realizations'
+random-feature products, which on a GPU's default TensorFloat-32 cores
+move a realization by up to about a percent and with the batch it is
+computed in; pass `"float64"` to keep one precision everywhere. Realizations are *stored* as `float32` (half the disk,
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.3.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.4.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,

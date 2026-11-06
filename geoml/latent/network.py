@@ -33,6 +33,7 @@ import functools as _functools
 import warnings as _warnings
 import zlib as _zlib
 from scipy import special as _special
+from tensorflow.python.eager import record as _record
 
 _tfd = _tfp.distributions
 
@@ -934,7 +935,7 @@ def _chunked_map(fn, inputs, n_chunks):
     must read no variable; whatever it differentiates arrives in
     `inputs`, all tensors."""
     inputs = tuple(inputs)
-    if _quadrature_xla():
+    if _realization_xla():
         fn = _tf.function(fn, jit_compile=True)
     if n_chunks == 1:
         return fn(_tf.constant(0), *inputs)
@@ -1614,7 +1615,9 @@ _NODE_BYTES = 48
 # (`GPOptions.quadrature_precision`): float32 for the `[..., n, nodes, m, d]`
 # arrays and the mixture's components, the offsets, gains and conditional
 # variances computed in float64 first and the kernel returned in float64,
-# every product and reduction after it in float64. Set through
+# every product and reduction after it in float64 -- except, in a pathwise
+# draw, the random features and their products with the inducing points,
+# which are float32 too and return to float64 reduced. Set through
 # `quadrature_rule` by the model, read at trace time
 _QUADRATURE_DTYPE = _tf.float64
 _REALIZATION_BYTES = 48
@@ -1786,6 +1789,16 @@ def _quadrature_xla():
     # trained on with the same bounds (2026-10-22); and on the GPU it bought
     # nothing, the uncompiled run reaching batch 16 as fast
     return _QUADRATURE_XLA and not _gpu_visible()
+
+
+def _realization_xla():
+    """Whether a chunk of realizations (`_chunked_map`: a reader's pathwise
+    draw, a walk's realizations) is compiled with XLA: as a quadrature
+    chunk on the CPU, and on a GPU too where no tape records it -- a
+    prediction. The crash `_quadrature_xla` keeps XLA off a GPU for was in
+    training. Read at trace time."""
+    return _QUADRATURE_XLA and (not _gpu_visible()
+                                or not _record.could_possibly_record())
 
 
 @_contextlib.contextmanager
@@ -4104,10 +4117,19 @@ class BasicGP(_GPNode):
                     * _tf.zeros_like(points)[..., None, :, :]
                 return [e.mean, var, cov, points, spread]
 
-            def prior_parts(points, points_var, root_r, mask=None):
+            def prior_parts(points, points_var, root_r, chol, mask=None):
+                """What the draw multiplies `k` by, once: `R G^-1 Phi(Z)`
+                for each output and `L^-T G^-1 Phi(Z)` after them, `[...,
+                size + 1, m, J + 1]` -- the inducing draw and the prior's
+                projection in one product, where solving the triangle for
+                every row's `k` cost a quarter of the draw."""
                 prior = self._whitened_prior(
                     damped_features(points, points_var), mask)
-                return [_tf.matmul(root_r, prior[..., None, :, :]), prior]
+                projection = _tf.linalg.triangular_solve(
+                    chol, prior, lower=True, adjoint=True)
+                return [_tf.concat([
+                    _tf.matmul(root_r, prior[..., None, :, :]),
+                    projection[..., None, :, :]], axis=-3)]
 
             if slots is not None:
                 ips, ipvs = _slot_points(self.parent)
@@ -4115,22 +4137,24 @@ class BasicGP(_GPNode):
                 outer = pmask[:, None, :, None] * pmask[:, None, None, :]
                 groups = [chain_parts(chain[0], ips, ipvs) + [
                     self.slots_cov_smooth_inv * outer]
-                    + prior_parts(ips, ipvs, self.slots_chol_r * outer, pmask)
+                    + prior_parts(ips, ipvs, self.slots_chol_r * outer,
+                                  self.slots_cov_chol, pmask)
                     + [self.slots_alpha[..., 0],
                        self.slots_bias[:, None, None, None], pmask, weights,
-                       self.slots_cov_chol, left]]
+                       left]]
                 frees = [chain[0].covariance is not None]
             else:
                 ids = _active_experts(self.root)
                 ips, ipvs = self._parent_points(ids)
                 groups = [chain_parts(chain[p], ips[p], ipvs[p]) + [
                     self.cov_smooth_inv[p]]
-                    + prior_parts(ips[p], ipvs[p], self.chol_r[p])
+                    + prior_parts(ips[p], ipvs[p], self.chol_r[p],
+                                  self.cov_chol[p])
                     + [self.alpha[p][..., 0],
                        _tf.reshape(self.parameters["bias_%d" % i].get_value(),
                                    [1, 1, 1]),
                        _tf.ones([int(self.root.n_ip[i])], _tf.float64),
-                       weights[p], self.cov_chol[p], left[p]]
+                       weights[p], left[p]]
                     for p, i in enumerate(ids)]
                 frees = [chain[p].covariance is not None
                          for p in range(len(ids))]
@@ -4144,10 +4168,14 @@ class BasicGP(_GPNode):
                 lead *= _static(dim, 1)
             if sliced:
                 lead *= int(_slot_mask(self.root).shape[0])
+            # the features' arrays, `[.., n, c, J + 1]`, in the quadrature's
+            # precision (`GPOptions.quadrature_precision`), read at trace time
+            features = _QUADRATURE_DTYPE
             per_draw = _REALIZATION_BYTES * lead * len(groups) * _static(
                 z.shape[0], _QUADRATURE_ROWS) * (
                 max(int(m) for m in self.root.n_ip) * int(self.parent.size)
-                + self.size * n_features)
+                + self.size * n_features
+                * (0.5 if features == _tf.float32 else 1.0))
             chunk = _chunk_of(n_sim, per_draw, self._REALIZATIONS_PER_CHUNK)
             n_chunks = n_sim // chunk
 
@@ -4160,8 +4188,8 @@ class BasicGP(_GPNode):
                 sims = smooth = resid = target = smooth_target = 0.0
                 w_c = fweights[..., start:start + chunk]  # [size, J + 1, c]
                 for g in range(len(groups)):
-                    (mean, var, cov, points, spread, smooth_inv, root_prior,
-                     prior, alpha, bias, mask, w, chol, residual) = \
+                    (mean, var, cov, points, spread, smooth_inv, joined,
+                     alpha, bias, mask, w, residual) = \
                         flat[g * per_group:(g + 1) * per_group]
                     # the standard deviation with a finite gradient at zero
                     held = var > 0.0
@@ -4182,39 +4210,43 @@ class BasicGP(_GPNode):
                                          smooth_inv, k)
                         conditional = _tf.maximum(1.0 - ksk, 0.0)
                     # the expert's draw of its inducing values from the
-                    # shared prior, `k R G^-1 Phi(Z) w` as coefficients of w
-                    drawn = _tf.einsum("...nSm,...smj->...snSj", k,
-                                       root_prior)  # [.., size, n, c, J + 1]
+                    # shared prior, `k R G^-1 Phi(Z) w` as coefficients of
+                    # w, and the prior draw's projection on the inducing
+                    # points, `k L^-T G^-1 Phi(Z)`, in one product
+                    product = _tf.einsum(
+                        "...nSm,...smj->...snSj", _tf.cast(k, features),
+                        _tf.cast(joined, features))  # [.., size + 1, n, c, J+1]
+                    drawn = product[..., :-1, :, :, :]
                     # the residual: the prior draw at the realized input
-                    # less its projection on the inducing points, through
-                    # the Cholesky of K
-                    cosines = fscale * _tf.cos(_tf.einsum(
-                        "...nSd,jd->...nSj", h_e / ranges, frequencies)
-                        + phases)
+                    # less that projection
+                    phase = _tf.einsum("...nSd,jd->...nSj", h_e / ranges,
+                                       frequencies) + phases
+                    if features != _tf.float64:
+                        # reduced in double first: far from the origin the
+                        # phase is large, and single precision would keep
+                        # none of its fraction
+                        phase = _tf.cast(phase - 2.0 * _np.pi * _tf.round(
+                            phase / (2.0 * _np.pi)), features)
+                    cosines = _tf.cast(fscale, features) * _tf.cos(phase)
                     phi_h = _tf.concat([cosines, _tf.ones_like(
-                        cosines[..., :1]) * _tf.sqrt(constant)], axis=-1)
-                    shape = _tf.shape(k)
-                    white = _tf.linalg.triangular_solve(
-                        chol, _tf.linalg.matrix_transpose(_tf.reshape(
-                            k, _tf.concat([shape[:-3], [-1, shape[-1]]], 0))),
-                        lower=True)                       # [.., m, n c]
-                    # shaped from `k`, which carries the slots where the
+                        cosines[..., :1]) * _tf.cast(_tf.sqrt(constant),
+                                                     features)], axis=-1)
+                    # the projection carries the slots `k` does, where the
                     # input's mean (a `GaussianInput`'s) may not
-                    res = phi_h - _tf.reshape(_tf.einsum(
-                        "...mN,...mj->...Nj", white, prior),
-                        _tf.concat([shape[:-1], _tf.shape(phi_h)[-1:]], 0))
+                    res = phi_h - product[..., -1, :, :, :]
                     # the smooth part's own variance: the conditional less
                     # the residual's, `max(conditional - |k R|², 0)`; the
                     # rows of `G^-1 Phi` are orthonormal, so `|k R|²` is the
                     # drawn coefficients' squared norm
-                    seen = _tf.minimum(conditional,
-                                       _tf.reduce_sum(drawn ** 2, -1))
+                    seen = _tf.minimum(conditional, _tf.cast(
+                        _tf.reduce_sum(drawn ** 2, -1), _tf.float64))
                     wv = w[..., None]                     # [.., size, n, 1]
                     part = part * wv
                     conditional = conditional * wv
                     seen = seen * wv
-                    drawn = drawn * wv[..., None]
-                    res = res[..., None, :, :, :] * wv[..., None]
+                    wf = _tf.cast(wv[..., None], features)
+                    drawn = drawn * wf
+                    res = res[..., None, :, :, :] * wf
                     if sliced:
                         part = _tf.reduce_sum(part, 0)
                         conditional = _tf.reduce_sum(conditional, 0)
@@ -4228,14 +4260,22 @@ class BasicGP(_GPNode):
                 # blended conditional variance, and its smooth part to that
                 # less the residual's, so the two differ by what the
                 # prediction integrates (`own`)
+                # the features' sums and products in their precision, the
+                # rescale and the realizations in double
                 total = smooth + resid
-                factor = _residual_scale(target,
-                                         _tf.reduce_sum(total ** 2, -1))
-                full = sims + factor * _tf.einsum("snSj,sjS->snS", total, w_c)
-                factor = _residual_scale(smooth_target,
-                                         _tf.reduce_sum(smooth ** 2, -1))
-                smooth = sims + factor * _tf.einsum("snSj,sjS->snS", smooth,
-                                                    w_c)
+                w_f = _tf.cast(w_c, features)
+
+                def norm(x):
+                    return _tf.cast(_tf.reduce_sum(x ** 2, -1), _tf.float64)
+
+                def along(x):
+                    return _tf.cast(_tf.einsum("snSj,sjS->snS", x, w_f),
+                                    _tf.float64)
+
+                factor = _residual_scale(target, norm(total))
+                full = sims + factor * along(total)
+                factor = _residual_scale(smooth_target, norm(smooth))
+                smooth = sims + factor * along(smooth)
                 # [c, 2, size, n]: the realization and its smooth part
                 return _tf.transpose(_tf.stack([full, smooth]), [3, 0, 1, 2])
 
@@ -6752,7 +6792,7 @@ class GPWalk(_FunctionalLatentVariable):
         rather than one by one (`tf.map_fn`): `starts` `[S, n, d]`, `coef`
         `[S, ..., size, m]`, the field read through `_plain_covariance`'s
         distance expansion, a chunk of realizations at a time under the
-        memory budget (`_chunked_map`, compiled under `_quadrature_xla`).
+        memory budget (`_chunked_map`, compiled under `_realization_xla`).
         Returns `[S, ..., n, d]`. On the folded-ore model the realizations
         walked one at a time were nearly half of a grid prediction."""
         field = self.field

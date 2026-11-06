@@ -56,7 +56,11 @@ device, and `set_seed` before anything is built:
   deep model also takes its quadrature over uncertain inputs in single
   precision where it sees a GPU (`GPOptions(quadrature_precision=None)`,
   the default), so the same model reopened on a CPU moves in about the
-  eighth digit; pass `"float64"` to keep one precision everywhere. To
+  eighth digit, and its realizations' random features likewise, whose
+  products TensorFlow runs on a recent GPU's TensorFloat-32 cores: there
+  a realization moves by up to about a percent and depends at a part in a
+  thousand on the batch it is computed in. Pass `"float64"` to keep one
+  precision everywhere. To
   hold a run to the CPU, set `CUDA_VISIBLE_DEVICES=""` in the environment.
 - **Another release of geoML.** A fix that changes a number changes it; the
   changelog says which.
