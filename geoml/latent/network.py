@@ -1637,6 +1637,32 @@ def _gpu_visible():
     return bool(_tf.config.list_logical_devices("GPU"))
 
 
+def _broadcast_walk():
+    """Whether a `GPWalk` writes its d x d updates as broadcast sums and
+    carries `h R^T` for the Stein term: on a GPU, where the gradient of a
+    batch of 2 x 2 products is slow in float64 (4.7 ms against 0.9 for the
+    `h` update of the folded section's walk), and not on a CPU, where the
+    broadcast's temporary costs more than the product (`walk_ops.py`)."""
+    return _gpu_visible()
+
+
+def _mixed(jac, x):
+    """`sum_j jac[..., i, j] x[..., j, *rest]`, the small axis summed over
+    by broadcasting rather than as a batch of matrix products."""
+    trailing = len(x.shape) - len(jac.shape) + 1
+    for _ in range(trailing):
+        jac = jac[..., None]
+    return _tf.reduce_sum(jac * _tf.expand_dims(x, -trailing - 2),
+                          axis=-trailing - 1)
+
+
+def _on_diagonal(g, eye):
+    """`g` `[..., s, n, q]` on the `d == s` blocks of `[..., n, d, s, q]`."""
+    rank = len(g.shape)
+    perm = list(range(rank - 3)) + [rank - 2, rank - 3, rank - 1]
+    return eye[:, :, None] * _tf.transpose(g, perm)[..., None, :, :]
+
+
 # the quadrature's budget where a model sets none (`GPOptions(
 # quadrature_memory=None)`): this share of the device's memory, divided among
 # the GP nodes that take the quadrature, and never more than the fixed 2e9 of
@@ -6376,8 +6402,19 @@ class GPWalk(_FunctionalLatentVariable):
         # R R^T + (K + D)^-1 = K^-1 for every output, the field's outputs
         # sharing its kernel: so the unexplained variance is one number per
         # walker, read through K^-1 once rather than per output
-        k_inv = _tf.matmul(root_r[..., 0, :, :], root_r[..., 0, :, :],
-                           transpose_b=True) + smooth_inv[..., 0, :, :]
+        broadcast = _broadcast_walk()
+        if broadcast:
+            # `h R^T`, carried beside `h` so that the Stein term is one
+            # contraction with the slope, updated through `cov R R^T` as `h`
+            # through `cov R`: where the d x d updates are cheap, cheaper
+            # than the product with `R` the term takes at every step
+            rr = _tf.matmul(root_r, root_r, transpose_b=True)
+            k_inv = rr[..., 0, :, :] + smooth_inv[..., 0, :, :]
+            q = _tf.zeros_like(h)
+        else:
+            rr = q = None
+            k_inv = _tf.matmul(root_r[..., 0, :, :], root_r[..., 0, :, :],
+                               transpose_b=True) + smooth_inv[..., 0, :, :]
         start_var = None
         for k in range(self.n_steps):
             # each step is recomputed in the backward pass rather than kept:
@@ -6388,18 +6425,21 @@ class GPWalk(_FunctionalLatentVariable):
             # points, and five steps needed 26 GB; recomputed, 60% less for
             # 15% more time (the changelog, 0.9.2)
             out = _recomputed(self._walk_step, k, size, step, u, u_var,
-                              alpha, root_r, k_inv, bias, mask, var0, cov0,
-                              mean, a, h, r)
-            mean, a, h, r = out[:4]
+                              alpha, root_r, rr, k_inv, bias, mask, var0,
+                              cov0, mean, a, h, q, r)
+            if broadcast:
+                mean, a, h, q, r = out[:5]
+            else:
+                mean, a, h, r = out[:4]
             if k == 0:
-                start_var = out[4]
+                start_var = out[-1]
         return mean, a, h, r, start_var
 
-    def _walk_step(self, k, size, step, u, u_var, alpha, root_r, k_inv,
-                   bias, mask, var0, cov0, mean, a, h, r):
-        """Step `k` of `_joint_walk`: the walkers' new `mean`, `a`, `h` and
-        `r`, and at the first step also the field's variance at the
-        start."""
+    def _walk_step(self, k, size, step, u, u_var, alpha, root_r, rr, k_inv,
+                   bias, mask, var0, cov0, mean, a, h, q, r):
+        """Step `k` of `_joint_walk`: the walkers' new `mean`, `a`, `h`,
+        `q` where it is carried (`rr`, `R R^T`, given) and `r`, and at the
+        first step also the field's variance at the start."""
         eye = _tf.eye(size, dtype=_tf.float64)
         start_var = None
         v = _tf.reduce_sum(h ** 2, axis=[-2, -1]) \
@@ -6420,7 +6460,9 @@ class GPWalk(_FunctionalLatentVariable):
         # a walker the field's uncertainty has pushed is correlated with
         # the field it meets: E[k(w, U) R eta] = E[grad k] Cov(w, eta) R
         # (Stein's lemma), zero at the first step
-        if k > 0:
+        if k > 0 and q is not None:
+            f = f + _tf.einsum("...njd,...ndsj->...ns", grad, q)
+        elif k > 0:
             f = f + _tf.einsum("...njd,...sjl,...ndsl->...ns",
                                grad, root_r, h)
         g = _tf.einsum("...nm,...sml->...snl", cov, root_r)
@@ -6431,10 +6473,6 @@ class GPWalk(_FunctionalLatentVariable):
         if k == 0:
             start_var = _tf.maximum(
                 1.0 - (explained_all[..., None, :] - g2), 0.0)
-        mean = mean + step * f
-        a = a + step * _tf.einsum("...ij,...jk->...ik", jac, a)
-        h = h + step * (_tf.einsum("...ij,...jsq->...isq", jac, h)
-                        + _tf.einsum("...snq,ds->...ndsq", g, eye))
         # what is left of the prior is unexplained
         left = _tf.broadcast_to(
             _tf.maximum(1.0 - explained_all, 0.0)[..., None, :],
@@ -6442,11 +6480,24 @@ class GPWalk(_FunctionalLatentVariable):
         positive = left > 0.0
         sd = _tf.where(positive, _tf.sqrt(_tf.where(positive, left, 1.0)),
                        _tf.zeros_like(left))
-        r = r + step * (_tf.einsum("...ij,...js->...is", jac, r)
-                        + _tf.einsum("...sn,ds->...nds", sd, eye))
-        if k == 0:
-            return mean, a, h, r, start_var
-        return mean, a, h, r
+        mean = mean + step * f
+        if q is not None:
+            a = a + step * _mixed(jac, a)
+            h = h + step * (_mixed(jac, h) + _on_diagonal(g, eye))
+            q = q + step * (
+                _mixed(jac, q) + _on_diagonal(_tf.einsum(
+                    "...nm,...smj->...snj", cov, rr), eye))
+            r = r + step * (_mixed(jac, r) + eye * _tf.linalg.matrix_transpose(
+                sd)[..., None, :])
+            out = (mean, a, h, q, r)
+        else:
+            a = a + step * _tf.einsum("...ij,...jk->...ik", jac, a)
+            h = h + step * (_tf.einsum("...ij,...jsq->...isq", jac, h)
+                            + _tf.einsum("...snq,ds->...ndsq", g, eye))
+            r = r + step * (_tf.einsum("...ij,...js->...is", jac, r)
+                            + _tf.einsum("...sn,ds->...nds", sd, eye))
+            out = (mean, a, h, r)
+        return out + (start_var,) if k == 0 else out
 
     @staticmethod
     def _walked_covariance(a_x, h_x, a_y, h_y, cov0):

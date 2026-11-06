@@ -801,13 +801,18 @@ def _walk_outputs(model, walk, x, by_expert):
     return [np.asarray(o) for o in out]
 
 
+@pytest.mark.parametrize("broadcast", [False, True])
 @pytest.mark.parametrize("n_experts, by_expert",
                          [(1, False), (3, False), (3, True)])
-def test_the_walk_is_the_reference_walk(n_experts, by_expert, monkeypatch):
-    """The unexplained variance through one `K^-1` changes the arithmetic,
-    never the walk."""
-    model, walk, x = _walk_model(n_experts, amp=1.0)
-    got = _walk_outputs(model, walk, x[:20], by_expert)
+def test_the_walk_is_the_reference_walk(n_experts, by_expert, broadcast,
+                                        monkeypatch):
+    """The unexplained variance through one `K^-1`, and on a GPU the Stein
+    term through `h R^T` and the d x d updates as broadcast sums, change the
+    arithmetic, never the walk."""
+    with monkeypatch.context() as patch:
+        patch.setattr(_net, "_broadcast_walk", lambda: broadcast)
+        model, walk, x = _walk_model(n_experts, amp=1.0)
+        got = _walk_outputs(model, walk, x[:20], by_expert)
     with monkeypatch.context() as patch:
         patch.setattr(_net.GPWalk, "_joint_walk", _reference_joint_walk)
         model, walk, x = _walk_model(n_experts, amp=1.0)

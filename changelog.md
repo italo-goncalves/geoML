@@ -16,6 +16,17 @@ from it. The walk is the same to rounding (`test_expected_kernel.py` holds
 it against the 0.10.2 formulas on one and three experts and in slots); a
 training step of the folded section's walk takes 527 ms on the GPU instead
 of 555, and 786 ms on the CPU instead of 808.
+* **On a GPU a walk step writes its small updates as broadcast sums.**
+The walkers' sensitivities are updated through a d x d Jacobian, a batch of
+2 x 2 matrix products whose gradient is slow in float64 on a GPU (4.7 ms
+for the folded section's `h` update, 0.3 of it forward); written as a
+broadcast sum over the small axis it takes 0.9 ms. Cheap updates make it
+worth carrying `h R^T` as well, so that the Stein term in the mean is one
+contraction with the field's slope instead of a product with `R` at every
+step. A CPU keeps the einsums, the broadcast's temporary costing it more
+than the product. The walk is the same to rounding in both forms; a
+training step of the folded section's walk takes 441 ms on the GPU, from
+555 in 0.10.2.
 
 ## version 0.10.2
 * **`models.score_measurements(model, data)` scores a model against the
