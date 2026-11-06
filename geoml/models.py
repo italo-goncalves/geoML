@@ -394,8 +394,9 @@ class GPOptions(_ModelOptions):
             coordinates, so a weight depends on the location alone and is
             the same for every GP node of the input. A weight under a
             thousandth of the largest at its location is zero, and the
-            expert is not computed there: `predict` then computes each group
-            of locations with only its own experts. Needs
+            expert is not computed there: where a GP node reads an
+            uncertain input, `predict` then computes each group of locations
+            with only its own experts. Needs
             `propagation="joint"` and inputs that are a `BasicInput` or a
             `GaussianInput` (weighted at its mean); `UncertainInputGP` and
             `GradientConstrainedInput` refuse it.
@@ -2307,11 +2308,13 @@ class VGPNetwork(_GPModel):
         not points, gets neither.
 
         Under fixed expert weights (`GPOptions(expert_weights="coverage")`)
-        on more than one expert, the locations are grouped by the experts
-        of nonzero weight there and each group is computed with its own
-        experts alone, as :meth:`predict_by_expert` computes them -- the
-        same answer as computing every expert everywhere, at a fraction of
-        the cost.
+        on more than one expert, in a network where a GP node reads an
+        uncertain input -- a GP on a GP, a walk's reader -- the locations
+        are grouped by the experts of nonzero weight there and each group
+        is computed with its own experts alone, as :meth:`predict_by_expert`
+        computes them: the same answer as computing every expert
+        everywhere, at a fraction of the cost. A GP on the coordinates
+        computes every expert, which costs less than a group's overhead.
         """
         if self._groups_by_expert():
             self._predict_by_expert(newdata, n_sim, include_noise=include_noise,
@@ -2321,8 +2324,14 @@ class VGPNetwork(_GPModel):
 
     def _groups_by_expert(self):
         """Whether `predict` computes each group of locations with its own
-        experts: under fixed weights, on an input of several experts."""
-        if not self._fixed_weights():
+        experts: under fixed weights, on an input of several experts, where
+        an expert is dear -- a GP node reads an uncertain input. Measured
+        on a GeoScape walk network (32 experts), a first prediction in 127
+        s instead of 655, a second in 33 instead of 206, at 7.3 GB instead
+        of 15.9; on Tom East's GP on the coordinates (20 experts) the
+        groups cost more than the experts they leave out, 1.5 s against
+        0.9 and, under XLA, a compilation per batch shape."""
+        if not self._fixed_weights() or not self._chunked_by_rows():
             return False
         try:
             blocks = self._expert_blocks()
@@ -3846,13 +3855,19 @@ class VGPNetwork(_GPModel):
             newdata, mask, coverage, neighbours, grouping, slots, pack)
         n_sim = _simulation_count(newdata, self.variables, n_sim,
                                   keep=mask is not None)
-        with _progress.reporting("predict_by_expert", len(groups),
-                                 "group") as report:
-            for done, (key, locs) in enumerate(groups):
-                with entered(key):
-                    self._predict(newdata, n_sim, include_noise, locs,
-                                  check_measurements=check_measurements)
-                report(done + 1)
+        # the batch size the first group measures serves the rest
+        self.__dict__.pop("_grouped_batch", None)
+        try:
+            with _progress.reporting("predict_by_expert", len(groups),
+                                     "group") as report:
+                for done, (key, locs) in enumerate(groups):
+                    with entered(key):
+                        self._predict(newdata, n_sim, include_noise, locs,
+                                      check_measurements=check_measurements,
+                                      grouped=bool(slots))
+                    report(done + 1)
+        finally:
+            self.__dict__.pop("_grouped_batch", None)
         single = len(sizes) == 1
         return dict(subsets=[g[0][0] if single else g[0] for g in groups],
                     sizes=[len(g[1]) for g in groups],
@@ -4025,7 +4040,7 @@ class VGPNetwork(_GPModel):
         return groups, entered, sizes, left_out
 
     def _predict(self, newdata, n_sim, include_noise, where,
-                 check_measurements=True):
+                 check_measurements=True, grouped=False):
         if self.data.n_dim != newdata.n_dim:
             raise ValueError("dimension of newdata is incompatible with model")
         where = _where_mask(newdata, where)
@@ -4090,7 +4105,8 @@ class VGPNetwork(_GPModel):
             return output, samples
 
         for batch, (output, samples) in self._over_batches(
-                newdata, batch_pred, where, with_rows=True):
+                newdata, batch_pred, where, with_rows=True,
+                grouped=grouped):
             if check is not None:
                 check.add(batch, samples)
             for v, lik, upd in zip(self.variables, self.likelihoods, output):
@@ -4154,11 +4170,22 @@ class VGPNetwork(_GPModel):
                 stored[full] = warped[:, i]
                 newdata.add_metadata(key, stored)
 
-    def _over_batches(self, newdata, call, where=None, with_rows=False):
+    def _over_batches(self, newdata, call, where=None, with_rows=False,
+                      grouped=False):
         """Runs `call(coordinates, variance, n_splits)` over `newdata` --
         `call(coordinates, variance, n_splits, rows)` under `with_rows`, for
         a caller that keeps something per location and must hand each
         batch its own slice.
+
+        `grouped` is one group of a prediction by expert, of which there
+        may be dozens, each its own call: every batch is then padded, with
+        copies of its last row, to a power of two locations, the size a
+        measured batch takes rounded down to one, and the size measured on
+        the first group kept for the rest, so that the groups share a few
+        shapes -- each new shape is a trace and, under XLA, a compilation
+        (33 groups of Tom East's 20 experts took 1384 s to compile a first
+        prediction, 1.6 s to run the second). A copy's answer is its row's,
+        and only the batch's own rows are handed back.
 
         A discretized block fans out into several rows before it reaches the
         model, so the batch is measured in those rows: otherwise
@@ -4185,6 +4212,11 @@ class VGPNetwork(_GPModel):
         probe = max(1, batch_size // network._PROBE_FRACTION)
         measure = network._device_limit() is not None and len(rows) > probe
         size = probe if measure else batch_size
+        held = self.__dict__.get("_grouped_batch") if grouped else None
+        if held is not None:
+            measure, size = False, held
+        if grouped:
+            size = _power_below(size)
         # what a measured batch may grow to: past the estimate, up to the
         # options' batch size, wherever no node sizes a chunk by the rows a
         # call states (`quadrature_rule`); the estimate cannot see what XLA
@@ -4212,6 +4244,11 @@ class VGPNetwork(_GPModel):
         start, i = 0, 0
         while start < len(rows):
             batch = rows[start:start + size]
+            own = len(batch)
+            if grouped:
+                padded = min(size, _power_above(own))
+                batch = _np.concatenate(
+                    [batch, _np.repeat(batch[-1:], padded - own)])
             # revised once the batches are measured
             total = i + int(_np.ceil((len(rows) - start) / size))
             if self.options.verbose:
@@ -4264,6 +4301,13 @@ class VGPNetwork(_GPModel):
                 size = self._measured_batch(base, len(data_coords),
                                             cap, per_location)
                 measure = i < 2
+                if grouped:
+                    size = _power_below(size)
+                    if not measure:
+                        self.__dict__["_grouped_batch"] = size
+            if grouped and len(batch) > own:
+                out = _first_rows(out, own, len(batch), per_location)
+                batch = batch[:own]
             yield batch, out
             start += len(batch)
             i += 1
@@ -4610,6 +4654,31 @@ class VGPNetwork(_GPModel):
                 newdata.variables[v].set_responsibilities(answer)
             out[v] = answer
         return out
+
+
+def _power_below(n):
+    """The largest power of two not above `n`, one at least."""
+    return 1 << max(0, int(n).bit_length() - 1)
+
+
+def _power_above(n):
+    """The smallest power of two not below `n`."""
+    return 1 << max(0, int(n - 1).bit_length())
+
+
+def _first_rows(out, own, padded, per_location):
+    """A padded batch's answer cut to its own `own` locations: every array
+    whose leading axis holds the `padded` locations, or their rows."""
+    def cut(value):
+        if value is None or not hasattr(value, "shape") \
+                or len(value.shape) == 0:
+            return value
+        if value.shape[0] == padded:
+            return value[:own]
+        if value.shape[0] == padded * per_location:
+            return value[:own * per_location]
+        return value
+    return _tf.nest.map_structure(cut, out)
 
 
 def _where_mask(container, where):

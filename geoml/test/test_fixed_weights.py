@@ -283,8 +283,9 @@ def test_a_prediction_by_group_is_the_prediction_by_every_expert(options):
         atol=1e-10)
 
 
-def test_predict_computes_each_group_with_its_own_experts(monkeypatch):
-    model, _ = _model(expert_weights="coverage")
+def test_predict_computes_each_group_with_its_own_experts_where_dear(
+        monkeypatch):
+    model, _ = _model(deep=True, expert_weights="coverage")
     model.train_full(5)
     calls = []
     original = model._predict_by_expert
@@ -299,8 +300,9 @@ def test_predict_computes_each_group_with_its_own_experts(monkeypatch):
     assert calls
     assert np.all(np.isfinite(np.asarray(grid.values("v/prediction"))))
     # one expert has nothing to group
-    single, _ = _model(n_experts=1, expert_weights="coverage")
-    monkeypatch.setattr(single, "_predict_by_expert", spy)
-    calls.clear()
-    single.predict(_grid(), n_sim=3)
-    assert not calls
+    for quiet in (_model(deep=True, n_experts=1, expert_weights="coverage"),
+                  _model(expert_weights="coverage")):
+        monkeypatch.setattr(quiet[0], "_predict_by_expert", spy)
+        calls.clear()
+        quiet[0].predict(_grid(), n_sim=3)
+        assert not calls
