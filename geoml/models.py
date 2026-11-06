@@ -2305,8 +2305,32 @@ class VGPNetwork(_GPModel):
         `warped_<variable>_<i>`, the measurements through the likelihood's
         warping, as the model sees them. A block model, whose locations are
         not points, gets neither.
+
+        Under fixed expert weights (`GPOptions(expert_weights="coverage")`)
+        on more than one expert, the locations are grouped by the experts
+        of nonzero weight there and each group is computed with its own
+        experts alone, as :meth:`predict_by_expert` computes them -- the
+        same answer as computing every expert everywhere, at a fraction of
+        the cost.
         """
+        if self._groups_by_expert():
+            self._predict_by_expert(newdata, n_sim, include_noise=include_noise,
+                                    where=where)
+            return
         self._predict(newdata, n_sim, include_noise, where)
+
+    def _groups_by_expert(self):
+        """Whether `predict` computes each group of locations with its own
+        experts: under fixed weights, on an input of several experts."""
+        if not self._fixed_weights():
+            return False
+        try:
+            blocks = self._expert_blocks()
+        except ValueError:
+            # a network with no expert-by-expert path (directional data, a
+            # node `_expert_structure` refuses) computes every expert
+            return False
+        return any(count > 1 for _, _, count in blocks)
 
     def predict_node(self, node: "_latent.network._LatentVariable",
                      newdata: "_data._SpatialData",
