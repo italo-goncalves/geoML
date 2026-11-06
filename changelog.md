@@ -12,7 +12,8 @@ nothing), and `test_experts.py` builds the split in six processes. A
 split may differ from what an earlier version gave for the same seed,
 which was itself one of several. `from_kmeans` keeps its threads: its
 centres are one solution in any process, apart in the last bit (3e-14),
-and one thread costs it two to three times as long.
+and one thread costs it two to three times as long. `threadpoolctl`, which
+scikit-learn already required, is declared beside it.
 
 ## version 0.10.4
 * **A reader's realizations multiply by the inducing points once.** A GP
