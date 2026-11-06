@@ -1614,7 +1614,9 @@ _NODE_BYTES = 48
 # (`GPOptions.quadrature_precision`): float32 for the `[..., n, nodes, m, d]`
 # arrays and the mixture's components, the offsets, gains and conditional
 # variances computed in float64 first and the kernel returned in float64,
-# every product and reduction after it in float64. Set through
+# every product and reduction after it in float64 -- except, in a pathwise
+# draw, the random features and their products with the inducing points,
+# which are float32 too and return to float64 reduced. Set through
 # `quadrature_rule` by the model, read at trace time
 _QUADRATURE_DTYPE = _tf.float64
 _REALIZATION_BYTES = 48
@@ -4155,10 +4157,14 @@ class BasicGP(_GPNode):
                 lead *= _static(dim, 1)
             if sliced:
                 lead *= int(_slot_mask(self.root).shape[0])
+            # the features' arrays, `[.., n, c, J + 1]`, in the quadrature's
+            # precision (`GPOptions.quadrature_precision`), read at trace time
+            features = _QUADRATURE_DTYPE
             per_draw = _REALIZATION_BYTES * lead * len(groups) * _static(
                 z.shape[0], _QUADRATURE_ROWS) * (
                 max(int(m) for m in self.root.n_ip) * int(self.parent.size)
-                + self.size * n_features)
+                + self.size * n_features
+                * (0.5 if features == _tf.float32 else 1.0))
             chunk = _chunk_of(n_sim, per_draw, self._REALIZATIONS_PER_CHUNK)
             n_chunks = n_sim // chunk
 
@@ -4196,16 +4202,24 @@ class BasicGP(_GPNode):
                     # shared prior, `k R G^-1 Phi(Z) w` as coefficients of
                     # w, and the prior draw's projection on the inducing
                     # points, `k L^-T G^-1 Phi(Z)`, in one product
-                    product = _tf.einsum("...nSm,...smj->...snSj", k,
-                                         joined)  # [.., size + 1, n, c, J+1]
+                    product = _tf.einsum(
+                        "...nSm,...smj->...snSj", _tf.cast(k, features),
+                        _tf.cast(joined, features))  # [.., size + 1, n, c, J+1]
                     drawn = product[..., :-1, :, :, :]
                     # the residual: the prior draw at the realized input
                     # less that projection
-                    cosines = fscale * _tf.cos(_tf.einsum(
-                        "...nSd,jd->...nSj", h_e / ranges, frequencies)
-                        + phases)
+                    phase = _tf.einsum("...nSd,jd->...nSj", h_e / ranges,
+                                       frequencies) + phases
+                    if features != _tf.float64:
+                        # reduced in double first: far from the origin the
+                        # phase is large, and single precision would keep
+                        # none of its fraction
+                        phase = _tf.cast(phase - 2.0 * _np.pi * _tf.round(
+                            phase / (2.0 * _np.pi)), features)
+                    cosines = _tf.cast(fscale, features) * _tf.cos(phase)
                     phi_h = _tf.concat([cosines, _tf.ones_like(
-                        cosines[..., :1]) * _tf.sqrt(constant)], axis=-1)
+                        cosines[..., :1]) * _tf.cast(_tf.sqrt(constant),
+                                                     features)], axis=-1)
                     # the projection carries the slots `k` does, where the
                     # input's mean (a `GaussianInput`'s) may not
                     res = phi_h - product[..., -1, :, :, :]
@@ -4213,14 +4227,15 @@ class BasicGP(_GPNode):
                     # the residual's, `max(conditional - |k R|², 0)`; the
                     # rows of `G^-1 Phi` are orthonormal, so `|k R|²` is the
                     # drawn coefficients' squared norm
-                    seen = _tf.minimum(conditional,
-                                       _tf.reduce_sum(drawn ** 2, -1))
+                    seen = _tf.minimum(conditional, _tf.cast(
+                        _tf.reduce_sum(drawn ** 2, -1), _tf.float64))
                     wv = w[..., None]                     # [.., size, n, 1]
                     part = part * wv
                     conditional = conditional * wv
                     seen = seen * wv
-                    drawn = drawn * wv[..., None]
-                    res = res[..., None, :, :, :] * wv[..., None]
+                    wf = _tf.cast(wv[..., None], features)
+                    drawn = drawn * wf
+                    res = res[..., None, :, :, :] * wf
                     if sliced:
                         part = _tf.reduce_sum(part, 0)
                         conditional = _tf.reduce_sum(conditional, 0)
@@ -4234,14 +4249,22 @@ class BasicGP(_GPNode):
                 # blended conditional variance, and its smooth part to that
                 # less the residual's, so the two differ by what the
                 # prediction integrates (`own`)
+                # the features' sums and products in their precision, the
+                # rescale and the realizations in double
                 total = smooth + resid
-                factor = _residual_scale(target,
-                                         _tf.reduce_sum(total ** 2, -1))
-                full = sims + factor * _tf.einsum("snSj,sjS->snS", total, w_c)
-                factor = _residual_scale(smooth_target,
-                                         _tf.reduce_sum(smooth ** 2, -1))
-                smooth = sims + factor * _tf.einsum("snSj,sjS->snS", smooth,
-                                                    w_c)
+                w_f = _tf.cast(w_c, features)
+
+                def norm(x):
+                    return _tf.cast(_tf.reduce_sum(x ** 2, -1), _tf.float64)
+
+                def along(x):
+                    return _tf.cast(_tf.einsum("snSj,sjS->snS", x, w_f),
+                                    _tf.float64)
+
+                factor = _residual_scale(target, norm(total))
+                full = sims + factor * along(total)
+                factor = _residual_scale(smooth_target, norm(smooth))
+                smooth = sims + factor * along(smooth)
                 # [c, 2, size, n]: the realization and its smooth part
                 return _tf.transpose(_tf.stack([full, smooth]), [3, 0, 1, 2])
 

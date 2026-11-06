@@ -131,6 +131,21 @@ def test_single_precision_moves_the_realizations_by_its_rounding(
     assert np.abs(sims["float32"] - sims["float64"]).max() < 1e-5 * spread
 
 
+def test_single_precision_keeps_the_realizations_at_the_inducing_points():
+    # where the prior draw's residual cancels against its projection on the
+    # inducing points, the subtraction the features make in float32
+    model, data = _model("walk", "Exponential")
+    x = np.asarray(geoml.data.inducing.from_kmeans(data, 16, seed=0)
+                   .coordinates)
+    sims = {}
+    for precision in ("float64", "float32"):
+        model.options.quadrature_precision = precision
+        sims[precision] = _realizations(model, x)[0]
+    assert np.all(np.isfinite(sims["float32"]))
+    spread = sims["float64"].std(axis=1).mean()
+    assert np.abs(sims["float32"] - sims["float64"]).max() < 1e-5 * spread
+
+
 def test_single_precision_keeps_the_variance_and_the_batching():
     # the realizations' variance over the reported latent variance (not one
     # here: the realizations come back through the warping), as in float64
@@ -144,7 +159,12 @@ def test_single_precision_keeps_the_variance_and_the_batching():
     assert abs(ratio["float32"] / ratio["float64"] - 1.0) < 1e-4
     model.options.prediction_batch_size = 25
     batched, _ = _realizations(model, x, n_sim=400)
-    assert np.abs(batched - sims).max() < 1e-5 * sims.std(axis=1).mean()
+    # a GPU's TensorFloat-32 products, which the features' take in single
+    # precision, round by the batch's shape
+    tf32 = _net._gpu_visible() \
+        and tf.config.experimental.tensor_float_32_execution_enabled()
+    tolerance = 1e-2 if tf32 else 1e-5
+    assert np.abs(batched - sims).max() < tolerance * sims.std(axis=1).mean()
 
 
 def test_the_rational_quadratic_stays_in_double():

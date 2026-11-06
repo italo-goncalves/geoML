@@ -7,6 +7,21 @@ every row's `k`, a quarter of the draw. `L^-T G^-1 Phi(Z)` is now solved
 once per call and joined to the other, and the two are one product. The
 realizations are the same to rounding (7e-15 on the folded section's walk,
 one expert, three and in slots); the stored ones, in float32, to the bit.
+* **`quadrature_precision="float32"` takes the realizations' features
+too** -- the default on a GPU. The random features at the realized input
+and their products with the inducing points, `[n, S, J + 1]` with 1025
+features, were float64 matrix products running at the GPU's float64 peak,
+two thirds of the draw once the kernel was single. They are float32 now,
+the features' phase reduced in double first (far from the origin a float32
+phase keeps none of its fraction) and the realizations assembled in double.
+A grid prediction of the folded section's walk takes 8.5 s on the GPU
+instead of 12.3; on the CPU 17.8 s in float32 against 21.7 in float64. The
+realizations move by 3e-6 of their scale on the CPU; on a GPU, whose
+float32 products TensorFlow runs on TensorFloat-32 cores by default, by up
+to 0.7% (against 4e-7 when only the kernel was single), and they depend at
+about a part in a thousand on the batch they are computed in --
+`docs/source/reference/reproducibility.md` says so. `"float64"` keeps the
+old numbers.
 
 ## version 0.10.3
 * **A model with a rock type keeps its traced training step.** The
