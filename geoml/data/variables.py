@@ -2191,12 +2191,6 @@ class RockTypeVariable(_Variable):
         codes[gathered] = _np.argmax(probability[gathered], axis=1)
         new.predicted.values[:] = codes
 
-    def training_input(self, idx=None):
-        if idx is None:
-            idx = _np.arange(self.coordinates.n_data)
-        return {"is_boundary": _tf.constant(
-            self.boundary.values.to_numpy()[idx, None], _tf.bool)}
-
     def compute_metrics(self, decluster: bool = False) -> "_pd.DataFrame":
         """
         Scores this variable's prediction against its own measurements.

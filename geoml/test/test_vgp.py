@@ -544,3 +544,27 @@ def test_the_training_step_is_traced_once_per_model():
     assert model._step[3] is not step
     assert model._step[1] is model.optimizer
 
+
+def test_a_rock_type_model_keeps_its_traced_step():
+    """A rock type's boundary column rode the trace as a constant, which no
+    likelihood read, and kept the step from being cached: every training
+    call traced it again, 10 s a call on the folded section's walk."""
+    geoml.set_seed(1234)
+    walker, _ = geoml.datasets.walker()
+    rock = np.where(np.asarray(walker.values("V/measurements"),
+                               dtype=float).ravel() > 300, "high", "low")
+    data = geoml.data.PointData.from_array(walker.coordinates)
+    data.add_categorical_variable("Rock", ["low", "high"], rock)
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(data, 30, seed=0),
+        transform=geoml.transform.Isotropic(50))
+    model = geoml.models.VGPNetwork(
+        data, "Rock", geoml.likelihood.HierarchicalGaussianIndicator(2),
+        geoml.latent.BasicGP(root, size=2),
+        options=geoml.models.GPOptions(verbose=False))
+    model.train_full(max_iter=2)
+    step = model._step[3]
+    traced = step.experimental_get_tracing_count()
+    model.train_full(max_iter=2)
+    assert model._step[3] is step
+    assert step.experimental_get_tracing_count() == traced

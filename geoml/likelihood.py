@@ -2192,8 +2192,8 @@ class CategoricalGaussianIndicator(_CategoricalLikelihood):
             bias = bias[:, :, None]
         return latent + bias
 
-    def log_lik(self, mu, var, y, has_value, is_boundary=None,
-                samples=None, *args, **kwargs):
+    def log_lik(self, mu, var, y, has_value, samples=None, *args,
+                **kwargs):
         y = 2 * y - 1
         mu = self._shifted(mu)
 
@@ -2312,8 +2312,8 @@ class HierarchicalGaussianIndicator(CategoricalGaussianIndicator):
     The priority is defined by the order of the labels in the data object, from lowest to highest.
     """
 
-    def log_lik(self, mu, var, y, has_value, is_boundary=None,
-                samples=None, *args, **kwargs):
+    def log_lik(self, mu, var, y, has_value, samples=None, *args,
+                **kwargs):
         y = 2 * y - 1
         mu = self._shifted(mu)
 

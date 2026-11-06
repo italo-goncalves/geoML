@@ -1,3 +1,13 @@
+## version 0.10.3
+* **A model with a rock type keeps its traced training step.** The
+variable's boundary column rode every training step as a constant that no
+likelihood read (`is_boundary`, a parameter of the two indicators' bounds
+since 2020, used only in code commented out), and a step carrying one was
+never cached: every `train_full` call traced the step again -- 10 s a call
+on the folded section's walk, 1.6 s on its stationary model -- and kept the
+trace's memory, and every fold of a `cross_validate` traced its own. The
+column and the parameter are gone, and the bound is unchanged to the bit.
+
 ## version 0.10.2
 * **`models.score_measurements(model, data)` scores a model against the
 measurements a container holds** -- the table `cross_validate` returns

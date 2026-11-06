@@ -1776,15 +1776,14 @@ class VGPNetwork(_GPModel):
         at 200 MB a step trace and 1.5-2.6 GB a model on the Tom v6 model,
         so a new one per call is a leak. The step is rebuilt only when the
         variables or the optimizer object change (`set_learning_rate`
-        replaces the optimizer, and a new rate is baked into the trace), or
-        when a variable hands the bound a payload -- `RockTypeVariable`'s
-        boundary column rides the trace as a constant, so it cannot serve
-        another data set. `reduce_retracing` lets the last, shorter batch
+        replaces the optimizer, and a new rate is baked into the trace).
+        The variables' training inputs ride the trace as constants, so they
+        must be the same for every data set a step serves -- none sends
+        any today. `reduce_retracing` lets the last, shorter batch
         of an epoch and the folds' differing row counts share one relaxed
         trace instead of a static trace each.
         """
-        payload = any(len(inp) > 0 for inp in training_inputs)
-        if self._step is not None and not payload:
+        if self._step is not None:
             cached_variables, optimizer, rule, step = self._step
             if optimizer is self.optimizer and rule == self._step_rule() \
                     and len(cached_variables) == len(variables) \
@@ -1820,9 +1819,8 @@ class VGPNetwork(_GPModel):
             self.optimizer.apply_gradients(
                 zip(tape.gradient(loss, variables), variables))
 
-        if not payload:
-            self._step = (tuple(variables), self.optimizer,
-                          self._step_rule(), step)
+        self._step = (tuple(variables), self.optimizer, self._step_rule(),
+                      step)
         return step
 
     def train_full(self, max_iter: int = 1000) -> None:
@@ -1924,8 +1922,6 @@ class VGPNetwork(_GPModel):
         """
         model_variables = self.get_unfixed_variables()
 
-        # The variables' own training inputs are not indexed by batch here, as
-        # they are in `train_full` -- see the commented-out attempt below.
         step = self._training_step(
             model_variables, [{} for _ in self.variables])
 
@@ -1955,9 +1951,6 @@ class VGPNetwork(_GPModel):
                 batches = self.options.batch_index(self.data.n_data)
 
                 for batch in batches:
-                    # training_inputs = [
-                    #     self.data.variables[v].training_input(idx)
-                    #     for v in self.variables]
                     idx = shuffled[batch]
                     step(_tf.constant(self.data.coordinates[idx], _tf.float64),
                          _tf.constant(self.y[idx], _tf.float64),
