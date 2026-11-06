@@ -1,3 +1,44 @@
+## version 0.10.3
+* **A model with a rock type keeps its traced training step.** The
+variable's boundary column rode every training step as a constant that no
+likelihood read (`is_boundary`, a parameter of the two indicators' bounds
+since 2020, used only in code commented out), and a step carrying one was
+never cached: every `train_full` call traced the step again -- 10 s a call
+on the folded section's walk, 1.6 s on its stationary model -- and kept the
+trace's memory, and every fold of a `cross_validate` traced its own. The
+column and the parameter are gone, and the bound is unchanged to the bit.
+* **A walk step reads its field's unexplained variance once.** The
+variance the inducing points leave unexplained, `1 - k K^-1 k`, is the same
+for every output of the field, its outputs sharing one kernel; a walk step
+took it output by output, through `(K + D)^-1` and `|k R|^2`. It now reads it
+once through `K^-1 = R R^T + (K + D)^-1`, and the start's explained variance
+from it. The walk is the same to rounding (`test_expected_kernel.py` holds
+it against the 0.10.2 formulas on one and three experts and in slots); a
+training step of the folded section's walk takes 527 ms on the GPU instead
+of 555, and 786 ms on the CPU instead of 808.
+* **On a GPU a walk step writes its small updates as broadcast sums.**
+The walkers' sensitivities are updated through a d x d Jacobian, a batch of
+2 x 2 matrix products whose gradient is slow in float64 on a GPU (4.7 ms
+for the folded section's `h` update, 0.3 of it forward); written as a
+broadcast sum over the small axis it takes 0.9 ms. Cheap updates make it
+worth carrying `h R^T` as well, so that the Stein term in the mean is one
+contraction with the field's slope instead of a product with `R` at every
+step. A CPU keeps the einsums, the broadcast's temporary costing it more
+than the product. The walk is the same to rounding in both forms; a
+training step of the folded section's walk takes 441 ms on the GPU, from
+555 in 0.10.2.
+* **A walk keeps its steps for the backward pass where they fit.** Since
+0.9.2 every step of a walk was recomputed in the backward pass, which kept
+a 32-expert network inside a 16 GB card and cost a fifth of a step where
+memory was never short. A walk now keeps its steps when every walk of its
+tree, for every expert it walks, data and inducing points, would hold no
+more than 0.2 of the device's memory (`network._WALK_SHARE`, in the setting
+every traced graph is keyed on; zero recomputes always), at 38 doubles a
+walker, inducing point and step for a field of two outputs, as measured.
+Kept and recomputed train alike to 1e-12. With the steps above, the folded
+section's walk trains at 349 ms a step on the GPU and 609 ms on the CPU,
+from 555 and 808 in 0.10.2, its peak 1.4 GB instead of 0.56.
+
 ## version 0.10.2
 * **`models.score_measurements(model, data)` scores a model against the
 measurements a container holds** -- the table `cross_validate` returns

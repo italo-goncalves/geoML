@@ -53,6 +53,11 @@ draws the walk (`predict_node` on the walk's start and end).
 | bodies (truth: 1) | 1 | 1 | 1 | 1 |
 | seconds | 25 | 700 | 23 | 490 |
 
+(The seconds include five traces of the training step each, one per
+100-step chunk: until 0.10.3 a rock type's boundary column kept the step
+from being cached, 10 s a trace for the deep model. `walk_cost.py` measures
+a step without it.)
+
 Seeds 1-3 agree to the third decimal (`figures/drillholes_results.jsonl`),
 so each column is one result.
 

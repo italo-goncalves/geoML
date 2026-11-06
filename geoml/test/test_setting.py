@@ -42,6 +42,7 @@ FLIPS = {
     "hermite_points": ("module", "_HERMITE_POINTS", 5),
     "quadrature_nodes": ("module", "_QUADRATURE_NODES", 32),
     "xla": ("module", "_QUADRATURE_XLA", False),
+    "walk_share": ("module", "_WALK_SHARE", 0.0),
 }
 # the caches whose calls draw realizations; the rest run with the
 # simulation rule of whatever is in force, training's being Monte Carlo

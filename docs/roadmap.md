@@ -3242,6 +3242,26 @@ sets do, how they meet slots and prediction by expert, what a save records,
 and the gate against today's weights (held-out scores, seams in a map, time
 and memory on a many-expert model).
 
+**M — What a walk still costs** (measured 2026-11-05, after 0.10.3 cut the
+folded section's training step from 555 to 349 ms on the GPU and from 808 to
+609 on the CPU; `docs/benchmarks/walk_cost.py`, `walk_ops.py`). Three parts
+remain, largest first:
+- *The reader's pathwise draws*, 41% of a grid prediction on the GPU (5.3 s
+  of 12.8) and about half on the CPU (12 s of 23): a GP reading the walk
+  draws each realization at its own positions, `k R G^-1 Phi(Z) w` and the
+  residual through the Cholesky of `K`, two products of rows x realizations
+  x inducing points x 1025 features (`BasicGP._pathwise_simulate`). It is
+  the cost of any GP reading an uncertain input, not the walk's; contracting
+  the feature weights first would leave only the norms that rescale each
+  draw, which read the features whole. Profile it on its own first.
+- *The refresh grows as the cube of the inducing points*: they walk
+  themselves every step, m walkers against m points, and at 775 a step is
+  2.0 s against 0.35 at 357. Experts divide it.
+- *XLA for the expected kernel during training on the CPU*: 9.2 ms to 6.7
+  with its gradient, isolated, at the folded section's shapes; never tried
+  in a training step, where XLA as a whole was slower and went NaN before,
+  and on the GPU it bought nothing in the step.
+
 ## 2. Fitting and initialization
 
 The theme is measured rather than assumed: **training does not leave the

@@ -725,6 +725,132 @@ def test_the_walk_against_walks_along_sampled_fields(n_experts):
     assert worst_cov < 0.05
 
 
+
+# The walk as 0.10.2 computed it, the unexplained variance read per output --
+# the reference the shared `K^-1` must reproduce to rounding
+def _reference_joint_walk(self, mean, var0, cov0, field):
+    u, u_var, alpha, root_r, smooth_inv, bias, mask = field
+    step = self.step * self.parameters["amp"].get_value()
+    size = self.size
+    eye = tf.eye(size, dtype=tf.float64)
+    mean = tf.broadcast_to(mean, tf.concat(
+        [tf.shape(u)[:-2], tf.shape(mean)[-2:]], 0)) \
+        if mask is not None else mean
+    lead = tf.shape(mean)[:-1]
+    a = tf.broadcast_to(eye, tf.concat([lead, [size, size]], 0))
+    h = tf.zeros(tf.concat([lead, [size, size, tf.shape(u)[-2]]], 0),
+                 tf.float64)
+    r = tf.zeros(tf.concat([lead, [size, size]], 0), tf.float64)
+    start_var = None
+    for k in range(self.n_steps):
+        v = tf.reduce_sum(h ** 2, axis=[-2, -1]) \
+            + tf.reduce_sum(r ** 2, axis=-1)
+        if var0 is not None:
+            v = v + tf.einsum("...de,...e->...d", a ** 2, var0)
+        c = None if cov0 is None else \
+            cov0 * tf.linalg.diag_part(a)[..., :, None, :]
+        cov, grad = self.field.expected_covariance(
+            mean, v, u, u_var, c, gradient=True)
+        if mask is not None:
+            cov = cov * mask[..., None, :]
+            grad = grad * mask[..., None, :, None]
+        f = tf.einsum("...nm,...smo->...ns", cov, alpha) + bias
+        jac = tf.einsum("...nmd,...smo->...nsd", grad, alpha)
+        if k > 0:
+            f = f + tf.einsum("...njd,...sjl,...ndsl->...ns",
+                              grad, root_r, h)
+        smooth = tf.reduce_sum(
+            tf.einsum("...nm,...sml->...snl", cov, smooth_inv)
+            * cov[..., None, :, :], axis=-1)
+        if k == 0:
+            start_var = tf.maximum(1.0 - smooth, 0.0)
+        g = tf.einsum("...nm,...sml->...snl", cov, root_r)
+        mean = mean + step * f
+        a = a + step * tf.einsum("...ij,...jk->...ik", jac, a)
+        h = h + step * (tf.einsum("...ij,...jsq->...isq", jac, h)
+                        + tf.einsum("...snq,ds->...ndsq", g, eye))
+        left = tf.maximum(1.0 - smooth - tf.reduce_sum(g ** 2, axis=-1), 0.0)
+        positive = left > 0.0
+        sd = tf.where(positive, tf.sqrt(tf.where(positive, left, 1.0)),
+                      tf.zeros_like(left))
+        r = r + step * (tf.einsum("...ij,...js->...is", jac, r)
+                        + tf.einsum("...sn,ds->...nds", sd, eye))
+    return mean, a, h, r, start_var
+
+
+def _walk_outputs(model, walk, x, by_expert):
+    """Everything the walk hands on: at `x`, its moments, the covariance
+    with the reader's inducing points and the expert weights, and its
+    inducing points' moments -- or, by expert in slots, a prediction."""
+    if by_expert:
+        target = geoml.data.PointData.from_array(x, ["X", "Y"])
+        model.predict_by_expert(target, n_sim=4)
+        return [np.asarray(target.values("v/prediction")),
+                np.asarray(target.values("v/latent_variance")),
+                target.variables["v"].get_simulations()]
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        moments = walk.propagate(tf.constant(x))
+        out = [moments[0], moments[1], walk._sim_state[1]]
+        for e in moments.experts:
+            out += [e.mean, e.variance, e.covariance]
+        for e in range(walk.root.n_experts):
+            out += [walk.inducing_points[e], walk.inducing_points_variance[e],
+                    walk.inducing_points_covariance[e], walk.walk_a[e],
+                    walk.walk_h[e]]
+    return [np.asarray(o) for o in out]
+
+
+@pytest.mark.parametrize("broadcast", [False, True])
+@pytest.mark.parametrize("n_experts, by_expert",
+                         [(1, False), (3, False), (3, True)])
+def test_the_walk_is_the_reference_walk(n_experts, by_expert, broadcast,
+                                        monkeypatch):
+    """The unexplained variance through one `K^-1`, and on a GPU the Stein
+    term through `h R^T` and the d x d updates as broadcast sums, change the
+    arithmetic, never the walk."""
+    with monkeypatch.context() as patch:
+        patch.setattr(_net, "_broadcast_walk", lambda: broadcast)
+        model, walk, x = _walk_model(n_experts, amp=1.0)
+        got = _walk_outputs(model, walk, x[:20], by_expert)
+    with monkeypatch.context() as patch:
+        patch.setattr(_net.GPWalk, "_joint_walk", _reference_joint_walk)
+        model, walk, x = _walk_model(n_experts, amp=1.0)
+        want = _walk_outputs(model, walk, x[:20], by_expert)
+    assert len(got) == len(want)
+    for a, b in zip(got, want):
+        np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-12)
+
+
+def test_kept_and_recomputed_steps_train_alike(monkeypatch):
+    """Keeping a walk's steps for the backward pass rather than recomputing
+    them changes the memory and the time, never the gradient."""
+    logs = []
+    for share in (0.0, 0.2):
+        with monkeypatch.context() as patch:
+            patch.setattr(_net, "_WALK_SHARE", share)
+            model, walk, _ = _walk_model(3, amp=1.0)
+            model.train_full(3)
+            logs.append(np.asarray(model.training_log))
+            if share:
+                with model._propagation():
+                    assert walk._keeps_steps(tf.zeros([60, 2], tf.float64),
+                                             tf.zeros([10, 2], tf.float64))
+    np.testing.assert_allclose(logs[0], logs[1], rtol=1e-12)
+
+
+def test_steps_too_large_for_the_share_are_recomputed(monkeypatch):
+    model, walk, _ = _walk_model(1, amp=1.0)
+    with model._propagation():
+        small = tf.zeros([500, 2], tf.float64)
+        u = tf.zeros([400, 2], tf.float64)
+        assert walk._keeps_steps(small, u)
+        # 32 slots of 200 points walking a batch of 2000 rows: 39 GB a call
+        assert not walk._keeps_steps(tf.zeros([32, 2000, 2], tf.float64),
+                                     tf.zeros([32, 200, 2], tf.float64))
+        monkeypatch.setattr(_net, "_WALK_SHARE", 0.0)
+        assert not walk._keeps_steps(small, u)
+
 # --------------------------------------------------------------------------- #
 # the second moment at uncertain inducing inputs
 # --------------------------------------------------------------------------- #
