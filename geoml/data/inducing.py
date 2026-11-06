@@ -57,6 +57,7 @@ import scipy.optimize as _optimize
 import scipy.sparse as _sparse
 import scipy.spatial as _spatial
 from sklearn.cluster import KMeans as _KMeans
+from threadpoolctl import threadpool_limits as _threadpool_limits
 
 import geoml._types as _types
 import geoml.data.containers as _data
@@ -502,8 +503,13 @@ def _balanced_labels(coordinates, n_clusters, balance, seed, rounds=30):
     mean = n_points / n_clusters
     low = max(1, int(_np.floor(mean * (1 - balance))))
     high = int(_np.ceil(mean * (1 + balance)))
-    centres = _KMeans(n_clusters, n_init=10, random_state=seed).fit(
-        coordinates).cluster_centers_
+    # on one thread: on a symmetric set (a lattice of inducing points) the
+    # ten starts reach mirror images of one clustering whose inertias differ
+    # in the thirteenth digit, and threaded sums decided which won by process
+    # -- three different splits of a 17 x 21 lattice in twelve processes
+    with _threadpool_limits(limits=1, user_api="openmp"):
+        centres = _KMeans(n_clusters, n_init=10, random_state=seed).fit(
+            coordinates).cluster_centers_
     labels = None
     for _ in range(rounds):
         cost = ((coordinates[:, None, :] - centres[None]) ** 2).sum(-1)

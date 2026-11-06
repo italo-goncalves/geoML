@@ -3256,6 +3256,27 @@ remain, largest first:
   4.6 s at one realization. Contracting the feature weights first would
   still halve the products, the norms that rescale each draw reading the
   features whole; not tried.
+- *The moments, compiled with XLA on a GPU* -- **built and dropped
+  2026-11-06**. Profiled on the folded section after 0.10.4 (15 batches of
+  2158 rows): the walk's ten steps 70% of a batch, about 18 ms each, the
+  reader's expert moments 27%; XLA on each step alone bought 14% of the
+  walk, and the prediction's whole graph is refused by XLA on a GPU
+  ("Invalid TensorList shape" where the realizations come in several
+  chunks). Compiling `GPWalk._joint_walk` and a GP node's
+  `_expert_moments` over an uncertain input whole -- a fresh
+  `tf.function(jit_compile=True)` per call inside the outer trace, so it
+  captures no other graph's tensors -- took the folded section's grid from
+  5.9 to 4.5 s (4.6 to 3.1 at one realization), the realizations moving by
+  1.6e-7, the GPU's peak 0.42 GB against 0.63. On the 2026-10-22 GeoScape
+  walk network (many experts, three readers) the first `predict` of a
+  process took **897 s against 655** plain, the second 109 against 206,
+  and the process was killed at a 28 GB cap where the plain path peaks at
+  15.9 GB: every expert and every outer trace is an XLA compilation of its
+  own, kept alive. GeoScape predicts once per process, so the first call
+  is the one that counts. Worth retrying only with one compilation per
+  node and shape kept across calls, which needs the moments' inputs
+  (the node's refreshed state included) passed as arguments rather than
+  captured. Patch kept outside the repository.
 - *The refresh grows as the cube of the inducing points*: they walk
   themselves every step, m walkers against m points, and at 775 a step is
   2.0 s against 0.35 at 357. Experts divide it.

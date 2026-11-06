@@ -69,7 +69,12 @@ device, and `set_seed` before anything is built:
   `inducing.from_kmeans`, `inducing.experts` and
   `PointData.spatial_k_fold`. They run before a model exists, so
   `set_seed` has nothing to reach them through -- pass a seed and the
-  points, the experts and the folds come back the same.
+  points, the experts and the folds come back the same. `experts` runs its
+  k-means on one thread, since on a lattice the threaded sums chose between
+  mirror images of one split by process; `from_kmeans` keeps every thread,
+  its centres the same solution in any process but not always the same
+  last bit (3e-14 measured on 300 centres of 20000 points), which one
+  thread would cost two to three times the time to remove.
   `transform.RandomProjections` is the same shape of knob with a fixed
   default, so it replays either way.
 

@@ -8,6 +8,10 @@ the two things that only show up when there is more than one expert: the
 ``K x K`` propagation loop in ``BasicGP.refresh``, and the traced refresh that
 replaces running that loop in eager Python.
 """
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
@@ -470,6 +474,33 @@ def test_experts_rejects_an_impossible_request():
         ind.experts(points, 3, overlap=-0.1)
     with pytest.raises(ValueError, match="balance"):
         ind.experts(points, 3, balance=1.0)
+
+
+_EXPERTS_IN_A_PROCESS = '''
+import hashlib
+import numpy as np
+import geoml
+lattice = geoml.data.Grid2D(start=[-8, -20], end=[8, 0], n=[17, 21])
+points = geoml.data.PointData.from_array(np.asarray(lattice.coordinates))
+sets = geoml.data.inducing.experts(points, 3, seed=0)
+print(hashlib.md5(b"".join(np.ascontiguousarray(
+    np.asarray(e.coordinates)).tobytes() for e in sets)).hexdigest())
+'''
+
+
+def test_experts_come_out_the_same_in_another_process():
+    # a symmetric set: KMeans' ten starts reach mirror images of one split,
+    # their inertias apart in the thirteenth digit, and threaded sums chose
+    # among them by process -- three splits of this lattice in twelve runs
+    root = os.path.dirname(os.path.dirname(os.path.abspath(geoml.__file__)))
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", TF_CPP_MIN_LOG_LEVEL="3",
+               PYTHONPATH=os.pathsep.join(
+                   [root] + [p for p in [os.environ.get("PYTHONPATH")] if p]))
+    answers = {subprocess.run(
+        [sys.executable, "-c", _EXPERTS_IN_A_PROCESS], env=env, check=True,
+        capture_output=True, text=True).stdout.strip().splitlines()[-1]
+        for _ in range(6)}
+    assert len(answers) == 1
 
 
 # --------------------------------------------------------------------------- #
