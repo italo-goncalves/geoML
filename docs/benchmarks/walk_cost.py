@@ -45,6 +45,16 @@ in the samples (0.5 ms each) and as the cube of the inducing points (264,
 565 and 2752 ms at 99, 357 and 775), the inducing points walking
 themselves at every refresh. Of the deep prediction, the 20 realizations
 are 57% (the reader's pathwise draws 5.3 s, the walk's 2.1 s).
+
+After 0.10.3 (the boundary column gone, `k K^-1 k` shared, the broadcast
+updates and `h R^T` on the GPU, the steps kept where they fit):
+
+| | GPU | CPU |
+|---|---|---|
+| step, deep | 349 ms | 609 ms |
+| a `train_full` call's retrace (deep) | 0 | 0 |
+| grid prediction, deep | 12.2 s | -- |
+| step at 775 inducing points | 1965 ms | -- |
 """
 import json
 import os
