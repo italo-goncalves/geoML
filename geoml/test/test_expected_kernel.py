@@ -821,6 +821,36 @@ def test_the_walk_is_the_reference_walk(n_experts, by_expert, broadcast,
     for a, b in zip(got, want):
         np.testing.assert_allclose(a, b, rtol=1e-10, atol=1e-12)
 
+
+def test_kept_and_recomputed_steps_train_alike(monkeypatch):
+    """Keeping a walk's steps for the backward pass rather than recomputing
+    them changes the memory and the time, never the gradient."""
+    logs = []
+    for share in (0.0, 0.2):
+        with monkeypatch.context() as patch:
+            patch.setattr(_net, "_WALK_SHARE", share)
+            model, walk, _ = _walk_model(3, amp=1.0)
+            model.train_full(3)
+            logs.append(np.asarray(model.training_log))
+            if share:
+                with model._propagation():
+                    assert walk._keeps_steps(tf.zeros([60, 2], tf.float64),
+                                             tf.zeros([10, 2], tf.float64))
+    np.testing.assert_allclose(logs[0], logs[1], rtol=1e-12)
+
+
+def test_steps_too_large_for_the_share_are_recomputed(monkeypatch):
+    model, walk, _ = _walk_model(1, amp=1.0)
+    with model._propagation():
+        small = tf.zeros([500, 2], tf.float64)
+        u = tf.zeros([400, 2], tf.float64)
+        assert walk._keeps_steps(small, u)
+        # 32 slots of 200 points walking a batch of 2000 rows: 39 GB a call
+        assert not walk._keeps_steps(tf.zeros([32, 2000, 2], tf.float64),
+                                     tf.zeros([32, 200, 2], tf.float64))
+        monkeypatch.setattr(_net, "_WALK_SHARE", 0.0)
+        assert not walk._keeps_steps(small, u)
+
 # --------------------------------------------------------------------------- #
 # the second moment at uncertain inducing inputs
 # --------------------------------------------------------------------------- #

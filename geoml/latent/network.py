@@ -1673,6 +1673,12 @@ def _on_diagonal(g, eye):
 _BUDGET_SHARE = 0.2
 _FIXED_BUDGET = 2e9
 
+# the share of the device's memory a training step may spend keeping the
+# steps of its walks for the backward pass rather than recomputing them,
+# divided among the walks of a tree and the experts each one walks
+# (`GPWalk._keeps_steps`); zero recomputes always, as before 0.10.3
+_WALK_SHARE = 0.2
+
 
 @_functools.lru_cache(maxsize=None)
 def _device_bytes():
@@ -1818,6 +1824,7 @@ class _Setting:
     hermite_points: int
     quadrature_nodes: int
     xla: bool
+    walk_share: float
     rows: int = _dataclasses.field(compare=False)
 
 
@@ -1837,7 +1844,7 @@ def _current():
         deep_moments=_DEEP_MOMENTS,
         pathwise=_PATHWISE_REALIZATIONS, rule=_QUADRATURE_RULE,
         hermite_points=_HERMITE_POINTS, quadrature_nodes=_QUADRATURE_NODES,
-        xla=_QUADRATURE_XLA, rows=_QUADRATURE_ROWS)
+        xla=_QUADRATURE_XLA, walk_share=_WALK_SHARE, rows=_QUADRATURE_ROWS)
 
 
 @_contextlib.contextmanager
@@ -1847,7 +1854,7 @@ def setting(value):
         _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS, \
         _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, _DEEP_MOMENTS, \
         _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS, \
-        _QUADRATURE_NODES, _QUADRATURE_XLA
+        _QUADRATURE_NODES, _QUADRATURE_XLA, _WALK_SHARE
     if value.precision not in ("float64", "float32"):
         raise ValueError("the quadrature's precision is 'float64' or "
                          "'float32', got %r" % (value.precision,))
@@ -1859,7 +1866,8 @@ def setting(value):
                 _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
                 _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT,
                 _DEEP_MOMENTS, _PATHWISE_REALIZATIONS, _QUADRATURE_RULE,
-                _HERMITE_POINTS, _QUADRATURE_NODES, _QUADRATURE_XLA)
+                _HERMITE_POINTS, _QUADRATURE_NODES, _QUADRATURE_XLA,
+                _WALK_SHARE)
     _QMC_SIMULATIONS = bool(value.qmc)
     _EXPERT_PROPAGATION = value.expert_propagation
     _JOINT_PROPAGATION = bool(value.joint)
@@ -1875,6 +1883,7 @@ def setting(value):
     _HERMITE_POINTS = value.hermite_points
     _QUADRATURE_NODES = value.quadrature_nodes
     _QUADRATURE_XLA = value.xla
+    _WALK_SHARE = float(value.walk_share)
     try:
         yield
     finally:
@@ -1882,7 +1891,7 @@ def setting(value):
          _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
          _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, _DEEP_MOMENTS,
          _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS,
-         _QUADRATURE_NODES, _QUADRATURE_XLA) = previous
+         _QUADRATURE_NODES, _QUADRATURE_XLA, _WALK_SHARE) = previous
 
 
 def _node_bytes(kernel):
@@ -6416,17 +6425,21 @@ class GPWalk(_FunctionalLatentVariable):
             k_inv = _tf.matmul(root_r[..., 0, :, :], root_r[..., 0, :, :],
                                transpose_b=True) + smooth_inv[..., 0, :, :]
         start_var = None
+        # where the steps do not fit the walk's share of the device, each is
+        # recomputed in the backward pass rather than kept: the field's
+        # expected kernel, its slope and every product made of them are
+        # rebuilt from what one step hands the next, which is all a step
+        # stores. Kept, they grew a training step's memory by about 4 GB a
+        # step on a network of 32 experts of ~200 points, and five steps
+        # needed 26 GB; recomputed, 60% less for 15% more time (the
+        # changelog, 0.9.2) -- and on the folded section, where they fit,
+        # recomputing them was 23% of a step
+        run = _recomputed if not self._keeps_steps(mean, u) \
+            else (lambda fn, *args: fn(*args))
         for k in range(self.n_steps):
-            # each step is recomputed in the backward pass rather than kept:
-            # the field's expected kernel, its slope and every product made
-            # of them are rebuilt from what one step hands the next, which
-            # is all a step stores. Kept, they grew a training step's memory
-            # by about 4 GB a step on a network of 32 experts of ~200
-            # points, and five steps needed 26 GB; recomputed, 60% less for
-            # 15% more time (the changelog, 0.9.2)
-            out = _recomputed(self._walk_step, k, size, step, u, u_var,
-                              alpha, root_r, rr, k_inv, bias, mask, var0,
-                              cov0, mean, a, h, q, r)
+            out = run(self._walk_step, k, size, step, u, u_var, alpha,
+                      root_r, rr, k_inv, bias, mask, var0, cov0, mean, a, h,
+                      q, r)
             if broadcast:
                 mean, a, h, q, r = out[:5]
             else:
@@ -6434,6 +6447,43 @@ class GPWalk(_FunctionalLatentVariable):
             if k == 0:
                 start_var = out[-1]
         return mean, a, h, r, start_var
+
+    # doubles a step keeps for the backward pass, per walker and inducing
+    # point, at a field of size d: the expected kernel's `[n, m, d]` arrays
+    # and the sensitivities' `[n, d, d, m]`. Measured 30-37 at d = 2 on the
+    # folded section (0.82 GB more for 854 walkers of 357 inducing points
+    # over ten steps, 2.36 and 2.45 GB at 775 points and at 2345 walkers),
+    # taken as 9 d + 5 d^2, 38 at d = 2
+    @staticmethod
+    def _step_doubles(size):
+        return 9 * size + 5 * size ** 2
+
+    def _keeps_steps(self, mean, u):
+        """Whether a training step keeps the steps of a walk from `mean`
+        `[..., n, d]` along a field on `u` `[..., m, d]` rather than
+        recomputing them: where the steps of every walk in the tree, for
+        every expert each walks, the data and the inducing points alike,
+        would fit `_WALK_SHARE` of the device's memory. A shape a trace
+        does not know counts as `_QUADRATURE_ROWS` rows."""
+        device = _device_bytes()
+        if _WALK_SHARE <= 0.0 or device is None:
+            return False
+        rows = 1
+        for dim in mean.shape[:-1]:
+            rows *= _static(dim, _QUADRATURE_ROWS)
+        kept = 8.0 * rows * _static(u.shape[-2], 1) * self.n_steps \
+            * self._step_doubles(self.size)
+        walks, seen, todo = 0, set(), [self.root]
+        while todo:
+            node = todo.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            walks += isinstance(node, GPWalk)
+            todo.extend(getattr(node, "children", []))
+        experts = 1 if _slots_of(self.root) is not None \
+            else len(_active_experts(self.root))
+        return kept * max(walks, 1) * 2 * experts <= _WALK_SHARE * device
 
     def _walk_step(self, k, size, step, u, u_var, alpha, root_r, rr, k_inv,
                    bias, mask, var0, cov0, mean, a, h, q, r):

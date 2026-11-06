@@ -27,6 +27,17 @@ step. A CPU keeps the einsums, the broadcast's temporary costing it more
 than the product. The walk is the same to rounding in both forms; a
 training step of the folded section's walk takes 441 ms on the GPU, from
 555 in 0.10.2.
+* **A walk keeps its steps for the backward pass where they fit.** Since
+0.9.2 every step of a walk was recomputed in the backward pass, which kept
+a 32-expert network inside a 16 GB card and cost a fifth of a step where
+memory was never short. A walk now keeps its steps when every walk of its
+tree, for every expert it walks, data and inducing points, would hold no
+more than 0.2 of the device's memory (`network._WALK_SHARE`, in the setting
+every traced graph is keyed on; zero recomputes always), at 38 doubles a
+walker, inducing point and step for a field of two outputs, as measured.
+Kept and recomputed train alike to 1e-12. With the steps above, the folded
+section's walk trains at 349 ms a step on the GPU and 609 ms on the CPU,
+from 555 and 808 in 0.10.2, its peak 1.4 GB instead of 0.56.
 
 ## version 0.10.2
 * **`models.score_measurements(model, data)` scores a model against the
