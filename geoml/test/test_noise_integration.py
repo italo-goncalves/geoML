@@ -504,3 +504,221 @@ def test_the_rule_is_fixed_rather_than_random():
     chain = wp.ChainedWarping(wp.Softplus(3), wp.Rotation(3))
     assert np.array_equal(np.asarray(_nodes(chain)[0]),
                           np.asarray(_nodes(chain)[0]))
+
+
+# --------------------------------------------------------------------------- #
+# the nodes in chunks
+# --------------------------------------------------------------------------- #
+def _node_by_node(likelihood, sims, jitter=None):
+    """The integral one node at a time, as `integrated_backward` computed it
+    until 0.10.7 (on the joint rule where it applies): the reference the
+    chunks must reproduce."""
+    import tensorflow as tf
+    import geoml.likelihood as lk
+
+    joint = jitter is not None and not likelihood.warping.elementwise
+    noise, value_w, spread_w = likelihood._noise_values(joint)
+    nodes = [(noise[i], value_w[i], spread_w[i], None)
+             for i in range(int(noise.shape[0]))]
+    if joint:
+        eta = lk._tfd.Normal(tf.constant(0.0, tf.float64),
+                             tf.constant(1.0, tf.float64)).quantile(
+            tf.constant(likelihood._joint_points()[:, -1], tf.float64))
+        nodes = [(e, w, s, eta[i % int(eta.shape[0])])
+                 for i, (e, w, s, _) in enumerate(nodes)]
+    elif jitter is not None:
+        nodes = [(e, w * jw, s * jw, eta) for e, w, s, _ in nodes
+                 for eta, jw in zip(lk._JITTER_NODES, lk._WEIGHTS_8)]
+    blank = tf.zeros([sims.shape[0], likelihood.warping.size_in,
+                      sims.shape[2]], tf.float64)
+    mean, drawn, second = blank, blank, blank
+    for eps, w, s, eta in nodes:
+        z = sims + eps[None]
+        if eta is not None:
+            z = z + tf.sqrt(jitter)[:, :, None] * eta
+        value = likelihood._back_transform(z)
+        mean, drawn, second = (mean + w * value, drawn + s * value,
+                               second + s * value ** 2)
+    return (np.asarray(mean),
+            np.asarray(tf.maximum(second - 2 * drawn * mean + mean ** 2, 0.)))
+
+
+def _chunk_cases():
+    import tensorflow as tf
+
+    rng = np.random.default_rng(5)
+    positive = rng.lognormal(size=[200, 4])
+    composition = positive / positive.sum(axis=1, keepdims=True)
+    width_changing = geoml.likelihood.MultivariateGaussian(
+        3, wp.ChainedWarping(wp.CenteredLogRatio(4), wp.PCA(4, 3)))
+    width_changing.initialize(composition)
+
+    mixing = geoml.likelihood.MultivariateGaussian(
+        3, wp.ChainedWarping(wp.Softplus(3), wp.Rotation(3), wp.ZScore(3)))
+    mixing.initialize(rng.lognormal(size=[200, 3]))
+
+    mixture = geoml.likelihood.Mixture(
+        wp.ChainedWarping(wp.Softplus(1), wp.ZScore(1, robust=True)),
+        contamination=[False, True])
+    mixture.initialize(rng.lognormal(size=[200, 1]))
+
+    sims = {3: tf.constant(rng.normal(size=[40, 3, 6]) * 0.5),
+            1: tf.constant(rng.normal(size=[40, 1, 6]) * 0.5)}
+    jitter = {3: tf.constant(rng.uniform(0.01, 0.2, size=[40, 3])),
+              1: tf.constant(rng.uniform(0.01, 0.2, size=[40, 1]))}
+    return [(lik, sims[lik.size], jitter[lik.size])
+            for lik in (width_changing, mixing, mixture)]
+
+
+@pytest.mark.parametrize("with_jitter", [False, True])
+def test_one_node_a_chunk_is_the_node_by_node_integral_to_the_bit(
+        monkeypatch, with_jitter):
+    import geoml.latent.network as net
+
+    monkeypatch.setattr(net, "_QUADRATURE_MEMORY", 1.0)
+    for lik, sims, jitter in _chunk_cases():
+        jitter = jitter if with_jitter else None
+        assert lik._nodes_per_chunk(512, sims) == 1
+        mean, variance = lik.integrated_backward(sims, jitter)
+        ref_mean, ref_variance = _node_by_node(lik, sims, jitter)
+        assert np.array_equal(np.asarray(mean), ref_mean)
+        assert np.array_equal(np.asarray(variance), ref_variance)
+
+
+@pytest.mark.parametrize("with_jitter", [False, True])
+def test_many_nodes_a_chunk_give_the_node_by_node_integral(
+        monkeypatch, with_jitter):
+    """Chunks only reorder the sums, and the budget decides how many nodes
+    one takes -- a divisor of the count, so every chunk has one shape."""
+    import geoml.latent.network as net
+
+    monkeypatch.setattr(net, "_QUADRATURE_ROWS", 40)
+    for lik, sims, jitter in _chunk_cases():
+        jitter = jitter if with_jitter else None
+        joint = with_jitter and not lik.warping.elementwise
+        count = int(lik._noise_values(joint)[0].shape[0]) * (
+            8 if with_jitter and not joint else 1)
+        chunk = lik._nodes_per_chunk(count, sims)
+        assert chunk == min(count, 64) and count % chunk == 0
+        mean, variance = lik.integrated_backward(sims, jitter)
+        ref_mean, ref_variance = _node_by_node(lik, sims, jitter)
+        assert np.allclose(np.asarray(mean), ref_mean, rtol=1e-12,
+                           atol=1e-13)
+        assert np.allclose(np.asarray(variance), ref_variance, rtol=1e-10,
+                           atol=1e-13)
+
+
+def test_a_chunk_is_a_divisor_held_to_the_budget(monkeypatch):
+    import geoml.latent.network as net
+
+    lik = _chunk_cases()[1][0]
+    import tensorflow as tf
+    sims = tf.zeros([10, 3, 25], tf.float64)
+    monkeypatch.setattr(net, "_QUADRATURE_ROWS", 1000)
+    # a node's values: 1000 rows x 3 columns x 25 realizations x 64 bytes
+    unit = 1000 * 3 * 25 * 64
+    monkeypatch.setattr(net, "_QUADRATURE_MEMORY", 100 * unit / 0.25)
+    assert lik._nodes_per_chunk(512, sims) == 64
+    assert lik._nodes_per_chunk(96, sims) == 48
+    assert lik._nodes_per_chunk(7, sims) == 7
+    monkeypatch.setattr(net, "_QUADRATURE_MEMORY", 6 * unit / 0.25)
+    assert lik._nodes_per_chunk(512, sims) == 4
+    assert lik._nodes_per_chunk(7, sims) == 1
+
+
+@pytest.mark.parametrize("signature", [(40, 1, 1), (None, 1, 1),
+                                       (40, 1, None), (None, 1, None)])
+def test_the_chunked_integral_traces_under_any_static_shape(signature):
+    """A traced prediction knows some dimensions and not others; the fold
+    over the chunks must keep the ones it knows, or it refuses to loop (a
+    fault model's prediction at one realization did)."""
+    import tensorflow as tf
+
+    lik = _likelihood()
+    sims = tf.constant(np.random.default_rng(0).normal(size=[40, 1, 1]))
+    jitter = tf.constant(np.full([40, 1], 0.1))
+    traced = tf.function(
+        lambda s, j: lik.integrated_backward(s, j),
+        input_signature=[tf.TensorSpec(signature, tf.float64),
+                         tf.TensorSpec([signature[0], 1], tf.float64)])
+    mean, variance = traced(sims, jitter)
+    plain = lik.integrated_backward(sims, jitter)
+    assert np.allclose(np.asarray(mean), np.asarray(plain[0]))
+    assert np.allclose(np.asarray(variance), np.asarray(plain[1]))
+
+
+def _rough_chain_likelihood():
+    """A mixing chain steep enough for the rule to matter: a rotation
+    between two exponentials."""
+    rng = np.random.default_rng(11)
+    lik = geoml.likelihood.MultivariateGaussian(
+        3, wp.ChainedWarping(wp.Softplus(3), wp.Rotation(3), wp.ZScore(3)))
+    lik.initialize(rng.lognormal(sigma=1.0, size=[300, 3]))
+    lik.parameters["noise"].set_value(np.full([1, 3, 1], 0.3))
+    return lik
+
+
+def test_a_mixing_warping_integrates_noise_and_jitter_on_one_rule():
+    import geoml.likelihood as lk
+
+    lik = _rough_chain_likelihood()
+    u, weights = lik._noise_nodes(joint=True)
+    assert tuple(u.shape) == (lk._JOINT_NODES, 3)
+    assert np.allclose(np.asarray(weights), 1 / lk._JOINT_NODES)
+    # the noise's coordinates of a rule in one more dimension than the noise
+    assert lik._joint_points().shape == (lk._JOINT_NODES, 4)
+    # without a jitter the mixing warping keeps its 64 points
+    assert tuple(lik._noise_nodes()[0].shape) == (lk._SOBOL_NODES, 3)
+
+
+def test_the_joint_rule_is_closer_to_the_integral_than_the_product():
+    """Against a fine joint rule, at the same 512 back-transforms."""
+    import tensorflow as tf
+    import geoml.likelihood as lk
+    from scipy.stats import norm
+
+    lik = _rough_chain_likelihood()
+    rng = np.random.default_rng(3)
+    sims = tf.constant(rng.normal(size=[60, 3, 4]))
+    jitter = tf.constant(rng.uniform(0.2, 0.8, size=[60, 3]))
+    root = tf.sqrt(jitter)[:, :, None]
+
+    def fine(seed):
+        u = geoml.stats.random.sobol_engine(4, seed).random(2 ** 15)
+        u = np.clip(u, 1e-6, 1 - 1e-6)
+        dist = lik._make_distribution(tf.constant(0.0, tf.float64))
+        eps = dist.quantile(tf.constant(u[:, :3, None]))
+        w = tf.fill([2 ** 15], tf.constant(2.0 ** -15, tf.float64))
+        return lik._node_sums(
+            sims, (eps, w, w, tf.constant(norm.ppf(u[:, 3]))), root)[0]
+
+    reference = np.mean([np.asarray(fine(s)) for s in (1, 2)], axis=0)
+    joint = np.asarray(lik.integrated_backward(sims, jitter)[0])
+
+    noise, vw, sw = lik._noise_values()
+    k, count = int(lk._JITTER_NODES.shape[0]), int(noise.shape[0])
+    product = np.asarray(lik._node_sums(sims, (
+        tf.repeat(noise, k, axis=0),
+        tf.reshape(vw[:, None] * lk._WEIGHTS_8[None, :], [-1]),
+        tf.reshape(sw[:, None] * lk._WEIGHTS_8[None, :], [-1]),
+        tf.tile(lk._JITTER_NODES, [count])), root)[0])
+
+    joint_error = np.median(np.abs(joint - reference))
+    product_error = np.median(np.abs(product - reference))
+    assert joint_error < product_error
+
+
+def test_an_elementwise_warping_keeps_the_gauss_hermite_product(monkeypatch):
+    """Eight nodes of the noise with eight of the jitter: exact enough per
+    component, and cheaper than any joint rule."""
+    import tensorflow as tf
+    import geoml.latent.network as net
+
+    monkeypatch.setattr(net, "_QUADRATURE_MEMORY", 1.0)
+    lik = _likelihood()
+    sims = tf.constant(np.random.default_rng(0).normal(size=[30, 1, 3]))
+    jitter = tf.constant(np.full([30, 1], 0.2))
+    mean, variance = lik.integrated_backward(sims, jitter)
+    reference = _node_by_node(lik, sims, jitter)
+    assert np.array_equal(np.asarray(mean), reference[0])
+    assert int(lik._noise_values()[0].shape[0]) == 8

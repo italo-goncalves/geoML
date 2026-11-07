@@ -78,7 +78,7 @@ computed in; pass `"float64"` to keep one precision everywhere. Realizations are
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.6.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.7.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -183,7 +183,8 @@ in the catalogue.
   parametric links replaced `Spline`, which stays for saved models (with
   `backbone="rq"` if you use it anyway). One marginal transform is where
   the benefit stops: stacking rotation-and-spline pairs made held-out
-  scores worse.
+  scores worse. A model with a `RobustPCA` saved before 0.10.7 reopens
+  with other axes than it trained with (it warns): refit and save it again.
 - **Noise law.** For a skewed grade under a log-like link, prefer a
   Gaussian likelihood: a heavy-tailed law (`Laplace`, `EpsilonInsensitive`)
   pushed back through the link can have an unbounded variance in data units
