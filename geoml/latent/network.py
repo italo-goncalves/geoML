@@ -2871,6 +2871,9 @@ class _GPNode(_FunctionalLatentVariable):
     def _weights_at(self, coords, ids, mask, like):
         """The fixed weights of the experts `ids` at `coords`, broadcast to
         the shape of `like`, `[experts, size, n]`."""
+        if coords is None and like.shape[0] == 1:
+            # one expert takes the whole weight wherever it is
+            return _tf.ones_like(like)
         if coords is None:
             raise ValueError(
                 "%s: fixed expert weights are read at the locations' own "

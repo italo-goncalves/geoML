@@ -79,7 +79,26 @@ def test_a_model_saved_before_keeps_the_variance_rule():
     assert options.expert_weights == "variance"
     assert options.expert_temperature == 1.0
     assert options.expert_blend == "moments"
-    assert geoml.models.GPOptions().expert_weights == "variance"
+
+
+def test_a_new_model_takes_fixed_weights_wherever_it_can():
+    assert geoml.models.GPOptions().expert_weights is None
+    model, _ = _model(deep=True)
+    assert model._expert_weights() == "coverage"
+    model.options.__dict__["propagation"] = "marginal"
+    model.options.__dict__["expert_propagation"] = "consensus"
+    assert model._expert_weights() == "variance"
+    data = _data()
+    ip = geoml.data.inducing.from_kmeans(data, 40, seed=0)
+    root = geoml.latent.BasicInput(geoml.data.inducing.experts(ip, 2, seed=0))
+    model = geoml.models.VGPNetwork(
+        data, "v", geoml.likelihood.Gaussian(geoml.warping.ZScore(1)),
+        geoml.latent.UncertainInputGP(root),
+        options=geoml.models.GPOptions(verbose=False))
+    assert model._expert_weights() == "variance"
+    model.options.__dict__["expert_blend"] = "balanced"
+    with pytest.raises(ValueError, match="balanced"):
+        model._expert_weights()
 
 
 @pytest.mark.parametrize("blend", ["moments", "balanced"])
@@ -145,7 +164,7 @@ def test_fixed_weights_do_not_move_with_training():
     model.train_full(10)
     np.testing.assert_array_equal(model.expert_weights(data), before)
     # the variance rule's do
-    model, data = _model()
+    model, data = _model(expert_weights="variance")
     before = model.expert_weights(data)
     model.train_full(10)
     assert np.max(np.abs(model.expert_weights(data) - before)) > 1e-3
@@ -228,7 +247,8 @@ def test_what_fixed_weights_cannot_weight_is_refused():
     with pytest.raises(ValueError, match="balanced"):
         _model(deep=True, expert_weights="coverage", expert_blend="balanced")
     with pytest.raises(ValueError, match="fixed weights"):
-        geoml.models.GPOptions(expert_blend="balanced")
+        geoml.models.GPOptions(expert_weights="variance",
+                               expert_blend="balanced")
     with pytest.raises(ValueError, match="joint"):
         geoml.models.GPOptions(expert_weights="coverage",
                                propagation="marginal",
@@ -306,3 +326,51 @@ def test_predict_computes_each_group_with_its_own_experts_where_dear(
         calls.clear()
         quiet[0].predict(_grid(), n_sim=3)
         assert not calls
+
+
+@pytest.mark.parametrize("sampling", ["partition", "assignment"])
+def test_an_epoch_by_expert_adds_up_to_the_bound(sampling):
+    # at fixed parameters each row counts once and each expert's KL once,
+    # the experts of zero weight on a row never reached; a partition fills
+    # an expert's quota from rows it has no weight for where it runs short
+    model, data = _model(expert_weights="coverage")
+    model.options.training_batch_size = 100
+    model.train_full(5)
+    for parameter in model._all_parameters:
+        parameter.fix()
+    rows = np.arange(data.n_data)
+    with model._propagation():
+        model._refresh(model.options.jitter)
+        log_lik = float(model._data_log_lik(
+            tf.constant(data.coordinates, tf.float64),
+            tf.constant(model.y, tf.float64),
+            tf.constant(model.has_value, tf.float64),
+            [{} for _ in model.variables],
+            x_var=tf.constant(data.get_batched_variance(rows)[0], tf.float64),
+            samples=model.options.training_samples, seed=model.options.seed))
+        kl = float(tf.add_n([n.kl_divergence() for n in model._nodes()]))
+    full = log_lik - kl + float(model.log_prior())
+    record = model.train_by_expert(1, coverage=1.0, sampling=sampling)
+    np.testing.assert_allclose(record["bound"][0], full, rtol=1e-9)
+
+
+def test_measurements_and_nodes_by_expert_are_the_plain_ones():
+    model, data = _model(deep=True, expert_weights="coverage")
+    model.train_full(5)
+    target = data[np.arange(60)]
+    plain = model.predict_measurements(target, n_sim=4, n_nodes=4)["v"]
+    grouped = model.predict_measurements(target, n_sim=4, n_nodes=4,
+                                         by_expert=True)["v"]
+    np.testing.assert_allclose(grouped, plain, rtol=1e-8, atol=1e-10)
+    node = model.leaves[0].parent.parents[1]
+    a, b = _grid(11), _grid(11)
+    model.predict_node(node, a, n_sim=3, name="n")
+    model.predict_node(node, b, n_sim=3, name="n", by_expert=True)
+
+    def sims(container):
+        return np.stack([np.asarray(part.simulations) for part
+                         in container.variables["n"].components.values()])
+    np.testing.assert_allclose(b.values("n/0/latent_mean"),
+                               a.values("n/0/latent_mean"), rtol=1e-9,
+                               atol=1e-12)
+    np.testing.assert_allclose(sims(b), sims(a), rtol=1e-8, atol=1e-10)

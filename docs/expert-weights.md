@@ -121,5 +121,7 @@ Fixed weights win where experts are many or a GP reads an uncertain input
 -- Tom East and the walk, the case they were built for, and the GeoScape
 network's time and memory -- and lose 4-7% of rmse on the two small
 shallow models, where the variance rule's averaging over many experts
-helps. The default stays the variance rule; the temperature helps nowhere
+helps. The user chose fixed weights as the default for every new model
+(2026-11-06), `expert_weights=None` taking them wherever the network can
+and the variance rule where it cannot; the temperature helps nowhere
 consistently and stays at one.

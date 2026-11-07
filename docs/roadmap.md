@@ -3231,11 +3231,10 @@ sit at rows of small variance.
 expert_temperature=, expert_blend=)`, the record and the measurements in
 `docs/expert-weights.md`: better on Tom East and the folded vein's walk,
 4-7% worse rmse on Walker and Jura, a GeoScape walk network's prediction
-5x faster at half the memory; the default stays the variance rule. Left
+5x faster at half the memory; fixed weights are the default for a new
+model wherever the network takes them, by the user's choice. Left
 open: a reference length tied to the kernel's range rather than to the
-inducing spacing, which Walker's long range suggests, and whether the
-default should follow the network -- fixed where a GP reads an uncertain
-input. Found on the way: on a GPU, Tom East's 20 m grid predicts in 9.0 s
+inducing spacing, which Walker's long range suggests. Found on the way: on a GPU, Tom East's 20 m grid predicts in 9.0 s
 under the variance rule with XLA and in 1.3 s with XLA off -- a second
 call, so not a first compilation -- against 0.93 s under fixed weights
 with XLA; not looked into.) What was asked: today

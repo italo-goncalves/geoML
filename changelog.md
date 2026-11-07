@@ -1,7 +1,10 @@
 ## version 0.10.6
-* **Experts can be weighted by fixed weights** -- `GPOptions(
-expert_weights="coverage")`, from recommendation 2 of the research note on
-geoML's experts. Each expert's weight at a location is geoML's raw weight
+* **A new model weights its experts by fixed weights** --
+`GPOptions(expert_weights=None)`, the default, takes `"coverage"` wherever
+the network can, from recommendation 2 of the research note on geoML's
+experts; under the marginal rule, or with an `UncertainInputGP` or a
+`GradientConstrainedInput`, it takes the variance rule, which a model saved
+before keeps, and `expert_weights="variance"` asks for it. Each expert's weight at a location is geoML's raw weight
 `(1 - v) / v` at a reference posterior, `v` one less the coverage of a
 Gaussian kernel over the expert's inducing points (four times their median
 spacing, in the input's own coordinates, a jitter of 1e-2), and a weight
@@ -14,8 +17,10 @@ with the variational state. Measured against the variance rule
 against 0.798 and log score 0.286 against 0.304; on the folded vein's walk
 (chapter 17, three experts) Brier 0.049 against 0.064, 0.051 against 0.082
 where experts meet; on Walker Lake and Jura, small shallow models whose
-variance rule averages many experts everywhere, rmse 7% and 4% worse. The
-default stays the variance rule, which a model saved before keeps.
+variance rule averages many experts everywhere, rmse 7% and 4% worse
+(on Jura a repeat run on the GPU moved the variance rule's rmse by 0.07 of
+the 0.11 between them). Every model trained with more than one expert
+answers differently from 0.10.5 unless it asks for the variance rule.
 * **`expert_temperature`** raises the raw weights to a power before they
 are normalized, under either rule (recommendation 1); at 2 it helped
 nowhere consistently, and the default is one, bit for bit.

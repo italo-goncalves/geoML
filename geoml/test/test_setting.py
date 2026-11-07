@@ -74,6 +74,7 @@ def _model(shallow=False, **options):
         data, "v", geoml.likelihood.Gaussian(geoml.warping.ZScore(1)), leaf,
         options=geoml.models.GPOptions(
             **dict(dict(verbose=False, jit_predict=False,
+                        expert_weights="variance",
                         propagation="joint", expert_propagation="independent",
                         quadrature_memory=2e9, quadrature_precision="float64"),
                    **options)))

@@ -487,7 +487,7 @@ def _walker_model(depth, propagation, kernel=None, n_experts=2, seed=4):
     leaf = geoml.latent.BasicGP(node, size=1, kernel=kernel)
     options = geoml.models.GPOptions(
         verbose=False, propagation=propagation,
-        expert_propagation="independent")
+        expert_propagation="independent", expert_weights="variance")
     return geoml.models.VGPNetwork(point, "V", geoml.likelihood.Gaussian(),
                                    leaf, options=options)
 

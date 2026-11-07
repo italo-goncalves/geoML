@@ -157,7 +157,7 @@ class GPOptions(_ModelOptions):
                  deep_moments: _Literal["hinge", "blur", "bound",
                                         "quadrature"] = "hinge",
                  expert_weights: _Literal["variance", "coverage"]
-                 = "variance",
+                 | None = None,
                  expert_temperature: float = 1.0,
                  expert_blend: _Literal["moments", "balanced"] = "moments"):
         """
@@ -382,8 +382,11 @@ class GPOptions(_ModelOptions):
             one). The rational quadratic kernel and
             `AdditiveGP` keep the quadrature under `"bound"`, with a
             warning, and `AdditiveGP` refuses `"hinge"` and `"blur"`.
-        expert_weights : {"variance", "coverage"}
-            How a GP node weights its experts where they meet. `"variance"`
+        expert_weights : {"variance", "coverage"} or None
+            How a GP node weights its experts where they meet. `None` (the
+            default) takes `"coverage"` wherever the network can, and
+            `"variance"` under the marginal rule or with an
+            `UncertainInputGP` or a `GradientConstrainedInput`. `"variance"`
             (what a model saved before 0.10.6 keeps) weights each by the
             variance it explains there, `(1 - v) / v`, normalized over the
             experts, so the weights move with training and every expert is
@@ -415,15 +418,16 @@ class GPOptions(_ModelOptions):
             field rather than a prediction of it, which a GP node reading
             another's output, a walk or a `GaussianInput` cannot take.
         """
-        if expert_weights not in _latent.network._EXPERT_WEIGHT_RULES:
+        if expert_weights is not None and expert_weights \
+                not in _latent.network._EXPERT_WEIGHT_RULES:
             raise ValueError(
-                "expert_weights must be 'variance' or 'coverage', got %r"
-                % (expert_weights,))
+                "expert_weights must be 'variance', 'coverage' or None, "
+                "got %r" % (expert_weights,))
         if expert_blend not in _latent.network._EXPERT_BLENDS:
             raise ValueError(
                 "expert_blend must be 'moments' or 'balanced', got %r"
                 % (expert_blend,))
-        if expert_blend == "balanced" and expert_weights != "coverage":
+        if expert_blend == "balanced" and expert_weights == "variance":
             raise ValueError(
                 "the balanced blend takes fixed weights: pass "
                 "expert_weights='coverage'")
@@ -1186,7 +1190,7 @@ class VGPNetwork(_GPModel):
         self._refresh_graph = None
         if getattr(self.options, "propagation", "marginal") == "joint":
             self._check_expected_kernel()
-        if getattr(self.options, "expert_weights", "variance") == "coverage":
+        if self._expert_weights() == "coverage":
             self._check_fixed_weights(self._setting())
         if self._full_variance():
             self._warn_explained_only()
@@ -1341,6 +1345,29 @@ class VGPNetwork(_GPModel):
             self._check_fixed_weights(value)
         return _latent.network.setting(value)
 
+    def _expert_weights(self):
+        """The expert weights in force (`GPOptions.expert_weights`): a
+        model saved before 0.10.6 keeps `"variance"`, and `None` takes
+        `"coverage"` wherever the network can -- not under the marginal
+        rule, nor with an `UncertainInputGP` or a
+        `GradientConstrainedInput` -- and `"variance"` there; the balanced
+        blend has no such fallback."""
+        rule = getattr(self.options, "expert_weights", "variance")
+        if rule is not None:
+            return rule
+        network = _latent.network
+        if getattr(self.options, "propagation", "marginal") == "joint" \
+                and not any(isinstance(node, (
+                    network.GradientConstrainedInput,
+                    network.UncertainInputGP)) for node in self._nodes()):
+            return "coverage"
+        if getattr(self.options, "expert_blend", "moments") == "balanced":
+            raise ValueError(
+                "the balanced blend takes fixed weights, which this network "
+                "cannot: it takes the marginal rule, an UncertainInputGP or "
+                "a GradientConstrainedInput")
+        return "variance"
+
     def _check_fixed_weights(self, value):
         """Refuses what fixed expert weights cannot weight: a location with
         no coordinates of its own to read them at (the marginal rule, a
@@ -1393,8 +1420,7 @@ class VGPNetwork(_GPModel):
             memory=self._quadrature_memory(),
             precision=self._quadrature_precision(),
             deep_moments=getattr(self.options, "deep_moments", "quadrature"),
-            expert_weights=getattr(self.options, "expert_weights",
-                                   "variance"),
+            expert_weights=self._expert_weights(),
             expert_temperature=float(getattr(
                 self.options, "expert_temperature", 1.0)),
             expert_blend=getattr(self.options, "expert_blend", "moments"),
@@ -2745,8 +2771,7 @@ class VGPNetwork(_GPModel):
     def _fixed_weights(self):
         """Whether the experts are weighted by their fixed weights
         (`GPOptions.expert_weights="coverage"`)."""
-        return getattr(self.options, "expert_weights",
-                       "variance") == "coverage"
+        return self._expert_weights() == "coverage"
 
     def _fixed_table(self, container, rows=None):
         """The fixed weights at `rows` of `container` (every row of a
@@ -2983,6 +3008,13 @@ class VGPNetwork(_GPModel):
         for g, quota in zip(order, counts):
             available = _np.flatnonzero(left)
             weight = table[rows[available], g]
+            if _np.count_nonzero(weight) < quota:
+                # fixed weights are zero away from an expert: the quota is
+                # filled from the rows it has no weight for, which its
+                # batch's sets compute with their own experts, so that
+                # every row is still read once an epoch
+                weight = weight + 1e-12 * max(weight.sum(), 1.0) \
+                    / len(weight)
             pick = available[rng.choice(len(available), quota, replace=False,
                                         p=weight / weight.sum())]
             left[pick] = False
