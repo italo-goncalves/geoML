@@ -317,11 +317,16 @@ def _points_of(node, ids):
 # divides them -- and the jitter its inducing matrix takes, the reference
 # posterior's `delta`: without it, a location inside two overlapping
 # experts would be decided by the last digits of two coverages near one.
-_REFERENCE_LENGTH = 1.0
+# Four spacings measured best of 1, 2 and 4 on Tom East and on the folded
+# section's walk, and within a percent either way on Walker Lake and Jura
+# (`docs/benchmarks/fixed_expert_weights.py`).
+_REFERENCE_LENGTH = 4.0
 _REFERENCE_JITTER = 1e-2
 # A raw weight under this share of the largest at its location is zero, and
-# the expert is not computed there (`_fixed_weights`)
-_WEIGHT_FLOOR = 1e-3
+# the expert is not computed there (`_fixed_weights`): a hundredth scored as
+# a thousandth did on the four models above and cut a second prediction of
+# a GeoScape walk network from 67 s to 51; a tenth began to cost accuracy
+_WEIGHT_FLOOR = 1e-2
 
 
 @_tf.autograph.experimental.do_not_convert

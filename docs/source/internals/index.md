@@ -17,6 +17,7 @@ expected-kernel
 parameter-priors
 implicit-surfaces
 sparse-experts
+expert-weights
 mixed-precision
 notebook-html-export
 ```

@@ -390,10 +390,10 @@ class GPOptions(_ModelOptions):
             computed at every location. `"coverage"` weights each by the
             same formula at a fixed reference posterior: `v` is one less the
             coverage of a Gaussian kernel over the expert's inducing points,
-            its length the points' median spacing, in the input's own
-            coordinates, so a weight depends on the location alone and is
+            its length four times the points' median spacing, in the input's
+            own coordinates, so a weight depends on the location alone and is
             the same for every GP node of the input. A weight under a
-            thousandth of the largest at its location is zero, and the
+            hundredth of the largest at its location is zero, and the
             expert is not computed there: where a GP node reads an
             uncertain input, `predict` then computes each group of locations
             with only its own experts. Needs

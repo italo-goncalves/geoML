@@ -291,6 +291,18 @@ in the catalogue.
   concatenated into its input to stay local; one fed by a GP alone spreads
   every expert over the field. Five nodes are refused; the message names
   them.
+- **Expert weights.** By default an expert's weight at a location comes
+  from its own posterior there, so every expert is computed everywhere.
+  `GPOptions(expert_weights="coverage")` fixes the weights by how well
+  each expert's inducing points cover the location: a GP reading an
+  uncertain input (a GP on a GP, a walk's reader) then predicts each group
+  of locations with its own experts only -- five times faster at half the
+  memory on a GeoScape walk network -- and it scored better held out on a
+  deposit's rock types (20 experts) and on the folded vein's walk, but 4-7%
+  worse rmse on two small shallow sets whose kernel range is long against
+  the experts. Prefer it for deep networks and many experts, and compare
+  on held-out data otherwise. `expert_temperature` and
+  `expert_blend="balanced"` exist and helped nowhere consistently.
 - **Validation.** `PointData.spatial_k_fold` writes folds that resemble the
   real prediction task, `models.cross_validate` scores the model out of
   fold, and `models.conformalize` recalibrates the intervals.

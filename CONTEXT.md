@@ -176,6 +176,15 @@ regime** — experts overlap deliberately, and no expert means anything
 geologically.
 _Avoid_: cluster, partition, local model
 
+**Expert weight**:
+How much an expert counts at a location where experts overlap. It is
+either *variance weights*, read off each expert's own posterior there,
+which move as training moves the experts, or *fixed weights*, read off how
+well each expert's inducing points cover the location, a property of the
+location alone. An expert of zero fixed weight at a location is not
+computed there.
+_Avoid_: gate, responsibility (a mixture's word), partition of unity
+
 **Expected kernel**:
 The covariance a GP node takes when its input is another node's uncertain
 output: the node's kernel averaged over that uncertainty, including how

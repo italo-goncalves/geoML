@@ -1,3 +1,46 @@
+## version 0.10.6
+* **Experts can be weighted by fixed weights** -- `GPOptions(
+expert_weights="coverage")`, from recommendation 2 of the research note on
+geoML's experts. Each expert's weight at a location is geoML's raw weight
+`(1 - v) / v` at a reference posterior, `v` one less the coverage of a
+Gaussian kernel over the expert's inducing points (four times their median
+spacing, in the input's own coordinates, a jitter of 1e-2), and a weight
+under a hundredth of the location's largest is zero: the weights depend on
+the location alone, the same for every GP node of the input, and where
+they are zero the expert is not computed. The training objective then
+bounds the evidence of one fixed model rather than of a model that moves
+with the variational state. Measured against the variance rule
+(`docs/expert-weights.md`): on Tom East (20 experts) held-out AUC 0.849
+against 0.798 and log score 0.286 against 0.304; on the folded vein's walk
+(chapter 17, three experts) Brier 0.049 against 0.064, 0.051 against 0.082
+where experts meet; on Walker Lake and Jura, small shallow models whose
+variance rule averages many experts everywhere, rmse 7% and 4% worse. The
+default stays the variance rule, which a model saved before keeps.
+* **`expert_temperature`** raises the raw weights to a power before they
+are normalized, under either rule (recommendation 1); at 2 it helped
+nowhere consistently, and the default is one, bit for bit.
+* **`expert_blend="balanced"`** normalizes fixed weights to a unit sum of
+squares and blends the variances by their squares: the moments of the
+weighted sum of independent experts, whose prior variance is one everywhere
+and whose objective is its exact bound. Refused where a GP node reads an
+uncertain input, whose per-expert chain is read as a prediction of the
+field. Between the two others on Walker and Jura, behind them on Tom East.
+* **Under fixed weights `predict` computes each group of locations with
+its own experts**, where a GP node reads an uncertain input -- a GP on a
+GP, a walk's reader: a location's fixed weights are known before the
+network runs and are the same under any set of experts holding its own, so
+the answer is the one every expert computed everywhere gives, to 1e-9 with
+the realizations. On the GeoScape walk network of 2026-10-22 (32 experts),
+a first prediction in 128 s instead of 655, a second in 51 instead of 206,
+at a peak of 7.5 GB instead of 15.9. `predict_by_expert` and training by
+expert read the fixed weights themselves: no sweep over the network, no
+weights carried from the data to the locations, nothing left out.
+* **A prediction by expert pads its batches** to a power of two, with
+copies of their last row, and keeps the batch size its first group
+measured: each group had probed its own and ended on a short batch, and
+under XLA every new shape was a compilation -- 33 groups of Tom East's
+experts took 1384 s to compile a first prediction, 376 s now.
+
 ## version 0.10.5
 * **`inducing.experts` gives the same experts in every process.** Its
 k-means took the best of ten starts by inertia, and on a symmetric set --
