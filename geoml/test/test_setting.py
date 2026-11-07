@@ -27,7 +27,8 @@ import geoml.latent.network as _net
 
 # how each part of the setting is changed: an option of the model's, or a
 # switch of the module's; the consensus rule takes the marginal one
-BASE = {"expert_propagation": {"propagation": "marginal"}}
+BASE = {"expert_propagation": {"propagation": "marginal"},
+        "expert_blend": {"expert_weights": "coverage", "shallow": True}}
 FLIPS = {
     "qmc": ("option", "qmc_simulations", True),
     "expert_propagation": ("option", "expert_propagation", "consensus"),
@@ -43,14 +44,20 @@ FLIPS = {
     "quadrature_nodes": ("module", "_QUADRATURE_NODES", 32),
     "xla": ("module", "_QUADRATURE_XLA", False),
     "walk_share": ("module", "_WALK_SHARE", 0.0),
+    "expert_weights": ("option", "expert_weights", "coverage"),
+    "expert_temperature": ("option", "expert_temperature", 2.0),
+    "expert_blend": ("option", "expert_blend", "balanced"),
 }
+# the flips under which the weights are fixed, read without a sweep
+NO_SWEEP = {"expert_weights", "expert_blend"}
 # the caches whose calls draw realizations; the rest run with the
 # simulation rule of whatever is in force, training's being Monte Carlo
 DRAWING = {"predict", "node", "measure"}
 
 
-def _model(**options):
-    """A GP reading the coordinates and the GP below them, two experts."""
+def _model(shallow=False, **options):
+    """A GP reading the coordinates and the GP below them, two experts --
+    or, `shallow`, the GP alone."""
     geoml.set_seed(1234)
     rng = np.random.default_rng(0)
     x = rng.uniform(0, 100, (120, 2))
@@ -61,11 +68,13 @@ def _model(**options):
     root = geoml.latent.BasicInput(geoml.data.inducing.experts(ip, 2, seed=0),
                                    transform=geoml.transform.Isotropic(20.0))
     first = geoml.latent.BasicGP(root, size=1)
-    leaf = geoml.latent.BasicGP(geoml.latent.Concatenate(root, first), size=1)
+    leaf = first if shallow else geoml.latent.BasicGP(
+        geoml.latent.Concatenate(root, first), size=1)
     model = geoml.models.VGPNetwork(
         data, "v", geoml.likelihood.Gaussian(geoml.warping.ZScore(1)), leaf,
         options=geoml.models.GPOptions(
             **dict(dict(verbose=False, jit_predict=False,
+                        expert_weights="variance",
                         propagation="joint", expert_propagation="independent",
                         quadrature_memory=2e9, quadrature_precision="float64"),
                    **options)))
@@ -95,7 +104,7 @@ def _handles(model, data, node, target):
         "measure": kinds("measure"),
         "moments": moments,
         "refresh": model._refresh_graph[0],
-        "weights": frozenset(model._weight_sweeps),
+        "weights": frozenset(model.__dict__.get("_weight_sweeps", {})),
         "step": model._step_rule(),
         "qmc": qmc,
     }
@@ -127,6 +136,8 @@ def test_every_cache_retraces_when_the_setting_changes(field, monkeypatch):
     restore = _flip(model, monkeypatch, field)
     flipped = _handles(model, data, node, target)
     caches = DRAWING if field == "qmc" else set(before) - {"qmc"}
+    if field in NO_SWEEP:
+        caches = caches - {"weights"}
     for cache in caches:
         assert flipped[cache] != before[cache], cache
 
@@ -135,6 +146,8 @@ def test_every_cache_retraces_when_the_setting_changes(field, monkeypatch):
     restore()
     again = _handles(model, data, node, target)
     for cache in ("predict", "node", "measure", "weights"):
+        if cache == "weights" and field in NO_SWEEP:
+            continue
         assert again[cache] == flipped[cache], cache
     assert again["step"] == before["step"]
 

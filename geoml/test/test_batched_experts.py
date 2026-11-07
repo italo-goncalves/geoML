@@ -6,6 +6,11 @@ nothing changes. Its batched twin, `latent.network.expert_slots`, computes
 the experts in a fixed number of slots so that one trace serves every set.
 `VGPNetwork.train_by_expert` and `predict_by_expert` are built on them. The memory and accuracy gates are experiments
 (`experiments/batched_experts/`); these tests pin the plumbing.
+
+The models here take the variance rule (`expert_weights="variance"`),
+whose weight table is a sweep over the network and whose prediction at
+full coverage is the plain one bit for bit; fixed weights, the default
+since 0.10.6, are tested in `test_fixed_weights.py`.
 """
 import numpy as np
 import tensorflow as tf
@@ -35,7 +40,8 @@ def _model(n_experts=4, deep=False, kernel=None):
     return geoml.models.VGPNetwork(
         data, "v", lk.Gaussian(wp.ZScore(1)), leaf,
         options=geoml.models.GPOptions(verbose=False,
-                                       training_batch_size=100))
+                                       training_batch_size=100,
+                                       expert_weights="variance"))
 
 
 def _targets(n=50):
@@ -175,6 +181,7 @@ def _deep_model(n_experts=4, propagation="independent"):
         data, "v", lk.Gaussian(wp.ZScore(1)), leaf,
         options=geoml.models.GPOptions(
             verbose=False, training_batch_size=100,
+            expert_weights="variance",
             expert_propagation=propagation,
             # the consensus rule is the marginal rule's; the expected
             # kernel takes the independent one
@@ -612,7 +619,8 @@ def test_refinement_by_expert():
     model = geoml.models.VGPNetwork(
         point, "V", lk.Gaussian(), latent.BasicGP(root, size=1),
         options=geoml.models.GPOptions(verbose=False,
-                                       prediction_batch_size=200))
+                                       prediction_batch_size=200,
+                                       expert_weights="variance"))
     model.train_full(max_iter=10)
     blocks = geoml.data.BlockSet3D([0, 0, 0], [4, 4, 4], [20.0] * 3,
                                    discretization=(2, 2, 2), max_levels=2)
@@ -725,7 +733,8 @@ def _node_model(name):
     data = _two_variables()
     geoml.set_seed(1234)
     options = geoml.models.GPOptions(verbose=False, training_batch_size=100,
-                                     expert_propagation="independent")
+                                     expert_propagation="independent",
+                                     expert_weights="variance")
     if name in ("two_inputs", "stack"):
         first, second = _input(data, 2), _input(data, 3, seed=1)
         leaves = [_gp(first), _gp(second)]
@@ -915,14 +924,18 @@ def test_an_epoch_of_a_partition_adds_up_to_the_bound(sampling, quotas,
     for parameter in m._all_parameters:
         parameter.fix()
     rows = np.arange(m.data.n_data)
-    m._refresh(m.options.jitter)
-    data = float(m._data_log_lik(
-        tf.constant(m.data.coordinates, tf.float64),
-        tf.constant(m.y, tf.float64), tf.constant(m.has_value, tf.float64),
-        [{} for _ in m.variables],
-        x_var=tf.constant(m.data.get_batched_variance(rows)[0], tf.float64),
-        samples=m.options.training_samples, seed=m.options.seed))
-    kl = float(tf.add_n([node.kl_divergence() for node in m._nodes()]))
+    # under the model's own setting, which training runs under
+    with m._propagation():
+        m._refresh(m.options.jitter)
+        data = float(m._data_log_lik(
+            tf.constant(m.data.coordinates, tf.float64),
+            tf.constant(m.y, tf.float64),
+            tf.constant(m.has_value, tf.float64),
+            [{} for _ in m.variables],
+            x_var=tf.constant(m.data.get_batched_variance(rows)[0],
+                              tf.float64),
+            samples=m.options.training_samples, seed=m.options.seed))
+        kl = float(tf.add_n([node.kl_divergence() for node in m._nodes()]))
     full = data - kl + float(m.log_prior())
     record = m.train_by_expert(1, coverage=1.0, sampling=sampling,
                                quotas=quotas, stepping=stepping)

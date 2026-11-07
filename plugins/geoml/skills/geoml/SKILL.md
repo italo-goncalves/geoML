@@ -78,7 +78,7 @@ computed in; pass `"float64"` to keep one precision everywhere. Realizations are
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.5.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.6.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -291,6 +291,18 @@ in the catalogue.
   concatenated into its input to stay local; one fed by a GP alone spreads
   every expert over the field. Five nodes are refused; the message names
   them.
+- **Expert weights.** Since 0.10.6 a new model fixes each expert's weight
+  by how well its inducing points cover the location, wherever the network
+  allows (`GPOptions(expert_weights=None)`): a GP reading an uncertain
+  input (a GP on a GP, a walk's reader) then predicts each group of
+  locations with its own experts only -- five times faster at half the
+  memory on a GeoScape walk network -- and it scored better held out on a
+  deposit's rock types (20 experts) and on the folded vein's walk, but 4-7%
+  worse rmse on two small shallow sets whose kernel range is long against
+  the experts, where `expert_weights="variance"` (each expert weighted by
+  its own posterior, the rule before 0.10.6) is worth comparing on held-out
+  data. `expert_temperature` and `expert_blend="balanced"` exist and helped
+  nowhere consistently.
 - **Validation.** `PointData.spatial_k_fold` writes folds that resemble the
   real prediction task, `models.cross_validate` scores the model out of
   fold, and `models.conformalize` recalibrates the intervals.

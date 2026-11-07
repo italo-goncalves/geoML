@@ -32,6 +32,7 @@ import dataclasses as _dataclasses
 import functools as _functools
 import warnings as _warnings
 import zlib as _zlib
+from scipy import spatial as _spatial
 from scipy import special as _special
 from tensorflow.python.eager import record as _record
 
@@ -92,6 +93,19 @@ def simulation_rule(qmc):
 # directly: the choice lives in `GPOptions.expert_propagation`, and it is
 # read at trace time by `BasicGP.refresh`.
 _EXPERT_PROPAGATION = "consensus"
+
+# How the experts are weighted where they meet (`GPOptions.expert_weights`,
+# `expert_temperature`, `expert_blend`, new in 0.10.6), read at trace time
+# like the rule above: "variance", each expert by the variance it explains
+# there, which moves with the variational state; "coverage", by the prior
+# coverage of a reference kernel over its inducing points in the input's
+# own coordinates, a function of the location alone (`_fixed_weights`).
+# The temperature raises the raw weights to a power; the blend is
+# "moments" (the weights sum to one, the moments `sum w mu`, `sum w v`) or
+# "balanced" (they are normalized in L2, the moments those of `sum w f_e`).
+_EXPERT_WEIGHTS = "variance"
+_EXPERT_TEMPERATURE = 1.0
+_EXPERT_BLEND = "moments"
 
 # Whether a GP node reads an uncertain input through the expected kernel,
 # its parent handing on the covariance between locations, or through the
@@ -295,6 +309,130 @@ def _points_of(node, ids):
         positions = [subset.index(i) for i in ids]
     return ([node.inducing_points[p] for p in positions],
             [node.inducing_points_variance[p] for p in positions])
+
+
+# The fixed weights' reference kernel: a Gaussian whose length is this many
+# times the median spacing of the expert's own inducing points, in the
+# input's coordinates before its transform -- where `inducing.experts`
+# divides them -- and the jitter its inducing matrix takes, the reference
+# posterior's `delta`: without it, a location inside two overlapping
+# experts would be decided by the last digits of two coverages near one.
+# Four spacings measured best of 1, 2 and 4 on Tom East and on the folded
+# section's walk, and within a percent either way on Walker Lake and Jura
+# (`docs/benchmarks/fixed_expert_weights.py`).
+_REFERENCE_LENGTH = 4.0
+_REFERENCE_JITTER = 1e-2
+# A raw weight under this share of the largest at its location is zero, and
+# the expert is not computed there (`_fixed_weights`): a hundredth scored as
+# a thousandth did on the four models above and cut a second prediction of
+# a GeoScape walk network from 67 s to 51; a tenth began to cost accuracy
+_WEIGHT_FLOOR = 1e-2
+
+
+@_tf.autograph.experimental.do_not_convert
+def _reference(root):
+    """What the fixed weights read of an input, made once from its inducing
+    points and padded as `padded_inducing_points` pads them: the points'
+    centre `[d]`, the points less it `[E + 1, m, d]`, their mask, each
+    expert's reference length `[E + 1]`, and the inverse of the Cholesky
+    factor of each expert's reference matrix `K + delta I` `[E + 1, m, m]`,
+    zero where padded."""
+    cached = root.__dict__.get("_reference_coverage")
+    if cached is not None:
+        return cached
+    points, mask = padded_inducing_points(root)
+    base = [_np.asarray(p, dtype=_np.float64)
+            for p in root.base_inducing_points]
+    centre = _np.concatenate(base).mean(axis=0)
+    spacings = []
+    for p in base:
+        spacing = _np.nan
+        if len(p) > 1:
+            distance, _ = _spatial.cKDTree(p).query(p, k=2)
+            spacing = float(_np.median(distance[:, 1]))
+        spacings.append(spacing if spacing > 0 else _np.nan)
+    known = [s for s in spacings if _np.isfinite(s)]
+    fallback = float(_np.median(known)) if known else 1.0
+    lengths = _np.full(len(base) + 1, fallback * _REFERENCE_LENGTH)
+    inverse = _np.zeros([len(base) + 1, points.shape[1], points.shape[1]])
+    for i, p in enumerate(base):
+        if _np.isfinite(spacings[i]):
+            lengths[i] = spacings[i] * _REFERENCE_LENGTH
+        sq = _np.sum((p[:, None, :] - p[None, :, :]) ** 2, axis=-1)
+        k = _np.exp(-0.5 * sq / lengths[i] ** 2) \
+            + _REFERENCE_JITTER * _np.eye(len(p))
+        inverse[i, :len(p), :len(p)] = _np.linalg.inv(_np.linalg.cholesky(k))
+    cached = (centre, points - centre, mask, lengths, inverse)
+    root._reference_coverage = cached
+    return cached
+
+
+def _coverage(root, coords, ids):
+    """The reference coverage `k(x, Z) (K + delta I)^-1 k(Z, x)` of each
+    expert in `ids` at `coords`, the input's own coordinates: `[len(ids),
+    n]`, between zero and one, zero for the padding expert."""
+    centre, points, mask, lengths, inverse = _reference(root)
+    pick = (lambda a: _tf.gather(_tf.constant(a, _tf.float64), ids))
+    pts, own, length, inv = pick(points), pick(mask), pick(lengths), \
+        pick(inverse)
+    x = _tf.cast(coords, _tf.float64) - _tf.constant(centre, _tf.float64)
+    sq = _tf.reduce_sum(x ** 2, axis=1)[None, :, None] \
+        + _tf.reduce_sum(pts ** 2, axis=-1)[:, None, :] \
+        - 2.0 * _tf.einsum("nd,amd->anm", x, pts)
+    scaled = _tf.maximum(sq, 0.0) / length[:, None, None] ** 2
+    k = _tf.exp(-0.5 * scaled) * own[:, None, :]
+    white = _tf.einsum("aij,anj->ani", inv, k)
+    # the nearest expert by its own length, for where no coverage is left
+    # to compare (beyond some 38 lengths of every expert, the kernel
+    # underflows)
+    far = _tf.reduce_min(scaled + (1.0 - own[:, None, :]) * 1e300, axis=-1)
+    return _tf.reduce_sum(white ** 2, axis=-1), far
+
+
+def _fixed_weights(root, coords, ids, mask=None):
+    """The experts `ids`'s fixed weights at `coords`, the input's own
+    coordinates, `[len(ids), n]`: each expert's reference coverage `c`
+    raised to the raw weight `(c / (1 - c))^T` -- geoML's weight with the
+    reference posterior in place of the expert's -- then zero where under
+    `_WEIGHT_FLOOR` of the largest, and normalized to sum to one, or to a
+    unit sum of squares under the balanced blend. Where every coverage has
+    underflowed, the nearest expert takes the whole weight.
+
+    A location's weights are the same under any `ids` holding its experts
+    of nonzero weight -- the largest among them -- which is what lets a
+    prediction compute each group of locations with their own experts
+    alone. `mask` zeroes the padded slots."""
+    covered, far = _coverage(root, coords, ids)
+    raw = covered / (1.0 - covered + 1e-6)
+    if mask is not None:
+        raw = raw * _tf.cast(mask, _tf.float64)[:, None]
+        far = far + (1.0 - _tf.cast(mask, _tf.float64))[:, None] * 1e300
+    if _EXPERT_TEMPERATURE != 1.0:
+        raw = raw ** _EXPERT_TEMPERATURE
+    top = _tf.reduce_max(raw, axis=0, keepdims=True)
+    raw = _tf.where(raw >= _WEIGHT_FLOOR * top, raw, _tf.zeros_like(raw))
+    nearest = _tf.one_hot(_tf.argmin(far, axis=0), _tf.shape(raw)[0],
+                          axis=0, dtype=_tf.float64)
+    raw = _tf.where(top > 0.0, raw, nearest)
+    if _EXPERT_BLEND == "balanced":
+        return raw / _tf.sqrt(_tf.reduce_sum(raw ** 2, axis=0,
+                                             keepdims=True))
+    return raw / _tf.reduce_sum(raw, axis=0, keepdims=True)
+
+
+def _variance_weights(weights):
+    """What the experts' variances are blended by: the weights, or their
+    squares under the balanced blend, whose moments are those of the
+    independent experts' weighted sum."""
+    return weights ** 2 if _EXPERT_BLEND == "balanced" else weights
+
+
+def _raw_variance_weights(variances):
+    """geoML's raw weights from the experts' variances, tempered."""
+    raw = (1.0 - variances) / (variances + 1e-6) + 1e-6
+    if _EXPERT_TEMPERATURE != 1.0:
+        raw = raw ** _EXPERT_TEMPERATURE
+    return raw
 
 
 def _aligned_points(parents, root):
@@ -1838,11 +1976,17 @@ class _Setting:
     quadrature_nodes: int
     xla: bool
     walk_share: float
+    expert_weights: str
+    expert_temperature: float
+    expert_blend: str
     rows: int = _dataclasses.field(compare=False)
 
 
 # what `GPOptions.deep_moments` takes
 _DEEP_MOMENT_FORMS = ("quadrature", "hinge", "blur", "bound")
+# what `GPOptions.expert_weights` and `expert_blend` take
+_EXPERT_WEIGHT_RULES = ("variance", "coverage")
+_EXPERT_BLENDS = ("moments", "balanced")
 
 
 def _current():
@@ -1857,7 +2001,10 @@ def _current():
         deep_moments=_DEEP_MOMENTS,
         pathwise=_PATHWISE_REALIZATIONS, rule=_QUADRATURE_RULE,
         hermite_points=_HERMITE_POINTS, quadrature_nodes=_QUADRATURE_NODES,
-        xla=_QUADRATURE_XLA, walk_share=_WALK_SHARE, rows=_QUADRATURE_ROWS)
+        xla=_QUADRATURE_XLA, walk_share=_WALK_SHARE,
+        expert_weights=_EXPERT_WEIGHTS,
+        expert_temperature=_EXPERT_TEMPERATURE, expert_blend=_EXPERT_BLEND,
+        rows=_QUADRATURE_ROWS)
 
 
 @_contextlib.contextmanager
@@ -1867,10 +2014,21 @@ def setting(value):
         _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS, \
         _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, _DEEP_MOMENTS, \
         _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS, \
-        _QUADRATURE_NODES, _QUADRATURE_XLA, _WALK_SHARE
+        _QUADRATURE_NODES, _QUADRATURE_XLA, _WALK_SHARE, _EXPERT_WEIGHTS,         _EXPERT_TEMPERATURE, _EXPERT_BLEND
     if value.precision not in ("float64", "float32"):
         raise ValueError("the quadrature's precision is 'float64' or "
                          "'float32', got %r" % (value.precision,))
+    if value.expert_weights not in _EXPERT_WEIGHT_RULES:
+        raise ValueError("the expert weights are one of %s, got %r"
+                         % (", ".join(map(repr, _EXPERT_WEIGHT_RULES)),
+                            value.expert_weights))
+    if value.expert_blend not in _EXPERT_BLENDS:
+        raise ValueError("the expert blend is one of %s, got %r"
+                         % (", ".join(map(repr, _EXPERT_BLENDS)),
+                            value.expert_blend))
+    if not value.expert_temperature > 0:
+        raise ValueError("the expert temperature is positive, got %r"
+                         % (value.expert_temperature,))
     if value.deep_moments not in _DEEP_MOMENT_FORMS:
         raise ValueError("the deep moments are one of %s, got %r"
                          % (", ".join(map(repr, _DEEP_MOMENT_FORMS)),
@@ -1880,7 +2038,8 @@ def setting(value):
                 _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT,
                 _DEEP_MOMENTS, _PATHWISE_REALIZATIONS, _QUADRATURE_RULE,
                 _HERMITE_POINTS, _QUADRATURE_NODES, _QUADRATURE_XLA,
-                _WALK_SHARE)
+                _WALK_SHARE, _EXPERT_WEIGHTS, _EXPERT_TEMPERATURE,
+                _EXPERT_BLEND)
     _QMC_SIMULATIONS = bool(value.qmc)
     _EXPERT_PROPAGATION = value.expert_propagation
     _JOINT_PROPAGATION = bool(value.joint)
@@ -1897,6 +2056,9 @@ def setting(value):
     _QUADRATURE_NODES = value.quadrature_nodes
     _QUADRATURE_XLA = value.xla
     _WALK_SHARE = float(value.walk_share)
+    _EXPERT_WEIGHTS = value.expert_weights
+    _EXPERT_TEMPERATURE = float(value.expert_temperature)
+    _EXPERT_BLEND = value.expert_blend
     try:
         yield
     finally:
@@ -1904,7 +2066,8 @@ def setting(value):
          _FULL_VARIANCE, _QUADRATURE_MEMORY, _QUADRATURE_ROWS,
          _QUADRATURE_DTYPE, _UNCERTAIN_POINTS_SECOND_MOMENT, _DEEP_MOMENTS,
          _PATHWISE_REALIZATIONS, _QUADRATURE_RULE, _HERMITE_POINTS,
-         _QUADRATURE_NODES, _QUADRATURE_XLA, _WALK_SHARE) = previous
+         _QUADRATURE_NODES, _QUADRATURE_XLA, _WALK_SHARE, _EXPERT_WEIGHTS,
+         _EXPERT_TEMPERATURE, _EXPERT_BLEND) = previous
 
 
 def _node_bytes(kernel):
@@ -2581,7 +2744,7 @@ class _GPNode(_FunctionalLatentVariable):
                     self._expert_moments(x, x_var, chain, with_second=True)
                 weights, w_mu, w_var, w_exp_var = self._blend(
                     mu, var, explained,
-                    None if second is None else second.left)
+                    None if second is None else second.left, coords)
                 experts = self._chain(cov_cross, mu, var) \
                     if _wants_joint(self) else None
                 if second is not None:
@@ -2590,7 +2753,8 @@ class _GPNode(_FunctionalLatentVariable):
                     jitter = _tf.reduce_sum(
                         (_tf.stack(second.jitter, axis=0)
                          if isinstance(second.jitter, list)
-                         else second.jitter) * weights, axis=0)
+                         else second.jitter) * _variance_weights(weights),
+                        axis=0)
             self._sim_state = (cov_cross, mu, weights)
             self._explained_var = w_exp_var
             self._input_jitter = jitter
@@ -2615,7 +2779,8 @@ class _GPNode(_FunctionalLatentVariable):
                     own = None if any(o is None for o in own) \
                         else _tf.stack(own, axis=0)
                 self._own_noise = None if own is None \
-                    else _tf.reduce_sum(own * weights, axis=0)
+                    else _tf.reduce_sum(own * _variance_weights(weights),
+                                        axis=0)
             elif self._READS_CHAIN and chain is None:
                 gap = self._certain_gap(cov_cross, var, weights)
                 if _pathwise() and self._feature_kernel():
@@ -2676,8 +2841,9 @@ class _GPNode(_FunctionalLatentVariable):
                     for a, b, c in zip(cov_cross, self.chol_r, rnd)], 0)
                 held = _tf.stack([_held(a, b) for a, b
                                   in zip(cov_cross, self.chol_r)], 0)
-                scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
-                                     _tf.reduce_sum(weights ** 2 * held, 0))
+                scale = _blend_scale(
+                    _tf.reduce_sum(_variance_weights(weights) * held, 0),
+                    _tf.reduce_sum(weights ** 2 * held, 0))
                 sims = _tf.reduce_sum(
                     _tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0) \
                     + scale[:, :, None] * _tf.reduce_sum(
@@ -2697,12 +2863,23 @@ class _GPNode(_FunctionalLatentVariable):
     @staticmethod
     def get_expert_weights(variances):
         # variances is [n_experts, ...]
-        explained_var = 1 - variances
-
-        weights = (explained_var / (variances + 1e-6)) + 1e-6
+        weights = _raw_variance_weights(variances)
         weights = weights / _tf.reduce_sum(weights, axis=0, keepdims=True)
 
         return weights
+
+    def _weights_at(self, coords, ids, mask, like):
+        """The fixed weights of the experts `ids` at `coords`, broadcast to
+        the shape of `like`, `[experts, size, n]`."""
+        if coords is None and like.shape[0] == 1:
+            # one expert takes the whole weight wherever it is
+            return _tf.ones_like(like)
+        if coords is None:
+            raise ValueError(
+                "%s: fixed expert weights are read at the locations' own "
+                "coordinates, and this call has none" % self.name)
+        weights = _fixed_weights(self.root, coords, ids, mask)
+        return _tf.broadcast_to(weights[:, None, :], _tf.shape(like))
 
 
 class BasicInput(_RootLatentVariable):
@@ -3546,8 +3723,9 @@ class BasicGP(_GPNode):
                 return _tf.reduce_sum((draws + mu) * weights[:, :, :, None],
                                       axis=0)
             held = _held(cov_cross, self.slots_chol_r)
-            scale = _blend_scale(_tf.reduce_sum(weights * held, 0),
-                                 _tf.reduce_sum(weights ** 2 * held, 0))
+            scale = _blend_scale(
+                _tf.reduce_sum(_variance_weights(weights) * held, 0),
+                _tf.reduce_sum(weights ** 2 * held, 0))
             return _tf.reduce_sum(mu * weights[:, :, :, None], axis=0) \
                 + scale[:, :, None] * _tf.reduce_sum(
                     draws * weights[:, :, :, None], axis=0)
@@ -3672,30 +3850,45 @@ class BasicGP(_GPNode):
             return (cov_cross, mu, var, explained_var) \
                 + ((None,) if with_second else ())
 
-    def _blend(self, mu, var, explained_var, left=None):
+    def _blend(self, mu, var, explained_var, left=None, coords=None):
         """The experts' moments blended by their weights: the weights, the
         mean `[size, n, 1]`, the variance and the explained variance.
 
         An expert is weighted by the variance its inducing points leave:
         the variance itself, or `left` where the second moment adds to the
         variance the spread of the mean over an uncertain input, which says
-        nothing of how well the expert knows the ground there."""
+        nothing of how well the expert knows the ground there. Under fixed
+        weights, by its reference coverage at `coords`, the locations in
+        the input's own coordinates (`_fixed_weights`)."""
         weigh = var if left is None else left
         slots = _slots_of(self.root)
         if slots is not None:
-            raw_w = ((1.0 - weigh) / (weigh + 1e-6) + 1e-6) \
-                * slots.mask[:, None, None]
-            weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
+            if _EXPERT_WEIGHTS == "coverage":
+                weights = self._weights_at(coords, slots.ids, slots.mask,
+                                           weigh)
+            else:
+                raw_w = _raw_variance_weights(weigh) \
+                    * slots.mask[:, None, None]
+                weights = raw_w / _tf.reduce_sum(raw_w, axis=0,
+                                                 keepdims=True)
+            held = _variance_weights(weights)
             w_mu = _tf.reduce_sum(mu * weights[:, :, :, None], axis=0)
-            w_var = _tf.reduce_sum(var * weights, axis=0)
-            w_exp_var = _tf.reduce_sum(explained_var * weights, axis=0)
+            w_var = _tf.reduce_sum(var * held, axis=0)
+            w_exp_var = _tf.reduce_sum(explained_var * held, axis=0)
             return weights, w_mu, w_var, w_exp_var
 
-        weights = _GPNode.get_expert_weights(weigh)
+        if _EXPERT_WEIGHTS == "coverage":
+            weights = self._weights_at(
+                coords, _active_experts(self.root), None,
+                _tf.stack(weigh, axis=0) if isinstance(weigh, list)
+                else weigh)
+        else:
+            weights = _GPNode.get_expert_weights(weigh)
+        held = _variance_weights(weights)
 
         w_mu = _tf.reduce_sum(_tf.stack(mu, axis=0) * weights[:, :, :, None], axis=0)
-        w_var = _tf.reduce_sum(_tf.stack(var, axis=0) * weights, axis=0)
-        w_exp_var = _tf.reduce_sum(_tf.stack(explained_var, axis=0) * weights, axis=0)
+        w_var = _tf.reduce_sum(_tf.stack(var, axis=0) * held, axis=0)
+        w_exp_var = _tf.reduce_sum(_tf.stack(explained_var, axis=0) * held, axis=0)
         return weights, w_mu, w_var, w_exp_var
 
     def _takes_second_moment(self, chain, covariances):
@@ -4013,10 +4206,12 @@ class BasicGP(_GPNode):
     def _certain_gap(self, cov_cross, var, weights):
         if _slots_of(self.root) is not None:
             seen = _held(cov_cross, self.slots_chol_r)
-            return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
+            return _tf.reduce_sum(_tf.maximum(var - seen, 0.0)
+                                  * _variance_weights(weights), 0)
         seen = _tf.stack([_held(k, r) for k, r
                           in zip(cov_cross, self.chol_r)], axis=0)
-        return _tf.reduce_sum(_tf.maximum(var - seen, 0.0) * weights, 0)
+        return _tf.reduce_sum(_tf.maximum(var - seen, 0.0)
+                              * _variance_weights(weights), 0)
 
     # realizations a chunk of `_pathwise_simulate` draws: None for the
     # memory budget's choice (`_chunk_of`), a number to force it; its
@@ -6638,20 +6833,34 @@ class GPWalk(_FunctionalLatentVariable):
                     a, h, a_z, h_z, e.covariance))
             start.append(start_var)
         if slots is not None:
-            raw_w = ((1.0 - start[0]) / (start[0] + 1e-6) + 1e-6) \
-                * slots.mask[:, None, None]
-            weights = raw_w / _tf.reduce_sum(raw_w, axis=0, keepdims=True)
+            if _EXPERT_WEIGHTS == "coverage":
+                weights = _tf.broadcast_to(_fixed_weights(
+                    self.root, x, slots.ids, slots.mask)[:, None, :],
+                    _tf.shape(start[0]))
+            else:
+                raw_w = _raw_variance_weights(start[0]) \
+                    * slots.mask[:, None, None]
+                weights = raw_w / _tf.reduce_sum(raw_w, axis=0,
+                                                 keepdims=True)
             stacked_mean = _tf.transpose(means[0], [0, 2, 1])
             stacked_var = _tf.transpose(variances[0], [0, 2, 1])
             stacked_gap = _tf.transpose(gaps[0], [0, 2, 1])
         else:
-            weights = _GPNode.get_expert_weights(_tf.stack(start, axis=0))
+            stacked_start = _tf.stack(start, axis=0)
+            if _EXPERT_WEIGHTS == "coverage":
+                weights = _tf.broadcast_to(_fixed_weights(
+                    self.root, x, _active_experts(self.root))[:, None, :],
+                    _tf.shape(stacked_start))
+            else:
+                weights = _GPNode.get_expert_weights(stacked_start)
             stacked_mean = _tf.stack([_tf.transpose(m) for m in means], 0)
             stacked_var = _tf.stack([_tf.transpose(v) for v in variances], 0)
             stacked_gap = _tf.stack([_tf.transpose(g) for g in gaps], 0)
         w_mean = _tf.reduce_sum(stacked_mean * weights, axis=0)
-        w_var = _tf.reduce_sum(stacked_var * weights, axis=0)
-        self._realization_gap = _tf.reduce_sum(stacked_gap * weights, axis=0)
+        w_var = _tf.reduce_sum(stacked_var * _variance_weights(weights),
+                               axis=0)
+        self._realization_gap = _tf.reduce_sum(
+            stacked_gap * _variance_weights(weights), axis=0)
         experts = tuple(_Joint(m, v, c) for m, v, c in
                         zip(means, variances, covariances)) \
             if _wants_joint(self) else None
