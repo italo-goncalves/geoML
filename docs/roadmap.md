@@ -18,6 +18,24 @@ file is for the cross-cutting ones. Design records for finished work are the
 
 ## 1. Modelling and inference
 
+(A reopened model's robust PCA not being the one it trained with: **fixed
+2026-11-07 for 0.10.7** -- the state rides the save, an older save warns;
+see the changelog.)
+
+**S — XLA refuses a walk network's prediction on the CPU** (found
+2026-11-07): `Invalid TensorList shape: (f64[5,5,2,6,1021]) expected
+(f64[5,25,2,6,1021])`, a realization count of 5 against 25 in a list the
+walk builds, on the Assen GeoScape network at `n_sim=25`. geoML warns and
+predicts without XLA, so it costs speed, not answers.
+
+(One rule over the noise and the jitter together: **built 2026-11-07 for
+0.10.7** at 512 points, the product's cost at twice its accuracy; the
+numbers are in the changelog. The 64 x 8 product had missed the measurement
+variance by 11.6% at the median on Assen, the joint rule misses it by 5.5%,
+so the noise integral under a large jitter is still far from the 0.2-0.6%
+of a standard deviation its docstring measured without one: a finer rule
+costs time in proportion.)
+
 (The tree's leaves as the points of contact with the likelihoods, and
 independent trees: **done 2026-09-05, 0.6.10** — see "Settled by
 measurement" below for the numbers. `VGPNetwork` takes a list of leaves,

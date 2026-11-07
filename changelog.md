@@ -1,3 +1,56 @@
+## version 0.10.7
+* **One rule over the noise and the jitter together** -- where a mixing
+warping meets a latent jitter, the noise integral takes one scrambled Sobol
+rule of 512 points over the noise's components and the jitter
+(`_JOINT_NODES`, `_Likelihood._joint_points`), where it took the product of
+the 64-point noise rule with eight Gauss-Hermite nodes of the jitter: the
+same 512 back-transforms, and so the same time, twice as accurate. On 200
+cells of the Assen GeoScape walk network, against a 32 768-point joint
+rule: the value 0.008 of a measurement's standard deviation off at the
+median and 0.040 at the 99th percentile, against 0.019 and 0.089; the
+measurement variance 5.5% off at the median against 11.6%. An elementwise
+warping keeps its 8 x 8 Gauss-Hermite product, and a mixing one without a
+jitter its 64 points, to the bit. Every prediction of a model whose GP
+node reads an uncertain input through a mixing warping moves by about that
+much -- chapter 16's walked Jura model among them; chapter 17's
+categorical walk has no warping to mix.
+* **A saved model keeps its robust PCA's axes** -- and every other warping
+state `initialize` sets outside the parameters, which a class now declares
+(`_SAVED_STATE`: the mean, eigenvalues and eigenvectors of `PCA` and
+`RobustPCA`, the scales of `ScaledSimplex`). `load_model` rebuilds a model
+by its constructors, which initialized the warpings again, and FastMCD drew
+its starting subsets from the package generator, which nothing seeds at
+`open`: every process that opened a model with a `RobustPCA` had other axes
+under the splines and rotation trained on the first. Two openings of an
+Assen GeoScape network predicted FeO_total 4.5% apart at the median, on
+every row, and its realizations 8%; GeoScape fits and predicts in separate
+Exchanges, so all of its predictions of such a model were made that way.
+The state rides the save beside the object's arguments and goes back once
+the model is built, the format unchanged; around new data
+(`load_model(data=...)`, every fold of `cross_validate`) the saved axes are
+kept, being those the trained links were fitted on, where `PCA` and
+`ScaledSimplex` used to be estimated again on the new data. **A model saved
+before 0.10.7 cannot be given its axes back**: opening it under the seed it
+was trained from does not reproduce them (the rebuilt model draws from the
+generator in another order -- on Assen that opening scored the lowest bound
+of four), so it opens as before, warns, and needs refitting.
+* **The noise integral runs its nodes a chunk at a time** -- up to 64
+nodes a backward pass through the warping, folded into the row axis
+(`_Likelihood._node_sums`), where `integrated_backward` took them one at a
+time in a `foldl`. Under the joint rule a GP node's uncertain input leaves a
+latent jitter, which a mixing warping integrates over 64 noise nodes times
+8 jitter nodes, so a prediction ran 512 small backward passes per batch: on
+a GeoScape walk network on the Assen model (a 9-part composition through a
+log-ratio, robust PCA, two splines and a rotation) a 584-row batch took
+10.8 s on the GPU, 9 of them starting those passes, and takes 1.35 s now --
+1200 cells 42.7 s against 3.4, the answer the same to 1e-8, as two runs of
+0.10.6 agree. A chunk holds at most a quarter of the quadrature's budget at
+the rows the call states, never the traced shape, so every batch sums its
+nodes in the same order; one node a chunk is the old loop to the bit
+(`test_noise_integration.py`). The GPU's peak on that batch rose from 0.74
+to about 2.5 GB (16 nodes a chunk: 1.75 GB, 20% slower; 128 or 512 no
+faster than 64).
+
 ## version 0.10.6
 * **A new model weights its experts by fixed weights** --
 `GPOptions(expert_weights=None)`, the default, takes `"coverage"` wherever

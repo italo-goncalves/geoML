@@ -465,3 +465,114 @@ def test_the_tree_is_registered_before_the_likelihoods():
                 expected.append(parameter)
     assert len(model.all_parameters) == len(expected)
     assert all(a is b for a, b in zip(model.all_parameters, expected))
+
+
+# --------------------------------------------------------------------------- #
+# state a warping keeps outside its parameters
+# --------------------------------------------------------------------------- #
+def _vector_values(n=60, seed=7):
+    rng = np.random.default_rng(seed)
+    coords = rng.uniform(0, 100, (n, 2))
+    values = np.stack([np.sin(coords[:, 0] / 25), np.cos(coords[:, 1] / 30),
+                       coords[:, 0] / 100], axis=1) + rng.normal(
+        scale=0.05, size=[n, 3])
+    # a few gross outliers, so that FastMCD's starting subsets matter
+    values[:6] += rng.normal(scale=3.0, size=[6, 3])
+    return coords, values
+
+
+def _vector_points(n=60, seed=7):
+    coords, values = _vector_values(n, seed)
+    point = geoml.data.PointData(pd.DataFrame(coords, columns=COLS), COLS)
+    point.add_vector_variable("w", ["a", "b", "c"], values)
+    return point
+
+
+def _robust_model(point=None):
+    geoml.set_seed(1234)
+    point = _vector_points() if point is None else point
+    root = geoml.latent.BasicInput(
+        _inducing(), transform=geoml.transform.Isotropic(40))
+    gp = geoml.latent.BasicGP(root, size=3, kernel=geoml.kernels.Gaussian())
+    warping = geoml.warping.ChainedWarping(
+        geoml.warping.RobustPCA(3, support_fraction=0.5),
+        geoml.warping.ZScore(3))
+    model = geoml.models.VGPNetwork(
+        point, "w", geoml.likelihood.Gaussian(warping), gp,
+        options=geoml.models.GPOptions(verbose=False, training_samples=8))
+    model.train_full(max_iter=3)
+    return model
+
+
+def _pca_state(model):
+    pca = model.likelihoods[0].warping.warpings[0]
+    return [np.asarray(getattr(pca, name))
+            for name in ("mean", "eigvals", "eigvecs")]
+
+
+def test_a_robust_pca_reopens_with_the_axes_it_trained_with(tmp_path):
+    """FastMCD is a random search, and a rebuilt model runs it again from
+    the package generator, which nothing seeds at `open`: before the axes
+    were saved, every process opening a model had another basis under the
+    links trained on the first."""
+    model = _robust_model()
+    trained = _pca_state(model)
+    # the precondition: the estimate does move with the generator
+    data = _vector_values()[1]
+    pca = geoml.warping.RobustPCA(3, support_fraction=0.5)
+    estimates = []
+    for seed in (1, 2, 3, 4):
+        geoml.set_seed(seed)
+        pca.initialize(data)
+        estimates.append(np.asarray(pca.mean))
+    assert not all(np.array_equal(estimates[0], e) for e in estimates[1:])
+
+    path = str(tmp_path / "model.zarr")
+    model.save(path)
+    for seed in (1, 2):
+        geoml.set_seed(seed)
+        loaded = geoml.models.VGPNetwork.open(path)
+        for kept, saved in zip(_pca_state(loaded), trained):
+            assert np.array_equal(kept, saved)
+
+
+def test_the_axes_are_kept_around_new_data(tmp_path):
+    """The links after the PCA were trained on its axes, and a model
+    rebuilt around other data keeps their parameters as its start -- so it
+    keeps the axes too, as `cross_validate`'s fold model does."""
+    model = _robust_model()
+    trained = _pca_state(model)
+    path = str(tmp_path / "model.zarr")
+    model.save(path)
+    loaded = geoml.models.VGPNetwork.open(path, data=_vector_points(seed=8))
+    for kept, saved in zip(_pca_state(loaded), trained):
+        assert np.array_equal(kept, saved)
+
+
+def test_a_save_without_the_state_opens_as_it_did(tmp_path):
+    """A model saved before 0.10.7 holds no axes: it opens, its PCA
+    estimated again from the data, as it always was, and says that the
+    estimate is not the one it trained with."""
+    import zarr
+
+    model = _robust_model()
+    path = str(tmp_path / "model.zarr")
+    model.save(path)
+    group = zarr.open_group(path, mode="r+")
+    meta = dict(group.attrs["geoml_model"])
+
+    def strip(node):
+        if isinstance(node, dict):
+            node.pop("state", None)
+            for value in node.values():
+                strip(value)
+        elif isinstance(node, list):
+            for value in node:
+                strip(value)
+
+    strip(meta["spec"])
+    group.attrs["geoml_model"] = meta
+    with pytest.warns(UserWarning, match="saved before geoML 0.10.7"):
+        loaded = geoml.models.VGPNetwork.open(path)
+    assert all(s is not None and np.all(np.isfinite(s))
+               for s in _pca_state(loaded))

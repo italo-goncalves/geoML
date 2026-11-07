@@ -36,6 +36,10 @@ device, and `set_seed` before anything is built:
   so a target predicted in pieces holds the ensemble it would have held
   whole;
 - the draws of a node, keyed by its name, which a save replays;
+- a saved model's predictions, reopened in any process -- for a model with
+  a `RobustPCA`, only one saved by geoML 0.10.7 or later: an older save
+  holds no axes, and opening it estimates them again from another random
+  start, with a warning;
 - training split into chunks: it takes the steps one call of the same
   length takes, and stops where it stops;
 - a mesh set contoured in worker processes, against one contoured in a

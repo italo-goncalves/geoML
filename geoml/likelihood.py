@@ -27,6 +27,7 @@ import geoml.parameter as _gpr
 import geoml.math.tf as _tftools
 import geoml.math.interpolate as _gint
 import geoml.stats.probability as _gmp
+import geoml.latent.network as _network
 
 import numpy as _np
 import tensorflow as _tf
@@ -39,6 +40,16 @@ _tfd = _tfp.distributions
 # what keeps a scrambled sequence reproducible.
 _SOBOL_NODES = 64
 _SOBOL_SEED = 20260809
+# Where the warping mixes and a GP node's uncertain input leaves a latent
+# jitter, one scrambled Sobol rule of this many points over the noise and
+# the jitter together (`_Likelihood._joint_points`), where the product of
+# the 64 points with eight Gauss-Hermite nodes of the jitter took as many.
+# On 200 cells of a GeoScape walk network (a 9-part composition, the jitter
+# a third of a latent variance), against a 32 768-point joint rule: the
+# value 0.008 of a measurement's standard deviation off at the median and
+# 0.040 at the 99th percentile, the measurement variance 5.5% at the median,
+# against 0.019, 0.089 and 11.6% for the product (2026-11-07).
+_JOINT_NODES = 512
 
 # How many equal-share nodes stand for the noise when a measurement is being
 # described rather than integrated away; see `_Likelihood.measurement_samples`.
@@ -64,6 +75,22 @@ _WEIGHTS_8 = _WEIGHTS_8 / _tf.reduce_sum(_WEIGHTS_8)
 # a standard normal at the eight Gauss-Hermite nodes, for the latent jitter
 # a GP node at an uncertain input leaves beside its realizations
 _JITTER_NODES = _ROOTS_8 * _np.sqrt(2.0)
+
+# The noise integral's nodes go through the warping's backward a chunk at a
+# time, the chunk folded into the row axis: one node at a time, a 584-row
+# batch of a GeoScape walk network spent 7.6 s of its 10.8 starting 512 small
+# backward passes on the GPU, and 0.74 s with 64 a chunk (2026-11-07). A
+# chunk takes at most this share of the quadrature's budget
+# (`network._QUADRATURE_MEMORY`), counting `_BACKWARD_BYTES` per element of a
+# node's values for what the backward holds beside them; the rows are the
+# ones the call states (`network._QUADRATURE_ROWS`), never the traced shape,
+# so every batch of a call sums its nodes in the same order.
+_NOISE_BUDGET_SHARE = 0.25
+_BACKWARD_BYTES = 64
+# and never more nodes than this: 128 and 512 a chunk ran no faster than 64
+# there (0.76 and 0.81 s against 0.74), and 512 held 3.2 GB of the GPU where
+# the whole prediction had held 0.74
+_MOST_PER_CHUNK = 64
 
 
 def _lattice_step(n):
@@ -375,7 +402,7 @@ class _Likelihood(_gpr.Parametric):
     def predict_from_samples(self, samples):
         raise NotImplementedError
 
-    def _noise_nodes(self):
+    def _noise_nodes(self, joint=False):
         """Nodes and weights that integrate the likelihood noise out.
 
         The noise is `eps = F^-1(u)` for `u` uniform on the unit cube -- which
@@ -395,11 +422,20 @@ class _Likelihood(_gpr.Parametric):
         The scramble is seeded, so the rule is fixed rather than random: a
         prediction does not depend on how it was batched, nor on any seed.
 
+        `joint` asks, on a mixing warping, for the noise's coordinates of the
+        rule over the noise and a latent jitter together (`_joint_points`),
+        whose last coordinate `integrated_backward` reads the jitter off.
+
         Returns
         -------
         u : (nodes, size) in the open unit cube
         weights : (nodes,), summing to one
         """
+        if joint and not self.warping.elementwise:
+            points = self._joint_points()[:, :self.size]
+            return (_tf.constant(points, _tf.float64),
+                    _tf.fill([_JOINT_NODES],
+                             _tf.constant(1 / _JOINT_NODES, _tf.float64)))
         if self.warping.elementwise:
             u = _tfd.Normal(_tf.constant(0.0, _tf.float64),
                             _tf.constant(1.0, _tf.float64)).cdf(
@@ -411,6 +447,17 @@ class _Likelihood(_gpr.Parametric):
         return (_tf.constant(_np.clip(points, 1e-6, 1 - 1e-6), _tf.float64),
                 _tf.fill([_SOBOL_NODES],
                          _tf.constant(1 / _SOBOL_NODES, _tf.float64)))
+
+    def _joint_points(self):
+        """The scrambled Sobol rule of `_JOINT_NODES` points over the noise's
+        `size` coordinates and one of a latent jitter, the last; seeded, so
+        fixed. A product of the noise's rule with Gauss-Hermite nodes of the
+        jitter spends its points on a grid in the jitter's direction; one
+        rule over both is twice as accurate for the same count, where the
+        warping mixes and the noise is a Sobol rule already."""
+        points = _rnd.sobol_engine(self.size + 1, _SOBOL_SEED).random(
+            _JOINT_NODES)
+        return _np.clip(points, 1e-6, 1 - 1e-6)
 
     def _measurement_nodes(self, n_nodes, shift=None):
         """Nodes that *represent* the noise instead of integrating against it.
@@ -462,7 +509,7 @@ class _Likelihood(_gpr.Parametric):
         # 1e-6 of either tail is not worth an infinity
         return _tf.clip_by_value(u, 1e-6, 1 - 1e-6)
 
-    def _noise_values(self):
+    def _noise_values(self, joint=False):
         """The noise nodes with the quantile applied.
 
         `eps` is `(nodes, size, 1)` in warped space, and the two weight
@@ -473,12 +520,14 @@ class _Likelihood(_gpr.Parametric):
         genuine components' business and a *measurement* is everything's --
         which is the single reason this is an override point.
 
+        `joint` is `_noise_nodes`'s.
+
         Returns
         -------
         eps : (nodes, size, 1)
         value_weights, spread_weights : (nodes,), each summing to one
         """
-        u, weights = self._noise_nodes()
+        u, weights = self._noise_nodes(joint)
         dist = self._make_distribution(_tf.constant(0.0, dtype=_tf.float64))
         return dist.quantile(u[:, :, None]), weights, weights
 
@@ -601,14 +650,11 @@ class _Likelihood(_gpr.Parametric):
         if jitter is None:
             values = self._back_transform(sims)
         else:
-            spread = _tf.sqrt(jitter)[:, :, None]
-            blank = _tf.zeros(
-                [_tf.shape(sims)[0], self.warping.size_in,
-                 _tf.shape(sims)[2]], dtype=sims.dtype)
-            values = _tf.foldl(
-                lambda carry, node: carry + node[1] * self._back_transform(
-                    sims + spread * node[0]),
-                (_JITTER_NODES, _WEIGHTS_8), initializer=blank)
+            k = int(_JITTER_NODES.shape[0])
+            values = self._node_sums(
+                sims, (_tf.zeros([k, 1, 1], _tf.float64), _WEIGHTS_8,
+                       _WEIGHTS_8, _JITTER_NODES),
+                _tf.sqrt(jitter)[:, :, None])[0]
         return values, _tf.fill(_tf.shape(values),
                                 _tf.constant(_np.nan, values.dtype))
 
@@ -635,11 +681,12 @@ class _Likelihood(_gpr.Parametric):
 
         `jitter`, `(rows, variables)`, is the latent variance the
         realizations leave out because a GP node's input is uncertain. It is
-        integrated beside the noise -- every noise node with each of eight
-        Gauss-Hermite nodes of it, eight times the back-transforms -- so a
-        value is `E[g(z + sqrt(jitter) eta + eps)]` and the spread takes it
-        in; one draw serves every component of a location, their jitters
-        arising from one uncertain input.
+        integrated beside the noise -- on an elementwise warping every noise
+        node with each of eight Gauss-Hermite nodes of it, on a mixing one
+        a single Sobol rule of `_JOINT_NODES` points over the noise and the
+        jitter together -- so a value is `E[g(z + sqrt(jitter) eta + eps)]`
+        and the spread takes it in; one draw serves every component of a
+        location, their jitters arising from one uncertain input.
 
         Returns
         -------
@@ -647,21 +694,22 @@ class _Likelihood(_gpr.Parametric):
         variance : the spread of a measurement of it, same units
         """
         self.warping.refresh()
-        noise, value_weights, spread_weights = self._noise_values()
-
-        blank = _tf.zeros(
-            [_tf.shape(sims)[0], self.warping.size_in, _tf.shape(sims)[2]],
-            dtype=sims.dtype)
-
-        def accumulate(carry, node):
-            eps, weight, spread = node
-            value = self._back_transform(sims + eps[None])
-            return (carry[0] + weight * value,
-                    carry[1] + spread * value,
-                    carry[2] + spread * value ** 2)
+        # where the warping mixes, one rule over the noise and the jitter
+        joint = jitter is not None and not self.warping.elementwise
+        noise, value_weights, spread_weights = self._noise_values(joint)
 
         nodes = (noise, value_weights, spread_weights)
-        if jitter is not None:
+        root = None
+        if joint:
+            # the jitter's coordinate of the same points, repeated for each
+            # component of a mixture, which takes its quantiles at them all
+            eta = _tfd.Normal(_tf.constant(0.0, _tf.float64),
+                              _tf.constant(1.0, _tf.float64)).quantile(
+                _tf.constant(self._joint_points()[:, -1], _tf.float64))
+            nodes = nodes + (_tf.tile(
+                eta, [int(noise.shape[0]) // _JOINT_NODES]),)
+            root = _tf.sqrt(jitter)[:, :, None]
+        elif jitter is not None:
             # every noise node with every jitter node, the weights multiplied
             k = int(_JITTER_NODES.shape[0])
             count = int(noise.shape[0])
@@ -673,21 +721,65 @@ class _Likelihood(_gpr.Parametric):
                      _tf.tile(_JITTER_NODES, [count]))
             root = _tf.sqrt(jitter)[:, :, None]
 
-            def accumulate(carry, node):
-                eps, weight, spread, eta = node
-                value = self._back_transform(sims + eps[None] + root * eta)
-                return (carry[0] + weight * value,
-                        carry[1] + spread * value,
-                        carry[2] + spread * value ** 2)
-
         # three sums, one pass: the reported value, and the first two moments
         # of a measurement. The spread is taken about the *reported* value --
         # `E[(v - mean)^2]` expanded -- which collapses to the familiar
         # `second - mean^2` whenever the two weightings agree, as they do
         # everywhere but a mixture declaring contamination
-        mean, drawn, second = _tf.foldl(
-            accumulate, nodes, initializer=(blank, blank, blank))
+        mean, drawn, second = self._node_sums(sims, nodes, root)
         return mean, _tf.maximum(second - 2 * drawn * mean + mean ** 2, 0.0)
+
+    def _nodes_per_chunk(self, nodes, sims):
+        """How many of `nodes` integration nodes go through the warping's
+        backward at once: the largest divisor of `nodes` whose values fit
+        `_NOISE_BUDGET_SHARE` of the quadrature's budget at the rows the
+        call states, at most `_MOST_PER_CHUNK`, one at the least."""
+        width = max(self.warping.size_in, self.warping.size_out)
+        n_sim = sims.shape[2] if sims.shape[2] is not None else 1
+        unit = (_network._QUADRATURE_ROWS * width * int(n_sim)
+                * _BACKWARD_BYTES)
+        cap = max(1, min(nodes, _MOST_PER_CHUNK,
+                         int(_NOISE_BUDGET_SHARE
+                             * _network._QUADRATURE_MEMORY // unit)))
+        return max(c for c in range(1, cap + 1) if nodes % c == 0)
+
+    def _node_sums(self, sims, nodes, root=None):
+        """`(sum w g(z), sum s g(z), sum s g(z)^2)` over the nodes, with
+        `z = sims + eps (+ root * eta)` and `nodes = (eps, w, s[, eta])`,
+        `eps` `(nodes, size, 1)`: the noise integral's three sums, a chunk
+        of nodes at a time (`_nodes_per_chunk`), each chunk folded into the
+        row axis for one backward pass. A chunk of one node is the
+        node-by-node loop this replaced, to the bit."""
+        count = int(nodes[0].shape[0])
+        chunk = self._nodes_per_chunk(count, sims)
+        grouped = tuple(_tf.reshape(t, [count // chunk, chunk]
+                                    + list(t.shape[1:])) for t in nodes)
+        # static where the traced shape says, so that the fold keeps it
+        dynamic = _tf.shape(sims)
+        shape = [dynamic[i] if sims.shape[i] is None else int(sims.shape[i])
+                 for i in range(3)]
+        width = self.warping.size_in
+        blank = _tf.zeros([shape[0], width, shape[2]], dtype=sims.dtype)
+
+        def accumulate(carry, group):
+            eps, weight, spread = group[:3]
+            z = sims[None] + eps[:, None]
+            if root is not None:
+                z = z + root[None] * group[3][:, None, None, None]
+            # [chunk, n, size, s] -> rows -> [chunk, n, width, s]
+            flat = _tf.reshape(_tf.transpose(z, [0, 3, 1, 2]),
+                               [-1, sims.shape[1]])
+            value = _tf.transpose(_tf.reshape(
+                self.warping.backward(flat),
+                [chunk, shape[2], shape[0], width]), [0, 2, 3, 1])
+            weight = weight[:, None, None, None]
+            spread = spread[:, None, None, None]
+            return (carry[0] + _tf.reduce_sum(weight * value, axis=0),
+                    carry[1] + _tf.reduce_sum(spread * value, axis=0),
+                    carry[2] + _tf.reduce_sum(spread * value ** 2, axis=0))
+
+        return _tf.foldl(accumulate, grouped,
+                         initializer=(blank, blank, blank))
 
     def initialize(self, y, weights=None):
         pass
@@ -1393,7 +1485,7 @@ class Mixture(_ContinuousLikelihood):
         return _MixtureDensity(
             [c._make_distribution(loc) for c in self.components], w)
 
-    def _noise_values(self):
+    def _noise_values(self, joint=False):
         """Every component's nodes, carrying two weightings.
 
         The value is averaged over the genuine components alone -- a
@@ -1404,7 +1496,7 @@ class Mixture(_ContinuousLikelihood):
         contamination, which is the default, the two vectors are equal and
         this is an ordinary noise integral.
         """
-        u, node_w = self._noise_nodes()
+        u, node_w = self._noise_nodes(joint)
         w = self.parameters["weights"].get_value()
         genuine = _tf.constant([0.0 if bad else 1.0
                                 for bad in self.contamination], _tf.float64)

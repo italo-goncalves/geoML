@@ -164,7 +164,8 @@ class _Warping(_gpr.Parametric):
         A no-op for the closed-form warpings. The likelihood calls it once
         at each of its entry points, so a warping with real state (the
         flow) pays for it per call rather than per invocation --
-        `integrated_backward` alone runs the backward once per noise node.
+        `integrated_backward` alone runs the backward once per chunk of
+        noise nodes.
         Deliberately a per-call recomputation and never a stored-Variable
         cache, which would cut the training gradients to the state's
         parameters.
@@ -1615,6 +1616,10 @@ class PCA(_Warping):
         The number given out; all of them if left out.
     """
     _mixes = True
+    # set by `initialize` and kept by a save: a robust estimate is a random
+    # search, and either estimate on other data is another basis than the
+    # one the links after it were trained on
+    _SAVED_STATE = ("mean", "eigvals", "eigvecs")
 
     def __init__(self, n_dim, n_components=None):
         super().__init__()
@@ -1679,6 +1684,10 @@ class RobustPCA(PCA):
     support_fraction
         The share of the samples the robust estimate is made from.
     """
+    # its state comes from a random search: a save without it cannot be
+    # opened with the axes it was trained with (`persistence` warns)
+    _RANDOM_STATE = True
+
     def __init__(self, n_dim, n_components=None, support_fraction=0.75):
         super().__init__(n_dim, n_components)
         self.support_fraction = support_fraction
@@ -1861,6 +1870,8 @@ class ScaledSimplex(Identity):
     Accepts zeros.
     """
     _mixes = True
+    # set by `initialize` from the data and kept by a save, as `PCA`'s is
+    _SAVED_STATE = ("scale",)
 
     def __init__(self, size):
         super().__init__(size)

@@ -42,6 +42,7 @@ __all__ = ["save_model", "load_model"]
 import os as _os
 import importlib as _importlib
 import inspect as _inspect
+import warnings as _warnings
 from typing import TYPE_CHECKING
 
 import numpy as _np
@@ -206,13 +207,24 @@ def _encode_parametric(obj, writer):
             "`geoml.parameter.Parametric` was imported"
             % type(obj).__name__)
 
-    return {
+    node = {
         "$": "object",
         "class": _class_name(obj),
         "args": [_encode(a, writer) for a in obj._init_args],
         "kwargs": {k: _encode(v, writer)
                    for k, v in obj._init_kwargs.items()},
     }
+    # what a class keeps outside its parameters and its constructor cannot
+    # rebuild (`_SAVED_STATE`): a robust PCA's axes come from FastMCD, which
+    # the rebuilt model would run again from an unseeded generator
+    state = {name: getattr(obj, name, None)
+             for name in getattr(type(obj), "_SAVED_STATE", ())}
+    state = {name: {"$": "array", "name": writer.put_array(
+        _np.asarray(value))} for name, value in state.items()
+        if value is not None}
+    if state:
+        node["state"] = state
+    return node
 
 
 def _write_parameters(group, model):
@@ -302,6 +314,8 @@ class _Reader(object):
         self.path = path
         self.objects = {}       # description id -> rebuilt object
         self.building = set()   # ids being built, to catch a cyclic file
+        self.states = []        # (object, saved state) to put back once
+                                # the model is built
 
 
 def _decode(node, reader):
@@ -344,6 +358,15 @@ def _decode(node, reader):
         args = [_decode(a, reader) for a in node["args"]]
         kwargs = {k: _decode(v, reader) for k, v in node["kwargs"].items()}
         obj = cls(*args, **kwargs)
+        if "state" in node:
+            reader.states.append((obj, node["state"]))
+        elif getattr(cls, "_RANDOM_STATE", False):
+            _warnings.warn(
+                "this model was saved before geoML 0.10.7, which saves a %s's "
+                "state: it was estimated again from the data with another "
+                "random start, so the model predicts with other axes than "
+                "the ones it was trained with -- refit it and save it again"
+                % cls.__name__)
     else:
         raise ModelFormatError("unknown entry '%s' in the model" % kind)
 
@@ -441,6 +464,12 @@ def load_model(path: _types.PathLike,
         _substitute_data(spec, data, reader)
 
     model = _decode(spec, reader)
+    # the state goes back once every constructor has run, the model's own
+    # having initialized its warpings from the data
+    for obj, state in reader.states:
+        for name, array in state.items():
+            setattr(obj, name, _tf.constant(
+                reader.group["arrays"][array["name"]][...]))
     _read_parameters(group, model, meta["parameters"])
 
     if meta.get("training_log", False):

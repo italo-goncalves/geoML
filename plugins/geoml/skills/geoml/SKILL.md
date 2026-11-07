@@ -183,7 +183,8 @@ in the catalogue.
   parametric links replaced `Spline`, which stays for saved models (with
   `backbone="rq"` if you use it anyway). One marginal transform is where
   the benefit stops: stacking rotation-and-spline pairs made held-out
-  scores worse.
+  scores worse. A model with a `RobustPCA` saved before 0.10.7 reopens
+  with other axes than it trained with (it warns): refit and save it again.
 - **Noise law.** For a skewed grade under a log-like link, prefer a
   Gaussian likelihood: a heavy-tailed law (`Laplace`, `EpsilonInsensitive`)
   pushed back through the link can have an unbounded variance in data units
