@@ -589,6 +589,80 @@ class _SpatialData(_TreeNode):
                 "drop %r whole" % (name, owner, owner))
         return self
 
+    def _where_mask(self, where):
+        """`where` as one boolean per location, or None for all of them.
+
+        A string names a boolean metadata column -- a stored filter, which
+        is what a block model has instead of being subsettable -- and
+        indices become the mask they select.
+        """
+        if where is None:
+            return None
+        if isinstance(where, str):
+            mask = _np.asarray(self.get_metadata(where)).ravel().astype(bool)
+        else:
+            mask = _np.asarray(where)
+            if mask.dtype != bool:
+                index = _np.zeros(self.n_data, dtype=bool)
+                index[mask] = True
+                mask = index
+        if mask.shape != (self.n_data,):
+            raise ValueError(
+                "`where` needs one value per location: got %d for %d"
+                % (mask.size, self.n_data))
+        return mask
+
+    def clear_predictions(self, names: "str | Sequence[str] | None" = None,
+                          where: "_types.Where" = None) -> "_SpatialData":
+        """
+        Empties what was predicted at some locations.
+
+        Every column a prediction writes -- the values, the uncertainties,
+        the shares and the realizations -- becomes missing at the locations
+        named, as it is where no prediction has reached. The variables stay,
+        and so do their measurements, the metadata and every other
+        location. `unpredicted` then names those locations, so
+        `predict(..., where=...)` fills them again.
+
+        Parameters
+        ----------
+        names : str or list
+            The variable(s) to empty. All of them when omitted.
+        where
+            The locations to empty: a boolean mask, indices, or the name
+            of a boolean metadata column. All of them when omitted.
+
+        Returns
+        -------
+        self, so that calls can be chained.
+
+        Raises
+        ------
+        ValueError
+            If a name is not a variable of this container.
+
+        See Also
+        --------
+        drop : removes a variable whole, measurements included.
+        unpredicted : the locations no prediction has reached.
+        """
+        if names is None:
+            names = list(self.variables)
+        elif isinstance(names, str):
+            names = [names]
+        names = [str(name) for name in names]
+        for name in names:
+            if name not in self.variables:
+                raise ValueError(
+                    "no variable named %r to empty; found %s"
+                    % (name, ", ".join(sorted(self.variables)) or "none"))
+        mask = self._where_mask(where)
+        rows = _np.arange(self.n_data) if mask is None \
+            else _np.flatnonzero(mask)
+        for name in names:
+            self.variables[name]._clear_predictions(rows)
+        return self
+
     def _check_three_dimensional(self):
         """A surface can only be assigned to locations that have a height."""
         if self.n_dim != 3:
@@ -1192,7 +1266,9 @@ class PointData(_PointBased):
         Parameters
         ----------
         data : _pd.DataFrame
+            A table with one row per location.
         coordinates : str or list
+            The names of the columns of `data` that hold the coordinates.
         """
         super().__init__()
 
@@ -1666,6 +1742,17 @@ class GaussianData(PointData):
     """
 
     def __init__(self, data, coordinates_mean, coordinates_variance):
+        """
+        Parameters
+        ----------
+        data : _pd.DataFrame
+            A table with one row per location.
+        coordinates_mean : str or list
+            The names of the columns of `data` that hold the coordinates.
+        coordinates_variance : str or list
+            The names of the columns that hold each coordinate's variance,
+            in the coordinates' order.
+        """
         super().__init__(data, coordinates_mean)
 
         if isinstance(coordinates_variance, str):

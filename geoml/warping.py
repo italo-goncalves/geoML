@@ -237,7 +237,13 @@ class Identity(_Warping):
     """Identity warping.
 
     Leaves the data as they are: the model sees the variable in its own
-    units. What a continuous likelihood uses when it is given no warping.
+    units. A continuous likelihood given no warping uses `ZScore`, so pass
+    this one to keep the data unscaled.
+
+    Parameters
+    ----------
+    size : int
+        The number of columns the warping transforms.
     """
     def __init__(self, size):
         super().__init__()
@@ -271,6 +277,8 @@ class Spline(_Warping):
 
         Parameters
         ----------
+        size : int
+            The number of columns the warping transforms.
         knots_per_arm : int
             The number of knots used to build each side (positive and negative)
             of the spline.
@@ -477,6 +485,8 @@ class ZScore(_Warping):
 
         Parameters
         ----------
+        size : int
+            The number of columns the warping transforms.
         mean : double
             The desired mean of the data.
         std : double
@@ -582,6 +592,8 @@ class Center(ZScore):
 
         Parameters
         ----------
+        size : int
+            The number of columns the warping transforms.
         mean : double
             The desired mean of the data.
         """
@@ -606,6 +618,8 @@ class Softplus(_Warping):
 
         Parameters
         ----------
+        size : int
+            The number of columns the warping transforms.
         shift : float
             A positive value to add to the data. Use it if you have zeros.
         """
@@ -656,6 +670,8 @@ class Log(_Warping):
 
         Parameters
         ----------
+        size : int
+            The number of columns the warping transforms.
         shift : float
             A positive value to add to the data. Use it if you have zeros.
         """
@@ -683,6 +699,14 @@ class Scale(ZScore):
 
     Divides each column by a scale and subtracts nothing, so zero stays
     zero. Initialized from the data's range.
+
+    Parameters
+    ----------
+    size : int
+        The number of columns the warping transforms.
+    scale : float
+        The scale each column is divided by until the warping is
+        initialized from data.
     """
     def __init__(self, size, scale=1):
         super().__init__(
@@ -1185,6 +1209,8 @@ class Sigmoid(_Warping):
 
         Parameters
         ----------
+        size : int
+            The number of columns the warping transforms.
         shift : float
             A positive value to ensure the data is constrained to the ]0, 1[ interval.
         """
@@ -1738,6 +1764,11 @@ class CenteredLogRatio(_Warping):
     that map, so the objective is a density on the hyperplane: values are
     comparable between compositional models and only loosely against a
     warping that transforms a variable one to one.
+
+    Parameters
+    ----------
+    n_dim : int
+        The number of parts in the composition.
     """
     _mixes = True
 
@@ -1868,6 +1899,11 @@ class ScaledSimplex(Identity):
     Compositional data transformation without log-ratios.
 
     Accepts zeros.
+
+    Parameters
+    ----------
+    size : int
+        The number of parts in the composition.
     """
     _mixes = True
     # set by `initialize` from the data and kept by a save, as `PCA`'s is

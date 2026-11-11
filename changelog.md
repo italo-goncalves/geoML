@@ -1,3 +1,118 @@
+## version 0.10.8
+* **`metrics.r_squared`**, the coefficient of determination: one less the
+squared error over the true values' spread about their mean, as
+scikit-learn's `r2_score` takes it -- negative for a prediction worse than
+that mean, and not the squared correlation, which a biased or wrongly
+scaled prediction keeps high. NaN where the true values do not vary.
+`cross_validate` and `score_measurements` report it as a column after
+`bias`, of the measurement samples' mean, per fold and pooled; the truth's
+spread is carried as a mean and a sum of squares about it, pooled by Chan's
+rule, so batches and folds give the r-squared of every measurement at once
+(to 1e-9 at mine coordinates, `test_cross_validation.py`).
+* **Trees left unnamed no longer draw the same realizations** -- a node
+without a name is numbered among the nodes connected to it, so two trees
+built apart both held a `BasicGP_1`, and a GP node's draws are keyed by
+its name: two untrained leaves on two roots with the same inducing points
+gave realizations correlated at 1.000 at every location, 0.043 once named
+apart (measured 2026-10-30). The moments and the bound were right; a joint
+grade-tonnage or a `derive` over such variables was not. `VGPNetwork` now
+gives every node a name of its own as it is built
+(`_settle_names`): the first node sighted keeps its name and a later one
+with a generated name takes the next number free in the whole model. A
+model of one tree is unchanged to the bit, and a name the user gave is
+never changed -- two given alike warn. **A saved model of several trees
+whose nodes were left unnamed gets the new names when it is opened, and so
+other realizations than it had**: its moments, its bound and its parameters
+are the same, and the old realizations were the wrong ones. This also
+reaches trees joined by `Stack`.
+* **A limit per realization on a `MeshSet`** (GeoScape's item 52):
+`limits=` and `exclude=` take, beside a sheet or a body for every
+realization, a pair `(set, key)` naming a body of another mesh set -- the
+prediction's meshes cut by that set's prediction body, and realization
+*i*'s by its body of realization *i*, which is what combining, cutting and
+clipping one set of realizations by another needs. The other set must hold
+every realization contoured, complete, in a store of its own (built with
+`store=` or opened), and the pairing is refused before any contour
+otherwise; the workers read each body from that store, which the new
+set's store names by absolute path (`paired` in its description, and in
+the provenance) and copies nothing of, so it has to stay where it is. A
+body the other set could not make fails that realization's shells, which
+are recorded as any failure is. `shells.limits[name]` is the prediction's
+body and `shells.simulations[i].limits[name]` the one that cut
+realization *i*. On the radial fixture, spheres of one grade cut to the
+same realization's spheres of another come out those spheres to 1e-6, on
+one worker and on two (`test_meshsets.py`). The store format stays 2: a
+reader that does not know `paired` reads the set as before.
+* **`clear_predictions(names=None, where=None)`** on every container
+(GeoScape's item 48): the columns a prediction writes -- values,
+uncertainties, shares, realizations, in a variable and in each of its
+parts -- go back to what a new variable holds at the locations named,
+while the variable, its measurements and weights, the metadata and the
+other locations stay. `unpredicted` then names those locations, and
+predicting them again gives back what was there, to the bit, on a
+container in memory or opened from its store (`test_predict_targets.py`).
+`where` is a mask, indices or a stored filter's name, as `predict` takes
+it. A column goes back to its own starting value, read off a new variable
+of one location: missing in most, zero in a category's probability. Not
+`drop(where=)`, which GeoScape asked for by that name: `drop` takes the
+measurements with the variable. The catalogue lists it among every
+container's methods.
+* **A doc for every parameter the catalogue offers** (GeoScape's item 51):
+the kernels' `epsilon` and `scale`, every warping's `size`, `sharpness` on
+the continuous likelihoods, the regular block models, the rotated block
+set, the meshes, `PointData` and `GaussianData`, and the block models'
+`assign_from_surface`, `assign_from_solid`, `split` and `from_data`.
+Thirty-odd more were written already and not read: the catalogue took
+`range_x, range_y : float` as one parameter of that name, and now gives
+each name the entry's text. `test_every_parameter_offered_has_a_doc` holds
+it, for classes, functions and containers' methods; internal classes are
+not offered and are left out. `warping.Identity`'s docstring said it is
+what a likelihood uses when given no warping, which is `ZScore`.
+* **Mesh operations 2 to 2.8 times as fast, every mesh the same to the
+bit** (the roadmap's "Faster mesh operations"). Profiled on
+the Assen model, 36 to 52% of a contour, a boolean, a `split` and a mesh
+set was NumPy sorting. `weld`, `drop_degenerate_faces` and the separation
+of a Manifold answer's touching vertices group their rows by a radix sort
+of whole numbers (`math.geometry._row_groups`, `_point_groups`: sixteen
+bits at a time, which NumPy sorts by counting) where they called
+`np.unique(axis=0)`, 4.8 times as fast on 1.5 million vertices, the rows
+compared as before where a coordinate's last decimal place is not exact
+in a float; `mesh3d` counts a mesh's edges once and hands the counts to
+the class it builds, which counted them again; the corner table sorts
+stably, its keys coming in runs, and builds them without holding any
+corner as coordinates; and the paint writes a block's interior by each
+point's place in the slab, one number a point where it built, masked and
+gathered three (7.5 s of a 12.9 s paint). On Assen (908 237 blocks;
+shells of 520k and 620k triangles): a contour 9.2 to 5.3 s, 37.6 to 21.1
+at supersample 1; intersection, difference and union 1.2, 1.7 and 2.4 s
+to 0.5, 0.7 and 1.1; `split` 1.4 to 0.5 s; a mesh set of four cut-offs
+with two realizations 129 to 74 s, of the six rocks 159 to 101 s, in one
+process. A second round numbers the corner table through a table of
+marks over the lattice where that is no larger than the sort's own
+arrays, or under 768 MB and 16 lattice points a key, counts the blocks at
+a corner once for all of a realization's columns, and marks a crossed
+block from a byte a corner: the contour 3.7 s (16.2 at supersample 1),
+the sets 54 and 76 s, and on Tom v6 (1 740 025 blocks) zinc at 5% from
+23.5 to 9.7 s. `simplify` is VTK's decimation and did not move. The 45
+meshes those runs make, and Tom's two, have the same vertices and
+triangles before and after (`docs/benchmarks/mesh_profile.py`, labels
+`head`, `flat`, `marks` and `keys32`). A third round holds the corner
+keys in 32 bits where the table is taken, skips the twin-face search of
+`drop_degenerate_faces` where no face has a twin, and welds once in the
+cut to the box: the contour 3.5 s (14.7), the sets 49 and 69 s. On eight
+workers a realization of the grade set goes from 12.4 to 7.6 s where one
+process goes from 45.7 to about 19: one process saturates this machine's
+memory channels, and a forked worker runs Manifold on one thread, which
+the roadmap records with what is left.
+* A realization's `gained` and `lost` volumes against the prediction's
+shell are read from the one body the two share (`meshsets._against`),
+each volume less the shared one, where both differences were taken: the
+same numbers to rounding, never below zero, at half the booleans -- 7.6 to
+4.8 s of a worker's task on the Assen grade set.
+* The pyright list is clean again: two diagnostics in `models.py` from
+0.10.x (a class attribute read off the wrong base, an optional subscripted)
+are closed. The one in `warping.py` the roadmap carried was gone already.
+
 ## version 0.10.7
 * **One rule over the noise and the jitter together** -- where a mixing
 warping meets a latent jitter, the noise integral takes one scrambled Sobol

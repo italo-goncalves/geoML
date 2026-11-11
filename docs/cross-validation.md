@@ -70,7 +70,8 @@ exists to avoid. The translation of kriging's fixed-variogram CV:
 
 Scores are of **measurements** (`predict_measurements` — the container's own
 simulations are of the ground, which no assay observes): per fold and pooled,
-`rmse`/`mae`/`bias` of the predictive mean, `crps`, and Deutsch's `goodness`.
+`rmse`/`mae`/`bias` of the predictive mean, its `r_squared` (since
+0.10.8), `crps`, and Deutsch's `goodness`.
 The conceded leakage, stated in the docstring: hyperparameters and warping
 saw all the data — the same concession kriging makes when it keeps the
 variogram. `refit="all"` trades the other way (warm-start everything, freeze

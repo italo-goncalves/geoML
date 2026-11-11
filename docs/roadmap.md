@@ -18,310 +18,11 @@ file is for the cross-cutting ones. Design records for finished work are the
 
 ## 1. Modelling and inference
 
-(A reopened model's robust PCA not being the one it trained with: **fixed
-2026-11-07 for 0.10.7** -- the state rides the save, an older save warns;
-see the changelog.)
-
 **S — XLA refuses a walk network's prediction on the CPU** (found
 2026-11-07): `Invalid TensorList shape: (f64[5,5,2,6,1021]) expected
 (f64[5,25,2,6,1021])`, a realization count of 5 against 25 in a list the
 walk builds, on the Assen GeoScape network at `n_sim=25`. geoML warns and
 predicts without XLA, so it costs speed, not answers.
-
-(One rule over the noise and the jitter together: **built 2026-11-07 for
-0.10.7** at 512 points, the product's cost at twice its accuracy; the
-numbers are in the changelog. The 64 x 8 product had missed the measurement
-variance by 11.6% at the median on Assen, the joint rule misses it by 5.5%,
-so the noise integral under a large jitter is still far from the 0.2-0.6%
-of a standard deviation its docstring measured without one: a finer rule
-costs time in proportion.)
-
-(The tree's leaves as the points of contact with the likelihoods, and
-independent trees: **done 2026-09-05, 0.6.10** — see "Settled by
-measurement" below for the numbers. `VGPNetwork` takes a list of leaves,
-one per likelihood, or a mapping from each variable to its likelihood; the
-single node is still accepted and still split, bit-identically. Leaves on
-roots of their own work with no join at all, which is what a tree of
-inducing points near the drillholes beside a gridded tree for geophysics
-needs.)
-
-**L — The expected kernel: deep networks that stop overfitting** (agreed
-2026-10-08, for 0.9.0; **built 2026-10-08** on branch `expected-kernel`,
-design record `docs/expected-kernel.md`: gates 1-3 passed -- the kernel
-within 0.0008 of 4e5 draws for every kernel, a leaf within 0.005 of draws
-of its parent's posterior through every supported operation, the folded
-section's deep networks at -9.0 and -11.1 a new hole against -25.4 and
--18.9 under the old rule and -12.2 for a VGP, calibrations 1.19 and 1.31
--- and the walk's first gate only at a short reach, see below). Found in the research
-project *Spatial cross-validation* (`report/new_covariance.md`,
-`report/dgp_propagation.tex`): a GP node hands its children only its
-variance at each location, the child treats any two locations as
-independent and inflates its range by half the input variance where the
-Gaussian kernel's own weight is 6, so a deep model's leaf barely feels the
-hidden layer's uncertainty. Its predictive variance read 0.002 of the
-model's own Monte Carlo predictive, the bound bought a tiny noise variance
-with that, and on a folded synthetic section scored per new drillhole:
-
-| Model | Log score per new hole |
-|---|---|
-| geoML `dgp` (marginal propagation) | −155.2 |
-| geoML `dgpc` (input-connected) | −31.2 |
-| VGP | −12.15 |
-| expected kernel, `dgp-cu` | −9.26 |
-| oracle on the unfolded coordinates | +3.1 |
-
-The expected kernel `E[k(h(x), h(x'))]` needs the variance of the
-*difference* `h(x) − h(x')`, so a node passes its children its covariance
-between locations; the child stays an ordinary sparse GP on the root's
-inducing points at the same O(N·U²) cost, its KL and the likelihood door
-unchanged. Decided:
-- **An option, old saves untouched**: `GPOptions(propagation=)`, the class
-  attribute `"marginal"` (what an old save falls back to) and the
-  `__init__` default `"joint"`; under `"marginal"` the code is today's.
-  `expert_propagation` likewise defaults to `"independent"` for new models.
-- **What travels**: per output, an N×U covariance (data against inducing
-  points, made in `propagate`) and a U×U one (inducing points against each
-  other, made in `refresh`). Mixing operations apply their rule entry by
-  entry, as to the variances today, so the covariance *between outputs* is
-  dropped after a `Linear` as it is now. A GP node's own posterior
-  covariance against its inducing points is `k_x (K+Λ)⁻¹ Λ`.
-- **The signature**: `propagate` returns a private named tuple
-  `_Moments(mean, variance, covariance)`, each a list over experts,
-  `covariance` `[size, n, m_e]` or `None` (a deterministic node, or
-  marginal mode); a refresh stores `inducing_points_covariance`
-  `[size, m_e, m_e]` beside the variance, which stays its diagonal; slots
-  carry the same with a leading slot axis.
-- **Experts chain per expert**: child expert *e* reads its parent's expert
-  *e* at the data and at its inducing points; moments stay per expert along
-  the chain and are blended only where a value leaves the tree (a leaf,
-  `predict_node`). `"joint"` with `"consensus"` is refused. Slots and
-  subsets work under `"joint"` in 0.9.0, the subset gate ("every expert in
-  the subset changes nothing") held on shallow and deep trees.
-- **Kernels**: the Gaussian in closed form; `Exponential`, `Matern32`,
-  `Matern52` and `RationalQuadratic`, scale mixtures of Gaussians, by a
-  fixed-node 1-D quadrature over the mixing measure. `Spherical` and
-  `Cubic` are **not** scale mixtures (measured 2026-10-08: a Spherical
-  Gram matrix in R⁶ has eigenvalue −0.026, and the best non-negative
-  Gaussian mixture misses Spherical by 0.020 and Cubic by 0.015 against
-  6e-7 for Matern32), and are refused under a random input with Cosine
-  refused in every GP node of a network; the remaining kernels cover the
-  uses.
-- **Nodes**: supported under `"joint"` are the inputs (`GaussianInput`'s
-  location variance entering the difference with no covariance against the
-  inducing points), `SelectInput`, `Linear`,
-  `Scale`, `Bias`, `Add`, `LinearCombination`, `Concatenate`, `BasicGP`,
-  `MultiStructureGP`, `AdditiveGP` and `GPWalk` (below); refused under a
-  random input are `UncertainInputGP` and `RadialTrend`, and a GP on a
-  `GradientConstrainedInput` (item below); a `GPWalk`'s field takes a
-  mixture kernel too, the walk reading it at uncertain positions;
-  `Multiply`, `Exponentiation`, `GaussianMixture`, `ProductOfExperts` and
-  `Stack` never feed a GP and keep their moments.
-- **Every refusal lives in `VGPNetwork`'s constructor under `"joint"`**,
-  never in a node's, so a save under `"marginal"` keeps opening.
-- **Realizations**: a GP node draws as now, `K_eff(x,Z)·chol_r·normals +
-  mean` -- the right marginal and the explained covariance, not conditioned
-  on the parent's realizations (that is the item "Propagate individual
-  realizations" below, a different model).
-- **Changed while building**: the walk's own KL stays (measured
-  necessary, see below), and the walk carries the field's unexplained
-  variance.
-- **Left out**: centring (identity plus amplitude) and the node-role rule;
-  the input connection is the recommended construction, which the manual
-  says, and nothing enforces it.
-- **Gates**: (1) the expected kernel against 2×10⁴ joint Monte Carlo draws
-  of the parent, max error under 0.005, on one expert, several, and three
-  layers; (2) on the folded section, 200 new holes, `"joint"` beats
-  `"marginal"` and the VGP on mean log score with calibration 1–1.5;
-  (3) chapter 5's deep GP rerun under `"joint"` and recorded. Nothing ships
-  unless (1) and (2) pass. `docs/benchmarks/expected_kernel.py`.
-- **`GPWalk` before the release** (added 2026-10-08): the walk carries the
-  covariances its children need, the field read at each step under the
-  expected kernel with the uncertainty the walk has accumulated, so an
-  uncertain walker reads a weaker field and slows down (and far from the
-  data drifts at the field's bias). The walk is an Euler solve of
-  `dw/dt = amp·f(w)` along **one** uncertain field, not fresh noise each
-  step: the field's residual is taken fully correlated along a point's
-  path, so its standard deviations add (spread `~K·s·sd_f`, where an SDE's
-  would be `~sqrt(K)·s·sd_f`), `n_steps` refines the solve rather than
-  adding noise, and `step·n_steps·amp` is the reach. The covariance against
-  the start positions (where the field's inducing points sit) is updated
-  exactly by Stein's lemma with the expected gradient of the expected
-  kernel; the covariances between two moved positions, which the children
-  need, by the expected Jacobian on both sides. Departing from 0.8's
-  numbers is accepted: the node's goal is analytical non-stationary kernel
-  learning. The fallback, if the gate refuses the analytic walk, is Q fixed
-  field samples walked exactly. Under `"joint"`
-  the `precision` parameter (the variance divided by `1 + precision` each
-  step) is ignored and on the deprecation list (section 5); the walk's own
-  KL was planned to go with it and was kept, measured (below). Realization *s* walks a field draw of its
-  own from the simulation stream. Gates: the walk's moments and
-  covariances against 10⁴ brute-force trajectories on one expert and on
-  several; a `GPWalk` network on the folded section under `"joint"`
-  against `"marginal"` on the 200 new holes. **Measured 2026-10-08**: the
-  linearized walk matches walks along sampled fields within their noise at
-  a reach up to a tenth of the field's range (mean 0.03 sd, variance ratio
-  0.96-1.05, covariance 0.05), and falls short beyond it -- variance ratio
-  down to 0.53 at amp 4 and 0.14 at amp 8, covariance off by 0.42 and
-  0.83. The folded section's walk network trains to amp 3 and scores -10.75
-  a new hole against -31.65 under the old rule (VGP -12.17), median -1.67,
-  but calibration 1.93. **Settled 2026-10-08** (the user's decision to
-  measure the fallback first, then to price the walk): fixed field draws
-  walked exactly scored the same (-10.95 and -11.57, calibration 1.95 and
-  2.07) at 3-6x the cost, and left chapter 16's confident region over
-  unsampled ground, so the linearization was never the problem -- dropped.
-  The cause of the region was the field's unexplained variance, which the
-  walk now carries per point (chapter 16's geometry and metals'
-  calibration back to 0.8.8's); the calibration's was an unpriced
-  deformation, which the walk's displacement KL fixed on one seed (1.97 ->
-  1.26, score -10.46) where priors on `amp` changed nothing. **Replaced
-  2026-10-09** (the user's order of fixes, three seeds): the walk adds no
-  KL, the GP reading it is advised to be isotropic, and the displacement
-  term is deprecated with `precision` -- see "A principled price for the
-  walk".
-  The walk is accurate to a reach of a fifth of the field's range and errs
-  both ways beyond it.
-  Record: `docs/expected-kernel.md`, "The walk".
-- **Phases**: (1) the expected kernel and its quadrature as a function,
-  gate 1 on one expert; (2) `_Moments` through every node under
-  `"marginal"`, covariance always `None`, the covering tests to the bit;
-  (3) `"joint"` in the network -- the two matrices, per-expert chains, the
-  refusals, `GPOptions` -- and gate 1 on several experts and three layers;
-  (4) slots and subsets, the subset gate; (5) gates 2 and 3; (6) `GPWalk`
-  and its gates; then the changelog, the manual (chapter 5, concatenation
-  as the recommended construction), the skill and
-  `docs/expected-kernel.md`. The release waits for the user's word. The
-  range bound stays at its default unless gate 2 shows it decides the
-  score; the covariance path takes the double-`where` square root, whose
-  second derivatives are finite at zero distance.
-
-**M — Eight Gaussians and the second moment in `BasicGP`** (agreed
-2026-10-08, the two items below; for 0.9.0; **steps 1 and 1b built
-2026-10-08**: kernel errors 5.1e-4, 9.8e-6 and 9.1e-6, gate 1 unchanged,
-chapter 5's deep model 262 s to 74 s at 100 iterations with the same
-scores; **step 2 built 2026-10-08**: Girard to 1e-10, Walker within 1.8%
-for all four kernels, `docs/benchmarks/second_moment.py`; **reworked
-2026-10-09 after step 4's cost** to closed form for the Gaussian kernel and
-64 points of quadrature for the others, Walker still within 1.8%; **step 3 built
-2026-10-08**: the prediction within 1% of realizations at drawn inputs,
-measurement quantiles within 4-5% of the interval, the rest the mixture's
-shape). Plan of record:
-1. **Tables.** `Exponential`, `Matern32` and `Matern52` read an uncertain
-   input through 8 fitted Gaussians each (rates and weights stored as
-   constants in `network.py`, weights summing to one; refitted by
-   `docs/benchmarks/kernel_mixtures.py`), independent of range and
-   uncertainty; the rational quadratic keeps its `scale`-adaptive rule and a
-   certain input the exact kernel. Gate: kernel error <= 1e-3 each, the
-   expected-kernel tests (the no-uncertainty tolerance relaxed to 1e-3),
-   positive definite, speed on chapter 5 and chapter 16. **1b**: the walk's
-   slopes in closed form per component, replacing a forward-mode pass per
-   dimension.
-2. **Second moment.** Where the inducing points are certain (a
-   `GaussianInput` root, through `Linear`/`SelectInput`), under `"joint"`
-   only: `v = 1 - tr(C L) + alphaᵀ L alpha - m²`, `L_ij = E[k(x, z_i)
-   k(x, z_j)]` in closed form per pair of components (one for the Gaussian,
-   36 for a table), `MultiStructureGP` over pairs of structures,
-   `AdditiveGP` within and across dimensions; the explained variance
-   `tr(C L)`. Deep networks (uncertain inducing inputs, the research's ~11%)
-   stay out -- their own item, later (measured 2026-10-16 under "Propagate
-   individual realizations": on the folded section the moment path reports
-   10-32% of such a model's variance). Gate: against `girard()` to 1e-10
-   (Gaussian), against the exact mixture on Walker Lake mean and variance
-   within 2% at every input variance for all four kernels; bit-identical
-   with no input variance; slots as sets.
-3. **The input's spread integrated like noise** (the user's choice over
-   realizations at drawn inputs, after
-   `docs/benchmarks/uncertain_input_realizations.py`: on a 1-D field at an
-   input sd of 0.4 the 5%/95% quantiles miss the exact mixture by 0.224
-   with the expected kernel alone, 0.092 integrated like noise, 0.038 at
-   drawn inputs whose realizations turn spiky). The realizations stay the
-   expected kernel's; what they leave out because the input is uncertain,
-   `Delta = tr((R Rᵀ + alpha alphaᵀ) Cov k)`, `Cov k = L - l lᵀ` -- never
-   negative -- rides beside them as a per-location latent jitter: a GP node
-   returns it beside its four outputs (an attribute on the tuple, as
-   `_Moments`), `_predict_raw` hands it to the likelihood, and
-   `integrated_backward` and `measurement_samples` take `sims + sqrt(Delta)
-   eta` over a few Gauss-Hermite nodes `eta` on top of the noise nodes
-   (about 8x the back-transform, at uncertain inputs only); the categorical
-   likelihoods the same in their probabilities. Training needs nothing: the
-   quadrature over the latent variance already integrates it. Gate:
-   `prediction` and the quantiles in data units against the exact mixture
-   through a nonlinear warping; with no input variance, bit-identical.
-4. **Training gate** on the `GaussianInput` plan's jittered locations:
-   held-out coverage and CRPS against the expected kernel alone and against
-   `UncertainInputGP`; time and memory at m = 100 and 300 (`L` is `n m²` per
-   expert under a gradient). **Done 2026-10-09**: the second moment beats
-   the first in every case and ties `UncertainInputGP`; a location error is
-   still better left untold. The closed form for a Matérn table cost 100x
-   a first-moment iteration at m = 100 and ran out of 45 GB at 300 -- the
-   user chose the hybrid (closed form for the Gaussian, quadrature for the
-   others): 8x at both sizes, 2.1 and 3.6 GB, once the kernel is read
-   through plain distances (2026-10-09). Measured and dropped the same day:
-   the Cholesky route (3% of a step), the input's linear part taken
-   analytically (no change: the whitened nodes integrate it already), and
-   experts for speed (none; `train_by_expert` saves memory).
-5. `UncertainInputGP` deprecated with a warning naming `BasicGP`, removed in
-   the breaking version; changelog, design record, skill. **Done
-   2026-10-09.**
-
-**S — Fewer components for the Matérn kernels' expected kernel** (measured
-2026-10-08; **built** as step 1 of the item above). The fixed trapezoid (52, 32 and 28 components for the
-exponential, Matern32 and Matern52) is accurate to 1e-7, far below any
-gate; the best positive mixture of 8 Gaussians, fitted once and stored as
-constants (weights summing to one, so the diagonal stays exact), misses the
-kernel by 5.5e-4, 1.5e-4 and 9.4e-5 on [0, 3] ranges, which bounds the
-expected kernel's error too (the expectation is linear in the mixture) --
-3.5 to 6.5 times fewer evaluations, still positive definite by
-construction. With it, the walk's slopes in closed form (each component's
-derivative in the mean is `-2 w mu / (r² (1 + 2 w v))` times itself) rather
-than one forward-mode pass per dimension. **Rejected on the way**:
-Paciorek's form with the kernel substituted, `prod (1 + kappa v)^(-1/2)
-R(sqrt(sum mu² / (1 + kappa v)))`, its inflation `kappa` fitted per kernel
-(23.8, 10.4, 8.1): it is the expectation only for the Gaussian, and misses
-it by 0.10-0.13 (exponential), 0.04-0.06 (Matern32) and 0.03-0.04
-(Matern52) in one to three dimensions; positive definite for independent
-inputs (Paciorek's theorem, by congruence) and not guaranteed with
-correlated ones, though no failure turned up on near-singular lattices.
-**Reopened 2026-11-02** by the deep moments' bound (item "Deep moments
-without the quadrature" below): its exact spread pairs the components, eight
-of them 36 pairs, each the size of the Gaussian kernel's one, so fewer
-components is what would make the bound fast for the Matérn family.
-
-**M — A principled price for the walk** (from the expected kernel,
-2026-10-08; **settled 2026-10-09**: the field's KL the only price, and the
-GP reading the walk built isotropic -- documented, not enforced -- -6.1 a
-new hole on the folded section's three seeds against the displacement
-term's -10.7, intervals erring wide (calibration 0.45-1.14) where the
-term's erred narrow (1.14-2.24). The reader's ranges held where they start
-scored -5.0 and were the library's for a day; the user's reading of
-chapter 17 put the trouble in the ranges differing between dimensions, not
-their scale, and the starting anisotropy in the input's transform, where
-the user sets it. The fixes tried in the user's order: a proper zero-displacement prior through the field's
-fixed scale (`amp` 0.3, 1, 3: -12.3, -12.3, -9.5, no scale right on every
-seed), the trade-off priced (the leaf's range prior at 10 and 50: -9.8 and
--6.8; held at 0.5, 1, 2: -5.3, -5.0, -5.4), and an uncertain `amp`
-(linearized, its uncertainty collapsed to 0.05-0.07 on two seeds: -11.3).
-Diagnosis: freezing one group at a time put the cause in the walk's stretch
-and the reader's range being one degree of freedom. Record:
-`docs/expected-kernel.md`, "The walk"; `docs/benchmarks/walk_price.py`.
-What follows is the plan as it stood.) The walk's KL under the expected kernel is the marginal rule's
-term, `1/2 sum (m_walked - m_start)² / v_walked` over the inducing points:
-not a KL (it treats the start as a prior and divides by the posterior's
-variance, with no trace or log-determinant), and since the displacement and
-its spread both scale with `amp`, in effect a penalty on the field's
-signal-to-noise ratio where it moves points. It works -- the folded
-section's calibration 1.97 -> 1.26, where MAP priors on `amp` (Gamma at mode
-1, exponential) changed nothing -- because it keeps the walk uncertain. In
-a proper bound the walk adds no random variable of its own, so no KL; what
-the point estimates miss is the uncertainty in the deformation's scale.
-The principled version: `amp` a random variable, a log-normal variational
-posterior `q(log amp)` against a prior whose base model is no deformation
-(an exponential on `amp`, the PC prior), `KL(q || p)` in the bound, and the
-walk's moments averaged over `q` -- a few Gauss-Hermite nodes in `log amp`,
-each a walk, the mean and covariance by the law of total variance over
-them; the realizations each at a node. Gate: on the folded section without
-the displacement term, calibration within 1-1.5 and a score at least the
-heuristic's (-10.46); chapter 16's rock maps no worse; the cost (one walk
-per node) against the term it replaces.
 
 **M — The walk's memory beyond 0.9.2** (measured 2026-10-16 on a GeoScape
 network: a size-3 field, a five-step walk, three readers, 32 experts of
@@ -361,44 +62,6 @@ rather than squeeze it:
   from it halves the 0.6 GB for one more step's work in the backward
   pass; worth it only if the walk grows longer.
 
-**S — A CPU prediction of the GeoScape walk network runs out of memory**
-(found 2026-10-24; **closed 2026-10-28 by item L's 1b**: the run below
-finishes in 340 s at 20.0 GB under the 28 GB cap; **cause measured
-2026-10-28**: the measurement pass ran
-eagerly, and every quadrature and pathwise chunk it reached built a fresh
-`tf.function` compiled with XLA, kept for the life of the process -- 2.8-3.9
-GB more resident per call at 430 rows, flat at 10.1 GB with
-`_QUADRATURE_XLA = False`; `compute_review.py`, case D). **Narrowed by item
-L's 1a, not closed**: the pass is one traced graph now and grows no more
-batch by batch, but its trace keeps 6.6 GB once (3.6 without the chunks'
-XLA), and the prediction itself holds 24.5 GB at 4429 rows -- each trace of
-its graph about 9 GB of XLA chunk compilations, a short last batch a second
-trace -- so the 4429-row run still met the 28 GB cap, at the pass's first
-batch. Left to 1b, which takes the samples from the prediction's own graph
-(the user's choice, 2026-10-28); padding the short last batch to one shape
-was the other route, not taken. The model of the coverage experiments
-(three GP nodes reading a `GPWalk`, 32 experts, trained by expert),
-predicted at its own 4429 data locations with 10 realizations and the GPU
-hidden, was killed by a 28 GB cap three times out of three -- float64
-included, so not the quadrature's precision -- while the same call on the
-GPU finishes in 1238 s. All 52 prediction batches (86 rows each) complete;
-the kill comes in the pass after them, batch 4-5 of 10: `predict`'s
-`_check_measurements`, which writes the `pit_*` and `warped_*` columns over
-the measured rows through `measurement_batches`, at the same batch size.
-- **First hypothesis**: retracing under XLA. In that pass the realizations'
-  `draw` chunk retraced on every batch (TensorFlow's "5 out of the last 5
-  calls ... triggered tf.function retracing"), and on the CPU every
-  quadrature and pathwise chunk is compiled with XLA (`_quadrature_xla`),
-  so each retrace is a compilation kept alive; the GPU, without XLA, does
-  not grow. Test: the same call with `network._QUADRATURE_XLA = False`,
-  and with the memory logged per batch.
-- **Then**: why the measurement pass retraces where the prediction does
-  not -- a shape that changes per batch (the last batch's rows, the
-  measured rows' count) or a function rebuilt per call.
-- Harness: `C:\Users\Public\segv\predict_variants.py` (variant `f64`,
-  `cpu-` prefix in `predict_run.sh`), the model in
-  `/home/italo/coverage_runs/A_model`.
-
 **M — The shared prior draw's fixed part, once per call** (filed
 2026-10-27). A prediction batch at a certain input rebuilds, in every GP
 node, what `_shared_prior_simulate` computes at the inducing points alone:
@@ -434,244 +97,6 @@ before 0.9.11 predicts with, and a GPU network reading an uncertain input.
   come from the features' Gram matrices across experts.
 - Go only if a plain-graph workload matters enough (old saves, GPU
   networks with the quadrature); under XLA there is little left to win.
-
-**L — Six places the computation repeats itself** (agreed 2026-10-28, from
-a review of the training and prediction paths; read off the code, weights
-not yet measured). One branch, one commit per item, released together; an
-item either keeps every number to the bit or is gated at rounding level
-(1e-10) against the version before it, and an item that does not show its
-gain on the benchmarks is dropped and recorded under Settled by
-measurement. Moving bits at rounding level is accepted (the reproducibility
-contract does not span releases; chapters 16-17 will show figure diffs).
-- **0. Benchmarks first.** `docs/benchmarks/compute_review.py`: time and
-  peak memory of a training step, `predict` with and without measurements,
-  and `cross_validate`, on (A) Walker shallow, one expert, a feature kernel
-  at certain inputs; (B) a synthetic `grid_experts` model trained by
-  expert; (C) chapter 17's walked model, joint rule; (D) the GeoScape walk
-  network on the CPU (the out-of-memory item above, `A_model`); (E) a
-  `GradientConstrainedInput` model. Reference outputs stored for every
-  later gate. Items 3, 4b-c and 6 go ahead only where the profile puts
-  their work at 5% or more of a step or batch.
-  **Done 2026-10-28** (results in `docs/benchmarks/figures/compute_review/`,
-  one JSON per case and device; C at 1000 rows, D at 430, 10
-  realizations). What each item can win:
-  - *1a*: the measurement pass, against the prediction over the same rows:
-    A 0.12 s / 0.05, B 0.49 / 0.17 on the CPU; D on the CPU under XLA
-    **100.6 s / 21.3**, with 192 `_chunked_sums` and 99 `_chunked_map`
-    calls run eagerly per pass and 2.8-3.9 GB kept per measured call (16.6
-    → 19.4 → 23.3 → 29.8 GB resident); with `_QUADRATURE_XLA = False` the
-    same pass 41.0 s / 41.9, flat at 10.1 GB; on the GPU 53.2 s / 79.6,
-    flat. C's variable is categorical: no pass.
-  - *2*: confirmed by count -- `_shared_prior_simulate` entered twice per
-    node per trace and `_values_and_noise` twice per likelihood (A, B).
-  - *3*: **dropped** -- the root sums answered by zeros moved a prediction
-    batch 0.8% (C, CPU), 0.7% (C, GPU) and -1.1% (D, CPU); the ablation
-    did take (two `_chunked_sums` traces of four). See Settled by
-    measurement.
-  - *4b-c*: a traced refresh of every node with the KL and its gradient,
-    against a step: A 51% (CPU) / 41% (GPU), E 44% / 45%, B 2% / 19% of an
-    epoch by expert (every expert refreshed, so an upper bound), C 6.0% /
-    6.3% of a 20.3 / 13.5 s step; D 4.3 s (CPU) / 5.4 s (GPU) per full
-    refresh. Go ahead.
-  - *6*: the first layer's plain covariance against the step: A -2.5% /
-    +6.2%, B +3.0% / +7.4%, C +3.0% (CPU), i.e. at the bar on the GPU only
-    and within the steps' scatter on the CPU. Go ahead with the gate
-    re-timed over more steps; dropped if the GPU gain does not hold.
-- **1a. The measured-row pass traced.** `predict` on a target holding
-  measurements runs the network a second time (`_check_measurements` ->
-  `measurement_batches` -> `batch_measure`), eagerly: no `_compiled` cache,
-  no XLA, and `_chunked_sums`/`_chunked_map` wrap a fresh
-  `tf.function(jit_compile=True)` on every call, which in eager mode
-  compiles every batch -- the likeliest cause of the CPU out-of-memory item
-  above. `responsibilities`' `batch_moments` is the same. Both go through a
-  traced cache and `_with_xla`. Gates: one trace across many batches;
-  `pit_*`/`warped_*` bit for bit on the plain graph, 1e-12 under XLA;
-  model D predicts on the CPU under the 28 GB cap (closing that item, or
-  ruling this cause out).
-  **Done 2026-10-28** (`_measure_function`/`_measure_raw`,
-  `_moments_function`/`_moments_raw`; the rotations drawn outside the
-  graph and handed in). On D at 430 rows the pass takes 6.6 s against
-  100.6, no growth between batches, 6.6 GB once for its trace; the
-  4429-row run still meets the cap (item S above). One-threaded on four
-  Walker models (shallow, `grid_experts`, a GP on a GP, a `Mixture`):
-  `pit_*` and `warped_*` bit for bit, plain graph and XLA; the measurement
-  samples not -- 1e-15 to 2e-12 of their largest value on the plain graph,
-  3.8e-9 under XLA, and 2.6e-8 on the GP on a GP, whose pathwise
-  realizations themselves come out of an eager and a traced run 3e-8 to
-  1e-7 apart while the moments agree to 1e-15 (the samples from one set of
-  realizations agree to 2e-13) -- past the 1e-10 bar there, the old pass
-  having drawn realizations as far from the prediction's graph.
-  **On the GPU the pass takes the plain graph** whatever `jit_predict`
-  says, as the quadrature chunks do (`_quadrature_xla`). Compiled with XLA
-  there it was slow both to compile and to run: Walker's single-expert
-  model predicting its exhaustive grid (whose true values run the pass)
-  took 127 s on the first call and 6.9 s on a warm one, against 7.6 and
-  2.0 s on the plain graph and 9.5 and 1.5 s with only the prediction
-  compiled -- 6.0 s of the warm call's 6.9 in `measurement_batches`. On
-  the CPU XLA still pays for the pass. Not run down: which part of the
-  pass XLA compiles badly on the GPU.
-- **2. Full and smooth realizations from one draw.** At a certain input a
-  feature-kernel node has its own residual, so `_predict_raw` (and
-  `batch_measure`) simulate twice; `_shared_prior_simulate` builds both
-  sums each time and returns one (the pathwise branch memoizes through
-  `_ONCE`; this one does not), and `likelihood.predict` folds over the
-  noise nodes twice (`_values_and_noise` for the values, again for the
-  smooth values). One coefficient computation, memoized for both; one fold
-  over both fields. Gate: bit for bit, and a counting stub (one
-  computation per node per batch, one fold per likelihood).
-  **Done 2026-10-28, half of it.** `_shared_prior_simulate` computes both
-  parts and keeps them in `_ONCE` as the pathwise draw does: bit for bit
-  on Walker's single-expert and `grid_experts` models onto the 78k-node
-  grid and on the four measured-row models (plain graph and XLA,
-  one-threaded); on the GPU a whole `predict` onto the grid 7-17% faster
-  (2.19 → 2.03 s, 8.28 → 7.06 under XLA; 4.70 → 4.22, 9.69 → 8.06), on
-  the CPU within the runs' scatter -- the graph optimizer probably merged
-  the twin there already. The grid holds Walker's true values, so each of
-  those calls also runs the measured-row pass, and the XLA figures are
-  mostly that pass compiled with XLA on the GPU, which it no longer is
-  (1a).
-  **The one fold was not built**: the two folds share no work. Answering
-  the smooth one with the full one's values (wrong numbers, the timing
-  only) cuts a CPU batch 25% plain and 13-16% under XLA, but that is the
-  smooth values' own integration -- other inputs, and the node's residual
-  integrated by eight nodes beside each noise node -- which one fold over
-  both fields would still do, over twice the rows; it could save call
-  overhead only, at the risk of bits (`C:\Users\Public\cr\item2.py`).
-- **3. The conditioned quadrature in one loop** (dropped by phase 0: at
-  most 0.8% of a batch). `_mixture_moments` runs
-  `sums` and `root_sums` as two `_chunked_sums` loops in prediction, both
-  computing the component kernel and `ksk`, because a `while_loop` body
-  cannot be pruned and training must leave the root sums out. Instead
-  `_chunked_sums` is told statically which outputs are wanted. Gate: bit
-  for bit, one `While` per node in the prediction graph, none of the root
-  sums in training's.
-- **5. Propagation settings as one value** (before 1b, which needs it). The
-  ~15 module globals the contexts set are restated by hand in six cache
-  keys (`refresh_cached` -- which omits `_FULL_VARIANCE` --
-  `_propagation_key`, `predict_raw`, `_node_function`, `_weight_sweep`,
-  `_step_rule`), and the rows that fit are worked out in five places under
-  three budgets and two device probes. A frozen internal value that is the
-  context, the key and the sizing input; the sizing in one module. Gate:
-  bit for bit on A-E, no extra traces, and a property test flipping each
-  setting and asserting every cache retraces. It is also the key the
-  shared-prior-draw cache above needs to be safe.
-  **Done 2026-10-28, the setting half.** `network._Setting` (frozen: the
-  simulation rule, the expert and joint rules, the full variance, the
-  quadrature's budget and precision, and the module's switches -- second
-  moment, pathwise, rule, Hermite points, Sobol nodes, chunk XLA; `rows`
-  rides along and keys nothing) is put in force by one context
-  (`network.setting`; `simulation_rule`, `propagation_rule` and
-  `quadrature_rule` now wrap it), built from the options by
-  `VGPNetwork._setting`, read back by `network._current()`, and is the key
-  of all seven caches (the prediction, a node's, the measured rows', the
-  moments', the traced refresh, the weight sweep, the training step's
-  rule). `test_setting.py` flips each part through its own door and
-  checks every cache retraces -- the refresh's key now holds the full
-  variance and the precision too, which it lacked (nothing found that the
-  refresh reads them through; the uniform key costs a retrace only when
-  they change) -- and that coming back traces nothing new. **It found a bug**: `expert_weights` entered no setting,
-  so a prediction by expert, which asks for the weights outside any,
-  swept under the module's defaults (the consensus and marginal rules)
-  while training by expert swept under the model's. On a deep model of
-  four experts under the joint rule the weights moved by up to 0.16 and
-  the prediction by expert by 0.8% of its scale; the old tree asked for
-  them inside the model's setting gives the new numbers bit for bit, and
-  everything else is unchanged to the bit one-threaded (1a's four models,
-  Walker's two onto the 78k-node grid, plain and XLA;
-  `C:\Users\Public\cr\gate5.py`). **The sizing half was not done**: the
-  budgets and device probes already sit in one block of `network.py`, the
-  per-row costs are each node's (`_row_bytes`, `_expert_row_bytes`), and
-  their consumers are `_prediction_rows` and the measured batches; a
-  module of their own would move them, not deepen them.
-- **1b. The measurement samples from the prediction's own draws.** The
-  prediction batch returns the samples for the measured rows it holds and
-  the second pass goes; `measurement_batches` stays the door for
-  `predict_measurements` and `cross_validate`, on the same forward module.
-  Batch sizing adds `n_sim · n_nodes · size` per measured row. Gates:
-  `pit_*` equal to 1a's to rounding, one forward pass less on measured
-  rows, peak memory no higher, a cancelled-and-resumed prediction giving
-  the same columns.
-  **Done 2026-10-28.** The prediction graph hands back what the samples
-  are drawn from (`_predict_raw(draws=True)`, `_measured_draws`, off the
-  one `_forward` the measured rows' door now shares), and a graph of its
-  own turns them into the samples (`_samples_function`) rather than the
-  prediction's: compiled into an XLA prediction on the GPU they would have
-  brought back the two-minute compilation found under 1a. Every batch of a
-  call asks for the draws where any visited row is measured, so one trace
-  serves it; `_MeasurementCheck` writes each batch's PITs and warped values
-  as it lands, so a cancelled prediction keeps those of the batches that
-  did -- neither the old pass nor the plan did, both writing at the end.
-  The sizing adds nothing: the samples are made after the forward pass has
-  let go of its arrays, at the old pass's size. Gates, one-threaded on 1a's
-  four models, plain graph and XLA: `pit_*` and the
-  `predict_measurements` samples bit for bit, the GP on a GP's included;
-  `warped_*` 2e-16 of their scale, the warping now run a batch at a time.
-  Item S's run (the GeoScape walk network at its 4429 data locations, the
-  CPU, a 28 GB cap) finishes: 340 s, 20.0 GB resident at its peak, PITs
-  for the 798 assayed rows in all three metals. Tests:
-  `test_a_prediction_checks_its_measured_rows_from_its_own_draws` (no
-  trace of the measured rows' pass, the PITs the door's) and
-  `test_a_cancelled_prediction_keeps_the_checks_of_the_batches_that_landed`.
-- **4. One factorization for a GP node.** `BasicGP.refresh` and
-  `_slot_refresh` hold two copies of 1 + 3·size Choleskys per expert, an
-  explicit `K⁻¹` used only for `alpha`, and ‖k·R‖² is formed at seven
-  sites. (4a, bit for bit) one factor builder for one expert and for
-  slots, one `posterior_factors(k)`, nodes declaring training and
-  prediction state so prediction stops snapshotting training-only tensors;
-  (4b, rounding) `alpha` by a triangular solve, `K⁻¹` gone; (4c, only if
-  4b's numbers ask for it) `chol(W)` from `C⁻ᵀ`, Woodbury for the
-  log-determinant, gated on an ill-conditioned set (points 0.03 apart, the
-  0.6.9 NaN) and on agreement to 1e-8 where conditioning is good.
-  **`GradientConstrainedInput` joins with `eps = jitter` on its gradient
-  rows** (the user's proposal): its `delta = 0` rows already carry the
-  model's `jitter` on the `(K + D)` side, so that side is unchanged and only
-  the root moves, from the cancelling `chol(K⁻¹ − (K+D)⁻¹)` to the whitened
-  form; `inner` is then conditioned about m/eps (3e11 at m = 300, 1e-9).
-  Gate on a test of its own (its coverage is thin): predictions, bound and
-  realization moments against today's, and the constraint still met (the
-  mean's derivative along each given direction zero); if 1e-9 is too loose
-  for the root, raise eps toward 1e-6 and measure what moves.
-  **Done 2026-10-28, 4a and 4b with `GradientConstrainedInput`; 4c not
-  taken.** One builder, `BasicGP._posterior_factors`, makes one expert's
-  factors or every slot's at once; `alpha` is `L⁻ᵀ alpha_white` by a
-  triangular solve, `K⁻¹` gone from `BasicGP`, the slots and
-  `GradientConstrainedInput`; `_held` is the one `|k R|²` (five sites --
-  the other two of the seven square other residuals); `_TRAINING_STATE`
-  names what only the KL reads (the prior and its smoothed Cholesky, the
-  whitened means, the deltas, the mask), which a prediction no longer
-  snapshots. **4a is not bit for bit and cannot be**: the builder is
-  exact against both old paths forward, eager and traced, but the old
-  per-expert code sliced `chol[None]` twice and the slots code reused one
-  broadcast, and the training gradient sums its contributions in the
-  graph's grouping -- the covariance's gradient 4e-16 apart, measured on
-  the builder alone. Gates (`C:\Users\Public\cr\gate4.py`, one-threaded,
-  the per-expert, slots, consensus, joint and constrained paths): models
-  trained and saved by the old tree and predicted by both, every moment
-  within 4e-12 of its scale (the GP on a GP's pathwise realizations 9e-8,
-  their known sensitivity, and its back-transformed prediction 2.5e-8);
-  trained afresh, the bounds within 7e-14. `GradientConstrainedInput`
-  joins with `eps = jitter` (1e-9) on its gradient rows: `R Rᵀ` the old
-  Cholesky's to 1e-13 of its largest entry, the mean and bound to
-  rounding, 2000 realizations' variances within 0.5% (other draws through
-  another root), and a new test holds the root to `K⁻¹ - (K + D)⁻¹` and
-  the mean's slope along every given direction to zero. **Speed: nothing
-  measurable** -- step and refresh within the runs' scatter on Walker,
-  chapter 15's experts, the constrained model and chapter 17 (refresh
-  1.15 → 1.17 s of a 20 s step there). So 4c, which would change every
-  realization (a different root), has nothing to buy: the refresh is 6%
-  of a step on chapter 17, and its share is large only where a step takes
-  17 ms.
-- **6. A plain cross-covariance at certain inputs.** `covariance_matrix`
-  builds the uncertain-input normalization (`total_var`, the determinants,
-  a `norm` of exactly 1) for every first-layer cross-covariance; XLA fuses
-  it away in prediction, training pays. `_expert_moments` takes
-  `_plain_covariance` where the chain is certain. Gate: covariance and
-  gradient to 1e-14 at zero variance; the training step on A and B.
-  **Dropped 2026-10-29** -- the step it would save is within a few
-  percent either way; see Settled by measurement.
-- **Close.** One full suite through `run_parallel.py`; the benchmark
-  numbers in the changelog, the failures under Settled by measurement;
-  CLAUDE.md's module-map notes where they describe what moved.
 
 **M — Refinement cuts unsampled ground wherever the background sits on a
 cut-off** (found 2026-10-27, on a GeoScape Run). GeoScape's Run 12 -- a
@@ -716,22 +141,6 @@ Read off the first prediction (`C:\Users\Public\segv\why94.py`):
   Run 12's far blocks marked 0% at 25 and 200 realizations, every block
   the old rule marked on four known fields still marked
   (`docs/benchmarks/split_coherence.py`). The share bias stays open.
-
-**M — The second moment of a GP at an uncertain input** (Girard's term,
-measured 2026-10-08 on Walker Lake, `GaussianInput` root; **built
-2026-10-09** as steps 2-4 of the item above, `UncertainInputGP`
-deprecated). Under the
-expected kernel `BasicGP`'s mean at an uncertain input is within 1-2% of
-the exact mixture's (better than `UncertainInputGP`'s 32 Sobol nodes, 3-9%),
-but its variance misses the variance of the mean over the input -- the
-matched GP's variance is `1 - E[k] (K + D)^-1 E[k]` -- by 18-133% for the
-Gaussian and 8-89% for the Matern32 at input variances of 0.01-3 squared
-ranges, where `UncertainInputGP` is within 1-3%. So `UncertainInputGP` is
-not obsolete for a single node on an uncertain input. The fix that would
-retire it: `E[k kᵀ]` (closed for the Gaussian, Girard; through the mixture
-for the others) for the variance, `tr((K+D)^-1 Cov k) - alphaᵀ Cov(k)
-alpha`; in a deep network the same term is what the research measured at
-~11% of the leaf's variance.
 
 **M — Covariance between a node's outputs** (from the expected kernel,
 2026-10-08). Mixing operations drop it, as they drop it for the variances
@@ -1501,23 +910,6 @@ and trains under `train_svi` and `train_by_expert`. The weighted form
 may be better served by the Gaussian node of the next item, which would
 make that half of this preset unnecessary.
 
-**S — Independent trees left unnamed draw the same realizations** (found
-2026-10-30, building `TaperedGP`; measured, and open). `_set_name` numbers a node
-among the nodes connected to it, so leaves on separate roots both come out
-`BasicGP_1`, and `_node_seed` keys the draws by name: the 0.6.10 fix for
-identical normals between GP nodes does not reach across trees. Measured on two
-untrained `BasicGP` leaves on two `BasicInput` roots with the same inducing
-points, two variables, 200 realizations: the correlation between the variables'
-realizations at a location is 1.000 at every location unnamed, and 0.043 (median)
-named apart. Training the two trees apart is not measured. Moments and the bound
-are untouched; anything reading realizations jointly across such variables is
-wrong, a joint grade-tonnage or `derive` above all. GeoScape passes every node a
-name, so its Runs are not affected as long as those differ. `TaperedGP` settles
-its own names when it joins trees (`_settle_names`). The fix for
-`VGPNetwork` is the same call across the leaves, but renaming changes a saved
-model's realizations on reload, against the reproducibility contract, so it needs
-a decision: new models only, through a class default as `propagation` did.
-
 **S — Check `AdditiveGP`'s realizations** (noticed 2026-10-30, building
 `TaperedGP`; found by reading the code, not measured). `BasicGP._feature_kernel`
 returns True for it: it has no override and inherits
@@ -2002,8 +1394,7 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
 - **Why the analytic path did not match the draws: the second moment, left
   out on purpose.** `_takes_second_moment` completes the moments only where
   the inducing points are certain, and a GP reading a GP has uncertain ones
-  (step 2 of "Eight Gaussians and the second moment": deep networks "stay
-  out"). Trained on the moment bound, the moment path reports 10-14% of the
+  (0.9.0's second moment in `BasicGP`: deep networks "stay out"). Trained on the moment bound, the moment path reports 10-14% of the
   model's own predictive variance on the GP on a GP and 27-32% beside the
   coordinates; nearly all the rest is the spread of the leaf's mean over
   the hidden layer. A Gaussian with the exact two moments scores within 0.5
@@ -2048,8 +1439,8 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   seed by seed at 0.6 of the time; a one-draw warm-up does not (-9.2,
   -10.7). Why light noise picks the basin and none or heavy noise do not
   is open -- though the noise must be fresh: the same draws kept for the
-  whole run land where the grid did (-9.99 at 16 draws, -7.85 at 64, under
-  "Fresh training draws").
+  whole run land where the grid did (-9.99 at 16 draws, -7.85 at 64; fresh
+  training draws are the default since 0.9.3).
 - **One draw a step** costs a moment step and is unbiased, but at a
   constant learning rate its bound stops rising early (table). A decaying
   rate is untried. One hidden function shared by every point was measured
@@ -2485,265 +1876,14 @@ path moment-matching with a warning. Measured
   sample by sample.
 - *The training draws are the same every iteration* (`seed=options.seed`
   on every step): the Monte Carlo bound is a fixed-sample average, biased
-  rather than noisy (item "Fresh training draws" below).
+  rather than noisy (fixed by fresh training draws, the default since
+  0.9.3).
 
 Open: the real-deposit gate against hard domains (likely Jura) before the
 node is public; Monte Carlo paths for the categorical likelihoods, so a rock-type
 leaf that is not Gaussian can train on its realizations; and the gate read
 from a rock-type leaf, where the indicator rule (the largest latent) and
 the mixture's softmax read one latent through two different links.
-
-**M — A mixture of likelihoods: overlapping mixtures of GPs** (agreed
-2026-09-25, redesigned 2026-10-01 with a warping per component; **done
-2026-10-01, public from 0.8.6**: every gate below passed, phase 2 included).
-Lázaro-Gredilla, Van Vaerenbergh & Lawrence (2012), *Overlapping Mixtures of
-Gaussian Processes for the data association problem*, Pattern Recognition
-45(4). M global latent functions; each sample comes from exactly one,
-chosen by its value rather than its place, so the components cross and
-overlap anywhere and the prediction is a mixture -- multimodal where they
-separate. This is what `GaussianMixture` cannot do: it blends *values* in
-the latent, so a realization is bimodal only where its gate is sharp, which
-is why it failed the crossing gate; this mixes *densities* in the
-likelihood, sample by sample.
-
-The design, settled:
-- **`likelihood.LikelihoodMixture(components)`**, beside today's `Mixture`
-  (noise scales around one latent value, one warping), which keeps its name
-  and path; the docstrings say how the two differ. Experimental, and
-  internal in the catalogue until the gates below pass.
-- **A component is any continuous likelihood instance**, with its own
-  family, noise and warping -- `[Gaussian(BoxCox(...)), Gaussian(ZScore(1))]`
-  -- today's `Mixture` included. A shared warping is the same object handed
-  to every component (persistence keeps it shared, and its Jacobian cancels
-  out of the sum). Every component takes the variable's width P, any P; a
-  mismatch is refused at construction.
-- **Component k reads its own slice of the leaf**, in list order; the leaf
-  is the sum of the components' latent widths (a `PCA` link can make one
-  narrower than P). A user wanting independent components builds the leaf
-  with `Stack`.
-- **The bound**, per row: `log Σ_k π_k exp(E_q[log p_k(y | f_k)])`, each
-  component's density in data space with its own warping's Jacobian -- the
-  term a shared warping lets factor out. Quadrature per component where its
-  warping is elementwise, Monte Carlo on realizations otherwise.
-- **Shares**: fixed `π`, trained (phase 1). Spatially varying shares read
-  from further latent columns through a softmax are phase 2, measured on
-  Tom East with the share columns on the same tree as a rock-type
-  likelihood on `Code_Simple`.
-- **Realizations divided among the components in fixed numbers**, in
-  proportion to `π` by largest remainder and interleaved, so any first k
-  hold the components in about the right proportions; the labels stored as
-  a node fact on the variable (one list, the same everywhere), a resumed
-  prediction refused if they would differ. Each realization goes through
-  its own component's noise and warping, so the plain ensemble *is* the
-  mixture and quantiles, cut-off shares, block support, measurement
-  samples and cross-validation need nothing new.
-- **Columns**: the mixture's usual ones; `responsibilities/<k>` -- the
-  posterior where measured, the prior share elsewhere -- written by the
-  outer mixture only (an inner noise `Mixture`'s are not, in phase 1); and
-  `component_prediction/<k>`, each component's prediction in data units.
-  The latent moments per component are what `predict_node` answers.
-- **No reaching for `lik.warping`**: the model, the diagram and the plots
-  ask the likelihood; warped metadata and the transformed pairs are skipped
-  for a mixture, which has no one warped space.
-- **Symmetry broken by initialization**: the data clustered into M groups
-  (seeded from the package generator), each component's warping
-  initialized on its group, `π` started at the group sizes -- so latent
-  zero means a different value in each component. Clustering on values
-  splits crossing curves at the crossing; the crossing gate says whether
-  training mends it, random responsibilities (the paper's) in reserve.
-
-Gates, before it is made public (`docs/benchmarks/gaussian_mixture_gates.py`,
-beside `GaussianMixture`'s, and a Tom East script reading a local copy the
-repository never holds):
-
-| gate | passes when |
-|---|---|
-| crossing sinusoids | realizations near both curves; ≥ 90% of samples' largest responsibility on their true curve |
-| split sinusoids | held-out rmse and CRPS within 5% of one GP |
-| population skew | separate warpings beat one shared warping on held-out CRPS; ≥ 80% largest responsibility on the true population |
-| Tom East (Ag, Pb, Zn as a vector; folds by hole) | held-out CRPS no worse than `BoxCox → RobustPCA → ZScore → SinhArcsinh → ZScore` in one likelihood; out of fold, the expected shares agreeing with `Code_Simple` at least as often as the rock type's own prediction does (changed 2026-10-01 from "well above chance") |
-
-A near miss is reported, not met by moving the threshold.
-
-**Phase 1 measured, 2026-10-01** (the class and the model's hooks built;
-the stored columns, labels fact, catalogue and diagram not yet):
-
-| gate | result | verdict |
-|---|---|---|
-| crossing | every location bimodal where the curves are apart, 49% / 49% of the realizations near each; the largest responsibility on the sample's own curve 63% under one global naming, **97.5% (100% apart)** asked locally -- a component passes from one curve to the other at a crossing, where nothing tells them apart | passes, on the local reading |
-| split | rmse 0.369, CRPS 0.114 against one GP's 0.192, 0.078; shares 0.08 / 0.92 | **fails**: fixed shares put the second component into every location -- what spatially varying shares (phase 2) are for |
-| population skew | separate warpings CRPS 0.561, agreement 96%; one shared warping 0.575, 93% | passes, narrowly (2.4% on CRPS) |
-| Tom East | CRPS Ag / Pb / Zn 49.4 / 3.67 / 3.10, goodness 0.87 / 0.82 / 0.81; one Gaussian through the recommended chain 68.3 / 3.96 / 4.17 (its rmse exploding, 5568 on Ag), through the components' own plain `BoxCox -> ZScore` 52.4 / 4.20 / 3.90 at goodness 0.73 / 0.60 / 0.67; shares 0.46 / 0.54, the largest responsibility agreeing with `Code_Simple` at 94% (in sample; chance 52.5%) | passes |
-
-The first run of these gates started the components from each column's
-normal scores, and the shared-warping arm came back at 54% and at 91% from
-one seed: on one column normal scores are symmetric whatever the data, so
-two groups always met at the median, the splits either side of it tied,
-and the clustering broke the tie differently from run to run. The start is
-a Yeo-Johnson power transform per column now, and every number above is
-from that start, repeated exactly three times. Decided 2026-10-01: the
-crossing gate is read locally (accepted), and the class stays internal
-until phase 2 passes the split gate.
-
-**Phase 2, agreed 2026-10-01: shares that change from place to place.**
-- `LikelihoodMixture(components, shares="fixed" | "latent")`; under
-  `"latent"` the leaf carries K share columns after the populations', their
-  softmax the shares, scaled by a trained `amplitude` (a variance, as
-  `GaussianMixture`'s) -- none at first, added when the split gate asked
-  for it: a share GP of prior variance one could not pass from one
-  population to the next sharply enough, and the realizations divided at the
-  boundary -- and moved by a trained `bias` per population, what the shares
-  return to away from the data (added 2026-10-01 at the user's request: Tom
-  East's ore is not half the ground), started by `initialize` on the
-  clustering's group sizes. A share
-  GP node may feed a rock-type likelihood before it is concatenated into the
-  mixture's leaf.
-- **Realizations**: realization s keeps its one interleaved point `u_s`,
-  and at each location takes the population whose interval of *that
-  realization's own* cumulative shares holds it. It changes population
-  where its share field crosses its point -- a smooth boundary, different
-  in every realization, carrying the boundary's uncertainty -- and at each
-  location the fraction of realizations in a population is the expected
-  share, so the plain ensemble stays the mixture and no reader changes.
-  Fixed shares are the special case (phase 1 unchanged). **This reverses
-  the 2026-09-25 rule** (a whole realization in one population, the
-  realizations split into equal groups, every reader weighting them by the
-  local shares): under shares that vary, that rule turned every reader of
-  realizations into a weighted one, and a tonnage read off one realization
-  could not hold one orebody. Rejected also: the point read against the
-  *mean* shares, which nests every realization's boundary inside one field.
-- **Training**: per row, the average over share realizations of
-  `log Σ_k softmax_k(g) exp(term_k)` -- on realizations, the path
-  non-Gaussian leaves already take, the fixed training draws a known bias
-  ("Fresh training draws" below).
-- **Storage**: each realization's population at each location, small
-  integers under `<variable>/population/<i>`, on the variable (a
-  vector's mixture is over the row), absent where no mixture models the
-  variable; coarsening leaves it missing. Built on a refactor first: the
-  realization axis was handled by the name `simulations` in about eight
-  places (carrying, coarsening, subsetting, Zarr both ways, the export, the
-  path, the realization walk), so a declared list of realization stores
-  replaces the name, held by a test before the population store exists.
-- **Gates**: the split gate (rmse and CRPS within 5% of one GP); crossing
-  and skew rerun under latent shares; Tom East with folds by hole, three
-  arms -- fixed shares, latent shares from the metals alone, latent shares
-  tied to `Code_Simple` -- scored by out-of-fold CRPS per metal and by the
-  expected shares' out-of-fold agreement with `Code_Simple`. Internal until
-  every gate passes; figures with the results.
-
-**Phase 2 measured, 2026-10-01.** Tom East's folds are built against the
-assayed intervals themselves (160 / 160 / 160 / 159 / 159). Built against
-every logged interval, most of them in holes with no assay, they mimicked
-distances so long that one fold held out 407 of the 798 and the rock type's
-own out-of-fold prediction agreed with the log at 0.609.
-
-| gate | no amplitude | with amplitude | populations and shares on separate GPs | verdict |
-|---|---|---|---|---|
-| split | rmse 0.221, CRPS 0.046 (one GP 0.192, 0.078) | rmse 0.166, CRPS 0.034, amplitude 26 | **rmse 0.149, CRPS 0.032**, amplitude 27 | passes |
-| crossing | local agreement 97.5% (100% apart) | the same, amplitude 0.035 | -- | unchanged |
-| skew | CRPS 0.567, agreement 96% | CRPS 0.558, 96%, amplitude 0.033 | -- | unchanged |
-
-The amplitude trains large where the shares must jump and near zero where
-they should be flat, which is what lets one construction serve both. On the
-split, the populations and the shares are two `BasicGP`s of two outputs
-each on the gate's grid of 45 inducing points, so each trains its own range.
-
-Tom East, out of fold over the new folds. Every arm reads one root: 500
-k-means centroids of the assayed intervals divided into five experts with
-10% overlap (110 points each), through `Anisotropy3D(100, 0.75, 0.5, 345,
-15, 70)`; the populations (six outputs) and the shares (two) on separate
-`BasicGP`s. Cross-validation drops the held-out data only -- a fold model
-rebuilt from the save holds the same 550 points to the bit, since only the
-`data` argument is swapped.
-
-| arm | CRPS Ag / Pb / Zn | goodness | expected shares agreeing with `Code_Simple` |
-|---|---|---|---|
-| one Gaussian, recommended chain | 84.6 / 4.25 / 3.48 (rmse on Ag 4e5) | 0.83 / 0.56 / 0.69 | -- |
-| one Gaussian, `BoxCox -> ZScore` | **46.0** / 3.77 / 3.45 | 0.71 / 0.64 / 0.55 | -- |
-| fixed shares | 46.7 / 3.32 / 2.89 | 0.78 / 0.81 / 0.79 | 0.525 (constant; chance 0.525) |
-| latent, metals alone | 47.3 / 3.44 / 2.85, amplitude 12.5 | 0.63 / 0.66 / 0.72 | 0.595 |
-| latent, tied to `Code_Simple` | 47.1 / **3.31 / 2.81**, amplitude 6.8 | 0.73 / 0.77 / 0.79 | **0.609**; the rock type's own 0.604 |
-
-Every mixture beats the recommended chain on every metal, so the CRPS half
-of the gate passes; the plain `BoxCox -> ZScore` likelihood is the best on
-Ag, by 1.5% over the best mixture, and the worst on Pb and Zn. The
-agreement half was "well above chance", and **decided 2026-10-01: the bar
-is the rock type's own out-of-fold prediction** -- the logged rock type is
-barely predictable between holes here, and a share field cannot know more
-about it than a likelihood trained on it. Against it the shares tied to the
-rock type pass, **0.609 against 0.604**; they follow that prediction at
-0.742. In sample the shares agree at 0.94 in every arm. **Every phase 2
-gate passes.**
-
-**With a bias per share** (same configuration; the baselines and fixed
-shares unchanged):
-
-| arm | CRPS Ag / Pb / Zn | goodness | agreement | shares away from the data |
-|---|---|---|---|---|
-| latent, metals alone | **45.6 / 3.28 / 2.71**, amplitude 11.6 | 0.66 / 0.68 / 0.75 | **0.713** | 0.978 / 0.022 |
-| latent, tied to `Code_Simple` | 46.8 / 3.29 / 2.81, amplitude 7.0 | 0.73 / 0.77 / 0.79 | 0.619; the rock type's own 0.605 | 0.537 / 0.463 |
-
-and the split gate rmse 0.146, CRPS 0.031, its bias at 0.96 / 0.04, the
-crossing and skew cases unchanged with their biases near equal shares. The
-shares from the metals alone now return to the lower population away from
-the data -- waste as the ground's background -- and are the best arm on every
-metal, Ag included, and the best predictor of the logged rock type out of
-fold, above the rock-type likelihood's own 0.605. Tied to the rock type the
-bias barely moves: the share columns are the rock-type likelihood's latent,
-and `CategoricalGaussianIndicator` has no bias of its own, so away from the
-data it says even odds and pulls the shares there. Goodness is lower for
-the metals-alone arm (0.66 to 0.75 against fixed shares' 0.78 to 0.81):
-its intervals are narrower than the held-out data support.
-
-**With a bias on the rock type too** (`CategoricalGaussianIndicator(2,
-bias=True)`, added 2026-10-01 at the user's request, optional because a
-save stores its parameters by position): CRPS 46.0 / 3.25 / 2.79, the
-shares' agreement 0.607 against the rock type's own 0.594, the shares
-returning to 0.677 / 0.323 and following the rock type at 0.932. The rock
-type's own bias trains small, +0.12 / -0.13: the likelihood sees only the
-798 assayed intervals, where Tom East is 52.5%, while across all 4585
-logged intervals it is 11.0% and across the 3787 never assayed 2.2% --
-the assays were taken where the ore is.
-
-**The rock type trained on every logged interval** (4585, the metals
-missing where unassayed; the 23 holes with no assay in the fold of the
-nearest assayed hole, so the assayed folds are unchanged; the inducing
-points still the assayed intervals'): the rock type's bias trains to
-+1.17 / -1.17 and the shares return to 0.999 / 0.001 -- the waste
-background. CRPS 45.8 / 3.30 / 2.83, goodness 0.69 / 0.71 / 0.74; the
-shares' agreement on the assayed intervals 0.637 against the rock type's
-own 0.551, which fell from 0.594: read on the assayed intervals, half of
-them ore, a model that has learned the ground is mostly waste calls more
-of them waste. The bar was set on a sample the assays chose, and is
-fair only between arms that saw the same rock data. Training took 638 s
-against 159.
-
-Scored instead on every logged interval, out of fold, by balanced accuracy
-(the mean of the two categories' recall -- calling everything waste is
-right 89% of the time there, and scores 0.5):
-
-| | accuracy | recall Waste | recall Tom East | balanced |
-|---|---|---|---|---|
-| the rock type's own call, all logged | 0.893 | 0.976 | 0.219 | 0.598 |
-| the expected shares, all logged | 0.874 | 0.913 | 0.555 | **0.734** |
-| the rock type's own call, assayed | 0.551 | 0.897 | 0.239 | 0.568 |
-| the expected shares, assayed | 0.637 | 0.712 | 0.568 | **0.640** |
-
-The shares find two and a half times the ore the rock type does between
-holes, for a few points of waste recall: the metals at neighbouring holes
-tell them where the ore runs, which the logged rock type alone cannot.
-The rock type's own call is barely better than calling everything waste.
-Mapped (`likelihood_mixture_figures.py latent`), the shares tied to it now
-draw one continuous lens dipping steeply to the northwest inside a waste
-background, where they drew separate pockets at even odds between holes.
-
-The first run under these folds, on 150 k-means points in one expert
-through `Isotropic(80)` with populations and shares on one GP, gave fixed
-shares 44.1 / 3.26 / 2.81, latent 49.3 / 3.46 / 3.06 at 0.564 agreement,
-tied to the rock type 46.4 / 3.36 / 2.94 at 0.570 against the rock type's
-own 0.603 -- a near miss, which the anisotropy and the separate share GP
-closed; the plain chain was 58.6 / 5.58 / 8.46 there, so the configuration
-helped the single likelihood most.
 
 **L — `LithologicalControl`: the logged rock type as an observation of the
 population** (requested 2026-10-31; proposed, nothing measured yet). Reading
@@ -2840,23 +1980,6 @@ Initialization of the mixture itself was ruled out on the way: its
 clustering put population 0 at waste (0.04 % Zn) and population 1 at ore
 (8.8 % Zn), and they stayed apart throughout.
 
-**S — The measured-against-simulated figure compares samples with the
-ground** (found 2026-10-15, same record; **geoML's side done 2026-10-16,
-0.9.3**: both backends' docstrings and titles say the simulated half is
-the ground and point to `predict_measurements`; the GeoScape note is its
-repository's; GeoScape's figure, with geoML's
-`simulation_pairs` to check for the same). The stored simulations are
-realizations of the ground, the noise integrated out (`integrated_backward`),
-so a sample histogram cannot be matched by them even under a perfect
-model: on the record above the Gaussian model's ground values reach the
-low-Pb mode at 0.040 where its measurement draws reach it at the data's
-0.100. The like-for-like comparison is `VGPNetwork.predict_measurements`
-(the accuracy and spread figures already use it); the pairs figure should
-draw from it, or at least label its simulated side as the ground. For
-GeoScape: a note in its requirements; for geoML: check
-`plots.simulation_pairs` and its interactive twin, and say in the
-docstring which of the two they show.
-
 **L — A likelihood subsystem** (raised 2026-10-01, deferred). Likelihoods
 composed as warpings are chained: a small protocol every component
 implements (the latent columns it reads, its log density in data space at
@@ -2868,71 +1991,6 @@ latent columns (a forward model), trained on realizations through the path
 non-Gaussian leaves use. To settle when taken up: the protocol, the naming
 of the family (`Mixture` against `LikelihoodMixture`), and a first forward
 model.
-
-**S — Fresh training draws** (found 2026-09-25, kept on the list by the
-user). Every training step passes `seed=options.seed`, so a likelihood that
-trains by Monte Carlo — a warping that mixes, and since 0.8.0 any leaf that
-is not Gaussian — optimizes one fixed set of `training_samples`
-realizations: a sample-average bound, biased rather than noisy, which the
-model can partly fit. On gate 1 of `GaussianMixture`, 20 draws reach a
-bound of 36.2 and 50 draws 26.7, the scores against the truth better at 50
-(RMSE 0.141 / CRPS 0.037 against 0.161 / 0.043). Fix: a seed keyed by the
-iteration (the phase's count), so a run split into chunks still replays
-one call bit for bit. Gate: the same two numbers, and the chunked-training
-test in `test_early_stopping.py` still exact.
-
-**Built 2026-10-16 as an option and measured** (`GPOptions(
-fresh_training_draws=False)`, 0.9.3; `docs/benchmarks/fresh_draws.py`,
-results in `docs/benchmarks/figures/fresh_draws/`). The seed moves by a
-step count kept on the model (`_training_seed`, `_draw_count`), read and
-stepped inside the traced step and reset with the phase, so chunks replay
-one call (`test_fresh_draws.py`) and nothing retraces; off is today's
-training to the bit. Three cases, the honest bound being the objective
-re-evaluated at the final parameters over 20 independent sets of 200
-draws, and the prediction shift what moving only the draw seed does to the
-predictions (initialization fixed, the prediction itself drawn under one
-seed):
-
-| Case | Draws | Own minus honest | Honest bound | Accuracy | Prediction shift |
-|---|---|---|---|---|---|
-| `GaussianMixture` gate 1 | fixed 20 | +20.3 | -45.3 | RMSE 0.204 (0.137-0.230) | 0.125 |
-| (3 inits x 2 draw seeds) | fresh 20 | -0.8 | -41.9 | 0.216 (0.186-0.234) | 0.049 |
-| | fixed 50 | +10.3 | 16.7 | 0.146 | 0.017 |
-| | fresh 50 | -1.4 | 12.1 | 0.140 | 0.032 |
-| Jura's metals, mixing chain | fixed 20 | +19.4 | -5444.1 | RMSE/sd 0.918 | 1.43 |
-| (2 inits x 2 draw seeds) | fresh 20 | -3.6 | -5440.6 | 0.920 | 0.28 |
-| | fixed 50 | +1.4 | -5437.4 | 0.920 | 0.79 |
-| | fresh 50 | -2.9 | -5437.7 | 0.921 | 0.31 |
-
-- **The bias goes**: fixed draws let the parameters fit their own sample
-  (the training log 10-20 nats above the honest bound); fresh ones leave
-  none.
-- **A fitted model depends less on its draws**: moving only the draw seed
-  moves the predictions 2.5x less on the mixture at 20 draws and 3-5x less
-  on Jura. At 50 fixed draws on the mixture the sample is already large
-  enough that fresh ones add their own step noise instead.
-- **Accuracy is unmoved where the bound was unbiased enough** (Jura, every
-  arm within 0.005 of 0.92), and on the mixture the count of draws matters
-  more than their freshness (50 against 20, either way).
-- **The basin** (the folded section's doubly stochastic training, 2000
-  steps, 3 seeds, new-hole score): 16 hidden draws fixed for the run
-  -9.99, fresh -6.12; 64 fixed -7.85, fresh -3.73, honest bound -157.7
-  against -119.9. Fixed draws land where the deterministic grid did; the
-  noise of fresh ones is what finds the better basin.
-- **Cost none**: the same time a step in every case. The bound is noisy
-  from step to step (2-15 nats), and `training_tolerance=0.01` stops
-  fixed and fresh at the same iteration on both cases (106-117), at the
-  same honest bound.
-
-Decided 2026-10-16: fresh is the default for a new model, the class default
-keeping saved models on their fixed draws, as `propagation` did.
-
-(Three small bugs found by reading -- directional data ignored under a
-variable named as a string, `ProjectionTo1D` pointing into the positive
-orthant only, and a GP node that failed to build left among its parent's
-children: **fixed 2026-10-15, 0.9.3**, `test_small_fixes.py`. The
-catalogue still marks `ProjectionTo1D` and `RandomProjections`
-`experimental`; nothing in either has been trained in earnest.)
 
 **M — A sampling-based conditioned quadrature for training** (filed
 2026-10-30, from the GP-NN link research project, whose stage A is the
@@ -2984,7 +2042,8 @@ against the second moment.
   The adoption rule set before the runs: a draw count reaching the rule's
   held-out log score within one seed's standard error, at 3x less time to
   target or peak memory. Basins may well decide it rather than cost: fresh
-  noise is what found the better basin under "Fresh training draws".
+  noise is what found the better basin with fresh training draws
+  (0.9.3, `docs/benchmarks/fresh_draws.py`).
 - **The change, if it passes** (S-M): a value of the quadrature's rule
   beside `"hermite"` (`_Setting.rule`, `_input_rule`), drawing in
   `_conditioned_sums` under `_training_seed`, so that chunks and replays
@@ -3099,54 +2158,6 @@ package read by its moments, the draws by their mixture at S = 256):
   reads two moments alone, so nothing above has tested dropping moment
   matching itself. Separately, why the GP on a GP fails. If (1) fails, this
   moves to Settled with these numbers.
-
-**M — Mixed precision for the conditioned quadrature** (agreed 2026-10-24,
-the user's go-ahead for every step). On a GeoScape network of three GP
-nodes reading a `GPWalk` the conditioned quadrature is 83% of a training
-step's op time, and a consumer GPU (the RTX 4060 Ti) runs float32 64 times
-faster than float64 and moves half the bytes. Treating the inducing points
-as certain to avoid that work was measured and rejected (Settled by
-measurement); this keeps the work and makes it cheaper.
-- **float32**: the `[..., n, nodes, m, d]` arrays of the readers'
-  quadrature (`_conditioned_sums`'s `kernel_at`), of the realizations'
-  conditioned kernel (`_conditioned_kernel`) and the mixture's component
-  terms (`_mixture_sum`): the offsets' squares, the inflated variances,
-  `log1p`, `exp`.
-- **float64**: the offsets `mean - points`, the gains and conditional
-  variances (`points_var - gain cov`), `[n, m, d]` or smaller, computed
-  and then cast, so that coordinates far from the origin and small
-  differences keep their digits; `k` cast back before the products with
-  `(K + D)^-1` and `alpha`, `1 - k (K + D)^-1 kᵀ` cancelling near the data;
-  parameters, refreshes, KL, likelihoods, warpings, every reduction.
-- **The option**: `GPOptions(quadrature_precision="float64" | "float32")`,
-  float64 by default and for a saved model (the class attribute), read at
-  trace time through `quadrature_rule` and keyed in the traces; a node of
-  the quadrature costs half the bytes under float32 (`_NODE_BYTES`), so
-  chunks double.
-- **Steps and gates**: (1) float64 baselines -- the network's step on GPU
-  and CPU, the folded section's new holes (three seeds, walk and GP on a
-  GP); (2) the quadrature's outputs and gradients against float64,
-  relative error about 1e-5 and 1e-4, no NaN, mine-grid coordinates
-  included; (3) the bound after 200 steps within about 1e-4 and the
-  parameters close; (4) held-out: score a new hole within about 0.05,
-  calibration and the realizations' variance ratio unchanged, every seed;
-  (5) speed on GPU and CPU, chapter 17 under the option; (6) the default
-  decided from the numbers -- perhaps float32 where a GPU is visible, as
-  XLA is ruled -- and the reproducibility contract updated if it moves.
-- **Expected** (not measured): 2-4x on the quadrature's elementwise work on
-  that GPU, 1.5-2.5x a step; 1.5-2x on the CPU.
-- **Built 2026-10-24 for 0.9.8, every gate passed** (changelog): moments
-  within 2e-7 and gradients within 2e-8 at fixed parameters, the folded
-  section's bound within 7e-7 and its new holes' score within 0.001 on
-  all six pairs, a GeoScape step 1.44x faster on the GPU and 1.06x on the
-  CPU, chapter 17 1.11x on the GPU with the same numbers -- the low end
-  of the guess, because the readers' inputs are two-dimensional and the
-  `[n, nodes, m]` kernel values and their products with `(K + D)^-1`,
-  kept in double, are most of what is left. The default is `None`:
-  float32 where a GPU is visible, float64 elsewhere. The two further
-  levers planned after it -- the realizations' feature products and
-  `k (K + D)^-1 kᵀ` in float32 -- were measured and rejected (Settled by
-  measurement).
 
 **M — The quadrature's rule should follow the input** (measured 2026-11-01;
 nothing in the package changed; harness and tables in
@@ -3338,39 +2349,6 @@ The theme is measured rather than assumed: **training does not leave the
 basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
-**M — Inducing points by cover tree** (requested 2026-10-10; **built
-2026-10-15, 0.9.3**: `inducing.from_cover_tree(data, separation,
-transform=)`, the samples farthest first, divided into experts by
-`experts`; read against the paper since: the guarantees of its Algorithm
-12 (eq. 20, separation and spatial resolution both `separation`), but in
-O(N·M) where its breadth-first tree is O(N log N), and without its two
-optional steps -- the local averaging that places a node between samples
-when that keeps it a radius from the others, so fewer nodes are needed,
-and the Voronoi repartition that balances the tree. Either is the next
-step if the measurement below asks for it; the clustered-data
-approximation of its §3.3 is Gaussian-likelihood only. What remains is
-that measurement). Terenin,
-Burt, Artemev, Flaxman, van der Wilk, Rasmussen & Ge (2024), *Numerically
-stable sparse Gaussian processes via minimum separation using cover
-trees*, JMLR 25(26), arXiv 2210.07893 (in the Paper Library; read from the
-abstract so far): conditions on the inducing points -- a minimum
-separation -- under which the sparse computations are numerically stable,
-an automated way to place points satisfying them in low dimension through
-a modified cover tree, and an alternative sparse approximation for a
-Gaussian likelihood trading a little accuracy for more stability. Where it
-meets geoML: the inducing helpers place points by k-means, lattice or hull
-(`from_kmeans`/`from_grid`/`from_hull`) and nothing guarantees a
-separation beyond `combine(tolerance=)`'s greedy merge; stability rests on
-the 1e-6 jitter and the whitened root of 0.6.9, which was needed because a
-fault displacement put restored inducing points 0.03 apart and the
-Cholesky went NaN in graph mode. The candidate is an
-`inducing.from_cover_tree(data, separation)` beside the others, the
-separation in the input's transformed units, and a measurement of what the
-guarantee costs or buys against `from_kmeans` at equal counts (held-out
-scores, the conditioning of `K`, training stability) on Walker, Jura and a
-3-D case. Read the paper in full first; the alternative approximation is
-Gaussian-likelihood only, which most of geoML's models are not.
-
 **M — Gradient-free training experiments.** Closed against three conditions
 in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
@@ -3464,53 +2442,6 @@ that stops earlier is the point. A new default changes how every re-run
 script trains, so it goes in the changelog, and the old settings should
 stay reachable: today `set_learning_rate` takes a rate only, so the
 outcome may also be an option for the decay and the optimizer.
-
-**S — `BoxCox`'s shift started from the data** (requested 2026-10-15;
-**built 2026-10-16, 0.9.3**: `BoxCox(size, shift=None)`, measured below).
-The shift is a constructor constant today, `1e-6` by default and one value
-for every component, and the docstring tells the user to set it to the
-order of the smallest positive value wherever the data hold zeros.
-`docs/benchmarks/walker_zero_shift.py` measured what forgetting costs: at
-the default, Walker's 22 zeros pulled the exponent's start from 0.60 to
-0.375, it trained to 0.42, and the variogram fan sat above the data at 10
-lags of 12; shifted by one, the fan landed on the true field's variogram.
-Advice in a docstring is the wrong place for a number the data already
-determine, so `initialize` should set it -- per component, from the
-column's smallest positive value (declustered, as the exponent's start
-is), and left alone on a column with no zeros, where the shift only has to
-be negligible. Two constraints:
-- **Persistence.** The shift is a plain attribute that a save gets back by
-  replaying the constructor's arguments, and `initialize` is not run on
-  load, so a value found from the data has to live somewhere the save
-  records. Making it a fixed `RealParameter` does that, but a save stores
-  parameters by position, and a new parameter on `BoxCox` would shift
-  every slot after it in every saved model holding one. The likely shape
-  is an opt-in (`shift="data"`, say) that registers the parameter only
-  then, with the old float path unchanged bit for bit.
-- **Whether the exponent's start should be profiled jointly over the
-  shift**, as the two-parameter Box-Cox does, or the shift fixed first
-  from the smallest value and the exponent profiled after. Measure both
-  on Walker and on a composition with zeros before choosing.
-
-**Built and measured 2026-10-16.** `shift=None` is the opt-in (a nullable
-float in the catalogue, where a string could not keep the positive
-constraint); `initialize` sets a fixed `shift` parameter per column, the
-smallest positive value where the column holds zeros and 1e-6 where not,
-and profiles the exponent after. The joint profile was ruled out by
-measuring it: on Walker's V and U its value rises monotonically as the
-shift falls (V: -5.63 at 21, -5.59 at 2.1, -5.24 at 1e-6), each zero
-adding `(λ-1)·log(shift)` to the Jacobian faster than the variance term
-takes back, so it would pick the smallest shift on any grid -- the very
-failure. No composition with zeros is bundled (Jura's metals and the
-Arctic lake have none), so the second case is per-column logic pinned by
-`test_parametric_warpings.py` on synthetic columns, one with zeros and
-one without. Walker's chapter model, found shift (2.1) against the
-manual's 1: exponent 0.605 against 0.583, out-of-fold rmse 212.7/212.8,
-crps 119.6/119.9, goodness 0.922 both, noise and ground 0.97/0.99 of the
-data's declustered variance, the exhaustive fan 0.76-1.03 of the true
-variogram against 0.74-1.02 (`walker_zero_shift.py`, arms `data` and
-`shift1`). The default stays 1e-6 because a save replays only passed
-arguments; the manual's chains still pass `shift=1.0`.
 
 ---
 
@@ -3766,54 +2697,8 @@ grade. Both read the whole classification at once, and the author chose one
 column per category for the kappa (2026-09-11), so where an overall score
 lives in the table is the open question.
 
-**S–M — Batched prediction from a latent node, into a container**
-(requested 2026-09-05; plan agreed and **built 2026-09-28, 0.8.5**;
-`test_predict_node.py`. Found in the building: a prediction resumed from
-`unpredicted()` matches a whole one to rounding, 5e-15 at the last rows of
-a batch, not to the bit as the model's `predict` does -- the same draws,
-the batch's shape moving the arithmetic).
-A node's `predict(x, x_var, n_sim, seed)` returns the raw four-tuple and
-nothing else: no batching, no refresh, no container to land in, so the
-values inside a tree -- where a `GPWalk` moved the coordinates, what a
-shared parent says before two leaves diverge, what a `Linear` trend
-contributes -- were reachable only by hand (chapter 17's benchmark read the
-walked coordinates through `interpolate` in hand-cut chunks). Decided:
-
-- **The door is on the model**: `VGPNetwork.predict_node(node, container,
-  n_sim=None, name=None, labels=None, where=None)`, run on `_over_batches`
-  so the refresh, progress, cancel, `where=` (a mask or a stored filter)
-  and `n_sim=None` are `predict`'s own. Any node above the input, the
-  leaves included; an input node is refused (the transform answers that),
-  as is a node outside the model's tree, and on a `ProjectedVGP` if it does
-  not work there. The model's `predict` is unchanged.
-- **The result is a `LatentVariable`** of `size` columns, named after the
-  node unless `name=`, its parts labelled by `labels=` or numbered; each
-  holds `latent_mean` and `latent_variance` (the propagated moments) and
-  the simulations -- no prediction column, no measurements, likelihood,
-  unit or back-transform. Declared like every variable, so paths, frame,
-  pyvista, Zarr, subsetting and carrying come free; `latent_mean` is the
-  predicted marker. The docstring says the realizations carry only the
-  variance the inducing points explain, and that on a nonlinear node the
-  moments are approximations. An existing variable of the same name and
-  another class, size or simulation count is refused; a model refuses it
-  as a training target, as it refuses a `DerivedVariable`.
-- **Realization s is the draw the model used on the way to the first leaf
-  that reaches the node**: the seed shifts of `Add`, `LinearCombination`,
-  `Multiply` and `ProductOfExperts` (parent i gets `seed[0] + i`) replayed
-  along that path, so realization 7 of a trend is the trend inside
-  realization 7 of the output -- through operation nodes; a GP above
-  another reads its moments, not its draws. The gate: the node's
-  realizations, carried through the operations above, give the leaf's.
-- **Point support only**: `Blocks3D`, `BlockSet3D`, `RotatedBlockSet3D`
-  refused, a `Grid3D` over the same box suggested -- the sub-block average
-  is a likelihood's, and a node has none.
-- **Catalogue**: `predict_node` in the workflow, `LatentVariable` in
-  `variable_types` with its columns' roles and scales. The store format
-  stays 2; an older geoML meeting the class fails naming it.
-- **Docs**: a section of chapter 17 on the walked coordinates; no figures.
-
-**M — Latent variables as a model's input** (split from the item above,
-2026-09-28). A `LatentVariable` may enter a new model as a `GaussianInput`
+**M — Latent variables as a model's input** (split 2026-09-28 from
+batched prediction from a latent node, `predict_node` since 0.8.5). A `LatentVariable` may enter a new model as a `GaussianInput`
 -- its `latent_mean` the coordinates, its `latent_variance` the location
 variance -- but the door is not settled because the use is wider than one
 variable: several latent variables joined into one input, and latent
@@ -3845,17 +2730,6 @@ that node learned from the held-out rows. Count it among the GP nodes.
 
 ## 4. Data, I/O and interchange
 
-(Mesh sets: **done 2026-09-11, 0.6.10** — see "Settled by measurement"
-below for the numbers. `MeshSet` contours a block model or a grid at every
-cut-off, or once per category, for the prediction and every realization,
-and holds the bodies as one mapping with the reports a set can make.)
-
-(Mesh operations through Manifold: **booleans done 2026-09-10, 0.6.10** —
-see "Settled by measurement" below for the numbers. `Solid3D`'s union,
-intersection and difference go to manifold3d itself and are exact; the
-rest of what Manifold offers was measured and replaces nothing of
-geoML's.)
-
 **S — Investigate what `get_contacts` makes of an unlogged interval**
 (asked 2026-09-25). `as_point_data(contacts=True)` makes no contact where
 a class meets an unlogged stretch or a gap, which is what GeoScape's "To
@@ -3879,33 +2753,6 @@ BlockModel as a `RotatedBlocks3D` rather than today's
 `RotatedBlockSet3D(max_levels=0)`; that changes a return type, which is
 why it waits for a user.
 
-(`get_contour(close=)` meeting its own cap edge-on and rounding the box's
-edges: **done 2026-09-14, 0.6.10**. Found building mesh sets on Assen
-(2026-09-11): FeO_total at 0.7 kept a layer one cell thick against the top
-of the lattice and met the cap along one edge four triangles shared, the
-welded fallback came back open at 44 edges, and a body closed against the
-box rounded its edges by half a boundary block (5% of a slab-filled 80 m
-box left uncovered); a set retried such shells a hair off their level,
-thirteen attempts and twenty minutes a shell on Tom v6. The split of
-touching edges (2026-09-13) took the retried Assen shells from 16 to 8; the
-rest were the cap folding flat onto itself, drawn as it was through lattice
-points valued exactly at the level. Now the ghosts carry copies of the
-blocks they mirror, the surface closes a cell past them, and Manifold cuts
-the body at the box: the slabs tile their box, a ball against the box
-reads within 1.40% of Monte Carlo at worst where it read 2.61%, and a
-census of every Assen realization at its own level finds none of 250
-shells needing a retry. Not rerun on the Tom v6 model.)
-
-(`simplify` keeping half its promise: **done 2026-09-14, 0.6.10**,
-`docs/benchmarks/simplify_both_ways.py`. The cause suspected was the one:
-the quadric pre-pass came back open on both Assen shells, was taken at 1
-and 2 m for being within half the budget, and every cut started from it,
-so both came back whole; a pre-pass that is not the mesh's kind is dropped
-now, and BIF and Hematite simplify at 0.5, 1 and 2 m to 12 522-38 856
-triangles, within budget both ways -- the reverse is measured too -- in 3
-to 7 s. The 0.72 m once read between BIF's vertices and its simplified
-shell was 35 vertices no triangle uses, which its store carried.)
-
 **M — A categorical realization's bodies leave a gap where three meet.**
 Found building mesh sets on the Assen rocks (2026-09-11,
 `docs/mesh-sets.md`): each category contoured on its own field, taken block
@@ -3925,81 +2772,6 @@ does not offer on scalar fields (its SurfaceNets works on labels, losing
 the sub-cell placement). The prediction's own bodies leave 0.053% and
 overlap by 0.008%, contoured on the likelihood's per-block fields one at a
 time; they would take the same cure.
-
-(One contour of a big block model costing 4 to 8 GB: **more than halved
-2026-09-13, 0.6.10**, in the same time and with every mesh identical to the
-bit -- see the changelog. The corner tables of the cut and the paint are
-built a corner at a time with 32-bit ranks, the first level of the cut is
-kept on the set, and the paint's fills go in chunks; on Assen the peaks
-fell 55-70% (`docs/benchmarks/contour_stages.py`). A mesh set's pool is
-sized by what its prediction's contours measured, so it now takes more
-workers on its own. Not done, and not needed yet: keeping the table to the
-blocks that can be marked, one ring past any whose corners straddle the
-level, which would leave the first level's the only full one. Measure the
-Tom v6 model before taking it up.)
-
-(Mesh set workers scaling 2.2 times on eight: **explained 2026-09-14**,
-`docs/benchmarks/mesh_set_workers.py`. None of the three candidates: the
-parent's writes took 3-15 s of a 100-290 s pool, the 114 MB a realization
-sends back nothing measurable, and VTK runs one thread here. A forked
-worker runs Manifold on one thread, the parent having started its thread
-pool (a boolean 3.8 s on one thread against 1.1 s on eighteen, which burn
-five times the CPU), so a task is one core's work -- 93 s, where one
-process takes 45 s on two. And the machine saturates: 8, 12 and 24 workers
-give 12.0, 10.8 and 11.2 s a realization, each task's CPU time growing with
-the workers for the same work (93, 125, 256 s), every stage alike -- a
-16-core, two-channel Ryzen 9 7950X out of memory bandwidth, then out of
-cores. Steps 3 and 4's leaner contours took eight workers from 27 s a
-realization to 12.8 s (3.6 times one process); OpenBLAS held to one thread
-a worker saves 38% of each task's CPU, 80 s of 173 having been spinning,
-for 5% of the time. Past that the only lever is less memory traffic a
-contour.)
-
-(A mesh set's summary showing only what the limits left: **done
-2026-09-14, 0.6.10** -- with limits present, printing a set shows each
-shell's volume before them beside what is left, a set reopened from its
-store too, where the Tom v6 sets an uncertainty limit had emptied read
-"volume 0" at every cut-off.)
-
-(A contour through blocks without a value getting NaN vertices: **done
-2026-09-15, 0.6.12**. Every fourth block of a small ball model unpredicted
-put 138 of 548 vertices at NaN in a `Solid3D` of NaN volume, and a region
-left out whole did the same wherever the surface reached it -- the
-contiguous one once reported clean had simply not been reached. A
-valueless block is now read across from its corners where valued blocks
-have them all, and left whole rather than cut; anything else is absent
-ground, where an open contour stops and a closed one closes, within a
-hundredth of a cell. `Mesh3D` refuses a point that is not a finite
-number.)
-
-**S–M — Refine on the average, not on every realization** (requested
-2026-09-29; **built 2026-09-29, 0.8.5**: 2633 blocks against 582 on the
-gate's case, the empty half left at 32 coarse blocks instead of 1439, the
-volume on the wrong side of the cut-off 625 m3 against 500;
-`docs/variable-block-models.md`). `needs_splitting` marks a block by `divided`
-(`likelihood._divided`): the share of realizations whose sub-blocks fall
-on both sides of a cut-off, each realization judged on its own. Where the
-data do not constrain the model, every realization is rough on its own
-account and straddles somewhere, so the unconstrained ground is refined as
-hard as the contacts are -- the blocks multiply where there is least to
-resolve. Wanted: judge the split on the average alone -- the sub-blocks of
-the prediction (the mean over realizations, per sub-block), a block cut
-where those fall on both sides of the cut-off, a category's on the mean
-`ind_skew`. This reverses `_divided`'s own argument (that a block is
-divided only if one realization holds two answers, so that model doubt
-never licenses a cut): the mean is smooth where the realizations disagree,
-which is the point. Only the continuous likelihoods change -- a category's
-`ind_skew` is read off the probabilities, already expectations. **Plan
-agreed 2026-09-29**: `_divided` judges the per-sub-block mean over
-realizations (the prediction at sub-block support, the field a contour is
-drawn on), so `divided` is redefined as a 0/1 flag, its catalogue role a
-`value` on `flag`; `tolerance` on `refine` and `needs_splitting` is kept
-and deprecated -- a warning when passed, removed later -- since any value
-under one now gives the same answer. The gate, red first: a small 3-D set
-with data in one half and inducing points in both, the unconstrained half
-left nearly unrefined, the contact still refined, the refined contour
-within a stated tolerance of a fine grid's; measured before and after, and
-recorded in `docs/variable-block-models.md`.
 
 **L — Import a `BlockSet3D` from CSV.** There is no way to read a block
 model somebody else made. The hard part is not parsing: `BlockSet3D` is a
@@ -4032,14 +2804,6 @@ model loaded and saved over its own store.
 ---
 
 ## 5. Housekeeping, docs and release
-
-(The tag's `full` CI job dying at 93%: **done 2026-09-15, 0.6.12, and
-passed on the v0.6.12 tag in 37 minutes**, the first full job to pass on
-a tag since v0.6.9's. On the v0.6.10 and v0.6.11 tags the suite ran clean
-to 93-95% and was cancelled with no test failing; as one pytest process
-it peaks at 23.1 GB, and the runner has 16. The job runs one process per
-test file now: under a 14 GB cap every file passed, the heaviest peaking
-at 6.1 GB.)
 
 **S — A refined surface in the manual again** (filed 2026-10-29). Chapter
 17 moved to a 2D section of a folded vein, so the manual no longer shows
@@ -4087,151 +2851,11 @@ refits):
 Measure nothing new for it: it removes code whose replacement the 0.9.0
 gates passed.
 
-**M — Keep the package skill true at every release** (agreed 2026-09-26;
-**built 2026-09-26**, 0.8.2: `--show`/`--list`/`--json`, `sync.py`, the
-skill rewritten, `test_skill.py` and `test_skill_release.py`).
-Found: two skills both named `geo-ml` — the research skill outside the
-repository (research line, notation, LaTeX, style, and a section 5 on the
-package) and the package skill in `plugins/geoml/skills/` — whose package
-text had drifted apart, no script generating one from the other though this
-file's Version note said one did, and every release bumping only the
-version line: at 0.8.0 the package skill still named the shims removed in
-0.7.0 and never mentioned the parametric warpings, leaves, `MeshSet`, the
-catalogue, `progress` or `unpredicted`. Settled:
-- **Names**: the package skill is `geoml`, the research skill
-  `geoml-research`, so the two never share one in a session.
-- **One source**: the package skill holds all package knowledge. The
-  research skill's section 5 shrinks to a pointer and about ten lines (the
-  object model in a paragraph, the install line, where the manual and the
-  reference live), since it is also used where the plugin is not installed.
-- **Prose only for what the catalogue cannot say**: the object model, the
-  workflow, the recommendations, the gotchas, the geostatistical
-  intuitions. The class lists and argument details go; a recommendation
-  names its classes and sends the reader to the catalogue for arguments.
-  Internal classes are named nowhere, experimental ones only as such.
-- **The catalogue queried, not copied**: `python -m geoml.catalogue` gains
-  `--show NAME` (short or dotted; an ambiguous short name lists the
-  candidates), `--list CATEGORY` and `--json`, writing the whole file as
-  now when given a path. The skill has the agent query the installed
-  version for any signature or bound, and falls back to the site's
-  reference pages where geoML is not installed. A snapshot was rejected:
-  stale the moment the user installs another version, and the whole
-  catalogue is 282 KB (about 70k tokens).
-- **The manual replaces the notebooks**: the 17 chapters, run at every
-  release by `test_manual.py`, copied into `references/` as Markdown with
-  their figure links rewritten to the site (the figures are 5.7 MB); the
-  eight notebooks, which predate the path notation and nothing tests, go.
-  `notebook-style.md` stays.
-- **Checks**: a name check in CI's structural job (every dotted name and
-  every class or function the skill mentions resolves and is not
-  internal) and a code check at release (every Python block in the skill
-  runs).
-- **The release step**, written into CLAUDE.md's Version note: bump the
-  version; run `plugins/geoml/sync.py` (the chapters copied, links
-  rewritten); review the skill's prose against the changelog's top
-  section; both checks pass.
-
-(The tag-triggered manual CI job: **verified 2026-09-14**. At v0.6.9 it was
-killed at 22 minutes of a 90-minute budget with no pytest output, the OOM
-signature of a 16 GB runner accumulating TensorFlow, matplotlib and
-pyvista. With `test_manual.py` running one subprocess per chapter, it
-passed on the v0.6.10 tag in 28 minutes. If it ever dies the same way
-again, the next lever is not a longer timeout.)
-
-(Chapter 13's variogram verdict, read against its figure: **done
-2026-09-15, 0.6.12**, `docs/benchmarks/walker_zero_shift.py`. The model
-did fit its noise high, and the zeros were why: Box-Cox's default shift of
-a millionth put Walker's 22 zero samples so far down the logarithm that
-they pulled the exponent from 0.58 to 0.42, and the steeper inverse
-widened the noise where the grade is high, noise and ground together 1.19
-of the data's declustered variance. Shifted by one, 0.98, and the fan
-follows the true variogram within 7% from the second lag on; denser
-inducing points, longer training and an exponential kernel mended none of
-it. Every chapter that builds Walker's V shifts it now, 4, 5, 7, 11, 13
-and 15, and 13 and 15 read their figures anew; the shortest lag's
-comparison with the truth is measured now, 26 900 true against 46 600 in
-the declustered data. Chapter 16's Jura holds no zeros, its smallest
-value 0.135, and keeps the default. Chapter 5 described its chain as
-chapter 4's "with a `Scale` in front" and credited "the softplus in the
-chain" with its positivity, neither of which it held; corrected with it.)
-
-**S — Chapters 16 and 17 no longer reproduce their figures byte for
-byte** (found 2026-09-15, at the 0.6.12 release run; **chapter 16 fixed
-2026-09-15, 0.7.0**). Chapter 16 changed from run to run: two runs of one
-checkout printed rmse 0.765 / 2.645 / ... / 32.830 and 0.768 / 2.646 /
-... / 32.831, its six figures moved by up to a fifth of their pixels,
-invisibly, and one of three runs landed back on the committed figures.
-Chapter 17 comes back the same in three runs, on 0.6.12's code and on
-0.6.11's, but not as committed on 2026-08-19, at under 0.6% of its pixels.
-Both reproduced exactly at the 0.6.11 release the day before, so this
-release's code was not the cause.
-
-The cause was **`RobustPCA`, whose FastMCD drew its starting subsets from
-NumPy's global generator** -- which `set_seed` does not reach. The note
-above says it was seeded from the package RNG; that was assumed from
-`Rotation`'s FastICA, which is, and never checked. Chapter 16's chain
-holds a `RobustPCA` and chapter 17's does not, which is exactly the split
-between the chapter that moved every run and the chapter that does not.
-Seeded (`warping.py`, `random_state` from `_rnd.rng()`), four processes
-under different hash seeds build that model to the same bits and three
-train it to the same bound. Two orders that changed with the process went
-with it -- `_Operation.get_unique_parents` iterated a set, which is the
-order `VGPNetwork._nodes` sums the KL in, and `get_unfixed_variables`
-likewise -- neither having moved a number, both able to.
-
-Chapter 16 was re-run on the fix and reproduced all six committed figures
-byte for byte, printing the rmse of the higher of the two runs, 0.768 /
-2.646 / 8.492 / 6.093 / 38.130 / 32.831, and §16.5's prose still holds.
-
-Chapter 17's own 0.6% is **not** this: no `RobustPCA`, no `Rotation`, and
-three runs agreed with each other before the fix. Two more agree after it,
-identically, 0.554% of `17-elbo.png` and 0.119% of `17-vein-surface.png`
-from the committed pair and nothing else touched -- a changed number, not a
-nondeterminism, its committed figures predating 0.6.12 by three weeks. Its
-prose quotes none of the numbers it prints. **Re-commit those two figures
-and the item closes.** Committed with 0.7.0 on 2026-09-16, after a third
-identical run inside the release suite; **closed.**
-
-The contract they broke is written down now:
-`docs/source/reference/reproducibility.md`, pinned by five tests in
-`test_seed.py`, the last of them training and predicting in another
-process.
-
-(Chapter 16's figures: **verified 2026-09-05** — rerun through the manual's
-own runner after the leaves change, the seeded chapter reproduced every
-committed figure byte for byte, and the §16.5 prose matches what the model
-prints: Portlandian at a balanced accuracy of 0.5 and a Jaccard of zero.)
-
-(**S — Retire the 0.6.0 deprecation shims in 0.7.0: done 2026-09-16.**
-The ten one-line modules and the lazy `__getattr__` that resolved them are
-gone. The persistence check was re-run first, and against the code rather
-than a reading of it: a store records the path of a `Parametric` or
-`_ModelOptions` class only, anything else refusing to save, and walking
-every subclass of both finds them in six modules -- `kernels`,
-`latent.network`, `likelihood`, `models`, `transform`, `warping` -- none a
-shim, while the ten shims' targets define none. So no save, old or new, can
-name a removed path. `test_removed_paths.py` pins the removal and, more
-usefully, that every recordable class resolves from the path it records.)
-
 **S — `latent/network.py` stays out of the pyright list.** About 28 of the
 file's diagnostics read `inducing_points` as possibly-None, and they cannot
 be fixed by declaring them: `None` is load-bearing in the finished state.
 Declaring `tuple` took 33 diagnostics to 67 and was reverted. Do not repeat
 that attempt.
-
-**S — One checked file is not clean: `warping.py`** (found 2026-09-11,
-re-measured 2026-09-15). The 251 errors this item used to list are gone.
-Pyright 1.1.411 over the `[tool.pyright]` list, run from the repository
-root in the `geoml` conda env, now reports **one**:
-`warping.py:1294` (1281 before 0.8.0's docstrings) `"NoReturn" is not
-iterable`, on
-`_ContinuousFlow.initialize`'s `x, _ = self.forward(x)` -- the base class's
-`forward` raises, so the checker reads the call as returning nothing and
-the unpacking as impossible. It is on HEAD's version of the file too, so it
-predates the 0.7.0 work. Whatever moved (a library version, the checker's
-own inference) took `data/drillhole.py`'s 107, `data/geoh5.py`'s 36 and the
-rest with it, which is why the old census is not worth chasing. Declare the
-return on the flow base, or annotate the call; either is minutes.
 
 ---
 
@@ -4242,120 +2866,22 @@ that build and run them, and reads what they leave behind. Its repository
 (`C:\Repos\geoscape`, same owner) keeps what it needs from geoML in
 `docs/geoml-requirements.md`, revised 2026-09-15 against 0.6.11, and the
 catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
-is that list's numbering, and M3 and M4 its milestones. **Every item on it
-is met as of 0.8.0**; what is left below is the paperwork outside the code.
-Three were met before the list was worked through -- one leaf per
-likelihood (item 2) and names replayed by a save (item 5), both in 0.6.10,
-and `geoml.__version__` at run time (item 7) -- then seven in 0.6.13,
-items 1, 3, 8, 13 and 15 in 0.7.0, and the eighteen the list gained on
-2026-09-16 (16-33) in 0.8.0, item 26 turning out not to be a bug, and
-the three added 2026-09-27 (34-36) in 0.8.3 -- item 34 a masked subset of
-any container opened from Zarr, not only `cross_validate`'s. Of the two
-added 2026-09-28, both in 0.8.4: item 38, read-only opens; and item 37,
-which asked `GPOptions.expert_propagation`'s docstring to say the option
-affects any network with experts. Measured, it does not -- a
-`LinearCombination` or `Add` of GP nodes over 3 and 20 experts trains to
-the same log and predicts the same means to the bit under both rules, in
-the same time -- so the docstring now says an operation over GP nodes is
-still one layer. The done-notes below hold what each cost and what it taught; GeoScape's
-requirements document is marked item by item since 0.8.0.
+is that list's numbering, and M3 and M4 its milestones. The changelog has
+each item as it was met; read again on 2026-11-11 and its three open items
+built for 0.10.8, **every item on it is met**, and what is left below is
+the paperwork outside the code.
 
-(Items 41-44, asked 2026-10-10 to 2026-10-25: **done 2026-10-26, for
-0.9.9.** 41: `train_by_expert`, `predict_by_expert` and
-`predict_measurements` in the catalogue's workflow. 42: `Progress.detail`,
-a refinement pass's cut by reason and its block count, and
-`train_by_expert`'s total under an assignment revised each epoch, since an
-epoch's batches are drawn. 43: a given `GPWalk` reach held as it is, its
-amplitude's training bounds widening to take it -- a held amplitude is
-never trained. 44, the one GeoScape's M4 needed: the batch sized by what
-every GP node holds for the experts it computes at once, `[width, rows, m,
-d + size]`, which nothing counted -- reproduced on a stand-in at the failed
-Run's sizes (four GP nodes, 32 experts of 209-257 points in 3-D): out of a
-16 GB GPU at 10000 rows by expert and 5000 with every expert, 23-26 bytes
-an element over about 1 GB held throughout; sized to 0.4 of the device,
-both finish at about 6.7 GB. The changelog has the rest.)
-
-(Item 45, asked 2026-10-26: **done the same day, for 0.9.10.** Item 44's
-estimate counted only the GP nodes' covariances; reproduced with the Run's
-own fitted model, a row held 15.5 MB against 4.6 estimated, almost all of
-it the realizations drawn at certain inputs (`_shared_prior_simulate`,
-32 experts' draws as branches of one graph). Rather than a cost for every
-node, a prediction on a GPU now measures its second batch and sizes the
-rest to 0.7 of the device's limit, never above the estimate: the Run
-finishes in 132 s at a 9.5 GB peak. The "hang" was TensorFlow retrying
-each failed allocation, minutes across the branches, the GPU idle; a batch
-that still runs out raises a `MemoryError` naming its size. Not done: the
-CPU keeps the estimate -- the resident high-water mark counts the first
-batch's tracing -- which leaves the CPU item filed 2026-10-24 under
-section 1 open. **Reopened the same day, for 0.9.11**: the next Run,
-predicting by expert, ran out on its first group -- each group of
-`predict_by_expert` is a call of its own, the estimate took every one
-whole, and only a call of several batches was measured. Measured on that
-Run's model, a row in 19 slots held 11.5 MB against 3.0 estimated, the
-shared prior draw's features most of it, so the features are counted now
-(`_expert_row_bytes`, at the same 32 bytes an element) and every call of
-more than one probe batch is measured: 63 s at a 4.8 GB peak; the
-refinement's second prediction (203471 blocks) at a 5.5 GB peak, a third
-slower than 0.9.10 ran up to its failure. Its third then took the host
-past 24 GB grouping the blocks -- the data's expert weights carried to
-every row at once, rows x 8 neighbours x 32 experts -- now carried in
-chunks of 65536 rows, the groups the same: 13.6 GB at that pass. Stopped
-there: the third prediction's first group alone was 13830 batches of 57
-blocks at 1.8 s, about seven hours, the GPU busy throughout; at three
-levels this network's refinement is a matter of hours, not measured to
-the end. Profiled then: 0.76 s a batch whatever its rows plus 2 ms a row,
-all inside the graph; so a new model predicts with XLA (falling back where
-XLA refuses, never on a GPU network with the quadrature), a measured batch
-grows past the estimate where nothing chunks by the rows, and the batch
-after the probes is measured again: that group 11.7 ms a block against
-29.8, 2.5 times the throughput. What is left of the fixed part is the
-roadmap item "The shared prior draw's fixed part, once per call".)
-
-(Item 46: **done 2026-10-26, for 0.9.11.**
-`predict_measurements`, `measurement_batches` and `predict_node` take
-`by_expert` and `expert_options` (`predict_by_expert`'s grouping, factored
-out as `_expert_groups`); `cross_validate(method="by_expert")` scores
-through it; with every expert active the answer is the plain one bit for
-bit. A node's traced function is keyed by the experts entered, as
-`predict_raw`'s is. The catalogue picks the keywords up from the
-signatures, so nothing for GeoScape to change but passing them.)
-
-(Item 47, asked 2026-10-30: **done the same day, for 0.9.13.** `trainable`
-on every class on offer, format 2 kept (`docs/catalogue.md` has the fields).
-The item asked for an expert's state to be flagged; the user left
-`alpha_white_i`, `delta_i` and `bias_i` out instead, which took "one per
-expert" and "variational" out of the format. Reading its claim that training
-leaves out what is fixed found the one place that did not: `cross_validate`'s
-reset freed every `bias_*`, so a model holding its bias at zero was scored
-with one (fixed). Two things that train stay unlisted, having no name a
-program can reach: the directions a dynamic anisotropy builds and the
-components a `Mixture` builds. **To do beside it, on GeoScape's side and not
-written from here**: `docs/geoml-catalogue.md` gains the fields and item 47
-is marked.)
-
-(Items 16-33: **done 2026-09-25, 0.8.0.** The catalogue is format 2: a
-`description` on every entry, read off the docstring between its summary
-and its first section, and forty docstrings written to have one; every
-bound a constructor clips to declared as a constraint, a test holding each
-declaration to the built parameter and the constructor warning when it
-clips; `network: false` on `Constant` and `Cosine`; the multivariate
-likelihoods `internal`; `Spline` public, GeoScape passing `backbone="rq"`
-itself since the default must stay `"cubic"` for old saves; `PCA`'s width
-out a `param` rule with a `fallback`; `contour_rule` on the two
-categorical likelihoods; a `containers` section, every public container
-listed or left out with a reason, each built and predicted into by a test;
-each variable type's columns with a role and a scale. In the code:
-`predict(where=)` takes a stored filter's name, `n_sim=None` takes the
-target's count and a different one is refused under `where` (one
-realization used to be copied into every stored column without a word);
-`combine` merges by distance; a categorical's measurement columns share its
-order of labels; `as_point_data(contacts=True)`; and `predict` into
-measured data writes each measurement's PIT and its warped value as
-metadata. Two bugs came out of it: `BlockSet3D.unpredicted` never
-cleared its split flags, so a fully predicted set read as unpredicted
-throughout (0.7.0's union), and `cross_validate` scored a composition
-declared in units against its assays as fractions of the whole, every PIT
-0.)
+Item 52 (a limit per Realization on a `MeshSet`) is
+`limits={"ore": (other_set, 0.5)}`, a pair of set and key: the other set's
+store is referred to by path and nothing is copied, so that store has to
+stay where it is. Item 51 (a doc for every parameter) is met for every
+class, container and method the catalogue offers
+(`test_every_parameter_offered_has_a_doc`); the sixteen classes it names
+as having no summary are all internal -- the Fourier nodes,
+`GradientIndicator`, the `Multivariate*` twins -- and stay undocumented:
+GeoScape is to stop listing internal entries. Item 48 is
+`clear_predictions`, under that name rather than `drop(where=)`, since
+`drop` takes the measurements with the variable.
 
 What GeoScape builds on, where a change must be flagged to it rather than
 made quietly: dotted class paths importable forever, already policy;
@@ -4364,100 +2890,14 @@ exposes nothing else; the Fourier-feature classes kept internal; **batch
 invariance**, a location's realizations independent of the call that
 computed them given the same fit, seed and count
 (`test_predicting_only_the_new_blocks_gives_the_same_answer`), which a
-per-location residual draw would break; and node names seeding the draws,
-GeoScape never renaming a node once created.
-
-(The catalogue, GeoScape's item 1: **done 2026-09-15, for 0.7.0**,
-`geoml/catalogue.py`, design record `docs/catalogue.md`. 104 classes and
-21 functions -- the last two being `geoml.progress` and `unpredicted`,
-added with items 13 and 15 so that GeoScape can discover the calls it needs
-for them -- every class declaring itself in a block where its module
-ends, and 238 tests building each declaration against its class. GeoScape's
-spec was revised with the answers read off the code, four amendments and a
-`nullable` field. The fixes its tests demanded went with it: `Identity()`
-and `Periodic()` saved at last, the shared `Identity()` defaults replaced by
-`None`, `Concatenate` asking its parents before claiming to pass inducing
-points on, operations refusing no parents, `GPWalk` a non-GP and
-`MultiStructureGP` a single structure, and the `__all__` gaps closed.
-`NormalizeWithBoundingBox` still cannot be saved, a `BoundingBox` not being
-encodable, and is catalogued internal.)
-
-(GeoScape's items 4, 6, 9, 10, 11, 12 and 14: **done 2026-09-15, for
-0.6.13**; the changelog has the detail. A target whose cut-offs differ from
-the model's takes the model's, in its own unit and with a warning -- the
-user chose re-keying over raising -- and `set_cutoffs` drops the shares of
-the cut-offs it removes. The stopping rule's trail and `train_svi`'s
-shuffle belong to the phase, so chunks reproduce one call bit for bit, and
-`converged` tells a Script when to stop calling. Every store writer keeps
-the root attributes not starting with `geoml`, and none writes over a store
-something still reads from, which had been silent data loss for an opened
-container, a loaded model and a mesh-set realization. The cross-validation
-container round-trips, tested, its score columns documented; chapters 8
-and 10 say at or below, and a category's share is the share inside it, so
-GeoScape flips grades only. `docs/source/reference/stores.md` documents
-the stores, the mesh set's attribute gaining `groups`, the layout pinned
-by `test_the_store_is_laid_out_as_its_reference_page_says`.)
-
-(**S — The reproducibility contract, written down** (GeoScape's item 8):
-**done 2026-09-15, 0.7.0.** `docs/source/reference/reproducibility.md` says
-what comes back the same -- the parameters, the log, the predictions, the
-realizations and the measurement samples, in any process; a location's
-realizations whatever the batching; a node's draws, keyed by its name; a
-training split into chunks; a mesh set contoured on workers; the catalogue
--- and what does not: another machine, another version, a GPU, another
-release. The one knob is `set_seed` before anything is built. Finding out
-which was which is what closed §5's chapter-16 item: `RobustPCA` left
-FastMCD reading NumPy's global generator, and two orders came off a set.
-Five tests in `test_seed.py`, the last training and predicting in a second
-process under a different hash seed and comparing every number as hex.)
-
-(**M — A progress hook** (GeoScape's item 13): **done 2026-09-15, 0.7.0.**
-`geoml.progress(callback)`, a context manager, one `Progress(task, done,
-total, unit, bound, within)` per unit *finished* -- `train_full` per
-iteration, `train_svi` per batch, `predict` per batch, `refine` per pass,
-`cross_validate` per fold, a mesh set per prediction body and per
-realization. The user chose the context manager over a per-call argument
-(D4), and cancel is the callback raising. A `ContextVar` rather than an
-argument because the calls nest; `within` names the enclosing tasks, so a
-refinement's predictions are told from a bare one. **Logging was rejected**:
-`Handler.handleError` swallows a handler's exception, so a cancel could not
-travel back. Two things the build taught. A generator must not set a
-`ContextVar` -- its body runs in the caller's context, so the mark leaks at
-every `yield` and outlives an abandoned generator -- which is why
-`_over_batches` reports through `emit` and not `reporting`. And **a
-refinement's passes are not bounded by `max_levels`**: a block still at
-level 0 can be marked by any later pass as `unbalanced` reaches it, so
-`refine` reports no total. A test caught the wrong cap.)
-
-(**M — A mesh set openable mid-build, and `unpredicted()` everywhere**
-(GeoScape's item 15): **done 2026-09-15, 0.7.0.** The user chose resume over
-discard (D5). The set's description goes into the store before the first
-realization and is rewritten after each one, `complete: false` and only the
-rows actually filled (`_attrs(keep=)`, the measure tables being allocated
-for every realization up front); `open` reads a partial store, warns, and
-reports `complete`. Store format **2**, format 1 still read since it was
-always a finished set. `unpredicted()` is on `_SpatialData` now, each
-variable class declaring its marker column (`_PREDICTED_MARKER`) because a
-rock type has an `entropy` and a vector variable an `uncertainty` where a
-grade has a `prediction`; without a variable a location counts as
-unpredicted where *any* of them misses it. `BlockSet3D` keeps its override
-and unions the two notions. The gate: predicting what `unpredicted()` names
-after a cancel gives, to the last bit, what predicting the lot gives.)
-
-(**M — Chunks that split the realization axis** (GeoScape's item 3, M3,
-performance): **done 2026-09-15, 0.7.0.** Past 32 realizations the trailing
-axis is split too, ten columns a chunk. Measured cold -- page cache dropped
--- on a `(2 000 000, 100)` float64 store, 1.49 GB, at 100, 25 and 10
-columns a chunk: reading one realization 0.76, 0.13 and 0.06 s, **and the
-reductions no worse for it**, a quantile pass 1.34, 1.09 and 1.26 s and a
-pass in row bands 2.53, 1.19 and 1.07 s, ten columns a chunk being ten
-times the rows and so fewer, longer reads. Ten wins on every measure, so
-there is no trade-off left to tune:
-`docs/benchmarks/realization_chunks.py`. A band still holds whole rows,
-reading each of its column chunks; `row_quantiles`/`row_cdf` gather the
-realization axis first (`_whole_rows`), one pass over the same bytes, since
-a block of a column-chunked dask array holds part of a row. Stores written
-earlier keep their chunks.)
+per-location residual draw would break; node names seeding the draws,
+GeoScape never renaming a node once created (a model renumbers only a
+generated name that another of its trees repeats, never a given one); and
+**a trained argument being the parameter of its name** -- GeoScape reads
+`parameters[name].get_value()` by the constructor argument's name after
+training, to draw an `Anisotropy3D` as an ellipsoid say, so a class that
+stored such an argument under another name would be read wrong (the
+catalogue's `trainable` entries carry the name as `start`).
 
 Outside the code, from the same list: a contributor licence agreement
 before the first outside contribution is merged; and title in writing, with
@@ -4531,6 +2971,86 @@ order of difficulty:
   before comparing -- the change of support of the item above, made
   nonlinear. It shares that item's prerequisite (the support visible to the
   model) and should be designed with it.
+
+---
+
+## 8. Optimizations
+
+**M — Faster mesh operations** (requested 2026-11-11; two rounds the same
+day, 0.10.8). Profiled on the Assen model and its shells and on Tom v6
+(`docs/benchmarks/mesh_profile.py`, one operation at a time under
+cProfile, then line by line): 36 to 52% of a contour, a boolean, a `split`
+and a mesh set was NumPy sorting -- `np.unique(axis=0)` in `weld`, the
+corner table's argsort, and a mesh's edges counted three times over where
+it is built -- and 7.5 s of a 12.9 s paint was the fills' points held as
+three coordinates each. With those gone, the corner table numbered through
+a table of marks where the lattice allows, and the cut marking its blocks
+a byte a corner, every mesh is identical to the bit (45 digests on Assen,
+2 on Tom): in one process, a contour 9.2 to 3.7 s (37.6 to 16.2 at
+supersample 1; Tom v6's zinc at 5%, 23.5 to 9.7 s), the booleans 2.2 to
+2.4 times as fast, `split` 2.8, a grade set of four cut-offs and two
+realizations 129 to 54 s, a rock set 159 to 76 s. `simplify` did not move:
+it is VTK's decimation (79% of a call at a tight budget).
+
+**On workers the gain is smaller, and the reason is the machine**
+(`mesh_set_workers.py`, labels `head8` and `marks8`): a realization of the
+grade set takes 45.7 to 19.6 s in one process, but 12.4 to 9.1 s a
+realization on eight workers, where each task runs 68 s against 19 alone.
+Eight processes streaming through memory they already hold take eight
+times as long as one (0.45 to 3.55 s for the same work each): one process
+saturates the two memory channels. A fresh 400 MB temporary also costs
+three times a reused one in a lone process, the kernel zeroing its pages,
+and keeping freed memory in the process (`mallopt`) removes that alone
+(1.34 to 0.86 s) and nothing under eight. So more workers buy little past
+two or three, and what would help a pool is moving fewer bytes.
+
+**A third round** (2026-11-11, meshes still identical): the corner keys in
+32 bits where the table of marks is taken and the lattice has fewer points
+than that counts, the twin-face search of `drop_degenerate_faces` skipped
+where no face has a twin, and `_clip_to_box` welding once: a contour 3.5 s
+(14.7 at supersample 1), the sets 49 and 69 s. And one change to a
+measure, not to a mesh: `_against` reads what a realization's shell gains
+and loses on the prediction's from the one body they share, where it took
+both differences -- the same numbers to rounding.
+
+**Workers, measured again** (`mesh_set_workers.py`, label `round3w`, and
+`keys32w` before the `_against` change): 13.9 s a realization on two
+workers, 9.8 on four, 7.6 on eight, against 19 or so in one process. A
+task takes 27 s in a pool of two and 56 s in a pool of eight. Two things
+bound it. In a forked worker Manifold runs on one thread, so the cut to
+the box and the comparison with the prediction's shell, 5 s of a task in
+one process, are 13 s of it in a worker whatever the pool's size. And the
+NumPy stages share the memory channels: the cut and the paint take 5 s
+each on two workers and 13.5 and 14 on eight.
+
+**Manifold on several threads in a worker, measured and not built**
+(2026-11-11). A child forked after its parent has used Manifold runs it on
+one core: three rounds of building two Assen shells as bodies and taking
+their intersection and difference, 5.44 s against 1.59 in the parent. A
+child forked before the parent's first use, a spawned one and a forkserver
+one all take 1.6 s on thirteen cores. What that would buy a set was
+measured with independent processes, each contouring realizations in
+itself with Manifold threaded, pinned to its own cores and BLAS held to
+one thread: four of them give 7.4 s a realization where four forked
+workers give 9.8, and eight give 6.5 where eight forked workers give 7.6
+-- 32% and 17%, the comparison and the cut to the box falling from 8.1
+and 9.7 s of a task to 2.0 and 5.1 at four. Getting it needs workers that
+are not forked from the caller: a forkserver pool, each worker handed the
+block geometry, the limits and the prediction's shells as arrays once and
+its realization's draws with each task, and pinned to its share of the
+cores so Manifold's threads do not pile up. It changes how a worker comes
+by its state (inherited today, sent then). **Not to be built** (the
+user's decision, 2026-11-11): do not propose it again without a new
+reason.
+
+**What is left**, none of it measured: the body `_clip_to_box` already holds handed
+to `_against` and to the limits, which each build it again from the mesh;
+a cut level's corner table built from the level before, since every level
+renumbers every block; both edge counts off one sort in `edge_defects`;
+the paint's slabs filled where the surface can be, the rest left at a
+constant on the right side; the default pool sized to bandwidth and not
+to memory alone; reading only the realizations asked for
+(`_read_realizations` reads every column of a band).
 
 ---
 

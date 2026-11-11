@@ -34,6 +34,10 @@ and are read when asked for; the ensemble is a lazy sequence that slices.
 
 ## Limits
 
+`limits={name: (other_set, key)}` (0.10.8) cuts each realization by
+another set's body of the same realization, read from that set's store,
+which the new store names by path; the prediction is cut by that set's
+prediction body, which is what `limits[name]` holds.
 `limits={name: mesh}` cuts every mesh to a sheet's underneath -- a
 topography -- or a body's inside; `exclude={name: mesh}` takes them away. A
 sheet becomes the ground beneath it once for the whole set, as

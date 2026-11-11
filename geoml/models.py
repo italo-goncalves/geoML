@@ -1160,6 +1160,7 @@ class VGPNetwork(_GPModel):
                     % (leaf.name, leaf.size,
                        "s" if len(group) > 1 else "",
                        "" if len(group) > 1 else "s", wanted))
+        self._settle_names()
         # The likelihoods are registered AFTER the tree. A save file stores
         # the parameters by position in `all_parameters`, which is
         # registration order, so this order is part of the format: every
@@ -1316,6 +1317,39 @@ class VGPNetwork(_GPModel):
         raise AttributeError(
             "this model has %d leaves, one per likelihood; read `leaves`"
             % len(self.leaves))
+
+    def _settle_names(self):
+        """Gives every node of the model a name of its own.
+
+        A node left unnamed is numbered among the nodes connected to it, so
+        two trees built apart both hold a `BasicGP_1`, and a GP node's
+        realizations are keyed by its name: the two would draw the same
+        normals. The first node sighted keeps its name and a later one with
+        a generated name takes the next number free in the whole model. A
+        name the user gave is kept, with a warning where it is repeated.
+        """
+        nodes = self._nodes()
+        taken = set()
+        for node in nodes:
+            if not (node.name in taken
+                    and getattr(node, "_generated_name", False)):
+                taken.add(node.name)
+        seen = set()
+        for node in nodes:
+            if node.name not in seen:
+                seen.add(node.name)
+            elif getattr(node, "_generated_name", False):
+                index = 1
+                while "%s_%d" % (type(node).__name__, index) in taken:
+                    index += 1
+                node.name = "%s_%d" % (type(node).__name__, index)
+                taken.add(node.name)
+                seen.add(node.name)
+            else:
+                warnings.warn(
+                    "two nodes of this model are named %r: GP nodes of one "
+                    "name draw the same realizations, so give each a name "
+                    "of its own" % (node.name,), stacklevel=3)
 
     def _nodes(self):
         """Every node of the tree, each once, leaves included.
@@ -1584,7 +1618,8 @@ class VGPNetwork(_GPModel):
                         "Matern52 or RationalQuadratic"
                         % (name, type(kernel).__name__))
                 elif self._full_variance() and node._READS_CHAIN \
-                        and node._CONDITIONED_SECOND_MOMENT \
+                        and getattr(node, "_CONDITIONED_SECOND_MOMENT",
+                                    False) \
                         and any(isinstance(p, (network._GPNode,
                                                network.GPWalk))
                                 for p in node.get_unique_parents()):
@@ -3938,7 +3973,7 @@ class VGPNetwork(_GPModel):
         # input's own transformed space, and its training sets
         per_input = []
         for r, (root, start, count) in enumerate(blocks):
-            if fixed:
+            if exact is not None:
                 # the locations' own weights, exactly: no carrying from the
                 # data, and an expert of zero weight is never needed
                 weights = exact[:, start:start + count].reshape(
@@ -4720,21 +4755,7 @@ def _where_mask(container, where):
     what a block model has instead of being subsettable -- and indices
     become the mask they select.
     """
-    if where is None:
-        return None
-    if isinstance(where, str):
-        mask = _np.asarray(container.get_metadata(where)).ravel().astype(bool)
-    else:
-        mask = _np.asarray(where)
-        if mask.dtype != bool:
-            index = _np.zeros(container.n_data, dtype=bool)
-            index[mask] = True
-            mask = index
-    if mask.shape != (container.n_data,):
-        raise ValueError(
-            "`where` needs one value per location: got %d for %d"
-            % (mask.size, container.n_data))
-    return mask
+    return container._where_mask(where)
 
 
 def _stored_n_sim(variable):
@@ -5108,7 +5129,9 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         `"all"`. The columns: `n`, the held-out measurements scored;
         `rmse`, `mae` and `bias` of the mean of the measurement samples
         against them, the bias being that mean minus the measurement;
-        `crps`, from the samples; `goodness`, of the samples' interval
+        `r_squared`, that mean's coefficient of determination against
+        them (:func:`geoml.metrics.r_squared`, the pooled row's against
+        every fold's measurements together); `crps`, from the samples; `goodness`, of the samples' interval
         coverage; `variable`; `component`, the variable's own name for a
         scalar one; and `fold`, the fold's label.
 
@@ -5320,7 +5343,8 @@ def score_measurements(model: VGPNetwork, data: "_data._SpatialData",
     pandas.DataFrame
         One row per scored component: `n` (the measurements scored),
         `rmse`, `mae`, `bias` (the samples' mean minus the measurement),
-        `crps`, `goodness`, `variable` and `component`.
+        `r_squared` (that mean's coefficient of determination), `crps`,
+        `goodness`, `variable` and `component`.
 
     See Also
     --------
@@ -5334,8 +5358,8 @@ def score_measurements(model: VGPNetwork, data: "_data._SpatialData",
     measured = _np.any([has.any(axis=1) for _, has, _ in truths.values()]
                        or [_np.zeros(data.n_data, dtype=bool)], axis=0)
     mask = measured if mask is None else mask & measured
-    columns = ["n", "rmse", "mae", "bias", "crps", "goodness", "variable",
-               "component"]
+    columns = ["n", "rmse", "mae", "bias", "r_squared", "crps", "goodness",
+               "variable", "component"]
     if not mask.any():
         return _pd.DataFrame(columns=columns)
     acc = {}
@@ -5363,10 +5387,25 @@ def _fresh_scores():
     Sufficient statistics rather than the scores themselves, so that a fold
     read in batches and a pooling read fold by fold are the same arithmetic:
     sums and a count, never a mean of means, which would weight a short
-    batch like a long one.
+    batch like a long one. The truth's spread, which `r_squared` divides
+    by, is carried as its mean and the sum of squares about it
+    (`truth_mean`, `truth_m2`) and pooled by Chan's rule, a raw sum of
+    squares losing its digits to cancellation where the values are large.
     """
     return {"n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0, "crps": 0.0,
+            "truth_mean": 0.0, "truth_m2": 0.0,
             "observed": None, "nominal": None}
+
+
+def _pool_spread(a, n, mean, m2):
+    """Fold `n` values of mean `mean` and squares about it `m2` into the
+    truth's spread `a` holds, before `a["n"]` counts them."""
+    total = a["n"] + n
+    if total == 0:
+        return
+    delta = mean - a["truth_mean"]
+    a["truth_m2"] += m2 + delta ** 2 * a["n"] * n / total
+    a["truth_mean"] += delta * n / total
 
 
 def _accumulate(a, truth, draw):
@@ -5375,6 +5414,8 @@ def _accumulate(a, truth, draw):
     n = int(truth.size)
     nominal, observed = _metrics.coverage(truth, draw)
 
+    mean = float(truth.mean())
+    _pool_spread(a, n, mean, float(((truth - mean) ** 2).sum()))
     a["n"] += n
     a["sse"] += float(((point - truth) ** 2).sum())
     a["sae"] += float(_np.abs(point - truth).sum())
@@ -5387,6 +5428,7 @@ def _accumulate(a, truth, draw):
 
 def _merge(into, other):
     """Fold one accumulator into another -- a fold into the pooled row."""
+    _pool_spread(into, other["n"], other["truth_mean"], other["truth_m2"])
     for key in ("n", "sse", "sae", "se", "crps"):
         into[key] += other[key]
     into["nominal"] = other["nominal"]
@@ -5402,6 +5444,9 @@ def _scores_from(a):
         "rmse": float(_np.sqrt(a["sse"] / n)),
         "mae": a["sae"] / n,
         "bias": a["se"] / n,
+        # as `metrics.r_squared`, NaN where the measurements do not vary
+        "r_squared": 1 - a["sse"] / a["truth_m2"] if a["truth_m2"] > 0
+        else float("nan"),
         "crps": a["crps"] / n,
         "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
     }

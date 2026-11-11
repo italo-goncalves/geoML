@@ -478,14 +478,21 @@ def _exclusive(meshes, order, shift):
 
 def _against(mesh, reference, shift):
     """How much of `mesh` lies outside `reference`, and how much of
-    `reference` lies outside `mesh`."""
+    `reference` lies outside `mesh`.
+
+    From the one body the two share: each one's volume less the shared
+    volume is what it holds alone, which is what the two differences
+    measured, to rounding, at half the booleans -- and in a forked worker
+    Manifold runs on one thread, where the pair was a quarter of a
+    realization's task."""
     body = _manifold(mesh, shift)
     if body is None:
         return 0.0, _volume(reference)
     if reference is None:
         return _volume(body), 0.0
-    return float((body - reference).volume()), \
-        float((reference - body).volume())
+    shared = _volume(body ^ reference)
+    alone = _volume(body) - shared, _volume(reference) - shared
+    return max(0.0, alone[0]), max(0.0, alone[1])
 
 
 def _pieces(mesh):
@@ -557,6 +564,68 @@ def _corners(data):
 
 
 # --------------------------------------------------------------------------- #
+# limits that are another set's bodies
+# --------------------------------------------------------------------------- #
+def _paired_bodies(mapping, numbers, store):
+    """A limits or exclusions mapping with every `(set, key)` pair replaced
+    by that set's prediction body, and what was replaced: `{name: {"store",
+    "key", "group", "failed"}}`, the other set's store, the key as given
+    and as its group is named, and the realizations in which that body
+    could not be made.
+
+    Everything a pair needs is checked here, before any contour: a set with
+    its realizations in a store that will outlive the build, complete, and
+    holding every realization in `numbers`.
+    """
+    meshes, paired = {}, {}
+    for name, value in (mapping or {}).items():
+        if not isinstance(value, tuple):
+            meshes[name] = value
+            continue
+        if len(value) != 2 or not isinstance(value[0], MeshSet):
+            raise TypeError(
+                "%r pairs a mesh set with one of its keys, as (set, key); "
+                "got %r" % (name, value))
+        other, key = value
+        key = other._key(key)
+        if other.realization is not None:
+            raise ValueError(
+                "%r names one realization's set; give the whole set, whose "
+                "realizations are taken one by one" % name)
+        missing = [n for n in numbers if n not in other._numbers]
+        if missing:
+            raise ValueError(
+                "%r is cut realization by realization, and the set given "
+                "holds %d realization%s, without %s of the %d contoured "
+                "here" % (name, len(other._numbers),
+                          "" if len(other._numbers) == 1 else "s",
+                          ", ".join(str(n) for n in missing[:8])
+                          + (", ..." if len(missing) > 8 else ""),
+                          len(numbers)))
+        if numbers and (other._store is None or other._finalizer is not None
+                        or not other.complete):
+            raise ValueError(
+                "%r is read from its set's store as the realizations are "
+                "made, and the store must still be there when this set is "
+                "opened again: build that set with `store=`, or write it "
+                "with `to_zarr` and open it, and let it finish" % name)
+        same = store is not None and other._store is not None and (
+            _os.path.abspath(_os.fspath(store))
+            == _os.path.abspath(other._store))
+        if same:
+            raise ValueError(
+                "%r is read from %s, which this set would be written over"
+                % (name, other._store))
+        meshes[name] = other[key]
+        paired[name] = {
+            "store": None if other._store is None
+            else _os.path.abspath(other._store),
+            "key": key, "group": _path_key(key),
+            "failed": sorted({int(f["realization"]) for f in other._failures
+                              if f["key"] == key})}
+    return meshes, paired
+
+
 # the realizations, made in worker processes
 # --------------------------------------------------------------------------- #
 # What every worker reads, set before the pool forks so the children
@@ -593,19 +662,40 @@ def _realization_task(position):
     else:
         columns = {key: draws[:, 0] for key in state["keys"]}
 
+    # a limit that is another set's body is that set's body of this
+    # realization, read from its store; one that cannot be read fails every
+    # shell of the realization, which is recorded like any other failure
+    bodies, unread = state["bodies"], None
+    if state.get("paired"):
+        bodies = list(bodies)
+        try:
+            for index, found in state["paired"]:
+                if number in found["failed"]:
+                    raise ValueError(
+                        "the limit at %r of the set in %s could not be made "
+                        "in realization %d" % (found["key"], found["store"],
+                                               number))
+                body = _read_mesh(found["store"], "simulations/%d/%s"
+                                  % (number, found["group"]))
+                bodies[index] = (_manifold(body, state["shift"]),
+                                 bodies[index][1])
+        except Exception as error:
+            unread = error
+
     meshes, raw, taken, failed, nudges = {}, {}, {}, {}, {}
     for key, level in zip(state["keys"], state["levels"]):
         # One realization's failure -- a shell Manifold refuses, a contour
         # that will not close -- must not throw away the rest of a build
         # that can run for an hour; it is recorded, and reported at the end
         try:
+            if unread is not None:
+                raise unread
             shell, nudges[key] = _shell(
                 state["data"], columns[key], level, state["side"],
                 state["supersample"], state["label"],
                 first=together.get(key, _UNTRIED))
             raw[key] = shell.volume
-            shell, taken[key] = _limited(shell, state["bodies"],
-                                         state["shift"])
+            shell, taken[key] = _limited(shell, bodies, state["shift"])
             if state["simplify"] is not None:
                 shell = _simplified(shell, state["simplify"])
             meshes[key] = shell
@@ -1031,10 +1121,16 @@ class MeshSet(_abc.Mapping):
         always the ground each category holds.
     limits
         Sheets and bodies every mesh is cut to, by name: a sheet keeps what
-        lies below it, a body what lies inside it.
+        lies below it, a body what lies inside it. A pair `(set, key)`
+        names a body of another `MeshSet` instead, taken realization by
+        realization: the prediction's meshes are cut to that set's
+        prediction body at `key`, and each realization's to the body of
+        the same realization. The other set must hold every realization
+        contoured here, in a store that stays where it is.
     exclude
         Sheets and bodies taken away from every mesh, by name: what lies
-        below a sheet, or a body's inside.
+        below a sheet, or a body's inside. A pair `(set, key)` is taken as
+        for `limits`.
     simulations
         Which realizations to contour as well: `True` for every one the
         variable carries, `False` for none, an int for the first n, or a
@@ -1130,8 +1226,8 @@ class MeshSet(_abc.Mapping):
     def __init__(self, data: "BlockSet3D | Grid3D", path: str,
                  cutoffs: "_types.Cutoffs | None" = None,
                  close: "bool | str" = "above",
-                 limits: "dict[str, Mesh3D] | None" = None,
-                 exclude: "dict[str, Mesh3D] | None" = None,
+                 limits: "dict[str, Any] | None" = None,
+                 exclude: "dict[str, Any] | None" = None,
                  simulations: "bool | int | Sequence[int]" = True,
                  supersample: int = 0, simplify: "float | None" = None,
                  rule: str = "largest", repair: bool = False,
@@ -1144,11 +1240,17 @@ class MeshSet(_abc.Mapping):
         stores = source["stores"]
         numbers = _numbers(simulations, None if stores is None
                            else int(stores[0].shape[1]))
+        # a body of another set, realization by realization: the
+        # prediction's body stands as the limit everywhere a limit is read,
+        # and the realizations are checked before anything is contoured
+        limits, paired = _paired_bodies(limits, numbers, store)
+        exclude, more = _paired_bodies(exclude, numbers, store)
+        paired.update(more)
         # the prediction's contours are the least a worker's will cost,
         # measured on this model on this machine as they are made
         meter = _PeakMeter()
         self._build(data, source, limits, exclude, supersample, simplify,
-                    rule, repair)
+                    rule, repair, paired=paired)
         if numbers:
             self._contour_realizations(
                 source, numbers, rule, repair,
@@ -1161,8 +1263,12 @@ class MeshSet(_abc.Mapping):
     # building
     # ------------------------------------------------------------------ #
     def _build(self, data, source, limits, excluded, supersample, simplify,
-               rule, repair, extra=None):
+               rule, repair, extra=None, paired=None):
         """The prediction's set, from a resolved source."""
+        # the limits and exclusions that are another set's bodies, each
+        # realization cut by its own: `{name: {"store", "key", "group",
+        # "failed"}}`
+        self._paired = dict(paired or {})
         self.data = data
         self.path = source["label"]
         self.kind = source["kind"]
@@ -1201,6 +1307,10 @@ class MeshSet(_abc.Mapping):
             "limits": list(self.limits), "exclude": list(self.excluded)}
         if self.kind == "category":
             self.provenance["rule"] = rule
+        if self._paired:
+            self.provenance["paired"] = {
+                name: {"store": found["store"], "key": found["key"]}
+                for name, found in self._paired.items()}
         self.provenance.update(extra or {})
 
         bodies = self._bodies()
@@ -1368,7 +1478,10 @@ class MeshSet(_abc.Mapping):
                 levels=self._levels, side=self.close,
                 supersample=self.supersample, label=self.path, rule=rule,
                 bodies=bodies, shift=self._shift, simplify=self._simplify,
-                repair=repair, reference=reference)
+                repair=repair, reference=reference,
+                paired=[(index, self._paired[name])
+                        for index, (name, _, _) in enumerate(self._bodies())
+                        if name in self._paired])
             try:
                 first = 0
                 if workers is None:
@@ -1461,6 +1574,10 @@ class MeshSet(_abc.Mapping):
         if self.limits or self.excluded:
             lines.append("  cut to %s" % ", ".join(
                 list(self.limits) + ["not %s" % n for n in self.excluded]))
+        if self._paired:
+            lines.append("  each realization by its own %s" % ", ".join(
+                "%s (%s of %s)" % (name, found["key"], found["store"])
+                for name, found in self._paired.items()))
         if self._numbers:
             lines.append("  %d realization%s in %s" % (
                 len(self._numbers), "" if len(self._numbers) == 1 else "s",
@@ -1527,6 +1644,16 @@ class MeshSet(_abc.Mapping):
                             "provenance", "_parent", "_field")})
         view._meshes = _StoredMeshes(self._store, "simulations/%d" % number,
                                      self._keys)
+        # cut by the other set's body of this realization, which is what
+        # the view's limits are; a view has no realizations to pair
+        view._paired = {}
+        for group in ("limits", "excluded"):
+            own = dict(getattr(self, group))
+            for name, found in self._paired.items():
+                if name in own:
+                    own[name] = _read_mesh(found["store"], "simulations/%d/%s"
+                                           % (number, found["group"]))
+            setattr(view, group, own)
         view._numbers = []
         view._measures = None
         view._taken = None
@@ -2601,7 +2728,8 @@ class MeshSet(_abc.Mapping):
             "levels": self._levels, "close": self.close,
             "supersample": self.supersample, "simplify": self._simplify,
             "rule": self.rule, "limits": list(self.limits),
-            "excluded": list(self.excluded), "name": self._name,
+            "excluded": list(self.excluded), "paired": self._paired,
+            "name": self._name,
             "unit": unit, "provenance": self.provenance,
             "realization": self.realization,
             "corners": self._corner_points, "shift": self._shift,
@@ -2705,6 +2833,8 @@ class MeshSet(_abc.Mapping):
                       for name in meta["limits"]}
         new.excluded = {name: _read_mesh(path, "excluded/%s" % name)
                         for name in meta["excluded"]}
+        # absent from a store written before 0.10.8, which had none
+        new._paired = dict(meta.get("paired") or {})
         new.realization = meta["realization"]
         new.provenance = dict(meta["provenance"])
         new._keys = keys

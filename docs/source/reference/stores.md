@@ -82,6 +82,7 @@ The root attribute `geoml_meshset` holds:
 | `supersample`, `simplify` | The contour's extra refinement levels, and its error budget or null |
 | `rule` | How a categorical realization picks its winner; null for grades |
 | `limits`, `excluded` | The names of the limits and exclusions |
+| `paired` | The limits and exclusions that are another mesh set's bodies, each realization cut by its own: per name, `store` (that set's store, an absolute path), `key` (the body's key there), `group` (its group's name) and `failed` (the realizations in which that set could not make it). The group under `limits/` or `excluded/` holds that set's prediction body; realization `n` was cut by `simulations/<n>/<group>` of `store`. Empty where there are none, and absent from a store written before geoML 0.10.8 |
 | `provenance` | The set's own provenance |
 | `realization` | Null for a whole set; a number for one realization written alone |
 | `numbers` | The realizations stored |

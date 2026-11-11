@@ -411,6 +411,69 @@ def test_sibling_leaves_draw_independent_normals(qmc):
         model, rock, metal, held.coordinates[:60], qmc) < 0.2
 
 
+def _same_points_twice(train, n_rock, n_el, seed=1234):
+    """Two trees on the same inducing points, nothing named."""
+    geoml.set_seed(seed)
+    points = geoml.data.inducing.from_kmeans(train, 40, seed=0)
+    first = gl.BasicInput(points, transform=tr.Isotropic(1.0))
+    second = gl.BasicInput(points, transform=tr.Isotropic(1.0))
+    return gl.BasicGP(first, size=n_rock), gl.BasicGP(second, size=n_el)
+
+
+def test_unnamed_trees_draw_independent_normals():
+    """Two trees built apart both number their GP node `BasicGP_1`, and the
+    draw is keyed by the name: their realizations correlated at 1.000 at
+    every location (measured 2026-10-30). The model gives each node a name
+    of its own."""
+    train, held, n_rock, n_el = _jura()
+    rock, metal = _same_points_twice(train, n_rock, n_el)
+    assert rock.name == metal.name == "BasicGP_1"
+    model = geoml.models.VGPNetwork(
+        train, ["Rock", "Elements"], _likelihoods(n_rock, n_el),
+        [rock, metal], options=_options())
+
+    names = [node.name for node in model._nodes()]
+    assert len(set(names)) == len(names)
+    assert rock.name == "BasicGP_1" and metal.name == "BasicGP_2"
+    assert _latent_correlation(
+        model, rock, metal, held.coordinates[:60], False) < 0.2
+
+
+def test_the_names_a_model_settles_are_the_same_on_every_build():
+    """A save replays the constructors, so the renumbering has to come out
+    the same each time; and one tree's names are left as they were."""
+    train, held, n_rock, n_el = _jura()
+
+    def names(leaves):
+        model = geoml.models.VGPNetwork(
+            train, ["Rock", "Elements"], _likelihoods(n_rock, n_el),
+            list(leaves), options=_options())
+        return [node.name for node in model._nodes()]
+
+    assert names(_same_points_twice(train, n_rock, n_el)) \
+        == names(_same_points_twice(train, n_rock, n_el))
+
+    _, rock, metal = _two_leaves(train, n_rock, n_el)
+    before = [rock.name, metal.name]
+    names([rock, metal])
+    assert [rock.name, metal.name] == before
+
+
+def test_a_name_given_twice_is_kept_and_warned_about():
+    train, held, n_rock, n_el = _jura()
+    geoml.set_seed(1234)
+    points = geoml.data.inducing.from_kmeans(train, 40, seed=0)
+    rock = gl.BasicGP(gl.BasicInput(points, transform=tr.Isotropic(1.0)),
+                      size=n_rock, name="field")
+    metal = gl.BasicGP(gl.BasicInput(points, transform=tr.Isotropic(1.0)),
+                       size=n_el, name="field")
+    with pytest.warns(UserWarning, match="named 'field'"):
+        geoml.models.VGPNetwork(
+            train, ["Rock", "Elements"], _likelihoods(n_rock, n_el),
+            [rock, metal], options=_options())
+    assert rock.name == metal.name == "field"
+
+
 def test_the_draw_is_keyed_by_the_name_and_stable():
     """Two keys, two draws; one key, the same draw twice; no key, the bare
     stateless draw as before."""
