@@ -73,6 +73,22 @@ def test_the_point_errors_on_a_worked_example():
     assert np.isclose(metrics.rmse(y_true, y_pred), np.sqrt(5 / 3))
     assert np.isclose(metrics.mae(y_true, y_pred), 1.0)
     assert np.isclose(metrics.bias(y_true, y_pred), -1 / 3)
+    # squared error 5 against a spread of 2 about the mean
+    assert np.isclose(metrics.r_squared(y_true, y_pred), 1 - 5 / 2)
+
+
+def test_r_squared_is_scikit_learns_and_not_the_squared_correlation():
+    rng = np.random.default_rng(0)
+    y_true = rng.normal(size=200)
+    y_pred = y_true + rng.normal(scale=0.5, size=200)
+    assert np.isclose(metrics.r_squared(y_true, y_pred),
+                      sklearn.metrics.r2_score(y_true, y_pred))
+    assert metrics.r_squared(y_true, y_true) == 1.0
+    assert np.isclose(metrics.r_squared(y_true, np.full(200, y_true.mean())),
+                      0.0)
+    # a doubled prediction correlates perfectly and still scores below one
+    assert metrics.r_squared(y_true, 2 * y_true) < 0.5
+    assert np.isnan(metrics.r_squared(np.ones(5), np.arange(5.0)))
 
 
 def test_crps_matches_the_gaussian_closed_form():

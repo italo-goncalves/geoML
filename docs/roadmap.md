@@ -4534,6 +4534,15 @@ order of difficulty:
 
 ---
 
+## 8. Optimizations
+
+**M — Faster mesh operations** (requested 2026-11-11). Speed up the mesh
+work: contouring, the Manifold booleans, `simplify`, `split` and the mesh
+sets. Profile first on the Assen and Tom v6 models, then work on whatever
+takes the most time.
+
+---
+
 ## Settled by measurement
 
 These were tried. The numbers are why they are, or are not, in the package.

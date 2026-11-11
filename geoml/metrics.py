@@ -84,6 +84,35 @@ def bias(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
     return float(_np.mean(y_pred - y_true))
 
 
+def r_squared(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
+    """
+    Coefficient of determination.
+
+    One less the squared error over the spread of the true values about
+    their own mean: one for a perfect prediction, zero for one no better
+    than that mean, negative for one worse. It is not the squared
+    correlation, which a biased or wrongly scaled prediction can keep high.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True values.
+    y_pred : array-like of shape (n_samples,)
+        Predicted values.
+
+    Returns
+    -------
+    score : float
+        The coefficient, NaN where the true values do not vary.
+    """
+    y_true = _np.asarray(y_true, dtype=float).ravel()
+    y_pred = _np.asarray(y_pred, dtype=float).ravel()
+    spread = _np.sum((y_true - _np.mean(y_true)) ** 2)
+    if spread == 0:
+        return float("nan")
+    return float(1 - _np.sum((y_pred - y_true) ** 2) / spread)
+
+
 def crps(y_true: _types.ArrayLike, y_pred: _types.ArrayLike) -> float:
     """
     Continuous ranked probability score, from samples. Lower is better.

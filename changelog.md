@@ -1,3 +1,15 @@
+## version 0.10.8
+* **`metrics.r_squared`**, the coefficient of determination: one less the
+squared error over the true values' spread about their mean, as
+scikit-learn's `r2_score` takes it -- negative for a prediction worse than
+that mean, and not the squared correlation, which a biased or wrongly
+scaled prediction keeps high. NaN where the true values do not vary.
+`cross_validate` and `score_measurements` report it as a column after
+`bias`, of the measurement samples' mean, per fold and pooled; the truth's
+spread is carried as a mean and a sum of squares about it, pooled by Chan's
+rule, so batches and folds give the r-squared of every measurement at once
+(to 1e-9 at mine coordinates, `test_cross_validation.py`).
+
 ## version 0.10.7
 * **One rule over the noise and the jitter together** -- where a mixing
 warping meets a latent jitter, the noise integral takes one scrambled Sobol

@@ -315,7 +315,7 @@ def test_the_scores_do_not_depend_on_the_batch_size(walker_cv, monkeypatch):
     _, narrow = geoml.models.cross_validate(
         model, iterations=5, n_sim=8, n_nodes=8)
 
-    columns = ["rmse", "mae", "bias", "crps", "goodness", "n"]
+    columns = ["rmse", "mae", "bias", "r_squared", "crps", "goodness", "n"]
     np.testing.assert_allclose(
         wide[columns].to_numpy(dtype=float),
         narrow[columns].to_numpy(dtype=float), rtol=1e-12, atol=0.0)
@@ -334,6 +334,7 @@ def _scores_by_hand(model, walker, rows):
     return dict(n=int(keep.sum()), rmse=geoml.metrics.rmse(truth, point),
                 mae=np.mean(np.abs(point - truth)),
                 bias=np.mean(point - truth),
+                r_squared=geoml.metrics.r_squared(truth, point),
                 crps=geoml.metrics.crps(truth, draw))
 
 
@@ -349,8 +350,9 @@ def test_the_scores_are_those_of_the_whole_samples(walker_cv, where):
     argument = {None: None, "mask": rows, "name": "scored"}[where]
     scores = geoml.models.score_measurements(model, walker, n_sim=4,
                                              n_nodes=8, where=argument)
-    assert list(scores.columns) == ["n", "rmse", "mae", "bias", "crps",
-                                    "goodness", "variable", "component"]
+    assert list(scores.columns) == ["n", "rmse", "mae", "bias", "r_squared",
+                                    "crps", "goodness", "variable",
+                                    "component"]
     row = scores.iloc[0]
     assert len(scores) == 1 and row["variable"] == "V"
     for key, value in _scores_by_hand(model, walker, rows).items():
@@ -366,7 +368,7 @@ def test_the_streamed_scores_do_not_depend_on_the_batch_size(
     monkeypatch.setattr(model.options, "prediction_batch_size", 37)
     narrow = geoml.models.score_measurements(model, walker, n_sim=4,
                                              n_nodes=8)
-    columns = ["rmse", "mae", "bias", "crps", "goodness", "n"]
+    columns = ["rmse", "mae", "bias", "r_squared", "crps", "goodness", "n"]
     np.testing.assert_allclose(wide[columns].to_numpy(dtype=float),
                                narrow[columns].to_numpy(dtype=float),
                                rtol=1e-12, atol=0.0)
@@ -674,3 +676,27 @@ def test_conformalize_names_the_missing_column(walker_cv):
     _, _, oof, _ = walker_cv
     with pytest.raises(ValueError, match="no metadata column"):
         geoml.models.conformalize(oof, "V", component="nope")
+
+
+@pytest.mark.parametrize("offset", [0.0, 2.8e6])
+def test_r_squared_pools_batches_and_folds_exactly(offset):
+    """The truth's spread is pooled by Chan's rule, so batches of any size
+    and folds merged into the pooled row give the r-squared of all the
+    measurements at once -- at mine coordinates too, where a raw sum of
+    squares would have lost its digits."""
+    rng = np.random.default_rng(6)
+    truth = offset + rng.normal(size=500)
+    draw = truth[:, None] + rng.normal(scale=0.4, size=[500, 6])
+    point = draw.mean(axis=1)
+
+    pooled = geoml.models._fresh_scores()
+    for start, stop in [(0, 7), (7, 180), (180, 181), (181, 500)]:
+        fold = geoml.models._fresh_scores()
+        for a, b in [(start, (start + stop) // 2), ((start + stop) // 2, stop)]:
+            if b > a:
+                geoml.models._accumulate(fold, truth[a:b], draw[a:b])
+        geoml.models._merge(pooled, fold)
+    scores = geoml.models._scores_from(pooled)
+    np.testing.assert_allclose(
+        scores["r_squared"], geoml.metrics.r_squared(truth, point),
+        rtol=1e-9)

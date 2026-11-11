@@ -5108,7 +5108,9 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         `"all"`. The columns: `n`, the held-out measurements scored;
         `rmse`, `mae` and `bias` of the mean of the measurement samples
         against them, the bias being that mean minus the measurement;
-        `crps`, from the samples; `goodness`, of the samples' interval
+        `r_squared`, that mean's coefficient of determination against
+        them (:func:`geoml.metrics.r_squared`, the pooled row's against
+        every fold's measurements together); `crps`, from the samples; `goodness`, of the samples' interval
         coverage; `variable`; `component`, the variable's own name for a
         scalar one; and `fold`, the fold's label.
 
@@ -5320,7 +5322,8 @@ def score_measurements(model: VGPNetwork, data: "_data._SpatialData",
     pandas.DataFrame
         One row per scored component: `n` (the measurements scored),
         `rmse`, `mae`, `bias` (the samples' mean minus the measurement),
-        `crps`, `goodness`, `variable` and `component`.
+        `r_squared` (that mean's coefficient of determination), `crps`,
+        `goodness`, `variable` and `component`.
 
     See Also
     --------
@@ -5334,8 +5337,8 @@ def score_measurements(model: VGPNetwork, data: "_data._SpatialData",
     measured = _np.any([has.any(axis=1) for _, has, _ in truths.values()]
                        or [_np.zeros(data.n_data, dtype=bool)], axis=0)
     mask = measured if mask is None else mask & measured
-    columns = ["n", "rmse", "mae", "bias", "crps", "goodness", "variable",
-               "component"]
+    columns = ["n", "rmse", "mae", "bias", "r_squared", "crps", "goodness",
+               "variable", "component"]
     if not mask.any():
         return _pd.DataFrame(columns=columns)
     acc = {}
@@ -5363,10 +5366,25 @@ def _fresh_scores():
     Sufficient statistics rather than the scores themselves, so that a fold
     read in batches and a pooling read fold by fold are the same arithmetic:
     sums and a count, never a mean of means, which would weight a short
-    batch like a long one.
+    batch like a long one. The truth's spread, which `r_squared` divides
+    by, is carried as its mean and the sum of squares about it
+    (`truth_mean`, `truth_m2`) and pooled by Chan's rule, a raw sum of
+    squares losing its digits to cancellation where the values are large.
     """
     return {"n": 0, "sse": 0.0, "sae": 0.0, "se": 0.0, "crps": 0.0,
+            "truth_mean": 0.0, "truth_m2": 0.0,
             "observed": None, "nominal": None}
+
+
+def _pool_spread(a, n, mean, m2):
+    """Fold `n` values of mean `mean` and squares about it `m2` into the
+    truth's spread `a` holds, before `a["n"]` counts them."""
+    total = a["n"] + n
+    if total == 0:
+        return
+    delta = mean - a["truth_mean"]
+    a["truth_m2"] += m2 + delta ** 2 * a["n"] * n / total
+    a["truth_mean"] += delta * n / total
 
 
 def _accumulate(a, truth, draw):
@@ -5375,6 +5393,8 @@ def _accumulate(a, truth, draw):
     n = int(truth.size)
     nominal, observed = _metrics.coverage(truth, draw)
 
+    mean = float(truth.mean())
+    _pool_spread(a, n, mean, float(((truth - mean) ** 2).sum()))
     a["n"] += n
     a["sse"] += float(((point - truth) ** 2).sum())
     a["sae"] += float(_np.abs(point - truth).sum())
@@ -5387,6 +5407,7 @@ def _accumulate(a, truth, draw):
 
 def _merge(into, other):
     """Fold one accumulator into another -- a fold into the pooled row."""
+    _pool_spread(into, other["n"], other["truth_mean"], other["truth_m2"])
     for key in ("n", "sse", "sae", "se", "crps"):
         into[key] += other[key]
     into["nominal"] = other["nominal"]
@@ -5402,6 +5423,9 @@ def _scores_from(a):
         "rmse": float(_np.sqrt(a["sse"] / n)),
         "mae": a["sae"] / n,
         "bias": a["se"] / n,
+        # as `metrics.r_squared`, NaN where the measurements do not vary
+        "r_squared": 1 - a["sse"] / a["truth_m2"] if a["truth_m2"] > 0
+        else float("nan"),
         "crps": a["crps"] / n,
         "goodness": _metrics.goodness(a["nominal"], a["observed"] / n),
     }
