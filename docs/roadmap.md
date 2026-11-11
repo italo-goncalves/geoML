@@ -3023,10 +3023,27 @@ one process, are 13 s of it in a worker whatever the pool's size. And the
 NumPy stages share the memory channels: the cut and the paint take 5 s
 each on two workers and 13.5 and 14 on eight.
 
-**What is left**, none of it measured: Manifold on several threads in a
-worker (a pool started before the process first uses Manifold, or spawned
-workers handed their realizations through shared memory), which would
-help at two to four workers; the body `_clip_to_box` already holds handed
+**Manifold on several threads in a worker, measured and not built**
+(2026-11-11). A child forked after its parent has used Manifold runs it on
+one core: three rounds of building two Assen shells as bodies and taking
+their intersection and difference, 5.44 s against 1.59 in the parent. A
+child forked before the parent's first use, a spawned one and a forkserver
+one all take 1.6 s on thirteen cores. What that would buy a set was
+measured with independent processes, each contouring realizations in
+itself with Manifold threaded, pinned to its own cores and BLAS held to
+one thread: four of them give 7.4 s a realization where four forked
+workers give 9.8, and eight give 6.5 where eight forked workers give 7.6
+-- 32% and 17%, the comparison and the cut to the box falling from 8.1
+and 9.7 s of a task to 2.0 and 5.1 at four. Getting it needs workers that
+are not forked from the caller: a forkserver pool, each worker handed the
+block geometry, the limits and the prediction's shells as arrays once and
+its realization's draws with each task, and pinned to its share of the
+cores so Manifold's threads do not pile up. It changes how a worker comes
+by its state (inherited today, sent then). **Not to be built** (the
+user's decision, 2026-11-11): do not propose it again without a new
+reason.
+
+**What is left**, none of it measured: the body `_clip_to_box` already holds handed
 to `_against` and to the limits, which each build it again from the mesh;
 a cut level's corner table built from the level before, since every level
 renumbers every block; both edge counts off one sort in `edge_defects`;

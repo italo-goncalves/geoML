@@ -78,7 +78,7 @@ computed in; pass `"float64"` to keep one precision everywhere. Realizations are
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.7.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.8.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -319,7 +319,9 @@ in the catalogue.
   above the noise floor (a block the model is merely unsure about is left
   whole, however its mean wobbles across a cut-off) -- predict what the
   split made. `MeshSet` contours a column for the prediction and every
-  realization at once, with volumes measured as it goes.
+  realization at once, with volumes measured as it goes; a limit given as
+  `(other_set, key)` cuts each realization by that set's body of the same
+  realization.
 
 ### 1.5 Theory → code
 
