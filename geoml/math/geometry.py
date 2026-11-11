@@ -298,6 +298,58 @@ def weld(points, triangles, precision=6):
     return keys[first], index[_np.asarray(triangles)]
 
 
+def _surviving_faces(welded):
+    """Which rows of a welded triangulation bound something: the faces
+    with three distinct corners and no twin, as `drop_degenerate_faces`
+    explains."""
+
+    distinct = ((welded[:, 0] != welded[:, 1])
+                & (welded[:, 1] != welded[:, 2])
+                & (welded[:, 0] != welded[:, 2]))
+    # collinear faces -- three distinct corners on one line -- are NOT
+    # dropped, and the restraint is measured: on a real 1.2M-triangle
+    # indicator contour they are structural in their tens of thousands,
+    # and dropping them tore 46 902 edges open while fixing nothing
+    rows = _np.flatnonzero(distinct)
+    good = welded[distinct]
+    if len(good) == 0:
+        return rows
+
+    first, inverse, counts = _row_groups(_np.sort(good, axis=1))
+    if int(counts.max()) == 1:
+        # no face has a twin, so every face with three corners stays:
+        # what follows would sort every edge to find that out
+        return rows
+
+    span = int(good.max()) + 1
+    edges = _np.sort(_np.stack(
+        [good[:, [0, 1]], good[:, [1, 2]], good[:, [2, 0]]]), axis=-1)
+    keys = edges[..., 0].astype(_np.int64) * span + edges[..., 1]
+
+    keep = counts[inverse] == 1
+    waiting = _np.flatnonzero(counts > 1)
+    for _ in range(len(waiting) + 1):
+        seen, times = _np.unique(keys[:, keep].ravel(), return_counts=True)
+        open_keys = seen[times == 1]
+        if len(open_keys) == 0 or len(waiting) == 0:
+            break
+        touches = _np.isin(keys[:, first[waiting]], open_keys).any(axis=0)
+        if not touches.any():
+            break
+        keep[first[waiting[touches]]] = True
+        waiting = waiting[~touches]
+
+    return rows[keep]
+
+
+def _welded_without_degenerate_faces(points, triangles, precision=6):
+    """`weld` of what `drop_degenerate_faces` leaves, from the one welding
+    the two would each make."""
+    distinct, welded = weld(points, _np.asarray(triangles), precision)
+    return distinct, welded[_surviving_faces(welded)]
+
+
+
 def drop_degenerate_faces(points, triangles, precision=6):
     """
     Removes the faces of a triangulation that bound nothing.
@@ -362,40 +414,7 @@ def drop_degenerate_faces(points, triangles, precision=6):
     """
     triangles = _np.asarray(triangles)
     _, welded = weld(points, triangles, precision)
-
-    distinct = ((welded[:, 0] != welded[:, 1])
-                & (welded[:, 1] != welded[:, 2])
-                & (welded[:, 0] != welded[:, 2]))
-    # collinear faces -- three distinct corners on one line -- are NOT
-    # dropped, and the restraint is measured: on a real 1.2M-triangle
-    # indicator contour they are structural in their tens of thousands,
-    # and dropping them tore 46 902 edges open while fixing nothing
-    rows = _np.flatnonzero(distinct)
-    good = welded[distinct]
-    if len(good) == 0:
-        return points, triangles[rows]
-
-    first, inverse, counts = _row_groups(_np.sort(good, axis=1))
-
-    span = int(good.max()) + 1
-    edges = _np.sort(_np.stack(
-        [good[:, [0, 1]], good[:, [1, 2]], good[:, [2, 0]]]), axis=-1)
-    keys = edges[..., 0].astype(_np.int64) * span + edges[..., 1]
-
-    keep = counts[inverse] == 1
-    waiting = _np.flatnonzero(counts > 1)
-    for _ in range(len(waiting) + 1):
-        seen, times = _np.unique(keys[:, keep].ravel(), return_counts=True)
-        open_keys = seen[times == 1]
-        if len(open_keys) == 0 or len(waiting) == 0:
-            break
-        touches = _np.isin(keys[:, first[waiting]], open_keys).any(axis=0)
-        if not touches.any():
-            break
-        keep[first[waiting[touches]]] = True
-        waiting = waiting[~touches]
-
-    return points, triangles[rows[keep]]
+    return points, triangles[_surviving_faces(welded)]
 
 
 def split_touching_edges(points, triangles, precision=6):

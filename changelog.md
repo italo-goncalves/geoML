@@ -96,10 +96,19 @@ the sets 54 and 76 s, and on Tom v6 (1 740 025 blocks) zinc at 5% from
 23.5 to 9.7 s. `simplify` is VTK's decimation and did not move. The 45
 meshes those runs make, and Tom's two, have the same vertices and
 triangles before and after (`docs/benchmarks/mesh_profile.py`, labels
-`head`, `flat` and `marks`). On eight workers a realization of the grade
-set goes from 12.4 to 9.1 s where one process goes from 45.7 to 19.6: one
-process saturates this machine's memory channels, which the roadmap
-records with what is left.
+`head`, `flat`, `marks` and `keys32`). A third round holds the corner
+keys in 32 bits where the table is taken, skips the twin-face search of
+`drop_degenerate_faces` where no face has a twin, and welds once in the
+cut to the box: the contour 3.5 s (14.7), the sets 49 and 69 s. On eight
+workers a realization of the grade set goes from 12.4 to 7.6 s where one
+process goes from 45.7 to about 19: one process saturates this machine's
+memory channels, and a forked worker runs Manifold on one thread, which
+the roadmap records with what is left.
+* A realization's `gained` and `lost` volumes against the prediction's
+shell are read from the one body the two share (`meshsets._against`),
+each volume less the shared one, where both differences were taken: the
+same numbers to rounding, never below zero, at half the booleans -- 7.6 to
+4.8 s of a worker's task on the Assen grade set.
 * The pyright list is clean again: two diagnostics in `models.py` from
 0.10.x (a class attribute read off the wrong base, an optional subscripted)
 are closed. The one in `warping.py` the roadmap carried was gone already.

@@ -1308,9 +1308,8 @@ def _clip_to_box(points, triangles, low, high):
     as a body even with its touching edges split.
     """
     shift = _np.round(_np.asarray(low, dtype=float))
-    points, triangles = _gmt.drop_degenerate_faces(
+    points, triangles = _gmt._welded_without_degenerate_faces(
         _np.asarray(points, dtype=float) - shift, triangles)
-    points, triangles = _gmt.weld(points, triangles)
     # a contour faces up its field's gradient, so a region kept below the
     # level comes wound inside out, which Manifold would take as said
     if _gmt.signed_volume(points, triangles) < 0:

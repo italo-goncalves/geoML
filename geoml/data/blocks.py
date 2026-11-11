@@ -603,16 +603,19 @@ def _ghost_values(parent_values, value, keep_above):
     return _np.where(kept, 2.0 * value - parent_values, parent_values)
 
 
-def _corner_keys(origin, size, span):
+def _corner_keys(origin, size, span, dtype: type = _np.int64):
     """Each block's eight corners as integer keys of the lattice points they
-    fall on, z-major, `span` points along each axis."""
-    keys = _np.empty((len(origin), 8), dtype=_np.int64)
+    fall on, z-major, `span` points along each axis. In `dtype`, which the
+    caller answers for holding every key."""
+    keys = _np.empty((len(origin), 8), dtype=dtype)
     # the first corner's key, and what a block's size adds to it along each
     # axis: the key of `origin + corner * size` written out, so no corner
     # is ever held as coordinates
-    first = (origin[:, 2] * span[1] + origin[:, 1]) * span[0] + origin[:, 0]
-    along = (size[:, 0], size[:, 1] * span[0],
-             size[:, 2] * (span[0] * span[1]))
+    first = ((origin[:, 2] * span[1] + origin[:, 1]) * span[0]
+             + origin[:, 0]).astype(dtype, copy=False)
+    along = (size[:, 0].astype(dtype, copy=False),
+             (size[:, 1] * span[0]).astype(dtype, copy=False),
+             (size[:, 2] * (span[0] * span[1])).astype(dtype, copy=False))
     for j, corner in enumerate(_gmt.HEX_CORNERS):
         keys[:, j] = first
         for axis in range(3):
@@ -651,29 +654,34 @@ def _lattice_corners(origin, size, span):
     origin = _np.asarray(origin, dtype=_np.int64)
     size = _np.asarray(size, dtype=_np.int64)
     span = _np.asarray(span, dtype=_np.int64)
-    keys = _corner_keys(origin, size, span)
-    rank = _np.int32 if keys.size < 2 ** 31 else _np.int64
-    if keys.size == 0:
+    count = 8 * len(origin)
+    rank = _np.int32 if count < 2 ** 31 else _np.int64
+    if count == 0:
         return _np.zeros(0, dtype=_np.int64), _np.zeros((0, 8), dtype=rank)
-    flat = keys.ravel()
     # Where the lattice is small beside the keys, no sort at all: a table
     # over its points, marked where a corner falls and then numbered, is
-    # read back at every key. Taken where the table is no larger than
-    # what the sort would hold, or is small in itself and not too
-    # sparse to be worth scanning;
-    # measured 3.6 times as fast on the 49 million keys of an Assen
-    # contour's finest level (`docs/benchmarks/mesh_profile.py`).
+    # read back at every key. Taken where the table is no larger than what
+    # the sort would hold, or is small in itself and not too sparse to be
+    # worth scanning; measured 3.6 times as fast on the 49 million keys of
+    # an Assen contour's finest level (`docs/benchmarks/mesh_profile.py`).
+    # The keys are then only ever places in the table, and are held in 32
+    # bits wherever the lattice has fewer points than that counts.
     points = int(span[0]) * int(span[1]) * int(span[2])
     table_bytes = points * _np.dtype(rank).itemsize
-    fits = table_bytes <= _SORT_BYTES * flat.size or (
-        table_bytes <= _TABLE_BYTES
-        and points <= _TABLE_POINTS * flat.size)
-    if fits and int(flat.min()) >= 0 and int(flat.max()) < points:
+    fits = table_bytes <= _SORT_BYTES * count or (
+        table_bytes <= _TABLE_BYTES and points <= _TABLE_POINTS * count)
+    if fits and int(origin.min()) >= 0 and bool(
+            _np.all((origin + size).max(axis=0) < span)):
+        flat = _corner_keys(
+            origin, size, span,
+            _np.int32 if points < 2 ** 31 else _np.int64).ravel()
         table = _np.zeros(points, dtype=rank)
         table[flat] = 1
         distinct = _np.flatnonzero(table)
         table[distinct] = _np.arange(len(distinct), dtype=rank)
         return distinct, table[flat].reshape(-1, 8)
+    keys = _corner_keys(origin, size, span)
+    flat = keys.ravel()
     # a stable sort: the blocks come in runs along the lattice, which it
     # merges where the default sorts from nothing (measured 1.6 times
     # faster on keys in no order at all, and the answer does not depend on

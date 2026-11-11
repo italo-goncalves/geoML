@@ -3004,15 +3004,36 @@ and keeping freed memory in the process (`mallopt`) removes that alone
 (1.34 to 0.86 s) and nothing under eight. So more workers buy little past
 two or three, and what would help a pool is moving fewer bytes.
 
-**What is left**, none of it measured: the corner tables in 32-bit keys
-where the lattice allows, and a cut level's table built from the level
-before, since every level renumbers every block; both edge counts off one
-sort in `edge_defects`; `drop_degenerate_faces` taking the weld its
-callers make again (four welds a contour); the paint's slabs filled where
-the surface can be, the rest left at a constant on the right side; the
-default pool sized to bandwidth and not to memory alone; reading only the
-realizations asked for (`_read_realizations` reads every column of a
-band).
+**A third round** (2026-11-11, meshes still identical): the corner keys in
+32 bits where the table of marks is taken and the lattice has fewer points
+than that counts, the twin-face search of `drop_degenerate_faces` skipped
+where no face has a twin, and `_clip_to_box` welding once: a contour 3.5 s
+(14.7 at supersample 1), the sets 49 and 69 s. And one change to a
+measure, not to a mesh: `_against` reads what a realization's shell gains
+and loses on the prediction's from the one body they share, where it took
+both differences -- the same numbers to rounding.
+
+**Workers, measured again** (`mesh_set_workers.py`, label `round3w`, and
+`keys32w` before the `_against` change): 13.9 s a realization on two
+workers, 9.8 on four, 7.6 on eight, against 19 or so in one process. A
+task takes 27 s in a pool of two and 56 s in a pool of eight. Two things
+bound it. In a forked worker Manifold runs on one thread, so the cut to
+the box and the comparison with the prediction's shell, 5 s of a task in
+one process, are 13 s of it in a worker whatever the pool's size. And the
+NumPy stages share the memory channels: the cut and the paint take 5 s
+each on two workers and 13.5 and 14 on eight.
+
+**What is left**, none of it measured: Manifold on several threads in a
+worker (a pool started before the process first uses Manifold, or spawned
+workers handed their realizations through shared memory), which would
+help at two to four workers; the body `_clip_to_box` already holds handed
+to `_against` and to the limits, which each build it again from the mesh;
+a cut level's corner table built from the level before, since every level
+renumbers every block; both edge counts off one sort in `edge_defects`;
+the paint's slabs filled where the surface can be, the rest left at a
+constant on the right side; the default pool sized to bandwidth and not
+to memory alone; reading only the realizations asked for
+(`_read_realizations` reads every column of a band).
 
 ---
 

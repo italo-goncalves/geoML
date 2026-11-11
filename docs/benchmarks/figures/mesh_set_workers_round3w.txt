@@ -1,0 +1,14 @@
+label round3w, geoML from /mnt/c/Users/Ítalo/OneDrive/Python/Pacotes/geoML-claude, BLAS threads in the workers: as they come
+908237 blocks, 32 CPUs, FeO_total at [0.6, 0.7, 0.8, 0.85], realizations 0-7
+the prediction's shells alone: 13 s
+
+== 2 workers: 111 s past the prediction, 13.9 s a realization
+  reading the realizations 0.7 s; the pool 111 s, of it the parent writing 3.9 s
+  a task in its worker: 27.1 s (25.5-28.7), 27.5 s of CPU, 1.01 cores, up to 32 threads, 115 MB sent back
+  its stages, mean s: against 4.8, classify 1.4, clip 8.0, cut 5.0, measure 0.5, paint 5.0
+
+== 8 workers: 61 s past the prediction, 7.6 s a realization
+  reading the realizations 0.7 s; the pool 60 s, of it the parent writing 4.5 s
+  a task in its worker: 55.9 s (54.7-57.2), 56.5 s of CPU, 1.01 cores, up to 32 threads, 115 MB sent back
+  its stages, mean s: against 5.9, classify 2.2, clip 12.8, cut 13.5, measure 0.8, paint 14.1
+done

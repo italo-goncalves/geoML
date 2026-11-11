@@ -478,14 +478,21 @@ def _exclusive(meshes, order, shift):
 
 def _against(mesh, reference, shift):
     """How much of `mesh` lies outside `reference`, and how much of
-    `reference` lies outside `mesh`."""
+    `reference` lies outside `mesh`.
+
+    From the one body the two share: each one's volume less the shared
+    volume is what it holds alone, which is what the two differences
+    measured, to rounding, at half the booleans -- and in a forked worker
+    Manifold runs on one thread, where the pair was a quarter of a
+    realization's task."""
     body = _manifold(mesh, shift)
     if body is None:
         return 0.0, _volume(reference)
     if reference is None:
         return _volume(body), 0.0
-    return float((body - reference).volume()), \
-        float((reference - body).volume())
+    shared = _volume(body ^ reference)
+    alone = _volume(body) - shared, _volume(reference) - shared
+    return max(0.0, alone[0]), max(0.0, alone[1])
 
 
 def _pieces(mesh):
