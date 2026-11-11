@@ -68,8 +68,8 @@ each name the entry's text. `test_every_parameter_offered_has_a_doc` holds
 it, for classes, functions and containers' methods; internal classes are
 not offered and are left out. `warping.Identity`'s docstring said it is
 what a likelihood uses when given no warping, which is `ZScore`.
-* **Mesh operations 1.6 to 2.8 times as fast, every mesh the same to the
-bit** (the roadmap's "Faster mesh operations", first round). Profiled on
+* **Mesh operations 2 to 2.8 times as fast, every mesh the same to the
+bit** (the roadmap's "Faster mesh operations"). Profiled on
 the Assen model, 36 to 52% of a contour, a boolean, a `split` and a mesh
 set was NumPy sorting. `weld`, `drop_degenerate_faces` and the separation
 of a Manifold answer's touching vertices group their rows by a radix sort
@@ -87,9 +87,19 @@ shells of 520k and 620k triangles): a contour 9.2 to 5.3 s, 37.6 to 21.1
 at supersample 1; intersection, difference and union 1.2, 1.7 and 2.4 s
 to 0.5, 0.7 and 1.1; `split` 1.4 to 0.5 s; a mesh set of four cut-offs
 with two realizations 129 to 74 s, of the six rocks 159 to 101 s, in one
-process. `simplify` is VTK's decimation and did not move. The 45 meshes
-those runs make have the same vertices and triangles before and after
-(`docs/benchmarks/mesh_profile.py`, labels `head` and `flat`).
+process. A second round numbers the corner table through a table of
+marks over the lattice where that is no larger than the sort's own
+arrays, or under 768 MB and 16 lattice points a key, counts the blocks at
+a corner once for all of a realization's columns, and marks a crossed
+block from a byte a corner: the contour 3.7 s (16.2 at supersample 1),
+the sets 54 and 76 s, and on Tom v6 (1 740 025 blocks) zinc at 5% from
+23.5 to 9.7 s. `simplify` is VTK's decimation and did not move. The 45
+meshes those runs make, and Tom's two, have the same vertices and
+triangles before and after (`docs/benchmarks/mesh_profile.py`, labels
+`head`, `flat` and `marks`). On eight workers a realization of the grade
+set goes from 12.4 to 9.1 s where one process goes from 45.7 to 19.6: one
+process saturates this machine's memory channels, which the roadmap
+records with what is left.
 * The pyright list is clean again: two diagnostics in `models.py` from
 0.10.x (a class attribute read off the wrong base, an optional subscripted)
 are closed. The one in `warping.py` the roadmap carried was gone already.

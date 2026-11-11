@@ -450,7 +450,8 @@ def test_the_names_a_model_settles_are_the_same_on_every_build():
             list(leaves), options=_options())
         return [node.name for node in model._nodes()]
 
-    assert names(_same_points_twice(train, n_rock, n_el))         == names(_same_points_twice(train, n_rock, n_el))
+    assert names(_same_points_twice(train, n_rock, n_el)) \
+        == names(_same_points_twice(train, n_rock, n_el))
 
     _, rock, metal = _two_leaves(train, n_rock, n_el)
     before = [rock.name, metal.name]

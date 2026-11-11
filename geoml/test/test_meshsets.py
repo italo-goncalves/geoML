@@ -1302,7 +1302,8 @@ def test_a_body_the_other_set_could_not_make_fails_its_realization(paired):
         cut = MeshSet(blocks, "g", cutoffs=[20.0],
                       limits={"core": (broken, 40.0)}, workers=1,
                       store=str(folder / "broken.zarr"))
-    assert [(f["realization"], f["key"]) for f in cut.failures]         == [(3, 20.0)]
+    assert [(f["realization"], f["key"]) for f in cut.failures] \
+        == [(3, 20.0)]
     assert "could not be made in realization 3" in cut.failures[0]["error"]
     assert np.isnan(cut._measured()["volume"][3, 0])
     assert np.isfinite(cut._measured()["volume"][[0, 1, 2, 4], 0]).all()

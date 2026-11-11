@@ -200,7 +200,8 @@ def _same(a, b, rows=slice(None)):
             import pandas as pd
             pd.testing.assert_frame_equal(a[key].iloc[rows], b[key].iloc[rows])
         else:
-            assert np.array_equal(a[key][rows], b[key][rows], equal_nan=True), key
+            assert np.array_equal(a[key][rows], b[key][rows],
+                                  equal_nan=True), key
 
 
 def test_emptied_locations_are_unpredicted_and_fill_again_to_the_bit(trained):

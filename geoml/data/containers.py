@@ -657,7 +657,8 @@ class _SpatialData(_TreeNode):
                     "no variable named %r to empty; found %s"
                     % (name, ", ".join(sorted(self.variables)) or "none"))
         mask = self._where_mask(where)
-        rows = _np.arange(self.n_data) if mask is None             else _np.flatnonzero(mask)
+        rows = _np.arange(self.n_data) if mask is None \
+            else _np.flatnonzero(mask)
         for name in names:
             self.variables[name]._clear_predictions(rows)
         return self

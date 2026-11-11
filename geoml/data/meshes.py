@@ -253,7 +253,9 @@ class Mesh3D(_PointBased):
         # `mesh3d` has asked them already to choose the class, and leaves
         # the answer here
         counted = self.__dict__.pop("_edge_defects", None)
-        open_count, reversed_count = _gmt.edge_defects(points, triangles)             if counted is None else counted
+        if counted is None:
+            counted = _gmt.edge_defects(points, triangles)
+        open_count, reversed_count = counted
         self.closed = open_count == 0
         self.consistent = reversed_count == 0
         self._signed_volume = _gmt.signed_volume(points, triangles)
@@ -1476,7 +1478,8 @@ def mesh3d(points, triangles, normals):
     # the edges are counted once, here, and the class built on the counts:
     # asked again by the constructor, a mesh was welded three times over
     defects = _gmt.edge_defects(points, triangles)
-    kind = Surface3D if defects[0] > 0         else Mesh3D if defects[1] > 0 else Solid3D
+    kind = Surface3D if defects[0] > 0 \
+        else Mesh3D if defects[1] > 0 else Solid3D
     mesh = kind.__new__(kind)
     mesh.__dict__["_edge_defects"] = defects
     mesh.__init__(points, triangles, normals)

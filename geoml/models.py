@@ -1618,7 +1618,8 @@ class VGPNetwork(_GPModel):
                         "Matern52 or RationalQuadratic"
                         % (name, type(kernel).__name__))
                 elif self._full_variance() and node._READS_CHAIN \
-                        and getattr(node, "_CONDITIONED_SECOND_MOMENT", False) \
+                        and getattr(node, "_CONDITIONED_SECOND_MOMENT",
+                                    False) \
                         and any(isinstance(p, (network._GPNode,
                                                network.GPWalk))
                                 for p in node.get_unique_parents()):

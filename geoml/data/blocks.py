@@ -621,6 +621,15 @@ def _corner_keys(origin, size, span):
     return keys
 
 
+# what sorting the corner keys holds at once, in bytes a key: the keys, the
+# order, the sorted copy and each key's rank
+_SORT_BYTES = 28
+# the largest table of marks taken past that, and the most lattice points
+# a key it may hold: a contour's later levels hold more than this anyway
+_TABLE_BYTES = 768 * 2 ** 20
+_TABLE_POINTS = 16
+
+
 def _lattice_corners(origin, size, span):
     """The distinct lattice points the blocks' corners fall on, and each
     block's eight corners as indices into them.
@@ -647,6 +656,24 @@ def _lattice_corners(origin, size, span):
     if keys.size == 0:
         return _np.zeros(0, dtype=_np.int64), _np.zeros((0, 8), dtype=rank)
     flat = keys.ravel()
+    # Where the lattice is small beside the keys, no sort at all: a table
+    # over its points, marked where a corner falls and then numbered, is
+    # read back at every key. Taken where the table is no larger than
+    # what the sort would hold, or is small in itself and not too
+    # sparse to be worth scanning;
+    # measured 3.6 times as fast on the 49 million keys of an Assen
+    # contour's finest level (`docs/benchmarks/mesh_profile.py`).
+    points = int(span[0]) * int(span[1]) * int(span[2])
+    table_bytes = points * _np.dtype(rank).itemsize
+    fits = table_bytes <= _SORT_BYTES * flat.size or (
+        table_bytes <= _TABLE_BYTES
+        and points <= _TABLE_POINTS * flat.size)
+    if fits and int(flat.min()) >= 0 and int(flat.max()) < points:
+        table = _np.zeros(points, dtype=rank)
+        table[flat] = 1
+        distinct = _np.flatnonzero(table)
+        table[distinct] = _np.arange(len(distinct), dtype=rank)
+        return distinct, table[flat].reshape(-1, 8)
     # a stable sort: the blocks come in runs along the lattice, which it
     # merges where the default sorts from nothing (measured 1.6 times
     # faster on keys in no order at all, and the answer does not depend on
@@ -917,7 +944,9 @@ def _painted_contour(origin, size, step, values, corner, value, label,
                                  + rise[None, :]).ravel()
                         keep = (level >= z_start) & (level <= z_stop)
                         at = at[keep]
-                        filled = filled[:, keep]
+                        for m in range(n_fields):
+                            slab[m][at] = filled[m][keep]
+                        continue
                     for m in range(n_fields):
                         slab[m][at] = filled[m]
 
@@ -2383,16 +2412,24 @@ class BlockSet3D(PointData):
         return BlockSet3D._corner_means(corners, values)[corners]
 
     @staticmethod
-    def _corner_means(corners, values):
-        """`_at_corners` once per corner point rather than per block."""
+    def _corner_means(corners, values, count=None):
+        """`_at_corners` once per corner point rather than per block.
+        `count` is how many blocks meet at each corner, where the caller
+        has it already: it is the same for every column that holds a
+        value in every block."""
         known = _np.isfinite(values)
         length = int(corners.max()) + 1
+        if known.all():
+            # no copy of the corners to leave the valueless blocks out
+            at, weights = corners.ravel(), values
+        else:
+            at, weights, count = corners[known].ravel(), values[known], None
         # bincount rather than `np.add.at`: the same sums, several times
         # faster -- add.at goes through the buffered-ufunc machinery
-        total = _np.bincount(corners[known].ravel(),
-                             weights=_np.repeat(values[known], 8),
+        total = _np.bincount(at, weights=_np.repeat(weights, 8),
                              minlength=length)
-        count = _np.bincount(corners[known].ravel(), minlength=length)
+        if count is None:
+            count = _np.bincount(at, minlength=length)
         return _np.divide(total, count, out=_np.full(length, _np.nan),
                           where=count > 0)
 
@@ -2456,20 +2493,24 @@ class BlockSet3D(PointData):
         for level in range(self.max_levels + int(supersample)):
             corners = self._base_corners(unit) if level == 0 \
                 else self._shared_corners(origin, size, shape)
+            # several columns share the count of blocks at each corner
+            count = None if columns == 1 else _np.bincount(
+                corners.ravel(), minlength=int(corners.max()) + 1)
             means = _np.stack(
                 [self._corner_means(corners, values) if values.ndim == 1
-                 else self._corner_means(corners, values[:, k])
+                 else self._corner_means(corners, values[:, k], count)
                  for k in range(columns)], axis=1)
+            del count
             decided = means if fields is None else _np.asarray(fields(means))
             marked = _np.zeros(len(origin), dtype=bool)
             for field in decided.T:
-                at_corner = field[corners]
-                # a corner with no value must not decide anything either
-                # way -- `fmin` and `fmax` pass over a NaN, and an all-NaN
-                # row compares false, without an n x 8 copy each
-                marked |= (_np.fmin.reduce(at_corner, axis=1) < value) \
-                    & (_np.fmax.reduce(at_corner, axis=1) > value)
-                del at_corner
+                # a block is crossed where some corner reads below the
+                # level and some above: each corner's side as two bits,
+                # gathered a byte a corner where the values were eight
+                side = (field < value).astype(_np.uint8)
+                side |= (field > value).astype(_np.uint8) << 1
+                marked |= _np.bitwise_or.reduce(side[corners], axis=1) == 3
+                del side
             near = _gmt.grow(corners, marked, margin)
             near &= _np.all(size >= ratio, axis=1)
             # a block holding no value has nothing to hand down: whole, the

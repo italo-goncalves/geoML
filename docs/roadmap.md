@@ -2976,26 +2976,43 @@ order of difficulty:
 
 ## 8. Optimizations
 
-**M — Faster mesh operations** (requested 2026-11-11; a first round the
-same day, 0.10.8). Profiled on the Assen model and its shells
+**M — Faster mesh operations** (requested 2026-11-11; two rounds the same
+day, 0.10.8). Profiled on the Assen model and its shells and on Tom v6
 (`docs/benchmarks/mesh_profile.py`, one operation at a time under
-cProfile): 36 to 52% of a contour, a boolean, a `split` and a mesh set was
-NumPy sorting -- `np.unique(axis=0)` in `weld`, the corner table's
-argsort, and a mesh's edges counted three times over where it is built --
-and 7.5 s of a 12.9 s paint was the fills' points held as three
-coordinates each. With those gone, every mesh identical to the bit (45
-digests): a contour 9.2 to 5.3 s (37.6 to 21.1 at supersample 1), the
-booleans 2.2 to 2.4 times as fast, `split` 2.8, a grade set of four
-cut-offs and two realizations 129 to 74 s, a rock set 159 to 101 s.
-`simplify` did not move: it is VTK's decimation (79% of a call at a tight
-budget). **What is left, on the rock set's profile after the round**, is
-flat: the corner table's sort 13%, `_corner_means` 8%, the paint's own
-arithmetic 10%, the cut's 7%, `_clip_to_box` 12%. Not yet profiled: Tom
-v6, and a set on several workers, where memory bandwidth was the ceiling
-(2026-09-14) and a leaner task may raise it. Candidates, none measured:
-both edge counts off one sort in `edge_defects`; the corner table of a
-cut level built from the level before; `drop_degenerate_faces` taking
-`_clip_to_box`'s weld instead of making its own.
+cProfile, then line by line): 36 to 52% of a contour, a boolean, a `split`
+and a mesh set was NumPy sorting -- `np.unique(axis=0)` in `weld`, the
+corner table's argsort, and a mesh's edges counted three times over where
+it is built -- and 7.5 s of a 12.9 s paint was the fills' points held as
+three coordinates each. With those gone, the corner table numbered through
+a table of marks where the lattice allows, and the cut marking its blocks
+a byte a corner, every mesh is identical to the bit (45 digests on Assen,
+2 on Tom): in one process, a contour 9.2 to 3.7 s (37.6 to 16.2 at
+supersample 1; Tom v6's zinc at 5%, 23.5 to 9.7 s), the booleans 2.2 to
+2.4 times as fast, `split` 2.8, a grade set of four cut-offs and two
+realizations 129 to 54 s, a rock set 159 to 76 s. `simplify` did not move:
+it is VTK's decimation (79% of a call at a tight budget).
+
+**On workers the gain is smaller, and the reason is the machine**
+(`mesh_set_workers.py`, labels `head8` and `marks8`): a realization of the
+grade set takes 45.7 to 19.6 s in one process, but 12.4 to 9.1 s a
+realization on eight workers, where each task runs 68 s against 19 alone.
+Eight processes streaming through memory they already hold take eight
+times as long as one (0.45 to 3.55 s for the same work each): one process
+saturates the two memory channels. A fresh 400 MB temporary also costs
+three times a reused one in a lone process, the kernel zeroing its pages,
+and keeping freed memory in the process (`mallopt`) removes that alone
+(1.34 to 0.86 s) and nothing under eight. So more workers buy little past
+two or three, and what would help a pool is moving fewer bytes.
+
+**What is left**, none of it measured: the corner tables in 32-bit keys
+where the lattice allows, and a cut level's table built from the level
+before, since every level renumbers every block; both edge counts off one
+sort in `edge_defects`; `drop_degenerate_faces` taking the weld its
+callers make again (four welds a contour); the paint's slabs filled where
+the surface can be, the rest left at a constant on the right side; the
+default pool sized to bandwidth and not to memory alone; reading only the
+realizations asked for (`_read_realizations` reads every column of a
+band).
 
 ---
 
