@@ -1,0 +1,303 @@
+geoML 0.10.7 from /home/italo/gm_head
+opened 908237 blocks in 1.0 s
+
+== contour FeO_total at 0.7, supersample 0: 9.2 s
+   cumulative, geoML's functions
+      9.21 s  99.6%       1  geoml/data/blocks.py:2402 get_contour
+      9.18 s  99.2%       1  geoml/data/blocks.py:2510 _contour_values
+      3.81 s  41.2%       4  geoml/data/blocks.py:563 _lattice_corners
+      3.40 s  36.8%       1  geoml/data/blocks.py:2290 _cut_to_contour
+      2.77 s  30.0%       1  geoml/data/blocks.py:649 _painted_contour
+      2.45 s  26.5%       3  geoml/data/blocks.py:2243 _shared_corners
+      1.74 s  18.8%       1  geoml/data/meshes.py:1286 _clip_to_box
+      1.33 s  14.3%       2  geoml/math/geometry.py:231 drop_degenerate_faces
+      1.03 s  11.2%       6  geoml/math/geometry.py:200 weld
+      0.96 s  10.4%       1  geoml/data/blocks.py:2685 _surface_of
+      0.66 s   7.1%       4  geoml/data/blocks.py:553 _corner_keys
+      0.61 s   6.6%       1  geoml/data/meshes.py:1442 mesh3d
+      0.57 s   6.2%       1  geoml/data/blocks.py:2249 _base_corners
+      0.33 s   3.6%       2  geoml/math/geometry.py:484 _edge_counts
+   own time, any function
+      4.14 s  44.8%      14  <method 'argsort' of 'numpy.ndarray' objects>
+      1.22 s  13.2%       1  geoml/data/blocks.py:649 _painted_contour
+      0.66 s   7.1%       4  geoml/data/blocks.py:553 _corner_keys
+      0.47 s   5.1%      12  <method 'sort' of 'numpy.ndarray' objects>
+      0.39 s   4.2%       4  geoml/data/blocks.py:563 _lattice_corners
+      0.39 s   4.2%     100  <method 'reduce' of 'numpy.ufunc' objects>
+      0.29 s   3.1%       1  geoml/data/meshes.py:1305 body_of
+      0.27 s   2.9%       1  geoml/data/blocks.py:2290 _cut_to_contour
+      0.27 s   2.9%       1  geoml/data/blocks.py:474 _ghost_shell
+      0.26 s   2.8%       3  geoml/data/blocks.py:2276 _corner_means
+      0.12 s   1.3%      16  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.08 s   0.9%       1  geoml/data/meshes.py:1286 _clip_to_box
+      0.05 s   0.6%       3  <method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkAlgorithm' objects>
+      0.05 s   0.6%       2  geoml/math/geometry.py:231 drop_degenerate_faces
+   Solid3D, 385164 triangles, digest 1e4c62cf7093
+
+== contour FeO_total at 0.7, supersample 1: 37.6 s
+   cumulative, geoML's functions
+     37.62 s 100.0%       1  geoml/data/blocks.py:2402 get_contour
+     37.56 s  99.8%       1  geoml/data/blocks.py:2510 _contour_values
+     14.46 s  38.4%       1  geoml/data/blocks.py:649 _painted_contour
+     11.41 s  30.3%       5  geoml/data/blocks.py:563 _lattice_corners
+      9.47 s  25.2%       1  geoml/data/blocks.py:2290 _cut_to_contour
+      8.15 s  21.7%       1  geoml/data/meshes.py:1286 _clip_to_box
+      6.93 s  18.4%       4  geoml/data/blocks.py:2243 _shared_corners
+      6.17 s  16.4%       2  geoml/math/geometry.py:231 drop_degenerate_faces
+      4.78 s  12.7%       6  geoml/math/geometry.py:200 weld
+      4.40 s  11.7%       1  geoml/data/blocks.py:2685 _surface_of
+      2.81 s   7.5%       1  geoml/data/meshes.py:1442 mesh3d
+      2.13 s   5.7%       5  geoml/data/blocks.py:553 _corner_keys
+      1.51 s   4.0%       2  geoml/math/geometry.py:484 _edge_counts
+      1.30 s   3.4%       1  geoml/data/meshes.py:936 __init__
+   own time, any function
+     14.63 s  38.9%      15  <method 'argsort' of 'numpy.ndarray' objects>
+      9.17 s  24.4%       1  geoml/data/blocks.py:649 _painted_contour
+      2.13 s   5.7%       5  geoml/data/blocks.py:553 _corner_keys
+      2.05 s   5.4%      12  <method 'sort' of 'numpy.ndarray' objects>
+      1.26 s   3.3%       1  geoml/data/meshes.py:1305 body_of
+      1.11 s   3.0%     181  <method 'reduce' of 'numpy.ufunc' objects>
+      1.11 s   2.9%       5  geoml/data/blocks.py:563 _lattice_corners
+      0.84 s   2.2%       1  geoml/data/blocks.py:474 _ghost_shell
+      0.79 s   2.1%       1  geoml/data/blocks.py:2290 _cut_to_contour
+      0.79 s   2.1%      16  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.66 s   1.8%       4  geoml/data/blocks.py:2276 _corner_means
+      0.31 s   0.8%      17  <method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkAlgorithm' objects>
+      0.28 s   0.7%       1  geoml/data/meshes.py:1286 _clip_to_box
+      0.24 s   0.6%       2  geoml/math/geometry.py:679 signed_volume
+   Solid3D, 1561878 triangles, digest 88b5b47877e0
+opened Hematite (620126 triangles) and Uncertainty (522308) in 1.0 s
+
+== Uncertainty intersection Hematite: 1.2 s
+   cumulative, geoML's functions
+      1.17 s 100.0%       1  geoml/data/meshes.py:968 intersection
+      1.17 s 100.0%       1  geoml/data/meshes.py:986 _combine
+      1.17 s 100.0%       1  geoml/data/meshes.py:1002 _resolved
+      0.61 s  52.1%       5  geoml/math/geometry.py:200 weld
+      0.61 s  51.8%       1  geoml/data/meshes.py:1231 _from_manifold
+      0.56 s  48.2%       2  geoml/data/meshes.py:1211 _to_manifold
+      0.52 s  44.5%       1  geoml/data/meshes.py:1442 mesh3d
+      0.29 s  24.5%       2  geoml/math/geometry.py:484 _edge_counts
+      0.23 s  19.9%       1  geoml/data/meshes.py:936 __init__
+      0.23 s  19.9%       1  geoml/data/meshes.py:199 __init__
+      0.20 s  17.3%       4  geoml/math/geometry.py:473 _counts_of
+      0.19 s  16.0%       1  geoml/math/geometry.py:490 edge_defects
+      0.16 s  13.6%       1  geoml/math/geometry.py:528 open_edges
+      0.13 s  10.9%       1  geoml/math/geometry.py:555 reversed_edges
+   own time, any function
+      0.57 s  48.4%       5  <method 'argsort' of 'numpy.ndarray' objects>
+      0.22 s  19.1%       2  geoml/data/meshes.py:1211 _to_manifold
+      0.18 s  15.1%       6  <method 'sort' of 'numpy.ndarray' objects>
+      0.06 s   5.2%       1  geoml/data/meshes.py:1231 _from_manifold
+      0.04 s   3.1%       9  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.02 s   1.4%      21  <method 'reduce' of 'numpy.ufunc' objects>
+      0.02 s   1.4%       1  geoml/math/geometry.py:163 vertex_normals
+      0.01 s   1.0%       1  geoml/math/geometry.py:582 area
+      0.01 s   0.9%       4  geoml/math/geometry.py:473 _counts_of
+      0.01 s   0.7%       3  numpy/_core/numeric.py:1567 cross
+      0.01 s   0.7%       1  geoml/math/geometry.py:679 signed_volume
+      0.01 s   0.6%       9  <method 'flatten' of 'numpy.ndarray' objects>
+      0.01 s   0.6%      10  <method 'astype' of 'numpy.ndarray' objects>
+      0.00 s   0.4%       5  geoml/math/geometry.py:200 weld
+   Solid3D, 331032 triangles, digest 6448cd6bd29e volume 903692.7
+
+== Uncertainty difference Hematite: 1.7 s
+   cumulative, geoML's functions
+      1.69 s 100.0%       1  geoml/data/meshes.py:975 difference
+      1.69 s 100.0%       1  geoml/data/meshes.py:986 _combine
+      1.69 s  99.7%       1  geoml/data/meshes.py:1002 _resolved
+      1.13 s  66.9%       1  geoml/data/meshes.py:1231 _from_manifold
+      0.97 s  57.2%       1  geoml/data/meshes.py:1442 mesh3d
+      0.80 s  47.3%       5  geoml/math/geometry.py:200 weld
+      0.55 s  32.7%       2  geoml/data/meshes.py:1211 _to_manifold
+      0.51 s  29.9%       2  geoml/math/geometry.py:484 _edge_counts
+      0.46 s  27.1%       1  geoml/data/meshes.py:936 __init__
+      0.46 s  27.1%       1  geoml/data/meshes.py:199 __init__
+      0.41 s  24.1%       4  geoml/math/geometry.py:473 _counts_of
+      0.37 s  21.7%       1  geoml/math/geometry.py:490 edge_defects
+      0.27 s  15.8%       1  geoml/math/geometry.py:528 open_edges
+      0.24 s  14.3%       1  geoml/math/geometry.py:555 reversed_edges
+   own time, any function
+      0.74 s  43.7%       5  <method 'argsort' of 'numpy.ndarray' objects>
+      0.32 s  18.9%       6  <method 'sort' of 'numpy.ndarray' objects>
+      0.21 s  12.6%       2  geoml/data/meshes.py:1211 _to_manifold
+      0.10 s   5.8%       1  geoml/data/meshes.py:1231 _from_manifold
+      0.06 s   3.8%       9  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.04 s   2.1%       1  geoml/math/geometry.py:163 vertex_normals
+      0.03 s   1.9%       4  geoml/math/geometry.py:473 _counts_of
+      0.03 s   1.6%       3  numpy/_core/numeric.py:1567 cross
+      0.03 s   1.6%      10  <method 'astype' of 'numpy.ndarray' objects>
+      0.03 s   1.6%      21  <method 'reduce' of 'numpy.ufunc' objects>
+      0.02 s   1.3%       1  geoml/math/geometry.py:582 area
+      0.02 s   0.9%       2  <method 'copy' of 'numpy.ndarray' objects>
+      0.01 s   0.8%       1  geoml/math/geometry.py:679 signed_volume
+      0.01 s   0.7%       4  <method 'nonzero' of 'numpy.ndarray' objects>
+   Solid3D, 565216 triangles, digest c4601e4c90c3 volume 1645589.4
+
+== Uncertainty union Hematite: 2.4 s
+   cumulative, geoML's functions
+      2.40 s 100.0%       1  geoml/data/meshes.py:959 union
+      2.40 s 100.0%       1  geoml/data/meshes.py:986 _combine
+      2.38 s  99.4%       1  geoml/data/meshes.py:1002 _resolved
+      1.80 s  75.1%       1  geoml/data/meshes.py:1231 _from_manifold
+      1.54 s  64.3%       1  geoml/data/meshes.py:1442 mesh3d
+      1.08 s  45.1%       5  geoml/math/geometry.py:200 weld
+      0.79 s  33.0%       2  geoml/math/geometry.py:484 _edge_counts
+      0.74 s  31.1%       1  geoml/data/meshes.py:936 __init__
+      0.74 s  31.1%       1  geoml/data/meshes.py:199 __init__
+      0.65 s  27.0%       4  geoml/math/geometry.py:473 _counts_of
+      0.60 s  25.0%       1  geoml/math/geometry.py:490 edge_defects
+      0.58 s  24.3%       2  geoml/data/meshes.py:1211 _to_manifold
+      0.42 s  17.4%       1  geoml/math/geometry.py:528 open_edges
+      0.38 s  15.8%       1  geoml/math/geometry.py:555 reversed_edges
+   own time, any function
+      1.00 s  41.7%       5  <method 'argsort' of 'numpy.ndarray' objects>
+      0.49 s  20.6%       6  <method 'sort' of 'numpy.ndarray' objects>
+      0.24 s  10.0%       2  geoml/data/meshes.py:1211 _to_manifold
+      0.17 s   6.9%       1  geoml/data/meshes.py:1231 _from_manifold
+      0.10 s   4.1%       9  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.07 s   2.8%       4  geoml/math/geometry.py:473 _counts_of
+      0.05 s   2.2%       1  geoml/math/geometry.py:163 vertex_normals
+      0.04 s   1.8%      10  <method 'astype' of 'numpy.ndarray' objects>
+      0.04 s   1.7%      21  <method 'reduce' of 'numpy.ufunc' objects>
+      0.04 s   1.5%       3  numpy/_core/numeric.py:1567 cross
+      0.04 s   1.5%       1  geoml/math/geometry.py:582 area
+      0.02 s   1.0%       1  geoml/math/geometry.py:679 signed_volume
+      0.02 s   0.7%       4  <method 'nonzero' of 'numpy.ndarray' objects>
+      0.02 s   0.7%       9  <method 'flatten' of 'numpy.ndarray' objects>
+   Solid3D, 852926 triangles, digest d8629f127cd5 volume 4109604.6
+
+== simplify Uncertainty to 1.00 m: 6.3 s
+   cumulative, geoML's functions
+      7.48 s 118.3%       3  geoml/data/meshes.py:1179 __exit__
+      6.33 s 100.0%       1  geoml/data/meshes.py:348 simplify
+      1.92 s  30.3%       1  geoml/data/meshes.py:432 cut_at
+      1.24 s  19.6%       2  geoml/data/meshes.py:410 deviation_of
+      1.22 s  19.3%       2  geoml/data/meshes.py:448 rebuilt
+      1.22 s  19.3%       2  geoml/data/meshes.py:1068 _rebuilt_as
+      0.63 s   9.9%       2  geoml/data/meshes.py:936 __init__
+      0.54 s   8.5%       2  geoml/math/geometry.py:231 drop_degenerate_faces
+      0.45 s   7.1%       5  geoml/math/geometry.py:200 weld
+      0.39 s   6.2%       2  geoml/data/meshes.py:199 __init__
+      0.32 s   5.0%       2  geoml/math/geometry.py:490 edge_defects
+      0.26 s   4.1%       5  geoml/math/geometry.py:473 _counts_of
+      0.24 s   3.7%       1  geoml/math/geometry.py:528 open_edges
+      0.24 s   3.7%       1  geoml/math/geometry.py:484 _edge_counts
+   own time, any function
+      1.91 s  30.1%       1  <method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkAlgorithm' objects>
+      1.27 s  20.1%      48  <built-in method posix.fork>
+      0.71 s  11.3%       5  <method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkStreamingDemandDrivenPipeline' objects>
+      0.61 s   9.6%       9  <method 'argsort' of 'numpy.ndarray' objects>
+      0.33 s   5.2%      16  <method 'sort' of 'numpy.ndarray' objects>
+      0.29 s   4.7%     400  <method 'poll' of 'select.poll' objects>
+      0.28 s   4.4%    5538  <built-in method posix.waitpid>
+      0.14 s   2.1%     320  <built-in method posix.write>
+      0.08 s   1.3%       9  pyvista/_deprecate_positional_args.py:200 inner_f
+      0.08 s   1.2%    4608  /home/italo/miniconda3/envs/geoml/lib/python3.12/multiprocessing/process.py:224 exitcode
+      0.07 s   1.1%      17  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.06 s   1.0%     354  <built-in method posix.read>
+      0.05 s   0.8%      48  <method 'reduce' of 'numpy.ufunc' objects>
+      0.04 s   0.7%       2  <built-in method numpy._core._multiarray_umath._unique_hash>
+   Solid3D, 48072 triangles, digest 5f2c98b6bf03
+
+== simplify Uncertainty to 0.25 m: 9.4 s
+   cumulative, geoML's functions
+      9.39 s 100.0%       1  geoml/data/meshes.py:348 simplify
+      9.32 s  99.2%       1  geoml/data/meshes.py:1179 __exit__
+      7.17 s  76.4%       4  geoml/data/meshes.py:432 cut_at
+      0.01 s   0.1%       1  geoml/data/meshes.py:247 _polydata
+      0.00 s   0.0%       5  geoml/data/meshes.py:410 deviation_of
+      0.00 s   0.0%       5  geoml/data/meshes.py:1185 query
+      0.00 s   0.0%       1  geoml/data/meshes.py:1148 __init__
+      0.00 s   0.0%       1  geoml/data/meshes.py:67 _usable_cpus
+      0.00 s   0.0%       1  geoml/data/containers.py:798 n_data
+      0.00 s   0.0%       1  geoml/data/base.py:108 max
+      0.00 s   0.0%       1  geoml/data/meshes.py:1176 __enter__
+      0.00 s   0.0%       1  geoml/data/containers.py:794 bounding_box
+      0.00 s   0.0%       1  geoml/data/base.py:104 min
+   own time, any function
+      7.09 s  75.5%       4  <method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkAlgorithm' objects>
+      0.71 s   7.5%      11  <method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkStreamingDemandDrivenPipeline' objects>
+      0.49 s   5.2%     717  <method 'poll' of 'select.poll' objects>
+      0.40 s   4.3%      16  <built-in method posix.fork>
+      0.14 s   1.5%    5835  <built-in method posix.waitpid>
+      0.13 s   1.3%    5696  /home/italo/miniconda3/envs/geoml/lib/python3.12/multiprocessing/process.py:224 exitcode
+      0.10 s   1.0%     345  <built-in method posix.write>
+      0.09 s   1.0%      21  pyvista/_deprecate_positional_args.py:200 inner_f
+      0.04 s   0.5%       1  <built-in method numpy._core._multiarray_umath._unique_hash>
+      0.04 s   0.4%      10  <method 'reduce' of 'numpy.ufunc' objects>
+      0.02 s   0.2%     185  <method 'dump' of '_pickle.Pickler' objects>
+      0.01 s   0.2%     686  <method 'write' of '_io.BytesIO' objects>
+      0.01 s   0.1%       7  <method 'ExportLegacyFormat' of 'vtkmodules.vtkCommonDataModel.vtkCellArray' objects>
+      0.01 s   0.1%       1  <method 'ImportLegacyFormat' of 'vtkmodules.vtkCommonDataModel.vtkCellArray' objects>
+   Solid3D, 522308 triangles, digest c703b8f8f9c9
+
+== split Uncertainty: 1.1 s
+   cumulative, geoML's functions
+      1.09 s 100.0%       1  geoml/data/meshes.py:255 split
+      0.82 s  74.8%       2  geoml/data/meshes.py:1442 mesh3d
+      0.58 s  52.6%       7  geoml/math/geometry.py:200 weld
+      0.44 s  40.3%       4  geoml/math/geometry.py:484 _edge_counts
+      0.38 s  34.4%       2  geoml/data/meshes.py:936 __init__
+      0.38 s  34.4%       2  geoml/data/meshes.py:199 __init__
+      0.32 s  29.1%       8  geoml/math/geometry.py:473 _counts_of
+      0.30 s  27.7%       2  geoml/math/geometry.py:490 edge_defects
+      0.23 s  21.4%       2  geoml/math/geometry.py:528 open_edges
+      0.22 s  19.8%       1  geoml/math/geometry.py:605 components
+      0.21 s  18.9%       2  geoml/math/geometry.py:555 reversed_edges
+      0.03 s   3.0%       2  geoml/math/geometry.py:582 area
+      0.03 s   2.5%       2  geoml/math/geometry.py:679 signed_volume
+      0.01 s   0.9%       2  geoml/data/base.py:153 from_array
+   own time, any function
+      0.53 s  48.8%       7  <method 'argsort' of 'numpy.ndarray' objects>
+      0.29 s  26.2%      14  <method 'sort' of 'numpy.ndarray' objects>
+      0.04 s   3.6%      17  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.04 s   3.4%       2  <built-in method numpy._core._multiarray_umath._unique_hash>
+      0.02 s   2.3%      47  <method 'reduce' of 'numpy.ufunc' objects>
+      0.02 s   1.8%       2  geoml/math/geometry.py:582 area
+      0.02 s   1.5%       1  <built-in method scipy.sparse._sparsetools.csr_sort_indices>
+      0.02 s   1.4%       8  geoml/math/geometry.py:473 _counts_of
+      0.02 s   1.4%       1  <built-in method scipy.sparse._sparsetools.coo_tocsr>
+      0.01 s   1.4%       1  geoml/math/geometry.py:605 components
+      0.01 s   1.3%       1  geoml/data/meshes.py:255 split
+      0.01 s   1.1%       2  geoml/math/geometry.py:679 signed_volume
+      0.01 s   1.0%       4  numpy/_core/numeric.py:1567 cross
+      0.01 s   0.9%      20  <method 'astype' of 'numpy.ndarray' objects>
+   2 pieces
+   Solid3D, 153264 triangles, digest 79293700e69e
+   Solid3D, 369044 triangles, digest c144f40718e3
+
+== split Hematite: 1.4 s
+   cumulative, geoML's functions
+      1.38 s 100.0%       1  geoml/data/meshes.py:255 split
+      1.06 s  76.5%       2  geoml/data/meshes.py:1442 mesh3d
+      0.75 s  54.3%       7  geoml/math/geometry.py:200 weld
+      0.58 s  41.9%       4  geoml/math/geometry.py:484 _edge_counts
+      0.48 s  34.5%       2  geoml/data/meshes.py:936 __init__
+      0.48 s  34.5%       2  geoml/data/meshes.py:199 __init__
+      0.40 s  29.1%       8  geoml/math/geometry.py:473 _counts_of
+      0.38 s  27.8%       2  geoml/math/geometry.py:490 edge_defects
+      0.31 s  22.4%       2  geoml/math/geometry.py:528 open_edges
+      0.27 s  19.6%       2  geoml/math/geometry.py:555 reversed_edges
+      0.24 s  17.6%       1  geoml/math/geometry.py:605 components
+      0.04 s   3.1%       2  geoml/math/geometry.py:582 area
+      0.03 s   2.4%       2  geoml/math/geometry.py:679 signed_volume
+      0.01 s   0.9%       2  geoml/data/base.py:153 from_array
+   own time, any function
+      0.70 s  50.6%       7  <method 'argsort' of 'numpy.ndarray' objects>
+      0.36 s  25.8%      14  <method 'sort' of 'numpy.ndarray' objects>
+      0.05 s   3.8%       2  <built-in method numpy._core._multiarray_umath._unique_hash>
+      0.05 s   3.6%      17  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      0.03 s   2.2%      47  <method 'reduce' of 'numpy.ufunc' objects>
+      0.02 s   1.7%       8  geoml/math/geometry.py:473 _counts_of
+      0.02 s   1.6%       2  geoml/math/geometry.py:582 area
+      0.02 s   1.3%       4  numpy/_core/numeric.py:1567 cross
+      0.02 s   1.3%       1  geoml/data/meshes.py:255 split
+      0.01 s   1.0%       2  geoml/math/geometry.py:679 signed_volume
+      0.01 s   1.0%       1  geoml/math/geometry.py:605 components
+      0.01 s   0.9%       1  <built-in method scipy.sparse._sparsetools.csr_sort_indices>
+      0.01 s   0.9%      20  <method 'astype' of 'numpy.ndarray' objects>
+      0.01 s   0.8%       1  <built-in method scipy.sparse._sparsetools.coo_tocsr>
+   2 pieces
+   Solid3D, 618598 triangles, digest 69f751b0a434
+   Solid3D, 1528 triangles, digest d4f6b83e83fd

@@ -173,3 +173,134 @@ def test_a_partial_prediction_fills_the_columns_in_parts(trained):
     trained.predict(parts, where=~first)
     np.testing.assert_array_equal(parts.get_metadata("pit_V"),
                                   whole.get_metadata("pit_V"))
+
+
+# --------------------------------------------------------------------------- #
+# emptying what was predicted at some locations
+# --------------------------------------------------------------------------- #
+def _everything(container):
+    """Every column the container exports, and every realization store."""
+    held = {"frame": container.as_data_frame()}
+
+    def walk(node, path):
+        for name, store in node.realization_stores():
+            held["%s/%s" % (path, name)] = np.asarray(store).copy()
+        for label, child in node.child_nodes().items():
+            walk(child, "%s/%s" % (path, label))
+
+    for name, variable in container.variables.items():
+        walk(variable, name)
+    return held
+
+
+def _same(a, b, rows=slice(None)):
+    assert set(a) == set(b)
+    for key in a:
+        if key == "frame":
+            import pandas as pd
+            pd.testing.assert_frame_equal(a[key].iloc[rows], b[key].iloc[rows])
+        else:
+            assert np.array_equal(a[key][rows], b[key][rows], equal_nan=True), key
+
+
+def test_emptied_locations_are_unpredicted_and_fill_again_to_the_bit(trained):
+    """GeoScape's item 48, and its gate: what `clear_predictions` empties
+    is what `unpredicted` names, the other locations keep every bit, and
+    predicting the emptied ones gives back what was there."""
+    grid = _grid()
+    trained.predict(grid, n_sim=4)
+    whole = _everything(grid)
+    gone = np.zeros(grid.n_data, dtype=bool)
+    gone[20:55] = True
+
+    assert grid.clear_predictions(where=gone) is grid
+    assert np.array_equal(grid.unpredicted(), gone)
+    _same(_everything(grid), whole, rows=np.flatnonzero(~gone))
+    emptied = _everything(grid)
+    assert np.all(np.isnan(emptied["V/simulations"][gone]))
+    assert np.all(np.isnan(np.asarray(
+        grid.values("V/noise_variance"), dtype=float)[gone]))
+
+    trained.predict(grid, where=grid.unpredicted())
+    _same(_everything(grid), whole)
+
+
+def test_emptying_takes_indices_a_stored_filter_and_names(trained):
+    grid = _grid()
+    trained.predict(grid, n_sim=3)
+    grid.add_metadata("west", np.asarray(grid.coordinates[:, 0] < 100))
+    grid.clear_predictions("V", where="west")
+    assert np.array_equal(grid.unpredicted(),
+                          np.asarray(grid.coordinates[:, 0] < 100))
+    grid.clear_predictions(["V"], where=[0, 99])
+    assert grid.unpredicted()[[0, 99]].all()
+    with pytest.raises(ValueError, match="no variable named 'W'"):
+        grid.clear_predictions("W")
+    grid.clear_predictions()
+    assert grid.unpredicted().all()
+
+
+def test_emptying_keeps_the_measurements_and_the_metadata(trained):
+    point, _ = geoml.datasets.walker()
+    data = point[np.arange(120)]
+    measured = np.asarray(data.values("V/measurements"), dtype=float).copy()
+    trained.predict(data, n_sim=3)
+    pit = data.get_metadata("pit_V").copy()
+    data.clear_predictions()
+
+    assert data.unpredicted().all()
+    assert np.array_equal(
+        np.asarray(data.values("V/measurements"), dtype=float), measured,
+        equal_nan=True)
+    assert np.array_equal(data.get_metadata("pit_V"), pit, equal_nan=True)
+
+
+def test_every_kind_of_variable_is_emptied_and_filled_again(tmp_path):
+    """A category's parts, a vector variable's components, their coded and
+    keyed columns and every realization store, on a container reopened from
+    its store."""
+    geoml.set_seed(1234)
+    train, held = geoml.datasets.jura()
+    n_rock = len(train.get("Rock").labels)
+    n_el = len(train.get("Elements").labels)
+    root = geoml.latent.BasicInput(
+        geoml.data.inducing.from_kmeans(train, 40, seed=0),
+        transform=geoml.transform.Isotropic(1.0))
+    model = geoml.models.VGPNetwork(
+        train, {"Rock": geoml.likelihood.CategoricalGaussianIndicator(n_rock),
+                "Elements": geoml.likelihood.MultivariateGaussian(n_el)},
+        latent_network=[geoml.latent.BasicGP(root, size=n_rock),
+                        geoml.latent.BasicGP(root, size=n_el)],
+        options=geoml.models.GPOptions(verbose=False, training_samples=8))
+    model.train_full(max_iter=3)
+    model.predict(held, n_sim=3)
+    held.to_zarr(str(tmp_path / "held.zarr"))
+    stored = type(held).open(str(tmp_path / "held.zarr"))
+    whole = _everything(stored)
+    gone = np.arange(stored.n_data) % 3 == 0
+
+    stored.clear_predictions(where=gone)
+    for name in ("Rock", "Elements"):
+        assert np.array_equal(stored.unpredicted(name), gone)
+    _same(_everything(stored), whole, rows=np.flatnonzero(~gone))
+    assert set(np.asarray(stored.get("Rock/predicted").to_numpy())[gone]) \
+        == {""}
+    assert np.array_equal(
+        np.asarray(stored.values("Rock/measurements_a")),
+        np.asarray(held.values("Rock/measurements_a")))
+
+    model.predict(stored, where=stored.unpredicted())
+    _same(_everything(stored), whole)
+
+
+def test_a_block_model_is_emptied_where_a_stored_filter_says(trained):
+    blocks = geoml.data.Blocks2D(
+        start=[10, 10], n=[8, 8], step=[20, 20], discretization=[2, 2])
+    trained.predict(blocks, n_sim=3)
+    whole = _everything(blocks)
+    blocks.add_metadata("north", np.asarray(blocks.coordinates[:, 1] > 90))
+    blocks.clear_predictions(where="north")
+    assert np.array_equal(blocks.unpredicted(),
+                          blocks.get_metadata("north").astype(bool))
+    trained.predict(blocks, where="north")
+    _same(_everything(blocks), whole)

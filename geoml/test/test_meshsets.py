@@ -884,7 +884,8 @@ def test_a_store_given_at_construction_is_the_set_s_own(radial, tmp_path):
 _DESCRIPTION = sorted([
     "close", "complete", "corners", "excluded", "failures", "format",
     "groups", "keys", "kind", "levels", "limits", "measures", "name",
-    "nudge", "numbers", "path", "provenance", "realization", "repairs",
+    "nudge", "numbers", "paired", "path", "provenance", "realization",
+    "repairs",
     "rule", "shift", "simplify", "summary", "supersample", "taken", "unit"])
 
 
@@ -1159,3 +1160,149 @@ def test_a_store_of_the_older_format_still_opens(radial, tmp_path):
     reopened = MeshSet.open(path)
     assert reopened.complete is True
     assert reopened.realization_volumes().shape[0] == len(OFFSETS)
+
+
+# --------------------------------------------------------------------------- #
+# a limit that is another set's body, realization by realization
+# --------------------------------------------------------------------------- #
+def _two_fields():
+    """The radial model with a second grade, `h`: the same field, its
+    realizations shifted the other way round, so a sphere of `h` grows
+    where the same realization's sphere of `g` shrinks."""
+    blocks = _radial()
+    field = np.asarray(blocks.variables["g"].prediction.values)
+    blocks.add_continuous_variable("h", field)
+    var = blocks.variables["h"]
+    var.prediction.values[:] = field
+    var.allocate_simulations(len(OFFSETS))
+    var.simulations[:, :] = field[:, None] + OFFSETS[None, ::-1]
+    return blocks
+
+
+@pytest.fixture(scope="module")
+def paired(tmp_path_factory):
+    """`h` at 40, a sphere of radius 10 less each realization's offset, in
+    a store of its own; and `g` at 20, radius 30 plus the offset, cut to
+    it realization by realization."""
+    folder = tmp_path_factory.mktemp("paired")
+    blocks = _two_fields()
+    core = MeshSet(blocks, "h", cutoffs=[40.0], workers=2,
+                   store=str(folder / "core.zarr"))
+    cut = MeshSet(blocks, "g", cutoffs=[20.0],
+                  limits={"core": (core, 40.0)}, workers=2,
+                  store=str(folder / "cut.zarr"))
+    return blocks, core, cut, folder
+
+
+def test_each_realization_is_cut_by_its_own_body_of_the_other_set(paired):
+    """GeoScape's item 52. Every sphere of `g` at 20 holds the same
+    realization's sphere of `h` at 40, so what is left is that sphere:
+    radius 12 where the offset is -2 and 8 where it is +2, and never the
+    prediction's 10 for all of them."""
+    blocks, core, cut, _ = paired
+    assert cut[20.0].volume == pytest.approx(core[40.0].volume, rel=1e-6)
+    volumes = []
+    for i in range(len(OFFSETS)):
+        own = core.simulations[i][40.0].volume
+        volumes.append(cut.simulations[i][20.0].volume)
+        assert volumes[i] == pytest.approx(own, rel=1e-6)
+        assert volumes[i] == pytest.approx(_sphere(10.0 - OFFSETS[i]),
+                                           rel=0.08)
+    assert volumes[0] > 1.5 * core[40.0].volume > 1.5 * 1.5 * volumes[-1]
+    assert not cut.failures
+    # what the cut took, realization by realization
+    raw = cut._measured()["raw"][:, 0]
+    np.testing.assert_allclose(cut._taken[0, :, 0], raw - np.array(volumes),
+                               rtol=1e-6)
+
+
+def test_a_paired_exclusion_takes_each_realization_s_own_body_away(paired):
+    blocks, core, _, folder = paired
+    hollow = MeshSet(blocks, "g", cutoffs=[20.0],
+                     exclude={"core": (core, 40.0)}, workers=1,
+                     store=str(folder / "hollow.zarr"))
+    for i in range(len(OFFSETS)):
+        whole = hollow._measured()["raw"][i, 0]
+        assert hollow.simulations[i][20.0].volume == pytest.approx(
+            whole - core.simulations[i][40.0].volume, rel=1e-6)
+
+
+def test_workers_and_one_process_pair_the_same_bodies(paired):
+    blocks, core, cut, folder = paired
+    alone = MeshSet(blocks, "g", cutoffs=[20.0],
+                    limits={"core": (core, 40.0)}, workers=1,
+                    store=str(folder / "alone.zarr"))
+    np.testing.assert_array_equal(alone._measured()["volume"],
+                                  cut._measured()["volume"])
+
+
+def test_a_paired_set_says_so_and_opens_with_its_pairing(paired):
+    blocks, core, cut, folder = paired
+    assert cut.provenance["paired"] == {
+        "core": {"store": os.path.abspath(str(folder / "core.zarr")),
+                 "key": 40.0}}
+    assert "each realization by its own core" in str(cut)
+    # a realization's limit is the body that cut it
+    assert cut.simulations[0].limits["core"].volume == pytest.approx(
+        core.simulations[0][40.0].volume)
+    assert cut.limits["core"].volume == pytest.approx(core[40.0].volume)
+
+    back = MeshSet.open(str(folder / "cut.zarr"))
+    assert back._paired == cut._paired
+    assert back.simulations[4].limits["core"].volume == pytest.approx(
+        core.simulations[4][40.0].volume)
+    assert back.simulations[4][20.0].volume == pytest.approx(
+        cut.simulations[4][20.0].volume)
+
+
+def test_a_pairing_is_refused_before_anything_is_contoured(paired, tmp_path,
+                                                           monkeypatch):
+    blocks, core, _, folder = paired
+
+    def never(*args, **kwargs):
+        raise AssertionError("a contour was made")
+
+    monkeypatch.setattr(msm, "_shell", never)
+    few = MeshSet.open(str(folder / "core.zarr"))
+    few._numbers = few._numbers[:2]
+    with pytest.raises(ValueError, match="holds 2 realizations, without "
+                                         "2, 3, 4 of the 5"):
+        MeshSet(blocks, "g", cutoffs=[20.0], limits={"core": (few, 40.0)})
+    with pytest.raises(KeyError):
+        MeshSet(blocks, "g", cutoffs=[20.0], limits={"core": (core, 35.0)})
+    with pytest.raises(TypeError, match=r"as \(set, key\)"):
+        MeshSet(blocks, "g", cutoffs=[20.0],
+                limits={"core": (core[40.0], 40.0)})
+    with pytest.raises(ValueError, match="one realization's set"):
+        MeshSet(blocks, "g", cutoffs=[20.0],
+                limits={"core": (core.simulations[0], 40.0)})
+    with pytest.raises(ValueError, match="would be written over"):
+        MeshSet(blocks, "g", cutoffs=[20.0], limits={"core": (core, 40.0)},
+                store=str(folder / "core.zarr"))
+
+
+def test_a_set_kept_in_a_temporary_store_cannot_be_paired():
+    blocks = _two_fields()
+    core = MeshSet(blocks, "h", cutoffs=[40.0], simulations=[0, 1],
+                   workers=1)
+    with pytest.raises(ValueError, match="build that set with `store=`"):
+        MeshSet(blocks, "g", cutoffs=[20.0], limits={"core": (core, 40.0)},
+                simulations=[0, 1])
+    # the prediction alone reads nothing from a store
+    alone = MeshSet(blocks, "g", cutoffs=[20.0],
+                    limits={"core": (core, 40.0)}, simulations=False)
+    assert alone[20.0].volume == pytest.approx(core[40.0].volume, rel=1e-6)
+
+
+def test_a_body_the_other_set_could_not_make_fails_its_realization(paired):
+    blocks, core, _, folder = paired
+    broken = MeshSet.open(str(folder / "core.zarr"))
+    broken._failures = [{"realization": 3, "key": 40.0, "error": "planted"}]
+    with pytest.warns(UserWarning, match="1 realization shell could not"):
+        cut = MeshSet(blocks, "g", cutoffs=[20.0],
+                      limits={"core": (broken, 40.0)}, workers=1,
+                      store=str(folder / "broken.zarr"))
+    assert [(f["realization"], f["key"]) for f in cut.failures]         == [(3, 20.0)]
+    assert "could not be made in realization 3" in cut.failures[0]["error"]
+    assert np.isnan(cut._measured()["volume"][3, 0])
+    assert np.isfinite(cut._measured()["volume"][[0, 1, 2, 4], 0]).all()

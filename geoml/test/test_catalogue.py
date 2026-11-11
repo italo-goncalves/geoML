@@ -933,6 +933,29 @@ def test_everything_offered_describes_itself(built):
     assert empty == []
 
 
+def test_every_parameter_offered_has_a_doc(built):
+    """A reading program shows a parameter's doc where its value is chosen.
+    Wherever an entry lists parameters -- a class, a function, a method of
+    a container -- each says what it is; internal classes are not offered."""
+    empty = []
+
+    def walk(entry, path):
+        if isinstance(entry, dict):
+            if entry.get("stability") == "internal":
+                return
+            for p in entry.get("params") or []:
+                if not p.get("doc"):
+                    empty.append("%s.%s" % (path, p["name"]))
+            for key, value in entry.items():
+                walk(value, "%s/%s" % (path, key))
+        elif isinstance(entry, list):
+            for i, value in enumerate(entry):
+                walk(value, "%s[%d]" % (path, i))
+
+    walk(built, "")
+    assert empty == []
+
+
 def test_a_description_is_not_its_summary(built):
     for name, entry in built["classes"].items():
         if entry["description"]:

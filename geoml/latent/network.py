@@ -2313,6 +2313,8 @@ class _LatentVariable(_gpr.Parametric):
         they cannot see each other, so they may repeat a name, which `get_node`
         reports if it is ever asked for one.
         """
+        # a model renumbers a generated name another of its trees repeats
+        self._generated_name = name is None
         if name is None:
             taken = {node.name for node in self._connected_nodes()}
             index = 1
@@ -3089,6 +3091,14 @@ class Stack(_Operation):
     Latent variable stacking.
 
     Consolidates a list of latent variables into a single object.
+
+    Parameters
+    ----------
+    latent_variables
+        The latent variables to join, their outputs side by side in the
+        order given. They may come from separate trees.
+    name : str
+        A name for the node. Numbered from its class when omitted.
     """
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
@@ -3139,6 +3149,14 @@ class Concatenate(Stack):
 
     Consolidates a list of latent variables into a single object. This operation requires all its parent nodes to
     be able to propagate inducing points.
+
+    Parameters
+    ----------
+    latent_variables
+        The latent variables to join, their outputs side by side in the
+        order given. All must descend from the same input.
+    name : str
+        A name for the node. Numbered from its class when omitted.
     """
     def __init__(self, *latent_variables, name=None):
         super().__init__(*latent_variables, name=name)
@@ -6199,6 +6217,16 @@ class Bias(_FunctionalLatentVariable):
     Bias
 
     Adds a deterministic constant to its input.
+
+    Parameters
+    ----------
+    parent
+        The latent variable the constant is added to.
+    scale : float
+        The largest magnitude the constant may train to: each output's bias
+        is kept within `-scale` and `scale`.
+    name : str
+        A name for the node. Numbered from its class when omitted.
     """
     def __init__(self, parent, scale=5, name=None):
         super().__init__(parent, name=name)

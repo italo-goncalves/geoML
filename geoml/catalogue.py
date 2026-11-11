@@ -166,7 +166,8 @@ CONTAINERS_LEFT_OUT = {
 NOT_PREDICTED_INTO = ("geoml.data.containers.DirectionalData",)
 # the methods a script calls on a container it has built, where the class
 # has them
-CONTAINER_METHODS = ("from_data", "assign_from_surface", "assign_from_solid")
+CONTAINER_METHODS = ("from_data", "assign_from_surface", "assign_from_solid",
+                     "clear_predictions")
 # methods one container family has, declared for its class and inherited by
 # its subclasses: a name is not enough, `Mesh3D.split` separating a mesh's
 # pieces where `BlockSet3D.split` cuts blocks
@@ -421,19 +422,22 @@ def _parameter_docs(obj):
                  and set(lines[i + 1].strip()) == {"-"}]
         if not heads:
             continue
-        name, text = None, []
+        # several names may share one entry: `range_x, range_y : float`
+        names, text = [], []
         for i in range(heads[0] + 2, len(lines)):
             line = lines[i]
             if i + 1 < len(lines) and lines[i + 1].strip() \
                     and set(lines[i + 1].strip()) == {"-"}:
                 break        # the heading of the next section
             if line and not line[0].isspace():
-                if name:
+                for name in names:
                     docs.setdefault(name, " ".join(text))
-                name, text = line.split(":")[0].strip().lstrip("*"), []
+                names = [name.strip().lstrip("*")
+                         for name in line.split(":")[0].split(",")]
+                text = []
             elif line.strip():
                 text.append(line.strip())
-        if name:
+        for name in names:
             docs.setdefault(name, " ".join(text))
     return docs
 

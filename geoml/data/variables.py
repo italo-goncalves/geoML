@@ -671,6 +671,38 @@ class _Variable(_TreeNode):
             return _np.ones(self.coordinates.n_data, dtype=bool)
         return _np.isnan(_np.asarray(column.values, dtype=float))
 
+    # the roles of `_COLUMNS` that are data rather than something predicted
+    _DATA_ROLES = ("measurement", "weight")
+
+    def _clear_predictions(self, rows, fresh=None):
+        """Puts the `rows` of every column a prediction writes back to what
+        a new variable holds there, in this node and beneath it. Driven by
+        the declarations, as `_subset_into` is, so a column added to them
+        is emptied too; the measurements and their weights are data and
+        stay.
+
+        What a new variable holds is read off one, `fresh`, built at a
+        single location: missing in most columns, but a category's
+        probability starts at zero.
+        """
+        if fresh is None:
+            fresh = type(self).from_variable(_OneLocation(), self)
+        for role in self._ZARR_ATTRS:
+            column = getattr(self, role, None)
+            if column is not None and self._COLUMNS.get(
+                    role, ("value",))[0] not in self._DATA_ROLES:
+                start = getattr(fresh, role, None)
+                _empty_rows(column.values, rows, None if start is None
+                            else _np.asarray(start.values)[0])
+        for family in self._DICT_FAMILIES:
+            for attribute in (getattr(self, family, None) or {}).values():
+                _empty_rows(attribute.values, rows)
+        for _, store in self.realization_stores():
+            _empty_rows(store, rows)
+        theirs = fresh.child_nodes()
+        for label, child in self.child_nodes().items():
+            child._clear_predictions(rows, theirs[label])
+
     # ------------------------------------------------------------------ #
     # Zarr persistence (see _SpatialData.to_zarr / _SpatialData.open)
     # ------------------------------------------------------------------ #
@@ -812,6 +844,25 @@ class _Variable(_TreeNode):
 # `_Attribute` used to be defined inside `_Variable`; the alias keeps its
 # `self._Attribute(...)` call sites working.
 _Variable._Attribute = _Attribute
+
+
+class _OneLocation(object):
+    """What a variable is built on to read the values it starts with."""
+    n_data = 1
+
+
+def _empty_rows(store, rows, missing=None, band=65536):
+    """Writes `missing` into the `rows` (indices) of a store: by default
+    NaN, or -1 in a store of codes. A band of rows at a time, so a store on
+    disk is never asked for all of them at once."""
+    if missing is None:
+        missing = _np.nan if store.dtype.kind == "f" else -1
+    for start in range(0, len(rows), band):
+        part = rows[start:start + band]
+        if len(store.shape) == 1:
+            store[part] = missing
+        else:
+            store[part, :] = missing
 
 
 class ContinuousVariable(_Variable):
@@ -1014,6 +1065,12 @@ class ContinuousVariable(_Variable):
         `refine` knows what the blocks have to be resolved against without
         being told a second time. The `proportions` and `divided` columns of
         a cut-off no longer declared are dropped.
+
+        Parameters
+        ----------
+        cutoffs
+            One grade or several, in the variable's own units. `None`
+            declares none.
         """
         self.cutoffs = None if cutoffs is None else \
             [float(c) for c in _np.atleast_1d(cutoffs)]

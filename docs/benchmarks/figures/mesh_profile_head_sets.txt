@@ -1,0 +1,96 @@
+geoML 0.10.7 from /home/italo/gm_head
+opened 908237 blocks in 1.0 s
+
+== mesh set of FeO_total, 4 cut-offs, prediction and 2 realizations: 128.9 s
+   cumulative, geoML's functions
+    119.23 s  92.5%      12  geoml/data/meshsets.py:253 _shell
+    119.22 s  92.5%      12  geoml/data/meshsets.py:229 _contoured
+    119.20 s  92.5%      12  geoml/data/blocks.py:2510 _contour_values
+     92.25 s  71.5%       3  geoml/data/meshsets.py:658 _each_realization
+     92.25 s  71.5%       2  geoml/data/meshsets.py:570 _realization_task
+     46.80 s  36.3%      37  geoml/data/blocks.py:563 _lattice_corners
+     38.12 s  29.6%      12  geoml/data/blocks.py:649 _painted_contour
+     37.83 s  29.3%      12  geoml/data/blocks.py:2290 _cut_to_contour
+     33.82 s  26.2%       1  geoml/data/meshsets.py:1163 _build
+     26.05 s  20.2%      25  geoml/data/blocks.py:2243 _shared_corners
+     21.98 s  17.0%      12  geoml/data/meshes.py:1286 _clip_to_box
+     18.78 s  14.6%      96  geoml/math/geometry.py:200 weld
+     18.51 s  14.4%      24  geoml/math/geometry.py:231 drop_degenerate_faces
+     16.78 s  13.0%      12  geoml/data/blocks.py:2685 _surface_of
+   own time, any function
+     57.56 s  44.6%     181  <method 'argsort' of 'numpy.ndarray' objects>
+     15.10 s  11.7%      12  geoml/data/blocks.py:649 _painted_contour
+      8.53 s   6.6%      37  geoml/data/blocks.py:553 _corner_keys
+      7.22 s   5.6%     144  <method 'sort' of 'numpy.ndarray' objects>
+      5.37 s   4.2%    1465  <method 'reduce' of 'numpy.ufunc' objects>
+      4.66 s   3.6%      37  geoml/data/blocks.py:563 _lattice_corners
+      3.99 s   3.1%      12  geoml/data/blocks.py:474 _ghost_shell
+      3.55 s   2.7%      12  geoml/data/blocks.py:2290 _cut_to_contour
+      3.05 s   2.4%      36  geoml/data/blocks.py:2276 _corner_means
+      3.03 s   2.3%      12  geoml/data/meshes.py:1305 body_of
+      1.96 s   1.5%     216  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      1.79 s   1.4%       8  geoml/data/meshsets.py:479 _against
+      1.27 s   1.0%      12  geoml/data/meshes.py:1211 _to_manifold
+      1.19 s   0.9%      12  geoml/data/meshes.py:1286 _clip_to_box
+
+== mesh set of the rocks, prediction and 2 realizations: 159.2 s
+   cumulative, geoML's functions
+    106.67 s  67.0%       3  geoml/data/meshsets.py:658 _each_realization
+    106.67 s  67.0%       2  geoml/data/meshsets.py:570 _realization_task
+     96.05 s  60.3%       2  geoml/data/blocks.py:2612 _contour_fields
+     53.52 s  33.6%       1  geoml/data/meshsets.py:1130 __init__
+     53.45 s  33.6%       1  geoml/data/meshsets.py:1277 _contour_realizations
+     48.75 s  30.6%       8  geoml/data/blocks.py:2290 _cut_to_contour
+     44.63 s  28.0%       1  geoml/data/meshsets.py:1163 _build
+     43.82 s  27.5%      18  geoml/data/meshsets.py:253 _shell
+     43.78 s  27.5%       6  geoml/data/meshsets.py:229 _contoured
+     43.77 s  27.5%       6  geoml/data/blocks.py:2510 _contour_values
+     37.17 s  23.4%      24  geoml/data/blocks.py:563 _lattice_corners
+     35.10 s  22.1%       8  geoml/data/blocks.py:649 _painted_contour
+     27.46 s  17.3%      18  geoml/data/blocks.py:2685 _surface_of
+     26.15 s  16.4%     144  geoml/math/geometry.py:200 weld
+   own time, any function
+     59.06 s  37.1%     220  <method 'argsort' of 'numpy.ndarray' objects>
+     14.77 s   9.3%       8  geoml/data/blocks.py:649 _painted_contour
+     12.45 s   7.8%    1858  <method 'reduce' of 'numpy.ufunc' objects>
+     10.37 s   6.5%     216  <method 'sort' of 'numpy.ndarray' objects>
+      8.17 s   5.1%      54  geoml/data/blocks.py:2276 _corner_means
+      7.07 s   4.4%       8  geoml/data/blocks.py:2290 _cut_to_contour
+      6.94 s   4.4%      24  geoml/data/blocks.py:553 _corner_keys
+      3.60 s   2.3%      18  geoml/data/meshes.py:1305 body_of
+      3.55 s   2.2%      24  geoml/data/blocks.py:563 _lattice_corners
+      3.04 s   1.9%     292  <method 'read' of '_io.BufferedReader' objects>
+      3.04 s   1.9%       8  geoml/data/blocks.py:474 _ghost_shell
+      2.63 s   1.7%     304  numpy/lib/_arraysetops_impl.py:350 _unique1d
+      2.59 s   1.6%      12  geoml/data/meshsets.py:479 _against
+      2.26 s   1.4%      18  geoml/data/meshes.py:1211 _to_manifold
+   FeO_total, prediction, 0.6: Solid3D, 377870 triangles, digest 2ef66e476e93
+   FeO_total, prediction, 0.7: Solid3D, 385164 triangles, digest 1e4c62cf7093
+   FeO_total, prediction, 0.8: Solid3D, 441280 triangles, digest 40eb0a055de7
+   FeO_total, prediction, 0.85: Solid3D, 325710 triangles, digest 53cb5412410a
+   FeO_total, realization 0, 0.6: Solid3D, 537118 triangles, digest 64b2209b4b88
+   FeO_total, realization 0, 0.7: Solid3D, 631468 triangles, digest f3b52271f656
+   FeO_total, realization 0, 0.8: Solid3D, 672658 triangles, digest 875fa8478fc9
+   FeO_total, realization 0, 0.85: Solid3D, 475102 triangles, digest 5888b16ce543
+   FeO_total, realization 1, 0.6: Solid3D, 562310 triangles, digest 0ec5fd61f75f
+   FeO_total, realization 1, 0.7: Solid3D, 714904 triangles, digest 689492491820
+   FeO_total, realization 1, 0.8: Solid3D, 720522 triangles, digest bb4252706efc
+   FeO_total, realization 1, 0.85: Solid3D, 577502 triangles, digest fa7e32c4fe3d
+   the rocks, prediction, BIF: Solid3D, 184084 triangles, digest 95e61a89db9d
+   the rocks, prediction, Calcitic Hematite: Solid3D, 530952 triangles, digest a11e4637df79
+   the rocks, prediction, Diabase: Solid3D, 360200 triangles, digest ea64743a6be8
+   the rocks, prediction, Hematite: Solid3D, 461412 triangles, digest 597046902dc4
+   the rocks, prediction, Limestone: Solid3D, 328902 triangles, digest 363a7e85b731
+   the rocks, prediction, Shale: Solid3D, 290528 triangles, digest 9d3cf0859724
+   the rocks, realization 0, BIF: Solid3D, 521952 triangles, digest d4aedf147cb7
+   the rocks, realization 0, Calcitic Hematite: Solid3D, 914490 triangles, digest 633a17252302
+   the rocks, realization 0, Diabase: Solid3D, 737224 triangles, digest 926eb5a9a528
+   the rocks, realization 0, Hematite: Solid3D, 799670 triangles, digest 3fcc3698a6c7
+   the rocks, realization 0, Limestone: Solid3D, 599504 triangles, digest fed98f2583c7
+   the rocks, realization 0, Shale: Solid3D, 620292 triangles, digest 10bde552e517
+   the rocks, realization 1, BIF: Solid3D, 604454 triangles, digest df819c29ea2b
+   the rocks, realization 1, Calcitic Hematite: Solid3D, 813320 triangles, digest 3a2f4fc73e9b
+   the rocks, realization 1, Diabase: Solid3D, 686474 triangles, digest bb8baa737cc7
+   the rocks, realization 1, Hematite: Solid3D, 749516 triangles, digest c6c9d46a043e
+   the rocks, realization 1, Limestone: Solid3D, 579310 triangles, digest 4843e42ed960
+   the rocks, realization 1, Shale: Solid3D, 659854 triangles, digest df5b04ffbf13

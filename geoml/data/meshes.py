@@ -197,6 +197,17 @@ class Mesh3D(_PointBased):
     provenance: dict
 
     def __init__(self, points, triangles, normals):
+        """
+        Parameters
+        ----------
+        points : array
+            The vertices' coordinates, one row each, in three columns.
+        triangles : array
+            The triangles, one row each: the positions in `points` of its
+            three vertices.
+        normals : array
+            A normal vector at each vertex, in three columns.
+        """
         super().__init__()
         self.provenance = {}
 
@@ -238,8 +249,11 @@ class Mesh3D(_PointBased):
 
         self.area = _gmt.area(points, triangles)
         # both counts from one welding: it is the expensive half, and every
-        # mesh is built asking both questions of the same triangulation
-        open_count, reversed_count = _gmt.edge_defects(points, triangles)
+        # mesh is built asking both questions of the same triangulation.
+        # `mesh3d` has asked them already to choose the class, and leaves
+        # the answer here
+        counted = self.__dict__.pop("_edge_defects", None)
+        open_count, reversed_count = _gmt.edge_defects(points, triangles)             if counted is None else counted
         self.closed = open_count == 0
         self.consistent = reversed_count == 0
         self._signed_volume = _gmt.signed_volume(points, triangles)
@@ -1271,10 +1285,8 @@ def _separated(points, triangles):
     belongs to, the copies stay apart through every welding. Returns
     `points` itself where nothing is kept twice.
     """
-    rounded = _np.round(points, 6)
-    _, inverse, counts = _np.unique(rounded, axis=0, return_inverse=True,
-                                    return_counts=True)
-    twice = counts[_np.ravel(inverse)] > 1
+    _, _, inverse, counts = _gmt._point_groups(points, 6)
+    twice = counts[inverse] > 1
     if not twice.any():
         return points
     moved = _np.array(points, dtype=float)
@@ -1461,11 +1473,14 @@ def mesh3d(points, triangles, normals):
     -------
     mesh : Surface3D, Solid3D or Mesh3D
     """
-    if _gmt.open_edges(points, triangles) > 0:
-        return Surface3D(points, triangles, normals)
-    if _gmt.reversed_edges(points, triangles) > 0:
-        return Mesh3D(points, triangles, normals)
-    return Solid3D(points, triangles, normals)
+    # the edges are counted once, here, and the class built on the counts:
+    # asked again by the constructor, a mesh was welded three times over
+    defects = _gmt.edge_defects(points, triangles)
+    kind = Surface3D if defects[0] > 0         else Mesh3D if defects[1] > 0 else Solid3D
+    mesh = kind.__new__(kind)
+    mesh.__dict__["_edge_defects"] = defects
+    mesh.__init__(points, triangles, normals)
+    return mesh
 
 
 def _below_sheet(surface):

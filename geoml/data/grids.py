@@ -773,6 +773,19 @@ class Grid3D(_GriddedData):
         same method that generates the rows, so the two cannot fall out of
         step. A `RotatedGrid3D` does not lie on an axis-aligned lattice and
         takes the general path.
+
+        Parameters
+        ----------
+        surface : Surface3D
+            The sheet to compare against.
+        name : str
+            Name of the metadata column holding the flag.
+        labels : tuple
+            What to call the two sides, in the order (above, below).
+        uncovered : float or "raise"
+            What to make of a location the sheet does not reach: its flag
+            is left empty, and `"raise"` refuses a surface that does not
+            cover every location.
         """
         # imported late: the mesh adapters live beside the mesh classes
         from geoml.data.meshes import (_sheet_interpolator, _check_covered,

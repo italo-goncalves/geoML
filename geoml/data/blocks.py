@@ -268,6 +268,23 @@ class Blocks1D(Grid1D):
     sub-blocks, a regular lattice inside it; the variance within the block
     is recorded as `dispersion`. What a resource is estimated on when every
     block is the same size; `BlockSet3D` is the one whose blocks are not.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first block.
+    n : array-like
+        Number of blocks along each axis.
+    step : array-like, optional
+        Size of a block along each axis. Give it or `end`.
+    end : array-like, optional
+        Centre of the last block, from which the size is worked out. Give
+        it or `step`.
+    labels : list, optional
+        Coordinate names.
+    discretization : array-like, optional
+        Sub-blocks per axis, averaged over to predict a block. One by
+        default, which predicts each block at its centre.
     """
 
 
@@ -283,6 +300,23 @@ class Blocks2D(Grid2D):
     sub-blocks, a regular lattice inside it; the variance within the block
     is recorded as `dispersion`. What a resource is estimated on when every
     block is the same size; `BlockSet3D` is the one whose blocks are not.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first block.
+    n : array-like
+        Number of blocks along each axis.
+    step : array-like, optional
+        Size of a block along each axis. Give it or `end`.
+    end : array-like, optional
+        Centre of the last block, from which the size is worked out. Give
+        it or `step`.
+    labels : list, optional
+        Coordinate names.
+    discretization : array-like, optional
+        Sub-blocks per axis, averaged over to predict a block. One by
+        default, which predicts each block at its centre.
     """
 
 
@@ -298,6 +332,23 @@ class Blocks3D(Grid3D):
     sub-blocks, a regular lattice inside it; the variance within the block
     is recorded as `dispersion`. What a resource is estimated on when every
     block is the same size; `BlockSet3D` is the one whose blocks are not.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first block.
+    n : array-like
+        Number of blocks along each axis.
+    step : array-like, optional
+        Size of a block along each axis. Give it or `end`.
+    end : array-like, optional
+        Centre of the last block, from which the size is worked out. Give
+        it or `step`.
+    labels : list, optional
+        Coordinate names.
+    discretization : array-like, optional
+        Sub-blocks per axis, averaged over to predict a block. One by
+        default, which predicts each block at its centre.
     """
     def as_pyvista(self, simulations=False, include="**"):
         """
@@ -437,6 +488,8 @@ class RotatedBlocks3D(RotatedGrid3D):
         Number of blocks along each of the model's own axes.
     step : array-like
         Size of a block along each of them.
+    end : array-like, optional
+        Not taken by a turned model: leave it out and give `step`.
     labels : list, optional
         Coordinate names.
     discretization : array-like, optional
@@ -554,9 +607,17 @@ def _corner_keys(origin, size, span):
     """Each block's eight corners as integer keys of the lattice points they
     fall on, z-major, `span` points along each axis."""
     keys = _np.empty((len(origin), 8), dtype=_np.int64)
+    # the first corner's key, and what a block's size adds to it along each
+    # axis: the key of `origin + corner * size` written out, so no corner
+    # is ever held as coordinates
+    first = (origin[:, 2] * span[1] + origin[:, 1]) * span[0] + origin[:, 0]
+    along = (size[:, 0], size[:, 1] * span[0],
+             size[:, 2] * (span[0] * span[1]))
     for j, corner in enumerate(_gmt.HEX_CORNERS):
-        at = origin + corner * size
-        keys[:, j] = (at[:, 2] * span[1] + at[:, 1]) * span[0] + at[:, 0]
+        keys[:, j] = first
+        for axis in range(3):
+            if corner[axis]:
+                keys[:, j] += along[axis]
     return keys
 
 
@@ -586,7 +647,11 @@ def _lattice_corners(origin, size, span):
     if keys.size == 0:
         return _np.zeros(0, dtype=_np.int64), _np.zeros((0, 8), dtype=rank)
     flat = keys.ravel()
-    order = _np.argsort(flat)
+    # a stable sort: the blocks come in runs along the lattice, which it
+    # merges where the default sorts from nothing (measured 1.6 times
+    # faster on keys in no order at all, and the answer does not depend on
+    # how ties fall)
+    order = _np.argsort(flat, kind="stable")
     ordered = flat[order]
     del keys, flat
     fresh = _np.empty(len(ordered), dtype=bool)
@@ -791,9 +856,9 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         value - _np.min(corner_value, axis=0, initial=value))
     far = value + (_np.sign(background - value) if closing else -1.0) * (
         100.0 * reach + gap)
-    # the fills' coordinates in 32 bits wherever the painted box allows
-    lattice = origin.astype(_np.int32) if int(span.max()) < 2 ** 31 \
-        else origin
+    # each block's first point as its place in the painted box, read z
+    # first as a slab is laid out
+    place = origin[:, 2] * plane + origin[:, 1] * int(span[0]) + origin[:, 0]
 
     verts = [[] for _ in range(n_fields)]
     faces = [[] for _ in range(n_fields)]
@@ -802,6 +867,7 @@ def _painted_contour(origin, size, step, values, corner, value, label,
         z_stop = min(z_start + thick, int(dims[2]))
         paint = _np.full((n_fields, z_stop - z_start + 1, int(span[1]),
                           int(span[0])), background, dtype=float)
+        slab = paint.reshape(n_fields, -1)
 
         for fill_rows, classes, member, fills in passes:
             for index, shape in enumerate(classes):
@@ -819,7 +885,11 @@ def _painted_contour(origin, size, step, values, corner, value, label,
                 mix = _np.prod(_np.where(_gmt.HEX_CORNERS[None, :, :] == 1,
                                          t[:, None, :], 1.0 - t[:, None, :]),
                                axis=2)
-                offsets = offsets.astype(lattice.dtype)
+                # where each point of a block sits past its first, in the
+                # slab read as one row of numbers, z first
+                steps = (offsets[:, 2] * plane + offsets[:, 1] * int(span[0])
+                         + offsets[:, 0]).astype(_np.int64)
+                rise = offsets[:, 2].astype(_np.int64)
                 # a few rows at a time: every point of every block of a
                 # size class at once -- int64 coordinates, their values,
                 # the mask and both kept copies -- was the paint's peak,
@@ -834,14 +904,22 @@ def _painted_contour(origin, size, step, values, corner, value, label,
                         reading = eight[row_in_big[part]]
                         for m in range(n_fields):
                             filled[m] = reading[:, :, m] @ mix.T
-                    points = (lattice[part, None, :]
-                              + offsets[None, :, :]).reshape(-1, 3)
+                    # written by each point's place in the slab, one
+                    # number a point: as three coordinates a point, built,
+                    # masked and gathered, this was most of the paint
+                    # (7.5 s of 12.9 on a 1.5-million-triangle contour)
+                    at = (place[part, None] - z_start * plane
+                          + steps[None, :]).ravel()
                     filled = filled.reshape(n_fields, -1)
-                    keep = ((points[:, 2] >= z_start)
-                            & (points[:, 2] <= z_stop))
-                    points = points[keep]
-                    paint[:, points[:, 2] - z_start, points[:, 1],
-                          points[:, 0]] = filled[:, keep]
+                    if _np.any(origin[part, 2] < z_start) or _np.any(
+                            origin[part, 2] + shape[2] > z_stop):
+                        level = (origin[part, 2][:, None]
+                                 + rise[None, :]).ravel()
+                        keep = (level >= z_start) & (level <= z_stop)
+                        at = at[keep]
+                        filled = filled[:, keep]
+                    for m in range(n_fields):
+                        slab[m][at] = filled[m]
 
         # the corner means last, over whatever the fills wrote: every
         # point that is any block's corner reads the welded value
@@ -1353,6 +1431,8 @@ class BlockSet3D(PointData):
         carry : bool
             Whether to bring the variables and metadata across. `False` gives
             bare geometry, for building a mesh to predict onto from scratch.
+        labels
+            Coordinate names of the new set.
         """
         mask = _np.asarray(mask)
         if mask.dtype != bool:
@@ -2075,6 +2155,23 @@ class BlockSet3D(PointData):
         sub-blocks `discretization` defines, scaled to each block's own size.
         `crossed_by` asks the same question and answers with the blocks worth
         cutting.
+
+        Parameters
+        ----------
+        surface : Surface3D
+            The sheet to compare against.
+        name : str
+            Name of the metadata column holding the flag.
+        labels : tuple
+            What to call the two sides, in the order (above, below).
+        fraction : str, optional
+            Name of a second metadata column, to hold the share of each block
+            below the sheet. Costs `prod(discretization)` queries per block.
+        uncovered : float or "raise"
+            What to make of a location the sheet does not reach: its flag
+            is left empty and its fraction is this value (`numpy.nan` for
+            `None`), and `"raise"` refuses a surface that does not
+            cover every location.
         """
         _blocks_from_surface(self, PointData.assign_from_surface, surface,
                              name, labels, fraction, uncovered)
@@ -2086,6 +2183,18 @@ class BlockSet3D(PointData):
 
         `fraction` holds the share of each block's volume inside the body, and
         `crossed_by` turns the same test into the blocks worth cutting.
+
+        Parameters
+        ----------
+        solid : Solid3D
+            The closed body to test against.
+        name : str
+            Name of the metadata column holding the whole-block flag.
+        labels : tuple
+            What to call the two sides, in the order (outside, inside).
+        fraction : str, optional
+            Name of a second metadata column, to hold the share of each block
+            inside the body. Costs `prod(discretization)` queries per block.
         """
         _blocks_from_solid(self, PointData.assign_from_solid, solid, name,
                            labels, fraction)
@@ -2721,6 +2830,25 @@ class RotatedBlockSet3D(BlockSet3D):
     assignment reads sub-block positions through `get_batched_coordinates`,
     so geometry against surfaces and solids works in world coordinates with
     nothing overridden.
+
+    Parameters
+    ----------
+    start : array-like
+        Centre of the first (coarsest) block, which the model turns about.
+    n : array-like
+        Number of blocks along each of the model's own axes, at the
+        coarsest level.
+    step : array-like
+        Size of a coarsest-level block along each of them.
+    azimuth, dip, rake : float
+        The rotation in degrees, as `RotatedGrid3D` takes it.
+    discretization : array-like
+        Sub-blocks per axis, used at every level, and so also the ratio a
+        block splits by. An axis given 1 is never refined.
+    max_levels : int
+        How many times a block may be split.
+    labels : list
+        Coordinate names.
     """
 
     def __init__(self, start, n, step, azimuth=0.0, dip=0.0, rake=0.0,
@@ -2798,6 +2926,21 @@ class RotatedBlockSet3D(BlockSet3D):
         As `RotatedGrid3D.from_data` -- the rotation fitted to the points and
         rounded to `decimals` (degrees) before the box is measured -- counting
         blocks rather than nodes.
+
+        Parameters
+        ----------
+        data
+            Any spatial object with 3-dimensional coordinates, drillholes
+            included.
+        step
+            The coarse block size, one number or one per direction.
+        margin : float or array
+            A fraction of the unrotated box's extent; see `Grid3D.from_data`.
+        decimals : int
+            Decimals for the origin and for the azimuth, dip and rake, in
+            degrees.
+        discretization, max_levels
+            As the constructor takes them.
         """
         points, azimuth, dip, rake = _fitted_rotation(data, decimals)
         mat = _gmt.rotation_matrix(azimuth, dip, rake)

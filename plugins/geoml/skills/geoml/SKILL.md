@@ -112,6 +112,9 @@ why those modules never move.
   `model.predict(grid)` fills the grid's columns. `grid.unpredicted()` names
   what no prediction reached yet, so a cancelled or partial prediction is
   finished with `model.predict(grid, where=grid.unpredicted())`.
+  `grid.clear_predictions(where=...)` empties what was predicted at some
+  locations and keeps the measurements; `grid.drop(name)` removes a
+  variable whole.
 - **Long calls report and can be cancelled.** Inside
   `with geoml.progress(callback):` training, prediction, refinement,
   cross-validation and mesh sets report each unit they finish; the callback

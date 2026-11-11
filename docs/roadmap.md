@@ -910,23 +910,6 @@ and trains under `train_svi` and `train_by_expert`. The weighted form
 may be better served by the Gaussian node of the next item, which would
 make that half of this preset unnecessary.
 
-**S — Independent trees left unnamed draw the same realizations** (found
-2026-10-30, building `TaperedGP`; measured, and open). `_set_name` numbers a node
-among the nodes connected to it, so leaves on separate roots both come out
-`BasicGP_1`, and `_node_seed` keys the draws by name: the 0.6.10 fix for
-identical normals between GP nodes does not reach across trees. Measured on two
-untrained `BasicGP` leaves on two `BasicInput` roots with the same inducing
-points, two variables, 200 realizations: the correlation between the variables'
-realizations at a location is 1.000 at every location unnamed, and 0.043 (median)
-named apart. Training the two trees apart is not measured. Moments and the bound
-are untouched; anything reading realizations jointly across such variables is
-wrong, a joint grade-tonnage or `derive` above all. GeoScape passes every node a
-name, so its Runs are not affected as long as those differ. `TaperedGP` settles
-its own names when it joins trees (`_settle_names`). The fix for
-`VGPNetwork` is the same call across the leaves, but renaming changes a saved
-model's realizations on reload, against the reproducibility contract, so it needs
-a decision: new models only, through a class default as `propagation` did.
-
 **S — Check `AdditiveGP`'s realizations** (noticed 2026-10-30, building
 `TaperedGP`; found by reading the code, not measured). `BasicGP._feature_kernel`
 returns True for it: it has no override and inherits
@@ -2366,39 +2349,6 @@ The theme is measured rather than assumed: **training does not leave the
 basin it starts in**, so where a start can be computed rather than guessed,
 it should be.
 
-**M — Inducing points by cover tree** (requested 2026-10-10; **built
-2026-10-15, 0.9.3**: `inducing.from_cover_tree(data, separation,
-transform=)`, the samples farthest first, divided into experts by
-`experts`; read against the paper since: the guarantees of its Algorithm
-12 (eq. 20, separation and spatial resolution both `separation`), but in
-O(N·M) where its breadth-first tree is O(N log N), and without its two
-optional steps -- the local averaging that places a node between samples
-when that keeps it a radius from the others, so fewer nodes are needed,
-and the Voronoi repartition that balances the tree. Either is the next
-step if the measurement below asks for it; the clustered-data
-approximation of its §3.3 is Gaussian-likelihood only. What remains is
-that measurement). Terenin,
-Burt, Artemev, Flaxman, van der Wilk, Rasmussen & Ge (2024), *Numerically
-stable sparse Gaussian processes via minimum separation using cover
-trees*, JMLR 25(26), arXiv 2210.07893 (in the Paper Library; read from the
-abstract so far): conditions on the inducing points -- a minimum
-separation -- under which the sparse computations are numerically stable,
-an automated way to place points satisfying them in low dimension through
-a modified cover tree, and an alternative sparse approximation for a
-Gaussian likelihood trading a little accuracy for more stability. Where it
-meets geoML: the inducing helpers place points by k-means, lattice or hull
-(`from_kmeans`/`from_grid`/`from_hull`) and nothing guarantees a
-separation beyond `combine(tolerance=)`'s greedy merge; stability rests on
-the 1e-6 jitter and the whitened root of 0.6.9, which was needed because a
-fault displacement put restored inducing points 0.03 apart and the
-Cholesky went NaN in graph mode. The candidate is an
-`inducing.from_cover_tree(data, separation)` beside the others, the
-separation in the input's transformed units, and a measurement of what the
-guarantee costs or buys against `from_kmeans` at equal counts (held-out
-scores, the conditioning of `K`, training stability) on Walker, Jura and a
-3-D case. Read the paper in full first; the alternative approximation is
-Gaussian-likelihood only, which most of geoML's models are not.
-
 **M — Gradient-free training experiments.** Closed against three conditions
 in 2026-09-03 (see below) and kept here only for the part that survived: the
 memory saving is real and available today, since taking the ranges off the
@@ -2907,20 +2857,6 @@ be fixed by declaring them: `None` is load-bearing in the finished state.
 Declaring `tuple` took 33 diagnostics to 67 and was reverted. Do not repeat
 that attempt.
 
-**S — One checked file is not clean: `warping.py`** (found 2026-09-11,
-re-measured 2026-09-15). The 251 errors this item used to list are gone.
-Pyright 1.1.411 over the `[tool.pyright]` list, run from the repository
-root in the `geoml` conda env, now reports **one**:
-`warping.py:1294` (1281 before 0.8.0's docstrings) `"NoReturn" is not
-iterable`, on
-`_ContinuousFlow.initialize`'s `x, _ = self.forward(x)` -- the base class's
-`forward` raises, so the checker reads the call as returning nothing and
-the unpacking as impossible. It is on HEAD's version of the file too, so it
-predates the 0.7.0 work. Whatever moved (a library version, the checker's
-own inference) took `data/drillhole.py`'s 107, `data/geoh5.py`'s 36 and the
-rest with it, which is why the old census is not worth chasing. Declare the
-return on the flow base, or annotate the call; either is minutes.
-
 ---
 
 ## 6. What GeoScape needs
@@ -2930,9 +2866,22 @@ that build and run them, and reads what they leave behind. Its repository
 (`C:\Repos\geoscape`, same owner) keeps what it needs from geoML in
 `docs/geoml-requirements.md`, revised 2026-09-15 against 0.6.11, and the
 catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
-is that list's numbering, and M3 and M4 its milestones. **Every item on it
-is met** (the last, item 47, in 0.9.13; the changelog has each one); what
-is left below is the paperwork outside the code.
+is that list's numbering, and M3 and M4 its milestones. The changelog has
+each item as it was met; read again on 2026-11-11 and its three open items
+built for 0.10.8, **every item on it is met**, and what is left below is
+the paperwork outside the code.
+
+Item 52 (a limit per Realization on a `MeshSet`) is
+`limits={"ore": (other_set, 0.5)}`, a pair of set and key: the other set's
+store is referred to by path and nothing is copied, so that store has to
+stay where it is. Item 51 (a doc for every parameter) is met for every
+class, container and method the catalogue offers
+(`test_every_parameter_offered_has_a_doc`); the sixteen classes it names
+as having no summary are all internal -- the Fourier nodes,
+`GradientIndicator`, the `Multivariate*` twins -- and stay undocumented:
+GeoScape is to stop listing internal entries. Item 48 is
+`clear_predictions`, under that name rather than `drop(where=)`, since
+`drop` takes the measurements with the variable.
 
 What GeoScape builds on, where a change must be flagged to it rather than
 made quietly: dotted class paths importable forever, already policy;
@@ -2941,8 +2890,14 @@ exposes nothing else; the Fourier-feature classes kept internal; **batch
 invariance**, a location's realizations independent of the call that
 computed them given the same fit, seed and count
 (`test_predicting_only_the_new_blocks_gives_the_same_answer`), which a
-per-location residual draw would break; and node names seeding the draws,
-GeoScape never renaming a node once created.
+per-location residual draw would break; node names seeding the draws,
+GeoScape never renaming a node once created (a model renumbers only a
+generated name that another of its trees repeats, never a given one); and
+**a trained argument being the parameter of its name** -- GeoScape reads
+`parameters[name].get_value()` by the constructor argument's name after
+training, to draw an `Anisotropy3D` as an ellipsoid say, so a class that
+stored such an argument under another name would be read wrong (the
+catalogue's `trainable` entries carry the name as `start`).
 
 Outside the code, from the same list: a contributor licence agreement
 before the first outside contribution is merged; and title in writing, with
@@ -3021,10 +2976,26 @@ order of difficulty:
 
 ## 8. Optimizations
 
-**M — Faster mesh operations** (requested 2026-11-11). Speed up the mesh
-work: contouring, the Manifold booleans, `simplify`, `split` and the mesh
-sets. Profile first on the Assen and Tom v6 models, then work on whatever
-takes the most time.
+**M — Faster mesh operations** (requested 2026-11-11; a first round the
+same day, 0.10.8). Profiled on the Assen model and its shells
+(`docs/benchmarks/mesh_profile.py`, one operation at a time under
+cProfile): 36 to 52% of a contour, a boolean, a `split` and a mesh set was
+NumPy sorting -- `np.unique(axis=0)` in `weld`, the corner table's
+argsort, and a mesh's edges counted three times over where it is built --
+and 7.5 s of a 12.9 s paint was the fills' points held as three
+coordinates each. With those gone, every mesh identical to the bit (45
+digests): a contour 9.2 to 5.3 s (37.6 to 21.1 at supersample 1), the
+booleans 2.2 to 2.4 times as fast, `split` 2.8, a grade set of four
+cut-offs and two realizations 129 to 74 s, a rock set 159 to 101 s.
+`simplify` did not move: it is VTK's decimation (79% of a call at a tight
+budget). **What is left, on the rock set's profile after the round**, is
+flat: the corner table's sort 13%, `_corner_means` 8%, the paint's own
+arithmetic 10%, the cut's 7%, `_clip_to_box` 12%. Not yet profiled: Tom
+v6, and a set on several workers, where memory bandwidth was the ceiling
+(2026-09-14) and a leaner task may raise it. Candidates, none measured:
+both edge counts off one sort in `edge_defects`; the corner table of a
+cut level built from the level before; `drop_degenerate_faces` taking
+`_clip_to_box`'s weld instead of making its own.
 
 ---
 

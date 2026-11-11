@@ -165,6 +165,12 @@ class Spherical(_Kernel):
     The geostatistical classic, ``1 - 1.5 d + 0.5 d**3`` of the distance in
     ranges and zero past one range. Continuous but not differentiable at the
     origin, so the field is rough at short scale, as a grade usually is.
+
+    Parameters
+    ----------
+    epsilon : float
+        A small number added to the squared distance before its square
+        root, which keeps the gradient finite at zero distance.
     """
     def __init__(self, epsilon: float = 1e-12):
         super().__init__()
@@ -183,6 +189,12 @@ class Exponential(_Kernel):
 
     ``exp(-3 d)`` of the distance in ranges, falling to 5% at one range.
     The roughest of the kernels here: continuous, never differentiable.
+
+    Parameters
+    ----------
+    epsilon : float
+        A small number added to the squared distance before its square
+        root, which keeps the gradient finite at zero distance.
     """
     def __init__(self, epsilon: float = 1e-12):
         super().__init__()
@@ -271,6 +283,12 @@ class RationalQuadratic(_Kernel):
     of Gaussian kernels over many ranges, which gives a long tail of weak
     correlation. `scale` is trained; the larger it grows, the closer the
     kernel comes to the Gaussian.
+
+    Parameters
+    ----------
+    scale : float
+        The starting value of the shape parameter, kept between 0.001 and
+        100. A small value gives a heavier tail.
     """
     def __init__(self, scale: float = 1):
         super().__init__()
@@ -786,6 +804,12 @@ class Scale(_WrapperCovariance):
     Kernel scaling.
 
     Add a parameter allowing for non-unit variance.
+
+    Parameters
+    ----------
+    base_covariance
+        The covariance to scale. Its values are multiplied by a trained
+        amplitude.
     """
     def __init__(self, base_covariance):
         super().__init__(base_covariance)

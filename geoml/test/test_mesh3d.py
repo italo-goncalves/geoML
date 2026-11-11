@@ -423,3 +423,52 @@ def test_a_mesh_keeps_its_class_through_zarr(tmp_path, builder):
     assert np.array_equal(np.asarray(reloaded.triangles),
                           np.asarray(mesh.triangles))
     assert np.isclose(reloaded.area, mesh.area)
+
+
+# --------------------------------------------------------------------------- #
+# grouping rows without comparing them whole
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("columns, high", [(1, 5), (3, 4), (3, 70000),
+                                           (2, 2 ** 40)])
+def test_rows_are_grouped_as_unique_groups_them(columns, high):
+    """`_row_groups` stands in for `np.unique(axis=0)`: the same distinct
+    rows in the same order, each at its first appearance, the same inverse
+    and counts -- over narrow and wide ranges, negative numbers and a
+    column that does not vary."""
+    import geoml.math.geometry as gmt
+    rng = np.random.default_rng(columns + high % 97)
+    rows = rng.integers(-high, high, size=(4000, columns))
+    rows[:, -1] = 7 if columns == 3 and high == 4 else rows[:, -1]
+    rows = np.concatenate([rows, rows[::3]])[rng.permutation(4000 + 1334)]
+
+    unique, first, inverse, counts = np.unique(
+        rows, axis=0, return_index=True, return_inverse=True,
+        return_counts=True)
+    ours = gmt._row_groups(rows)
+
+    assert np.array_equal(ours[0], first)
+    assert np.array_equal(rows[ours[0]], unique)
+    assert np.array_equal(ours[1], inverse.ravel())
+    assert np.array_equal(ours[2], counts)
+
+
+def test_welding_gives_what_unique_over_the_rounded_points_gave():
+    """At mine coordinates, with places repeated, a hair apart and a zero
+    of either sign; and past the size a float holds whole, where the rows
+    are compared as they always were."""
+    import geoml.math.geometry as gmt
+    rng = np.random.default_rng(3)
+    base = rng.random((3000, 3)) * [3000, 4000, 600] + [650000, 2.8e6, 900]
+    points = np.concatenate([base, base + 2e-7, base[:500] + 3e-6,
+                             [[0.0, -1e-9, 1.0], [0.0, 1e-9, 1.0]]])
+    points = points[rng.permutation(len(points))]
+    triangles = rng.integers(0, len(points), size=(5000, 3))
+
+    for scale in (1.0, 1e12):
+        scaled = points * scale
+        keys = np.round(scaled, 6)
+        unique, index = np.unique(keys, axis=0, return_inverse=True)
+        welded_points, welded = gmt.weld(scaled, triangles)
+        assert np.array_equal(welded_points, unique)
+        assert np.array_equal(welded, index.ravel()[triangles])
+    assert len(gmt.weld(points, triangles)[0]) < len(points)

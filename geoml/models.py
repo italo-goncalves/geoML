@@ -1160,6 +1160,7 @@ class VGPNetwork(_GPModel):
                     % (leaf.name, leaf.size,
                        "s" if len(group) > 1 else "",
                        "" if len(group) > 1 else "s", wanted))
+        self._settle_names()
         # The likelihoods are registered AFTER the tree. A save file stores
         # the parameters by position in `all_parameters`, which is
         # registration order, so this order is part of the format: every
@@ -1316,6 +1317,39 @@ class VGPNetwork(_GPModel):
         raise AttributeError(
             "this model has %d leaves, one per likelihood; read `leaves`"
             % len(self.leaves))
+
+    def _settle_names(self):
+        """Gives every node of the model a name of its own.
+
+        A node left unnamed is numbered among the nodes connected to it, so
+        two trees built apart both hold a `BasicGP_1`, and a GP node's
+        realizations are keyed by its name: the two would draw the same
+        normals. The first node sighted keeps its name and a later one with
+        a generated name takes the next number free in the whole model. A
+        name the user gave is kept, with a warning where it is repeated.
+        """
+        nodes = self._nodes()
+        taken = set()
+        for node in nodes:
+            if not (node.name in taken
+                    and getattr(node, "_generated_name", False)):
+                taken.add(node.name)
+        seen = set()
+        for node in nodes:
+            if node.name not in seen:
+                seen.add(node.name)
+            elif getattr(node, "_generated_name", False):
+                index = 1
+                while "%s_%d" % (type(node).__name__, index) in taken:
+                    index += 1
+                node.name = "%s_%d" % (type(node).__name__, index)
+                taken.add(node.name)
+                seen.add(node.name)
+            else:
+                warnings.warn(
+                    "two nodes of this model are named %r: GP nodes of one "
+                    "name draw the same realizations, so give each a name "
+                    "of its own" % (node.name,), stacklevel=3)
 
     def _nodes(self):
         """Every node of the tree, each once, leaves included.
@@ -1584,7 +1618,7 @@ class VGPNetwork(_GPModel):
                         "Matern52 or RationalQuadratic"
                         % (name, type(kernel).__name__))
                 elif self._full_variance() and node._READS_CHAIN \
-                        and node._CONDITIONED_SECOND_MOMENT \
+                        and getattr(node, "_CONDITIONED_SECOND_MOMENT", False) \
                         and any(isinstance(p, (network._GPNode,
                                                network.GPWalk))
                                 for p in node.get_unique_parents()):
@@ -3938,7 +3972,7 @@ class VGPNetwork(_GPModel):
         # input's own transformed space, and its training sets
         per_input = []
         for r, (root, start, count) in enumerate(blocks):
-            if fixed:
+            if exact is not None:
                 # the locations' own weights, exactly: no carrying from the
                 # data, and an expert of zero weight is never needed
                 weights = exact[:, start:start + count].reshape(
@@ -4720,21 +4754,7 @@ def _where_mask(container, where):
     what a block model has instead of being subsettable -- and indices
     become the mask they select.
     """
-    if where is None:
-        return None
-    if isinstance(where, str):
-        mask = _np.asarray(container.get_metadata(where)).ravel().astype(bool)
-    else:
-        mask = _np.asarray(where)
-        if mask.dtype != bool:
-            index = _np.zeros(container.n_data, dtype=bool)
-            index[mask] = True
-            mask = index
-    if mask.shape != (container.n_data,):
-        raise ValueError(
-            "`where` needs one value per location: got %d for %d"
-            % (mask.size, container.n_data))
-    return mask
+    return container._where_mask(where)
 
 
 def _stored_n_sim(variable):

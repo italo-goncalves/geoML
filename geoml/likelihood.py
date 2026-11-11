@@ -827,7 +827,11 @@ class _ContinuousLikelihood(_Likelihood):
         ----------
         warping : geoml.warping.Warping
             A Warping object that normalizes the data values. Its output size
-            is the number of components modelled.
+            is the number of components modelled. A `ZScore` of one
+            component when omitted.
+        sharpness : int
+            Data augmentation. The weight of the data is multiplied by this
+            factor.
         """
         if warping is None:
             warping = _warp.ZScore(1)
