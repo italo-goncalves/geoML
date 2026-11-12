@@ -78,7 +78,7 @@ computed in; pass `"float64"` to keep one precision everywhere. Realizations are
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.8.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.9.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,

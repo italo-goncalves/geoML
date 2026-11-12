@@ -1232,8 +1232,14 @@ def _to_manifold(solid, shift):
     back as an empty answer carrying a status, and an empty answer reads
     exactly like two bodies that never meet -- the trap VTK's filter set.
     """
+    # welded where the body was judged closed, at its own coordinates, and
+    # moved afterwards: welding rounds, and a vertex half a unit of the
+    # last decimal from its twin rounds with it in one frame and away from
+    # it in another. A contour cut at a box whose faces fall on such a
+    # half was closed as built and open, to Manifold, once moved.
     points, triangles = _gmt.weld(
-        _np.asarray(solid.coordinates, dtype=float) - shift, solid.triangles)
+        _np.asarray(solid.coordinates, dtype=float), solid.triangles)
+    points = points - shift
     body = _manifold.Manifold(_manifold.Mesh64(
         vert_properties=_np.ascontiguousarray(points),
         tri_verts=_np.ascontiguousarray(triangles, dtype=_np.uint64)))
@@ -1310,6 +1316,18 @@ def _clip_to_box(points, triangles, low, high):
     shift = _np.round(_np.asarray(low, dtype=float))
     points, triangles = _gmt._welded_without_degenerate_faces(
         _np.asarray(points, dtype=float) - shift, triangles)
+    # A contour of a lattice has many of its vertices in the box's faces,
+    # and welding rounds them: where a face falls between two of the
+    # decimals welded to, they come back beside it, and the cut would add
+    # vertices of its own in the face, a sliver thinner than the welding
+    # from each. Those slivers are what a later welding joins one way in
+    # one frame and another way in the next. So what rounds to a face is
+    # put on it.
+    for bound in (low, high):
+        face = _np.asarray(bound, dtype=float) - shift
+        for axis in range(3):
+            column = points[:, axis]
+            column[column == _np.round(face[axis], 6)] = face[axis]
     # a contour faces up its field's gradient, so a region kept below the
     # level comes wound inside out, which Manifold would take as said
     if _gmt.signed_volume(points, triangles) < 0:

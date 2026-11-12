@@ -630,3 +630,73 @@ def test_clip_meshes_refuses_what_it_cannot_cut():
                        np.zeros([0, 3]))
     with pytest.raises(MeshTypeError, match="bodies and sheets"):
         topo.clip_meshes([shapeless])
+
+
+def _shell_at_a_half(centre, origin):
+    """A block-model shell meeting the model's box, the box's faces half a
+    unit of the sixth decimal from anything welding rounds to."""
+    blocks = geoml.data.BlockSet3D(origin, [8, 8, 8], [20.0] * 3,
+                                   discretization=(2, 2, 2), max_levels=1)
+    values = 70.0 - np.linalg.norm(
+        np.asarray(blocks.coordinates)
+        - np.asarray(origin) - np.asarray([centre]), axis=1)
+    blocks.add_continuous_variable("g")
+    blocks.variables["g"].prediction.values[:] = values
+    return blocks, blocks.get_contour("g", 0.0, close="above")
+
+
+def test_a_box_between_two_welded_decimals_leaves_no_slivers():
+    """A contour of a lattice has vertices in the box's faces. Welded, they
+    came back half a micrometre beside a face that falls between two
+    decimals, the cut to the box added its own in the face, and the pairs
+    welded together at the model's coordinates and apart in the frame the
+    booleans work in: a body closed as built that Manifold refused
+    (GeoScape's requirement 53, every shell of a model so placed)."""
+    origin = [59612.2035595, -2780336.5413285, 1191.9066355]
+    blocks, one = _shell_at_a_half([20.0, 80.0, 80.0], origin)
+    _, two = _shell_at_a_half([150.0, 60.0, 90.0], origin)
+    assert isinstance(one, Solid3D) and isinstance(two, Solid3D)
+
+    box = blocks.bounding_box
+    for shell in (one, two):
+        points = np.asarray(shell.coordinates)
+        assert len(np.unique(np.round(points, 5), axis=0)) == len(points)
+        on_a_face = np.zeros(len(points), dtype=bool)
+        for bound in (np.ravel(box.min), np.ravel(box.max)):
+            near = np.abs(points - bound) < 1e-5
+            assert np.all(points[near] == np.broadcast_to(
+                bound, points.shape)[near])
+            on_a_face |= near.any(axis=1)
+        assert on_a_face.sum() > 20
+
+    union, shared = one.union(two), one.intersection(two)
+    assert isinstance(union, Solid3D) and isinstance(shared, Solid3D)
+    assert shared.volume > 0
+    assert union.volume + shared.volume == pytest.approx(
+        one.volume + two.volume, rel=1e-6)
+
+
+def test_a_body_is_welded_for_manifold_where_it_was_judged():
+    """Two copies of a vertex half a unit of the last welded decimal apart
+    weld together or not by the frame they are rounded in. A body closed
+    at its own coordinates is handed to Manifold as it closed there."""
+    from geoml.data.meshes import _to_manifold
+
+    cube = pv.Cube(bounds=(0, 1, 0, 1, 0, 1)).triangulate()
+    faces = cube.faces.reshape(-1, 4)[:, 1:]
+    # every triangle with corners of its own, and on one face the copies
+    # alternately on a value between two welded decimals and on the
+    # decimal above it: the pair measured on a contoured body, which
+    # rounds together as it stands and apart once moved by 59650
+    points = np.asarray(cube.points, dtype=float)[faces].reshape(-1, 3)
+    low = points[:, 0] == 0.0
+    points[:, 0] = np.where(low, 59602.2035595, 59603.5)
+    points[low & (np.arange(len(points)) % 2 == 1), 0] = 59602.20356
+    triangles = np.arange(len(points)).reshape(-1, 3)
+    solid = mesh3d(points, triangles,
+                   geoml.math.geometry.vertex_normals(points, triangles))
+    assert isinstance(solid, Solid3D)
+
+    for shift in ([0.0, 0.0, 0.0], [59650.0, 0.0, 0.0], [59602.0, -5.0, 2.0]):
+        body = _to_manifold(solid, np.asarray(shift))
+        assert body.volume() == pytest.approx(solid.volume, rel=1e-6)
