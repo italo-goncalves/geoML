@@ -1,3 +1,23 @@
+## version 0.10.9
+* **A contour of a model whose box falls between two welded decimals is a
+body Manifold takes** (GeoScape's requirement 53). Every body of the
+Tutorial's block model -- 47 371 blocks, a face of its box at
+x = 59602.2035595 -- was refused with `Manifold cannot take this body
+(NotManifold)` by a mesh set with realizations and by a contour limited by
+another set's body. A contour of a lattice has vertices in the box's
+faces; welded to six decimals they came back half a micrometre beside
+such a face, the cut to the box put its own vertices in the face, and the
+pairs welded together at the model's coordinates and apart in the frame
+the booleans work in, a rounding tie either way. `_clip_to_box` now puts
+what rounds to a face on it, so no such pair is made (the shell at 70:
+14 329 vertices where there were 14 448, none within 1e-4 of another),
+and `_to_manifold` welds a body at its own coordinates, where it was
+judged closed, before moving it. On that model the set at 60 and 80 with
+25 realizations and the cut by its body at 60 are built with no shell
+failing, where two of fifty realization shells would not close. A model
+whose box is on the welded decimals contours to the same bytes (the
+Assen digests); a boolean's answer keeps its triangles and volume and
+moves at rounding.
 ## version 0.10.8
 * **`metrics.r_squared`**, the coefficient of determination: one less the
 squared error over the true values' spread about their mean, as
