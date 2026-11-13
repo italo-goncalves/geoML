@@ -882,10 +882,10 @@ def test_a_store_given_at_construction_is_the_set_s_own(radial, tmp_path):
 
 
 _DESCRIPTION = sorted([
-    "close", "complete", "corners", "excluded", "failures", "format",
-    "groups", "keys", "kind", "levels", "limits", "measures", "name",
-    "nudge", "numbers", "paired", "path", "provenance", "realization",
-    "repairs",
+    "close", "complete", "corners", "digests", "excluded", "failures",
+    "format", "groups", "keys", "kind", "levels", "limits", "measures",
+    "name", "nudge", "numbers", "paired", "path", "planned", "provenance",
+    "realization", "repairs",
     "rule", "shift", "simplify", "summary", "supersample", "taken", "unit"])
 
 
@@ -1307,3 +1307,204 @@ def test_a_body_the_other_set_could_not_make_fails_its_realization(paired):
     assert "could not be made in realization 3" in cut.failures[0]["error"]
     assert np.isnan(cut._measured()["volume"][3, 0])
     assert np.isfinite(cut._measured()["volume"][[0, 1, 2, 4], 0]).all()
+
+
+# --------------------------------------------------------------------------- #
+# a build that stopped, finished in its own store (0.10.10)
+# --------------------------------------------------------------------------- #
+def _stop_at(count):
+    def stop(event):
+        if event.task == "mesh_set" and event.unit == "realization" \
+                and event.done >= count:
+            raise _Stop()
+    return stop
+
+
+def _stopped(data, where, count, **kwargs):
+    """A build of `data` into `where` cancelled once `count` realizations
+    are in."""
+    with pytest.raises(_Stop):
+        with geoml.progress(_stop_at(count)):
+            MeshSet(data, store=where, **kwargs)
+
+
+def _description(path):
+    return dict(zarr.open_group(path, mode="r").attrs["geoml_meshset"])
+
+
+def _assert_same_store(one, two):
+    """The description and every realization's meshes, to the bit."""
+    a, b = _description(one), _description(two)
+    for name in ("complete", "keys", "numbers", "planned", "digests",
+                 "measures", "taken", "summary", "nudge"):
+        assert a[name] == b[name], name
+
+    def order(failures):
+        return sorted(failures, key=lambda f: (f["realization"],
+                                               str(f["key"])))
+
+    assert order(a["failures"]) == order(b["failures"])
+    for number in a["numbers"]:
+        for group in a["groups"]:
+            name = "simulations/%d/%s" % (number, group)
+            x, y = msm._read_mesh(one, name), msm._read_mesh(two, name)
+            np.testing.assert_array_equal(np.asarray(x.coordinates),
+                                          np.asarray(y.coordinates))
+            np.testing.assert_array_equal(np.asarray(x.triangles),
+                                          np.asarray(y.triangles))
+
+
+def test_a_stopped_build_resumed_is_the_build_that_ran_through(radial,
+                                                                tmp_path):
+    """GeoScape's item 54. The realizations the build finished stay as
+    they are, the rest are contoured into the same store, and the store
+    is the one a build that never stopped writes."""
+    whole = str(tmp_path / "whole.zarr")
+    MeshSet(radial, "g", workers=1, store=whole)
+    path = str(tmp_path / "stopped.zarr")
+    _stopped(radial, path, 2, path="g", workers=1)
+    assert _description(path)["planned"] == list(range(len(OFFSETS)))
+    with pytest.warns(UserWarning, match="holds 2 of the 5 realizations"):
+        MeshSet.open(path)
+
+    events = []
+    with geoml.progress(events.append):
+        resumed = MeshSet.resume(path, radial, workers=1)
+    assert resumed.complete is True
+    _assert_same_store(path, whole)
+    # the count goes on from what the store held
+    counts = [(e.done, e.total) for e in events
+              if e.task == "mesh_set" and e.unit == "realization"]
+    assert counts[0] == (2, len(OFFSETS))
+    assert counts[-1] == (len(OFFSETS), len(OFFSETS))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert MeshSet.open(path).complete is True
+
+
+def test_a_resume_can_stop_and_be_resumed_again(radial, tmp_path):
+    """Workers finish in any order, so what a stopped store holds is any
+    few of the realizations, and a resume can be stopped in its turn."""
+    whole = str(tmp_path / "whole.zarr")
+    MeshSet(radial, "g", workers=1, store=whole)
+    path = str(tmp_path / "twice.zarr")
+    _stopped(radial, path, 2, path="g", workers=2)
+    with pytest.raises(_Stop):
+        with geoml.progress(_stop_at(4)):
+            MeshSet.resume(path, radial, workers=2)
+    assert len(_description(path)["numbers"]) >= 4
+    assert _description(path)["complete"] is False
+    MeshSet.resume(path, radial, workers=2)
+    _assert_same_store(path, whole)
+
+
+def test_a_finished_store_is_opened_and_nothing_contoured(radial, tmp_path,
+                                                          monkeypatch):
+    path = str(tmp_path / "done.zarr")
+    MeshSet(radial, "g", simulations=[0, 1], workers=1, store=path)
+
+    def never(*args, **kwargs):
+        raise AssertionError("contoured")
+
+    monkeypatch.setattr(msm, "_shell", never)
+    again = MeshSet.resume(path, radial)
+    assert again.complete is True and again._numbers == [0, 1]
+    assert MeshSet.resume(path, radial, simulations=[1])._numbers == [0, 1]
+    with pytest.raises(ValueError, match="does not add"):
+        MeshSet.resume(path, radial, simulations=True)
+
+
+def test_another_block_model_is_refused(tmp_path):
+    path = str(tmp_path / "stopped.zarr")
+    _stopped(_radial(), path, 2, path="g", workers=1)
+
+    moved = _radial()
+    moved.variables["g"].prediction.values[:] += 1.0
+    with pytest.raises(ValueError, match="other values"):
+        MeshSet.resume(path, moved, workers=1)
+    # the same prediction, other realizations under the same name
+    redrawn = _radial(offsets=OFFSETS + 0.25)
+    with pytest.raises(ValueError, match="other realizations"):
+        MeshSet.resume(path, redrawn, workers=1)
+    other = geoml.data.BlockSet3D([0, 0, 0], [8, 8, 4], [10.0, 10.0, 10.0],
+                                  discretization=(2, 2, 2), max_levels=2)
+    other = other.split(np.arange(other.n_data))
+    distance = np.linalg.norm(np.asarray(other.coordinates) - CENTRE,
+                              axis=1)
+    field = 50.0 - distance
+    other.add_continuous_variable("g", field)
+    other.variables["g"].prediction.values[:] = field
+    other.variables["g"].allocate_simulations(len(OFFSETS))
+    other.variables["g"].simulations[:, :] = field[:, None]
+    other.variables["g"].set_cutoffs([20.0, 30.0, 40.0])
+    with pytest.raises(ValueError, match="another shape"):
+        MeshSet.resume(path, other, workers=1)
+    # nothing was written over: the right model still finishes it
+    assert len(_description(path)["numbers"]) == 2
+    MeshSet.resume(path, _radial(), workers=1)
+    assert _description(path)["complete"] is True
+
+
+def test_an_older_store_is_told_which_realizations_it_was_for(radial,
+                                                              tmp_path):
+    """A store written before 0.10.10 records neither the realizations it
+    was to hold nor its draws."""
+    whole = str(tmp_path / "whole.zarr")
+    MeshSet(radial, "g", workers=1, store=whole)
+    path = str(tmp_path / "old.zarr")
+    _stopped(radial, path, 2, path="g", workers=1)
+    root = zarr.open_group(path, mode="a")
+    meta = dict(root.attrs["geoml_meshset"])
+    del meta["planned"], meta["digests"]
+    root.attrs["geoml_meshset"] = meta
+
+    with pytest.raises(ValueError, match="pass simulations="):
+        MeshSet.resume(path, radial, workers=1)
+    with pytest.warns(UserWarning, match="could not be checked"):
+        resumed = MeshSet.resume(path, radial, simulations=True, workers=1)
+    assert resumed._numbers == list(range(len(OFFSETS)))
+    np.testing.assert_array_equal(resumed._measured()["volume"],
+                                  MeshSet.open(whole)._measured()["volume"])
+
+
+def test_a_failed_shell_is_kept_and_not_tried_again(radial, tmp_path,
+                                                    monkeypatch):
+    original = msm._shell
+
+    def failing(message):
+        def shell(data, values, level, *args, **kwargs):
+            # realization 0 is the only one staying under 44
+            if level == 30.0 and np.nanmax(values) < 44.0:
+                raise RuntimeError(message)
+            return original(data, values, level, *args, **kwargs)
+        return shell
+
+    monkeypatch.setattr(msm, "_shell", failing("planted"))
+    path = str(tmp_path / "failed.zarr")
+    _stopped(radial, path, 2, path="g", workers=1)
+    monkeypatch.setattr(msm, "_shell", failing("tried again"))
+    with pytest.warns(UserWarning, match="could not be made"):
+        resumed = MeshSet.resume(path, radial, workers=1)
+    assert resumed.failures == [{"realization": 0, "key": 30.0,
+                                 "error": "RuntimeError: planted"}]
+
+
+def test_a_categorical_set_resumes(tmp_path):
+    blocks = _slabs()
+    whole = str(tmp_path / "whole.zarr")
+    MeshSet(blocks, "Rock", workers=1, store=whole)
+    path = str(tmp_path / "stopped.zarr")
+    _stopped(blocks, path, 1, path="Rock", workers=1)
+    MeshSet.resume(path, blocks, workers=1)
+    _assert_same_store(path, whole)
+
+
+def test_a_set_cut_by_another_set_resumes_with_its_pairing(paired):
+    blocks, core, cut, folder = paired
+    path = str(folder / "stopped_cut.zarr")
+    _stopped(blocks, path, 2, path="g", cutoffs=[20.0],
+             limits={"core": (core, 40.0)}, workers=1)
+    resumed = MeshSet.resume(path, blocks, workers=1)
+    assert resumed._paired == cut._paired
+    np.testing.assert_array_equal(resumed._measured()["volume"],
+                                  cut._measured()["volume"])

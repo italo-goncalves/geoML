@@ -1,3 +1,26 @@
+## version 0.10.10
+* **`MeshSet.resume(store, data)` finishes a set whose build stopped**
+(GeoScape's item 54). A contour cancelled or killed leaves a store that
+opens with the realizations it finished; `resume` contours the rest into
+the same store and marks it complete, the finished ones kept as they are,
+and the store it leaves is the one a build that ran through writes --
+meshes, measures and failures to the bit (`test_meshsets.py`, on cut-off
+and categorical sets, a pairing with another set, a resume stopped and
+resumed again, and workers finishing out of order). What the set was built
+with is read from the store's description, a limit taken from another set
+from that set's store. Before contouring it makes the prediction's meshes
+again and compares them with the stored ones, and compares the held
+realizations' draws with a digest the store records of each, so another
+block model, or the same one predicted again, is refused. A shell that
+failed stays failed; a finished store is opened with nothing contoured;
+adding realizations to a finished set is refused. Progress counts on from
+what the store held. The description gains `planned`, the realizations a
+build was asked for, and `digests` (store format still 2); a store written
+before has neither, so `resume` is told the realizations with
+`simulations=` and checks the prediction alone, with a warning. It is the
+catalogue workflow's `contour.resume`, and `MeshSet.open` says how many of
+the planned realizations an unfinished store holds.
+
 ## version 0.10.9
 * **A contour of a model whose box falls between two welded decimals is a
 body Manifold takes** (GeoScape's requirement 53). Every body of the

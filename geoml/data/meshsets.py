@@ -23,6 +23,7 @@ import concurrent.futures as _futures
 import itertools as _iter
 import multiprocessing as _mp
 import os as _os
+import hashlib as _hashlib
 import shutil as _shutil
 import tempfile as _tempfile
 import warnings as _warnings
@@ -877,6 +878,15 @@ def _default_workers(cost, stores, numbers):
     return pool
 
 
+def _draws_digest(values):
+    """A digest of one realization's draws, `(n_rows, n_stores)` as
+    `_read_realizations` hands them over, which a resumed build checks the
+    data's against: the same block model with its realizations predicted
+    again under the same name contours to other bodies."""
+    return _hashlib.blake2b(_np.ascontiguousarray(values, dtype=float)
+                            .tobytes(), digest_size=16).hexdigest()
+
+
 def _read_realizations(stores, numbers):
     """Realizations `numbers` of every store, `(n_rows, len(numbers),
     len(stores))`, read a band of rows at a time."""
@@ -1164,8 +1174,9 @@ class MeshSet(_abc.Mapping):
         worker that dies before it is done raises a `RuntimeError`.
     store
         The path of a Zarr store to keep the set in, which `MeshSet.open`
-        reads back. A temporary store, removed with the set, holds the
-        realizations when left out.
+        reads back, and `MeshSet.resume` finishes where a build stopped
+        before its last realization. A temporary store, removed with the
+        set, holds the realizations when left out.
 
     Attributes
     ----------
@@ -1191,6 +1202,7 @@ class MeshSet(_abc.Mapping):
     See Also
     --------
     BlockSet3D.get_contour : one contour, which a set makes many of.
+    MeshSet.resume : a build that stopped, finished in its own store.
     Solid3D : what every mesh of a set is.
 
     Examples
@@ -1217,6 +1229,9 @@ class MeshSet(_abc.Mapping):
     realization: "int | None"
     provenance: dict
     repairs: "_pd.Series | None"
+
+    # per realization held, a digest of the draws it was contoured from
+    _digests: "list[str | None]"
 
     # A set is complete unless a build is still running or it was
     # opened from a store whose build did not finish. Every path that
@@ -1294,6 +1309,7 @@ class MeshSet(_abc.Mapping):
         # so the shift costs nothing on the way back
         self._shift = _np.round(_np.min(self._corner_points, axis=0))
         self._numbers = []
+        self._digests = []
         self._measures = None
         self._taken = None
         self._failures = []
@@ -1385,27 +1401,36 @@ class MeshSet(_abc.Mapping):
         return found
 
     def _contour_realizations(self, source, numbers, rule, repair, workers,
-                              store, cost=None):
+                              store, cost=None, held=None):
         """Every realization's set, contoured in groups, measured, stored.
 
         With `workers` None the pool is sized here, to the first
         realization, contoured in this process and measured, or to `cost`,
-        the prediction's, where that was more."""
+        the prediction's, where that was more. `held` is what a store left
+        by a build that stopped already holds -- `numbers`, `measures`,
+        `taken`, `digests` and `failures` as its description reads them --
+        and those realizations are kept, in the store as they are, and
+        only the rest contoured."""
         if store is None:
             directory = _tempfile.mkdtemp(prefix="geoml_meshset_")
             store = _os.path.join(directory, "meshes.zarr")
             self._finalizer = _weakref.finalize(
                 self, _shutil.rmtree, directory, True)
         store = _os.fspath(store)
-        root = _open_for_writing(store)
+        if held is None:
+            root = _open_for_writing(store)
+            for key in self._keys:
+                _write_mesh(root, "prediction/%s" % _path_key(key),
+                            self._meshes[key])
+            for group, meshes in (("limits", self.limits),
+                                  ("excluded", self.excluded)):
+                for name, mesh in meshes.items():
+                    _write_mesh(root, "%s/%s" % (group, name), mesh)
+        else:
+            # the prediction and the limits are there already, and were
+            # checked against these before anything was contoured
+            root = _zarr.open_group(store, mode="r+")
         self._store = store
-        for key in self._keys:
-            _write_mesh(root, "prediction/%s" % _path_key(key),
-                        self._meshes[key])
-        for group, meshes in (("limits", self.limits),
-                              ("excluded", self.excluded)):
-            for name, mesh in meshes.items():
-                _write_mesh(root, "%s/%s" % (group, name), mesh)
 
         bodies = [(_manifold(body, self._shift), keep)
                   for _, body, keep in self._bodies()]
@@ -1419,11 +1444,25 @@ class MeshSet(_abc.Mapping):
 
         n_keys = len(self._keys)
         self._numbers = list(numbers)
+        self._digests = [None] * len(numbers)
         table = {name: _np.full((len(numbers), n_keys), _np.nan)
                  for name in _MEASURES}
         cuts = _np.full((len(bodies), len(numbers), n_keys), _np.nan)
         self._measures, self._taken = table, cuts
         self._failures = []
+        where = {number: i for i, number in enumerate(numbers)}
+        done_rows = []
+        if held is not None:
+            for i, number in enumerate(held["numbers"]):
+                row = where[number]
+                for name in _MEASURES:
+                    table[name][row] = held["measures"][name][i]
+                cuts[:, row, :] = held["taken"][:, i, :]
+                self._digests[row] = held["digests"][i]
+                done_rows.append(row)
+            self._failures = list(held["failures"])
+        todo = [number for number in numbers
+                if where[number] not in set(done_rows)]
         # The description goes in before the first realization and is
         # rewritten after each one, so a store read while the build is
         # still running opens and says what it holds. It used to be
@@ -1431,8 +1470,7 @@ class MeshSet(_abc.Mapping):
         # KeyError -- a cancelled or crashed contour left nothing
         # readable, however many realizations it had finished.
         self.complete = False
-        done_rows = []
-        root.attrs["geoml_meshset"] = self._attrs(keep=done_rows)
+        root.attrs["geoml_meshset"] = self._attrs(keep=sorted(done_rows))
 
         def report(done):
             # `emit` rather than `reporting`: nothing inside a realization
@@ -1440,8 +1478,7 @@ class MeshSet(_abc.Mapping):
             # is no task to mark, only a count to send
             _progress.emit("mesh_set", done, len(numbers), "realization")
 
-        report(0)
-        where = {number: i for i, number in enumerate(numbers)}
+        report(len(done_rows))
         stores = source["stores"]
         per_realization = 8 * int(stores[0].shape[0]) * len(stores)
         size = max(1, int(_GROUP_BYTES // per_realization))
@@ -1469,11 +1506,14 @@ class MeshSet(_abc.Mapping):
             root.attrs["geoml_meshset"] = self._attrs(keep=sorted(done_rows))
             report(len(done_rows))
 
-        for start in range(0, len(numbers), size):
-            group = numbers[start:start + size]
+        for start in range(0, len(todo), size):
+            group = todo[start:start + size]
+            values = _read_realizations(stores, group)
+            for i, number in enumerate(group):
+                self._digests[where[number]] = _draws_digest(values[:, i, :])
             _BUILD.clear()
             _BUILD.update(
-                data=self.data, values=_read_realizations(stores, group),
+                data=self.data, values=values,
                 numbers=group, kind=self.kind, keys=self._keys,
                 levels=self._levels, side=self.close,
                 supersample=self.supersample, label=self.path, rule=rule,
@@ -1641,7 +1681,8 @@ class MeshSet(_abc.Mapping):
             if name not in ("_meshes", "_numbers", "_measures", "_taken",
                             "_failures", "_finalizer", "_band_cache",
                             "_summary", "repairs", "realization",
-                            "provenance", "_parent", "_field")})
+                            "provenance", "_parent", "_field",
+                            "_digests")})
         view._meshes = _StoredMeshes(self._store, "simulations/%d" % number,
                                      self._keys)
         # cut by the other set's body of this realization, which is what
@@ -1655,6 +1696,7 @@ class MeshSet(_abc.Mapping):
                                            % (number, found["group"]))
             setattr(view, group, own)
         view._numbers = []
+        view._digests = []
         view._measures = None
         view._taken = None
         view._failures = [f for f in self._failures
@@ -2200,10 +2242,12 @@ class MeshSet(_abc.Mapping):
             if name not in ("_meshes", "_numbers", "_measures", "_taken",
                             "_failures", "_finalizer", "_band_cache",
                             "_summary", "repairs", "_store", "_parent",
-                            "provenance", "limits", "excluded")})
+                            "provenance", "limits", "excluded",
+                            "_digests")})
         new.limits = dict(self.limits if limits is None else limits)
         new.excluded = dict(self.excluded if excluded is None else excluded)
         new._numbers, new._measures, new._taken = [], None, None
+        new._digests = []
         new._failures, new._finalizer, new._store = [], None, None
         new._band_cache = {}
         new._parent = self._parent
@@ -2707,10 +2751,11 @@ class MeshSet(_abc.Mapping):
         unit = self._unit if isinstance(self._unit, (str, int, float,
                                                      type(None))) \
             else str(self._unit)
-        numbers = self._numbers
+        numbers, digests = self._numbers, self._digests
         measures, taken = self._measures, self._taken
         if keep is not None:
             numbers = [numbers[i] for i in keep]
+            digests = [digests[i] for i in keep]
             if measures is not None:
                 measures = {name: _np.asarray(values)[keep]
                             for name, values in measures.items()}
@@ -2734,6 +2779,11 @@ class MeshSet(_abc.Mapping):
             "realization": self.realization,
             "corners": self._corner_points, "shift": self._shift,
             "summary": self._summary, "numbers": numbers,
+            # every realization the build was asked for, which a store left
+            # by one that stopped holds only some of, and a digest of each
+            # held realization's draws, aligned with `numbers`: what
+            # `resume` finishes, and what it checks the data against
+            "planned": self._numbers, "digests": digests,
             "nudge": [self._nudge.get(key, 0.0) for key in self._keys],
             "measures": measures, "taken": taken,
             "failures": self._failures,
@@ -2858,6 +2908,9 @@ class MeshSet(_abc.Mapping):
             "taken": [list(_floats(t)) for t in summary["taken"]]}
         new._nudge = dict(zip(keys, _floats(meta["nudge"])))
         new._numbers = [int(n) for n in meta["numbers"]]
+        # absent from a store written before 0.10.10
+        new._digests = list(meta.get("digests")
+                            or [None] * len(new._numbers))
         new._measures = None if meta["measures"] is None else {
             name: _floats(values) for name, values in meta["measures"].items()}
         # an empty list keeps no shape, so the cuts are reshaped by what
@@ -2880,10 +2933,234 @@ class MeshSet(_abc.Mapping):
                 _floats(meta["repairs"]["values"]),
                 index=meta["repairs"]["keys"], name="removed")
         if not new.complete:
+            planned = meta.get("planned")
             _warnings.warn(
                 "%r was left by a build that did not finish: it holds %d of "
-                "the realizations it was to hold, and everything measured "
-                "over them counts those alone" % (path, len(new._numbers)))
+                "the %srealizations it was to hold, and everything measured "
+                "over them counts those alone; `MeshSet.resume` finishes it"
+                % (path, len(new._numbers),
+                   "" if planned is None else "%d " % len(planned)))
+        return new
+
+    @classmethod
+    def resume(cls, store: _types.PathLike, data: "BlockSet3D | Grid3D",
+               simulations: "bool | int | Sequence[int] | None" = None,
+               workers: "int | None" = None) -> "MeshSet":
+        """
+        Finishes a set whose build stopped, in its own store.
+
+        A build that was cancelled, or whose process was killed, leaves a
+        store that opens and holds the realizations it finished. This
+        contours the rest into the same store and marks it complete, the
+        finished realizations kept as they are -- the answer being what
+        one build that ran through would have written. Everything the set
+        was built with is read from the store's own description: the
+        column, the cut-offs, the side, the supersampling, the budget, the
+        rule, the repair and the limits, a limit taken from another set
+        read from that set's store again.
+
+        Before anything is contoured, the prediction's meshes are made
+        again and compared with the stored ones, and the draws of every
+        realization the store holds with the digests it recorded of them;
+        a block model that is not the one the set was contoured from is
+        refused. A store written before geoML 0.10.10 holds no digests,
+        and its draws go unchecked, with a warning.
+
+        Realization shells that could not be made stay recorded as
+        failures and are not tried again: the same draws contour the same
+        way. A store that is already complete is opened and returned, with
+        nothing contoured, so a script can call this whether or not the
+        build it continues finished.
+
+        Parameters
+        ----------
+        store
+            The store the build was writing, as `store=` gave it.
+        data
+            The block model or grid the set was contoured from.
+        simulations
+            The realizations the finished set holds, as for `MeshSet`. The
+            ones the build was asked for when left out; a store written
+            before geoML 0.10.10 does not say which those were, and needs
+            them here. The realizations the store holds are kept either
+            way.
+        workers
+            How many processes contour the realizations left, as for
+            `MeshSet`.
+
+        Returns
+        -------
+        MeshSet
+            The finished set, backed by `store`.
+
+        Raises
+        ------
+        ValueError
+            If the store holds a set without realizations, does not say
+            which realizations it was to hold and `simulations` is left
+            out, is complete and is asked for realizations it does not
+            hold, or was contoured from another block model; or if a set a
+            limit is taken from is no longer where it was.
+
+        See Also
+        --------
+        MeshSet.open : the set as the store holds it, finished or not.
+
+        Examples
+        --------
+        .. code-block:: python
+
+            try:
+                with geoml.progress(stop_when_asked):
+                    geoml.data.MeshSet(blocks, "Comp/FeO_total",
+                                       cutoffs=[50, 60], store="fe.zarr")
+            except Cancelled:
+                pass
+            shells = geoml.data.MeshSet.resume("fe.zarr", blocks)
+        """
+        path = _os.fspath(store)
+        root = _zarr.open_group(path, mode="r")
+        meta = dict(cast("dict[str, Any]", root.attrs["geoml_meshset"]))
+        if meta.get("format") not in _READABLE_FORMATS:
+            raise ValueError(
+                "%r was written at mesh set format %s and this version reads "
+                "%s" % (path, meta.get("format"),
+                        ", ".join(str(v) for v in _READABLE_FORMATS)))
+        if meta["realization"] is not None:
+            raise ValueError(
+                "%r holds one realization's set, which has no realizations "
+                "of its own to finish" % path)
+        complete = bool(meta.get("complete", True))
+        held = [int(n) for n in meta["numbers"]]
+        planned = meta.get("planned")
+        if "probability_of" in meta["provenance"]:
+            if complete:
+                return cls.open(path, data)
+            raise ValueError(
+                "%r holds a set of probabilities, which has no realizations "
+                "to finish" % path)
+
+        kind = meta["kind"]
+        keys = [str(k) for k in meta["keys"]] if kind == "category" \
+            else [float(k) for k in meta["keys"]]
+        source = _source(data, meta["path"],
+                         None if kind == "category" else keys, meta["close"])
+        stores = source["stores"]
+        count = None if stores is None else int(stores[0].shape[1])
+        if simulations is None:
+            if planned is None and not complete:
+                raise ValueError(
+                    "%r was written before geoML 0.10.10, and does not say "
+                    "which realizations it was to hold; pass simulations=, "
+                    "as the build that stopped was given it" % path)
+            numbers = held if planned is None else [int(n) for n in planned]
+        else:
+            numbers = _numbers(simulations, count)
+        target = sorted(set(numbers) | set(held))
+        if complete:
+            extra = sorted(set(target) - set(held))
+            if extra:
+                raise ValueError(
+                    "%r holds a finished set, and resuming it does not add "
+                    "realizations to it: %s are not among those it holds; "
+                    "build a set of them" % (path, ", ".join(
+                        str(n) for n in extra[:8])
+                        + (", ..." if len(extra) > 8 else "")))
+            return cls.open(path, data)
+        if not target:
+            raise ValueError("%r holds no realizations to finish" % path)
+        if stores is None:
+            raise ValueError(
+                "%r was contoured from realizations %r no longer carries"
+                % (path, meta["path"]))
+
+        corners = _floats(meta["corners"])
+        found = _corners(data)
+        if corners.shape != found.shape or not _np.array_equal(corners,
+                                                               found):
+            raise ValueError(
+                "%r was contoured from a block model of another shape: "
+                "its corners are not this one's" % path)
+
+        # the limits as the store holds them, those taken from another
+        # set as that set's store holds it, checked again as a build does
+        paired = dict(meta.get("paired") or {})
+
+        def limits_of(group, names):
+            found = {}
+            for name in names:
+                if name in paired:
+                    other = paired[name]["store"]
+                    if other is None or not _os.path.isdir(other):
+                        raise ValueError(
+                            "%r is taken from the set in %s, which is no "
+                            "longer there" % (name, other))
+                    found[name] = (cls.open(other), paired[name]["key"])
+                else:
+                    found[name] = _read_mesh(path, "%s/%s" % (group, name))
+            return found
+
+        limits, pairs = _paired_bodies(
+            limits_of("limits", meta["limits"]), target, path)
+        exclude, more = _paired_bodies(
+            limits_of("excluded", meta["excluded"]), target, path)
+        pairs.update(more)
+
+        rule = meta["rule"] or "largest"
+        repair = bool(meta["provenance"].get("repaired", False))
+        new = cls.__new__(cls)
+        meter = _PeakMeter()
+        new._build(data, source, limits, exclude, int(meta["supersample"]),
+                   meta["simplify"], rule, repair, paired=pairs)
+        for key in keys:
+            stored = _read_mesh(path, "prediction/%s" % _path_key(key))
+            made = new._meshes[key]
+            if not (_np.array_equal(_np.asarray(stored.coordinates),
+                                    _np.asarray(made.coordinates))
+                    and _np.array_equal(_np.asarray(stored.triangles),
+                                        _np.asarray(made.triangles))):
+                raise ValueError(
+                    "%r was contoured from other values: the prediction's "
+                    "mesh at %r comes out otherwise from this block model"
+                    % (path, key))
+        cost = meter.growth()
+
+        digests = list(meta.get("digests") or [None] * len(held))
+        checked = [(number, digest) for number, digest in zip(held, digests)
+                   if digest is not None]
+        if len(checked) < len(held):
+            _warnings.warn(
+                "%r was written before geoML 0.10.10 and records nothing of "
+                "the draws its realizations were contoured from, so they "
+                "could not be checked against this block model's" % path)
+        per_realization = 8 * int(stores[0].shape[0]) * len(stores)
+        size = max(1, int(_GROUP_BYTES // per_realization))
+        for start in range(0, len(checked), size):
+            group = checked[start:start + size]
+            values = _read_realizations(stores, [n for n, _ in group])
+            for i, (number, digest) in enumerate(group):
+                if _draws_digest(values[:, i, :]) != digest:
+                    raise ValueError(
+                        "%r was contoured from other realizations: "
+                        "realization %d of this block model is not the one "
+                        "the store holds" % (path, number))
+
+        n_bodies = len(meta["limits"]) + len(meta["excluded"])
+        n_keys, n_held = len(keys), len(held)
+        measures = meta["measures"] or {}
+        new._contour_realizations(
+            source, target, rule, repair,
+            None if workers is None else max(1, int(workers)), path,
+            cost=cost, held={
+                "numbers": held,
+                "measures": {
+                    name: _floats(measures.get(name, [])).reshape(
+                        n_held, n_keys) if n_held else
+                    _np.zeros((0, n_keys)) for name in _MEASURES},
+                "taken": _floats(meta["taken"] or []).reshape(
+                    n_bodies, n_held, n_keys),
+                "digests": digests,
+                "failures": list(meta["failures"])})
         return new
 
 

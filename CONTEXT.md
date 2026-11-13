@@ -290,6 +290,13 @@ untouched. Never a flag geoML sets or a value it returns: a caller must be
 able to tell a cancelled run from a finished one.
 _Avoid_: abort, interrupt, stop
 
+**Resume**:
+Finishing a long call that was cancelled or killed from what it left,
+giving what one call that ran through gives: a prediction through
+`unpredicted()`, a mesh set through `MeshSet.resume`, in the store it was
+writing. Never a retry: what finished is kept as it is.
+_Avoid_: restart, continue (a restart throws away what finished)
+
 ## Validation
 
 **Fold**:
