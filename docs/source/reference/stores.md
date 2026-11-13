@@ -86,6 +86,8 @@ The root attribute `geoml_meshset` holds:
 | `provenance` | The set's own provenance |
 | `realization` | Null for a whole set; a number for one realization written alone |
 | `numbers` | The realizations stored |
+| `planned` | The realizations the build was asked for, which a store left by one that stopped holds only some of; absent from a store written before geoML 0.10.10 |
+| `digests` | Per entry of `numbers`, a hexadecimal BLAKE2b digest (16 bytes) of the draws that realization was contoured from, the rows in order and the variable's stores side by side, as float64; null where it was not recorded, and absent from a store written before geoML 0.10.10 |
 | `summary` | The prediction's bodies, one value per key: `volume`, `raw` (the volume before any cut), `pieces`, `largest` (the largest piece's share of the volume) and `triangles`; plus `taken`, the volume each cut removed, one list per cut |
 | `measures` | The same for every realization: one table per name among `volume`, `raw`, `pieces`, `largest`, `triangles`, `gained`, `lost` and `nudge`, a row per entry of `numbers` and a column per key; `gained` and `lost` are the volume gained and lost against the prediction's body |
 | `taken` | The volume each cut removed from each realization's bodies, indexed `[cut][realization][key]`, the cuts being the limits and then the exclusions |
@@ -100,6 +102,9 @@ cancelled or killed -- opens and describes what it holds. `numbers`,
 `measures` and `taken` then cover the realizations actually stored, and
 `complete` is false. Before 0.7.0 the description was written once, at the
 end, and until then there was no `geoml_meshset` attribute to read at all.
+`MeshSet.resume` finishes such a store in place: it contours the
+realizations of `planned` that `numbers` lacks and writes them beside the
+others, leaving every realization already there as it is.
 
 Stores written before geoML 0.6.13 lack `groups`. Their group names spell
 each cut-off as Python's `str(float(key))` does, as in `30.0` or `1e-05`,

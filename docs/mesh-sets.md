@@ -79,6 +79,26 @@ volume it gains and loses against the prediction's shell -- so
 realization's failure is recorded (`failures`, a warning at the end) rather
 than allowed to throw away a build that can run for an hour.
 
+**A build that stopped is finished in its store** (0.10.10, GeoScape's
+item 54). The store opens before the build has finished (0.7.0), and
+`MeshSet.resume(store, data)` contours what it lacks into it: the
+description says what the set was built with -- the column, cut-offs,
+side, supersampling, budget, rule, repair and limits, a limit taken from
+another set by that set's store -- so nothing is said twice and nothing
+can disagree. The realizations the build was asked for are recorded as
+`planned`; a store written before records none, and is told them with
+`simulations=`. Two checks come before any contour: the prediction's
+meshes are made again and must match the stored ones to the bit, and the
+draws of every realization held must match the digest recorded of them as
+they were read, which is what catches a block model predicted again under
+the same name. A realization's contour depends on its own draws alone, so
+the store a resumed build leaves is the one a build that ran through
+writes, meshes and measures to the bit; a shell that failed stays failed,
+and a finished store is opened with nothing contoured, so a script may
+call `resume` whether or not the build it continues finished. Adding
+realizations to a finished set is refused: a set of them is another
+build.
+
 **How many workers.** As many as the CPUs allow, eight at most, and no
 more than memory holds (2026-09-11). A worker costs what one contour of
 the model does, and that grows with the model: on the Tom v6 model, 6.8

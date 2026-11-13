@@ -77,6 +77,7 @@ FUNCTIONS = {
     "geoml.data.variables.ContinuousVariable.set_cutoffs": "workflow",
     "geoml.data.meshsets.MeshSet": "workflow",
     "geoml.data.meshsets.MeshSet.to_zarr": "workflow",
+    "geoml.data.meshsets.MeshSet.resume": "workflow",
     # the module is private so that `geoml.progress` is the context manager
     # rather than a module holding one of that name; the path below is what
     # an import resolves, and `geoml.progress` is what a script writes
@@ -123,6 +124,9 @@ WORKFLOW = {
     "contour": {
         "mesh_set": "geoml.data.meshsets.MeshSet",
         "save": "geoml.data.meshsets.MeshSet.to_zarr",
+        # what a stopped contour is finished with, in the store it was
+        # writing
+        "resume": "geoml.data.meshsets.MeshSet.resume",
     },
     # spans the others: every long call reports inside the block, and the
     # callback raising is the cancel
