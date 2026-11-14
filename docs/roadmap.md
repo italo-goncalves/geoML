@@ -1949,6 +1949,68 @@ the current score for this warping, with the noise family chosen inside
 it. Without zeros it reduces to the current Gaussian score with the
 discarded direction removed (see the latent-score item above).
 
+*Bridges to the grain-count law* (2026-11-14). These compare the items above
+with the research project "ToS-CoDA-nugget" (`report/main.tex`, Section 10
+there; Section 9 of `scaled_simplex_entmax.tex` here). Checks:
+`verification/bridge_tos.py` here and `verification/censored_latent.py` there.
+
+**S — The grain-count law is the α = 0 member of the censored family, and
+a dominant matrix makes it factorise.** With independent log-gamma latent
+noise (shapes = expected grain counts), the censored likelihood at α = 0 is
+the scaled Dirichlet density of the grain report (to 1e-13 in
+log-density). Its `τ` is the log of the total amount. When the matrix part's
+latent noise → 0, the likelihood becomes a product over the other parts,
+zeros included (within 3e-7). That is the element-wise factorisation the
+grain report assumes for multi-element assays. So one censored-likelihood
+implementation can serve both: the Box–Cox warping for the major parts and
+the matrix, and the grain law's per-element factors for trace phases.
+
+**M — Per-part latent noise from grains, and what the "assay" term
+holds.** By the delta method, the latent variance of part *k* equals the
+relative variance of its amount at every α. That is 1/n for n expected
+grains (Poisson check, within 3% at n = 5). At α = 0 the exact values are the
+trigamma, and the digamma minus `log n` for the mean shift: the grain
+report's log-ratio nugget and support bias. So the noise of the volume item
+above splits as
+`σ_k²(v) ≈ σ_assay² + 1/(a_k N_f(V)) + v_grain,k/(m_k v)`: assay error,
+heterogeneity between facies pieces (gamma shape `a_k`, averaged over the
+`N_f(V)` pieces a sample crosses), and grain sampling. The constant fitted
+as "assay error" may hold piece heterogeneity, which is *not* constant
+across supports. One σ per part is required, not optional: no single
+concentration fits all parts unless all grains are equal (grain report,
+Prop. 2). The sum is a delta-method approximation and is unconfirmed as a whole.
+
+**M — Where the censored Gaussian latent stops working: sampling zeros.**
+With the matrix pinning `τ`, a trace part is zero with probability
+`Φ(-1/(α cv_k))` under a censored Gaussian latent, and `e^-n` (or the
+negative binomial `(1 + n/a)^-a`) under the grain law. At n = 1: 0.37
+against 0.16 (α = 1) or 0.023 (α = 0.5). The tails differ in rate
+(`exp(-n/(2α²))` against `e^-n`), and with heterogeneity the censored model
+levels off at `Φ(-√a/α)` = 0.013 (α = 1) at any support. Below about five
+grains per sample, zeros are sampling zeros, and only the discrete grain
+law is right about them. `ScaledSimplex` and its Box–Cox family fit the
+matrix and the major parts. Also: the Box–Cox power that removes the skew of
+a gamma amount is 0.28–0.333 (n = 1 to 300), the Wilson–Hilferty cube root.
+On grain-dominated data a fitted α near 1/3 may reflect sampling noise
+rather than how the parts compensate each other; a separate `ψ` warping
+would separate the two.
+
+**M — Proposals shared with the grain report (unconfirmed).**
+- *Detection limits inside the censored likelihood:* with the rest of the
+  composition unassayed, an assay below detection is the two-missing-parts
+  case, with the hidden part bounded by `t_k`. An exact zero is `t_k → 0`.
+  It is the compositional form of the Tobit item below.
+- *Blocks larger than the range:* one latent mean and one variance per
+  sample leave systematic error (here 0.008–0.015; the grain report's
+  25 m blocks lose 0.02–0.04 g/t to point averaging). Averaged point
+  marginals are overconfident. Joint posterior draws of the sub-block
+  latents, each pushed through the back-map and then averaged, could keep
+  both the shape and the uncertainty.
+- *`m(ℓ)` from facies:* `m(ℓ) = Σ_c u_c(ℓ) m_c`, with `u_c` from Gaussian
+  indicators (as in the grain report's inference). This gives the learnable
+  scale a few global parameters and settles the trend identifiability noted
+  in the `m(s)` item.
+
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
 the detection limit by universal practice, and that biases exactly the low
@@ -3111,6 +3173,26 @@ support means evaluating at `s(V_block)` rather than fanning out
 sub-blocks. A doctrine inversion worth flagging: compositing to equal length
 homogenizes support, which is exactly the signal the texture parameters
 need, so heterogeneous support stops being a nuisance and becomes data.
+
+*Update 2026-11-14: the specification has moved on.* The current draft
+(research project "ToS-CoDA-nugget", `report/main.tex`, 18 September 2026
+onwards) replaces the shared-concentration Beta. It shows that law fails for
+more than two parts (no shared effective volume, its Prop. 2) and for coarse
+gold. Gold is understated fourteen-fold in relative variance, and the
+below-detection rate at core support comes out < 1e-4 against 0.61. What
+replaces it:
+- a grain-count law with piece heterogeneity: a negative-binomial count of
+  gamma grains, a three-cumulant shifted gamma for large counts, and
+  censoring that factorises by element;
+- a two-scale facies law;
+- a support-averaged kernel ("pieces", with Richardson extrapolation of
+  `k(S,S)`) that trains on raw intervals and predicts blocks of any shape.
+
+It was prototyped on geoML 0.7.0 (`ef10653`) as a GP-node subclass. Latest
+master (`8b43333`, checked 2026-11-14) has no support-averaged node yet. This
+item should be rewritten from that draft before work starts. The
+`ScaledSimplex` bridge items above show how its likelihood relates to the
+compositional warpings.
 
 Support and censoring want the same channel. **Decide once, for both**,
 whether they ride the data object (the `GaussianData` precedent, which also
