@@ -1765,6 +1765,128 @@ model as the ceiling: rmse, CRPS and coverage on the hidden elements, the
 common elements no worse, and every joined realization summing to the
 whole.
 
+*`ScaledSimplex` items* (found 2026-11-13, reading `warping.py` at
+`8b43333`). Analysis, proofs and scripts are in the research project
+"Alternative CoDA transformations" (`report/main.tex`, `verification/`). The
+notation throughout: `m` is the `scale` (mean composition of the complete
+rows), `zeta = x/m` the latent, and `D` the number of parts.
+
+**S — `ScaledSimplex.forward`'s log-determinant is off by `-log D`
+against `CenteredLogRatio`.** Both backward maps ignore a latent shift
+along `1` (`softmax(z + c)`, and `ScaledSimplex.backward(zeta + c)`), so for
+both the latent space is effectively the plane `1'v = 0`, and the factor
+that makes their objectives comparable is the one from the data plane
+`1'x = 1` onto it along `1`. That is `-sum(log x) - log D` for the clr
+(what `CenteredLogRatio` reports) and `-sum(log m) - log D` for
+`ScaledSimplex`, which reports `-sum(log m)`. The missing term is a constant
+that does not depend on `m`, so fitting is unaffected even with a
+learnable `m` (item below); only cross-warping comparisons move, by
+`-log D` per row. (An earlier note in the research report put the gap at
+`log||m|| - 0.5 log D`; that was the factor onto the image plane
+`m'zeta = 1` measured orthogonally, the wrong section for a map that
+discards the direction `1`. Checked symbolically for D = 3, 4 and by Monte
+Carlo of the pushed-forward density to within 2%.)
+
+**S — `ScaledSimplex.backward` leaves its zeros at about `1e-17`.** After
+the shrink, the binding part is exactly 0.0 in only 71% of infeasible
+latents (20,000 draws, D = 5). Code that tests `== 0` misses the rest.
+Setting the arg-max part of `shift` to 0 makes them exact.
+
+**M — `ScaledSimplex` cannot produce two zeros at once.** The shrink moves
+an infeasible point along the ray to `m`, which leaves the simplex through
+the interior of a facet unless it passes exactly through a lower face (a
+vertex at D = 3, an edge at D = 4): probability zero. Of 400,000
+`N(1, 1.5² I)` latents at D = 5, 82% get one zero and none get two. A
+retraction that agrees with the current one wherever the latent is feasible
+and gives every face positive mass is the threshold
+`x = m * max(0, zeta - tau)`, with `tau` set by a sort so that the parts
+sum to one: a weighted sparsemax (Martins & Astudillo 2016), and exactly
+the projection onto the simplex in the chi-square metric
+`sum((x - r)²/m)`. On the same draws it gives 0–4 zeros with shares
+18/43/30/8/1%. It keeps `backward(forward(x)) = x` and the shift
+invariance. Read as a model, a part is zero when its latent falls below a
+threshold common to the row, a Tobit with a shared cut-off, which is what
+the censored-likelihood item above would then score.
+
+**M — The latent score of a compositional warping counts the direction
+the back-map discards.** `log_lik` scores the D-dimensional Gaussian at the
+warped row. For isotropic noise that splits into the density on the plane
+`1'v = 0` times a one-dimensional Gaussian along `1`, which the output never
+sees. For clr rows (`1'z = 0`) the extra factor rewards `1'f = 0` and adds
+one more `-0.5 log(2 pi sigma²)`; with `1'f` fitted to 0 the noise variance
+that maximizes it is `(D - 1)/D` of the variance on the plane (0.80 at
+D = 5). For `ScaledSimplex` the extra factor makes the redundant latent
+direction fit `sum(x/m)`, a quantity the back-map throws away. Not measured
+on a trained geoML model; the check is to score both warpings with the
+along-`1` component removed and compare fitted noise and CRPS.
+
+**M — Keep the partial rows under `ScaledSimplex`, with a (D−1)-wide
+latent.** The goal is always the full composition of mass or volume (user,
+2026-11-13): a row with some parts unassayed is a set of exact shares of
+the whole plus a known remainder, never a re-closed subcomposition. Today
+the row is dropped whole (`_prepare_composition`, and `log_lik` averages
+`has_value` over the row for any mixing warping). The latent should be
+(D−1)-wide, as `PCA` already does: `zeta = 1 + E t`, with `E` an
+orthonormal basis of `m'v = 0`, so every `t`, its noise included, keeps
+`m'zeta = 1` and only non-negativity is left to the retraction. A partial
+row then observes the linear functionals `zeta_O = 1_O + E_O t`, scored as
+`N(zeta_O; 1_O + E_O f, sigma² E_O E_O')`: not elementwise, but closed
+form. Conditioning `t` on `zeta_O` keeps the observed parts exactly and
+fills the known remainder for any nugget (errors < 4e-15). The D-wide
+latent with an iid nugget moves the observed parts (median 0.004 at
+nugget 0.01) and `backward` then has to repair it by projection. In an iid
+test (D = 5, two parts hidden in half the rows, 30 reps) the hidden-part
+rmse was 0.026 / 0.030 (D−1) against 0.029 / 0.043 (D) at nugget 0.01 /
+0.1, and the `zeta` route beat alr on data with zeros, 0.025 against 0.043.
+It also needs a `rest` that is missing when any listed part is. The
+linearity holds at α = 1 only (see the Box–Cox item).
+
+**M — A learnable, spatially variable `m(s)`.** Feasible in geoML (user,
+2026-11-13). What it changes: the compensation rule becomes local,
+`s_j = m_j(s)/(1 - m_i(s))`, and equals the log-ratio rule where
+`m(s) = x(s)`; `m(s)` acts as the composition's trend and `zeta` as a
+multiplicative residual, with noise on part *j* scaled by `m_j(s)`.
+`-sum(log m)` now enters the fit, which is right (the `-log D` above is
+the only constant missing). Under the current likelihood a part that is
+zero in a row contributes `log N(0; f_j, sigma²) - log m_j`, unbounded as
+`m_j -> 0` (+9.2 nats from `1e-4` to `1e-8`). Under the censored
+likelihood of the Box–Cox item the same row converges (−1.246), and the
+Fenchel–Young loss is finite at zeros too, so either removes the
+obstacle. Still open: `m(s)` and the GP's own mean both carry a trend, so
+one of them has to be held smooth or low-rank.
+
+**M–L — A Box–Cox family of `ScaledSimplex`, trainable with zeros
+(weighted entmax).** Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
+`x = m * [1 + α(w - τ)]_+^(1/α)`, `τ` by bisection so the parts sum to one.
+The backward is `argmax_x w'x - Ω(x)` with `Ω` half the Cressie–Read power
+divergence of `x` from `m` (λ = α): Pearson chi-square at α = 1, where it
+is `ScaledSimplex` with the threshold retraction above, and
+Kullback–Leibler at α = 0, where it is softmax / `CenteredLogRatio`. So it
+is a weighted α-entmax (Peters et al. 2019, entmax parameter 1 + α), and
+the sparsemax construction (Martins & Astudillo 2016; Blondel et al. 2020)
+carries over. The Fenchel–Young loss `Ω*(w) + Ω(x) - w'x` is convex in
+`w`, finite at zeros, and has gradient `backward(w) - x`. It trained a
+17-feature transect fit with 6% zeros in 178 L-BFGS steps, rmse 0.023
+against the truth and 97% of zero/non-zero calls right. It is a loss, not
+a likelihood. The likelihood counterpart is exact and cheap. With iid
+latent noise, the threshold `τ` is the latent shift `backward` ignores and
+is integrated out in one dimension, so a row with positive parts `P` and
+zeros `Z` scores
+`log[sum_P g / (sqrt|P| prod_P g)] + log ∫ prod_P φ(b_k + c - η_k)
+prod_Z Φ((c - 1/α - η_k)/σ) dc`, with `g_k = x_k^(1-α) m_k^α` and `b_k`
+the Box–Cox value. That is a Gaussian factor in closed form times a
+40-node Gauss–Hermite expectation. It matched Monte Carlo on vertices,
+edges and interior (|z| < 1.5). Zeros enter only through `Φ`. The share
+paid by part *j* is `∝ x_j^(1-α) m_j^α`, sliding from log-ratio (α = 0) to
+`ScaledSimplex` (α = 1), and α is estimable from data with zeros. The
+profile censored likelihood (n = 300, 29–40% rows with zeros, 20 reps)
+gave 0.255 ± 0.015, 0.500 ± 0.016 and 0.982 ± 0.029 for true values
+0.25, 0.5 and 1. log-det on zero-free rows:
+`-sum(log g) + log(sum g) - log D`. This supersedes the closure-based
+α-family written here earlier the same day (its shares had an extra term
+and it had no training loss with zeros). A trainable α is one scalar on
+the warping; the censored term is the Tobit item below, specialised.
+
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
 the detection limit by universal practice, and that biases exactly the low
