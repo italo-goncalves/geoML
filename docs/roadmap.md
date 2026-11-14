@@ -1887,6 +1887,68 @@ gave 0.255 ± 0.015, 0.500 ± 0.016 and 0.982 ± 0.029 for true values
 and it had no training loss with zeros). A trainable α is one scalar on
 the warping; the censored term is the Tobit item below, specialised.
 
+*Follow-up, 2026-11-14.* A separate report in the same project
+(`report/scaled_simplex_entmax.tex`) carries the items below. Its
+density is measured on the `|P| - 1` free coordinates of the positive
+shares, so the `sqrt|P|` above drops out. Scripts: `experiments/censored.py`;
+checks: `verification/censored_general.py`, `censored_noise_warping.py`.
+
+**M — Extend the censored likelihood: per-part σ, per-sample σ and
+missing parts.** With `σ_k` per part, the Gaussian factor in `τ` stays
+closed form, with precision `Λ_P = sum_P σ_k^-2`. Each zero becomes
+`Φ((τ - 1/α - η_k)/σ_k)`, and `σ` may also vary by row. A row with
+unassayed parts `M` and known remainder `R = 1 - sum_O x_k` adds a
+factor `h_M(τ)` inside the same one-dimensional integral. For `|M| = 1` it
+is one density, and it equals the completed row exactly. For `|M| = 2` it
+is an interior integral over the split of `R` plus two boundary terms, one
+for each hidden part being zero. All forms matched Monte Carlo
+(|z| < 2.3). This is the Box–Cox-family counterpart of the partial-rows
+item above, valid for every α, not only α = 1.
+
+**M — Samples of different volume (support).** For a sample of `v`
+independent cells of volume `v0`, the latent noise variance is
+`σ²(v) = σ_a² + σ_0² v0/v`, i.e. assay error plus a nugget that averages
+out. For α < 1 the back-map is non-linear, so the delta method also gives
+a mean drift `η(v) ≈ η_∞ + d/v`, with `d_k = ½ b_k''(μ_x) Var(x_k)`. This
+is Gy's fundamental sampling error carried into the latent, and it gets
+*more* accurate as `v` grows. Spatially structured variability inside a
+sample (range ρ) behaves the other way. Its within-sample dispersion
+variance grows with `v`, and one block-averaged latent per sample leaves
+an error of 0.008–0.021 in the shares for `v ≥ ρ` (α = 0.5, ρ = 8 cells),
+even with second-order corrections. Splitting the sample into sub-blocks
+of length ≲ ρ/2 gives ≤ 0.005. That is the same discretisation geoML would
+use for block support, with `σ(v)` and the drift handling only the nugget
+inside each sub-block. The ρ/2 rule comes from one case.
+
+**M — Other noise families and a further warping under the censored
+likelihood.** The censored likelihood only needs each part's latent
+density and distribution function. So Laplace or Student-t noise fit in,
+as does a monotone `ψ_k` applied to `w` (e.g. a sinh-arcsinh to normalise
+it). A positive part then contributes `f((ψ(w) - η)/σ) ψ'(w)/σ`, and a zero
+contributes `F((ψ(τ - 1/α) - η)/σ)`. The `τ` integral loses its closed form
+but stays one-dimensional. Its grid has to reach the noise family's 1e-10
+quantile: a ±12 s.d. grid lost 40% of a rare vertex probability under t4.
+`ψ` must be fitted inside this likelihood, not to the marginal of
+`forward(x)`, because there every zero sits at the atom `-1/α`. A non-linear
+`ψ` also breaks the exact shift invariance, so all `D` latent means become
+(weakly) identified. Checked against Monte Carlo for Laplace,
+Gauss + sinh-arcsinh and t4 + sinh-arcsinh (|z| < 2.1); the generic code
+matches the closed form to 9e-7.
+
+**M — Evidence that the current `log_lik` is biased on data with zeros.**
+The current `log_lik` scores `forward(x)` as an exact latent value: zeros
+at `-1/α`, and `D` independent Gaussians. Fitted to data simulated from
+the censored model (D = 4, N = 500, 20 reps), it underestimates the noise
+s.d. (0.83 and 0.80 of the truth at α = 1 and 0.5). It also predicts too
+few rows with a zero: 13% against 23%, and 18% against 36%. Laplace is in
+between (0.95 / 0.94; 19% / 28%), and the censored fit is calibrated
+(1.00 / 1.01; 23% / 36%). The censored model is correctly specified here,
+so this measures the size of the bias, not performance on real data.
+Recommendation: once zeros are allowed, the censored likelihood replaces
+the current score for this warping, with the noise family chosen inside
+it. Without zeros it reduces to the current Gaussian score with the
+discarded direction removed (see the latent-score item above).
+
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
 the detection limit by universal practice, and that biases exactly the low
