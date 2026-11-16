@@ -428,13 +428,30 @@ class ArrayStore:
     def __setitem__(self, item, value):
         if self._backend == "zarr":
             if self._array.read_only:
-                # zarr refuses too, but without saying what to do instead
-                raise ValueError(
-                    "%s was opened read-only; open it with mode='r+' to "
-                    "write into it, or write the container to another "
-                    "store with to_zarr" % (self._store_path or "this store"))
+                self._take_a_copy()
+        if self._backend == "zarr":
             item = _rows_of_masks(item)
         self._array[item] = value
+
+    def _take_a_copy(self):
+        """Swap a read-only array for a writable copy of it.
+
+        A store opened read-only is never written (GeoScape's item 55): the
+        first write turns it into a copy held as a new store would be, in
+        memory or, past the spill size, in a temporary store of its own,
+        and the file it was read from stays as it was.
+        """
+        copy = ArrayStore.allocate(
+            self.shape, dtype=self.dtype, fill_value=self._array.fill_value,
+            chunks=self._array.chunks)
+        if copy._backend == "zarr":
+            _da.store(_da.from_array(self._array, chunks=self._array.chunks),
+                      copy._array, lock=False)
+        else:
+            copy._array[...] = self._array[...]
+        self._array, self._backend = copy._array, copy._backend
+        self._store_path, self._tempdir = copy._store_path, copy._tempdir
+        copy._tempdir = None
 
     def _stored(self):
         """The values as stored, not widened: what a copy keeps."""

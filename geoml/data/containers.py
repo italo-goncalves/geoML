@@ -967,11 +967,14 @@ class _SpatialData(_TreeNode):
             A directory written by :meth:`to_zarr`.
         mode
             `"r+"` (the default) to read and write the store's arrays, `"r"`
-            to read them only: a prediction into a stored variable, or any
-            other write into the store, is then refused. What is added to a
-            read-only container -- a new variable, a metadata column -- is
-            held in memory and never reaches the store; :meth:`to_zarr`
-            writes the lot somewhere else.
+            to read them only: the store is then never written. A write into
+            one of its arrays -- a prediction into a stored variable, a
+            column set by hand -- lands in a copy of that array, held in
+            memory or past the spill size in a temporary store, and what is
+            added -- a new variable, a metadata column -- is held the same
+            way; :meth:`to_zarr` writes the lot somewhere else. A
+            prediction of every location allocates its realizations afresh
+            rather than copying the stored ones.
 
         Raises
         ------

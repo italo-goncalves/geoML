@@ -1194,3 +1194,169 @@ def test_a_container_is_built_and_predicted_into_as_it_declares(
     model = models[container.n_dim]
     model.predict(container, n_sim=2)
     assert not container.unpredicted().any()
+
+
+# --------------------------------------------------------------------------- #
+# what the expected kernel refuses (GeoScape's item 57)
+# --------------------------------------------------------------------------- #
+class _Checked:
+    """The model's own check, on a network and options without a model."""
+    _check_expected_kernel = geoml.models.VGPNetwork._check_expected_kernel
+    _check_deep_moments = geoml.models.VGPNetwork._check_deep_moments
+    _full_variance = geoml.models.VGPNetwork._full_variance
+
+    def __init__(self, leaf, options):
+        self.leaf, self.options = leaf, options
+
+    def _nodes(self):
+        return [self.leaf] + self.leaf.get_unique_parents()
+
+
+def _joint(obj):
+    return type(obj)._catalogue.get("joint", {})
+
+
+def _category(obj):
+    return type(obj)._catalogue["category"]
+
+
+def _feeds_gp(node):
+    for child in node.children:
+        if _category(child) == "latent":
+            return True
+        if child.propagates_inducing_points and _feeds_gp(child):
+            return True
+    return False
+
+
+def _declared_refusal(leaf, options):
+    """Whether the declarations alone say the network is refused."""
+    required = geoml.models.GPOptions._catalogue["joint"]["requires"]
+    if any(getattr(options, k) != v for k, v in required.items()):
+        return True
+    for node in [leaf] + leaf.get_unique_parents():
+        joint, below = _joint(node), node.get_unique_parents()
+        random = [_joint(p).get("random", False) for p in below]
+        if _category(node) == "latent":
+            kernel = _joint(node.kernel)
+            if kernel.get("refused"):
+                return True
+        rule = joint.get("random_below")
+        if rule == "refused" and any(random):
+            return True
+        if rule == "inputs" and any(r is True for r in random):
+            return True
+        if rule == "kernel" and any(random) \
+                and not kernel["uncertain_input"]:
+            return True
+        if joint.get("read_by_gp") is False and _feeds_gp(node):
+            return True
+        if "field_kernel" in joint \
+                and not _joint(node.field.kernel)["uncertain_input"]:
+            return True
+        if options.full_variance \
+                and options.deep_moments in joint.get(
+                    "deep_moments_refused", ()) \
+                and any(r is True and _category(p) != "input"
+                        for p, r in zip(below, random)):
+            return True
+    return False
+
+
+def _checked_refusal(leaf, options):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            _Checked(leaf, options)._check_expected_kernel()
+        except ValueError:
+            return True
+    return False
+
+
+KERNELS = [c for c in catalogue.classes()
+           if c._catalogue["category"] == "kernel"]
+GP_NODES = [latent.BasicGP, latent.AdditiveGP, latent.UncertainInputGP,
+            latent.MultiStructureGP]
+
+
+def _below():
+    """A node to stand under the one checked, of every kind there is to
+    meet: certain, a random input, random two nodes down, a walk, and the
+    gradient-constrained input."""
+    root = _root()
+    return {
+        "input": root,
+        "gaussian input": latent.GaussianInput(
+            _points(), transform=tr.Isotropic(30.0)),
+        "gp": _gp(root, 2),
+        "linear over a gp": latent.Linear(_gp(root, 3), size=2),
+        "walk": latent.GPWalk(_gp(root, 2)),
+        "gradient": latent.GradientConstrainedInput(
+            _points(), _directions(),
+            kr.Covariance(kr.Gaussian(), tr.Isotropic(30.0)), size=2)}
+
+
+def _options(**kwargs):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return geoml.models.GPOptions(verbose=False, **kwargs)
+
+
+def test_every_kernel_and_node_with_a_rule_is_published(built):
+    for cls in KERNELS:
+        assert "joint" in cls._catalogue, cls.__name__
+    for name, entry in built["classes"].items():
+        cls = catalogue.resolve(name)
+        if "joint" in cls.__dict__.get("_catalogue", {}):
+            assert entry["joint"] == cls._catalogue["joint"], name
+    assert built["functions"]["geoml.models.GPOptions"]["joint"] == {
+        "requires": {"expert_propagation": "independent"}}
+
+
+@pytest.mark.parametrize("cls", GP_NODES, ids=lambda c: c.__name__)
+def test_a_gp_node_is_refused_as_its_declarations_say(cls):
+    options = _options()
+    agreed = 0
+    for kernel in KERNELS:
+        for kind, below in _below().items():
+            for above in (False, True):
+                node = cls(below, size=1, kernel=kernel())
+                leaf = latent.BasicGP(node, size=1) if above else node
+                declared = _declared_refusal(leaf, options)
+                assert declared == _checked_refusal(leaf, options), \
+                    (kernel.__name__, kind, above)
+                agreed += declared
+    assert agreed > 0
+
+
+def test_a_walk_a_trend_and_the_inputs_are_refused_as_declared():
+    options = _options()
+    cases = []
+    for kernel in KERNELS:
+        field = latent.BasicGP(_root(), size=2, kernel=kernel())
+        cases.append(latent.GPWalk(field))
+    for below in _below().values():
+        cases.append(latent.RadialTrend(below, size=1))
+    gradient = _below()["gradient"]
+    cases += [latent.BasicGP(gradient, size=1),
+              latent.BasicGP(latent.Linear(gradient, size=1), size=1),
+              latent.Linear(_below()["gradient"], size=1)]
+    for leaf in cases:
+        assert _declared_refusal(leaf, options) \
+            == _checked_refusal(leaf, options), leaf.name
+
+
+def test_the_options_and_the_deep_moments_are_refused_as_declared():
+    for below in ("input", "gp", "gaussian input", "walk"):
+        leaf = latent.AdditiveGP(_below()[below], size=1)
+        for full in (False, True):
+            for form in ("quadrature", "hinge", "blur", "bound"):
+                options = _options(full_variance=full, deep_moments=form)
+                assert _declared_refusal(leaf, options) \
+                    == _checked_refusal(leaf, options), (below, full, form)
+    # the options refuse the other rule themselves, under the joint one
+    with pytest.raises(ValueError, match="independent"):
+        _options(expert_propagation="consensus")
+    assert not _declared_refusal(_gp(_root(), 1), _options())

@@ -2589,6 +2589,29 @@ the null
 space of the Gram with normals of its own or take more features where the
 Gram is short of rank.
 
+**M — Categorical sharpness inversely proportional to class abundance**
+(requested 2026-11-14; nothing built or measured). `sharpness` is one
+integer today, multiplying every row's log-density alike
+(`CategoricalGaussianIndicator.log_lik`, inherited by
+`HierarchicalGaussianIndicator`; `OrderedGaussianIndicator` and `Bernoulli`
+have their own), so a rare rock type carries a few rows' worth of the bound
+beside the dominant one, and the model can over-call the dominant category
+-- which `proportions` is the figure for. The idea is to weight a row by its
+class's rarity: a category's sharpness proportional to one over its share
+of the data. Open before building: the shares declustered or by count
+(the container's `"declustering"` column is there); the weights normalized
+so the mean row weight stays the current sharpness, so the bound's balance
+against the KL does not move; read once at `initialize` and held fixed, or
+an argument the user sets per category; and the price, since weighting
+rows by class is a change of the class priors -- the probabilities stop
+being calibrated against the data's own shares and lean toward the rare
+categories, which `bias=True` would partly absorb. Off by default and an
+argument rather than a parameter, so a save replays it and older saves
+open. Measure on chapter 6, chapter 16 and Tom East's rock types against
+the plain likelihood: `proportions` and `reliability` for the shares and
+the calibration, per-category recall, and the log and Brier scores out of
+fold, which say whether the rare categories are found or only over-called.
+
 ## 2. Fitting and initialization
 
 The theme is measured rather than assumed: **training does not leave the
@@ -3114,8 +3137,10 @@ that build and run them, and reads what they leave behind. Its repository
 catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
 is that list's numbering, and M3 and M4 its milestones. The changelog has
 each item as it was met; read again on 2026-11-11 and its three open items
-built for 0.10.8, **every item on it is met**, and what is left below is
-the paperwork outside the code.
+built for 0.10.8, and on 2026-11-16 for items 55-59 (55, 57 and 59 built
+for 0.10.11, 56 declined -- see "Refused without measuring" -- and 58
+already met by `part_columns`), **every item on it is answered**, and what
+is left below is the paperwork outside the code.
 
 Item 52 (a limit per Realization on a `MeshSet`) is
 `limits={"ore": (other_set, 0.5)}`, a pair of set and key: the other set's
@@ -3869,6 +3894,16 @@ no than a number. Revisit if the premise changes.
 - **QKNA.** A diagnostic for a kriging neighbourhood search that does not
   exist here. The one piece worth stealing, the slope of regression, is what
   `prediction_scatter` already draws.
+- **A warning when `set_limits` moves a value** (GeoScape's item 56,
+  declined 2026-11-16). Limits given way to are how a range's constructor
+  bounds yield to the ones an input reads off its inducing points, which
+  every model does, so a warning would speak on most models about a value
+  nobody chose. The workaround is GeoScape's own: after the call that sets
+  the limits (building the model, or `set_limits` itself), read
+  `parameters[name].get_value()` for every value the user typed and compare
+  it with what was typed -- the parameter's name is the argument's, as the
+  catalogue's `trainable.start` says -- and say so on the Run where they
+  differ.
 
 ### Already here under another name
 

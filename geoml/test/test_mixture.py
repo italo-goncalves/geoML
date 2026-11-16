@@ -433,6 +433,75 @@ def test_a_vector_variable_gets_one_answer_per_location():
         assert len(point.variables["v"].components[label].responsibilities) == 0
 
 
+def test_responsibilities_answer_only_where_asked():
+    """`where` reads the rows asked about and leaves the others as they
+    were; by expert, the answer is the same."""
+    x, y, _ = _contaminated(n=90)
+    mix = geoml.likelihood.Mixture(geoml.warping.ZScore(1))
+    model, point = _model(mix, x, y, max_iter=20)
+    whole = model.responsibilities(point)["v"]
+
+    where = np.arange(point.n_data) % 3 == 1
+    fresh = point[np.ones(point.n_data, dtype=bool)]
+    fresh.variables["v"].responsibilities.clear()
+    answer = model.responsibilities(fresh, where=where)["v"]
+    np.testing.assert_allclose(answer[where], whole[where], atol=1e-10)
+    assert np.all(np.isnan(answer[~where]))
+    assert np.all(np.isnan(fresh.values("v/responsibilities/0")[~where]))
+
+    # what the other rows held stays
+    point.variables["v"].responsibilities[0].values[:] = 2.0
+    model.responsibilities(point, where=where)
+    kept = point.values("v/responsibilities/0")
+    assert np.all(kept[~where] == 2.0)
+    np.testing.assert_allclose(kept[where], whole[where, 0], atol=1e-10)
+
+    grouped = model.responsibilities(point, store=False, where=where,
+                                     by_expert=True)["v"]
+    np.testing.assert_allclose(grouped[where], whole[where], atol=1e-10)
+
+
+def test_cross_validation_files_responsibilities_out_of_fold(tmp_path):
+    """GeoScape's item 59: each fold's rows answered by the fold model that
+    never saw them, the first fold rebuilt by hand to check."""
+    import geoml.persistence as persistence
+    x, y, _ = _contaminated(n=90)
+    mix = geoml.likelihood.Mixture(geoml.warping.ZScore(1))
+    model, point = _model(mix, x, y, max_iter=30)
+    labels = np.arange(point.n_data) % 3
+    point.add_metadata("fold", labels)
+    in_sample = model.responsibilities(point, store=False)["v"]
+
+    # a fold model's fresh state draws from the package RNG
+    geoml.set_seed(7)
+    oof, _ = geoml.models.cross_validate(
+        model, iterations=10, n_sim=4, n_nodes=4,
+        path=str(tmp_path / "cv"), responsibilities=True)
+    answer = np.stack([oof.values("v/responsibilities/%d" % k)
+                       for k in range(2)], axis=1)
+    np.testing.assert_allclose(answer.sum(axis=1), 1.0)
+    assert not np.allclose(answer, in_sample, atol=1e-6)
+
+    held = labels == 0
+    saved = str(tmp_path / "by_hand")
+    geoml.set_seed(7)
+    persistence.save_model(model, saved)
+    first = persistence.load_model(saved, data=point[~held])
+    geoml.models._fresh_variational_state(first)
+    first.train_full(max_iter=10)
+    by_hand = first.responsibilities(point, store=False, where=held)["v"]
+    np.testing.assert_array_equal(answer[held], by_hand[held])
+
+
+def test_cross_validation_asks_for_responsibilities_of_a_mixture(tmp_path):
+    x, y, _ = _contaminated(n=60)
+    model, point = _model(geoml.likelihood.Gaussian(), x, y, max_iter=5)
+    point.add_metadata("fold", np.arange(point.n_data) % 2)
+    with pytest.raises(ValueError, match="mixture"):
+        geoml.models.cross_validate(model, iterations=2,
+                                    responsibilities=True)
+
+
 def test_responsibilities_need_a_mixture():
     x, y, _ = _contaminated(n=60)
     model, point = _model(geoml.likelihood.Gaussian(), x, y, max_iter=20)

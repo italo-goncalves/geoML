@@ -96,6 +96,30 @@ governed by the node's `bias=`, so nothing in the format has to say "one per
 expert" or "variational". Also left out, as never trained: a quadrature's
 `nodes`, `Center`'s `std`, `Scale`'s `mean` and `BoxCox`'s found `shift`.
 
+Added in 0.10.11 for GeoScape's item 57, the format staying 2: `joint`, what
+`GPOptions(propagation="joint")` refuses, said where the check
+(`VGPNetwork._check_expected_kernel`) says it. On every kernel,
+`uncertain_input` -- whether a GP node with it reads an uncertain input (the
+scale mixtures of Gaussians: Gaussian, exponential, the two Materns, the
+rational quadratic) -- and `refused: true` on the cosine, which no GP node
+takes under that rule. On the nodes with a rule, parents lying below a node
+and "below" reaching through every node between: `random` (`true`, or
+`"input"` for `GaussianInput`), its output random to every node above it;
+`random_below`, what it needs where a random node lies below it --
+`"kernel"` a kernel with `uncertain_input`, `"inputs"` random inputs only
+(`UncertainInputGP`), `"refused"` none (`RadialTrend`); `read_by_gp: false`,
+no GP node above it, directly or through nodes passing the inducing points
+on (`GradientConstrainedInput`, `UncertainInputGP`); `field_kernel`, the
+walk's field taking an uncertain input; and `deep_moments_refused` on
+`AdditiveGP`, the `deep_moments` it refuses under `full_variance=True` where
+a random node other than an input lies below it. A node declaring nothing
+has no rule. The options' own entry says `joint.requires`, the one other
+option the rule needs (`expert_propagation="independent"`, which
+`GPOptions` refuses otherwise). `test_catalogue.py` builds every GP node
+with every kernel over every kind of node below, with and without a GP
+above, and every walk, trend and deep-moments case, and holds what the
+declarations predict to what the check does.
+
 ## Found on the way
 
 Each of these would have made a declaration false, and the tests below

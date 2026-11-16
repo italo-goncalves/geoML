@@ -7904,6 +7904,30 @@ for _class, _trained in (
                    "fixed_when": {"argument": "reach", "differs": None}},
                   "precision"])):
     _class._catalogue["trainable"] = _trained
+# What a node is and takes under `GPOptions(propagation="joint")`, the rules
+# `VGPNetwork._check_expected_kernel` enforces. Parents lie below a node,
+# and "below" means however many nodes lie between: `random`, its output is
+# random to every node above it ("input" for a random input, the one kind
+# `UncertainInputGP` reads); `random_below`, what it needs where a node below
+# it is random -- "kernel" a kernel that takes an uncertain input, "inputs"
+# random inputs only, "refused" none; `read_by_gp: False`, no GP node above
+# it, directly or through nodes that pass the inducing points on;
+# `field_kernel`, its field's kernel taking an uncertain input;
+# `deep_moments_refused`, the `GPOptions.deep_moments` it refuses under
+# `full_variance=True` where a random node other than an input lies below
+# it. A node declaring nothing has no rule. Checked against the check
+# itself in `test_catalogue.py`.
+_GP_JOINT = {"random": True, "random_below": "kernel"}
+for _class, _joint in (
+        (BasicGP, _GP_JOINT), (MultiStructureGP, _GP_JOINT),
+        (AdditiveGP, dict(_GP_JOINT, deep_moments_refused=["hinge", "blur"])),
+        (UncertainInputGP, {"random": True, "random_below": "inputs",
+                            "read_by_gp": False}),
+        (GPWalk, {"random": True, "field_kernel": "uncertain_input"}),
+        (GradientConstrainedInput, {"random": True, "read_by_gp": False}),
+        (GaussianInput, {"random": "input"}),
+        (RadialTrend, {"random_below": "refused"})):
+    _class._catalogue["joint"] = _joint
 # an argument holding fixed everything an object it was given trains
 for _class, _param, _argument in (
         (BasicInput, "transform", "fix_transform"),
