@@ -866,6 +866,16 @@ Product._catalogue = {"category": "covariance",
                       "params": {"args": {"type": "ref:covariance[]"}}}
 Scale._catalogue = {"category": "covariance",
                     "params": {"base_covariance": {"type": "ref:covariance"}}}
+# Under `GPOptions(propagation="joint")`: whether a GP node with the kernel
+# reads an uncertain input (a scale mixture of Gaussians, which the
+# expected kernel integrates), and the one a GP node may not take at all.
+# Checked against `VGPNetwork._check_expected_kernel` in `test_catalogue.py`.
+for _kernel in (Gaussian, Exponential, Matern32, Matern52,
+                RationalQuadratic):
+    _kernel._catalogue["joint"] = {"uncertain_input": True}
+for _kernel in (Spherical, Cubic, Constant):
+    _kernel._catalogue["joint"] = {"uncertain_input": False}
+Cosine._catalogue["joint"] = {"uncertain_input": False, "refused": True}
 
 # What each trains, under the names `parameters` holds them by (see
 # `latent/network.py`).

@@ -78,7 +78,7 @@ computed in; pass `"float64"` to keep one precision everywhere. Realizations are
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.10.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.11.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -373,8 +373,9 @@ The papers and the code name the same things differently.
   (`"V/simulations/7"`) or reduce in row bands.
 - **Open a store you only read with `mode="r"`.** A container's `open`
   defaults to `"r+"`, and a prediction into it writes into the store.
-  Read-only, a write is refused and the store stays as it was; `to_zarr`
-  never writes over the store a container reads from.
+  Read-only, a write lands in a copy held in memory (or a temporary
+  store) and the store stays as it was; `to_zarr` writes the result
+  elsewhere, never over the store a container reads from.
 - **The stored realizations are of the ground; a measurement scatters
   around it.** Comparing a prediction with an assay needs
   `model.predict_measurements`, not the stored realizations -- and

@@ -1765,6 +1765,252 @@ model as the ceiling: rmse, CRPS and coverage on the hidden elements, the
 common elements no worse, and every joined realization summing to the
 whole.
 
+*`ScaledSimplex` items* (found 2026-11-13, reading `warping.py` at
+`8b43333`). Analysis, proofs and scripts are in the research project
+"Alternative CoDA transformations" (`report/main.tex`, `verification/`). The
+notation throughout: `m` is the `scale` (mean composition of the complete
+rows), `zeta = x/m` the latent, and `D` the number of parts.
+
+**S — `ScaledSimplex.forward`'s log-determinant is off by `-log D`
+against `CenteredLogRatio`.** Both backward maps ignore a latent shift
+along `1` (`softmax(z + c)`, and `ScaledSimplex.backward(zeta + c)`), so for
+both the latent space is effectively the plane `1'v = 0`, and the factor
+that makes their objectives comparable is the one from the data plane
+`1'x = 1` onto it along `1`. That is `-sum(log x) - log D` for the clr
+(what `CenteredLogRatio` reports) and `-sum(log m) - log D` for
+`ScaledSimplex`, which reports `-sum(log m)`. The missing term is a constant
+that does not depend on `m`, so fitting is unaffected even with a
+learnable `m` (item below); only cross-warping comparisons move, by
+`-log D` per row. (An earlier note in the research report put the gap at
+`log||m|| - 0.5 log D`; that was the factor onto the image plane
+`m'zeta = 1` measured orthogonally, the wrong section for a map that
+discards the direction `1`. Checked symbolically for D = 3, 4 and by Monte
+Carlo of the pushed-forward density to within 2%.)
+
+**S — `ScaledSimplex.backward` leaves its zeros at about `1e-17`.** After
+the shrink, the binding part is exactly 0.0 in only 71% of infeasible
+latents (20,000 draws, D = 5). Code that tests `== 0` misses the rest.
+Setting the arg-max part of `shift` to 0 makes them exact.
+
+**M — `ScaledSimplex` cannot produce two zeros at once.** The shrink moves
+an infeasible point along the ray to `m`, which leaves the simplex through
+the interior of a facet unless it passes exactly through a lower face (a
+vertex at D = 3, an edge at D = 4): probability zero. Of 400,000
+`N(1, 1.5² I)` latents at D = 5, 82% get one zero and none get two. A
+retraction that agrees with the current one wherever the latent is feasible
+and gives every face positive mass is the threshold
+`x = m * max(0, zeta - tau)`, with `tau` set by a sort so that the parts
+sum to one: a weighted sparsemax (Martins & Astudillo 2016), and exactly
+the projection onto the simplex in the chi-square metric
+`sum((x - r)²/m)`. On the same draws it gives 0–4 zeros with shares
+18/43/30/8/1%. It keeps `backward(forward(x)) = x` and the shift
+invariance. Read as a model, a part is zero when its latent falls below a
+threshold common to the row, a Tobit with a shared cut-off, which is what
+the censored-likelihood item above would then score.
+
+**M — The latent score of a compositional warping counts the direction
+the back-map discards.** `log_lik` scores the D-dimensional Gaussian at the
+warped row. For isotropic noise that splits into the density on the plane
+`1'v = 0` times a one-dimensional Gaussian along `1`, which the output never
+sees. For clr rows (`1'z = 0`) the extra factor rewards `1'f = 0` and adds
+one more `-0.5 log(2 pi sigma²)`; with `1'f` fitted to 0 the noise variance
+that maximizes it is `(D - 1)/D` of the variance on the plane (0.80 at
+D = 5). For `ScaledSimplex` the extra factor makes the redundant latent
+direction fit `sum(x/m)`, a quantity the back-map throws away. Not measured
+on a trained geoML model; the check is to score both warpings with the
+along-`1` component removed and compare fitted noise and CRPS.
+
+**M — Keep the partial rows under `ScaledSimplex`, with a (D−1)-wide
+latent.** The goal is always the full composition of mass or volume (user,
+2026-11-13): a row with some parts unassayed is a set of exact shares of
+the whole plus a known remainder, never a re-closed subcomposition. Today
+the row is dropped whole (`_prepare_composition`, and `log_lik` averages
+`has_value` over the row for any mixing warping). The latent should be
+(D−1)-wide, as `PCA` already does: `zeta = 1 + E t`, with `E` an
+orthonormal basis of `m'v = 0`, so every `t`, its noise included, keeps
+`m'zeta = 1` and only non-negativity is left to the retraction. A partial
+row then observes the linear functionals `zeta_O = 1_O + E_O t`, scored as
+`N(zeta_O; 1_O + E_O f, sigma² E_O E_O')`: not elementwise, but closed
+form. Conditioning `t` on `zeta_O` keeps the observed parts exactly and
+fills the known remainder for any nugget (errors < 4e-15). The D-wide
+latent with an iid nugget moves the observed parts (median 0.004 at
+nugget 0.01) and `backward` then has to repair it by projection. In an iid
+test (D = 5, two parts hidden in half the rows, 30 reps) the hidden-part
+rmse was 0.026 / 0.030 (D−1) against 0.029 / 0.043 (D) at nugget 0.01 /
+0.1, and the `zeta` route beat alr on data with zeros, 0.025 against 0.043.
+It also needs a `rest` that is missing when any listed part is. The
+linearity holds at α = 1 only (see the Box–Cox item).
+
+**M — A learnable, spatially variable `m(s)`.** Feasible in geoML (user,
+2026-11-13). What it changes: the compensation rule becomes local,
+`s_j = m_j(s)/(1 - m_i(s))`, and equals the log-ratio rule where
+`m(s) = x(s)`; `m(s)` acts as the composition's trend and `zeta` as a
+multiplicative residual, with noise on part *j* scaled by `m_j(s)`.
+`-sum(log m)` now enters the fit, which is right (the `-log D` above is
+the only constant missing). Under the current likelihood a part that is
+zero in a row contributes `log N(0; f_j, sigma²) - log m_j`, unbounded as
+`m_j -> 0` (+9.2 nats from `1e-4` to `1e-8`). Under the censored
+likelihood of the Box–Cox item the same row converges (−1.246), and the
+Fenchel–Young loss is finite at zeros too, so either removes the
+obstacle. Still open: `m(s)` and the GP's own mean both carry a trend, so
+one of them has to be held smooth or low-rank.
+
+**M–L — A Box–Cox family of `ScaledSimplex`, trainable with zeros
+(weighted entmax).** Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
+`x = m * [1 + α(w - τ)]_+^(1/α)`, `τ` by bisection so the parts sum to one.
+The backward is `argmax_x w'x - Ω(x)` with `Ω` half the Cressie–Read power
+divergence of `x` from `m` (λ = α): Pearson chi-square at α = 1, where it
+is `ScaledSimplex` with the threshold retraction above, and
+Kullback–Leibler at α = 0, where it is softmax / `CenteredLogRatio`. So it
+is a weighted α-entmax (Peters et al. 2019, entmax parameter 1 + α), and
+the sparsemax construction (Martins & Astudillo 2016; Blondel et al. 2020)
+carries over. The Fenchel–Young loss `Ω*(w) + Ω(x) - w'x` is convex in
+`w`, finite at zeros, and has gradient `backward(w) - x`. It trained a
+17-feature transect fit with 6% zeros in 178 L-BFGS steps, rmse 0.023
+against the truth and 97% of zero/non-zero calls right. It is a loss, not
+a likelihood. The likelihood counterpart is exact and cheap. With iid
+latent noise, the threshold `τ` is the latent shift `backward` ignores and
+is integrated out in one dimension, so a row with positive parts `P` and
+zeros `Z` scores
+`log[sum_P g / (sqrt|P| prod_P g)] + log ∫ prod_P φ(b_k + c - η_k)
+prod_Z Φ((c - 1/α - η_k)/σ) dc`, with `g_k = x_k^(1-α) m_k^α` and `b_k`
+the Box–Cox value. That is a Gaussian factor in closed form times a
+40-node Gauss–Hermite expectation. It matched Monte Carlo on vertices,
+edges and interior (|z| < 1.5). Zeros enter only through `Φ`. The share
+paid by part *j* is `∝ x_j^(1-α) m_j^α`, sliding from log-ratio (α = 0) to
+`ScaledSimplex` (α = 1), and α is estimable from data with zeros. The
+profile censored likelihood (n = 300, 29–40% rows with zeros, 20 reps)
+gave 0.255 ± 0.015, 0.500 ± 0.016 and 0.982 ± 0.029 for true values
+0.25, 0.5 and 1. log-det on zero-free rows:
+`-sum(log g) + log(sum g) - log D`. This supersedes the closure-based
+α-family written here earlier the same day (its shares had an extra term
+and it had no training loss with zeros). A trainable α is one scalar on
+the warping; the censored term is the Tobit item below, specialised.
+
+*Follow-up, 2026-11-14.* A separate report in the same project
+(`report/scaled_simplex_entmax.tex`) carries the items below. Its
+density is measured on the `|P| - 1` free coordinates of the positive
+shares, so the `sqrt|P|` above drops out. Scripts: `experiments/censored.py`;
+checks: `verification/censored_general.py`, `censored_noise_warping.py`.
+
+**M — Extend the censored likelihood: per-part σ, per-sample σ and
+missing parts.** With `σ_k` per part, the Gaussian factor in `τ` stays
+closed form, with precision `Λ_P = sum_P σ_k^-2`. Each zero becomes
+`Φ((τ - 1/α - η_k)/σ_k)`, and `σ` may also vary by row. A row with
+unassayed parts `M` and known remainder `R = 1 - sum_O x_k` adds a
+factor `h_M(τ)` inside the same one-dimensional integral. For `|M| = 1` it
+is one density, and it equals the completed row exactly. For `|M| = 2` it
+is an interior integral over the split of `R` plus two boundary terms, one
+for each hidden part being zero. All forms matched Monte Carlo
+(|z| < 2.3). This is the Box–Cox-family counterpart of the partial-rows
+item above, valid for every α, not only α = 1.
+
+**M — Samples of different volume (support).** For a sample of `v`
+independent cells of volume `v0`, the latent noise variance is
+`σ²(v) = σ_a² + σ_0² v0/v`, i.e. assay error plus a nugget that averages
+out. For α < 1 the back-map is non-linear, so the delta method also gives
+a mean drift `η(v) ≈ η_∞ + d/v`, with `d_k = ½ b_k''(μ_x) Var(x_k)`. This
+is Gy's fundamental sampling error carried into the latent, and it gets
+*more* accurate as `v` grows. Spatially structured variability inside a
+sample (range ρ) behaves the other way. Its within-sample dispersion
+variance grows with `v`, and one block-averaged latent per sample leaves
+an error of 0.008–0.021 in the shares for `v ≥ ρ` (α = 0.5, ρ = 8 cells),
+even with second-order corrections. Splitting the sample into sub-blocks
+of length ≲ ρ/2 gives ≤ 0.005. That is the same discretisation geoML would
+use for block support, with `σ(v)` and the drift handling only the nugget
+inside each sub-block. The ρ/2 rule comes from one case.
+
+**M — Other noise families and a further warping under the censored
+likelihood.** The censored likelihood only needs each part's latent
+density and distribution function. So Laplace or Student-t noise fit in,
+as does a monotone `ψ_k` applied to `w` (e.g. a sinh-arcsinh to normalise
+it). A positive part then contributes `f((ψ(w) - η)/σ) ψ'(w)/σ`, and a zero
+contributes `F((ψ(τ - 1/α) - η)/σ)`. The `τ` integral loses its closed form
+but stays one-dimensional. Its grid has to reach the noise family's 1e-10
+quantile: a ±12 s.d. grid lost 40% of a rare vertex probability under t4.
+`ψ` must be fitted inside this likelihood, not to the marginal of
+`forward(x)`, because there every zero sits at the atom `-1/α`. A non-linear
+`ψ` also breaks the exact shift invariance, so all `D` latent means become
+(weakly) identified. Checked against Monte Carlo for Laplace,
+Gauss + sinh-arcsinh and t4 + sinh-arcsinh (|z| < 2.1); the generic code
+matches the closed form to 9e-7.
+
+**M — Evidence that the current `log_lik` is biased on data with zeros.**
+The current `log_lik` scores `forward(x)` as an exact latent value: zeros
+at `-1/α`, and `D` independent Gaussians. Fitted to data simulated from
+the censored model (D = 4, N = 500, 20 reps), it underestimates the noise
+s.d. (0.83 and 0.80 of the truth at α = 1 and 0.5). It also predicts too
+few rows with a zero: 13% against 23%, and 18% against 36%. Laplace is in
+between (0.95 / 0.94; 19% / 28%), and the censored fit is calibrated
+(1.00 / 1.01; 23% / 36%). The censored model is correctly specified here,
+so this measures the size of the bias, not performance on real data.
+Recommendation: once zeros are allowed, the censored likelihood replaces
+the current score for this warping, with the noise family chosen inside
+it. Without zeros it reduces to the current Gaussian score with the
+discarded direction removed (see the latent-score item above).
+
+*Bridges to the grain-count law* (2026-11-14). These compare the items above
+with the research project "ToS-CoDA-nugget" (`report/main.tex`, Section 10
+there; Section 9 of `scaled_simplex_entmax.tex` here). Checks:
+`verification/bridge_tos.py` here and `verification/censored_latent.py` there.
+
+**S — The grain-count law is the α = 0 member of the censored family, and
+a dominant matrix makes it factorise.** With independent log-gamma latent
+noise (shapes = expected grain counts), the censored likelihood at α = 0 is
+the scaled Dirichlet density of the grain report (to 1e-13 in
+log-density). Its `τ` is the log of the total amount. When the matrix part's
+latent noise → 0, the likelihood becomes a product over the other parts,
+zeros included (within 3e-7). That is the element-wise factorisation the
+grain report assumes for multi-element assays. So one censored-likelihood
+implementation can serve both: the Box–Cox warping for the major parts and
+the matrix, and the grain law's per-element factors for trace phases.
+
+**M — Per-part latent noise from grains, and what the "assay" term
+holds.** By the delta method, the latent variance of part *k* equals the
+relative variance of its amount at every α. That is 1/n for n expected
+grains (Poisson check, within 3% at n = 5). At α = 0 the exact values are the
+trigamma, and the digamma minus `log n` for the mean shift: the grain
+report's log-ratio nugget and support bias. So the noise of the volume item
+above splits as
+`σ_k²(v) ≈ σ_assay² + 1/(a_k N_f(V)) + v_grain,k/(m_k v)`: assay error,
+heterogeneity between facies pieces (gamma shape `a_k`, averaged over the
+`N_f(V)` pieces a sample crosses), and grain sampling. The constant fitted
+as "assay error" may hold piece heterogeneity, which is *not* constant
+across supports. One σ per part is required, not optional: no single
+concentration fits all parts unless all grains are equal (grain report,
+Prop. 2). The sum is a delta-method approximation and is unconfirmed as a whole.
+
+**M — Where the censored Gaussian latent stops working: sampling zeros.**
+With the matrix pinning `τ`, a trace part is zero with probability
+`Φ(-1/(α cv_k))` under a censored Gaussian latent, and `e^-n` (or the
+negative binomial `(1 + n/a)^-a`) under the grain law. At n = 1: 0.37
+against 0.16 (α = 1) or 0.023 (α = 0.5). The tails differ in rate
+(`exp(-n/(2α²))` against `e^-n`), and with heterogeneity the censored model
+levels off at `Φ(-√a/α)` = 0.013 (α = 1) at any support. Below about five
+grains per sample, zeros are sampling zeros, and only the discrete grain
+law is right about them. `ScaledSimplex` and its Box–Cox family fit the
+matrix and the major parts. Also: the Box–Cox power that removes the skew of
+a gamma amount is 0.28–0.333 (n = 1 to 300), the Wilson–Hilferty cube root.
+On grain-dominated data a fitted α near 1/3 may reflect sampling noise
+rather than how the parts compensate each other; a separate `ψ` warping
+would separate the two.
+
+**M — Proposals shared with the grain report (unconfirmed).**
+- *Detection limits inside the censored likelihood:* with the rest of the
+  composition unassayed, an assay below detection is the two-missing-parts
+  case, with the hidden part bounded by `t_k`. An exact zero is `t_k → 0`.
+  It is the compositional form of the Tobit item below.
+- *Blocks larger than the range:* one latent mean and one variance per
+  sample leave systematic error (here 0.008–0.015; the grain report's
+  25 m blocks lose 0.02–0.04 g/t to point averaging). Averaged point
+  marginals are overconfident. Joint posterior draws of the sub-block
+  latents, each pushed through the back-map and then averaged, could keep
+  both the shape and the uncertainty.
+- *`m(ℓ)` from facies:* `m(ℓ) = Σ_c u_c(ℓ) m_c`, with `u_c` from Gaussian
+  indicators (as in the grain report's inference). This gives the learnable
+  scale a few global parameters and settles the trend identifiability noted
+  in the `m(s)` item.
+
 **M–L — *[geostat]* Censored observations (a Tobit likelihood).** Plan
 proposed and parked. An assay reported as `<0.01` is substituted with half
 the detection limit by universal practice, and that biases exactly the low
@@ -2343,6 +2589,29 @@ the null
 space of the Gram with normals of its own or take more features where the
 Gram is short of rank.
 
+**M — Categorical sharpness inversely proportional to class abundance**
+(requested 2026-11-14; nothing built or measured). `sharpness` is one
+integer today, multiplying every row's log-density alike
+(`CategoricalGaussianIndicator.log_lik`, inherited by
+`HierarchicalGaussianIndicator`; `OrderedGaussianIndicator` and `Bernoulli`
+have their own), so a rare rock type carries a few rows' worth of the bound
+beside the dominant one, and the model can over-call the dominant category
+-- which `proportions` is the figure for. The idea is to weight a row by its
+class's rarity: a category's sharpness proportional to one over its share
+of the data. Open before building: the shares declustered or by count
+(the container's `"declustering"` column is there); the weights normalized
+so the mean row weight stays the current sharpness, so the bound's balance
+against the KL does not move; read once at `initialize` and held fixed, or
+an argument the user sets per category; and the price, since weighting
+rows by class is a change of the class priors -- the probabilities stop
+being calibrated against the data's own shares and lean toward the rare
+categories, which `bias=True` would partly absorb. Off by default and an
+argument rather than a parameter, so a save replays it and older saves
+open. Measure on chapter 6, chapter 16 and Tom East's rock types against
+the plain likelihood: `proportions` and `reliability` for the shares and
+the calibration, per-category recall, and the log and Brier scores out of
+fold, which say whether the rare categories are found or only over-called.
+
 ## 2. Fitting and initialization
 
 The theme is measured rather than assumed: **training does not leave the
@@ -2868,8 +3137,10 @@ that build and run them, and reads what they leave behind. Its repository
 catalogue's format in `docs/geoml-catalogue.md`. "GeoScape's item N" below
 is that list's numbering, and M3 and M4 its milestones. The changelog has
 each item as it was met; read again on 2026-11-11 and its three open items
-built for 0.10.8, **every item on it is met**, and what is left below is
-the paperwork outside the code.
+built for 0.10.8, and on 2026-11-16 for items 55-59 (55, 57 and 59 built
+for 0.10.11, 56 declined -- see "Refused without measuring" -- and 58
+already met by `part_columns`), **every item on it is answered**, and what
+is left below is the paperwork outside the code.
 
 Item 52 (a limit per Realization on a `MeshSet`) is
 `limits={"ore": (other_set, 0.5)}`, a pair of set and key: the other set's
@@ -2927,6 +3198,26 @@ support means evaluating at `s(V_block)` rather than fanning out
 sub-blocks. A doctrine inversion worth flagging: compositing to equal length
 homogenizes support, which is exactly the signal the texture parameters
 need, so heterogeneous support stops being a nuisance and becomes data.
+
+*Update 2026-11-14: the specification has moved on.* The current draft
+(research project "ToS-CoDA-nugget", `report/main.tex`, 18 September 2026
+onwards) replaces the shared-concentration Beta. It shows that law fails for
+more than two parts (no shared effective volume, its Prop. 2) and for coarse
+gold. Gold is understated fourteen-fold in relative variance, and the
+below-detection rate at core support comes out < 1e-4 against 0.61. What
+replaces it:
+- a grain-count law with piece heterogeneity: a negative-binomial count of
+  gamma grains, a three-cumulant shifted gamma for large counts, and
+  censoring that factorises by element;
+- a two-scale facies law;
+- a support-averaged kernel ("pieces", with Richardson extrapolation of
+  `k(S,S)`) that trains on raw intervals and predicts blocks of any shape.
+
+It was prototyped on geoML 0.7.0 (`ef10653`) as a GP-node subclass. Latest
+master (`8b43333`, checked 2026-11-14) has no support-averaged node yet. This
+item should be rewritten from that draft before work starts. The
+`ScaledSimplex` bridge items above show how its likelihood relates to the
+compositional warpings.
 
 Support and censoring want the same channel. **Decide once, for both**,
 whether they ride the data object (the `GaussianData` precedent, which also
@@ -3603,6 +3894,16 @@ no than a number. Revisit if the premise changes.
 - **QKNA.** A diagnostic for a kriging neighbourhood search that does not
   exist here. The one piece worth stealing, the slope of regression, is what
   `prediction_scatter` already draws.
+- **A warning when `set_limits` moves a value** (GeoScape's item 56,
+  declined 2026-11-16). Limits given way to are how a range's constructor
+  bounds yield to the ones an input reads off its inducing points, which
+  every model does, so a warning would speak on most models about a value
+  nobody chose. The workaround is GeoScape's own: after the call that sets
+  the limits (building the model, or `set_limits` itself), read
+  `parameters[name].get_value()` for every value the user typed and compare
+  it with what was typed -- the parameter's name is the argument's, as the
+  catalogue's `trainable.start` says -- and say so on the Run where they
+  differ.
 
 ### Already here under another name
 

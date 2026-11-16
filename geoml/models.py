@@ -120,6 +120,12 @@ class GPOptions(_ModelOptions):
     # the lookup falls through to here.
     jit_predict = False
     qmc_simulations = False
+    # What the catalogue says of the options under `propagation="joint"`,
+    # beside what the nodes and kernels declare: the one other option it
+    # needs (`VGPNetwork._check_expected_kernel`, checked in
+    # `test_catalogue.py`).
+    _catalogue = {
+        "joint": {"requires": {"expert_propagation": "independent"}}}
     # what a model saved before 0.9.0 was trained under; a new one takes the
     # `__init__` defaults below
     expert_propagation = "consensus"
@@ -4637,7 +4643,10 @@ class VGPNetwork(_GPModel):
                            "group")
 
     def responsibilities(self, newdata: "_data._SpatialData",
-                         store: bool = True) -> "dict[str, _np.ndarray]":
+                         store: bool = True, where: _types.Where = None,
+                         by_expert: bool = False,
+                         expert_options: "dict[str, _Any] | None" = None
+                         ) -> "dict[str, _np.ndarray]":
         """Posterior probability that each measurement came from each noise
         component of a mixture likelihood.
 
@@ -4649,11 +4658,26 @@ class VGPNetwork(_GPModel):
         ----------
         newdata
             Point data carrying the variables' measurements -- the training
-            data, a validation set, or the out-of-fold container
-            :func:`cross_validate` returns. Modified in place if `store`.
+            data or a validation set. Modified in place if `store`. For
+            answers out of fold, ask :func:`cross_validate` with
+            `responsibilities=True`: asked of the out-of-fold container
+            afterwards, this model reads every location with the model
+            trained on all of them.
         store
             Whether to file the answer on each variable, as
             `<variable>/responsibilities/<component>`, as well as return it.
+        where
+            The locations to answer for: a boolean mask, row indices, or the
+            name of a boolean metadata column. Every other row is missing in
+            the answer and, if `store`, keeps what it held. All of them by
+            default.
+        by_expert
+            Whether to read the moments a group of locations at a time, each
+            group with only the experts that cover it, as
+            :meth:`predict_by_expert` does.
+        expert_options
+            Keywords for the grouping under `by_expert`, as
+            :meth:`predict_by_expert` takes them.
 
         Returns
         -------
@@ -4698,27 +4722,54 @@ class VGPNetwork(_GPModel):
                 "responsibilities are of measurements, and %s carries no %s"
                 % (type(newdata).__name__, ", ".join(str(v) for v in absent)))
 
-        def batch_moments(x, x_var, n_splits):
+        def batch_moments(x, x_var, n_splits, rows):
             with self._propagation():
                 return self._with_xla(
                     lambda jit: self._moments_function(jit),
                     x, x_var, self.options.seed)
 
-        chunks = {v: ([], []) for v, _ in wanted}
-        for _, output in self._over_batches(newdata, batch_moments):
-            for (v, _), (mu, var) in zip(wanted, output):
-                chunks[v][0].append(_np.asarray(mu))
-                chunks[v][1].append(_np.asarray(var))
+        mask = _where_mask(newdata, where)
+        chunks = {v: ([], [], []) for v, _ in wanted}
+
+        def gather(locations):
+            for rows, output in self._over_batches(
+                    newdata, batch_moments, where=locations,
+                    with_rows=True):
+                for (v, _), (mu, var) in zip(wanted, output):
+                    chunks[v][0].append(_np.asarray(rows))
+                    chunks[v][1].append(_np.asarray(mu))
+                    chunks[v][2].append(_np.asarray(var))
+
+        if not by_expert:
+            gather(mask)
+        else:
+            groups, entered, _, _ = self._expert_groups(
+                newdata, mask, **(expert_options or {}))
+            for done, (key, locations) in enumerate(groups):
+                with entered(key):
+                    gather(locations)
+                _progress.emit("predict_by_expert", done + 1, len(groups),
+                               "group")
 
         out = {}
         for v, lik in wanted:
-            mu = _np.concatenate(chunks[v][0], axis=0)
-            var = _np.concatenate(chunks[v][1], axis=0)
+            rows = _np.concatenate(chunks[v][0])
             y, has_value = newdata.variables[v].get_measurements()
-            answer = lik.responsibilities(mu, var, y)
-            answer[~_np.all(has_value == 1.0, axis=1)] = _np.nan
+            answered = lik.responsibilities(
+                _np.concatenate(chunks[v][1], axis=0),
+                _np.concatenate(chunks[v][2], axis=0), y[rows])
+            answered[~_np.all(has_value[rows] == 1.0, axis=1)] = _np.nan
+            answer = _np.full((newdata.n_data, answered.shape[1]), _np.nan)
+            answer[rows] = answered
             if store:
-                newdata.variables[v].set_responsibilities(answer)
+                variable = newdata.variables[v]
+                held = variable.responsibilities
+                if mask is not None and held                         and len(held) == answer.shape[1]:
+                    # the rows not asked about keep what they hold
+                    for k, attribute in held.items():
+                        attribute.values[rows] = answered[:, k]
+                else:
+                    variable.set_responsibilities(answer)
             out[v] = answer
         return out
 
@@ -5037,7 +5088,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                    method: str = "full", epochs: int = 50,
                    n_sim: int = 20, n_nodes: int = 32,
                    path: _types.PathLike | None = None,
-                   expert_options: "dict[str, _Any] | None" = None
+                   expert_options: "dict[str, _Any] | None" = None,
+                   responsibilities: bool = False
                    ) -> "tuple[_data._SpatialData, _pd.DataFrame]":
     """Score a model on folds it never saw, with one short refit per fold.
 
@@ -5113,6 +5165,13 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
     expert_options
         Keywords for :meth:`VGPNetwork.train_by_expert` under
         `method="by_expert"`.
+    responsibilities
+        Whether each fold model also gives its held-out measurements their
+        responsibilities (:meth:`VGPNetwork.responsibilities`), filed on
+        the out-of-fold container as
+        `<variable>/responsibilities/<component>` for every variable whose
+        likelihood is a mixture -- the answer read out of fold, which is
+        the only honest one.
 
     Returns
     -------
@@ -5121,7 +5180,8 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         the fold labels included -- carrying out-of-fold predictions and
         simulations, plus one metadata column per scored component
         (`pit_<variable>`, or `pit_<variable>_<component>`) holding where
-        each measurement fell inside its own predictive distribution. It
+        each measurement fell inside its own predictive distribution, and
+        the out-of-fold responsibilities if asked for. It
         saves with `to_zarr` and opens with `open` like any container.
     scores : pandas.DataFrame
         One row per scored component and fold, in the folds' sorted order,
@@ -5180,6 +5240,12 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
         raise ValueError(
             "method must be 'full', 'svi' or 'by_expert', got %r"
             % (method,))
+    if responsibilities and not any(
+            isinstance(lik, (_lk.Mixture, _lk.LikelihoodMixture))
+            for lik in model.likelihoods):
+        raise ValueError(
+            "no variable in this model has a mixture likelihood, and "
+            "responsibilities are a mixture's answer")
 
     cleanup = path is None
     if cleanup:
@@ -5242,6 +5308,10 @@ def cross_validate(model: VGPNetwork, folds: str = "fold",
                 else:
                     fold_model._predict(oof, n_sim, True, held,
                                         check_measurements=False)
+                if responsibilities:
+                    # grouped as the prediction above is
+                    fold_model.responsibilities(
+                        oof, where=held, by_expert=method == "by_expert")
 
                 held_points = oof[held]
                 held_rows = _np.flatnonzero(held)

@@ -1,3 +1,34 @@
+## version 0.10.11
+* **A container opened read-only takes writes without touching its store**
+(GeoScape's item 55). `open(store, mode="r")` refused a prediction into a
+variable the store held (item 38, 0.8.4); now the first write into one of
+its arrays turns that array into a copy, held in memory or, past the spill
+size, in a temporary store, and the store on disk stays as it was to the
+byte (`test_persistence.py`). A prediction of every location allocates its
+realizations afresh, so only its single columns are copied; under `where=`
+the realizations it writes into are copied first. `to_zarr` writes the
+result elsewhere, and onto the store it was opened from is still refused.
+* **The expected kernel's refusals are catalogue data** (GeoScape's item
+57). Every kernel says whether a GP node with it reads an uncertain input
+(`joint.uncertain_input`, the cosine `joint.refused`), the nodes with a rule
+say whether their output is random and what they need where a random node
+lies below them, and `GPOptions` says the expert rule it requires
+(`docs/catalogue.md`). A test builds every GP node with every kernel over
+every kind of parent, and the walks, trends and deep-moments cases, and
+holds what the declarations predict to what `VGPNetwork` refuses.
+* **`cross_validate(..., responsibilities=True)`** (GeoScape's item 59):
+each fold model gives its held-out measurements their responsibilities, filed
+on the out-of-fold container as `<variable>/responsibilities/<component>` --
+the answer read out of fold, which a model trained on all the data cannot
+give. `VGPNetwork.responsibilities` takes `where=`, answering the rows named
+and leaving the others as they were, and `by_expert=` with
+`expert_options=`, as `predict_by_expert` groups; its docstring no longer
+offers the out-of-fold container as a place to ask, which read every
+location with the model trained on all of them.
+* GeoScape's item 56 (`set_limits` warning when it moves a value) is
+declined: see `docs/roadmap.md`. Item 58 needed no change: a categorical
+variable's realizations are published under `part_columns.simulations`.
+
 ## version 0.10.10
 * **`MeshSet.resume(store, data)` finishes a set whose build stopped**
 (GeoScape's item 54). A contour cancelled or killed leaves a store that

@@ -310,28 +310,72 @@ def test_a_container_is_never_written_over_the_store_it_reads(tmp_path):
 # --------------------------------------------------------------------------- #
 # opening read-only
 # --------------------------------------------------------------------------- #
-def test_a_store_opened_read_only_refuses_every_write(tmp_path):
+def _store_bytes(path):
+    """Every file of a store and its contents, to compare before and after."""
+    import os
+    out = {}
+    for folder, _, files in os.walk(path):
+        for name in files:
+            full = os.path.join(folder, name)
+            with open(full, "rb") as f:
+                out[os.path.relpath(full, path)] = f.read()
+    return out
+
+
+def test_a_store_opened_read_only_takes_writes_in_memory(tmp_path,
+                                                         monkeypatch):
     """A program handing a store to a script that only reads it opens it
-    read-only (GeoScape's item 38): the values and a copy elsewhere as
-    usual, and a prediction into a stored variable or a write
-    into a column refused before anything reaches the store."""
+    read-only (GeoScape's items 38 and 55): a prediction into a stored
+    variable, or a write into a column, lands in a copy, the store stays
+    as it was to the byte, and to_zarr writes what was predicted."""
     model, grid = _model_and_grid()
     model.predict(grid, n_sim=3)
     path = str(tmp_path / "run.zarr")
     grid.to_zarr(path)
-    before = np.asarray(grid.variables["v"].prediction.values).copy()
+    written = _store_bytes(path)
 
+    # the reference: the same predictions into a store opened to write
+    reference = str(tmp_path / "reference.zarr")
+    grid.to_zarr(reference)
+    writable = geoml.data.Grid2D.open(reference)
+    where = np.arange(writable.n_data) % 3 == 0
+    writable.variables["v"].prediction.values[where] = np.nan
+    model.predict(writable, where=where)
+
+    copied = []
+    original = geoml.storage.ArrayStore._take_a_copy
+
+    def recording(store):
+        copied.append(store.shape)
+        original(store)
+
+    monkeypatch.setattr(geoml.storage.ArrayStore, "_take_a_copy", recording)
     opened = geoml.data.Grid2D.open(path, mode="r")
+    opened.variables["v"].prediction.values[where] = np.nan
+    model.predict(opened, where=where)
+    for name in ("prediction", "latent_variance"):
+        np.testing.assert_array_equal(
+            opened.values("v/" + name), writable.values("v/" + name))
     np.testing.assert_array_equal(
-        opened.values("v/prediction"), before)
-    opened.to_zarr(str(tmp_path / "copy.zarr"))
+        np.asarray(opened.variables["v"].simulations),
+        np.asarray(writable.variables["v"].simulations))
+    assert (opened.n_data, 3) in copied
+    assert _store_bytes(path) == written
 
-    with pytest.raises(ValueError, match="read-only"):
-        model.predict(opened, n_sim=3)
-    with pytest.raises(ValueError, match="read-only"):
-        opened.variables["v"].prediction.values[:2] = 0.0
+    # a prediction of every row allocates its realizations afresh
+    copied.clear()
+    again = geoml.data.Grid2D.open(path, mode="r")
+    model.predict(again)
+    assert copied and all(len(shape) == 1 for shape in copied)
+    assert _store_bytes(path) == written
+
+    copy = str(tmp_path / "copy.zarr")
+    opened.to_zarr(copy)
     np.testing.assert_array_equal(
-        geoml.data.Grid2D.open(path).values("v/prediction"), before)
+        geoml.data.Grid2D.open(copy).values("v/prediction"),
+        writable.values("v/prediction"))
+    with pytest.raises(ValueError, match="reads its arrays"):
+        opened.to_zarr(path)
 
 
 def test_a_new_variable_is_not_written_into_a_read_only_store(tmp_path):

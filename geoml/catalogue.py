@@ -321,6 +321,9 @@ def _function_entry(name, category):
         "category": category, "summary": _summary(obj),
         "description": _description(obj),
         "params": _parameters(function, overrides, _parameter_docs(obj))}
+    if _inspect.isclass(obj) and "joint" in obj.__dict__.get("_catalogue",
+                                                             {}):
+        entry["joint"] = obj.__dict__["_catalogue"]["joint"]
     if not _inspect.isclass(obj):
         returns = _signature(function).return_annotation
         if returns is not _inspect.Signature.empty:
