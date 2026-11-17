@@ -1,3 +1,10 @@
+## version 0.10.12
+* **`HermiteRBF` is in the catalogue** (GeoScape's item 60): as a function
+and its `__call__`, with a `surface` step in the workflow, so a Script can
+fit a height to points (`normals=False`) and evaluate it at a `Grid2D`'s
+nodes. The constructor and the call carry annotations now, `basis` an enum
+of the three bases.
+
 ## version 0.10.11
 * **A container opened read-only takes writes without touching its store**
 (GeoScape's item 55). `open(store, mode="r")` refused a prediction into a

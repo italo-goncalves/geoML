@@ -32,6 +32,7 @@ conditionally positive definite basis instead of a covariance. None of it
 is original here; the references are on `HermiteRBF`.
 """
 import warnings as _warnings
+from typing import Literal, Optional, Union
 
 import numpy as _np
 import scipy.linalg as _sla
@@ -40,6 +41,7 @@ import tensorflow as _tf
 
 import geoml.math.geometry as _geom
 import geoml.stats.random as _rnd
+from geoml._types import ArrayLike
 
 # rows of the query-by-centre products held at once when evaluating
 _CHUNK_ELEMENTS = 50_000_000
@@ -213,6 +215,11 @@ class HermiteRBF:
     behind the normals and positive ahead of them, close to a signed
     distance near the surface.
 
+    With `normals=False` and one value per point it interpolates the values
+    alone: a height over a plane, given `(n, 2)` points and their
+    elevations, evaluated at a `Grid2D`'s nodes with the instance called on
+    its coordinates.
+
     Parameters
     ----------
     points
@@ -284,8 +291,16 @@ class HermiteRBF:
     University Press.
     """
 
-    def __init__(self, points, values=None, normals=None, basis="cubic",
-                 transform=None, max_error=None, offset=None, k=12):
+    # what the catalogue cannot read off the annotations: the transform is
+    # annotated nowhere, its module importing this one
+    _catalogue = {"params": {"transform": {"type": "ref:transform"}}}
+
+    def __init__(self, points: ArrayLike,
+                 values: Optional[ArrayLike] = None,
+                 normals: Union[ArrayLike, tuple, bool, None] = None,
+                 basis: Literal["cubic", "thin_plate", "linear"] = "cubic",
+                 transform=None, max_error: Optional[float] = None,
+                 offset: Optional[float] = None, k: int = 12):
         if basis not in _BASES:
             raise ValueError("basis must be one of %s" % (_BASES,))
         points = _np.asarray(points, dtype=float)
@@ -542,10 +557,24 @@ class HermiteRBF:
             _np.asarray(self._field(_tf.constant(working[part]))[0])
             for part in self._chunks(len(working))])
 
-    def __call__(self, x):
+    def __call__(self, x: ArrayLike):
         """
-        The field at `x`, `(n, d)`: zero on the surface, negative behind
-        the normals, positive ahead of them.
+        The field at `x`.
+
+        Zero on the surface, negative behind the normals and positive ahead
+        of them; fitted to values alone, the interpolated value, which is
+        the points' own value at each of them.
+
+        Parameters
+        ----------
+        x
+            Locations, `(n, d)`, in the coordinates the points were given
+            in.
+
+        Returns
+        -------
+        tf.Tensor
+            The field, `(n,)`; `numpy.asarray` turns it into an array.
         """
         u = self._working_tensor(x)
         return _tf.concat([self._field(u[part])[0]
