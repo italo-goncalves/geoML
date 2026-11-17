@@ -120,6 +120,15 @@ with every kernel over every kind of node below, with and without a GP
 above, and every walk, trend and deep-moments case, and holds what the
 declarations predict to what the check does.
 
+Added for GeoScape's item 60, the format staying 2: `HermiteRBF` and its
+`__call__` as functions, and a `surface` step in the workflow (`fit`,
+`evaluate`), for a height interpolated over a `Grid2D` -- values alone,
+`normals=False` -- or a surface as the field's zero level set. Nothing about
+it trains, so it is a function a Script calls rather than a class a network
+is built from; its constructor is annotated (`basis` an enum) and the
+transform, which the annotations cannot name without an import cycle, is
+declared `ref:transform` on the class.
+
 ## Found on the way
 
 Each of these would have made a declaration false, and the tests below

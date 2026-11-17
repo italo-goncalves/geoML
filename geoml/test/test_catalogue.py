@@ -1360,3 +1360,36 @@ def test_the_options_and_the_deep_moments_are_refused_as_declared():
     with pytest.raises(ValueError, match="independent"):
         _options(expert_propagation="consensus")
     assert not _declared_refusal(_gp(_root(), 1), _options())
+
+
+def test_the_workflow_names_a_height_interpolated_over_a_grid(built):
+    """GeoScape's item 60: a Script fits `HermiteRBF` to heights alone and
+    evaluates it at a Grid2D's nodes, from what the catalogue says."""
+    surface = built["workflow"]["surface"]
+    fit = built["functions"][surface["fit"]]
+    params = {p["name"]: p for p in fit["params"]}
+    assert params["basis"]["type"] == "enum"
+    assert params["basis"]["constraints"]["choices"] == \
+        ["cubic", "thin_plate", "linear"]
+    assert params["basis"]["default"] == "cubic"
+    assert params["transform"]["type"] == "ref:transform"
+    assert params["normals"]["default"] is None
+    assert params["max_error"]["type"] == "float"
+    assert fit["description"] and \
+        built["functions"][surface["evaluate"]]["description"]
+    assert [p["name"] for p in built["functions"][surface["evaluate"]][
+        "params"]] == ["x"]
+
+    rng = np.random.default_rng(0)
+    points = rng.uniform(0, 100, (200, 2))
+    heights = 50 + 10 * np.sin(points[:, 0] / 15) + 0.2 * points[:, 1]
+    grid = geoml.data.Grid2D([0, 0], [51, 51], [2, 2])
+    for basis in params["basis"]["constraints"]["choices"]:
+        rbf = catalogue.resolve(surface["fit"])(
+            points, values=heights, normals=False, basis=basis)
+        at_grid = np.asarray(rbf(grid.coordinates))
+        assert at_grid.shape == (grid.n_data,) and np.isfinite(at_grid).all()
+        np.testing.assert_allclose(np.asarray(rbf(points)), heights,
+                                   atol=1e-8)
+        assert heights.min() - 15 < at_grid.min()
+        assert at_grid.max() < heights.max() + 15

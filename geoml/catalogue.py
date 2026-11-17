@@ -84,6 +84,8 @@ FUNCTIONS = {
     "geoml._progress.progress": "workflow",
     "geoml.data.containers.PointData.unpredicted": "workflow",
     "geoml.data.containers.PointData.spatial_k_fold": "workflow",
+    "geoml.math.rbf.HermiteRBF": "workflow",
+    "geoml.math.rbf.HermiteRBF.__call__": "workflow",
 }
 
 WORKFLOW = {
@@ -127,6 +129,13 @@ WORKFLOW = {
         # what a stopped contour is finished with, in the store it was
         # writing
         "resume": "geoml.data.meshsets.MeshSet.resume",
+    },
+    # a field through scattered points with no parameter to train: a
+    # height interpolated over a Grid2D (normals=False), or a surface as
+    # its zero level set; evaluated by calling it on coordinates
+    "surface": {
+        "fit": "geoml.math.rbf.HermiteRBF",
+        "evaluate": "geoml.math.rbf.HermiteRBF.__call__",
     },
     # spans the others: every long call reports inside the block, and the
     # callback raising is the cancel
