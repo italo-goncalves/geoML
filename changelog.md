@@ -1,4 +1,36 @@
 ## version 0.10.13
+* **`warping.PowerSimplex(size, alpha=1.0, fixed=True)`, the Box-Cox
+family of `ScaledSimplex`.** Each share maps to `((x/m)**alpha - 1)/alpha`,
+the scale `m` being the mean composition of the complete rows, and back by
+a weighted alpha-entmax, `m * [1 + alpha (w - tau)]_+ ** (1/alpha)`, the
+threshold making the parts sum to one: the softmax of `log(m) + w` at 0,
+`ScaledSimplex` at 1. When one part rises the others give way in
+proportion to `x**(1-alpha) * m**alpha`, from the log-ratio rule to the
+mean-share rule, and a row can come back with any number of parts at zero.
+The threshold is exact in which parts stay positive (a sort and the
+breakpoints) and solved by a bracketed Newton step between them; its
+derivatives come from one implicit step, so the back-map's Jacobian is the
+closed form `diag(g) - g g'/sum(g)`. The log-determinant is the factor
+onto the plane of zero sum, `-sum(log g) + log(sum(g)) - log(size)`, as
+`CenteredLogRatio`'s is. Zeros in the data are refused (`DomainError`)
+unless the power is fixed at 1. **The power is fixed by default**: trained
+under the usual likelihood it moves the right way but settles toward the
+middle -- 0.44, 0.58 and 0.89 for true powers of 0.25, 0.5 and 1. On
+compositions drawn from the family (`docs/benchmarks/power_simplex.py`) it
+has the best held-out CRPS at the true power below one: 0.0286 against
+0.0305 (`ScaledSimplex`) and 0.0310 (`CenteredLogRatio`) at 0.25, 0.0306
+against 0.0328 and 0.0374 at 0.5. From the research report
+`scaled_simplex_entmax.tex` (project "Alternative CoDA transformations").
+* **`ScaledSimplex` maps back by a threshold, and its log-determinant
+gains `-log(size)`.** The way back was an oblique projection followed by a
+shrink toward the mean, which gave one zero at most and left its zeros at
+about 1e-17; it is now `m * max(0, z - tau)`, the projection onto the
+simplex in the chi-square metric (a weighted sparsemax, one sort), giving
+any number of zeros, exactly 0.0. **A model saved with `ScaledSimplex`
+predicts differently** wherever a realization left the simplex. The
+log-determinant now follows `CenteredLogRatio`'s convention -- the factor
+onto the plane of zero sum, along the shift the way back ignores -- which
+moves the bound by `-n log(size)` and no fit.
 * **A warping refuses values it cannot transform, by name.** On GeoScape's
 Corta Atalaya project two negative Hg assays (-0.299 and -0.283) went
 through `BoxCox(shift=0.01)` as NaN, and the PCA after it failed with

@@ -22,7 +22,8 @@ under `CenteredLogRatio`, an infinite value under any of them or a
    :members: Identity, ZScore, Center, Scale, Log, Softplus, Sigmoid,
              BoxCox, YeoJohnson, Arcsinh, SinhArcsinh,
              Spline, ChainedWarping, Rotation, PCA, RobustPCA,
-             CenteredLogRatio, ScaledSimplex, ContinuousNormalizingFlow,
+             CenteredLogRatio, ScaledSimplex, PowerSimplex,
+             ContinuousNormalizingFlow,
              TensorProductFlow, DomainError
    :show-inheritance:
 ```

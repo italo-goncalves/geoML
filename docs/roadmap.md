@@ -1772,7 +1772,8 @@ notation throughout: `m` is the `scale` (mean composition of the complete
 rows), `zeta = x/m` the latent, and `D` the number of parts.
 
 **S — `ScaledSimplex.forward`'s log-determinant is off by `-log D`
-against `CenteredLogRatio`.** Both backward maps ignore a latent shift
+against `CenteredLogRatio`** — done in 0.10.13, and `PowerSimplex`
+reports the factor onto the same plane. Both backward maps ignore a latent shift
 along `1` (`softmax(z + c)`, and `ScaledSimplex.backward(zeta + c)`), so for
 both the latent space is effectively the plane `1'v = 0`, and the factor
 that makes their objectives comparable is the one from the data plane
@@ -1787,12 +1788,18 @@ learnable `m` (item below); only cross-warping comparisons move, by
 discards the direction `1`. Checked symbolically for D = 3, 4 and by Monte
 Carlo of the pushed-forward density to within 2%.)
 
-**S — `ScaledSimplex.backward` leaves its zeros at about `1e-17`.** After
+**S — `ScaledSimplex.backward` leaves its zeros at about `1e-17`** —
+done in 0.10.13: the threshold that replaced the shrink reads a part
+within rounding of it as exactly zero, and a zero sent out and back
+comes back 0.0. After
 the shrink, the binding part is exactly 0.0 in only 71% of infeasible
 latents (20,000 draws, D = 5). Code that tests `== 0` misses the rest.
 Setting the arg-max part of `shift` to 0 makes them exact.
 
-**M — `ScaledSimplex` cannot produce two zeros at once.** The shrink moves
+**M — `ScaledSimplex` cannot produce two zeros at once** — done in
+0.10.13: its way back is the threshold below (a weighted sparsemax, one
+sort), with no compatibility kept for saves that used the shrink (the
+user's call). The shrink moves
 an infeasible point along the ray to `m`, which leaves the simplex through
 the interior of a facet unless it passes exactly through a lower face (a
 vertex at D = 3, an edge at D = 4): probability zero. Of 400,000
@@ -1856,7 +1863,31 @@ obstacle. Still open: `m(s)` and the GP's own mean both carry a trend, so
 one of them has to be held smooth or low-rank.
 
 **M–L — A Box–Cox family of `ScaledSimplex`, trainable with zeros
-(weighted entmax).** Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
+(weighted entmax)** — the warping is done in 0.10.13 as
+`warping.PowerSimplex(size, alpha, fixed)`; the censored likelihood is
+not (next item). The threshold is found by sorting -- the breakpoints
+where a part reaches zero fix which parts stay positive exactly -- and a
+Newton step on the log of the sum on that segment, closed forms at 0
+(softmax) and 1 (`ScaledSimplex`), the Jacobian `diag(g) - gg'/sum(g)`
+given by one implicit step; no closed form exists for a general power
+(the equation is a polynomial of degree 1/α). Zeros are refused below a
+fixed power of one, which the censored likelihood will lift. **Trained
+under the usual likelihood, α is biased toward the middle**: from a start
+of 1 it settled at 0.44, 0.58 and 0.89 for true powers of 0.25, 0.5 and 1
+(3000 iterations, D = 4, n ≈ 400-500, rows with zeros left out; 0.41,
+0.56, 0.86 with no `ZScore` after it), passing near the truth early and
+then drifting up -- so it is fixed by default.
+*Gate, 2026-11-17* (`docs/benchmarks/power_simplex.py`: D = 4, 600
+rows, a fifth held out, three seeds, training on the rows without a zero
+and scoring every held-out row): at the true power, `PowerSimplex` has the
+best CRPS where the power is below one -- 0.0286 against 0.0305
+(`ScaledSimplex`) and 0.0310 (CLR) at 0.25, 0.0306 against 0.0328 and
+0.0374 at 0.5 -- and the 90% coverage nearest nominal (0.919 and 0.892).
+At 1 it is `ScaledSimplex` to the bit; CLR's CRPS is lower there (0.0435
+against 0.0446) and its coverage 0.729 against 0.844. Zeros are where the
+usual likelihood shows its limit: trained without the rows that hold
+them, the power model samples a zero in 15% of rows at 0.5 where 28% of
+the held-out rows have one -- which is the censored likelihood's job. Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
 `x = m * [1 + α(w - τ)]_+^(1/α)`, `τ` by bisection so the parts sum to one.
 The backward is `argmax_x w'x - Ω(x)` with `Ω` half the Cressie–Read power
 divergence of `x` from `m` (λ = α): Pearson chi-square at α = 1, where it
@@ -1894,7 +1925,14 @@ shares, so the `sqrt|P|` above drops out. Scripts: `experiments/censored.py`;
 checks: `verification/censored_general.py`, `censored_noise_warping.py`.
 
 **M — Extend the censored likelihood: per-part σ, per-sample σ and
-missing parts.** With `σ_k` per part, the Gaussian factor in `τ` stays
+missing parts.** *How it fits the code (2026-11-17)*: a likelihood class
+of its own, after the user's planned Variable for compositions with zeros
+and missing parts. The Variable supplies each row's pattern (positive,
+zero, missing, later a detection limit); the warping supplies `b_k`,
+`g_k` and the threshold `-1/α` (`PowerSimplex`, or `ScaledSimplex` at
+α = 1) and must be applied to the composition itself, only elementwise
+links after it; the likelihood integrates `τ`. It starts the warping
+without `PowerSimplex`'s refusal of zeros. With `σ_k` per part, the Gaussian factor in `τ` stays
 closed form, with precision `Λ_P = sum_P σ_k^-2`. Each zero becomes
 `Φ((τ - 1/α - η_k)/σ_k)`, and `σ` may also vary by row. A row with
 unassayed parts `M` and known remainder `R = 1 - sum_O x_k` adds a

@@ -30,6 +30,7 @@ __all__ = ["Identity",
            "RobustPCA",
            "Rotation",
            "ScaledSimplex",
+           "PowerSimplex",
            "BoxCox",
            "YeoJohnson",
            "Arcsinh",
@@ -1993,16 +1994,72 @@ class Rotation(Identity):
         return x
 
 
+# how close to the threshold, in the latent's units, a part is read as zero
+_ZERO_TOLERANCE = 1e-13
+
+
+def _weighted_sparsemax(z, scale):
+    """The composition `scale * max(0, z - tau)`, `tau` making it sum to one.
+
+    The projection onto the simplex in the chi-square metric
+    ``sum((x - r)**2 / scale)``, `r` being the point of the plane of unit sum
+    that `z` stands for: a weighted sparsemax, exact by one sort. Sorted
+    descending, the parts that stay positive are the first `k` for which
+    ``z_(k) > tau_k``, with ``tau_k`` the threshold that would make those `k`
+    alone sum to one; every other part is exactly zero.
+    """
+    z = _tf.convert_to_tensor(z, _tf.float64)
+    scale = _tf.broadcast_to(_tf.cast(scale, _tf.float64), _tf.shape(z))
+    order = _tf.argsort(z, axis=1, direction="DESCENDING")
+    z_sorted = _tf.gather(z, order, batch_dims=1)
+    scale_sorted = _tf.gather(scale, order, batch_dims=1)
+    mass = _tf.cumsum(scale_sorted, axis=1)
+    moment = _tf.cumsum(scale_sorted * z_sorted, axis=1)
+    thresholds = (moment - 1.0) / mass
+    # a part within rounding of the threshold is a zero: a zero sent out
+    # and back stands exactly at it, and the threshold, a ratio of sums,
+    # misses it by a few units in the last place either way
+    rounding = _ZERO_TOLERANCE * (1.0 + _tf.abs(thresholds))
+    kept = _tf.reduce_sum(
+        _tf.cast(z_sorted > thresholds + rounding, _tf.int32), axis=1)
+    tau = _tf.gather(thresholds, kept - 1, batch_dims=1)[:, None]
+    gap = z - tau
+    return _tf.where(gap > _ZERO_TOLERANCE * (1.0 + _tf.abs(tau)),
+                     scale * gap, 0.0)
+
+
 class ScaledSimplex(Identity):
     """
     Compositional data transformation without log-ratios.
 
-    Accepts zeros.
+    Divides each part by its mean share, `x / scale`, the scale being the
+    mean composition of the complete rows. The way back restores the unit
+    sum by a threshold common to the row, ``scale * max(0, z - tau)``: the
+    projection onto the simplex in the chi-square metric, so a latent that
+    leaves the simplex comes back with as many parts exactly zero as it
+    needs. Accepts zeros, which map to zero.
+
+    When one part rises, every other part gives way in proportion to its
+    mean share, wherever the composition is. It is `PowerSimplex` at
+    ``alpha = 1``.
 
     Parameters
     ----------
     size : int
         The number of parts in the composition.
+
+    Notes
+    -----
+    The way back ignores a shift of the whole latent row, so the latent
+    space is in effect the plane of zero sum, and the log-determinant
+    reported is the volume factor from the plane of unit sum onto it,
+    ``-sum(log scale) - log(size)``: the convention of `CenteredLogRatio`,
+    which makes the two objectives comparable.
+
+    See Also
+    --------
+    PowerSimplex : the family this is the linear member of.
+    CenteredLogRatio : the log-ratio member, which takes no zeros.
     """
     _mixes = True
     # set by `initialize` from the data and kept by a save, as `PCA`'s is
@@ -2013,24 +2070,16 @@ class ScaledSimplex(Identity):
         self.scale = None
 
     def forward(self, x):
-        # each part divided by a constant of its own, so the Jacobian is
-        # diagonal and the log-determinant is minus the log of the scales
+        # each part divided by a constant of its own; the volume factor is
+        # taken onto the plane of zero sum along the shift the way back
+        # ignores, which adds -log(size) to the diagonal's determinant
         log_det = _tf.reduce_sum(_tf.zeros_like(x), axis=1) \
-            - _tf.reduce_sum(_tf.math.log(self.scale))
+            - _tf.reduce_sum(_tf.math.log(self.scale)) \
+            - _np.log(self.size_in)
         return x / self.scale, log_det
 
     def backward(self, x):
-        x = x * self.scale
-        total = _tf.reduce_sum(x, axis=1, keepdims=True)
-        x = x + (1.0 - total) * self.scale
-
-        denom = _tf.where(_tf.less(x, 0.0), self.scale - x, 1.0)
-        shift = _tf.where(_tf.less(x, 0.0), -x / denom, 0.0)
-
-        max_s = _tf.reduce_max(shift, axis=1, keepdims=True)
-        x = (1.0 - max_s) * x + max_s * self.scale
-        x = _tf.maximum(x, 0.0)
-        return x
+        return _weighted_sparsemax(x, self.scale)
 
     def initialize(self, x, weights=None):
         _check_domain(self, x, lower=0.0, closed=True, missing=True)
@@ -2040,6 +2089,223 @@ class ScaledSimplex(Identity):
         scale = _np.sum(x_new, axis=0, keepdims=True) / _np.sum(complete)
         self.scale = _tf.constant(scale, _tf.float64)
         return x_new / self.scale
+
+
+# the Newton steps `PowerSimplex.backward` takes on the threshold, each kept
+# inside a bracket that bisection would also narrow: the support is exact
+# before the first, and the root is smooth on it
+_NEWTON_STEPS = 30
+
+
+def _entmax_powers(v, exponent):
+    """``[1 + v]_+ ** exponent``, through `log1p`: at a small power the
+    exponent is large and ``1 + v`` close to one, where the plain power
+    loses the digits the sum to one is made of."""
+    kept = v > -1.0
+    return _tf.where(
+        kept, _tf.exp(exponent * _tf.math.log1p(_tf.where(kept, v, 0.0))),
+        0.0)
+
+
+def _entmax_threshold(w, scale, alpha):
+    """The threshold `tau` that makes ``sum(scale * [1 + alpha (w - tau)]_+
+    ** (1 / alpha))`` equal one, for ``0 < alpha``, as a value only.
+
+    The sum is decreasing in `tau` and smooth between the breakpoints where
+    a part reaches zero, ``w_k + 1 / alpha``. Evaluating it at every
+    breakpoint fixes which parts stay positive exactly; on that segment the
+    root is found by Newton steps on the log of the sum, which is exact in
+    one step as ``alpha -> 0``, a step that leaves the bracket replaced by
+    bisection.
+    """
+    power = 1.0 / alpha
+    order = _tf.argsort(w, axis=1, direction="DESCENDING")
+    w_sorted = _tf.gather(w, order, batch_dims=1)
+    scale_sorted = _tf.gather(scale, order, batch_dims=1)
+    breaks = w_sorted + power
+    width = _tf.shape(w)[1]
+
+    at_breaks = _tf.reduce_sum(scale_sorted[:, None, :] * _entmax_powers(
+        alpha * (w_sorted[:, None, :] - breaks[:, :, None]), power), axis=2)
+    kept = _tf.reduce_sum(_tf.cast(at_breaks < 1.0, _tf.int32), axis=1)
+
+    upper = _tf.gather(breaks, kept - 1, batch_dims=1)
+    below = _tf.where(
+        kept < width,
+        _tf.gather(breaks, _tf.minimum(kept, width - 1), batch_dims=1),
+        _tf.constant(-_np.inf, _tf.float64))
+    # where the part with the largest latent alone would reach one: the sum
+    # is at least one there, so the root is not to its left
+    alone = w_sorted[:, 0] \
+        - _tf.math.expm1(-alpha * _tf.math.log(scale_sorted[:, 0])) / alpha
+    lower = _tf.maximum(below, alone)
+    support = _tf.cast(
+        _tf.range(width)[None, :] < kept[:, None], _tf.float64)
+
+    tau = lower
+    for _ in range(_NEWTON_STEPS):
+        v = alpha * (w_sorted - tau[:, None])
+        total = _tf.reduce_sum(
+            support * scale_sorted * _entmax_powers(v, power), axis=1)
+        slope = -_tf.reduce_sum(
+            support * scale_sorted * _entmax_powers(v, power - 1.0), axis=1)
+        above = total > 1.0
+        lower = _tf.where(above, tau, lower)
+        upper = _tf.where(above, upper, tau)
+        step = tau - total * _tf.math.log(total) / slope
+        # closed at both ends: at the root the step is `tau` itself, which
+        # the update has just made a bound
+        inside = (step >= lower) & (step <= upper)
+        tau = _tf.where(inside, step, 0.5 * (lower + upper))
+    return _tf.stop_gradient(tau)[:, None]
+
+
+class PowerSimplex(_Warping):
+    """
+    Box-Cox transformation of a composition's shares, mapped back by a
+    weighted entmax.
+
+    Maps each part to ``((x / scale)**alpha - 1) / alpha``, the scale being
+    the mean composition of the complete rows, and back by
+    ``scale * [1 + alpha (w - tau)]_+ ** (1 / alpha)``, with the threshold
+    `tau` making the parts sum to one. The way back is the composition that
+    maximizes ``w'x`` less half the Cressie-Read power divergence of `x`
+    from the scale: a weighted alpha-entmax. A part is zero when its latent
+    falls a whole ``1 / alpha`` below the threshold, so a row can come back
+    with any number of zeros.
+
+    The power sets who gives way when one part rises: every other part in
+    proportion to ``x**(1 - alpha) * scale**alpha``, which slides from the
+    current composition at ``alpha = 0`` -- the log-ratio rule, where the
+    way back is the softmax of ``log(scale) + w`` -- to the mean composition
+    at ``alpha = 1``, where it is `ScaledSimplex`.
+
+    Parameters
+    ----------
+    size
+        The number of parts in the composition.
+    alpha
+        The power, in ``[0, 1]``.
+    fixed
+        Whether to keep the power at `alpha` rather than train it. Trained
+        under the usual likelihood, the power moves from its start toward
+        the data's own and settles short of it, toward the middle of the
+        range, so a value known or chosen is the safer one.
+
+    Raises
+    ------
+    DomainError
+        From `initialize`, where the data hold zeros and the power may be
+        below one: a zero there has no finite log-determinant.
+
+    Notes
+    -----
+    The way back ignores a shift of the whole latent row, so the
+    log-determinant reported is the volume factor onto the plane of zero
+    sum along it, ``-sum(log g) + log(sum(g)) - log(size)`` with
+    ``g = x**(1 - alpha) * scale**alpha``, which is `ScaledSimplex`'s at
+    ``alpha = 1`` and `CenteredLogRatio`'s at ``alpha = 0``.
+
+    References
+    ----------
+    Peters, B., Niculae, V., & Martins, A. F. T. (2019). Sparse
+    sequence-to-sequence models. *Proceedings of ACL*, 1504-1519.
+
+    Cressie, N., & Read, T. R. C. (1984). Multinomial goodness-of-fit
+    tests. *Journal of the Royal Statistical Society: Series B*, 46(3),
+    440-464.
+
+    See Also
+    --------
+    ScaledSimplex : the member at ``alpha = 1``.
+    CenteredLogRatio : the log-ratio transformation, ``alpha = 0`` up to a
+        shift.
+    """
+    _mixes = True
+    # set by `initialize` from the data and kept by a save, as `PCA`'s is
+    _SAVED_STATE = ("scale",)
+    # below this the power is read as zero: the logarithm and the softmax
+    _SMALL = 1e-8
+
+    def __init__(self, size, alpha=1.0, fixed=True):
+        super().__init__()
+        self._size_in = size
+        self._size_out = size
+        self.scale = None
+        self._add_parameter("alpha", _gpr.RealParameter(
+            alpha, 0.0, 1.0, fixed=fixed))
+
+    def _alpha(self):
+        alpha = _tf.cast(self.parameters["alpha"].get_value(), _tf.float64)
+        small = alpha < self._SMALL
+        return alpha, small, _tf.where(small, _tf.ones_like(alpha), alpha)
+
+    def forward(self, x):
+        x = _tf.convert_to_tensor(x, _tf.float64)
+        alpha, small, safe = self._alpha()
+        positive = x > 0.0
+        log_ratio = _tf.math.log(_tf.where(positive, x / self.scale, 1.0))
+        powered = _tf.where(positive, _tf.math.expm1(safe * log_ratio) / safe,
+                            -1.0 / safe)
+        logged = _tf.where(positive, log_ratio,
+                           _tf.constant(-_np.inf, _tf.float64))
+        w = _tf.where(small, logged, powered)
+
+        # g = x**(1 - alpha) * scale**alpha, the rate at which each part
+        # moves with its latent; a zero has none below alpha = 1
+        log_g = _tf.math.log(self.scale) + (1.0 - alpha) * log_ratio
+        log_g = _tf.where(_tf.logical_not(positive) & (alpha < 1.0),
+                          _tf.constant(-_np.inf, _tf.float64), log_g)
+        log_det = - _tf.reduce_sum(log_g, axis=1) \
+            + _tf.reduce_logsumexp(log_g, axis=1) - _np.log(self.size_in)
+        return w, log_det
+
+    def backward(self, x):
+        w = _tf.convert_to_tensor(x, _tf.float64)
+        alpha, small, safe = self._alpha()
+        scale = _tf.broadcast_to(self.scale, _tf.shape(w))
+        power = 1.0 / safe
+
+        # the threshold is solved as a value and given its derivatives by
+        # one implicit step: d tau = d(sum x) / sum(g) at the root, which is
+        # what makes the Jacobian `diag(g) - g g' / sum(g)` reach `w`, the
+        # power and the scale
+        tau = _entmax_threshold(w, scale, safe)
+        v = safe * (w - tau)
+        g = scale * _entmax_powers(v, power - 1.0) \
+            * _tf.cast(v > -1.0, _tf.float64)
+        total = _tf.reduce_sum(scale * _entmax_powers(v, power), axis=1,
+                               keepdims=True)
+        tau = tau + (total - 1.0) / _tf.stop_gradient(
+            _tf.reduce_sum(g, axis=1, keepdims=True))
+        general = scale * _entmax_powers(safe * (w - tau), power)
+
+        general = _tf.where(alpha >= 1.0,
+                            _weighted_sparsemax(1.0 + w, self.scale), general)
+        return _tf.where(
+            small, _tf.nn.softmax(_tf.math.log(scale) + w, axis=1), general)
+
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=0.0, closed=True, missing=True)
+        x = _np.asarray(x, dtype=float)
+        complete = x[~_np.any(_np.isnan(x), axis=1)]
+        alpha = self.parameters["alpha"]
+        zeros = _np.sum(complete == 0.0, axis=0)
+        if _np.any(zeros) and (
+                not alpha.fixed or float(alpha.get_value()) < 1.0):
+            # a zero has no finite log-determinant below alpha = 1, which
+            # the usual likelihood adds to every row -- the censored
+            # likelihood planned for compositions with zeros will take them
+            # and will start the warping without this check
+            column = int(_np.argmax(zeros > 0))
+            raise DomainError(
+                f"PowerSimplex takes zeros only at a fixed alpha of 1: "
+                f"component {column} holds {int(zeros[column])} of them. "
+                f"Use alpha=1 with fixed=True, or ScaledSimplex.",
+                self, column, int(zeros[column]))
+        self.scale = _tf.constant(
+            _np.mean(complete, axis=0, keepdims=True), _tf.float64)
+        return self.forward(x)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -2138,6 +2404,10 @@ Rotation._catalogue = _declared(
     fixed={"type": "bool"})
 ScaledSimplex._catalogue = _declared(_SIZED, label="Scaled simplex",
                                      size=_COUNT)
+PowerSimplex._catalogue = _declared(
+    _SIZED, label="Power simplex", size=_COUNT,
+    alpha={"type": "float", "constraints": {"min": 0, "max": 1}},
+    fixed={"type": "bool"})
 
 # What each trains, under the names `parameters` holds them by (see
 # `latent/network.py`). `Center`'s `std` and `Scale`'s `mean` are held by what
@@ -2154,5 +2424,8 @@ for _class, _trained in (
         (TensorProductFlow, ["rng_time", "factors_space", "factors_time",
                              "factors_component", "weights", "rng_space"]),
         (Rotation, [{"name": "rotation",
-                     "fixed_when": {"argument": "fixed", "equals": True}}])):
+                     "fixed_when": {"argument": "fixed", "equals": True}}]),
+        (PowerSimplex, [{"name": "alpha",
+                         "fixed_when": {"argument": "fixed",
+                                        "equals": True}}])):
     _class._catalogue["trainable"] = _trained

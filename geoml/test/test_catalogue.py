@@ -546,7 +546,7 @@ def _warping_calls(cls):
             wp.SinhArcsinh: (3,), wp.Sigmoid: (3,),
             wp.ContinuousNormalizingFlow: (2,), wp.TensorProductFlow: (2,),
             wp.PCA: (4, 2), wp.RobustPCA: (4, 2), wp.CenteredLogRatio: (3,),
-            wp.Rotation: (3,), wp.ScaledSimplex: (3,),
+            wp.Rotation: (3,), wp.ScaledSimplex: (3,), wp.PowerSimplex: (3,),
             wp.ChainedWarping: (wp.ZScore(3), wp.PCA(3, 2))}[cls]
 
 
@@ -750,6 +750,7 @@ def _conditioned_builds():
         builds.append((latent.GPWalk, args, dict(kwargs, reach=reach), {}))
     for fixed in (True, False):
         builds.append((wp.Rotation, (3,), {"fixed": fixed}, {}))
+        builds.append((wp.PowerSimplex, (3,), {"fixed": fixed}, {}))
     for points, normals in (_plane(), _line()):
         for extra in ({}, {"drag": True}, {"profile": "bell"}):
             builds.append((tr.FaultDisplacement, (points, normals),
@@ -869,6 +870,7 @@ def _start_calls():
         (wp.YeoJohnson, (3,), {"exponent": 0.5}),
         (wp.Arcsinh, (3,), {"scale": 2.0}),
         (wp.SinhArcsinh, (3,), {"skewness": 0.5, "tailweight": 2.0}),
+        (wp.PowerSimplex, (3,), {"alpha": 0.5}),
         (lk.Mixture, (wp.ZScore(1),), {"weights": [0.3, 0.7]}),
         (lk.LikelihoodMixture, (_gaussians(),), {"weights": [0.3, 0.7]}),
         (lk.Bernoulli, (), {"shift": 1.0}),

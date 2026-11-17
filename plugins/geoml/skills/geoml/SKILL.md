@@ -410,7 +410,13 @@ The papers and the code name the same things differently.
 - **In implicit modelling the sign of the potential field matters, not its
   magnitude.** A contact constrains the field to cross a threshold.
 - **Compositional data live on a simplex.** A log-ratio transform maps them
-  to real space; back-transforming must restore the closure.
+  to real space; back-transforming must restore the closure. A log-ratio
+  takes no zero. `warping.PowerSimplex` (Box-Cox of each share, back by a
+  weighted entmax) runs from the log-ratio rule at `alpha=0` to
+  `ScaledSimplex` at `alpha=1`, and its way back can return any number of
+  parts at zero; zeros in the data it takes only at a fixed `alpha=1`.
+  Choose the power rather than train it: under the usual likelihood a
+  trained power settles toward the middle of its range.
 - **A held-out score measured at sampled locations cannot speak for the
   ground between them.** A regular backbone of inducing points is there for
   the map, and a validation set from the same campaign cannot notice it.
