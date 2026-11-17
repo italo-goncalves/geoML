@@ -309,3 +309,66 @@ def test_a_shift_from_the_data_survives_a_save(tmp_path):
     again = restored.likelihoods[0].warping.warpings[0]
     np.testing.assert_array_equal(
         again.parameters["shift"].get_value().numpy(), found)
+
+
+# --------------------------------------------------------------------------- #
+# the domain each warping starts from
+# --------------------------------------------------------------------------- #
+def _with_one(value, column=1, rows=1):
+    x = _lognormal(n=50, k=3) + 0.5
+    x[:rows, column] = value
+    return x
+
+
+@pytest.mark.parametrize("warping, x, column, count", [
+    (lambda: wp.BoxCox(3, shift=0.01), _with_one(-0.3, rows=2), 1, 2),
+    (lambda: wp.BoxCox(3, shift=0.01), _with_one(-0.01), 1, 1),
+    (lambda: wp.BoxCox(3, shift=None), _with_one(-0.3, column=2), 2, 1),
+    (lambda: wp.Log(3), _with_one(-1.0), 1, 1),
+    (lambda: wp.Softplus(3), _with_one(-1.0, column=0), 0, 1),
+    (lambda: wp.Sigmoid(3), _with_one(101.0) / 100.0, 1, 1),
+    (lambda: wp.CenteredLogRatio(3), _with_one(0.0), 1, 1),
+    (lambda: wp.ScaledSimplex(3), _with_one(-0.1), 1, 1),
+    (lambda: wp.PCA(3), _with_one(np.inf), 1, 1),
+    (lambda: wp.RobustPCA(3), _with_one(np.nan), 1, 1),
+])
+def test_values_outside_the_domain_are_refused_by_name(warping, x, column, count):
+    warping = warping()
+    with pytest.raises(wp.DomainError) as raised:
+        warping.initialize(x)
+    assert raised.value.warping is warping
+    assert raised.value.column == column
+    assert raised.value.count == count
+    assert type(warping).__name__ in str(raised.value)
+    assert f"component {column}" in str(raised.value)
+
+
+def test_values_on_a_closed_edge_of_the_domain_are_taken():
+    x = _lognormal(n=50, k=3) / 100.0
+    x[0, 0], x[1, 1] = 0.0, 1.0
+    wp.Sigmoid(3).initialize(x)
+    x = _lognormal(n=50, k=3)
+    x[0, 0], x[1, 1] = 0.0, np.nan
+    wp.ScaledSimplex(3).initialize(x)
+    wp.BoxCox(3, shift=0.01).initialize(np.where(np.isnan(x), 0.0, x))
+
+
+def test_a_model_names_the_variable_and_the_column():
+    rng = np.random.default_rng(5)
+    coords = rng.uniform(0.0, 100.0, (60, 2))
+    values = rng.lognormal(0.0, 1.0, (60, 3))
+    values[[3, 7], 2] = -0.3
+    point = geoml.data.PointData.from_array(coords, ["x", "y"])
+    point.add_vector_variable("Assay", ["Cu", "Zn", "Hg"], values)
+    inducing = geoml.data.PointData.from_array(
+        rng.uniform(0.0, 100.0, (12, 2)), ["x", "y"])
+    gp = geoml.latent.BasicGP(geoml.latent.BasicInput(
+        inducing, transform=geoml.transform.Isotropic(40.0)), size=3)
+    chain = wp.ChainedWarping(wp.BoxCox(3, shift=0.01), wp.PCA(3))
+    with pytest.raises(wp.DomainError) as raised:
+        geoml.models.VGPNetwork(
+            point, "Assay", geoml.likelihood.Gaussian(chain), gp,
+            options=geoml.models.GPOptions(verbose=False))
+    message = str(raised.value)
+    assert "Variable 'Assay', column 'Hg'" in message
+    assert "holds 2 outside it, from -0.3 to -0.3" in message

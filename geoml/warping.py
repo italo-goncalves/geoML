@@ -112,6 +112,85 @@ def _arm_shares(widths, outer):
     return shares / shares.sum()
 
 
+class DomainError(ValueError):
+    """
+    Values a warping cannot transform.
+
+    Raised by `initialize` when a component holds values outside the
+    warping's domain -- a negative value under a logarithm, say -- or values
+    that are not finite. The warping is checked when it starts from the
+    data, so the error names the offending values before they turn into NaN
+    further down the chain.
+
+    Attributes
+    ----------
+    warping
+        The warping that refused the values.
+    column
+        The component holding them, counted from zero in what reaches the
+        warping.
+    count
+        How many values are outside the domain in that component.
+    """
+
+    def __init__(self, message, warping=None, column=None, count=None):
+        super().__init__(message)
+        self.warping = warping
+        self.column = column
+        self.count = count
+
+
+def _check_domain(warping, x, lower=None, upper=None, closed=False,
+                  missing=False):
+    """Refuses values `warping` cannot transform, one component at a time.
+
+    `lower` and `upper` are bounds per component or for all of them, open
+    unless `closed`; an infinite value is refused always, a missing one
+    unless `missing` says the warping takes it. Raises a `DomainError`
+    naming the first component that fails.
+    """
+    x = _np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        x = x[:, None]
+    width = x.shape[1]
+    lower = _np.broadcast_to(
+        -_np.inf if lower is None else _np.asarray(lower, dtype=float),
+        [width])
+    upper = _np.broadcast_to(
+        _np.inf if upper is None else _np.asarray(upper, dtype=float),
+        [width])
+    name = type(warping).__name__
+    for i in range(width):
+        column = x[:, i]
+        absent = _np.isnan(column)
+        if _np.any(absent) and not missing:
+            raise DomainError(
+                f"{name} cannot transform missing values: component {i} "
+                f"holds {int(absent.sum())} of them.",
+                warping, i, int(absent.sum()))
+        present = column[~absent]
+        infinite = ~_np.isfinite(present)
+        if _np.any(infinite):
+            raise DomainError(
+                f"{name} cannot transform infinite values: component {i} "
+                f"holds {int(infinite.sum())} of them.",
+                warping, i, int(infinite.sum()))
+        if closed:
+            outside = (present < lower[i]) | (present > upper[i])
+        else:
+            outside = (present <= lower[i]) | (present >= upper[i])
+        if _np.any(outside):
+            low = "[" if closed else "]"
+            high = "]" if closed else "["
+            bounds = f"{low}{lower[i]:g}, {upper[i]:g}{high}"
+            values = present[outside]
+            raise DomainError(
+                f"{name} transforms values in {bounds} only: component {i} "
+                f"holds {values.size} outside it, from {values.min():g} to "
+                f"{values.max():g}. Correct or remove them in the data.",
+                warping, i, int(values.size))
+
+
 class _Warping(_gpr.Parametric):
     """
     Base warping class.
@@ -648,6 +727,10 @@ class Softplus(_Warping):
                             )
         log_det = _tf.reduce_sum(_tf.math.log(log_det), axis=1)
         return x_warp, log_det
+
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=-self.shift)
+        return super().initialize(x, weights)
     
     def backward(self, x):
         # x = _tftools.ensure_rank_2(x)
@@ -689,6 +772,10 @@ class Log(_Warping):
         # everywhere else, so that a chain can add its links together
         log_det = - _tf.reduce_sum(_tf.math.log(x + self.shift), axis=1)
         return x_warp, log_det
+
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=-self.shift)
+        return super().initialize(x, weights)
 
     def backward(self, x):
         return _tf.math.exp(x)
@@ -886,6 +973,7 @@ class BoxCox(_Warping):
             self.parameters["shift"].set_value(_np.array(shifts))
         else:
             shifts = [self.shift] * self.size_in
+        _check_domain(self, x, lower=-_np.array(shifts))
         starts = [
             _profile_start(
                 x[:, i], weights, self._GRID,
@@ -1227,6 +1315,11 @@ class Sigmoid(_Warping):
         x_warp = - _tf.math.log(1 / x - 1)
         log_det = _tf.reduce_sum(- _tf.math.log(x - x**2), axis=1)
         return x_warp, log_det
+
+    def initialize(self, x, weights=None):
+        # the shift squeezes [0, 1] inside the open interval
+        _check_domain(self, x, lower=0.0, upper=1.0, closed=True)
+        return super().initialize(x, weights)
 
     def backward(self, x):
         return 1 / (1 + _tf.math.exp(-x))
@@ -1681,6 +1774,7 @@ class PCA(_Warping):
         return x
 
     def initialize(self, x, weights=None):
+        _check_domain(self, x)
         self.mean = _tf.constant(_np.mean(x, axis=0, keepdims=True), _tf.float64)
         x_center = x - self.mean
         cov = _np.matmul(_np.transpose(x_center), x_center) / x_center.shape[0]
@@ -1719,6 +1813,7 @@ class RobustPCA(PCA):
         self.support_fraction = support_fraction
 
     def initialize(self, x, weights=None):
+        _check_domain(self, x)
         with _warnings.catch_warnings():
             # FastMCD chatters while it searches: "Determinant has increased"
             # on its concentration steps, and a not-full-rank notice on the
@@ -1800,6 +1895,10 @@ class CenteredLogRatio(_Warping):
 
     def backward(self, x):
         return _tf.nn.softmax(x, axis=1)
+
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=0.0)
+        return super().initialize(x, weights)
 
 
 class Rotation(Identity):
@@ -1934,6 +2033,7 @@ class ScaledSimplex(Identity):
         return x
 
     def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=0.0, closed=True, missing=True)
         missing = _np.isnan(x)
         complete = ~_np.any(missing, axis=1, keepdims=True)
         x_new = _np.where(missing, 0, x) * complete

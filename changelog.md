@@ -1,3 +1,19 @@
+## version 0.10.13
+* **A warping refuses values it cannot transform, by name.** On GeoScape's
+Corta Atalaya project two negative Hg assays (-0.299 and -0.283) went
+through `BoxCox(shift=0.01)` as NaN, and the PCA after it failed with
+numpy's `LinAlgError: Eigenvalues did not converge`, which named neither.
+`initialize` now checks the data against the warping's domain -- above
+minus the shift for `Log`, `Softplus` and `BoxCox` (the shift found first
+where `shift=None`), `[0, 1]` for `Sigmoid`, positive for
+`CenteredLogRatio`, non-negative for `ScaledSimplex`, and finite for those
+and for `PCA`/`RobustPCA` -- and raises `warping.DomainError` (a
+`ValueError`) with the component, the count and the range of the values
+outside. `VGPNetwork` adds the variable's name, and the column's label
+where the refusing warping is the first link and so sees the data's own
+columns: "Variable 'Assay', column 'Hg': BoxCox transforms values in
+]-0.01, inf[ only: component 8 holds 2 outside it, from -0.299 to -0.283".
+
 ## version 0.10.12
 * **`HermiteRBF` is in the catalogue** (GeoScape's item 60): as a function
 and its `__call__`, with a `surface` step in the workflow, so a Script can

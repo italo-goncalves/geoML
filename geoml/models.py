@@ -1228,8 +1228,13 @@ class VGPNetwork(_GPModel):
             y, has_value = data.variables[v].get_measurements()
             has_value = _np.all(has_value == 1.0, axis=1)
             y = y[has_value, :]
-            self.likelihoods[i].initialize(
-                y, weights=None if stored is None else stored[has_value])
+            try:
+                self.likelihoods[i].initialize(
+                    y, weights=None if stored is None else stored[has_value])
+            except _warp.DomainError as error:
+                raise _warp.DomainError(
+                    f"Variable {v!r}{_data_column(self.likelihoods[i], error, data.variables[v])}: {error}",
+                    error.warping, error.column, error.count) from error
 
         # directions
         self.directional_likelihood = _lk.GradientIndicator()
@@ -4772,6 +4777,23 @@ class VGPNetwork(_GPModel):
                     variable.set_responsibilities(answer)
             out[v] = answer
         return out
+
+
+def _data_column(likelihood, error, variable):
+    """`", column 'Hg'"` where a warping's refusal is of a column of the
+    data -- the first link of the likelihood's own warping sees the data's
+    columns as they are; any later link sees transformed ones."""
+    if not likelihood._SINGLE_WARPING:
+        return ""
+    first = likelihood.warping
+    if isinstance(first, _warp.ChainedWarping):
+        first = first.warpings[0]
+    labels = getattr(variable, "labels", None)
+    if error.warping is not first or error.column is None:
+        return ""
+    if labels is None:
+        return ""
+    return f", column {labels[error.column]!r}"
 
 
 def _power_below(n):
