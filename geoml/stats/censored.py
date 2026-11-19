@@ -256,7 +256,8 @@ def _faces(m):
 class Rule:
     """How many nodes each integral takes."""
 
-    def __init__(self, n_tau=24, n_legendre=16, n_sobol=1024, seed=0):
+    def __init__(self, n_tau=24, n_legendre=16, n_sobol=1024, seed=0,
+                 n_guide=8):
         y, w = _np.polynomial.hermite.hermgauss(n_tau)
         self.tau_nodes = _tf.constant(y * _np.sqrt(2.0), _tf.float64)
         self.tau_log_weights = _tf.constant(
@@ -265,6 +266,11 @@ class Rule:
         self.legendre_nodes = _tf.constant((g + 1.0) / 2.0, _tf.float64)
         self.legendre_log_weights = _tf.constant(_np.log(v / 2.0),
                                                  _tf.float64)
+        # the passes that only narrow a window, and the guide values that
+        # only place the nodes in `tau`, take fewer
+        g, v = _np.polynomial.legendre.leggauss(n_guide)
+        self.guide_nodes = _tf.constant((g + 1.0) / 2.0, _tf.float64)
+        self.guide_log_weights = _tf.constant(_np.log(v / 2.0), _tf.float64)
         self.n_sobol = n_sobol
         self.seed = seed
         self._sobol = {}
@@ -379,6 +385,8 @@ def log_likelihood(y, observed, latent, noise_sd, simplex, links, rule,
 
     f_t = f[:, :, :, None]
     sd_t = sd[:, :, :, None]
+    sd_flat = _tf.reshape(sd, [-1])
+    censored = _tf.where(zero | hidden)                    # (k, 2)
 
     def on_nodes(centre, width):
         """The nodes in `tau`, the log-density they are placed by, and at
@@ -394,27 +402,34 @@ def log_likelihood(y, observed, latent, noise_sd, simplex, links, rule,
         log_density = -0.5 * z ** 2 - 0.5 * _np.log(2 * _np.pi)             - _tf.math.log(sd_t) + log_slope
         terms = _tf.reduce_sum(
             _tf.where(positive[:, :, None, None], log_density, 0.0), axis=1)
-        edge = _tf.broadcast_to(tau[:, None, :, :] + simplex.threshold,
-                                _tf.shape(at))
-        value_edge, _ = links.forward(edge, columns_t)
-        z_edge = (value_edge - f_t) / sd_t
-        log_zero = _log_ndtr(z_edge)
+        # where a part vanishes, and the log-probability it is zero, only
+        # for the parts that are zero or hidden: the normal's log-CDF over
+        # every part was most of a complete row's cost
+        edge = _tf.gather(tau, censored[:, 0]) + simplex.threshold
+        col = _tf.broadcast_to(censored[:, 1, None, None], _tf.shape(edge))
+        value_edge, _ = links.forward(edge, col)
+        z_edge = (value_edge - _tf.gather_nd(f, censored)[:, :, None]) \
+            / _tf.gather(sd_flat, censored[:, 1])[:, None, None]
+        log_zero = _tf.scatter_nd(censored, _log_ndtr(z_edge),
+                                  _tf.shape(at, out_type=_tf.int64))
         terms = terms + _tf.reduce_sum(
             _tf.where(zero[:, :, None, None], log_zero, 0.0), axis=1)
-        return tau, log_q, terms, z_edge, log_zero
+        return tau, log_q, terms, log_zero
 
     n_hidden = _tf.reduce_sum(_tf.cast(hidden, _tf.int32), axis=1)
 
-    def hidden_terms(tau, z_edge, log_zero):
+    def hidden_terms(tau, log_zero, guide=False):
         """``log h_M(tau)``: the sum constraint's Jacobian where nothing is
-        hidden, every face of the hidden parts where something is."""
+        hidden, every face of the hidden parts where something is. A
+        `guide` value, which only places the nodes in `tau`, takes each
+        integral over the hidden parts in one pass."""
         log_h = _tf.broadcast_to(
             _tf.math.log(_tf.maximum(gamma, 1e-300))[:, None, None],
             _tf.shape(tau))
         for m in range(1, min(max_hidden, size) + 1):
             rows = _tf.where(scored & (n_hidden == m))[:, 0]
             part = _hidden_rows(rows, m, hidden, remainder, gamma, f, sd,
-                                tau, z_edge, log_zero, simplex, links, rule)
+                                tau, log_zero, simplex, links, rule, guide)
             log_h = _tf.tensor_scatter_nd_update(log_h, rows[:, None], part)
         return log_h
 
@@ -425,9 +440,9 @@ def log_likelihood(y, observed, latent, noise_sd, simplex, links, rule,
     # falls on a node
     width = 3.0 * width
     for _ in range(2):
-        tau, log_q, terms, z_edge, log_zero = on_nodes(centre, width)
+        tau, log_q, terms, log_zero = on_nodes(centre, width)
         log_weight = rule.tau_log_weights + terms - log_q \
-            + hidden_terms(tau, z_edge, log_zero)
+            + hidden_terms(tau, log_zero, guide=True)
         share = _tf.nn.softmax(log_weight, axis=2)
         mean = _tf.reduce_sum(share * tau, axis=2)
         spread = _tf.sqrt(_tf.maximum(
@@ -439,8 +454,8 @@ def log_likelihood(y, observed, latent, noise_sd, simplex, links, rule,
                              / _np.sqrt(rule.tau_nodes.shape[0]))
         centre = _tf.stop_gradient(mean)
         width = _tf.stop_gradient(spread)
-    tau, log_q, terms, z_edge, log_zero = on_nodes(centre, width)
-    log_h = hidden_terms(tau, z_edge, log_zero)
+    tau, log_q, terms, log_zero = on_nodes(centre, width)
+    log_h = hidden_terms(tau, log_zero)
 
     log_integral = _tf.reduce_logsumexp(
         rule.tau_log_weights + terms + log_h - log_q, axis=2)
@@ -449,8 +464,8 @@ def log_likelihood(y, observed, latent, noise_sd, simplex, links, rule,
     return _tf.where(scored[:, None], out, 0.0), scored
 
 
-def _hidden_rows(rows, m, hidden, remainder, gamma, f, sd, tau, z_edge,
-                 log_zero, simplex, links, rule):
+def _hidden_rows(rows, m, hidden, remainder, gamma, f, sd, tau, log_zero,
+                 simplex, links, rule, guide=False):
     """``log h_M(tau)`` for the rows with `m` hidden parts: every face, a
     subset of them positive and the others zero."""
     hide = _tf.gather(hidden, rows)
@@ -471,7 +486,7 @@ def _hidden_rows(rows, m, hidden, remainder, gamma, f, sd, tau, z_edge,
         log_value = _tf.reduce_sum(_tf.gather(lz, rest, axis=1), axis=1) \
             if rest else _tf.zeros_like(tau_r)
         k = _face(face, cols, R, gamma_r, f_r, sd_r, tau_r, simplex, links,
-                  rule)
+                  rule, guide)
         faces.append(log_value + k)
     return _tf.reduce_logsumexp(_tf.stack(faces, axis=0), axis=0)
 
@@ -531,7 +546,7 @@ def _range(p, upper, tau, cols, f_r, sd_r, simplex, links):
     return lo, hi
 
 
-def _adaptive(lo, hi, log_f, rule, passes=3):
+def _adaptive(lo, hi, log_f, rule, passes=3, coarse=False):
     """``log`` of the integral of ``exp(log_f(z))`` over ``[lo, hi]``, `z`
     shaped ``lo.shape + (G,)``, by Gauss-Legendre on a window narrowed to
     the integrand's own mean and spread before the last pass: in an
@@ -539,15 +554,20 @@ def _adaptive(lo, hi, log_f, rule, passes=3):
     by the part's own density never reach."""
     a, b = lo, hi
     for step in range(passes):
-        z = a[..., None] + (b - a)[..., None] * rule.legendre_nodes
-        log_terms = rule.legendre_log_weights + log_f(z)
+        if coarse or step < passes - 1:
+            nodes, log_weights = rule.guide_nodes, rule.guide_log_weights
+        else:
+            nodes = rule.legendre_nodes
+            log_weights = rule.legendre_log_weights
+        z = a[..., None] + (b - a)[..., None] * nodes
+        log_terms = log_weights + log_f(z)
         if step == passes - 1:
             break
         share = _tf.nn.softmax(log_terms, axis=-1)
         mean = _tf.reduce_sum(share * z, axis=-1)
         sd = _tf.sqrt(_tf.maximum(_tf.reduce_sum(
             share * (z - mean[..., None]) ** 2, axis=-1), 1e-24))
-        sd = _tf.maximum(sd, (b - a) / rule.legendre_nodes.shape[0])
+        sd = _tf.maximum(sd, (b - a) / nodes.shape[0])
         reach = 10.0 if step == 0 else 8.0
         a = _tf.stop_gradient(_tf.maximum(lo, mean - reach * sd))
         b = _tf.stop_gradient(_tf.maximum(_tf.minimum(hi, mean + reach * sd),
@@ -556,7 +576,7 @@ def _adaptive(lo, hi, log_f, rule, passes=3):
 
 
 def _pair(j, l, R, gamma, tau, cols, f_r, sd_r, simplex, links, rule,
-          passes=3):
+          passes=3, coarse=False):
     """``log K`` for two hidden parts sharing `R`, both positive: each in
     turn is the free one, up to half the remainder, the other solved."""
     pieces = []
@@ -575,13 +595,15 @@ def _pair(j, l, R, gamma, tau, cols, f_r, sd_r, simplex, links, rule,
             log_k = term + _tf.math.log(gamma[..., None] + g + g_l)
             return _log_normal(z) + _tf.where(valid, log_k, _LOG_ZERO)
 
-        pieces.append(_adaptive(lo, hi, log_f, rule, passes))
+        pieces.append(_adaptive(lo, hi, log_f, rule, passes, coarse))
     return _tf.reduce_logsumexp(_tf.stack(pieces, axis=0), axis=0)
 
 
-def _face(face, cols, R, gamma_r, f_r, sd_r, tau_r, simplex, links, rule):
+def _face(face, cols, R, gamma_r, f_r, sd_r, tau_r, simplex, links, rule,
+          guide=False):
     """``log K_Q(tau)`` for the face where the hidden parts at positions
-    `face` are positive and share the remainder."""
+    `face` are positive and share the remainder; a `guide` value in one
+    coarse pass of each integral."""
     q = len(face)
     R_t = _tf.broadcast_to(R[:, None, None], _tf.shape(tau_r))
     gamma_t = _tf.broadcast_to(gamma_r[:, None, None], _tf.shape(tau_r))
@@ -591,7 +613,8 @@ def _face(face, cols, R, gamma_r, f_r, sd_r, tau_r, simplex, links, rule):
         return term + _tf.math.log(gamma_t + g_l)
     if q == 2:
         return _pair(face[0], face[1], R_t, gamma_t, tau_r, cols, f_r, sd_r,
-                     simplex, links, rule)
+                     simplex, links, rule, passes=1 if guide else 3,
+                     coarse=guide)
     if q == 3:
         # a convolution: the first part over all it could hold, the other
         # two sharing what it leaves
@@ -606,10 +629,12 @@ def _face(face, cols, R, gamma_r, f_r, sd_r, tau_r, simplex, links, rule):
                           _tf.where(valid, left, R_t[..., None] / 2),
                           gamma_t[..., None] + g,
                           _tf.broadcast_to(tau_r[..., None], _tf.shape(x)),
-                          cols, f_r, sd_r, simplex, links, rule, passes=2)
+                          cols, f_r, sd_r, simplex, links, rule,
+                          passes=1 if guide else 2, coarse=guide)
             return _log_normal(z) + _tf.where(valid, inner, _LOG_ZERO)
 
-        return _adaptive(lo, hi, log_f, rule, passes=2)
+        return _adaptive(lo, hi, log_f, rule, passes=1 if guide else 2,
+                         coarse=guide)
 
     # four or more: each part in turn the largest, solved; the others by
     # seeded Sobol points in the box of their latent noise up to half the

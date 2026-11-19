@@ -1953,9 +1953,15 @@ building it: four or more positive hidden parts need about 4096 Sobol
 points for 1e-3 nats a row, far too many for training, so `max_hidden`
 defaults to 3; the intervals over-cover (0.97 of a 90% one) on the gate's
 data, not yet explained; the partial rows bought no measurable skill there
-at four times the cost; and training costs about thirty times
-`Gaussian`'s on the complete rows -- the adaptive passes and the full-row
-evaluation of non-affine links are the obvious places to look. *How it fits the code (2026-11-17)*: a likelihood class
+at four times the cost; and training cost about eighteen times
+`Gaussian`'s on the complete rows. Profiled the same day: the guide passes
+and the log-CDF over every part were cut (changelog), a step 2.2-2.6x
+faster, now 7x `Gaussian`'s on complete rows and 30x on the gate's mix.
+Left: the closed form of a row with only positive parts under affine links
+(an exact Gaussian integral in the shift, still taken on 24 nodes), the
+full-row evaluation of non-affine links (2-3x an affine one), and the
+single thread TensorFlow gives these operations; XLA cannot compile the
+unrolled face loops. *How it fits the code (2026-11-17)*: a likelihood class
 of its own, after the user's planned Variable for compositions with zeros
 and missing parts -- `MassFractionVariable`, built in 0.10.13: zeros arrive
 as `y == 0` with `has_value` 1, a missing part as `has_value` 0, through

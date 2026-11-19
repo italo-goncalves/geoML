@@ -31,8 +31,18 @@ they are rare (0.0304 and 0.0303 at 0.25); the intervals over-cover
 settled at 0.20, 0.48 and 1.00 for true values of 0.25, 0.5 and 1, where
 the usual likelihood gave 0.44, 0.58 and 0.89. Rows with parts missing
 added nothing measurable there (CRPS 0.0308 against 0.0303 on the
-complete rows alone) at four times the cost; the complete rows alone cost
-about thirty times `Gaussian`'s training. The bound is a density on a
+complete rows alone) at four times the cost. Profiled before release: a
+step was the likelihood's almost entirely, rows missing two parts at
+twenty times a complete one's, and two changes cut it with no row less
+accurate in the node sweep -- the normal's log-CDF taken only for the
+parts zero or hidden (it was most of a complete row's cost), and the
+passes that only place nodes (the shift's two guide passes, and every
+narrowing pass of the hidden parts' Gauss-Legendre rule) taken in one
+pass of eight nodes. A training step on the gate's data went from 106 to
+41 ms on the complete rows and from 425 to 190 ms on every row
+(`Gaussian`: 6 ms); 600 rows missing two parts of four from 3.9 to 1.4 s,
+missing three from 81 to 25 s. TensorFlow runs these operations on one
+thread, and XLA was still compiling 30 rows after ten minutes. The bound is a density on a
 different measure for each pattern of zeros, so compare it with another
 likelihood by held-out scores, never by the bound. The model's door asks
 each likelihood which rows it scores (`_scored_rows`) and leaves out, with
