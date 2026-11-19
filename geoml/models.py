@@ -1845,8 +1845,9 @@ class VGPNetwork(_GPModel):
         """The measurements of every modelled variable side by side, and
         the mask of which cells hold one."""
         y, has_value = [], []
-        for v in self.variables:
+        for v, lik in zip(self.variables, self.likelihoods):
             y_v, h_v = data.variables[v].get_measurements()
+            y_v, h_v = _whole_rows(v, lik, y_v, h_v)
             y.append(y_v)
             has_value.append(h_v)
         return _np.concatenate(y, axis=1), _np.concatenate(has_value, axis=1)
@@ -4777,6 +4778,30 @@ class VGPNetwork(_GPModel):
                     variable.set_responsibilities(answer)
             out[v] = answer
         return out
+
+
+def _whole_rows(name, likelihood, y, has_value):
+    """`y` and `has_value` with every row `likelihood` cannot score left
+    out.
+
+    Only a `MassFractionVariable` hands over a row holding some of its
+    columns and not others. A likelihood that weighs a row whole would score
+    the missing columns at their placeholder, and `CensoredSimplex` scores
+    a row only up to a number of missing parts, so a row it cannot score is
+    marked missing throughout -- its values too, a placeholder being
+    something every warping can transform -- and the count is reported.
+    """
+    held = _np.asarray(has_value) == 1.0
+    left = _np.any(held, axis=1) & ~likelihood._scored_rows(has_value)
+    if not left.any():
+        return y, has_value
+    warnings.warn(
+        f"Variable {name!r}: {int(left.sum())} row(s) cannot be scored by "
+        f"{type(likelihood).__name__}, as {likelihood._unscored()}; the "
+        f"model leaves them out")
+    y = _np.where(left[:, None], 1.0, y)
+    has_value = _np.where(left[:, None], 0.0, has_value)
+    return y, has_value
 
 
 def _data_column(likelihood, error, variable):

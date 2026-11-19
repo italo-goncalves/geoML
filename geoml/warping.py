@@ -206,6 +206,13 @@ class _Warping(_gpr.Parametric):
     # declaration against a numerical Jacobian.
     _mixes = False
 
+    # Whether this warping is increasing and defined on the whole line,
+    # which is what lets `likelihood.CensoredSimplex` evaluate it at any
+    # latent value after a simplex warping; and whether it is affine, which
+    # keeps that likelihood's integrals over the row's shift exact.
+    _WHOLE_LINE = False
+    _AFFINE = False
+
     # How wide this warping is on each side. Every subclass sets both in its
     # own constructor, from the size it is built for; they start at zero
     # rather than None because a width is a count.
@@ -325,6 +332,9 @@ class Identity(_Warping):
     size : int
         The number of columns the warping transforms.
     """
+    _WHOLE_LINE = True
+    _AFFINE = True
+
     def __init__(self, size):
         super().__init__()
         self._size_in = size
@@ -351,6 +361,8 @@ class Spline(_Warping):
     n_knots : int
         Total number of knots.
     """
+    _WHOLE_LINE = True
+
     def __init__(self, size, knots_per_arm=5, backbone="cubic"):
         """
         Initializer for Spline.
@@ -558,6 +570,9 @@ class ZScore(_Warping):
     # The quantile band a robust initialization trusts; what lies outside is
     # clipped to the fence before the moments are taken.
     _ROBUST_QUANTILES = (0.01, 0.99)
+
+    _WHOLE_LINE = True
+    _AFFINE = True
 
     def __init__(self, size, mean=None, std=None, robust=False):
         """
@@ -1022,6 +1037,8 @@ class YeoJohnson(_Warping):
     _EXPONENT_LIMITS = (0.0, 2.0)
     _GRID = _np.linspace(0.0, 2.0, 81)
 
+    _WHOLE_LINE = True
+
     def __init__(self, size, exponent=1.0):
         super().__init__()
         self._size_in = size
@@ -1101,6 +1118,8 @@ class Arcsinh(_Warping):
     transformations to handle extreme values of the dependent variable.
     *Journal of the American Statistical Association*, 83(401), 123-127.
     """
+    _WHOLE_LINE = True
+
     def __init__(self, size, scale=1.0):
         super().__init__()
         self._size_in = size
@@ -1162,6 +1181,8 @@ class SinhArcsinh(_Warping):
     """
     _SKEW_GRID = _np.linspace(-2.0, 2.0, 21)
     _TAIL_GRID = _np.logspace(_np.log10(0.25), _np.log10(4.0), 21)
+
+    _WHOLE_LINE = True
 
     def __init__(self, size, skewness=0.0, tailweight=1.0):
         super().__init__()
@@ -1950,6 +1971,10 @@ class Rotation(Identity):
     """
     _mixes = True
 
+    # not a link: it mixes the parts
+    _WHOLE_LINE = False
+    _AFFINE = False
+
     def __init__(self, n_dim, fixed=False):
         super().__init__(n_dim)
 
@@ -2064,6 +2089,10 @@ class ScaledSimplex(Identity):
     _mixes = True
     # set by `initialize` from the data and kept by a save, as `PCA`'s is
     _SAVED_STATE = ("scale",)
+
+    # not a link: it mixes the parts
+    _WHOLE_LINE = False
+    _AFFINE = False
 
     def __init__(self, size):
         super().__init__(size)

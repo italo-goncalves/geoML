@@ -1,4 +1,72 @@
 ## version 0.10.13
+* **`likelihood.CensoredSimplex(warping, max_hidden=3)`, zeros and missing
+parts scored as they are** (experimental). A `Gaussian` with one noise per
+part whose rows are scored differently: the shift of the whole latent row,
+which a simplex warping's way back ignores, is integrated out instead of
+scored; a zero part is censored -- the probability that its latent lies
+below the point where the part vanishes; and a part a
+`MassFractionVariable` holds as not assayed is integrated over every value
+it could take given what the observed parts leave of the whole, zero
+included (`stats.censored`, from the research report
+`scaled_simplex_entmax.tex`). The warping is `PowerSimplex` or
+`ScaledSimplex`, followed by increasing elementwise links defined on the
+whole line (each warping declares `_WHOLE_LINE`, and `_AFFINE` for the
+ones that keep every integral exact); `Log`, `BoxCox`, `Softplus` and
+mixing links are refused by name. Trained by Monte Carlo over the latent
+realizations; prediction and measurement samples are `Gaussian`'s.
+Measured against brute-force references (`test_censored_simplex.py`,
+`docs/benchmarks/censored_simplex_nodes.py`): the shift's integral by 24
+Gauss-Hermite nodes after two adaptive recentrings, within 4e-6 nats even
+on rows at -56; two positive hidden parts by adaptive Gauss-Legendre in
+the free part's normal coordinate, three by a nested convolution of it
+(2e-4); four or more by 1024 Sobol points, only within 3e-3, which is why
+`max_hidden` is 3 by default. On compositions drawn from the family
+(`docs/benchmarks/censored_simplex.py`, three seeds) the measurement
+samples now carry the data's zeros -- rows with a zero 0.28 against 0.28
+held out at a power of 0.5 and 0.64 against 0.62 at 1, where `Gaussian`
+gave 0.16 and 0.29 -- and the held-out CRPS improves where zeros are
+common (0.0315 to 0.0303 at 0.5, 0.0469 to 0.0289 at 1) and ties where
+they are rare (0.0304 and 0.0303 at 0.25); the intervals over-cover
+(0.97 of a 90% interval). **The power can be trained under it**: from 1 it
+settled at 0.20, 0.48 and 1.00 for true values of 0.25, 0.5 and 1, where
+the usual likelihood gave 0.44, 0.58 and 0.89. Rows with parts missing
+added nothing measurable there (CRPS 0.0308 against 0.0303 on the
+complete rows alone) at four times the cost; the complete rows alone cost
+about thirty times `Gaussian`'s training. The bound is a density on a
+different measure for each pattern of zeros, so compare it with another
+likelihood by held-out scores, never by the bound. The model's door asks
+each likelihood which rows it scores (`_scored_rows`) and leaves out, with
+a warning, the rows it cannot.
+* **`MassFractionVariable`, the parts of a whole as exact fractions of
+it**, added by `container.add_mass_fraction_variable(name, labels,
+measurements, units=, rest=)` or by `DrillholeData.as_point_data(
+mass_fraction={...})`, which takes the same groups as `compositional=`. A
+subclass of `CompositionalVariable` -- units, predictions and simulations
+in each part's own unit, as there -- whose preparation keeps what a
+composition's throws away: a zero stays 0.0 (no substitution), and a row
+missing some parts keeps the others (a composition marks the row missing).
+Negative values are refused by part; a partial row whose parts already
+exceed the whole is marked missing; with `rest` the rest is missing
+wherever a listed part is and exactly zero where the parts make up the
+whole; a complete row over the whole is scaled down to it. Aggregation
+averages the complete rows as fractions and keeps the units (the
+composition branch of `aggregate` drops them, and closes the parts in
+their stored units). **Partial rows wait for a likelihood that reads
+them**: `log_lik` weighs a row whole, so a likelihood declares
+`_PARTIAL_ROWS` (False on all of them today) and the model trains on the
+complete rows alone, zeros included, warning how many it left out. Zeros
+train today under `ScaledSimplex`, or `PowerSimplex` at a fixed power of
+1; a log-ratio warping refuses them by name.
+* **`power=` on the exploratory `pairs` and `pca`** (both backends, and
+`prepare.component_analysis`) opens a composition up through
+`PowerSimplex`'s map instead of the centred log-ratio:
+`prepare.power_coordinates` divides each part by its mean, takes it through
+Box-Cox at the power and centres each row, since the way back ignores a
+shift common to a row -- the centred log-ratio moved by a constant per
+part at 0, the parts over their means at 1, and a zero part finite above
+0. It is `power` rather than `alpha`, which both methods already take for
+the points' transparency. A mass-fraction variable is drawn and analysed as
+it is unless `log` or `power` is given, its zeros having no logarithm.
 * **`warping.PowerSimplex(size, alpha=1.0, fixed=True)`, the Box-Cox
 family of `ScaledSimplex`.** Each share maps to `((x/m)**alpha - 1)/alpha`,
 the scale `m` being the mean composition of the complete rows, and back by

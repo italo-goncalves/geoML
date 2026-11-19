@@ -75,9 +75,15 @@ there the parts are stored, predicted and simulated in the units they were
 assayed in, becoming fractions of the whole only where the model reads and
 writes them. `UNITS` is the table of names the package can divide by.
 
+A `MassFractionVariable` is a composition whose parts are exact fractions
+of the whole sample: a zero stays a zero, and a row missing some parts
+keeps the ones it has. A likelihood that weighs a row whole trains on the
+complete rows alone, and the model says how many it left out.
+
 ```{eval-rst}
 .. automodule:: geoml.data.variables
    :members: ContinuousVariable, VectorVariable, CompositionalVariable,
+             MassFractionVariable,
              CategoricalVariable, RockTypeVariable, BinaryVariable,
              DerivedVariable, LatentVariable, UNITS
    :show-inheritance:

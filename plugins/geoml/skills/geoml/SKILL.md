@@ -416,7 +416,20 @@ The papers and the code name the same things differently.
   `ScaledSimplex` at `alpha=1`, and its way back can return any number of
   parts at zero; zeros in the data it takes only at a fixed `alpha=1`.
   Choose the power rather than train it: under the usual likelihood a
-  trained power settles toward the middle of its range.
+  trained power settles toward the middle of its range. Assays that are
+  exact fractions of the whole sample, with real zeros or parts not
+  assayed in every sample, are a `MassFractionVariable`
+  (`add_mass_fraction_variable`, or `mass_fraction=` on the drillhole
+  conversion), not a composition: the zeros are kept, and a row missing
+  parts keeps the ones it has. Give it `likelihood.CensoredSimplex`
+  (experimental) over a `PowerSimplex` and a `ZScore`: a zero is scored as
+  a probability, a missing part is integrated out, the measurement samples
+  then hold zeros as often as the data, and the power can be trained under
+  it, which it cannot under `Gaussian`. Any other likelihood trains on the
+  complete rows and says how many it left out. Compare such models by
+  held-out scores: the censored bound is on a different measure. To look at such
+  data, `pairs(power=...)` and `pca(power=...)` open it up by the same map
+  at a power above zero.
 - **A held-out score measured at sampled locations cannot speak for the
   ground between them.** A regular backbone of inducing points is there for
   the map, and a validation set from the same campaign cannot notice it.

@@ -1953,6 +1953,53 @@ class CompositionalVariable(VectorVariable):
         return self.metrics
 
 
+class MassFractionVariable(CompositionalVariable):
+    """The parts of a whole, each as its exact fraction of it.
+
+    A composition known in absolute terms: every part is its mass -- or
+    volume -- over the whole sample's, not a quantity relative to the other
+    parts. A zero is a part that is not there and stays a zero. A missing
+    part is one that was not assayed: the row keeps the parts it has, and
+    through them what remains for the parts it lacks, where a composition
+    marks the whole row missing. `add_mass_fraction_variable` is the door
+    that prepares them.
+
+    A row with some parts missing reaches the model only through a
+    likelihood that reads partial rows; under any other likelihood the model
+    trains on the complete rows, zeros included, and says how many rows it
+    left out.
+    """
+
+    def get_measurements(self):
+        out = [self.components[label].measurements.values.to_numpy()
+               for label in self.labels]
+        out = _np.stack(out, axis=1).astype(float) / self.divisors()[None, :]
+
+        missing = _np.isnan(out)
+        complete = ~_np.any(missing, axis=1)
+        total = _np.nansum(out, axis=1)
+        # a complete row is the whole, and a partial one cannot exceed it;
+        # `add_mass_fraction_variable` makes both true, and a column written
+        # in by hand afterwards is held to them here
+        broken = (complete & ~(_np.abs(total - 1) < 1e-10)) \
+            | (~complete & (total > 1 + 1e-10))
+        missing = missing | broken[:, None]
+
+        has_value = (~missing).astype(float)
+        out = _np.where(missing, 1.0, out).astype(float)
+        return out, has_value
+
+    def compute_metrics(self, alpha=0.05):
+        # the Aitchison distance a composition adds is a distance between
+        # logarithms, which a zero part leaves undefined
+        metrics = [self.components[comp].compute_metrics(alpha)
+                   for comp in self.labels]
+        metrics = _pd.concat(metrics, axis=1)
+        metrics.columns = self.labels
+        self.metrics = metrics
+        return self.metrics
+
+
 class _Category(_Variable):
     probability: _Attribute
     indicator: _Attribute

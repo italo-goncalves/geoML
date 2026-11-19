@@ -1715,7 +1715,11 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   closed form, though not as mixtures of Gaussians), which would let them
   carry the gap too.
 
-**M–L — Merging subcompositions** (requested 2026-09-10). Some
+**M–L — Merging subcompositions** (requested 2026-09-10). *Superseded
+(2026-11-17)*: a shorter assay suite is parts missing in some rows, which
+`MassFractionVariable` (0.10.13) keeps and the censored likelihood with
+missing parts (below) will score inside one composition, with no second
+variable and no join. Kept for the record. Some
 compositional data sets are missing data in a structured way: the same
 elements unassayed in a large share of the samples, as a campaign that ran
 a shorter suite leaves them. `_prepare_composition` marks a row missing
@@ -1887,7 +1891,9 @@ At 1 it is `ScaledSimplex` to the bit; CLR's CRPS is lower there (0.0435
 against 0.0446) and its coverage 0.729 against 0.844. Zeros are where the
 usual likelihood shows its limit: trained without the rows that hold
 them, the power model samples a zero in 15% of rows at 0.5 where 28% of
-the held-out rows have one -- which is the censored likelihood's job. Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
+the held-out rows have one -- which is the censored likelihood's job.
+
+Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
 `x = m * [1 + α(w - τ)]_+^(1/α)`, `τ` by bisection so the parts sum to one.
 The backward is `argmax_x w'x - Ω(x)` with `Ω` half the Cressie–Read power
 divergence of `x` from `m` (λ = α): Pearson chi-square at α = 1, where it
@@ -1925,9 +1931,37 @@ shares, so the `sqrt|P|` above drops out. Scripts: `experiments/censored.py`;
 checks: `verification/censored_general.py`, `censored_noise_warping.py`.
 
 **M — Extend the censored likelihood: per-part σ, per-sample σ and
-missing parts.** *How it fits the code (2026-11-17)*: a likelihood class
+missing parts.** *Built 2026-11-19 for 0.10.13 (experimental; gates passed, see the changelog), from the plan agreed that day*:
+`likelihood.CensoredSimplex`, a `Gaussian` subclass (one noise per part,
+Gaussian noise only) with `_PARTIAL_ROWS = True`, accepting `mass_fraction`
+and `compositional`; its warping is `PowerSimplex` or `ScaledSimplex`
+followed by any increasing elementwise links defined on the whole line
+(declared per class; `Log`, `BoxCox`, `Softplus` refused). Trained by Monte
+Carlo over the latent realizations; each row's `tau` integral by
+Gauss-Hermite about a centre and width linearized from the links (exact for
+affine links), in log space; hidden parts by faces -- one positive part
+closed, two by Gauss-Legendre, three or more by seeded Sobol points --
+with more than six hidden parts left out and `R = 0` scored as zeros;
+the common shift left to the GP prior; the likelihood starts its own links.
+Node counts measured against a dense reference (1e-3 nats a row). Gates:
+every row form against brute force; alpha trained through a model;
+`docs/benchmarks/censored_simplex.py` against `Gaussian` + `PowerSimplex`
+(CRPS, coverage, the share of rows with a zero; never the bound, the
+measures differing by zero pattern); batch invariance and a save. Detection
+limits, per-sample sigma and other noise families wait. Found while
+building it: four or more positive hidden parts need about 4096 Sobol
+points for 1e-3 nats a row, far too many for training, so `max_hidden`
+defaults to 3; the intervals over-cover (0.97 of a 90% one) on the gate's
+data, not yet explained; the partial rows bought no measurable skill there
+at four times the cost; and training costs about thirty times
+`Gaussian`'s on the complete rows -- the adaptive passes and the full-row
+evaluation of non-affine links are the obvious places to look. *How it fits the code (2026-11-17)*: a likelihood class
 of its own, after the user's planned Variable for compositions with zeros
-and missing parts. The Variable supplies each row's pattern (positive,
+and missing parts -- `MassFractionVariable`, built in 0.10.13: zeros arrive
+as `y == 0` with `has_value` 1, a missing part as `has_value` 0, through
+the per-column mask both trainers already batch, and the likelihood sets
+`_PARTIAL_ROWS = True` so the model stops collapsing partial rows. The
+Variable supplies each row's pattern (positive,
 zero, missing, later a detection limit); the warping supplies `b_k`,
 `g_k` and the threshold `-1/α` (`PowerSimplex`, or `ScaledSimplex` at
 α = 1) and must be applied to the composition itself, only elementwise

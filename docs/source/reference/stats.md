@@ -13,6 +13,18 @@ saved model keeps the number it drew, so its simulations replay on reload.
    :members: set_seed, rng, sobol_engine
 ```
 
+## The censored simplex
+
+The row forms behind `likelihood.CensoredSimplex`, on whole batches and in
+log space: a row's positive parts on the fibre of the warping's way back,
+its zeros below their threshold, and its missing parts integrated over the
+faces of what the observed parts leave of the whole.
+
+```{eval-rst}
+.. automodule:: geoml.stats.censored
+   :members: log_likelihood, patterns, Simplex, Links, Rule
+```
+
 ## Distributions
 
 Custom TensorFlow-Probability distributions, used by the likelihoods and
