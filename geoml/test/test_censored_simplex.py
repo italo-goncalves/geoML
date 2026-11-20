@@ -341,3 +341,57 @@ def test_rows_with_nothing_observed_or_too_much_hidden_are_not_scored():
         simplex, cs.Links(None, D), cs.Rule(), max_hidden=1)
     assert not scored.numpy().any()
     assert (out.numpy() == 0).all()
+
+
+def _tiled(links, v, columns, function):
+    """Every value in every column, its own column read back: the form
+    `Links._whole_rows` replaced, kept as the reference."""
+    flat = tf.reshape(v, [-1])
+    out = function(tf.tile(flat[:, None], [1, links.size]))
+    own = tf.one_hot(tf.reshape(columns, [-1]), links.size,
+                     dtype=tf.float64)
+    return tf.reshape(tf.reduce_sum(out * own, axis=1), tf.shape(v))
+
+
+@pytest.mark.parametrize("kind", ["spline", "links"])
+def test_each_value_is_read_through_its_own_column_alone(kind):
+    """A bent chain sees each value once, in its own column: the same
+    numbers and gradients as placing it in every column, with the columns
+    unevenly filled and one of them empty."""
+    size = 5
+    rng = np.random.default_rng(3)
+    if kind == "spline":
+        chain = wp.ChainedWarping(wp.ZScore(size),
+                                  wp.Spline(size, backbone="rq"))
+        chain.initialize(rng.gamma(2.0, 1.0, (200, size)))
+    else:
+        chain = _links("bent", size)
+    links = cs.Links(chain, size)
+    assert not links.affine
+    v = tf.constant(rng.normal(0.0, 1.5, (7, 3, 4)))
+    columns = tf.constant(rng.choice([0, 1, 3, 4], (7, 3, 4),
+                                     p=[0.6, 0.2, 0.1, 0.1]))
+    with tf.GradientTape(persistent=True) as tape:
+        tape.watch(v)
+        new = [links.forward(v, columns)[0], links.forward(v, columns)[1],
+               links.backward(v, columns)]
+        old = [_tiled(links, v, columns, links._apply),
+               _tiled(links, v, columns,
+                      lambda x: tf.math.log(_slope(links, x))),
+               _tiled(links, v, columns, links._invert)]
+    for a, b in zip(new, old):
+        np.testing.assert_array_equal(a.numpy(), b.numpy())
+    for a, b in zip(new, old):
+        np.testing.assert_allclose(tape.gradient(a, v).numpy(),
+                                   tape.gradient(b, v).numpy(),
+                                   rtol=1e-12, atol=1e-14)
+    # nothing to read: an empty batch of rows
+    empty = tf.zeros((0, 3), tf.float64)
+    assert links.backward(empty, tf.zeros((0, 3), tf.int32)).shape == (0, 3)
+
+
+def _slope(links, x):
+    with tf.GradientTape() as tape:
+        tape.watch(x)
+        y = links._apply(x)
+    return tape.gradient(y, x)

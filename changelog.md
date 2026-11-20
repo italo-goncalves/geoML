@@ -1,3 +1,22 @@
+## version 0.10.14
+* **`CensoredSimplex` reads a bent link chain once per value, not once per
+part.** Where the links after the simplex warping are not affine (a
+`Spline`, say), each value went through the whole chain in every column
+and only its own was kept, so a row of 11 parts cost 11 times what it
+needed. On the GPU a GeoScape network on 11 parts (`PowerSimplex -> ZScore
+-> Spline`, `max_hidden=3`) ran out of memory in `train_by_expert` on a
+`[11, 3686400]` tensor of the face with three hidden parts. The values now
+go into their own column of a matrix as tall as the most values one part
+holds (`Links._whole_rows`), with the same numbers to the bit and the same
+gradients to 1e-12: on 20 rows with three hidden parts the gradient's peak
+fell from 12.1 to 2.7 GB, the bound unchanged.
+* **A training step that runs out of the device's memory raises a
+`MemoryError` saying what to make smaller**: `train_svi` the
+`training_batch_size`, `train_by_expert` its `visits` (or `batch_size`
+under `sampling="replacement"`), `train_full` to train in batches, and a
+`CensoredSimplex`'s `max_hidden` wherever one is trained; TensorFlow's own
+error, which names an operation deep in the graph, rides as its cause.
+
 ## version 0.10.13
 * **`linear_tails=True` on `BoxCox`, `Log` and `Spline`: the way back
 grows linearly past the data.** A realization of a Corta Atalaya block

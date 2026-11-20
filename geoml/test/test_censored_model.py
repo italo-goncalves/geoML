@@ -187,3 +187,25 @@ def test_a_save_keeps_the_likelihood(trained, tmp_path):
     restored.predict(query, n_sim=4)
     np.testing.assert_allclose(np.asarray(query.values("m/a/prediction")),
                                before, rtol=1e-10)
+
+
+@pytest.mark.parametrize("method", ["train_full", "train_svi",
+                                    "train_by_expert"])
+def test_a_step_out_of_memory_names_what_to_make_smaller(method,
+                                                         monkeypatch):
+    coords, x = _fractions(40, 3)
+    _, model = _model(x, coords, _censored(max_hidden=3))
+
+    def exhausted(*args, **kwargs):
+        raise tf.errors.ResourceExhaustedError(None, None, "OOM")
+
+    monkeypatch.setattr(model.likelihoods[0], "log_lik", exhausted)
+    with pytest.raises(MemoryError) as raised:
+        getattr(model, method)(1)
+    message = str(raised.value)
+    assert "max_hidden (now 3" in message and "on the CPU" in message
+    assert {"train_full": "train_svi or train_by_expert",
+            "train_svi": "training_batch_size",
+            "train_by_expert": "visits (now 1)"}[method] in message
+    assert isinstance(raised.value.__cause__,
+                      tf.errors.ResourceExhaustedError)

@@ -177,9 +177,9 @@ class Links:
 
     `links` is a warping, a list of them applied in order, or None. An
     affine chain is read off two points per part, so a value of any part
-    costs one multiplication; any other chain is evaluated on the whole
-    row, each value placed in every column and its own column kept, which
-    costs the row's width more.
+    costs one multiplication; any other chain is evaluated on whole rows,
+    each value placed in its own column of a matrix as tall as the most
+    values one part holds.
     """
 
     def __init__(self, links, size):
@@ -212,13 +212,30 @@ class Links:
         return z
 
     def _whole_rows(self, v, columns, function):
-        # every value in every column, its own column read back
+        # each value in its own column of a matrix as tall as the most
+        # values any one column holds, the rest of it zero -- in every
+        # link's domain, the links running over the whole line -- and read
+        # back from where it was put. Every value in every column cost the
+        # row's width more, and on the GPU ran a censored model's batch out
+        # of memory (2026-11-20)
         flat = _tf.reshape(v, [-1])
-        tiled = _tf.tile(flat[:, None], [1, self.size])
-        out = function(tiled)
-        own = _tf.one_hot(_tf.reshape(columns, [-1]), self.size,
-                          dtype=_tf.float64)
-        return _tf.reshape(_tf.reduce_sum(out * own, axis=1), _tf.shape(v))
+        cols = _tf.reshape(_tf.cast(columns, _tf.int64), [-1])
+        order = _tf.cast(_tf.argsort(cols, stable=True), _tf.int64)
+        counts = _tf.math.bincount(cols, minlength=self.size,
+                                   maxlength=self.size, dtype=_tf.int64)
+        starts = _tf.cumsum(counts, exclusive=True)
+        sorted_cols = _tf.gather(cols, order)
+        within = _tf.range(_tf.size(cols, out_type=_tf.int64)) \
+            - _tf.gather(starts, sorted_cols)
+        at = _tf.stack([within, sorted_cols], axis=1)
+        packed = _tf.scatter_nd(at, _tf.gather(flat, order),
+                                _tf.stack([_tf.reduce_max(counts),
+                                           _tf.constant(self.size,
+                                                        _tf.int64)]))
+        out = _tf.gather_nd(function(packed), at)
+        back = _tf.scatter_nd(order[:, None], out,
+                              _tf.shape(flat, out_type=_tf.int64))
+        return _tf.reshape(back, _tf.shape(v))
 
     def forward(self, v, columns):
         """``psi(v)`` and ``log psi'(v)``."""
