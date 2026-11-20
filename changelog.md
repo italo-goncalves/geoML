@@ -148,6 +148,12 @@ outside. `VGPNetwork` adds the variable's name, and the column's label
 where the refusing warping is the first link and so sees the data's own
 columns: "Variable 'Assay', column 'Hg': BoxCox transforms values in
 ]-0.01, inf[ only: component 8 holds 2 outside it, from -0.299 to -0.283".
+* **`run_parallel.py --gpu`** lets the tests see the GPU, each process
+growing its share of the card's memory, and records no times. On it eleven
+tests fail that pass on the CPU -- they count the CPU's batches, take its
+branches or want double precision where a GPU's realizations are single --
+and `test_priors.py` did not finish in 90 minutes (roadmap: "The suite on a
+GPU").
 
 ## version 0.10.12
 * **`HermiteRBF` is in the catalogue** (GeoScape's item 60): as a function

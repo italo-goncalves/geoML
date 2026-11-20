@@ -3235,6 +3235,38 @@ be fixed by declaring them: `None` is load-bearing in the finished state.
 Declaring `tuple` took 33 diagnostics to 67 and was reverted. Do not repeat
 that attempt.
 
+**S — The suite on a GPU** (filed 2026-11-20, the 0.10.13 release run,
+`run_parallel.py --gpu --cpus 12`). Eleven tests in seven files fail on
+the GPU and pass on the CPU, none of them a fault in the package; they
+assume the CPU:
+- *The CPU's batching.* On a GPU the first prediction batches take a
+  quarter of the estimate and the next are measured, so counts of batches
+  or progress events read otherwise: `test_full_variance.py`'s
+  `..._measures_its_batches` (its first call, before it patches
+  `_device_limit`), `test_measurement_samples.py`'s `..._traced_once_...`,
+  `test_progress.py`'s three, `test_coordinates_variance.py`'s
+  `..._batch_variance`. Patch `_net._device_limit` to `None` where the
+  test means the plain batches.
+- *The CPU's branches.* `test_batched_experts.py`'s `..._counts_the_experts_
+  a_call_computes` takes its baseline from the every-expert branch, which
+  a GPU does not take (patch `_gpu_visible` to False for it);
+  `test_measurement_samples.py`'s `..._xla_on_the_cpu_only` expects XLA on
+  the measured rows, which a GPU turns off by design.
+- *Single precision.* The realizations' feature products run in float32 on
+  a GPU and round by the batch's shape: `test_batched_experts.py`'s
+  `..._predict_in_slots_as_the_model_does[independent]` (1.4e-3) and
+  `test_gaussian_input.py`'s `..._to_the_last_bit` (about 1e-3) want
+  `quadrature_precision = "float64"`, as `test_a_network_predicts_by_
+  expert_as_the_model_does` already pins; `..._measurements_by_expert_
+  are_the_measurements_at_full_coverage` missed `atol=1e-12` by 2e-11.
+- `test_priors.py`'s `test_a_per_component_combination_predicts_end_to_end`
+  was still running after 90 minutes on the GPU, the main thread at 100 %
+  of a core, against 23 s for the whole file on the CPU; not yet looked
+  at. The long units ran slower on the card too: `test_expected_kernel.py`
+  [3/5] 3211 s, `test_batched_experts.py` [6/8] 3874 s.
+Not a release gate (CI and the release runs use the CPU), but the user
+runs on the GPU.
+
 ---
 
 ## 6. What GeoScape needs
