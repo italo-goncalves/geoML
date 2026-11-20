@@ -1893,6 +1893,27 @@ class VGPNetwork(_GPModel):
         self._phase = None
         self._by_expert = None
 
+    @_contextlib.contextmanager
+    def _training_memory(self, what, smaller):
+        """Turns a training step that runs out of the device's memory into
+        a `MemoryError` naming what to make smaller."""
+        try:
+            yield
+        except _tf.errors.ResourceExhaustedError as error:
+            # TensorFlow retries each allocation before it gives up, and its
+            # own message names an operation deep in the graph; what the
+            # caller can change is the size of what a step reads
+            censored = [lik.max_hidden for lik in self.likelihoods
+                        if isinstance(lik, _lk.CensoredSimplex)
+                        and lik.max_hidden > 1]
+            raise MemoryError(
+                "a training step over %s ran out of the device's memory; "
+                "%s%s, or train on the CPU"
+                % (what, smaller,
+                   ", or give CensoredSimplex a smaller max_hidden (now %d: "
+                   "each hidden part beyond two nests one more integral)"
+                   % max(censored) if censored else "")) from error
+
     def _check_tails(self):
         """Warns, once per model and before its first training call, of a
         warping whose way back carries a latent draw far past the data."""
@@ -2067,7 +2088,10 @@ class VGPNetwork(_GPModel):
 
         # the propagation rule is read when the step traces (and re-traces),
         # which happens inside the loop
-        with self._propagation(rows=self.data.n_data), \
+        with self._training_memory(
+                "all %d rows" % self.data.n_data,
+                "train in batches (train_svi or train_by_expert)"), \
+                self._propagation(rows=self.data.n_data), \
                 _progress.reporting("train", max_iter, "iteration") as report:
             for i in range(max_iter):
                 step(x, y, has_value, x_var)
@@ -2142,7 +2166,10 @@ class VGPNetwork(_GPModel):
         n_batches = len(self.options.batch_index(self.data.n_data))
         done = 0
 
-        with self._propagation(rows=self.options.training_batch_size), \
+        with self._training_memory(
+                "a batch of %d rows" % self.options.training_batch_size,
+                "set a smaller GPOptions(training_batch_size=...)"), \
+                self._propagation(rows=self.options.training_batch_size), \
                 _progress.reporting(
                     "train", epochs * n_batches, "batch") as report:
             for i in range(epochs):
@@ -3645,7 +3672,12 @@ class VGPNetwork(_GPModel):
         try:
             if slots:
                 self._sync_expert_store(roots, gp, store)
-            with self._propagation(rows=batch_size), \
+            with self._training_memory(
+                    "an expert's batch",
+                    "pass a smaller batch_size" if sampling == "replacement"
+                    else "pass a larger visits (now %d), which splits each "
+                    "expert's rows into more, smaller batches" % visits), \
+                    self._propagation(rows=batch_size), \
                     _progress.reporting(
                         "train", None if assignment else epochs * per_epoch,
                         "batch") as report:
