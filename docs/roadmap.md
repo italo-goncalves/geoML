@@ -3501,6 +3501,31 @@ to memory alone; reading only the realizations asked for
 
 These were tried. The numbers are why they are, or are not, in the package.
 
+**Cheaper integrals for `CensoredSimplex`'s hidden parts** (2026-11-20,
+after a GeoScape network on 11 parts, `PowerSimplex -> ZScore -> Spline`,
+ran the GPU out of memory). Where the cost is: a row with three hidden
+parts hands the links about 88 000 values a realization, two hidden 6 000,
+none 836 -- 76% of it the inner pair inside the three-part convolution,
+every term repeated at each of the 24 shift nodes; and the links are most
+of it, the Tutorial chain against `ZScore` alone 2.65 against 0.39 GB at
+the gradient's peak on 20 rows, 1.96 against 0.26 s a step, 208 against 15
+s to trace. Measured and not adopted (scratch scripts, not kept):
+- *`log h(tau)` read off a few Chebyshev points across the shift window*
+  and interpolated to the 24 Hermite nodes: off by 0.3 to 46 nats on rows
+  with three hidden parts even at 12 points, 1 to 4 nats with one -- the
+  hidden term is no smooth function over the window.
+- *Each hidden part's cell masses on a uniform grid over [0, R], the
+  hidden term their convolution* (every face and any count at m x (N + 1)
+  link values, no nesting): median error at 512 cells 1.6e-2 nats with two
+  hidden parts and 0.15 with three, against the quadrature's 1.8e-8 and
+  1.9e-4 -- convergence held back by each part's density singular at zero
+  (`x ** (alpha - 1)`) -- and 640 nats off on improbable rows, the cell
+  masses rounding to zero in the tails.
+- *A cubic table of the way back per part on a uniform latent grid* (one
+  gather a value): 2.4x faster than the spline at 3.7 million values on the
+  GPU, the same peak memory -- the spline is already a table lookup, so a
+  shortcut on a single value buys little; the count is the cost.
+
 **The split criteria that lost to coherence** (2026-10-29, item M on
 refinement). Scored on four known fields (the pod, the ore body, the rock
 plane, a rough random field; 8 and 20 realizations; coarse blocks and
