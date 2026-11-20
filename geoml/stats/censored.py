@@ -28,10 +28,17 @@ a part not assayed is integrated over every value it could take, given
 what the observed parts leave of the whole (`R`).
 
 Everything here is in log space and in float64, and works on whole
-batches: `n` rows, `S` latent realizations, `T` nodes in `tau`. Reference:
-the research report ``scaled_simplex_entmax.tex`` (project "Alternative
-CoDA transformations"), equations (eq:loglik), (eq:missing) and
-(eq:general).
+batches: `n` rows, `S` latent realizations, `T` nodes in `tau`.
+
+References: Butler, A. and Glasbey, C. (2008), A latent Gaussian model for
+compositional data with zeros, *JRSS C* 57(5), 505-520 (the model family);
+Farinhas, A., Aziz, W., Niculae, V. and Martins, A. F. T. (2022), Sparse
+communication via mixed distributions, ICLR, arXiv:2108.02658, Appendix B,
+eqs. 27-28 (this likelihood at ``alpha = 1``, a uniform scale and Gaussian
+noise); the research report ``scaled_simplex_entmax.tex`` (project
+"Alternative CoDA transformations"), equations (eq:loglik), (eq:missing)
+and (eq:general), for the weighted Box-Cox family, parts not assayed and
+other noise families.
 """
 import itertools as _itertools
 

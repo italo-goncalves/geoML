@@ -2027,6 +2027,37 @@ the current score for this warping, with the noise family chosen inside
 it. Without zeros it reduces to the current Gaussian score with the
 discarded direction removed (see the latent-score item above).
 
+**S — Prior art for the censored likelihood (novelty check, 2026-11-19).**
+Cite this before any docstring or paper describes the likelihood as new.
+- At α = 1 with a uniform scale and independent Gaussian latents, the
+  censored likelihood is the Gaussian-sparsemax density of Farinhas, Aziz,
+  Niculae and Martins (ICLR 2022, arXiv 2108.02658, Appendix B, eqs.
+  27–28). That density is a Gaussian factor in the positive parts times a
+  one-dimensional integral of Φ over the zero parts. It matches ours to
+  6e-9 in log-density (`verification/farinhas_equivalence.py` in the
+  research project). They derive it but do not fit it to data.
+- The latent-Gaussian-plus-Euclidean-projection model itself is Butler &
+  Glasbey (JRSS C, 2008). Their latent lies on the plane `1'z = 1`, and
+  beyond D = 3 they fit by Gibbs sampling.
+- Spatial models with zeros: Leininger et al. (JABES, 2013) censor each part
+  at a fixed zero against a never-zero baseline, with areal CAR effects and
+  MCMC.
+- Missing parts with a known remainder appear in Dirichlet mixtures (Pillay
+  et al., arXiv 2607.27403, 2026), with censored parts as bounds.
+
+Recorded as possibly novel, with no prior match in the library, web search
+or arXiv full texts on 2026-11-19:
+- the weighted Box–Cox (entmax) generalisation, with the threshold read as
+  the latent shift the back-map ignores — a modest step;
+- its use as the observed-data likelihood of a GP model of compositions,
+  with a row-shared threshold integrated out, no baseline and any number of
+  zeros;
+- missing parts inside the same integral;
+- the sample-volume terms;
+- other noise families.
+
+Details are in Section 11 of `scaled_simplex_entmax.tex`.
+
 *Bridges to the grain-count law* (2026-11-14). These compare the items above
 with the research project "ToS-CoDA-nugget" (`report/main.tex`, Section 10
 there; Section 9 of `scaled_simplex_entmax.tex` here). Checks:

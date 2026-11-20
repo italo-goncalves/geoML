@@ -2998,9 +2998,24 @@ class CensoredSimplex(Gaussian):
 
     References
     ----------
+    Butler, A. and Glasbey, C. (2008). A latent Gaussian model for
+    compositional data with zeros. *Journal of the Royal Statistical
+    Society: Series C (Applied Statistics)* 57(5), 505-520.
+    doi:10.1111/j.1467-9876.2008.00627.x. The model family: a latent
+    Gaussian projected onto the simplex, zeros on its boundary.
+
+    Farinhas, A., Aziz, W., Niculae, V. and Martins, A. F. T. (2022).
+    Sparse communication via mixed distributions. *International
+    Conference on Learning Representations (ICLR)*. arXiv:2108.02658.
+    Appendix B, eqs. 27-28 give this likelihood for ``alpha = 1``, a
+    uniform scale and Gaussian noise: a Gaussian factor in the positive
+    parts times a one-dimensional integral over the zero parts.
+
     The research report ``scaled_simplex_entmax.tex`` (project
     "Alternative CoDA transformations"), equations (eq:loglik),
-    (eq:missing) and (eq:general).
+    (eq:missing) and (eq:general): the weighted Box-Cox (entmax) family,
+    parts not assayed, other noise families and further links; Section 11
+    there for what is and is not new.
     """
     _PARTIAL_ROWS = True
 
