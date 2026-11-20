@@ -102,8 +102,9 @@ part at 0, the parts over their means at 1, and a zero part finite above
 the points' transparency. A mass-fraction variable is drawn and analysed as
 it is unless `log` or `power` is given, its zeros having no logarithm.
 * **`warping.PowerSimplex(size, alpha=1.0, fixed=True)`, the Box-Cox
-family of `ScaledSimplex`.** Each share maps to `((x/m)**alpha - 1)/alpha`,
-the scale `m` being the mean composition of the complete rows, and back by
+family of `ScaledSimplex`, experimental in the catalogue.** Each share
+maps to `((x/m)**alpha - 1)/alpha`, the scale `m` being the mean
+composition of the complete rows, and back by
 a weighted alpha-entmax, `m * [1 + alpha (w - tau)]_+ ** (1/alpha)`, the
 threshold making the parts sum to one: the softmax of `log(m) + w` at 0,
 `ScaledSimplex` at 1. When one part rises the others give way in

@@ -417,8 +417,8 @@ The papers and the code name the same things differently.
   magnitude.** A contact constrains the field to cross a threshold.
 - **Compositional data live on a simplex.** A log-ratio transform maps them
   to real space; back-transforming must restore the closure. A log-ratio
-  takes no zero. `warping.PowerSimplex` (Box-Cox of each share, back by a
-  weighted entmax) runs from the log-ratio rule at `alpha=0` to
+  takes no zero. `warping.PowerSimplex` (experimental; Box-Cox of each
+  share, back by a weighted entmax) runs from the log-ratio rule at `alpha=0` to
   `ScaledSimplex` at `alpha=1`, and its way back can return any number of
   parts at zero; zeros in the data it takes only at a fixed `alpha=1`.
   Choose the power rather than train it: under the usual likelihood a

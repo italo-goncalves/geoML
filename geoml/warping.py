@@ -2577,8 +2577,9 @@ Rotation._catalogue = _declared(
     fixed={"type": "bool"})
 ScaledSimplex._catalogue = _declared(_SIZED, label="Scaled simplex",
                                      size=_COUNT)
+# experimental with the censored likelihood it was built for
 PowerSimplex._catalogue = _declared(
-    _SIZED, label="Power simplex", size=_COUNT,
+    _SIZED, label="Power simplex", stability="experimental", size=_COUNT,
     alpha={"type": "float", "constraints": {"min": 0, "max": 1}},
     fixed={"type": "bool"})
 
