@@ -1,3 +1,160 @@
+## version 0.10.13
+* **`linear_tails=True` on `BoxCox`, `Log` and `Spline`: the way back
+grows linearly past the data.** A realization of a Corta Atalaya block
+model (GeoScape, Run 4) came back at 4e7 % Cu against a data maximum of
+3.7 %, Sb at 6e9 ppm, and the blocks' predictions with them. The assays'
+chain was `BoxCox → PCA(7) → Spline` with no `ZScore` after it, six
+exponents trained to zero -- the logarithm -- and three steps multiplied
+on the way back: the spline's outermost segment, kept from collapsing
+where no datum is, ran at a slope of 2.4-3.2; the first principal axis
+scaled by 4.2; and the exponential. Latent draws near -9.6 at blocks whose
+latent mean sat past the data's own did the rest. With the option a link
+records the data's limits at `initialize` (the largest value for the two
+log-like links, whose way back below the data already falls to zero; both
+ends for the spline) and continues along its tangent beyond them, so value
+and derivative stay continuous, the data see the same map to the bit and
+training is unchanged, and the limits ride a save (`_SAVED_STATE`). On the
+trained Run 4 warping, the worst blocks' draws come back at 56 % Cu
+through `BoxCox` alone and 21 % with the spline too (S 273 %, Sb 3300 ppm,
+Hg 625 ppm), from 5.7e6 % (`test_linear_tails.py`). It is off by default,
+saves replaying the arguments they record. **A model warns before its
+first training call** (`VGPNetwork._check_tails`, once) where a latent
+draw of plus or minus six, brought back through the chain, lands more than
+100 spans of the data past it -- the trained Run 4 chain landed 165, at its
+start 2300, a log link on lognormal data of log-sd 1.5 about 90; opening a
+saved model warns of nothing, its fit being settled.
+* **`likelihood.CensoredSimplex(warping, max_hidden=3)`, zeros and missing
+parts scored as they are** (experimental). A `Gaussian` with one noise per
+part whose rows are scored differently: the shift of the whole latent row,
+which a simplex warping's way back ignores, is integrated out instead of
+scored; a zero part is censored -- the probability that its latent lies
+below the point where the part vanishes; and a part a
+`MassFractionVariable` holds as not assayed is integrated over every value
+it could take given what the observed parts leave of the whole, zero
+included (`stats.censored`, from the research report
+`scaled_simplex_entmax.tex`). The warping is `PowerSimplex` or
+`ScaledSimplex`, followed by increasing elementwise links defined on the
+whole line (each warping declares `_WHOLE_LINE`, and `_AFFINE` for the
+ones that keep every integral exact); `Log`, `BoxCox`, `Softplus` and
+mixing links are refused by name. Trained by Monte Carlo over the latent
+realizations; prediction and measurement samples are `Gaussian`'s.
+Measured against brute-force references (`test_censored_simplex.py`,
+`docs/benchmarks/censored_simplex_nodes.py`): the shift's integral by 24
+Gauss-Hermite nodes after two adaptive recentrings, within 4e-6 nats even
+on rows at -56; two positive hidden parts by adaptive Gauss-Legendre in
+the free part's normal coordinate, three by a nested convolution of it
+(2e-4); four or more by 1024 Sobol points, only within 3e-3, which is why
+`max_hidden` is 3 by default. On compositions drawn from the family
+(`docs/benchmarks/censored_simplex.py`, three seeds) the measurement
+samples now carry the data's zeros -- rows with a zero 0.28 against 0.28
+held out at a power of 0.5 and 0.64 against 0.62 at 1, where `Gaussian`
+gave 0.16 and 0.29 -- and the held-out CRPS improves where zeros are
+common (0.0315 to 0.0303 at 0.5, 0.0469 to 0.0289 at 1) and ties where
+they are rare (0.0304 and 0.0303 at 0.25); the intervals over-cover
+(0.97 of a 90% interval). **The power can be trained under it**: from 1 it
+settled at 0.20, 0.48 and 1.00 for true values of 0.25, 0.5 and 1, where
+the usual likelihood gave 0.44, 0.58 and 0.89. Rows with parts missing
+added nothing measurable there (CRPS 0.0308 against 0.0303 on the
+complete rows alone) at four times the cost. Profiled before release: a
+step was the likelihood's almost entirely, rows missing two parts at
+twenty times a complete one's, and two changes cut it with no row less
+accurate in the node sweep -- the normal's log-CDF taken only for the
+parts zero or hidden (it was most of a complete row's cost), and the
+passes that only place nodes (the shift's two guide passes, and every
+narrowing pass of the hidden parts' Gauss-Legendre rule) taken in one
+pass of eight nodes. A training step on the gate's data went from 106 to
+41 ms on the complete rows and from 425 to 190 ms on every row
+(`Gaussian`: 6 ms); 600 rows missing two parts of four from 3.9 to 1.4 s,
+missing three from 81 to 25 s. TensorFlow runs these operations on one
+thread, and XLA was still compiling 30 rows after ten minutes. The bound is a density on a
+different measure for each pattern of zeros, so compare it with another
+likelihood by held-out scores, never by the bound. The model's door asks
+each likelihood which rows it scores (`_scored_rows`) and leaves out, with
+a warning, the rows it cannot.
+* **`MassFractionVariable`, the parts of a whole as exact fractions of
+it**, added by `container.add_mass_fraction_variable(name, labels,
+measurements, units=, rest=)` or by `DrillholeData.as_point_data(
+mass_fraction={...})`, which takes the same groups as `compositional=`. A
+subclass of `CompositionalVariable` -- units, predictions and simulations
+in each part's own unit, as there -- whose preparation keeps what a
+composition's throws away: a zero stays 0.0 (no substitution), and a row
+missing some parts keeps the others (a composition marks the row missing).
+Negative values are refused by part; a partial row whose parts already
+exceed the whole is marked missing; with `rest` the rest is missing
+wherever a listed part is and exactly zero where the parts make up the
+whole; a complete row over the whole is scaled down to it. Aggregation
+averages the complete rows as fractions and keeps the units (the
+composition branch of `aggregate` drops them, and closes the parts in
+their stored units). **Partial rows wait for a likelihood that reads
+them**: `log_lik` weighs a row whole, so a likelihood declares
+`_PARTIAL_ROWS` (False on all of them today) and the model trains on the
+complete rows alone, zeros included, warning how many it left out. Zeros
+train today under `ScaledSimplex`, or `PowerSimplex` at a fixed power of
+1; a log-ratio warping refuses them by name.
+* **`power=` on the exploratory `pairs` and `pca`** (both backends, and
+`prepare.component_analysis`) opens a composition up through
+`PowerSimplex`'s map instead of the centred log-ratio:
+`prepare.power_coordinates` divides each part by its mean, takes it through
+Box-Cox at the power and centres each row, since the way back ignores a
+shift common to a row -- the centred log-ratio moved by a constant per
+part at 0, the parts over their means at 1, and a zero part finite above
+0. It is `power` rather than `alpha`, which both methods already take for
+the points' transparency. A mass-fraction variable is drawn and analysed as
+it is unless `log` or `power` is given, its zeros having no logarithm.
+* **`warping.PowerSimplex(size, alpha=1.0, fixed=True)`, the Box-Cox
+family of `ScaledSimplex`, experimental in the catalogue.** Each share
+maps to `((x/m)**alpha - 1)/alpha`, the scale `m` being the mean
+composition of the complete rows, and back by
+a weighted alpha-entmax, `m * [1 + alpha (w - tau)]_+ ** (1/alpha)`, the
+threshold making the parts sum to one: the softmax of `log(m) + w` at 0,
+`ScaledSimplex` at 1. When one part rises the others give way in
+proportion to `x**(1-alpha) * m**alpha`, from the log-ratio rule to the
+mean-share rule, and a row can come back with any number of parts at zero.
+The threshold is exact in which parts stay positive (a sort and the
+breakpoints) and solved by a bracketed Newton step between them; its
+derivatives come from one implicit step, so the back-map's Jacobian is the
+closed form `diag(g) - g g'/sum(g)`. The log-determinant is the factor
+onto the plane of zero sum, `-sum(log g) + log(sum(g)) - log(size)`, as
+`CenteredLogRatio`'s is. Zeros in the data are refused (`DomainError`)
+unless the power is fixed at 1. **The power is fixed by default**: trained
+under the usual likelihood it moves the right way but settles toward the
+middle -- 0.44, 0.58 and 0.89 for true powers of 0.25, 0.5 and 1. On
+compositions drawn from the family (`docs/benchmarks/power_simplex.py`) it
+has the best held-out CRPS at the true power below one: 0.0286 against
+0.0305 (`ScaledSimplex`) and 0.0310 (`CenteredLogRatio`) at 0.25, 0.0306
+against 0.0328 and 0.0374 at 0.5. From the research report
+`scaled_simplex_entmax.tex` (project "Alternative CoDA transformations").
+* **`ScaledSimplex` maps back by a threshold, and its log-determinant
+gains `-log(size)`.** The way back was an oblique projection followed by a
+shrink toward the mean, which gave one zero at most and left its zeros at
+about 1e-17; it is now `m * max(0, z - tau)`, the projection onto the
+simplex in the chi-square metric (a weighted sparsemax, one sort), giving
+any number of zeros, exactly 0.0. **A model saved with `ScaledSimplex`
+predicts differently** wherever a realization left the simplex. The
+log-determinant now follows `CenteredLogRatio`'s convention -- the factor
+onto the plane of zero sum, along the shift the way back ignores -- which
+moves the bound by `-n log(size)` and no fit.
+* **A warping refuses values it cannot transform, by name.** On GeoScape's
+Corta Atalaya project two negative Hg assays (-0.299 and -0.283) went
+through `BoxCox(shift=0.01)` as NaN, and the PCA after it failed with
+numpy's `LinAlgError: Eigenvalues did not converge`, which named neither.
+`initialize` now checks the data against the warping's domain -- above
+minus the shift for `Log`, `Softplus` and `BoxCox` (the shift found first
+where `shift=None`), `[0, 1]` for `Sigmoid`, positive for
+`CenteredLogRatio`, non-negative for `ScaledSimplex`, and finite for those
+and for `PCA`/`RobustPCA` -- and raises `warping.DomainError` (a
+`ValueError`) with the component, the count and the range of the values
+outside. `VGPNetwork` adds the variable's name, and the column's label
+where the refusing warping is the first link and so sees the data's own
+columns: "Variable 'Assay', column 'Hg': BoxCox transforms values in
+]-0.01, inf[ only: component 8 holds 2 outside it, from -0.299 to -0.283".
+* **`run_parallel.py --gpu`** lets the tests see the GPU, each process
+growing its share of the card's memory, and records no times. On it eleven
+tests fail that pass on the CPU -- they count the CPU's batches, take its
+branches or want double precision where a GPU's realizations are single --
+and `test_priors.py` did not finish in 90 minutes (roadmap: "The suite on a
+GPU").
+
 ## version 0.10.12
 * **`HermiteRBF` is in the catalogue** (GeoScape's item 60): as a function
 and its `__call__`, with a `surface` step in the workflow, so a Script can

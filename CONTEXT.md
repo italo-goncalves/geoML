@@ -88,6 +88,23 @@ One part of a vector or compositional variable, addressed one level down —
 `Elements/Zn`. A composition's components share a whole; a vector's do not.
 _Avoid_: element, part (except of a composition), column
 
+**Mass fraction**:
+A part's exact share of a whole sample, by mass or by volume. A zero is a
+part that is not there; a missing part is one that was not assayed, and
+leaves the parts that were as they are. What sets it apart from a
+composition, whose parts say something only relative to each other.
+_Avoid_: share (a population's chance before anything is measured),
+proportion (a share of a block below a cut-off)
+
+**Censored**:
+A value known only to lie on one side of a threshold. A zero part of a
+mass fraction is censored in the model's own space: its latent value lies
+anywhere below the point where the part vanishes, and the likelihood
+scores the probability of that, not a density. A value below a detection
+limit is censored the same way. Not missing: a missing part says nothing
+of its own, only through what the other parts leave of the whole.
+_Avoid_: truncated (a distribution cut off, not an observation), imputed
+
 **Category**:
 One class of a categorical variable, addressed like a component but
 answering with probabilities and indicators rather than values.
@@ -242,6 +259,13 @@ scale. A **chain** of them is applied in order, and whether one *mixes* —
 whether one component of its input can reach another of its output —
 decides how the likelihood integrates the noise.
 _Avoid_: link function, transform (a transform acts on coordinates here)
+
+**Linear tails**:
+A warping's map continued along its tangent beyond the values it was
+initialized on, so that a latent draw past the data comes back a linear
+distance past it rather than a power or an exponential of it. The data
+see the same map; only what lies beyond them changes.
+_Avoid_: clipping, capping (nothing is cut off)
 
 **Transform**:
 A map applied to *coordinates* before a kernel sees them — anisotropy, a

@@ -78,7 +78,7 @@ computed in; pass `"float64"` to keep one precision everywhere. Realizations are
 every read widened back to `float64`); `geoml.set_realization_dtype("float64")`
 keeps them wide.
 
-**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.12.
+**License:** GPL-3 (dual-licensed; see README). **Version:** 0.10.13.
 
 **Layout:** five subpackages (`data`, `latent`, `math`, `stats`, `viz`) plus
 the older `plots`, around modules left flat on purpose: `models`,
@@ -188,6 +188,12 @@ in the catalogue.
   the benefit stops: stacking rotation-and-spline pairs made held-out
   scores worse. A model with a `RobustPCA` saved before 0.10.7 reopens
   with other axes than it trained with (it warns): refit and save it again.
+  End a chain with `ZScore`, and give `BoxCox`, `Log` and `Spline`
+  `linear_tails=True`: beyond the data their way back then grows
+  linearly, where a trained exponent of zero makes `BoxCox` an exponential
+  that, compounded by a spline's steep tail and a projection, put block
+  realizations at 1e7 times the data's maximum. The model warns before
+  training when a chain would do that.
 - **Noise law.** For a skewed grade under a log-like link, prefer a
   Gaussian likelihood: a heavy-tailed law (`Laplace`, `EpsilonInsensitive`)
   pushed back through the link can have an unbounded variance in data units
@@ -410,7 +416,26 @@ The papers and the code name the same things differently.
 - **In implicit modelling the sign of the potential field matters, not its
   magnitude.** A contact constrains the field to cross a threshold.
 - **Compositional data live on a simplex.** A log-ratio transform maps them
-  to real space; back-transforming must restore the closure.
+  to real space; back-transforming must restore the closure. A log-ratio
+  takes no zero. `warping.PowerSimplex` (experimental; Box-Cox of each
+  share, back by a weighted entmax) runs from the log-ratio rule at `alpha=0` to
+  `ScaledSimplex` at `alpha=1`, and its way back can return any number of
+  parts at zero; zeros in the data it takes only at a fixed `alpha=1`.
+  Choose the power rather than train it: under the usual likelihood a
+  trained power settles toward the middle of its range. Assays that are
+  exact fractions of the whole sample, with real zeros or parts not
+  assayed in every sample, are a `MassFractionVariable`
+  (`add_mass_fraction_variable`, or `mass_fraction=` on the drillhole
+  conversion), not a composition: the zeros are kept, and a row missing
+  parts keeps the ones it has. Give it `likelihood.CensoredSimplex`
+  (experimental) over a `PowerSimplex` and a `ZScore`: a zero is scored as
+  a probability, a missing part is integrated out, the measurement samples
+  then hold zeros as often as the data, and the power can be trained under
+  it, which it cannot under `Gaussian`. Any other likelihood trains on the
+  complete rows and says how many it left out. Compare such models by
+  held-out scores: the censored bound is on a different measure. To look at such
+  data, `pairs(power=...)` and `pca(power=...)` open it up by the same map
+  at a power above zero.
 - **A held-out score measured at sampled locations cannot speak for the
   ground between them.** A regular backbone of inducing points is there for
   the map, and a validation set from the same campaign cannot notice it.

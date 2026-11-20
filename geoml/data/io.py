@@ -295,7 +295,8 @@ def _supported_top_variables():
     components, never at the top level.
     """
     return (ContinuousVariable, DerivedVariable, LatentVariable,
-            VectorVariable, CompositionalVariable, RockTypeVariable,
+            VectorVariable, CompositionalVariable, MassFractionVariable,
+            RockTypeVariable,
             CategoricalVariable, OrderedRockType, BinaryVariable,
             AnomalyVariable)
 
@@ -324,6 +325,8 @@ def _rebuild_variable(container, group, vmeta):
         container.add_vector_variable(name, labels=labels)
     elif cls_name == "CompositionalVariable":
         container.add_compositional_variable(name, labels=labels)
+    elif cls_name == "MassFractionVariable":
+        container.add_mass_fraction_variable(name, labels=labels)
     elif cls_name == "CategoricalVariable":
         container.add_categorical_variable(name, labels=labels)
     elif cls_name == "RockTypeVariable":

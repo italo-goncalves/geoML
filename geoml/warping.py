@@ -30,6 +30,7 @@ __all__ = ["Identity",
            "RobustPCA",
            "Rotation",
            "ScaledSimplex",
+           "PowerSimplex",
            "BoxCox",
            "YeoJohnson",
            "Arcsinh",
@@ -112,6 +113,85 @@ def _arm_shares(widths, outer):
     return shares / shares.sum()
 
 
+class DomainError(ValueError):
+    """
+    Values a warping cannot transform.
+
+    Raised by `initialize` when a component holds values outside the
+    warping's domain -- a negative value under a logarithm, say -- or values
+    that are not finite. The warping is checked when it starts from the
+    data, so the error names the offending values before they turn into NaN
+    further down the chain.
+
+    Attributes
+    ----------
+    warping
+        The warping that refused the values.
+    column
+        The component holding them, counted from zero in what reaches the
+        warping.
+    count
+        How many values are outside the domain in that component.
+    """
+
+    def __init__(self, message, warping=None, column=None, count=None):
+        super().__init__(message)
+        self.warping = warping
+        self.column = column
+        self.count = count
+
+
+def _check_domain(warping, x, lower=None, upper=None, closed=False,
+                  missing=False):
+    """Refuses values `warping` cannot transform, one component at a time.
+
+    `lower` and `upper` are bounds per component or for all of them, open
+    unless `closed`; an infinite value is refused always, a missing one
+    unless `missing` says the warping takes it. Raises a `DomainError`
+    naming the first component that fails.
+    """
+    x = _np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        x = x[:, None]
+    width = x.shape[1]
+    lower = _np.broadcast_to(
+        -_np.inf if lower is None else _np.asarray(lower, dtype=float),
+        [width])
+    upper = _np.broadcast_to(
+        _np.inf if upper is None else _np.asarray(upper, dtype=float),
+        [width])
+    name = type(warping).__name__
+    for i in range(width):
+        column = x[:, i]
+        absent = _np.isnan(column)
+        if _np.any(absent) and not missing:
+            raise DomainError(
+                f"{name} cannot transform missing values: component {i} "
+                f"holds {int(absent.sum())} of them.",
+                warping, i, int(absent.sum()))
+        present = column[~absent]
+        infinite = ~_np.isfinite(present)
+        if _np.any(infinite):
+            raise DomainError(
+                f"{name} cannot transform infinite values: component {i} "
+                f"holds {int(infinite.sum())} of them.",
+                warping, i, int(infinite.sum()))
+        if closed:
+            outside = (present < lower[i]) | (present > upper[i])
+        else:
+            outside = (present <= lower[i]) | (present >= upper[i])
+        if _np.any(outside):
+            low = "[" if closed else "]"
+            high = "]" if closed else "["
+            bounds = f"{low}{lower[i]:g}, {upper[i]:g}{high}"
+            values = present[outside]
+            raise DomainError(
+                f"{name} transforms values in {bounds} only: component {i} "
+                f"holds {values.size} outside it, from {values.min():g} to "
+                f"{values.max():g}. Correct or remove them in the data.",
+                warping, i, int(values.size))
+
+
 class _Warping(_gpr.Parametric):
     """
     Base warping class.
@@ -125,6 +205,13 @@ class _Warping(_gpr.Parametric):
     # Keep it truthful -- `test_warping_integration` checks every warping's
     # declaration against a numerical Jacobian.
     _mixes = False
+
+    # Whether this warping is increasing and defined on the whole line,
+    # which is what lets `likelihood.CensoredSimplex` evaluate it at any
+    # latent value after a simplex warping; and whether it is affine, which
+    # keeps that likelihood's integrals over the row's shift exact.
+    _WHOLE_LINE = False
+    _AFFINE = False
 
     # How wide this warping is on each side. Every subclass sets both in its
     # own constructor, from the size it is built for; they start at zero
@@ -245,6 +332,9 @@ class Identity(_Warping):
     size : int
         The number of columns the warping transforms.
     """
+    _WHOLE_LINE = True
+    _AFFINE = True
+
     def __init__(self, size):
         super().__init__()
         self._size_in = size
@@ -266,12 +356,24 @@ class Spline(_Warping):
     centered at the origin and the arms span up to +/- 5 units. Its main
     use is to transform an asymmetric distribution to one closer to a Gaussian.
 
+    With `linear_tails`, below the smallest value it was initialized on and
+    above the largest the map continues along its tangent there, so its
+    derivative stays continuous and a latent draw beyond the data comes
+    back at the slope the data's own tail has.
+
     Attributes
     ----------
     n_knots : int
         Total number of knots.
     """
-    def __init__(self, size, knots_per_arm=5, backbone="cubic"):
+    _WHOLE_LINE = True
+    # the data's smallest and largest values per column, where
+    # `linear_tails` turns the map straight; set by `initialize` and kept
+    # by a save
+    _SAVED_STATE = ("lower", "upper")
+
+    def __init__(self, size, knots_per_arm=5, backbone="cubic",
+                 linear_tails=False):
         """
         Initializer for Spline.
 
@@ -287,8 +389,19 @@ class Spline(_Warping):
             cubic, the default) or `"rq"` (the monotonic rational
             quadratic, whose inverse is a closed form rather than an
             iteration). Same knots and slopes either way.
+        linear_tails : bool
+            Whether to continue the map along its tangent beyond the
+            smallest and the largest value it was initialized on. Training
+            is unchanged, every datum lying between them, and the tangents
+            follow the knots as they train. Without it the map is the
+            spline out to its outermost knots, whose last segment, kept
+            from collapsing where no datum is, can be several times
+            steeper on the way back than the data's own tail.
         """
         super().__init__()
+        self.linear_tails = bool(linear_tails)
+        self.lower = None
+        self.upper = None
         self._size_in = size
         self._size_out = size
         self.n_knots = knots_per_arm * 2 + 1
@@ -324,27 +437,58 @@ class Spline(_Warping):
         warped_coordinates = 10 * warped_coordinates - 5
         return warped_coordinates
     
+    def _limits(self):
+        """The data's smallest and largest values, or None."""
+        if not self.linear_tails or self.upper is None:
+            return None
+        return (_tf.cast(_tf.reshape(self.lower, [1, -1]), _tf.float64),
+                _tf.cast(_tf.reshape(self.upper, [1, -1]), _tf.float64))
+
     def forward(self, x):
         warped_coordinates = _tf.stack(
             [self._get_warped_coordinates(i) for i in range(self.size_in)],
             axis=1
         )
-        x_warp = self.spline.interpolate(self.x_original, warped_coordinates, x)
-        xd = self.spline.interpolate_d1(self.x_original, warped_coordinates, x)
+        limits = self._limits()
+        # beyond the data the spline is read at the limit and continued
+        # along its tangent there: value and derivative both continuous
+        x_in = x if limits is None \
+            else _tf.clip_by_value(x, limits[0], limits[1])
+        x_warp = self.spline.interpolate(self.x_original, warped_coordinates,
+                                         x_in)
+        xd = self.spline.interpolate_d1(self.x_original, warped_coordinates,
+                                        x_in)
+        if limits is not None:
+            x_warp = x_warp + xd * (x - x_in)
         log_det = _tf.reduce_sum(_tf.math.log(xd), axis=1)
 
         return x_warp, log_det
-    
+
     def backward(self, x):
         warped_coordinates = _tf.stack(
             [self._get_warped_coordinates(i) for i in range(self.size_in)],
             axis=1
         )
+        limits = self._limits()
+        if limits is not None:
+            # the limits' images, between which the spline is inverted and
+            # beyond which the tangent is
+            ends = self.spline.interpolate(
+                self.x_original, warped_coordinates,
+                _tf.concat(limits, axis=0))
+            x_in = _tf.clip_by_value(x, ends[:1], ends[1:])
+        else:
+            x_in = x
         # solved rather than approximated: interpolating the knots the
         # other way round meets `forward` at the knots and parts between
         # them, which used to leave `forward(backward(y))` a tenth of a
         # standard deviation from `y`
-        x_back = self.spline.invert(self.x_original, warped_coordinates, x)
+        x_back = self.spline.invert(self.x_original, warped_coordinates, x_in)
+        if limits is not None:
+            x_back = _tf.clip_by_value(x_back, limits[0], limits[1])
+            slope = self.spline.interpolate_d1(
+                self.x_original, warped_coordinates, x_back)
+            x_back = x_back + (x - x_in) / slope
         return x_back
 
     def initialize(self, x, weights=None):
@@ -447,6 +591,11 @@ class Spline(_Warping):
             self.parameters[f"warped_partition_right_{dim}"].set_value(
                 _arm_shares(_np.diff(scaled[per_arm:]), outer=-1))
 
+        if self.linear_tails:
+            self.lower = _tf.constant(_np.nanmin(values, axis=0)[None, :],
+                                      _tf.float64)
+            self.upper = _tf.constant(_np.nanmax(values, axis=0)[None, :],
+                                      _tf.float64)
         return self.forward(_tf.constant(values, _tf.float64))[0]
 
 
@@ -478,6 +627,9 @@ class ZScore(_Warping):
     # The quantile band a robust initialization trusts; what lies outside is
     # clipped to the fence before the moments are taken.
     _ROBUST_QUANTILES = (0.01, 0.99)
+
+    _WHOLE_LINE = True
+    _AFFINE = True
 
     def __init__(self, size, mean=None, std=None, robust=False):
         """
@@ -648,6 +800,10 @@ class Softplus(_Warping):
                             )
         log_det = _tf.reduce_sum(_tf.math.log(log_det), axis=1)
         return x_warp, log_det
+
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=-self.shift)
+        return super().initialize(x, weights)
     
     def backward(self, x):
         # x = _tftools.ensure_rank_2(x)
@@ -663,8 +819,16 @@ class Log(_Warping):
 
     Forward function: log
     Backward function: exp
+
+    With `linear_tails`, above the largest value it was initialized on the
+    map continues along its tangent there, so the way back grows linearly
+    beyond the data rather than exponentially.
     """
-    def __init__(self, size, shift=1e-6):
+    # the data's largest value per column, where `linear_tails` turns the
+    # map straight; set by `initialize` and kept by a save
+    _SAVED_STATE = ("upper",)
+
+    def __init__(self, size, shift=1e-6, linear_tails=False):
         """
         Initializer for Log.
 
@@ -674,6 +838,12 @@ class Log(_Warping):
             The number of columns the warping transforms.
         shift : float
             A positive value to add to the data. Use it if you have zeros.
+        linear_tails : bool
+            Whether to continue the map along its tangent above the largest
+            value it was initialized on. Training is unchanged, every
+            datum lying below that value; a latent draw beyond the data
+            then comes back a linear distance past the data's maximum
+            instead of an exponential one.
         """
         super().__init__()
         self._size_in = size
@@ -682,16 +852,49 @@ class Log(_Warping):
         if shift <= 0:
             raise ValueError("shift must be positive")
         self.shift = shift
+        self.linear_tails = bool(linear_tails)
+        self.upper = None
+
+    def _tangent(self):
+        """The largest datum and the logarithm there, or None."""
+        if not self.linear_tails or self.upper is None:
+            return None
+        upper = _tf.cast(_tf.reshape(self.upper, [1, -1]), _tf.float64)
+        return upper, _tf.math.log(upper + self.shift)
 
     def forward(self, x):
-        x_warp = _tf.math.log(x + self.shift)
+        tangent = self._tangent()
+        x_in = x if tangent is None else _tf.minimum(x, tangent[0])
+        x_warp = _tf.math.log(x_in + self.shift)
         # the derivative is 1 / (x + shift); what goes out is its log, as
         # everywhere else, so that a chain can add its links together
-        log_det = - _tf.reduce_sum(_tf.math.log(x + self.shift), axis=1)
+        log_slope = - _tf.math.log(x_in + self.shift)
+        if tangent is not None:
+            upper, at = tangent
+            above = x > upper
+            x_warp = _tf.where(above, at + (x - upper) * _tf.exp(-at),
+                               x_warp)
+            log_slope = _tf.where(above, -at + 0.0 * x, log_slope)
+        log_det = _tf.reduce_sum(log_slope, axis=1)
         return x_warp, log_det
 
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=-self.shift)
+        if self.linear_tails:
+            self.upper = _tf.constant(
+                _np.nanmax(_np.asarray(x, dtype=float), axis=0)[None, :],
+                _tf.float64)
+        return super().initialize(x, weights)
+
     def backward(self, x):
-        return _tf.math.exp(x)
+        tangent = self._tangent()
+        if tangent is None:
+            return _tf.math.exp(x)
+        _, at = tangent
+        # the exponential is taken only up to the tangent point, so that a
+        # draw far above it costs neither an overflow nor a NaN gradient
+        return _tf.where(x > at, _tf.exp(at) * (1.0 + x - at),
+                         _tf.exp(_tf.minimum(x, at)))
 
 
 class Scale(ZScore):
@@ -796,6 +999,14 @@ class BoxCox(_Warping):
     exponent
         The starting exponent, one value or one per component;
         `initialize` replaces it.
+    linear_tails
+        Whether to continue the map along its tangent above the largest
+        value it was initialized on. Training is unchanged, every datum
+        lying below that value, and the tangent follows the exponent as it
+        trains; a latent draw beyond the data then comes back a linear
+        distance past the data's maximum instead of a power of it -- an
+        exponential one at the exponent zero, where the transform is the
+        logarithm.
 
     Notes
     -----
@@ -821,9 +1032,14 @@ class BoxCox(_Warping):
     """
     _EXPONENT_LIMITS = (0.0, 2.0)
     _GRID = _np.linspace(0.0, 2.0, 81)
+    # the data's largest value per column, where `linear_tails` turns the
+    # map straight; set by `initialize` and kept by a save
+    _SAVED_STATE = ("upper",)
 
-    def __init__(self, size, shift=1e-6, exponent=1.0):
+    def __init__(self, size, shift=1e-6, exponent=1.0, linear_tails=False):
         super().__init__()
+        self.linear_tails = bool(linear_tails)
+        self.upper = None
         self._size_in = size
         self._size_out = size
         if shift is not None and shift <= 0:
@@ -862,17 +1078,43 @@ class BoxCox(_Warping):
         inner = _tf.maximum(1.0 + safe * y, 1e-12)
         return _tf.where(small, y, _tf.math.log(inner) / safe)
 
+    def _tangent(self, lam):
+        """The largest datum, the transform there and its slope, or None."""
+        if not self.linear_tails or self.upper is None:
+            return None
+        upper = _tf.cast(_tf.reshape(self.upper, [1, -1]), _tf.float64)
+        u = _tf.math.log(upper + self._shift())
+        # d/dx ((x + shift)**λ - 1) / λ = (x + shift)**(λ - 1)
+        return upper, self._power(u, lam), _tf.exp((lam - 1.0) * u)
+
     def forward(self, x):
         lam = self.parameters["exponent"].get_value()[None, :]
-        u = _tf.math.log(x + self._shift())
-        log_det = _tf.reduce_sum((lam - 1.0) * u, axis=1)
-        return self._power(u, lam), log_det
+        tangent = self._tangent(lam)
+        # the power is taken only up to the tangent point, which keeps its
+        # branch finite and its gradient clean where it is not used
+        x_in = x if tangent is None else _tf.minimum(x, tangent[0])
+        u = _tf.math.log(x_in + self._shift())
+        warped, log_slope = self._power(u, lam), (lam - 1.0) * u
+        if tangent is not None:
+            upper, at, slope = tangent
+            above = x > upper
+            warped = _tf.where(above, at + (x - upper) * slope, warped)
+            log_slope = _tf.where(above, _tf.math.log(slope) + 0.0 * x,
+                                  log_slope)
+        return warped, _tf.reduce_sum(log_slope, axis=1)
 
     def backward(self, x):
         lam = self.parameters["exponent"].get_value()[None, :]
+        tangent = self._tangent(lam)
+        x_in = x if tangent is None else _tf.minimum(x, tangent[1])
         # a draw under zero's own image has its pre-image under zero, down
         # to minus the shift: a zero grade, as the floor past -1/λ is
-        return _tf.maximum(_tf.exp(self._root(x, lam)) - self._shift(), 0.0)
+        back = _tf.maximum(_tf.exp(self._root(x_in, lam)) - self._shift(),
+                           0.0)
+        if tangent is None:
+            return back
+        upper, at, slope = tangent
+        return _tf.where(x > at, upper + (x - at) / slope, back)
 
     def initialize(self, x, weights=None):
         x = _np.asarray(x, dtype=float)
@@ -886,6 +1128,7 @@ class BoxCox(_Warping):
             self.parameters["shift"].set_value(_np.array(shifts))
         else:
             shifts = [self.shift] * self.size_in
+        _check_domain(self, x, lower=-_np.array(shifts))
         starts = [
             _profile_start(
                 x[:, i], weights, self._GRID,
@@ -894,6 +1137,9 @@ class BoxCox(_Warping):
             for i, shift in enumerate(shifts)]
         if not self.parameters["exponent"].fixed:
             self.parameters["exponent"].set_value(_np.array(starts))
+        if self.linear_tails:
+            self.upper = _tf.constant(_np.nanmax(x, axis=0)[None, :],
+                                      _tf.float64)
         return super().initialize(x, weights)
 
 
@@ -932,6 +1178,8 @@ class YeoJohnson(_Warping):
     """
     _EXPONENT_LIMITS = (0.0, 2.0)
     _GRID = _np.linspace(0.0, 2.0, 81)
+
+    _WHOLE_LINE = True
 
     def __init__(self, size, exponent=1.0):
         super().__init__()
@@ -1012,6 +1260,8 @@ class Arcsinh(_Warping):
     transformations to handle extreme values of the dependent variable.
     *Journal of the American Statistical Association*, 83(401), 123-127.
     """
+    _WHOLE_LINE = True
+
     def __init__(self, size, scale=1.0):
         super().__init__()
         self._size_in = size
@@ -1073,6 +1323,8 @@ class SinhArcsinh(_Warping):
     """
     _SKEW_GRID = _np.linspace(-2.0, 2.0, 21)
     _TAIL_GRID = _np.logspace(_np.log10(0.25), _np.log10(4.0), 21)
+
+    _WHOLE_LINE = True
 
     def __init__(self, size, skewness=0.0, tailweight=1.0):
         super().__init__()
@@ -1227,6 +1479,11 @@ class Sigmoid(_Warping):
         x_warp = - _tf.math.log(1 / x - 1)
         log_det = _tf.reduce_sum(- _tf.math.log(x - x**2), axis=1)
         return x_warp, log_det
+
+    def initialize(self, x, weights=None):
+        # the shift squeezes [0, 1] inside the open interval
+        _check_domain(self, x, lower=0.0, upper=1.0, closed=True)
+        return super().initialize(x, weights)
 
     def backward(self, x):
         return 1 / (1 + _tf.math.exp(-x))
@@ -1681,6 +1938,7 @@ class PCA(_Warping):
         return x
 
     def initialize(self, x, weights=None):
+        _check_domain(self, x)
         self.mean = _tf.constant(_np.mean(x, axis=0, keepdims=True), _tf.float64)
         x_center = x - self.mean
         cov = _np.matmul(_np.transpose(x_center), x_center) / x_center.shape[0]
@@ -1719,6 +1977,7 @@ class RobustPCA(PCA):
         self.support_fraction = support_fraction
 
     def initialize(self, x, weights=None):
+        _check_domain(self, x)
         with _warnings.catch_warnings():
             # FastMCD chatters while it searches: "Determinant has increased"
             # on its concentration steps, and a not-full-rank notice on the
@@ -1801,6 +2060,10 @@ class CenteredLogRatio(_Warping):
     def backward(self, x):
         return _tf.nn.softmax(x, axis=1)
 
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=0.0)
+        return super().initialize(x, weights)
+
 
 class Rotation(Identity):
     """
@@ -1850,6 +2113,10 @@ class Rotation(Identity):
     """
     _mixes = True
 
+    # not a link: it mixes the parts
+    _WHOLE_LINE = False
+    _AFFINE = False
+
     def __init__(self, n_dim, fixed=False):
         super().__init__(n_dim)
 
@@ -1894,52 +2161,322 @@ class Rotation(Identity):
         return x
 
 
+# how close to the threshold, in the latent's units, a part is read as zero
+_ZERO_TOLERANCE = 1e-13
+
+
+def _weighted_sparsemax(z, scale):
+    """The composition `scale * max(0, z - tau)`, `tau` making it sum to one.
+
+    The projection onto the simplex in the chi-square metric
+    ``sum((x - r)**2 / scale)``, `r` being the point of the plane of unit sum
+    that `z` stands for: a weighted sparsemax, exact by one sort. Sorted
+    descending, the parts that stay positive are the first `k` for which
+    ``z_(k) > tau_k``, with ``tau_k`` the threshold that would make those `k`
+    alone sum to one; every other part is exactly zero.
+    """
+    z = _tf.convert_to_tensor(z, _tf.float64)
+    scale = _tf.broadcast_to(_tf.cast(scale, _tf.float64), _tf.shape(z))
+    order = _tf.argsort(z, axis=1, direction="DESCENDING")
+    z_sorted = _tf.gather(z, order, batch_dims=1)
+    scale_sorted = _tf.gather(scale, order, batch_dims=1)
+    mass = _tf.cumsum(scale_sorted, axis=1)
+    moment = _tf.cumsum(scale_sorted * z_sorted, axis=1)
+    thresholds = (moment - 1.0) / mass
+    # a part within rounding of the threshold is a zero: a zero sent out
+    # and back stands exactly at it, and the threshold, a ratio of sums,
+    # misses it by a few units in the last place either way
+    rounding = _ZERO_TOLERANCE * (1.0 + _tf.abs(thresholds))
+    kept = _tf.reduce_sum(
+        _tf.cast(z_sorted > thresholds + rounding, _tf.int32), axis=1)
+    tau = _tf.gather(thresholds, kept - 1, batch_dims=1)[:, None]
+    gap = z - tau
+    return _tf.where(gap > _ZERO_TOLERANCE * (1.0 + _tf.abs(tau)),
+                     scale * gap, 0.0)
+
+
 class ScaledSimplex(Identity):
     """
     Compositional data transformation without log-ratios.
 
-    Accepts zeros.
+    Divides each part by its mean share, `x / scale`, the scale being the
+    mean composition of the complete rows. The way back restores the unit
+    sum by a threshold common to the row, ``scale * max(0, z - tau)``: the
+    projection onto the simplex in the chi-square metric, so a latent that
+    leaves the simplex comes back with as many parts exactly zero as it
+    needs. Accepts zeros, which map to zero.
+
+    When one part rises, every other part gives way in proportion to its
+    mean share, wherever the composition is. It is `PowerSimplex` at
+    ``alpha = 1``.
 
     Parameters
     ----------
     size : int
         The number of parts in the composition.
+
+    Notes
+    -----
+    The way back ignores a shift of the whole latent row, so the latent
+    space is in effect the plane of zero sum, and the log-determinant
+    reported is the volume factor from the plane of unit sum onto it,
+    ``-sum(log scale) - log(size)``: the convention of `CenteredLogRatio`,
+    which makes the two objectives comparable.
+
+    See Also
+    --------
+    PowerSimplex : the family this is the linear member of.
+    CenteredLogRatio : the log-ratio member, which takes no zeros.
     """
     _mixes = True
     # set by `initialize` from the data and kept by a save, as `PCA`'s is
     _SAVED_STATE = ("scale",)
+
+    # not a link: it mixes the parts
+    _WHOLE_LINE = False
+    _AFFINE = False
 
     def __init__(self, size):
         super().__init__(size)
         self.scale = None
 
     def forward(self, x):
-        # each part divided by a constant of its own, so the Jacobian is
-        # diagonal and the log-determinant is minus the log of the scales
+        # each part divided by a constant of its own; the volume factor is
+        # taken onto the plane of zero sum along the shift the way back
+        # ignores, which adds -log(size) to the diagonal's determinant
         log_det = _tf.reduce_sum(_tf.zeros_like(x), axis=1) \
-            - _tf.reduce_sum(_tf.math.log(self.scale))
+            - _tf.reduce_sum(_tf.math.log(self.scale)) \
+            - _np.log(self.size_in)
         return x / self.scale, log_det
 
     def backward(self, x):
-        x = x * self.scale
-        total = _tf.reduce_sum(x, axis=1, keepdims=True)
-        x = x + (1.0 - total) * self.scale
-
-        denom = _tf.where(_tf.less(x, 0.0), self.scale - x, 1.0)
-        shift = _tf.where(_tf.less(x, 0.0), -x / denom, 0.0)
-
-        max_s = _tf.reduce_max(shift, axis=1, keepdims=True)
-        x = (1.0 - max_s) * x + max_s * self.scale
-        x = _tf.maximum(x, 0.0)
-        return x
+        return _weighted_sparsemax(x, self.scale)
 
     def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=0.0, closed=True, missing=True)
         missing = _np.isnan(x)
         complete = ~_np.any(missing, axis=1, keepdims=True)
         x_new = _np.where(missing, 0, x) * complete
         scale = _np.sum(x_new, axis=0, keepdims=True) / _np.sum(complete)
         self.scale = _tf.constant(scale, _tf.float64)
         return x_new / self.scale
+
+
+# the Newton steps `PowerSimplex.backward` takes on the threshold, each kept
+# inside a bracket that bisection would also narrow: the support is exact
+# before the first, and the root is smooth on it
+_NEWTON_STEPS = 30
+
+
+def _entmax_powers(v, exponent):
+    """``[1 + v]_+ ** exponent``, through `log1p`: at a small power the
+    exponent is large and ``1 + v`` close to one, where the plain power
+    loses the digits the sum to one is made of."""
+    kept = v > -1.0
+    return _tf.where(
+        kept, _tf.exp(exponent * _tf.math.log1p(_tf.where(kept, v, 0.0))),
+        0.0)
+
+
+def _entmax_threshold(w, scale, alpha):
+    """The threshold `tau` that makes ``sum(scale * [1 + alpha (w - tau)]_+
+    ** (1 / alpha))`` equal one, for ``0 < alpha``, as a value only.
+
+    The sum is decreasing in `tau` and smooth between the breakpoints where
+    a part reaches zero, ``w_k + 1 / alpha``. Evaluating it at every
+    breakpoint fixes which parts stay positive exactly; on that segment the
+    root is found by Newton steps on the log of the sum, which is exact in
+    one step as ``alpha -> 0``, a step that leaves the bracket replaced by
+    bisection.
+    """
+    power = 1.0 / alpha
+    order = _tf.argsort(w, axis=1, direction="DESCENDING")
+    w_sorted = _tf.gather(w, order, batch_dims=1)
+    scale_sorted = _tf.gather(scale, order, batch_dims=1)
+    breaks = w_sorted + power
+    width = _tf.shape(w)[1]
+
+    at_breaks = _tf.reduce_sum(scale_sorted[:, None, :] * _entmax_powers(
+        alpha * (w_sorted[:, None, :] - breaks[:, :, None]), power), axis=2)
+    kept = _tf.reduce_sum(_tf.cast(at_breaks < 1.0, _tf.int32), axis=1)
+
+    upper = _tf.gather(breaks, kept - 1, batch_dims=1)
+    below = _tf.where(
+        kept < width,
+        _tf.gather(breaks, _tf.minimum(kept, width - 1), batch_dims=1),
+        _tf.constant(-_np.inf, _tf.float64))
+    # where the part with the largest latent alone would reach one: the sum
+    # is at least one there, so the root is not to its left
+    alone = w_sorted[:, 0] \
+        - _tf.math.expm1(-alpha * _tf.math.log(scale_sorted[:, 0])) / alpha
+    lower = _tf.maximum(below, alone)
+    support = _tf.cast(
+        _tf.range(width)[None, :] < kept[:, None], _tf.float64)
+
+    tau = lower
+    for _ in range(_NEWTON_STEPS):
+        v = alpha * (w_sorted - tau[:, None])
+        total = _tf.reduce_sum(
+            support * scale_sorted * _entmax_powers(v, power), axis=1)
+        slope = -_tf.reduce_sum(
+            support * scale_sorted * _entmax_powers(v, power - 1.0), axis=1)
+        above = total > 1.0
+        lower = _tf.where(above, tau, lower)
+        upper = _tf.where(above, upper, tau)
+        step = tau - total * _tf.math.log(total) / slope
+        # closed at both ends: at the root the step is `tau` itself, which
+        # the update has just made a bound
+        inside = (step >= lower) & (step <= upper)
+        tau = _tf.where(inside, step, 0.5 * (lower + upper))
+    return _tf.stop_gradient(tau)[:, None]
+
+
+class PowerSimplex(_Warping):
+    """
+    Box-Cox transformation of a composition's shares, mapped back by a
+    weighted entmax.
+
+    Maps each part to ``((x / scale)**alpha - 1) / alpha``, the scale being
+    the mean composition of the complete rows, and back by
+    ``scale * [1 + alpha (w - tau)]_+ ** (1 / alpha)``, with the threshold
+    `tau` making the parts sum to one. The way back is the composition that
+    maximizes ``w'x`` less half the Cressie-Read power divergence of `x`
+    from the scale: a weighted alpha-entmax. A part is zero when its latent
+    falls a whole ``1 / alpha`` below the threshold, so a row can come back
+    with any number of zeros.
+
+    The power sets who gives way when one part rises: every other part in
+    proportion to ``x**(1 - alpha) * scale**alpha``, which slides from the
+    current composition at ``alpha = 0`` -- the log-ratio rule, where the
+    way back is the softmax of ``log(scale) + w`` -- to the mean composition
+    at ``alpha = 1``, where it is `ScaledSimplex`.
+
+    Parameters
+    ----------
+    size
+        The number of parts in the composition.
+    alpha
+        The power, in ``[0, 1]``.
+    fixed
+        Whether to keep the power at `alpha` rather than train it. Trained
+        under the usual likelihood, the power moves from its start toward
+        the data's own and settles short of it, toward the middle of the
+        range, so a value known or chosen is the safer one.
+
+    Raises
+    ------
+    DomainError
+        From `initialize`, where the data hold zeros and the power may be
+        below one: a zero there has no finite log-determinant.
+
+    Notes
+    -----
+    The way back ignores a shift of the whole latent row, so the
+    log-determinant reported is the volume factor onto the plane of zero
+    sum along it, ``-sum(log g) + log(sum(g)) - log(size)`` with
+    ``g = x**(1 - alpha) * scale**alpha``, which is `ScaledSimplex`'s at
+    ``alpha = 1`` and `CenteredLogRatio`'s at ``alpha = 0``.
+
+    References
+    ----------
+    Peters, B., Niculae, V., & Martins, A. F. T. (2019). Sparse
+    sequence-to-sequence models. *Proceedings of ACL*, 1504-1519.
+
+    Cressie, N., & Read, T. R. C. (1984). Multinomial goodness-of-fit
+    tests. *Journal of the Royal Statistical Society: Series B*, 46(3),
+    440-464.
+
+    See Also
+    --------
+    ScaledSimplex : the member at ``alpha = 1``.
+    CenteredLogRatio : the log-ratio transformation, ``alpha = 0`` up to a
+        shift.
+    """
+    _mixes = True
+    # set by `initialize` from the data and kept by a save, as `PCA`'s is
+    _SAVED_STATE = ("scale",)
+    # below this the power is read as zero: the logarithm and the softmax
+    _SMALL = 1e-8
+
+    def __init__(self, size, alpha=1.0, fixed=True):
+        super().__init__()
+        self._size_in = size
+        self._size_out = size
+        self.scale = None
+        self._add_parameter("alpha", _gpr.RealParameter(
+            alpha, 0.0, 1.0, fixed=fixed))
+
+    def _alpha(self):
+        alpha = _tf.cast(self.parameters["alpha"].get_value(), _tf.float64)
+        small = alpha < self._SMALL
+        return alpha, small, _tf.where(small, _tf.ones_like(alpha), alpha)
+
+    def forward(self, x):
+        x = _tf.convert_to_tensor(x, _tf.float64)
+        alpha, small, safe = self._alpha()
+        positive = x > 0.0
+        log_ratio = _tf.math.log(_tf.where(positive, x / self.scale, 1.0))
+        powered = _tf.where(positive, _tf.math.expm1(safe * log_ratio) / safe,
+                            -1.0 / safe)
+        logged = _tf.where(positive, log_ratio,
+                           _tf.constant(-_np.inf, _tf.float64))
+        w = _tf.where(small, logged, powered)
+
+        # g = x**(1 - alpha) * scale**alpha, the rate at which each part
+        # moves with its latent; a zero has none below alpha = 1
+        log_g = _tf.math.log(self.scale) + (1.0 - alpha) * log_ratio
+        log_g = _tf.where(_tf.logical_not(positive) & (alpha < 1.0),
+                          _tf.constant(-_np.inf, _tf.float64), log_g)
+        log_det = - _tf.reduce_sum(log_g, axis=1) \
+            + _tf.reduce_logsumexp(log_g, axis=1) - _np.log(self.size_in)
+        return w, log_det
+
+    def backward(self, x):
+        w = _tf.convert_to_tensor(x, _tf.float64)
+        alpha, small, safe = self._alpha()
+        scale = _tf.broadcast_to(self.scale, _tf.shape(w))
+        power = 1.0 / safe
+
+        # the threshold is solved as a value and given its derivatives by
+        # one implicit step: d tau = d(sum x) / sum(g) at the root, which is
+        # what makes the Jacobian `diag(g) - g g' / sum(g)` reach `w`, the
+        # power and the scale
+        tau = _entmax_threshold(w, scale, safe)
+        v = safe * (w - tau)
+        g = scale * _entmax_powers(v, power - 1.0) \
+            * _tf.cast(v > -1.0, _tf.float64)
+        total = _tf.reduce_sum(scale * _entmax_powers(v, power), axis=1,
+                               keepdims=True)
+        tau = tau + (total - 1.0) / _tf.stop_gradient(
+            _tf.reduce_sum(g, axis=1, keepdims=True))
+        general = scale * _entmax_powers(safe * (w - tau), power)
+
+        general = _tf.where(alpha >= 1.0,
+                            _weighted_sparsemax(1.0 + w, self.scale), general)
+        return _tf.where(
+            small, _tf.nn.softmax(_tf.math.log(scale) + w, axis=1), general)
+
+    def initialize(self, x, weights=None):
+        _check_domain(self, x, lower=0.0, closed=True, missing=True)
+        x = _np.asarray(x, dtype=float)
+        complete = x[~_np.any(_np.isnan(x), axis=1)]
+        alpha = self.parameters["alpha"]
+        zeros = _np.sum(complete == 0.0, axis=0)
+        if _np.any(zeros) and (
+                not alpha.fixed or float(alpha.get_value()) < 1.0):
+            # a zero has no finite log-determinant below alpha = 1, which
+            # the usual likelihood adds to every row -- the censored
+            # likelihood planned for compositions with zeros will take them
+            # and will start the warping without this check
+            column = int(_np.argmax(zeros > 0))
+            raise DomainError(
+                f"PowerSimplex takes zeros only at a fixed alpha of 1: "
+                f"component {column} holds {int(zeros[column])} of them. "
+                f"Use alpha=1 with fixed=True, or ScaledSimplex.",
+                self, column, int(zeros[column]))
+        self.scale = _tf.constant(
+            _np.mean(complete, axis=0, keepdims=True), _tf.float64)
+        return self.forward(x)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -1980,19 +2517,21 @@ Identity._catalogue = _declared(_SIZED, size=_COUNT)
 Spline._catalogue = _declared(
     _SIZED, size=_COUNT,
     knots_per_arm={"type": "int", "constraints": {"min": 1}},
-    backbone={"type": "enum", "constraints": {"choices": ["cubic", "rq"]}})
+    backbone={"type": "enum", "constraints": {"choices": ["cubic", "rq"]}},
+    linear_tails={"type": "bool"})
 ZScore._catalogue = _declared(
     _SIZED, label="Z-score", size=_COUNT, mean=_LOCATIONS,
     std=dict(_GIVEN_SCALE, type="float[]"), robust={"type": "bool"})
 Center._catalogue = _declared(_SIZED, size=_COUNT, mean=_LOCATIONS)
 Softplus._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
-Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
+Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE,
+                           linear_tails={"type": "bool"})
 Scale._catalogue = _declared(_SIZED, size=_COUNT,
                              scale=dict(_GIVEN_SCALE, type="json"))
 BoxCox._catalogue = _declared(
     _SIZED, label="Box-Cox", size=_COUNT,
     shift=dict(_POSITIVE, nullable=True),
-    exponent=_EXPONENT)
+    exponent=_EXPONENT, linear_tails={"type": "bool"})
 YeoJohnson._catalogue = _declared(
     _SIZED, label="Yeo-Johnson", size=_COUNT, exponent=_EXPONENT)
 Arcsinh._catalogue = _declared(_SIZED, size=_COUNT,
@@ -2038,6 +2577,11 @@ Rotation._catalogue = _declared(
     fixed={"type": "bool"})
 ScaledSimplex._catalogue = _declared(_SIZED, label="Scaled simplex",
                                      size=_COUNT)
+# experimental with the censored likelihood it was built for
+PowerSimplex._catalogue = _declared(
+    _SIZED, label="Power simplex", stability="experimental", size=_COUNT,
+    alpha={"type": "float", "constraints": {"min": 0, "max": 1}},
+    fixed={"type": "bool"})
 
 # What each trains, under the names `parameters` holds them by (see
 # `latent/network.py`). `Center`'s `std` and `Scale`'s `mean` are held by what
@@ -2054,5 +2598,8 @@ for _class, _trained in (
         (TensorProductFlow, ["rng_time", "factors_space", "factors_time",
                              "factors_component", "weights", "rng_space"]),
         (Rotation, [{"name": "rotation",
-                     "fixed_when": {"argument": "fixed", "equals": True}}])):
+                     "fixed_when": {"argument": "fixed", "equals": True}}]),
+        (PowerSimplex, [{"name": "alpha",
+                         "fixed_when": {"argument": "fixed",
+                                        "equals": True}}])):
     _class._catalogue["trainable"] = _trained

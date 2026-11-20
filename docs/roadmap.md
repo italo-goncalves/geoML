@@ -1715,7 +1715,11 @@ draw -- Salimbeni & Deisenroth as written, whose inducing inputs are free
   closed form, though not as mixtures of Gaussians), which would let them
   carry the gap too.
 
-**M–L — Merging subcompositions** (requested 2026-09-10). Some
+**M–L — Merging subcompositions** (requested 2026-09-10). *Superseded
+(2026-11-17)*: a shorter assay suite is parts missing in some rows, which
+`MassFractionVariable` (0.10.13) keeps and the censored likelihood with
+missing parts (below) will score inside one composition, with no second
+variable and no join. Kept for the record. Some
 compositional data sets are missing data in a structured way: the same
 elements unassayed in a large share of the samples, as a campaign that ran
 a shorter suite leaves them. `_prepare_composition` marks a row missing
@@ -1772,7 +1776,8 @@ notation throughout: `m` is the `scale` (mean composition of the complete
 rows), `zeta = x/m` the latent, and `D` the number of parts.
 
 **S — `ScaledSimplex.forward`'s log-determinant is off by `-log D`
-against `CenteredLogRatio`.** Both backward maps ignore a latent shift
+against `CenteredLogRatio`** — done in 0.10.13, and `PowerSimplex`
+reports the factor onto the same plane. Both backward maps ignore a latent shift
 along `1` (`softmax(z + c)`, and `ScaledSimplex.backward(zeta + c)`), so for
 both the latent space is effectively the plane `1'v = 0`, and the factor
 that makes their objectives comparable is the one from the data plane
@@ -1787,12 +1792,18 @@ learnable `m` (item below); only cross-warping comparisons move, by
 discards the direction `1`. Checked symbolically for D = 3, 4 and by Monte
 Carlo of the pushed-forward density to within 2%.)
 
-**S — `ScaledSimplex.backward` leaves its zeros at about `1e-17`.** After
+**S — `ScaledSimplex.backward` leaves its zeros at about `1e-17`** —
+done in 0.10.13: the threshold that replaced the shrink reads a part
+within rounding of it as exactly zero, and a zero sent out and back
+comes back 0.0. After
 the shrink, the binding part is exactly 0.0 in only 71% of infeasible
 latents (20,000 draws, D = 5). Code that tests `== 0` misses the rest.
 Setting the arg-max part of `shift` to 0 makes them exact.
 
-**M — `ScaledSimplex` cannot produce two zeros at once.** The shrink moves
+**M — `ScaledSimplex` cannot produce two zeros at once** — done in
+0.10.13: its way back is the threshold below (a weighted sparsemax, one
+sort), with no compatibility kept for saves that used the shrink (the
+user's call). The shrink moves
 an infeasible point along the ray to `m`, which leaves the simplex through
 the interior of a facet unless it passes exactly through a lower face (a
 vertex at D = 3, an edge at D = 4): probability zero. Of 400,000
@@ -1856,7 +1867,33 @@ obstacle. Still open: `m(s)` and the GP's own mean both carry a trend, so
 one of them has to be held smooth or low-rank.
 
 **M–L — A Box–Cox family of `ScaledSimplex`, trainable with zeros
-(weighted entmax).** Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
+(weighted entmax)** — the warping is done in 0.10.13 as
+`warping.PowerSimplex(size, alpha, fixed)`; the censored likelihood is
+not (next item). The threshold is found by sorting -- the breakpoints
+where a part reaches zero fix which parts stay positive exactly -- and a
+Newton step on the log of the sum on that segment, closed forms at 0
+(softmax) and 1 (`ScaledSimplex`), the Jacobian `diag(g) - gg'/sum(g)`
+given by one implicit step; no closed form exists for a general power
+(the equation is a polynomial of degree 1/α). Zeros are refused below a
+fixed power of one, which the censored likelihood will lift. **Trained
+under the usual likelihood, α is biased toward the middle**: from a start
+of 1 it settled at 0.44, 0.58 and 0.89 for true powers of 0.25, 0.5 and 1
+(3000 iterations, D = 4, n ≈ 400-500, rows with zeros left out; 0.41,
+0.56, 0.86 with no `ZScore` after it), passing near the truth early and
+then drifting up -- so it is fixed by default.
+*Gate, 2026-11-17* (`docs/benchmarks/power_simplex.py`: D = 4, 600
+rows, a fifth held out, three seeds, training on the rows without a zero
+and scoring every held-out row): at the true power, `PowerSimplex` has the
+best CRPS where the power is below one -- 0.0286 against 0.0305
+(`ScaledSimplex`) and 0.0310 (CLR) at 0.25, 0.0306 against 0.0328 and
+0.0374 at 0.5 -- and the 90% coverage nearest nominal (0.919 and 0.892).
+At 1 it is `ScaledSimplex` to the bit; CLR's CRPS is lower there (0.0435
+against 0.0446) and its coverage 0.729 against 0.844. Zeros are where the
+usual likelihood shows its limit: trained without the rows that hold
+them, the power model samples a zero in 15% of rows at 0.5 where 28% of
+the held-out rows have one -- which is the censored likelihood's job.
+
+Forward `w = ((x/m)^α - 1)/α`, elementwise; backward
 `x = m * [1 + α(w - τ)]_+^(1/α)`, `τ` by bisection so the parts sum to one.
 The backward is `argmax_x w'x - Ω(x)` with `Ω` half the Cressie–Read power
 divergence of `x` from `m` (λ = α): Pearson chi-square at α = 1, where it
@@ -1894,7 +1931,48 @@ shares, so the `sqrt|P|` above drops out. Scripts: `experiments/censored.py`;
 checks: `verification/censored_general.py`, `censored_noise_warping.py`.
 
 **M — Extend the censored likelihood: per-part σ, per-sample σ and
-missing parts.** With `σ_k` per part, the Gaussian factor in `τ` stays
+missing parts.** *Built 2026-11-19 for 0.10.13 (experimental; gates passed, see the changelog), from the plan agreed that day*:
+`likelihood.CensoredSimplex`, a `Gaussian` subclass (one noise per part,
+Gaussian noise only) with `_PARTIAL_ROWS = True`, accepting `mass_fraction`
+and `compositional`; its warping is `PowerSimplex` or `ScaledSimplex`
+followed by any increasing elementwise links defined on the whole line
+(declared per class; `Log`, `BoxCox`, `Softplus` refused). Trained by Monte
+Carlo over the latent realizations; each row's `tau` integral by
+Gauss-Hermite about a centre and width linearized from the links (exact for
+affine links), in log space; hidden parts by faces -- one positive part
+closed, two by Gauss-Legendre, three or more by seeded Sobol points --
+with more than six hidden parts left out and `R = 0` scored as zeros;
+the common shift left to the GP prior; the likelihood starts its own links.
+Node counts measured against a dense reference (1e-3 nats a row). Gates:
+every row form against brute force; alpha trained through a model;
+`docs/benchmarks/censored_simplex.py` against `Gaussian` + `PowerSimplex`
+(CRPS, coverage, the share of rows with a zero; never the bound, the
+measures differing by zero pattern); batch invariance and a save. Detection
+limits, per-sample sigma and other noise families wait. Found while
+building it: four or more positive hidden parts need about 4096 Sobol
+points for 1e-3 nats a row, far too many for training, so `max_hidden`
+defaults to 3; the intervals over-cover (0.97 of a 90% one) on the gate's
+data, not yet explained; the partial rows bought no measurable skill there
+at four times the cost; and training cost about eighteen times
+`Gaussian`'s on the complete rows. Profiled the same day: the guide passes
+and the log-CDF over every part were cut (changelog), a step 2.2-2.6x
+faster, now 7x `Gaussian`'s on complete rows and 30x on the gate's mix.
+Left: the closed form of a row with only positive parts under affine links
+(an exact Gaussian integral in the shift, still taken on 24 nodes), the
+full-row evaluation of non-affine links (2-3x an affine one), and the
+single thread TensorFlow gives these operations; XLA cannot compile the
+unrolled face loops. *How it fits the code (2026-11-17)*: a likelihood class
+of its own, after the user's planned Variable for compositions with zeros
+and missing parts -- `MassFractionVariable`, built in 0.10.13: zeros arrive
+as `y == 0` with `has_value` 1, a missing part as `has_value` 0, through
+the per-column mask both trainers already batch, and the likelihood sets
+`_PARTIAL_ROWS = True` so the model stops collapsing partial rows. The
+Variable supplies each row's pattern (positive,
+zero, missing, later a detection limit); the warping supplies `b_k`,
+`g_k` and the threshold `-1/α` (`PowerSimplex`, or `ScaledSimplex` at
+α = 1) and must be applied to the composition itself, only elementwise
+links after it; the likelihood integrates `τ`. It starts the warping
+without `PowerSimplex`'s refusal of zeros. With `σ_k` per part, the Gaussian factor in `τ` stays
 closed form, with precision `Λ_P = sum_P σ_k^-2`. Each zero becomes
 `Φ((τ - 1/α - η_k)/σ_k)`, and `σ` may also vary by row. A row with
 unassayed parts `M` and known remainder `R = 1 - sum_O x_k` adds a
@@ -1948,6 +2026,37 @@ Recommendation: once zeros are allowed, the censored likelihood replaces
 the current score for this warping, with the noise family chosen inside
 it. Without zeros it reduces to the current Gaussian score with the
 discarded direction removed (see the latent-score item above).
+
+**S — Prior art for the censored likelihood (novelty check, 2026-11-19).**
+Cite this before any docstring or paper describes the likelihood as new.
+- At α = 1 with a uniform scale and independent Gaussian latents, the
+  censored likelihood is the Gaussian-sparsemax density of Farinhas, Aziz,
+  Niculae and Martins (ICLR 2022, arXiv 2108.02658, Appendix B, eqs.
+  27–28). That density is a Gaussian factor in the positive parts times a
+  one-dimensional integral of Φ over the zero parts. It matches ours to
+  6e-9 in log-density (`verification/farinhas_equivalence.py` in the
+  research project). They derive it but do not fit it to data.
+- The latent-Gaussian-plus-Euclidean-projection model itself is Butler &
+  Glasbey (JRSS C, 2008). Their latent lies on the plane `1'z = 1`, and
+  beyond D = 3 they fit by Gibbs sampling.
+- Spatial models with zeros: Leininger et al. (JABES, 2013) censor each part
+  at a fixed zero against a never-zero baseline, with areal CAR effects and
+  MCMC.
+- Missing parts with a known remainder appear in Dirichlet mixtures (Pillay
+  et al., arXiv 2607.27403, 2026), with censored parts as bounds.
+
+Recorded as possibly novel, with no prior match in the library, web search
+or arXiv full texts on 2026-11-19:
+- the weighted Box–Cox (entmax) generalisation, with the threshold read as
+  the latent shift the back-map ignores — a modest step;
+- its use as the observed-data likelihood of a GP model of compositions,
+  with a row-shared threshold integrated out, no baseline and any number of
+  zeros;
+- missing parts inside the same integral;
+- the sample-volume terms;
+- other noise families.
+
+Details are in Section 11 of `scaled_simplex_entmax.tex`.
 
 *Bridges to the grain-count law* (2026-11-14). These compare the items above
 with the research project "ToS-CoDA-nugget" (`report/main.tex`, Section 10
@@ -3126,6 +3235,38 @@ be fixed by declaring them: `None` is load-bearing in the finished state.
 Declaring `tuple` took 33 diagnostics to 67 and was reverted. Do not repeat
 that attempt.
 
+**S — The suite on a GPU** (filed 2026-11-20, the 0.10.13 release run,
+`run_parallel.py --gpu --cpus 12`). Eleven tests in seven files fail on
+the GPU and pass on the CPU, none of them a fault in the package; they
+assume the CPU:
+- *The CPU's batching.* On a GPU the first prediction batches take a
+  quarter of the estimate and the next are measured, so counts of batches
+  or progress events read otherwise: `test_full_variance.py`'s
+  `..._measures_its_batches` (its first call, before it patches
+  `_device_limit`), `test_measurement_samples.py`'s `..._traced_once_...`,
+  `test_progress.py`'s three, `test_coordinates_variance.py`'s
+  `..._batch_variance`. Patch `_net._device_limit` to `None` where the
+  test means the plain batches.
+- *The CPU's branches.* `test_batched_experts.py`'s `..._counts_the_experts_
+  a_call_computes` takes its baseline from the every-expert branch, which
+  a GPU does not take (patch `_gpu_visible` to False for it);
+  `test_measurement_samples.py`'s `..._xla_on_the_cpu_only` expects XLA on
+  the measured rows, which a GPU turns off by design.
+- *Single precision.* The realizations' feature products run in float32 on
+  a GPU and round by the batch's shape: `test_batched_experts.py`'s
+  `..._predict_in_slots_as_the_model_does[independent]` (1.4e-3) and
+  `test_gaussian_input.py`'s `..._to_the_last_bit` (about 1e-3) want
+  `quadrature_precision = "float64"`, as `test_a_network_predicts_by_
+  expert_as_the_model_does` already pins; `..._measurements_by_expert_
+  are_the_measurements_at_full_coverage` missed `atol=1e-12` by 2e-11.
+- `test_priors.py`'s `test_a_per_component_combination_predicts_end_to_end`
+  was still running after 90 minutes on the GPU, the main thread at 100 %
+  of a core, against 23 s for the whole file on the CPU; not yet looked
+  at. The long units ran slower on the card too: `test_expected_kernel.py`
+  [3/5] 3211 s, `test_batched_experts.py` [6/8] 3874 s.
+Not a release gate (CI and the release runs use the CPU), but the user
+runs on the GPU.
+
 ---
 
 ## 6. What GeoScape needs
@@ -3178,6 +3319,17 @@ or a `geoscape-cli` that imports geoML. Version 1 and the cloud need
 neither, Scripts being text and portal services not distribution.
 
 ---
+
+**Tails that overshoot (Corta Atalaya, 2026-11-19).** Run 4's block
+realizations reached 4e7 % Cu through `BoxCox → PCA(7) → Spline` with no
+closing `ZScore`; diagnosed and fixed in 0.10.13 by `linear_tails=True` on
+`BoxCox`, `Log` and `Spline` and a warning before training (changelog).
+Left for GeoScape, outside geoML: its editor could set `linear_tails` on by
+default for those three, the catalogue declaring the argument, since
+geoML cannot -- a save replays the arguments it records -- and offer an
+assay vector as a `MassFractionVariable`, which bounds every realization by
+the whole. Left in geoML, not built: a check at prediction that no
+realization exceeds its unit's whole (100 %, 1e6 ppm), *S*.
 
 ## 7. Geometallurgy
 

@@ -46,6 +46,7 @@ def _cases():
         (wp.CenteredLogRatio(3), composition),
         (wp.Rotation(3), normal),
         (wp.ScaledSimplex(3), composition),
+        (wp.PowerSimplex(3, alpha=0.5), composition),
         (wp.ContinuousNormalizingFlow(3, inducing_points=10), normal),
         (wp.TensorProductFlow(3, grid=7, rank=3), normal),
     ]
@@ -164,7 +165,6 @@ def _log_det_cases():
         (wp.Rotation(3), normal),
         (wp.PCA(3), spread),
         (wp.RobustPCA(3), spread),
-        (wp.ScaledSimplex(3), parts),
     ]
 
 
@@ -242,6 +242,34 @@ def test_the_log_ratios_determinant_is_the_one_on_the_hyperplane(n):
         restricted = basis.T @ jacobian @ basis
         assert np.log(abs(np.linalg.det(restricted))) == \
             pytest.approx(reported[i], abs=1e-5)
+
+
+@pytest.mark.parametrize("warping", [
+    lambda n: wp.ScaledSimplex(n),
+    lambda n: wp.PowerSimplex(n, alpha=0.0),
+    lambda n: wp.PowerSimplex(n, alpha=0.4),
+    lambda n: wp.PowerSimplex(n, alpha=1.0)],
+    ids=["scaled", "power-0", "power-0.4", "power-1"])
+@pytest.mark.parametrize("n", [3, 5])
+def test_a_simplex_warpings_determinant_is_the_one_onto_the_hyperplane(
+        warping, n):
+    """Their way back ignores a shift of the whole latent row, as the
+    softmax does, so what `forward` reports is the volume factor from the
+    plane of unit sum onto the plane of zero sum, along that shift -- the
+    centered log-ratio's convention, which is what makes the objectives
+    comparable. Until 0.10.13 `ScaledSimplex` reported the determinant of
+    its diagonal, `log(n)` above it."""
+    import tensorflow as tf
+    rng = np.random.default_rng(40 + n)
+    data = rng.dirichlet(np.ones(n) * 2.0, size=30)
+    warping = warping(n)
+    warping.initialize(data)
+    rows = data[:6]
+    reported = np.asarray(warping.forward(tf.constant(rows))[1])
+    basis = _tangent_basis(n)
+    for i, row in enumerate(rows):
+        restricted = basis.T @ _jacobian(warping, row) @ basis
+        assert np.log(abs(np.linalg.det(restricted))) ==             pytest.approx(reported[i], abs=1e-5)
 
 
 @pytest.mark.parametrize("n", [3, 5])

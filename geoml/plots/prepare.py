@@ -169,10 +169,82 @@ def logarithm(values: _types.ArrayLike,
         raise ValueError(
             "a logarithm needs positive values; columns %s hold zeros or "
             "negatives. Replace them first -- half the smallest positive "
-            "value is the usual choice for a detection limit"
+            "value is the usual choice for a detection limit -- or, for a "
+            "composition, give a power above zero instead"
             % ", ".join(str(int(column)) for column in bad))
 
     return centred_log_ratio(values) if compositional else _np.log(values)
+
+
+def power_coordinates(values: _types.ArrayLike,
+                      power: float) -> _types.FloatArray:
+    """
+    A composition opened up by `warping.PowerSimplex`'s map.
+
+    Each part is divided by its mean over the rows and taken through the
+    Box-Cox transform ``((x / m) ** power - 1) / power`` -- the logarithm at
+    a power of zero -- and each row is then centred, since the map back to
+    the simplex ignores a shift common to every part of a row. At zero this
+    is the centred log-ratio, moved by a constant per part; at one, the
+    parts divided by their means. Above zero a zero part has a finite value,
+    ``-1 / power``, which is what lets data with zeros be drawn.
+
+    Parameters
+    ----------
+    values : array
+        `(n_data, n_parts)`, every row a whole composition. Dividing each
+        part by its own mean makes the units the parts are stored in
+        irrelevant.
+    power : float
+        Between 0 and 1.
+
+    Raises
+    ------
+    ValueError
+        Where the power is outside [0, 1], a value is negative, or a part
+        is zero at a power of zero.
+    """
+    values = _np.asarray(values, dtype=float)
+    if not 0.0 <= power <= 1.0:
+        raise ValueError("the power must lie between 0 and 1, not %r"
+                         % (power,))
+    if _np.any(values < 0):
+        raise ValueError("a composition holds no negative part")
+    if power == 0 and _np.any(values == 0):
+        bad = _np.where(_np.any(values == 0, axis=0))[0]
+        raise ValueError(
+            "columns %s hold zeros, which have no logarithm; a power above "
+            "zero gives a zero part a finite value"
+            % ", ".join(str(int(column)) for column in bad))
+
+    with _np.errstate(divide="ignore"):
+        logged = _np.log(values / _np.mean(values, axis=0, keepdims=True))
+    opened = logged if power == 0 else _np.expm1(power * logged) / power
+    return opened - _np.mean(opened, axis=1, keepdims=True)
+
+
+def opened_up(values: _types.ArrayLike, labels, compositional: bool,
+              log: bool = False, power: "float | None" = None):
+    """
+    A variable's columns on the scale a figure draws them on, and their
+    labels.
+
+    `power` opens up a composition through `power_coordinates`; otherwise
+    `log` takes `logarithm`'s road, and with neither the columns are drawn
+    as they are.
+    """
+    if power is not None:
+        if not compositional:
+            raise TypeError(
+                "a power opens up a composition, whose parts share a whole; "
+                "pass log=True to draw anything else on a log scale")
+        return (power_coordinates(values, power),
+                ["pow%g(%s)" % (power, label) for label in labels])
+    if log:
+        return (logarithm(values, compositional),
+                ["%s(%s)" % ("clr" if compositional else "log", label)
+                 for label in labels])
+    return _np.asarray(values, dtype=float), list(labels)
 
 
 def principal_components(values: _types.ArrayLike,
@@ -227,25 +299,29 @@ def principal_components(values: _types.ArrayLike,
             "eigenvalues": eigenvalues}
 
 
-def component_analysis(var, explained: float = 0.9, log: bool = False):
+def component_analysis(var, explained: float = 0.9, log: bool = False,
+                       power: "float | None" = None):
     """
-    `principal_components` for a variable, on a log scale if asked.
+    `principal_components` for a variable, on a log scale or through a power
+    if asked.
 
     A composition is opened up whether or not `log` is set, and that is not an
     oversight: its parts carry a constant sum, so their covariance is singular
     and the first component of the raw proportions would spend itself
-    describing the closure rather than the data. There is no useful PCA of a
-    composition to refuse it. Everything else is left as measured unless `log`
-    says otherwise.
+    describing the closure rather than the data. It takes the centred
+    log-ratio unless `power` names another map (`power_coordinates`). A
+    mass-fraction variable is the exception: its zeros have no logarithm, so
+    its fractions are taken as they are unless `log` or `power` says
+    otherwise. Everything else is left as measured unless `log` does.
     """
     values, measured, labels = numeric_values(var)
     values = values[measured]
 
     compositional = isinstance(var, _data.CompositionalVariable)
-    if compositional or log:
-        values = logarithm(values, compositional)
-        labels = ["%s(%s)" % ("clr" if compositional else "log", label)
-                  for label in labels]
+    always = compositional \
+        and not isinstance(var, _data.MassFractionVariable)
+    values, labels = opened_up(values, labels, compositional,
+                               log or always, power)
 
     analysis = principal_components(values, explained)
     analysis["labels"] = labels

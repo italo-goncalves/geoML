@@ -546,7 +546,7 @@ def _warping_calls(cls):
             wp.SinhArcsinh: (3,), wp.Sigmoid: (3,),
             wp.ContinuousNormalizingFlow: (2,), wp.TensorProductFlow: (2,),
             wp.PCA: (4, 2), wp.RobustPCA: (4, 2), wp.CenteredLogRatio: (3,),
-            wp.Rotation: (3,), wp.ScaledSimplex: (3,),
+            wp.Rotation: (3,), wp.ScaledSimplex: (3,), wp.PowerSimplex: (3,),
             wp.ChainedWarping: (wp.ZScore(3), wp.PCA(3, 2))}[cls]
 
 
@@ -568,7 +568,8 @@ def test_a_warping_takes_and_gives_the_widths_it_declares(cls):
 # likelihoods: every pairing they declare, built and trained a step
 # --------------------------------------------------------------------------- #
 _VARIABLE_NAMES = {"continuous": "continuous", "vector": "vector",
-                   "compositional": "composition", "rock_type": "rock_type",
+                   "compositional": "composition",
+                   "mass_fraction": "mass_fraction", "rock_type": "rock_type",
                    "categorical": "categorical",
                    "ordered_rock_type": "ordered", "binary": "binary",
                    "anomaly": "anomaly"}
@@ -587,6 +588,13 @@ def every_variable():
                               rng.uniform(1.0, 2.0, (n, 2)))
     point.add_compositional_variable(
         "composition", ["s", "t"], rng.dirichlet([3.0, 4.0], n))
+    # zeros, and a row missing a part, which the model leaves out
+    fractions = rng.dirichlet([3.0, 4.0, 2.0], n)
+    fractions[:4, 2] = 0.0
+    fractions[:4] /= fractions[:4].sum(axis=1, keepdims=True)
+    fractions[4, 1] = np.nan
+    point.add_mass_fraction_variable("mass_fraction", ["u", "v", "w"],
+                                     fractions)
     point.add_rock_type_variable("rock_type", labels=("granite", "basalt"),
                                  measurements_a=rock)
     point.add_categorical_variable("categorical", ("granite", "basalt"), rock)
@@ -608,6 +616,9 @@ def _likelihood(cls, length):
         return cls(wp.Identity(length))
     if cls is lk.Mixture:
         return cls(wp.ZScore(length))
+    if cls is lk.CensoredSimplex:
+        return cls(wp.ChainedWarping(wp.PowerSimplex(length, alpha=0.5),
+                                     wp.ZScore(length)))
     if cls is lk.LikelihoodMixture:
         return cls([lk.Gaussian(wp.ZScore(length)),
                     lk.Gaussian(wp.ZScore(length))], shares="latent")
@@ -750,6 +761,7 @@ def _conditioned_builds():
         builds.append((latent.GPWalk, args, dict(kwargs, reach=reach), {}))
     for fixed in (True, False):
         builds.append((wp.Rotation, (3,), {"fixed": fixed}, {}))
+        builds.append((wp.PowerSimplex, (3,), {"fixed": fixed}, {}))
     for points, normals in (_plane(), _line()):
         for extra in ({}, {"drag": True}, {"profile": "bell"}):
             builds.append((tr.FaultDisplacement, (points, normals),
@@ -869,6 +881,7 @@ def _start_calls():
         (wp.YeoJohnson, (3,), {"exponent": 0.5}),
         (wp.Arcsinh, (3,), {"scale": 2.0}),
         (wp.SinhArcsinh, (3,), {"skewness": 0.5, "tailweight": 2.0}),
+        (wp.PowerSimplex, (3,), {"alpha": 0.5}),
         (lk.Mixture, (wp.ZScore(1),), {"weights": [0.3, 0.7]}),
         (lk.LikelihoodMixture, (_gaussians(),), {"weights": [0.3, 0.7]}),
         (lk.Bernoulli, (), {"shift": 1.0}),

@@ -1108,6 +1108,8 @@ class VGPNetwork(_GPModel):
         super().__init__(options=options)
 
         self.data = data
+        # whether the warpings' tails were looked at before training
+        self._tails_checked = False
 
         # `variables={"Rock": lik, ...}` names each likelihood beside its
         # variable, which is the spelling that cannot get the order wrong
@@ -1228,8 +1230,13 @@ class VGPNetwork(_GPModel):
             y, has_value = data.variables[v].get_measurements()
             has_value = _np.all(has_value == 1.0, axis=1)
             y = y[has_value, :]
-            self.likelihoods[i].initialize(
-                y, weights=None if stored is None else stored[has_value])
+            try:
+                self.likelihoods[i].initialize(
+                    y, weights=None if stored is None else stored[has_value])
+            except _warp.DomainError as error:
+                raise _warp.DomainError(
+                    f"Variable {v!r}{_data_column(self.likelihoods[i], error, data.variables[v])}: {error}",
+                    error.warping, error.column, error.count) from error
 
         # directions
         self.directional_likelihood = _lk.GradientIndicator()
@@ -1840,8 +1847,9 @@ class VGPNetwork(_GPModel):
         """The measurements of every modelled variable side by side, and
         the mask of which cells hold one."""
         y, has_value = [], []
-        for v in self.variables:
+        for v, lik in zip(self.variables, self.likelihoods):
             y_v, h_v = data.variables[v].get_measurements()
+            y_v, h_v = _whole_rows(v, lik, y_v, h_v)
             y.append(y_v)
             has_value.append(h_v)
         return _np.concatenate(y, axis=1), _np.concatenate(has_value, axis=1)
@@ -1884,6 +1892,19 @@ class VGPNetwork(_GPModel):
             variable.assign(_tf.zeros(variable.shape, variable.dtype))
         self._phase = None
         self._by_expert = None
+
+    def _check_tails(self):
+        """Warns, once per model and before its first training call, of a
+        warping whose way back carries a latent draw far past the data."""
+        if getattr(self, "_tails_checked", True):
+            return
+        self._tails_checked = True
+        for v, likelihood in zip(self.variables, self.likelihoods):
+            if not isinstance(likelihood, _lk._ContinuousLikelihood):
+                continue
+            y, has_value = self.data.variables[v].get_measurements()
+            _lk._warn_tail_reach(
+                likelihood, y[_np.all(has_value == 1.0, axis=1)], v)
 
     def _training_phase(self, variables, kind):
         """The stopping rule and the minibatch order a training call goes on
@@ -2026,6 +2047,7 @@ class VGPNetwork(_GPModel):
         --------
         train_svi : minibatch training, for larger data sets.
         """
+        self._check_tails()
         training_inputs = [self.data.variables[v].training_input()
                            for v in self.variables]
 
@@ -2099,6 +2121,7 @@ class VGPNetwork(_GPModel):
         --------
         train_full : one gradient step per iteration on all the data.
         """
+        self._check_tails()
         model_variables = self.get_unfixed_variables()
 
         step = self._training_step(
@@ -3457,6 +3480,7 @@ class VGPNetwork(_GPModel):
         if global_update not in ("batch", "round", "epoch"):
             raise ValueError("global_update is 'batch', 'round' or 'epoch', "
                              "got %r" % (global_update,))
+        self._check_tails()
         if decay not in ("steps", "epochs"):
             raise ValueError("decay is 'steps' or 'epochs', got %r"
                              % (decay,))
@@ -4772,6 +4796,47 @@ class VGPNetwork(_GPModel):
                     variable.set_responsibilities(answer)
             out[v] = answer
         return out
+
+
+def _whole_rows(name, likelihood, y, has_value):
+    """`y` and `has_value` with every row `likelihood` cannot score left
+    out.
+
+    Only a `MassFractionVariable` hands over a row holding some of its
+    columns and not others. A likelihood that weighs a row whole would score
+    the missing columns at their placeholder, and `CensoredSimplex` scores
+    a row only up to a number of missing parts, so a row it cannot score is
+    marked missing throughout -- its values too, a placeholder being
+    something every warping can transform -- and the count is reported.
+    """
+    held = _np.asarray(has_value) == 1.0
+    left = _np.any(held, axis=1) & ~likelihood._scored_rows(has_value)
+    if not left.any():
+        return y, has_value
+    warnings.warn(
+        f"Variable {name!r}: {int(left.sum())} row(s) cannot be scored by "
+        f"{type(likelihood).__name__}, as {likelihood._unscored()}; the "
+        f"model leaves them out")
+    y = _np.where(left[:, None], 1.0, y)
+    has_value = _np.where(left[:, None], 0.0, has_value)
+    return y, has_value
+
+
+def _data_column(likelihood, error, variable):
+    """`", column 'Hg'"` where a warping's refusal is of a column of the
+    data -- the first link of the likelihood's own warping sees the data's
+    columns as they are; any later link sees transformed ones."""
+    if not likelihood._SINGLE_WARPING:
+        return ""
+    first = likelihood.warping
+    if isinstance(first, _warp.ChainedWarping):
+        first = first.warpings[0]
+    labels = getattr(variable, "labels", None)
+    if error.warping is not first or error.column is None:
+        return ""
+    if labels is None:
+        return ""
+    return f", column {labels[error.column]!r}"
 
 
 def _power_below(n):

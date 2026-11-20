@@ -195,6 +195,7 @@ VARIABLES = {
     "continuous": ("ContinuousVariable", ()),
     "vector": ("VectorVariable", ("n_components",)),
     "compositional": ("CompositionalVariable", ("n_components",)),
+    "mass_fraction": ("MassFractionVariable", ("n_components",)),
     "rock_type": ("RockTypeVariable", ("n_classes",)),
     "categorical": ("CategoricalVariable", ("n_classes",)),
     "ordered_rock_type": ("OrderedRockType", ("n_classes",)),

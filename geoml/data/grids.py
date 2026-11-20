@@ -148,7 +148,23 @@ def _aggregate_onto(target, data, variables=None, metadata=True):
                 % (name, ", ".join(sorted(data.variables)) or "none"))
         variable = data.variables[name]
 
-        if isinstance(variable, CompositionalVariable):
+        if isinstance(variable, MassFractionVariable):
+            # the complete rows alone, zeros included: a mean of parts over
+            # rows that each hold the whole holds the whole, and a part's
+            # mean over the rows that assayed it would not add up with the
+            # others'. Averaged as fractions, stored in each part's unit
+            fractions, has_value = variable.get_measurements()
+            complete = _np.all(has_value == 1.0, axis=1)
+            fractions = _np.where(complete[:, None], fractions, _np.nan)
+            parts = _np.stack(
+                [_cell_means(n_cells, cell, fractions[:, i])
+                 for i in range(fractions.shape[1])], axis=1)
+            target.variables[name] = MassFractionVariable(
+                name, target, list(variable.labels),
+                variable.from_model_units(parts),
+                units={label: variable.components[label].unit
+                       for label in variable.labels})
+        elif isinstance(variable, CompositionalVariable):
             # averaged part by part, then closed again: means of parts do not
             # sum to one on their own, and a composition that does not close
             # is not a composition

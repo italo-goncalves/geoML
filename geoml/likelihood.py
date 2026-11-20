@@ -27,6 +27,7 @@ import geoml.parameter as _gpr
 import geoml.math.tf as _tftools
 import geoml.math.interpolate as _gint
 import geoml.stats.probability as _gmp
+import geoml.stats.censored as _censored
 import geoml.latent.network as _network
 
 import numpy as _np
@@ -375,6 +376,21 @@ class _Likelihood(_gpr.Parametric):
     # stores; a mixture of likelihoods has one per component and none of
     # its own.
     _SINGLE_WARPING = False
+
+    # Whether `log_lik` scores a row that holds some of its columns and not
+    # others. Only `CensoredSimplex` does: the others weigh a row whole, so
+    # the model hands them complete rows only
+    # (`VGPNetwork._stacked_measurements`).
+    _PARTIAL_ROWS = False
+
+    def _scored_rows(self, has_value):
+        """Which rows, of those holding anything, `log_lik` can score: the
+        complete ones, unless the likelihood says otherwise."""
+        return _np.all(_np.asarray(has_value) == 1.0, axis=1)
+
+    def _unscored(self):
+        """Why the rows `_scored_rows` leaves out are left out."""
+        return "they hold some of their parts and not others"
 
     def __init__(self, size: int):
         super().__init__()
@@ -941,6 +957,65 @@ class _ContinuousLikelihood(_Likelihood):
 
     def _make_distribution(self, *args, **kwargs):
         raise NotImplementedError
+
+
+# where `_warn_tail_reach` probes the latent space, and how far past the
+# data, in spans of the data, a value it brings back may land unremarked:
+# a log link on lognormal data of log-sd 1.5 lands about 90 spans out at
+# the probe, which is the law the link states rather than an accident of
+# the chain; Run 4 of Corta Atalaya landed 2300 at its start, 165 trained
+_REACH_PROBE = 6.0
+_REACH_LIMIT = 100.0
+
+
+def _warn_tail_reach(likelihood, y, name=None):
+    """Warn where the warping's way back carries a latent value at the edge
+    of what a prediction draws far past the data.
+
+    Each latent axis is probed at plus and minus `_REACH_PROBE` -- the
+    latent prior is a unit variance, and a model's realizations reach that
+    far -- and brought back through the whole chain. A probe landing more
+    than `_REACH_LIMIT` spans of the data past its range is the overshoot a
+    log link, a steep spline tail or a projection compound into
+    (Corta Atalaya, 2026-11: realizations at 1e7 times the data's maximum).
+    Asked by the model before it trains, with the warping as training will
+    start from, so that a saved model opened to predict is not warned of
+    what was settled when it was fitted.
+    """
+    warping = likelihood.warping
+    y = _np.asarray(y, dtype=float)
+    if y.ndim == 1:
+        y = y[:, None]
+    y = y[_np.all(_np.isfinite(y), axis=1)]
+    if len(y) < 2:
+        return
+    lo, hi = y.min(axis=0), y.max(axis=0)
+    span = hi - lo
+    probes = _np.zeros((2 * warping.size_out, warping.size_out))
+    for k in range(warping.size_out):
+        probes[2 * k, k] = -_REACH_PROBE
+        probes[2 * k + 1, k] = _REACH_PROBE
+    with _np.errstate(all="ignore"):
+        back = _np.asarray(warping.backward(_tf.constant(probes)))
+        reach = _np.where(span > 0, _np.maximum(back - hi, lo - back) / span,
+                          0.0)
+    reach = _np.where(_np.isnan(back), _np.inf, reach)
+    worst = reach.max(axis=0)
+    far = _np.where(worst > _REACH_LIMIT)[0]
+    if far.size == 0:
+        return
+    column = far[_np.argmax(worst[far])]
+    probe = _np.argmax(reach[:, column])
+    _warnings.warn(
+        "%s's warping carries a latent value of %+g back to %.3g in "
+        "component %d, whose data lie in [%.3g, %.3g]; %d component(s) land "
+        "more than %g spans of their data past it. Realizations will "
+        "overshoot the data by as much: give the log-like links and the "
+        "splines `linear_tails=True`, and end the chain with `ZScore`."
+        % ("Variable %r" % name if name is not None
+           else type(likelihood).__name__, probes[probe].sum(),
+           back[probe, column], column,
+           lo[column], hi[column], far.size, _REACH_LIMIT), stacklevel=4)
 
 
 def _warn_log_tail(likelihood, y):
@@ -2832,13 +2907,197 @@ class GradientIndicator(_Likelihood):
 # --------------------------------------------------------------------------- #
 # the catalogue
 # --------------------------------------------------------------------------- #
+def _simplex_and_links(warping):
+    """The simplex warping a `CensoredSimplex` reads and the links after
+    it, refusing any other shape of chain."""
+    def flat(w):
+        if isinstance(w, _warp.ChainedWarping):
+            return [link for inner in w.warpings for link in flat(inner)]
+        return [w]
+
+    chain = flat(warping)
+    first, rest = chain[0], chain[1:]
+    if not isinstance(first, (_warp.PowerSimplex, _warp.ScaledSimplex)):
+        raise TypeError(
+            "CensoredSimplex needs its warping to start with PowerSimplex "
+            "or ScaledSimplex, which is what puts a zero at a threshold; "
+            "it starts with %s" % type(first).__name__)
+    for link in rest:
+        if isinstance(link, (_warp.PowerSimplex, _warp.ScaledSimplex)) \
+                or not link.elementwise \
+                or not getattr(link, "_WHOLE_LINE", False):
+            raise TypeError(
+                "CensoredSimplex takes, after the simplex warping, only "
+                "increasing links that act on each part alone and are "
+                "defined on the whole line (ZScore, Center, Scale, "
+                "SinhArcsinh, YeoJohnson, Arcsinh, Spline): the integral "
+                "over the row's shift evaluates them at any latent value. "
+                "%s is not one" % type(link).__name__)
+    return first, rest
+
+
+class CensoredSimplex(Gaussian):
+    """
+    A Gaussian likelihood on the simplex, for zeros and missing parts.
+
+    The noise is Gaussian on the latent scale, one variance per part, as in
+    `Gaussian`. What changes is how a row is scored. A simplex warping's
+    way back ignores a shift of the whole latent row, and this likelihood
+    integrates that shift out instead of scoring it. A zero part is
+    censored: its latent value lies anywhere below the point where the part
+    vanishes, and the row scores the probability of that, not a density. A
+    missing part -- one a `MassFractionVariable` holds as not assayed -- is
+    integrated over every value it could take, given what the observed
+    parts leave of the whole, zero included.
+
+    The warping is `warping.PowerSimplex` or `warping.ScaledSimplex`, alone
+    or followed by increasing links that act on each part alone and are
+    defined on the whole line: `ZScore`, `Center`, `Scale`, `SinhArcsinh`,
+    `YeoJohnson`, `Arcsinh` or `Spline`. With affine links every integral
+    in the shift is exact; any other is integrated about a centre
+    linearized through it. Training takes the expectation over the latent
+    realizations (`GPOptions.training_samples`); prediction, the
+    measurement samples and cross-validation are `Gaussian`'s, the zeros
+    coming back exactly from the warping's way back.
+
+    Parameters
+    ----------
+    warping
+        The simplex warping, alone or chained with the links after it.
+    sharpness
+        Data augmentation, as in `Gaussian`.
+    max_hidden
+        The most parts a row may be missing and still be scored. The model
+        leaves out the rows missing more, and says how many. Up to three
+        the integrals are exact to within 3e-4 nats a row; four or more
+        positive parts among the missing ones are integrated by 1024 Sobol
+        points, within about 3e-3, at a cost that grows quickly with
+        them.
+
+    Raises
+    ------
+    TypeError
+        Where the warping is not a simplex warping followed by links of
+        the kind above.
+
+    See Also
+    --------
+    geoml.data.MassFractionVariable : the variable it is built for.
+    geoml.warping.PowerSimplex : the warping it reads.
+
+    Notes
+    -----
+    A row's likelihood is a density on the face of the simplex its zero
+    parts lie on, measured in its positive parts' free coordinates, so rows
+    with different zeros are on different measures: the bound is
+    comparable across the parameter values of one model, never against a
+    model with another likelihood. Compare held-out scores instead.
+
+    With `ZScore` after the warping the data cannot tell a shift of the
+    whole latent row from no shift, and the GP prior alone holds it.
+
+    References
+    ----------
+    Butler, A. and Glasbey, C. (2008). A latent Gaussian model for
+    compositional data with zeros. *Journal of the Royal Statistical
+    Society: Series C (Applied Statistics)* 57(5), 505-520.
+    doi:10.1111/j.1467-9876.2008.00627.x. The model family: a latent
+    Gaussian projected onto the simplex, zeros on its boundary.
+
+    Farinhas, A., Aziz, W., Niculae, V. and Martins, A. F. T. (2022).
+    Sparse communication via mixed distributions. *International
+    Conference on Learning Representations (ICLR)*. arXiv:2108.02658.
+    Appendix B, eqs. 27-28 give this likelihood for ``alpha = 1``, a
+    uniform scale and Gaussian noise: a Gaussian factor in the positive
+    parts times a one-dimensional integral over the zero parts.
+
+    The research report ``scaled_simplex_entmax.tex`` (project
+    "Alternative CoDA transformations"), equations (eq:loglik),
+    (eq:missing) and (eq:general): the weighted Box-Cox (entmax) family,
+    parts not assayed, other noise families and further links; Section 11
+    there for what is and is not new.
+    """
+    _PARTIAL_ROWS = True
+
+    def __init__(self, warping: "_warp._Warping", sharpness: int = 1,
+                 max_hidden: int = 3):
+        super().__init__(warping, sharpness)
+        self._simplex, self._links = _simplex_and_links(warping)
+        self.max_hidden = int(max_hidden)
+        self._rule = _censored.Rule()
+
+    def _scored_rows(self, has_value):
+        held = _np.asarray(has_value) == 1.0
+        return _np.any(held, axis=1) \
+            & (_np.sum(~held, axis=1) <= self.max_hidden)
+
+    def _unscored(self):
+        return "they miss more than %d parts" % self.max_hidden
+
+    def initialize(self, y, weights=None):
+        y = _np.asarray(y, dtype=float)
+        _warp._check_domain(self._simplex, y, lower=0.0, closed=True,
+                            missing=True)
+        complete = ~_np.any(_np.isnan(y), axis=1)
+        y = y[complete]
+        if weights is not None:
+            weights = _np.asarray(weights, dtype=float)[complete]
+        positive = y > 0
+        if isinstance(self._simplex, _warp.PowerSimplex):
+            alpha = self._simplex.parameters["alpha"]
+            if not positive.all() and alpha.fixed \
+                    and float(alpha.get_value()) == 0.0:
+                raise _warp.DomainError(
+                    "a power of zero is the log-ratio, which no zero part "
+                    "can reach: give the power a value above zero, or let "
+                    "it train", self._simplex)
+        self._simplex.scale = _tf.constant(
+            _np.mean(y, axis=0, keepdims=True), _tf.float64)
+
+        # the links start on each part's positive values alone: a zero's
+        # forward value is the threshold, not a measurement. Each part's
+        # zeros take its positive values in turn, so that every column
+        # keeps the distribution of what was measured above zero
+        warped = _np.asarray(self._simplex.forward(
+            _tf.constant(y, _tf.float64))[0], dtype=float)
+        filled = warped.copy()
+        for k in range(warped.shape[1]):
+            values = warped[positive[:, k], k]
+            if values.size == 0:
+                raise _warp.DomainError(
+                    "part %d is zero in every complete row, which leaves "
+                    "its links nothing to start from" % k, self._simplex,
+                    k, int((~positive[:, k]).sum()))
+            gaps = _np.where(~positive[:, k])[0]
+            filled[gaps, k] = values[_np.arange(gaps.size) % values.size]
+        for link in self._links:
+            filled = _np.asarray(link.initialize(filled, weights),
+                                 dtype=float)
+
+    def log_lik(self, mu, var, y, has_value, samples=None, *args,
+                latent_gaussian=True, **kwargs):
+        if samples is None or isinstance(samples, int):
+            raise ValueError(
+                "CensoredSimplex trains on the latent realizations, which "
+                "the model hands over; none were given")
+        self.warping.refresh()
+        noise_sd = _tf.sqrt(_tf.reshape(
+            self.parameters["noise"].get_value(), [-1]))
+        out, _ = _censored.log_likelihood(
+            y, has_value > 0.5, samples, noise_sd,
+            _censored.Simplex(self._simplex),
+            _censored.Links(self._links, self.size), self._rule,
+            self.max_hidden)
+        return _tf.reduce_sum(_tf.reduce_mean(out, axis=1)) * self.sharpness
+
+
 # What `geoml.catalogue` cannot read off a likelihood: the variable types it
 # may be bound to -- nothing checks them when a model is built, only the
 # sizes, so `test_catalogue.py` builds each pairing instead -- and how its
 # size follows: from its warping for the continuous ones, whose warping must
 # take the variable's `length`, from the variable's classes for a
 # categorical one.
-_GRADED = ["continuous", "vector", "compositional"]
+_GRADED = ["continuous", "vector", "compositional", "mass_fraction"]
 _BY_WARPING = {"rule": "warping"}
 _CLASSES = {"size_param": True, "constraints": {"min": 2}}
 
@@ -2846,14 +3105,26 @@ for _likelihood in (Gaussian, Laplace, Gamma, StudentT, EpsilonInsensitive,
                     Huber):
     _likelihood._catalogue = {"category": "likelihood", "size": _BY_WARPING,
                               "accepts": _GRADED}
+# a Gamma density is zero at zero, where a mass fraction may well be
+Gamma._catalogue["accepts"] = [kind for kind in _GRADED
+                               if kind != "mass_fraction"]
 # the same likelihoods sized for a vector, kept so that the models saved
 # with them still open; a network takes the univariate form at any width
 for _likelihood in (MultivariateGaussian, MultivariateLaplace,
                     MultivariateEpsilonInsensitive, MultivariateHuber):
     _likelihood._catalogue = {
         "category": "likelihood", "size": _BY_WARPING,
-        "accepts": ["vector", "compositional"], "stability": "internal",
+        "accepts": ["vector", "compositional", "mass_fraction"],
+        "stability": "internal",
         "params": {"n_components": {"constraints": {"min": 1}}}}
+# experimental until its gates pass (roadmap: "Extend the censored
+# likelihood"); its warping must start with a simplex warping, which the
+# catalogue's `warping` type cannot say
+CensoredSimplex._catalogue = {
+    "category": "likelihood", "size": _BY_WARPING,
+    "accepts": ["mass_fraction", "compositional"],
+    "stability": "experimental",
+    "params": {"max_hidden": {"type": "int", "constraints": {"min": 1}}}}
 Mixture._catalogue = {
     "category": "likelihood", "size": _BY_WARPING, "accepts": _GRADED,
     "stability": "experimental",
@@ -2909,7 +3180,8 @@ GradientIndicator._catalogue = {
 _SHIFTS = {"name": "bias", "start": None,
            "exists_when": {"argument": "bias", "equals": True}}
 for _class, _trained in (
-        (Gaussian, ["noise"]), (Laplace, ["scale"]), (Gamma, ["mean_alpha"]),
+        (Gaussian, ["noise"]), (CensoredSimplex, ["noise"]),
+        (Laplace, ["scale"]), (Gamma, ["mean_alpha"]),
         (StudentT, ["scale", "df"]),
         (EpsilonInsensitive, ["epsilon", "c_rate"]),
         (Huber, ["threshold", "std"]),

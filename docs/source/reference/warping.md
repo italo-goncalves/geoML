@@ -11,12 +11,19 @@ units rather than the latent one; chains add theirs. Each also declares
 whether one component of its input can reach another of its output, which
 decides how the likelihood integrates the noise.
 
+A warping whose domain is bounded checks the data it starts from: a value
+it cannot transform (a negative grade under `Log` or `BoxCox`, a zero part
+under `CenteredLogRatio`, an infinite value under any of them or a
+`PCA`) raises a
+`DomainError` naming the component, and a model names the variable too.
+
 ```{eval-rst}
 .. automodule:: geoml.warping
    :members: Identity, ZScore, Center, Scale, Log, Softplus, Sigmoid,
              BoxCox, YeoJohnson, Arcsinh, SinhArcsinh,
              Spline, ChainedWarping, Rotation, PCA, RobustPCA,
-             CenteredLogRatio, ScaledSimplex, ContinuousNormalizingFlow,
-             TensorProductFlow
+             CenteredLogRatio, ScaledSimplex, PowerSimplex,
+             ContinuousNormalizingFlow,
+             TensorProductFlow, DomainError
    :show-inheritance:
 ```

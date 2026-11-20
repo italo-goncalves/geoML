@@ -1780,14 +1780,16 @@ class DrillholeData(_data._SpatialData):
         return reference.data[[HOLE, FROM, TO]]
 
     def as_point_data(self, tables=None, position=0.5, compositional=None,
-                      vector=None, drop_missing=True, contacts=False):
+                      vector=None, drop_missing=True, contacts=False,
+                      mass_fraction=None):
         """
         Converts the interval data to points at the centre of each interval.
 
         Every requested table must be on the same support, which compositing
         produces; the tables are then merged row for row. Numeric columns
         become continuous variables and categorical ones become categorical
-        variables, unless they are claimed by a compositional or vector group.
+        variables, unless they are claimed by a compositional, mass-fraction
+        or vector group.
 
         The hole each point came from, its depth down that hole and the
         length it stands for are carried as the metadata columns `HOLEID`,
@@ -1835,6 +1837,13 @@ class DrillholeData(_data._SpatialData):
             a `LENGTH` of zero and the boundary as its `DEPTH`. A change to
             or from an unlogged stretch is no contact: an empty interval, or
             a gap, says nothing about where the class ends.
+        mass_fraction : dict
+            Groups of columns to convert to mass-fraction variables, in the
+            same spellings as `compositional`. Each part is taken as its
+            exact fraction of the whole sample: zeros are kept, a part not
+            assayed is missing while the others keep their values, and
+            with "rest" the further part is missing wherever any listed
+            part is. Negative values are refused.
 
         Returns
         -------
@@ -1859,9 +1868,11 @@ class DrillholeData(_data._SpatialData):
 
         groups = {name: _composition_group(name, group, column_units)
                   for name, group in (compositional or {}).items()}
+        fractions = {name: _composition_group(name, group, column_units)
+                     for name, group in (mass_fraction or {}).items()}
 
         claimed = set()
-        for columns, _, _ in groups.values():
+        for columns, _, _ in list(groups.values()) + list(fractions.values()):
             claimed.update(columns)
         for columns in (vector or {}).values():
             claimed.update(columns)
@@ -1931,6 +1942,10 @@ class DrillholeData(_data._SpatialData):
                        if c in column_units})
         for name, (columns, units, rest) in groups.items():
             point.add_compositional_variable(
+                name, columns, frame[columns].values.astype(float),
+                units=units, rest=rest)
+        for name, (columns, units, rest) in fractions.items():
+            point.add_mass_fraction_variable(
                 name, columns, frame[columns].values.astype(float),
                 units=units, rest=rest)
 

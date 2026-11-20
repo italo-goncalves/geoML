@@ -37,7 +37,8 @@ machine, every core was busy, and every process took the GPU the display
 runs on. The runner takes half the physical cores by default, pins each
 process to cores of its own -- which every thread and forked worker
 inherits, and which geoML's pools read -- lowers the tests' priority, and
-hides the GPU. **A process gets physical cores**, each with its hyperthread
+hides the GPU (`--gpu` shows it, each process growing its share of the
+card's memory rather than taking it whole). **A process gets physical cores**, each with its hyperthread
 siblings: counted in logical CPUs, four of them were two cores on a
 hyperthreaded machine, and chapter 17 ran on two cores at 0.9.0.
 
@@ -218,16 +219,16 @@ def _collected(path):
     return [line for line in listed.splitlines() if "::" in line]
 
 
-def _run(unit, slots, logs):
+def _run(unit, slots, logs, gpu=False):
     name, args = unit
     slot = slots.get()
     try:
-        return _run_on(name, args, slot, logs)
+        return _run_on(name, args, slot, logs, gpu)
     finally:
         slots.put(slot)
 
 
-def _run_on(name, args, slot, logs):
+def _run_on(name, args, slot, logs, gpu=False):
     # the slot's logical CPUs, and as many threads as it has physical cores
     cores, threads = slot
     log = logs / (name.replace("/", "_") + ".log")
@@ -243,6 +244,10 @@ def _run_on(name, args, slot, logs):
                PYTHONPATH=os.pathsep.join(
                    [str(ROOT)] + [p for p in [os.environ.get("PYTHONPATH")]
                                   if p]))
+    if gpu:
+        # several processes share the card, each growing into what it uses
+        del env["CUDA_VISIBLE_DEVICES"]
+        env["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
     command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                *args] + [a for d in DESELECT for a in ("--deselect", d)]
     start = time.monotonic()
@@ -273,6 +278,10 @@ def main(argv=None):
                              % (CPUS_PER_JOB, GB_PER_JOB))
     parser.add_argument("--no-manual", action="store_true",
                         help="leave the manual's chapters out")
+    parser.add_argument("--gpu", action="store_true",
+                        help="let the tests see the GPU, each process "
+                             "growing its share of its memory; the times "
+                             "are not recorded, the order being the CPU's")
     parser.add_argument("--logs", default=None,
                         help="where to write each unit's output")
     options = parser.parse_args(argv)
@@ -299,14 +308,16 @@ def main(argv=None):
     start = time.monotonic()
     results = []
     with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
-        running = [pool.submit(_run, unit, slots, logs) for unit in units]
+        running = [pool.submit(_run, unit, slots, logs, options.gpu)
+                   for unit in units]
         for future in concurrent.futures.as_completed(running):
             name, passed, seconds, log = future.result()
             results.append((seconds, name, passed, log))
             print("%s %6.0f s  %s" % ("pass" if passed else "FAIL", seconds,
                                       name), flush=True)
 
-    _record(results)
+    if not options.gpu:
+        _record(results)
     failed = [r for r in results if not r[2]]
     for _, name, _, log in failed:
         print("\n==== %s ====\n%s" % (name, log.read_text()[-4000:]))

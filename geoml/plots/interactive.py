@@ -276,7 +276,7 @@ class Interactive(_base.Selection):
 
     def pairs(self, kind="scatter", alpha=0.7, bins=60, log_counts=False,
               log=False, principal_components=0, upper=None, size=5,
-              height=None, width=None) -> "_go.Figure":
+              height=None, width=None, power=None) -> "_go.Figure":
         """
         Every component against every other, with its distribution down the
         diagonal.
@@ -309,6 +309,12 @@ class Interactive(_base.Selection):
             What to put in the upper triangle, which is otherwise left empty:
             `"hist2d"` or `"density"` for where the mass is with the categories
             pooled, or `"correlation"` for the coefficient alone.
+        power : float
+            Open a composition up by `warping.PowerSimplex`'s map at this
+            power, between 0 and 1, instead of the centred log-ratio: 0 is
+            the log-ratios, 1 the parts divided by their means, and anything
+            above 0 draws a zero part at a finite value. Replaces `log` for
+            a composition; see `prepare.power_coordinates`.
         """
         self._check_kind(kind)
         var = self._require_vector("pairs")
@@ -317,25 +323,28 @@ class Interactive(_base.Selection):
         series = self._series()
 
         compositional = isinstance(var, _data.CompositionalVariable)
-        if log:
+        fractions = isinstance(var, _data.MassFractionVariable)
+        if log or power is not None:
             # only the measured rows: the gaps are padded with 1.0 to keep the
-            # array square, and that padding is not data to be transformed
+            # array square, and that padding is not data to be checked or
+            # transformed
+            opened, labels = _prep.opened_up(values[measured], labels,
+                                             compositional, log, power)
             transformed = values.copy()
-            transformed[measured] = _prep.logarithm(values[measured],
-                                                    compositional)
+            transformed[measured] = opened
             values = transformed
-            labels = ["%s(%s)" % ("clr" if compositional else "log", label)
-                      for label in labels]
 
         analysis = None
         if principal_components > 0:
-            if compositional and not log:
+            if compositional and not fractions and not log \
+                    and power is None:
                 raise TypeError(
                     "the principal components of %r are those of its log-"
                     "ratios, which are not directions in the proportions "
-                    "drawn here. Pass log=True to draw the log-ratios, which "
-                    "is the space they belong to, or use `pca()` to put the "
-                    "data on the components' own axes" % var.name)
+                    "drawn here. Pass log=True to draw the log-ratios, or a "
+                    "power to draw the coordinates it opens the composition "
+                    "into, or use `pca()` to put the data on the components' "
+                    "own axes" % var.name)
             analysis = _prep.principal_components(values[measured],
                                                   explained=1.0)
 
@@ -359,7 +368,8 @@ class Interactive(_base.Selection):
             legend={"title": {"text": getattr(self.categorical, "name", "")}})
 
     def pca(self, explained=0.9, log=False, kind="scatter", alpha=0.7,
-            bins=60, log_counts=False, size=5, height=None, width=None) -> "_go.Figure":
+            bins=60, log_counts=False, size=5, height=None, width=None,
+            power=None) -> "_go.Figure":
         """
         The same pairs plot, on principal components instead of measurements.
 
@@ -374,14 +384,19 @@ class Interactive(_base.Selection):
             Share of the total variance to reach, between 0 and 1.
         log : bool
             Take the components of the logarithms rather than of the
-            measurements. A composition is opened up either way.
+            measurements. A composition is opened up either way, a
+            mass-fraction variable only when this is set, its zeros having
+            no logarithm.
+        power : float
+            Open a composition up by `warping.PowerSimplex`'s map at this
+            power instead of the centred log-ratio, as in `pairs`.
         kind, alpha, bins, log_counts
             As in `pairs`.
         """
         self._check_kind(kind)
         var = self._require_vector("pca")
         self._check_measured(var, _prep.numeric_values(var)[1])
-        analysis = _prep.component_analysis(var, explained, log)
+        analysis = _prep.component_analysis(var, explained, log, power)
 
         scores = analysis["scores"]
         ratio = analysis["ratio"]
