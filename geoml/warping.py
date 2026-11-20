@@ -356,14 +356,24 @@ class Spline(_Warping):
     centered at the origin and the arms span up to +/- 5 units. Its main
     use is to transform an asymmetric distribution to one closer to a Gaussian.
 
+    With `linear_tails`, below the smallest value it was initialized on and
+    above the largest the map continues along its tangent there, so its
+    derivative stays continuous and a latent draw beyond the data comes
+    back at the slope the data's own tail has.
+
     Attributes
     ----------
     n_knots : int
         Total number of knots.
     """
     _WHOLE_LINE = True
+    # the data's smallest and largest values per column, where
+    # `linear_tails` turns the map straight; set by `initialize` and kept
+    # by a save
+    _SAVED_STATE = ("lower", "upper")
 
-    def __init__(self, size, knots_per_arm=5, backbone="cubic"):
+    def __init__(self, size, knots_per_arm=5, backbone="cubic",
+                 linear_tails=False):
         """
         Initializer for Spline.
 
@@ -379,8 +389,19 @@ class Spline(_Warping):
             cubic, the default) or `"rq"` (the monotonic rational
             quadratic, whose inverse is a closed form rather than an
             iteration). Same knots and slopes either way.
+        linear_tails : bool
+            Whether to continue the map along its tangent beyond the
+            smallest and the largest value it was initialized on. Training
+            is unchanged, every datum lying between them, and the tangents
+            follow the knots as they train. Without it the map is the
+            spline out to its outermost knots, whose last segment, kept
+            from collapsing where no datum is, can be several times
+            steeper on the way back than the data's own tail.
         """
         super().__init__()
+        self.linear_tails = bool(linear_tails)
+        self.lower = None
+        self.upper = None
         self._size_in = size
         self._size_out = size
         self.n_knots = knots_per_arm * 2 + 1
@@ -416,27 +437,58 @@ class Spline(_Warping):
         warped_coordinates = 10 * warped_coordinates - 5
         return warped_coordinates
     
+    def _limits(self):
+        """The data's smallest and largest values, or None."""
+        if not self.linear_tails or self.upper is None:
+            return None
+        return (_tf.cast(_tf.reshape(self.lower, [1, -1]), _tf.float64),
+                _tf.cast(_tf.reshape(self.upper, [1, -1]), _tf.float64))
+
     def forward(self, x):
         warped_coordinates = _tf.stack(
             [self._get_warped_coordinates(i) for i in range(self.size_in)],
             axis=1
         )
-        x_warp = self.spline.interpolate(self.x_original, warped_coordinates, x)
-        xd = self.spline.interpolate_d1(self.x_original, warped_coordinates, x)
+        limits = self._limits()
+        # beyond the data the spline is read at the limit and continued
+        # along its tangent there: value and derivative both continuous
+        x_in = x if limits is None \
+            else _tf.clip_by_value(x, limits[0], limits[1])
+        x_warp = self.spline.interpolate(self.x_original, warped_coordinates,
+                                         x_in)
+        xd = self.spline.interpolate_d1(self.x_original, warped_coordinates,
+                                        x_in)
+        if limits is not None:
+            x_warp = x_warp + xd * (x - x_in)
         log_det = _tf.reduce_sum(_tf.math.log(xd), axis=1)
 
         return x_warp, log_det
-    
+
     def backward(self, x):
         warped_coordinates = _tf.stack(
             [self._get_warped_coordinates(i) for i in range(self.size_in)],
             axis=1
         )
+        limits = self._limits()
+        if limits is not None:
+            # the limits' images, between which the spline is inverted and
+            # beyond which the tangent is
+            ends = self.spline.interpolate(
+                self.x_original, warped_coordinates,
+                _tf.concat(limits, axis=0))
+            x_in = _tf.clip_by_value(x, ends[:1], ends[1:])
+        else:
+            x_in = x
         # solved rather than approximated: interpolating the knots the
         # other way round meets `forward` at the knots and parts between
         # them, which used to leave `forward(backward(y))` a tenth of a
         # standard deviation from `y`
-        x_back = self.spline.invert(self.x_original, warped_coordinates, x)
+        x_back = self.spline.invert(self.x_original, warped_coordinates, x_in)
+        if limits is not None:
+            x_back = _tf.clip_by_value(x_back, limits[0], limits[1])
+            slope = self.spline.interpolate_d1(
+                self.x_original, warped_coordinates, x_back)
+            x_back = x_back + (x - x_in) / slope
         return x_back
 
     def initialize(self, x, weights=None):
@@ -539,6 +591,11 @@ class Spline(_Warping):
             self.parameters[f"warped_partition_right_{dim}"].set_value(
                 _arm_shares(_np.diff(scaled[per_arm:]), outer=-1))
 
+        if self.linear_tails:
+            self.lower = _tf.constant(_np.nanmin(values, axis=0)[None, :],
+                                      _tf.float64)
+            self.upper = _tf.constant(_np.nanmax(values, axis=0)[None, :],
+                                      _tf.float64)
         return self.forward(_tf.constant(values, _tf.float64))[0]
 
 
@@ -762,8 +819,16 @@ class Log(_Warping):
 
     Forward function: log
     Backward function: exp
+
+    With `linear_tails`, above the largest value it was initialized on the
+    map continues along its tangent there, so the way back grows linearly
+    beyond the data rather than exponentially.
     """
-    def __init__(self, size, shift=1e-6):
+    # the data's largest value per column, where `linear_tails` turns the
+    # map straight; set by `initialize` and kept by a save
+    _SAVED_STATE = ("upper",)
+
+    def __init__(self, size, shift=1e-6, linear_tails=False):
         """
         Initializer for Log.
 
@@ -773,6 +838,12 @@ class Log(_Warping):
             The number of columns the warping transforms.
         shift : float
             A positive value to add to the data. Use it if you have zeros.
+        linear_tails : bool
+            Whether to continue the map along its tangent above the largest
+            value it was initialized on. Training is unchanged, every
+            datum lying below that value; a latent draw beyond the data
+            then comes back a linear distance past the data's maximum
+            instead of an exponential one.
         """
         super().__init__()
         self._size_in = size
@@ -781,20 +852,49 @@ class Log(_Warping):
         if shift <= 0:
             raise ValueError("shift must be positive")
         self.shift = shift
+        self.linear_tails = bool(linear_tails)
+        self.upper = None
+
+    def _tangent(self):
+        """The largest datum and the logarithm there, or None."""
+        if not self.linear_tails or self.upper is None:
+            return None
+        upper = _tf.cast(_tf.reshape(self.upper, [1, -1]), _tf.float64)
+        return upper, _tf.math.log(upper + self.shift)
 
     def forward(self, x):
-        x_warp = _tf.math.log(x + self.shift)
+        tangent = self._tangent()
+        x_in = x if tangent is None else _tf.minimum(x, tangent[0])
+        x_warp = _tf.math.log(x_in + self.shift)
         # the derivative is 1 / (x + shift); what goes out is its log, as
         # everywhere else, so that a chain can add its links together
-        log_det = - _tf.reduce_sum(_tf.math.log(x + self.shift), axis=1)
+        log_slope = - _tf.math.log(x_in + self.shift)
+        if tangent is not None:
+            upper, at = tangent
+            above = x > upper
+            x_warp = _tf.where(above, at + (x - upper) * _tf.exp(-at),
+                               x_warp)
+            log_slope = _tf.where(above, -at + 0.0 * x, log_slope)
+        log_det = _tf.reduce_sum(log_slope, axis=1)
         return x_warp, log_det
 
     def initialize(self, x, weights=None):
         _check_domain(self, x, lower=-self.shift)
+        if self.linear_tails:
+            self.upper = _tf.constant(
+                _np.nanmax(_np.asarray(x, dtype=float), axis=0)[None, :],
+                _tf.float64)
         return super().initialize(x, weights)
 
     def backward(self, x):
-        return _tf.math.exp(x)
+        tangent = self._tangent()
+        if tangent is None:
+            return _tf.math.exp(x)
+        _, at = tangent
+        # the exponential is taken only up to the tangent point, so that a
+        # draw far above it costs neither an overflow nor a NaN gradient
+        return _tf.where(x > at, _tf.exp(at) * (1.0 + x - at),
+                         _tf.exp(_tf.minimum(x, at)))
 
 
 class Scale(ZScore):
@@ -899,6 +999,14 @@ class BoxCox(_Warping):
     exponent
         The starting exponent, one value or one per component;
         `initialize` replaces it.
+    linear_tails
+        Whether to continue the map along its tangent above the largest
+        value it was initialized on. Training is unchanged, every datum
+        lying below that value, and the tangent follows the exponent as it
+        trains; a latent draw beyond the data then comes back a linear
+        distance past the data's maximum instead of a power of it -- an
+        exponential one at the exponent zero, where the transform is the
+        logarithm.
 
     Notes
     -----
@@ -924,9 +1032,14 @@ class BoxCox(_Warping):
     """
     _EXPONENT_LIMITS = (0.0, 2.0)
     _GRID = _np.linspace(0.0, 2.0, 81)
+    # the data's largest value per column, where `linear_tails` turns the
+    # map straight; set by `initialize` and kept by a save
+    _SAVED_STATE = ("upper",)
 
-    def __init__(self, size, shift=1e-6, exponent=1.0):
+    def __init__(self, size, shift=1e-6, exponent=1.0, linear_tails=False):
         super().__init__()
+        self.linear_tails = bool(linear_tails)
+        self.upper = None
         self._size_in = size
         self._size_out = size
         if shift is not None and shift <= 0:
@@ -965,17 +1078,43 @@ class BoxCox(_Warping):
         inner = _tf.maximum(1.0 + safe * y, 1e-12)
         return _tf.where(small, y, _tf.math.log(inner) / safe)
 
+    def _tangent(self, lam):
+        """The largest datum, the transform there and its slope, or None."""
+        if not self.linear_tails or self.upper is None:
+            return None
+        upper = _tf.cast(_tf.reshape(self.upper, [1, -1]), _tf.float64)
+        u = _tf.math.log(upper + self._shift())
+        # d/dx ((x + shift)**λ - 1) / λ = (x + shift)**(λ - 1)
+        return upper, self._power(u, lam), _tf.exp((lam - 1.0) * u)
+
     def forward(self, x):
         lam = self.parameters["exponent"].get_value()[None, :]
-        u = _tf.math.log(x + self._shift())
-        log_det = _tf.reduce_sum((lam - 1.0) * u, axis=1)
-        return self._power(u, lam), log_det
+        tangent = self._tangent(lam)
+        # the power is taken only up to the tangent point, which keeps its
+        # branch finite and its gradient clean where it is not used
+        x_in = x if tangent is None else _tf.minimum(x, tangent[0])
+        u = _tf.math.log(x_in + self._shift())
+        warped, log_slope = self._power(u, lam), (lam - 1.0) * u
+        if tangent is not None:
+            upper, at, slope = tangent
+            above = x > upper
+            warped = _tf.where(above, at + (x - upper) * slope, warped)
+            log_slope = _tf.where(above, _tf.math.log(slope) + 0.0 * x,
+                                  log_slope)
+        return warped, _tf.reduce_sum(log_slope, axis=1)
 
     def backward(self, x):
         lam = self.parameters["exponent"].get_value()[None, :]
+        tangent = self._tangent(lam)
+        x_in = x if tangent is None else _tf.minimum(x, tangent[1])
         # a draw under zero's own image has its pre-image under zero, down
         # to minus the shift: a zero grade, as the floor past -1/λ is
-        return _tf.maximum(_tf.exp(self._root(x, lam)) - self._shift(), 0.0)
+        back = _tf.maximum(_tf.exp(self._root(x_in, lam)) - self._shift(),
+                           0.0)
+        if tangent is None:
+            return back
+        upper, at, slope = tangent
+        return _tf.where(x > at, upper + (x - at) / slope, back)
 
     def initialize(self, x, weights=None):
         x = _np.asarray(x, dtype=float)
@@ -998,6 +1137,9 @@ class BoxCox(_Warping):
             for i, shift in enumerate(shifts)]
         if not self.parameters["exponent"].fixed:
             self.parameters["exponent"].set_value(_np.array(starts))
+        if self.linear_tails:
+            self.upper = _tf.constant(_np.nanmax(x, axis=0)[None, :],
+                                      _tf.float64)
         return super().initialize(x, weights)
 
 
@@ -2375,19 +2517,21 @@ Identity._catalogue = _declared(_SIZED, size=_COUNT)
 Spline._catalogue = _declared(
     _SIZED, size=_COUNT,
     knots_per_arm={"type": "int", "constraints": {"min": 1}},
-    backbone={"type": "enum", "constraints": {"choices": ["cubic", "rq"]}})
+    backbone={"type": "enum", "constraints": {"choices": ["cubic", "rq"]}},
+    linear_tails={"type": "bool"})
 ZScore._catalogue = _declared(
     _SIZED, label="Z-score", size=_COUNT, mean=_LOCATIONS,
     std=dict(_GIVEN_SCALE, type="float[]"), robust={"type": "bool"})
 Center._catalogue = _declared(_SIZED, size=_COUNT, mean=_LOCATIONS)
 Softplus._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
-Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE)
+Log._catalogue = _declared(_SIZED, size=_COUNT, shift=_POSITIVE,
+                           linear_tails={"type": "bool"})
 Scale._catalogue = _declared(_SIZED, size=_COUNT,
                              scale=dict(_GIVEN_SCALE, type="json"))
 BoxCox._catalogue = _declared(
     _SIZED, label="Box-Cox", size=_COUNT,
     shift=dict(_POSITIVE, nullable=True),
-    exponent=_EXPONENT)
+    exponent=_EXPONENT, linear_tails={"type": "bool"})
 YeoJohnson._catalogue = _declared(
     _SIZED, label="Yeo-Johnson", size=_COUNT, exponent=_EXPONENT)
 Arcsinh._catalogue = _declared(_SIZED, size=_COUNT,

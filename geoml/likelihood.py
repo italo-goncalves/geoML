@@ -959,6 +959,65 @@ class _ContinuousLikelihood(_Likelihood):
         raise NotImplementedError
 
 
+# where `_warn_tail_reach` probes the latent space, and how far past the
+# data, in spans of the data, a value it brings back may land unremarked:
+# a log link on lognormal data of log-sd 1.5 lands about 90 spans out at
+# the probe, which is the law the link states rather than an accident of
+# the chain; Run 4 of Corta Atalaya landed 2300 at its start, 165 trained
+_REACH_PROBE = 6.0
+_REACH_LIMIT = 100.0
+
+
+def _warn_tail_reach(likelihood, y, name=None):
+    """Warn where the warping's way back carries a latent value at the edge
+    of what a prediction draws far past the data.
+
+    Each latent axis is probed at plus and minus `_REACH_PROBE` -- the
+    latent prior is a unit variance, and a model's realizations reach that
+    far -- and brought back through the whole chain. A probe landing more
+    than `_REACH_LIMIT` spans of the data past its range is the overshoot a
+    log link, a steep spline tail or a projection compound into
+    (Corta Atalaya, 2026-11: realizations at 1e7 times the data's maximum).
+    Asked by the model before it trains, with the warping as training will
+    start from, so that a saved model opened to predict is not warned of
+    what was settled when it was fitted.
+    """
+    warping = likelihood.warping
+    y = _np.asarray(y, dtype=float)
+    if y.ndim == 1:
+        y = y[:, None]
+    y = y[_np.all(_np.isfinite(y), axis=1)]
+    if len(y) < 2:
+        return
+    lo, hi = y.min(axis=0), y.max(axis=0)
+    span = hi - lo
+    probes = _np.zeros((2 * warping.size_out, warping.size_out))
+    for k in range(warping.size_out):
+        probes[2 * k, k] = -_REACH_PROBE
+        probes[2 * k + 1, k] = _REACH_PROBE
+    with _np.errstate(all="ignore"):
+        back = _np.asarray(warping.backward(_tf.constant(probes)))
+        reach = _np.where(span > 0, _np.maximum(back - hi, lo - back) / span,
+                          0.0)
+    reach = _np.where(_np.isnan(back), _np.inf, reach)
+    worst = reach.max(axis=0)
+    far = _np.where(worst > _REACH_LIMIT)[0]
+    if far.size == 0:
+        return
+    column = far[_np.argmax(worst[far])]
+    probe = _np.argmax(reach[:, column])
+    _warnings.warn(
+        "%s's warping carries a latent value of %+g back to %.3g in "
+        "component %d, whose data lie in [%.3g, %.3g]; %d component(s) land "
+        "more than %g spans of their data past it. Realizations will "
+        "overshoot the data by as much: give the log-like links and the "
+        "splines `linear_tails=True`, and end the chain with `ZScore`."
+        % ("Variable %r" % name if name is not None
+           else type(likelihood).__name__, probes[probe].sum(),
+           back[probe, column], column,
+           lo[column], hi[column], far.size, _REACH_LIMIT), stacklevel=4)
+
+
 def _warn_log_tail(likelihood, y):
     """Warn where an exponential or heavier noise tail sits under a
     log-like link, naming the rate below which the value with the noise

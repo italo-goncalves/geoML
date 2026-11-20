@@ -1108,6 +1108,8 @@ class VGPNetwork(_GPModel):
         super().__init__(options=options)
 
         self.data = data
+        # whether the warpings' tails were looked at before training
+        self._tails_checked = False
 
         # `variables={"Rock": lik, ...}` names each likelihood beside its
         # variable, which is the spelling that cannot get the order wrong
@@ -1891,6 +1893,19 @@ class VGPNetwork(_GPModel):
         self._phase = None
         self._by_expert = None
 
+    def _check_tails(self):
+        """Warns, once per model and before its first training call, of a
+        warping whose way back carries a latent draw far past the data."""
+        if getattr(self, "_tails_checked", True):
+            return
+        self._tails_checked = True
+        for v, likelihood in zip(self.variables, self.likelihoods):
+            if not isinstance(likelihood, _lk._ContinuousLikelihood):
+                continue
+            y, has_value = self.data.variables[v].get_measurements()
+            _lk._warn_tail_reach(
+                likelihood, y[_np.all(has_value == 1.0, axis=1)], v)
+
     def _training_phase(self, variables, kind):
         """The stopping rule and the minibatch order a training call goes on
         with.
@@ -2032,6 +2047,7 @@ class VGPNetwork(_GPModel):
         --------
         train_svi : minibatch training, for larger data sets.
         """
+        self._check_tails()
         training_inputs = [self.data.variables[v].training_input()
                            for v in self.variables]
 
@@ -2105,6 +2121,7 @@ class VGPNetwork(_GPModel):
         --------
         train_full : one gradient step per iteration on all the data.
         """
+        self._check_tails()
         model_variables = self.get_unfixed_variables()
 
         step = self._training_step(
@@ -3463,6 +3480,7 @@ class VGPNetwork(_GPModel):
         if global_update not in ("batch", "round", "epoch"):
             raise ValueError("global_update is 'batch', 'round' or 'epoch', "
                              "got %r" % (global_update,))
+        self._check_tails()
         if decay not in ("steps", "epochs"):
             raise ValueError("decay is 'steps' or 'epochs', got %r"
                              % (decay,))

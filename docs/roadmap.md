@@ -3257,6 +3257,17 @@ neither, Scripts being text and portal services not distribution.
 
 ---
 
+**Tails that overshoot (Corta Atalaya, 2026-11-19).** Run 4's block
+realizations reached 4e7 % Cu through `BoxCox → PCA(7) → Spline` with no
+closing `ZScore`; diagnosed and fixed in 0.10.13 by `linear_tails=True` on
+`BoxCox`, `Log` and `Spline` and a warning before training (changelog).
+Left for GeoScape, outside geoML: its editor could set `linear_tails` on by
+default for those three, the catalogue declaring the argument, since
+geoML cannot -- a save replays the arguments it records -- and offer an
+assay vector as a `MassFractionVariable`, which bounds every realization by
+the whole. Left in geoML, not built: a check at prediction that no
+realization exceeds its unit's whole (100 %, 1e6 ppm), *S*.
+
 ## 7. Geometallurgy
 
 Variables that describe how the ground will behave in the plant rather

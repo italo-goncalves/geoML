@@ -1,4 +1,28 @@
 ## version 0.10.13
+* **`linear_tails=True` on `BoxCox`, `Log` and `Spline`: the way back
+grows linearly past the data.** A realization of a Corta Atalaya block
+model (GeoScape, Run 4) came back at 4e7 % Cu against a data maximum of
+3.7 %, Sb at 6e9 ppm, and the blocks' predictions with them. The assays'
+chain was `BoxCox → PCA(7) → Spline` with no `ZScore` after it, six
+exponents trained to zero -- the logarithm -- and three steps multiplied
+on the way back: the spline's outermost segment, kept from collapsing
+where no datum is, ran at a slope of 2.4-3.2; the first principal axis
+scaled by 4.2; and the exponential. Latent draws near -9.6 at blocks whose
+latent mean sat past the data's own did the rest. With the option a link
+records the data's limits at `initialize` (the largest value for the two
+log-like links, whose way back below the data already falls to zero; both
+ends for the spline) and continues along its tangent beyond them, so value
+and derivative stay continuous, the data see the same map to the bit and
+training is unchanged, and the limits ride a save (`_SAVED_STATE`). On the
+trained Run 4 warping, the worst blocks' draws come back at 56 % Cu
+through `BoxCox` alone and 21 % with the spline too (S 273 %, Sb 3300 ppm,
+Hg 625 ppm), from 5.7e6 % (`test_linear_tails.py`). It is off by default,
+saves replaying the arguments they record. **A model warns before its
+first training call** (`VGPNetwork._check_tails`, once) where a latent
+draw of plus or minus six, brought back through the chain, lands more than
+100 spans of the data past it -- the trained Run 4 chain landed 165, at its
+start 2300, a log link on lognormal data of log-sd 1.5 about 90; opening a
+saved model warns of nothing, its fit being settled.
 * **`likelihood.CensoredSimplex(warping, max_hidden=3)`, zeros and missing
 parts scored as they are** (experimental). A `Gaussian` with one noise per
 part whose rows are scored differently: the shift of the whole latent row,

@@ -188,6 +188,12 @@ in the catalogue.
   the benefit stops: stacking rotation-and-spline pairs made held-out
   scores worse. A model with a `RobustPCA` saved before 0.10.7 reopens
   with other axes than it trained with (it warns): refit and save it again.
+  End a chain with `ZScore`, and give `BoxCox`, `Log` and `Spline`
+  `linear_tails=True`: beyond the data their way back then grows
+  linearly, where a trained exponent of zero makes `BoxCox` an exponential
+  that, compounded by a spline's steep tail and a projection, put block
+  realizations at 1e7 times the data's maximum. The model warns before
+  training when a chain would do that.
 - **Noise law.** For a skewed grade under a log-like link, prefer a
   Gaussian likelihood: a heavy-tailed law (`Laplace`, `EpsilonInsensitive`)
   pushed back through the link can have an unbounded variance in data units

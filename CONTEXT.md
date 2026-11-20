@@ -260,6 +260,13 @@ whether one component of its input can reach another of its output —
 decides how the likelihood integrates the noise.
 _Avoid_: link function, transform (a transform acts on coordinates here)
 
+**Linear tails**:
+A warping's map continued along its tangent beyond the values it was
+initialized on, so that a latent draw past the data comes back a linear
+distance past it rather than a power or an exponential of it. The data
+see the same map; only what lies beyond them changes.
+_Avoid_: clipping, capping (nothing is cut off)
+
 **Transform**:
 A map applied to *coordinates* before a kernel sees them — anisotropy, a
 projection, a fault's displacement. The spatial counterpart of a warping,
